@@ -111,6 +111,8 @@ class TransferPlan:
     available_staging_bytes: int = 0
     confidence_threshold: float = 0.85
     validation_mode: str = "strict"
+    # Write semantics — uniqueness gates only hard-block when identity is required.
+    sync_mode: str = ""
 
 
 @dataclass

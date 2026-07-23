@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from services.db_type_utils import SCHEMALESS_DESTS, ci_get, normalize_dest_kind
+from services.primary_key import sync_requires_unique_identity
 from services.type_system import (
     ddl_type,
     decimal_scale_would_truncate,
@@ -334,6 +335,9 @@ def evaluate_ddl_compatibility(
             dest_kind=dest_kind,
             destination_pk_columns=destination_pk_columns,
         )
+        if sync_requires_unique_identity(sync)
+        or (table_exists and destination_pk_columns)
+        else []
     )
 
     if not schemaless and table_exists and target_schema:

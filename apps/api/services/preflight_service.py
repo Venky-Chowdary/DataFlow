@@ -175,6 +175,7 @@ class FilePreflightContext(PreflightContext):
             for c in self.plan.destination.target_columns
         ]
         mode = getattr(self.plan, "validation_mode", "strict") or "strict"
+        sync_mode = getattr(self.plan, "sync_mode", "") or ""
         return audit(
             source_columns=source_columns,
             mappings=mapping_dicts,
@@ -183,6 +184,7 @@ class FilePreflightContext(PreflightContext):
             sample_rows=self.sample_rows,
             validation_mode=mode,
             destination_db_type=self.plan.destination.db_type,
+            sync_mode=sync_mode,
         )
 
 
@@ -653,6 +655,7 @@ def run_file_preflight(
         available_staging_bytes=available_staging_bytes,
         confidence_threshold=confidence_threshold,
         validation_mode=validation_mode,
+        sync_mode=sync_mode,
     )
 
     ctx = FilePreflightContext(plan, sample_rows)

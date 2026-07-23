@@ -173,6 +173,14 @@ interface ValidateDashboardProps {
    * Used for duplicate-identity blockers (Map alone cannot change the sync contract).
    */
   onOpenIdentitySettings?: () => void;
+  /** Sample-unique key suggestions (honest: Validate sample only). */
+  uniqueKeySuggestions?: Array<{
+    column: string;
+    uniqueCount: number;
+    sampleRows: number;
+  }>;
+  /** Apply a suggested primary key, then open Advanced / re-validate. */
+  onApplyPrimaryKey?: (column: string) => void;
   /** Open Mapping proof drawer — evidence only (Column matches card). */
   onOpenMappingProof?: () => void;
   /** Compact Map proof KPIs for Validate (exact overlaps / risks / mode). */
@@ -546,6 +554,8 @@ export function ValidateDashboard({
   cellPreview = null,
   onReviewMappings,
   onOpenIdentitySettings,
+  uniqueKeySuggestions = [],
+  onApplyPrimaryKey,
   onOpenMappingProof,
   mappingProofSummary = null,
   onRunPreflight,
@@ -1264,24 +1274,22 @@ export function ValidateDashboard({
                       : "Change primary key or sync mode"}
                   </Button>
                 )}
-                {onReviewMappings && (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    disabled={remediating}
-                    leadingIcon={<DtIcon name="layers" size={14} />}
-                    onClick={() =>
-                      onReviewMappings(
-                        duplicateRoot.primaryKey
-                          ? { focusSource: duplicateRoot.primaryKey }
-                          : undefined,
-                      )
-                    }
-                  >
-                    {duplicateRoot.primaryKey
-                      ? `Review ${duplicateRoot.primaryKey} on Map`
-                      : "Review identity on Map"}
-                  </Button>
+                {uniqueKeySuggestions && uniqueKeySuggestions.length > 0 && onApplyPrimaryKey && (
+                  <>
+                    {uniqueKeySuggestions.slice(0, 2).map((s) => (
+                      <Button
+                        key={s.column}
+                        size="sm"
+                        variant="secondary"
+                        disabled={remediating}
+                        leadingIcon={<DtIcon name="check" size={14} />}
+                        onClick={() => onApplyPrimaryKey(s.column)}
+                        title={`Unique in ${s.sampleRows}-row sample`}
+                      >
+                        Try PK · {s.column}
+                      </Button>
+                    ))}
+                  </>
                 )}
                 <Button
                   size="sm"
@@ -2182,23 +2190,17 @@ export function ValidateDashboard({
                       </ul>
                     )}
                     <div className="df2-vd-blocker-actions df2-vd-fix-actions">
-                      {/* Primary CTAs live in Suggested fixes bar + rail — avoid triple duplicate. */}
-                      {onReviewMappings && (
+                      {/* One primary place for identity: Suggested fixes bar + rail. */}
+                      {onOpenIdentitySettings && (
                         <Button
                           size="sm"
-                          variant="secondary"
-                          leadingIcon={<DtIcon name="layers" size={14} />}
-                          onClick={() =>
-                            onReviewMappings(
-                              duplicateRoot?.primaryKey
-                                ? { focusSource: duplicateRoot.primaryKey }
-                                : undefined,
-                            )
-                          }
+                          variant="primary"
+                          leadingIcon={<DtIcon name="settings" size={14} />}
+                          onClick={onOpenIdentitySettings}
                         >
                           {duplicateRoot?.primaryKey
-                            ? `Review ${duplicateRoot.primaryKey} on Map`
-                            : "Review identity on Map"}
+                            ? `Change primary key (${duplicateRoot.primaryKey})`
+                            : "Change primary key or sync mode"}
                         </Button>
                       )}
                     </div>

@@ -549,6 +549,7 @@ def run_integrity_audit(
     sample_rows: list[dict] | None = None,
     validation_mode: str = "strict",
     schema_policy: str = "manual_review",
+    sync_mode: str = "",
 ) -> dict[str, Any]:
     """
     Run all critical data integrity checks in one pass.
@@ -626,7 +627,12 @@ def run_integrity_audit(
         )
         checks.append(_check_financial_precision(mappings, source_types, rows))
         checks.append(_check_required_nulls(mappings, rows, null_rate_max=cfg["null_rate_max"], dest_kind=dest_kind, primary_key=pk, validation_mode=validation_mode))
-        checks.append(_check_duplicate_keys(mappings, rows, validation_mode, dest_kind=dest_kind, primary_key=pk))
+        # Append/overwrite do not require a unique identity contract — do not
+        # invent a hard block from inferred ``id`` duplicates (operator confusion).
+        from services.primary_key import sync_requires_unique_identity
+
+        dup_pk = pk if sync_requires_unique_identity(sync_mode) else None
+        checks.append(_check_duplicate_keys(mappings, rows, validation_mode, dest_kind=dest_kind, primary_key=dup_pk))
         checks.append(
             _check_mapping_confidence(mappings, confidence_min=cfg["confidence"], validation_mode=validation_mode)
         )

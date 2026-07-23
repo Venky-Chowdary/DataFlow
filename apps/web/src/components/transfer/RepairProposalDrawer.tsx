@@ -238,9 +238,15 @@ export function RepairProposalDrawer({
               Approve &amp; apply cannot dedupe rows — fix the data or identity contract, then Re-run Validate.
             </p>
             <ol className="df2-repair-next-steps">
-              <li>Dedupe the MySQL source on the real unique key, or</li>
-              <li>On Map, stop treating a non-unique column as identity (pick another unique field), or</li>
-              <li>Change sync mode only if the destination truly allows non-unique loads — then Re-run Validate.</li>
+              <li>Dedupe the source on the real unique key, or</li>
+              <li>
+                Open Destination → Advanced settings and set Primary key to a unique column
+                (Map Approve cannot change identity), or
+              </li>
+              <li>
+                Switch to append/overwrite only if the destination truly allows non-unique loads —
+                then Re-run Validate.
+              </li>
             </ol>
           </div>
         )}

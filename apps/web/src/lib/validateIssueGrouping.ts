@@ -204,7 +204,7 @@ export function findDuplicateKeyRoot(preflight: PreflightResult | null | undefin
     title: "Duplicate identity keys",
     impact: impactParts.join(" · "),
     fixHint:
-      "Dedupe the source sample, pick the real primary key, or switch sync mode if append without uniqueness is intended — then re-run Validate.",
+      "Open Destination → Advanced and set Primary key to a unique column (or switch to append/overwrite if uniqueness is not required). Map Approve cannot dedupe rows — then Re-run Validate.",
     primaryKey,
     duplicateCount,
     sampleRows,

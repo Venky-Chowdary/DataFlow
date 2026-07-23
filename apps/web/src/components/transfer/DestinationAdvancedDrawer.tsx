@@ -74,6 +74,8 @@ interface DestinationAdvancedDrawerProps {
   /** Heuristic suggestions for empty cursor / PK selects. */
   suggestedCursor?: string;
   suggestedPrimaryKey?: string;
+  /** Sample-unique PK candidates (honest: preview sample only). */
+  uniqueKeySuggestions?: Array<{ column: string; sampleRows: number; uniqueCount: number }>;
   /** Debezium-compatible snapshot mode (CDC). */
   snapshotMode?: string;
   onSnapshotModeChange?: (mode: string) => void;
@@ -174,6 +176,7 @@ export function DestinationAdvancedDrawer({
   onStreamPrimaryKeyChange,
   suggestedCursor = "",
   suggestedPrimaryKey = "",
+  uniqueKeySuggestions = [],
   snapshotMode = "initial",
   onSnapshotModeChange,
   priorityColumn = "",
@@ -298,7 +301,7 @@ export function DestinationAdvancedDrawer({
           </div>
         </div>
 
-        {(requiresCursor || requiresPrimaryKey) && (suggestedCursor || suggestedPrimaryKey) && (
+        {((requiresCursor || requiresPrimaryKey) && (suggestedCursor || suggestedPrimaryKey || uniqueKeySuggestions.length > 0)) && (
           <div className="df2-adv-suggest-row">
             {requiresCursor && suggestedCursor && !defaultCursor && (
               <button
@@ -315,9 +318,24 @@ export function DestinationAdvancedDrawer({
                 className="df2-adv-suggest-chip"
                 onClick={() => onStreamPrimaryKeyChange(names[0], suggestedPrimaryKey)}
               >
-                Use suggested primary key · <strong>{suggestedPrimaryKey}</strong>
+                Use name heuristic · <strong>{suggestedPrimaryKey}</strong>
               </button>
             )}
+            {requiresPrimaryKey &&
+              uniqueKeySuggestions
+                .filter((s) => s.column !== defaultPrimaryKey)
+                .slice(0, 3)
+                .map((s) => (
+                  <button
+                    key={s.column}
+                    type="button"
+                    className="df2-adv-suggest-chip"
+                    title={`Unique in ${s.sampleRows}-row sample (${s.uniqueCount} values) — not full-table proof`}
+                    onClick={() => onStreamPrimaryKeyChange(names[0], s.column)}
+                  >
+                    Unique in sample · <strong>{s.column}</strong>
+                  </button>
+                ))}
           </div>
         )}
 

@@ -432,6 +432,19 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                     pk_src, pk_tgt = m.source, m.target
                     break
         if pk_tgt:
+            # Append/overwrite: sample uniqueness is not a DDL contract unless dest has PK.
+            try:
+                from services.primary_key import sync_requires_unique_identity
+
+                if not sync_requires_unique_identity(getattr(ctx.plan, "sync_mode", "") or ""):
+                    return _pass(
+                        GateId.G6_TARGET_DDL,
+                        "Schemaless destination — uniqueness not required for this sync mode",
+                        start,
+                        {"schemaless": True, "sync_mode": getattr(ctx.plan, "sync_mode", "")},
+                    )
+            except Exception:
+                pass
             dupes = ctx.probe_unique_constraint([pk_tgt])
             if dupes:
                 return _block(
@@ -682,20 +695,30 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
         )
 
     # Canonical identity key (same helper as G6/G9) — never invent ``user_id`` PK.
-    pk_target = None
+    # Append/overwrite do not require uniqueness — skip duplicate-key hard block.
+    require_unique = True
     try:
-        from services.primary_key import resolve_primary_key_target
+        from services.primary_key import sync_requires_unique_identity
 
-        pk_target = resolve_primary_key_target(
-            ctx.plan.mappings,
-            ctx.plan.destination.db_type or "",
-            validation_mode=ctx.plan.validation_mode,
-        )
+        require_unique = sync_requires_unique_identity(getattr(ctx.plan, "sync_mode", "") or "")
     except Exception:
-        for m in ctx.plan.mappings:
-            if m.target.lower() in {"id", "_id"}:
-                pk_target = m.target
-                break
+        require_unique = True
+
+    pk_target = None
+    if require_unique:
+        try:
+            from services.primary_key import resolve_primary_key_target
+
+            pk_target = resolve_primary_key_target(
+                ctx.plan.mappings,
+                ctx.plan.destination.db_type or "",
+                validation_mode=ctx.plan.validation_mode,
+            )
+        except Exception:
+            for m in ctx.plan.mappings:
+                if m.target.lower() in {"id", "_id"}:
+                    pk_target = m.target
+                    break
 
     duplicates = 0
     if pk_target:

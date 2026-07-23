@@ -108,6 +108,7 @@ import { runLocalPreflight } from "../lib/localPreflight";
 import { readJobEventLog } from "../lib/jobEventLog";
 import { schemaIntrospectionFailureMessage } from "../lib/preflightMessages";
 import { findDuplicateKeyRoot } from "../lib/validateIssueGrouping";
+import { suggestUniqueKeyCandidates } from "../lib/uniqueKeySuggestions";
 import {
   buildStreamContracts,
   seedStreamFieldsFromCandidates,
@@ -825,6 +826,50 @@ export function TransferPage({
   });
   const syncModeLabel = SYNC_MODES.find((m) => m.id === syncMode)?.label ?? syncMode;
   const schemaPolicyLabel = SCHEMA_POLICIES.find((p) => p.id === schemaPolicy)?.label ?? schemaPolicy;
+
+  const uniqueKeySuggestions = useMemo(
+    () =>
+      suggestUniqueKeyCandidates(
+        samplePreviewRows as Record<string, unknown>[],
+        currentSourceColumns,
+        { exclude: primaryKeyField ? [primaryKeyField] : [], limit: 5 },
+      ),
+    [samplePreviewRows, currentSourceColumns, primaryKeyField],
+  );
+
+  const openIdentitySettings = useCallback(() => {
+    setStep(STEP_DESTINATION);
+    setAdvancedOpen(true);
+    toast({
+      title: "Identity & sync settings",
+      message:
+        "Change the primary key field or sync mode here, then return to Validate and Re-run. Mapping approve cannot remove duplicate source rows.",
+      tone: "info",
+    });
+  }, [toast]);
+
+  const applyPrimaryKeySuggestion = useCallback(
+    (column: string) => {
+      if (!column) return;
+      setPrimaryKeyField(column);
+      const stream = primarySourceStream || sourceStreamName;
+      if (stream) {
+        setStreamFields((prev) => ({
+          ...prev,
+          [stream]: {
+            ...(prev[stream] || { cursorField: "", primaryKeyField: "" }),
+            primaryKeyField: column,
+          },
+        }));
+      }
+      toast({
+        title: `Primary key → ${column}`,
+        message: "Unique in the Validate sample only — confirm in Advanced, then Re-run Validate.",
+        tone: "success",
+      });
+    },
+    [primarySourceStream, sourceStreamName, toast],
+  );
 
   const buildSourceEndpoint = () => {
     if (sourceKind === "file") {
@@ -2753,20 +2798,12 @@ export function TransferPage({
         break;
       }
       case "fix_source_keys":
-        setMapFocusSource(action.column || primaryKeyField || null);
         setMapIdentityBanner(
           action.column
-            ? `Duplicate values on ${action.column} blocked Validate.`
-            : "Duplicate identity keys blocked Validate.",
+            ? `Duplicate values on ${action.column} blocked Validate — change primary key or sync mode in Advanced settings.`
+            : "Duplicate identity keys blocked Validate — change primary key or sync mode in Advanced settings.",
         );
-        setStep(STEP_DESTINATION);
-        setAdvancedOpen(true);
-        toast({
-          title: "Duplicate identity keys",
-          message:
-            "Change the primary key field or sync mode in Destination → Advanced, then return to Validate and Re-run. Map review alone cannot dedupe source rows.",
-          tone: "warning",
-        });
+        openIdentitySettings();
         break;
       case "review_mappings":
       case "rerun_mapping":
@@ -3933,7 +3970,19 @@ export function TransferPage({
           onContinue={() => void goToPreflight()}
           initialFocusSource={mapFocusSource}
           identityFixBanner={mapIdentityBanner}
-          onIdentityFixConsumed={() => setMapFocusSource(null)}
+          onIdentityFixConsumed={() => {
+            setMapFocusSource(null);
+            setMapIdentityBanner(null);
+          }}
+          syncModeLabel={syncModeLabel}
+          primaryKeyField={primaryKeyField}
+          cursorField={cursorField}
+          requiresPrimaryKey={requiresPrimaryKey}
+          requiresCursor={requiresCursor}
+          onOpenIdentitySettings={openIdentitySettings}
+          uniqueKeySuggestions={uniqueKeySuggestions}
+          onApplyPrimaryKey={applyPrimaryKeySuggestion}
+          sampleRows={(samplePreviewRows as Record<string, unknown>[]) || []}
         />
       )}
 
@@ -4761,6 +4810,7 @@ export function TransferPage({
             streamNeedsReview={streamNeedsReview}
             suggestedCursor={cursorCandidate}
             suggestedPrimaryKey={primaryKeyCandidate}
+            uniqueKeySuggestions={uniqueKeySuggestions}
             snapshotMode={snapshotMode}
             onSnapshotModeChange={setSnapshotMode}
             allowAppendOnly={allowAppendOnly}
@@ -4942,20 +4992,16 @@ export function TransferPage({
               if (opts?.focusSource) {
                 setMapFocusSource(opts.focusSource);
                 setMapIdentityBanner(
-                  `Validate focused ${opts.focusSource} — confirm this is the right identity column.`,
+                  `Validate focused ${opts.focusSource} — column mapping is evidence only. Use identity settings to change the primary key.`,
                 );
               }
               setStep(STEP_MAP);
             }}
-            onOpenIdentitySettings={() => {
-              setStep(STEP_DESTINATION);
-              setAdvancedOpen(true);
-              toast({
-                title: "Identity & sync settings",
-                message:
-                  "Change the primary key field or sync mode here, then return to Validate and Re-run. Mapping approve cannot remove duplicate source rows.",
-                tone: "info",
-              });
+            onOpenIdentitySettings={openIdentitySettings}
+            uniqueKeySuggestions={uniqueKeySuggestions}
+            onApplyPrimaryKey={(column) => {
+              applyPrimaryKeySuggestion(column);
+              openIdentitySettings();
             }}
             onOpenMappingProof={() => setMappingProofOpen(true)}
             mappingProofSummary={mappingProofSummary}
@@ -5212,16 +5258,7 @@ export function TransferPage({
           onSaveAsContract={() => void handleSaveAsContract()}
           onPrimaryFix={
             duplicateKeyRoot
-              ? () => {
-                  setStep(STEP_DESTINATION);
-                  setAdvancedOpen(true);
-                  toast({
-                    title: "Identity & sync settings",
-                    message:
-                      "Change the primary key field or sync mode, then return to Validate and Re-run.",
-                    tone: "info",
-                  });
-                }
+              ? openIdentitySettings
               : undefined
           }
           primaryFixLabel={

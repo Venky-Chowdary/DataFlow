@@ -7,11 +7,13 @@ import {
   type MappingProof,
 } from "../../components/MappingProofDrawer";
 import { Dialog } from "../../components/ui/Dialog";
+import { Button } from "../../components/ui/Button";
 import { DtIcon } from "../../components/DtIcon";
 import type { ColumnFilter } from "../../lib/columnWorkbench";
 import { countByFilter, filterMappings } from "../../lib/columnWorkbench";
 import type { EditableMapping } from "../../lib/mapping";
 import { mappingHealthSummary } from "../../lib/mapping";
+import type { UniqueKeySuggestion } from "../../lib/uniqueKeySuggestions";
 
 interface TransferMapStepProps {
   columnMappings: EditableMapping[];
@@ -58,6 +60,15 @@ interface TransferMapStepProps {
   /** Shown when Validate sent the operator here for identity/duplicate-key work. */
   identityFixBanner?: string | null;
   onIdentityFixConsumed?: () => void;
+  /** Identity / sync contract (Destination → Advanced) — always visible on Map. */
+  syncModeLabel?: string;
+  primaryKeyField?: string;
+  cursorField?: string;
+  requiresPrimaryKey?: boolean;
+  requiresCursor?: boolean;
+  onOpenIdentitySettings?: () => void;
+  uniqueKeySuggestions?: UniqueKeySuggestion[];
+  onApplyPrimaryKey?: (column: string) => void;
 }
 
 const INTELLIGENCE_PAIR_LIMIT = 500;
@@ -99,6 +110,14 @@ export function TransferMapStep({
   initialFocusSource = null,
   identityFixBanner = null,
   onIdentityFixConsumed,
+  syncModeLabel = "",
+  primaryKeyField = "",
+  cursorField = "",
+  requiresPrimaryKey = false,
+  requiresCursor = false,
+  onOpenIdentitySettings,
+  uniqueKeySuggestions = [],
+  onApplyPrimaryKey,
 }: TransferMapStepProps) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ColumnFilter>("all");
@@ -306,16 +325,90 @@ export function TransferMapStep({
       )}
 
       <div className="df2-card-body df2-map-step-body">
+        {(syncModeLabel || onOpenIdentitySettings) && (
+          <div className="df2-map-identity-chip" role="region" aria-label="Identity and sync contract">
+            <div className="df2-map-identity-chip-main">
+              <span className="df2-map-identity-chip-kicker">Identity contract</span>
+              <div className="df2-map-identity-chip-meta">
+                <span>
+                  Sync <strong>{syncModeLabel || "—"}</strong>
+                </span>
+                <span>
+                  Primary key{" "}
+                  <strong>
+                    {requiresPrimaryKey
+                      ? primaryKeyField || "required — unset"
+                      : primaryKeyField || "not required"}
+                  </strong>
+                </span>
+                {requiresCursor && (
+                  <span>
+                    Cursor <strong>{cursorField || "required — unset"}</strong>
+                  </span>
+                )}
+              </div>
+              <p className="df2-map-identity-chip-hint">
+                Column mapping pairs fields. Primary key and sync mode live in Destination → Advanced —
+                Map Approve cannot dedupe source rows or change identity.
+              </p>
+              {uniqueKeySuggestions.length > 0 && requiresPrimaryKey && (
+                <div className="df2-map-identity-suggest" aria-label="Sample-unique key suggestions">
+                  <span className="df2-label-hint">Unique in sample — try as primary key:</span>
+                  {uniqueKeySuggestions.slice(0, 3).map((s) => (
+                    <button
+                      key={s.column}
+                      type="button"
+                      className="df2-adv-suggest-chip"
+                      title={`Unique in ${s.sampleRows}-row sample (${s.uniqueCount} values)`}
+                      onClick={() => {
+                        onApplyPrimaryKey?.(s.column);
+                        onOpenIdentitySettings?.();
+                      }}
+                    >
+                      Use <strong>{s.column}</strong>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            {onOpenIdentitySettings && (
+              <Button
+                size="sm"
+                variant={requiresPrimaryKey && !primaryKeyField ? "primary" : "secondary"}
+                leadingIcon={<DtIcon name="settings" size={14} />}
+                onClick={onOpenIdentitySettings}
+              >
+                Open identity settings
+              </Button>
+            )}
+          </div>
+        )}
+
         {identityFixBanner && (
           <div className="df2-map-identity-banner" role="status">
             <DtIcon name="alert" size={16} />
-            <div>
-              <strong>Identity fix from Validate</strong>
+            <div className="df2-map-identity-banner-body">
+              <strong>Identity fix required</strong>
               <p>{identityFixBanner}</p>
               <p className="df2-map-identity-banner-hint">
-                Column mapping alone cannot remove duplicate source rows. Change the primary key or
-                sync mode in Destination → Advanced settings, or dedupe the source, then re-validate.
+                Reviewing this column on Map is evidence only. Change the primary key or sync mode in
+                Destination → Advanced, or dedupe the source, then re-validate.
               </p>
+              <div className="df2-map-identity-banner-actions">
+                {onOpenIdentitySettings && (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    leadingIcon={<DtIcon name="settings" size={14} />}
+                    onClick={onOpenIdentitySettings}
+                  >
+                    Open identity settings
+                  </Button>
+                )}
+                <Button size="sm" variant="ghost" onClick={() => onIdentityFixConsumed?.()}>
+                  Dismiss
+                </Button>
+              </div>
             </div>
           </div>
         )}
@@ -361,11 +454,29 @@ export function TransferMapStep({
         </div>
       </div>
 
-      <div className="df2-wizard-footer">
-        <button type="button" className="df2-btn" onClick={onBack}>← Back</button>
-        <button type="button" className="df2-btn df2-btn-primary" onClick={onContinue}>
-          Continue to Validate →
-        </button>
+      <div className="df2-wizard-footer df2-map-footer">
+        <div className="df2-map-footer-status" aria-live="polite">
+          <span>
+            <strong>Mapping:</strong>{" "}
+            {mappingReviewCount > 0
+              ? `${mappingReviewCount} column(s) need review`
+              : `${columnMappings.length} columns ready`}
+          </span>
+          <span>
+            <strong>Identity:</strong>{" "}
+            {requiresPrimaryKey && !primaryKeyField
+              ? "primary key required — open settings"
+              : requiresPrimaryKey && primaryKeyField
+                ? `PK ${primaryKeyField} · uniqueness checked on Validate`
+                : `${syncModeLabel || "sync"} · uniqueness not required`}
+          </span>
+        </div>
+        <div className="df2-map-footer-actions">
+          <button type="button" className="df2-btn" onClick={onBack}>← Back</button>
+          <button type="button" className="df2-btn df2-btn-primary" onClick={onContinue}>
+            Continue to Validate →
+          </button>
+        </div>
       </div>
 
       <Dialog

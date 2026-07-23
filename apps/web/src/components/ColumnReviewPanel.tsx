@@ -460,7 +460,7 @@ export function ColumnReviewPanel({
             <DtIcon name="sparkle" size={16} />
             <span>
               <strong>New destination table</strong>
-              {" — identity mapping; types will CREATE on first write"}
+              {" — create-new fields; types will CREATE on first write"}
               {destType ? ` with ${destType}-native DDL` : ""}.
             </span>
           </div>

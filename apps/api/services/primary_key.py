@@ -17,6 +17,25 @@ Purpose = Literal["uniqueness", "required_nulls"]
 _EXACT_SQL_KEYS = ("id", "_id", "uuid", "pk", "key")
 _EXACT_SCHEMALESS_KEYS = ("_id",)
 
+# Sync modes that must enforce identity uniqueness on the Validate sample.
+# Append / overwrite do not invent a PK contract — blocking on inferred ``id``
+# duplicates there confuses operators (Airbyte-class honesty: only require
+# uniqueness when the write path needs it).
+_UNIQUE_IDENTITY_SYNC_MODES = frozenset({
+    "upsert",
+    "incremental_deduped",
+    "cdc",
+    "scd2",
+    "mirror",
+    "full_refresh_mirror",
+    "reverse_etl",
+})
+
+
+def sync_requires_unique_identity(sync_mode: str | None) -> bool:
+    """True when Validate must fail-closed on duplicate identity keys."""
+    return (sync_mode or "").strip().lower() in _UNIQUE_IDENTITY_SYNC_MODES
+
 
 def _mapping_pairs(mappings: Iterable[Any]) -> list[tuple[str, str]]:
     pairs: list[tuple[str, str]] = []
