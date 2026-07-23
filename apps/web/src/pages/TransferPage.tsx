@@ -2635,6 +2635,15 @@ export function TransferPage({
         if (hit) void executePreflight(next);
         break;
       }
+      case "fix_source_keys":
+        setStep(STEP_MAP);
+        toast({
+          title: "Duplicate identity keys",
+          message:
+            "Approve & apply cannot dedupe source rows. On Map, pick a unique identity column or dedupe the source, then re-run Validate.",
+          tone: "warning",
+        });
+        break;
       case "review_mappings":
       case "rerun_mapping":
         setStep(STEP_MAP);
@@ -2643,7 +2652,7 @@ export function TransferPage({
           message:
             action.kind === "rerun_mapping"
               ? "Re-run mapping to accept the new schema, then re-run preflight."
-              : "Review and approve the flagged mappings, then re-run preflight.",
+              : "Review identity / mappings, then re-run Validate. Mapping approve alone does not remove source duplicates.",
           tone: "info",
         });
         break;

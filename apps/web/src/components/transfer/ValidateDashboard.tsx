@@ -2224,6 +2224,7 @@ export function ValidateDashboard({
         proposal={repairProposal}
         mappings={repairMappings}
         onClose={() => setRepairOpen(false)}
+        onOpenMap={onReviewMappings}
         onApplied={(updated) => {
           onRepairMappingsApplied?.(updated);
           pendingVerifyRef.current = true;
@@ -2235,8 +2236,10 @@ export function ValidateDashboard({
         }}
         onDecided={(p) => {
           pushRemediation(
-            p.status === "rejected" ? "Repair rejected" : "Repair approved",
-            p.summary || p.id,
+            p.status === "rejected" ? "Repair rejected" : "Repair reviewed",
+            p.apply_result?.message
+              || p.summary
+              || p.id,
             p.status,
           );
         }}

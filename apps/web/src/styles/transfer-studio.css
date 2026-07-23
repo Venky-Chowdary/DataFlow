@@ -6274,6 +6274,75 @@ th.df2-type-string .df2-type-badge {
   width: 100%;
 }
 
+.df2-repair-proposal {
+  display: grid;
+  gap: 12px;
+}
+.df2-repair-root {
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  display: grid;
+  gap: 8px;
+}
+.df2-repair-root strong { color: #991b1b; font-size: 13px; }
+.df2-repair-root p { margin: 0; font-size: 12.5px; color: #7f1d1d; line-height: 1.45; }
+.df2-repair-next-steps {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+  font-size: 12.5px;
+  color: #7f1d1d;
+  line-height: 1.4;
+}
+.df2-repair-summary p {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: #334155;
+  line-height: 1.45;
+}
+.df2-repair-section { display: grid; gap: 8px; }
+.df2-repair-issues {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.df2-repair-issues li {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+}
+.df2-repair-issues li.is-block {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+.df2-repair-issues li.is-warn {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+.df2-repair-issues li strong { display: block; font-size: 13px; color: #0f172a; }
+.df2-repair-issues li p { margin: 4px 0 0; font-size: 12.5px; color: #475569; line-height: 1.4; }
+.df2-repair-actions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.df2-repair-actions li {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  font-size: 12.5px;
+  color: #334155;
+}
+
 .df2-vd-blocker-fix {
   display: inline-flex;
   align-items: center;

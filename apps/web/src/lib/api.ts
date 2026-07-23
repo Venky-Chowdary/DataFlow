@@ -2866,6 +2866,10 @@ export interface RepairProposal {
     applied?: boolean;
     mappings?: RepairMapping[];
     error?: string;
+    reason?: string;
+    message?: string;
+    mutated_count?: number;
+    skipped_actions?: Record<string, unknown>[];
   };
 }
 
