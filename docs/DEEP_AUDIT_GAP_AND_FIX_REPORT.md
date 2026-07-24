@@ -106,6 +106,25 @@ pytest apps/api/tests/test_schema_drift.py \
 29 passed in 30.00s
 ```
 
+### Preflight UI remediation (this session)
+
+| Fix | Root cause | Evidence |
+|-----|------------|----------|
+| Validate panel showed raw blocker text with no CTA | `blockers[].guidance` only had `why`/`fix`/`examples`; the UI duplicated the message and a disabled Execute button, leaving the operator to guess the next step | `services/preflight_rules.py` gate rules now emit `suggested_actions` (e.g. `review_mappings`, `check_connection`, `rerun_mapping`) with a label; `explain_gate` propagates them into `guidance` |
+| Action labels not wired to Studio navigation | `ValidateActionsRail` only rendered a primary fix button for duplicate-key roots; other blockers had no primary action | `TransferPage` now derives `onPrimaryFix`/`primaryFixLabel` from the first blocker's first `suggested_action` and routes `review_mappings` → Map, `check_connection` → Source, `rerun_mapping`/`quarantine_and_rerun` → re-run preflight, `fix_source_keys` → identity settings |
+| TypeScript/build validation | `suggested_actions` is a new field crossing backend↔frontend contracts | `apps/web/src/lib/types.ts` and `apps/web/src/lib/validateIssueGrouping.ts` expose `suggested_actions`; `npm run build` and `validateIssueGrouping.test.ts` pass |
+
+```text
+npm run build  (apps/web)
+✓ built in 1.71s
+
+npx tsx --test apps/web/src/lib/validateIssueGrouping.test.ts
+5 passed
+
+pytest apps/api/tests/test_validate_failfast_critical_hazards.py apps/api/tests/test_data_rule_scenario_matrix.py apps/api/tests/test_create_new_all_destinations_matrix.py
+3806 passed in 4.52s
+```
+
 ---
 
 ## 2. Audit Methodology
@@ -584,4 +603,43 @@ pytest apps/api/tests -k 'postgresql_to_postgresql'
   with emulators; real production semantics remain to be certified.
 - **Lakehouse MERGE and cloud warehouse live routes.** Still require live credentials
   or emulators for full matrix proof.
+
+## 14. Preflight UI Remediation (this session)
+
+### Gap
+The Validate panel listed raw blocker messages and disabled Execute, but gave the
+operator no obvious next action. For many blockers the correct next step is to
+open Map, fix the source connector, or re-run preflight — none of which was
+surfaced as a primary button.
+
+### Fixes this session
+
+| Fix | Root cause | Evidence |
+|-----|------------|----------|
+| Gate rules now carry `suggested_actions` | `PREFLIGHT_GATE_RULES` only had narrative `why`/`fix`/`examples`; the API did not emit machine-readable next steps | `apps/api/services/preflight_rules.py` |
+| Backend propagates actions into `guidance` | `explain_gate` returned `title`/`category`/`why`/`fix`/`examples` but not `suggested_actions` | `apps/api/services/preflight_rules.py` |
+| Frontend types expose `suggested_actions` | `PreflightResult.blockers[].guidance` and `DisplayBlocker` had no action list | `apps/web/src/lib/types.ts`, `apps/web/src/lib/validateIssueGrouping.ts` |
+| TransferPage routes first blocker action to the right control | `ValidateActionsRail` only rendered a primary fix button for duplicate-key roots | `apps/web/src/pages/TransferPage.tsx` |
+
+### Verification this session
+
+```text
+npm run build  (apps/web)
+✓ built in 1.71s
+
+npx --yes tsx --test apps/web/src/lib/validateIssueGrouping.test.ts
+5 passed
+
+pytest apps/api/tests/test_validate_failfast_critical_hazards.py \
+       apps/api/tests/test_data_rule_scenario_matrix.py \
+       apps/api/tests/test_create_new_all_destinations_matrix.py
+3806 passed in 4.52s
+```
+
+### What is still NOT proven
+
+- **CDC end-to-end exactly-once.** CDC unit/integration tests pass with emulators; real slot/LSN persistence and production exactly-once semantics are not yet certified.
+- **Cloud warehouse and real-service routes.** ~952 matrix tests still skip because no live Snowflake/BigQuery/Redshift/GCS/ADLS/Salesforce/etc. credentials or emulators are configured.
+- **BLE001 blind-except narrowing.** `except Exception as exc:` still triggers `BLE001`; the next pass should narrow `Exception` to concrete, source-specific exception families in the hot data path.
+- **Lakehouse MERGE.** Iceberg/Delta MERGE semantics for idempotent writes are still a roadmap item.
 
