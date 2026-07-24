@@ -540,6 +540,14 @@ export function TransferMapStep({
                     Fix destination connection
                   </button>
                 </>
+              ) : destConnectionError ? (
+                <>
+                  <strong>Destination schema could not be loaded</strong>
+                  {` — ${destConnectionError} `}
+                  <button type="button" className="df2-btn df2-btn-sm" onClick={onBack}>
+                    Retry Destination/Map
+                  </button>
+                </>
               ) : (
                 <>
                   <strong>Destination schema unknown</strong>

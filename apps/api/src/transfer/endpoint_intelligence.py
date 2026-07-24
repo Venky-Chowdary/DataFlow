@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 from connectors.mongodb_common import _mongo_client
 from services.value_serializer import cell_to_string
 
@@ -708,6 +710,9 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         out["columns"] = out.get("columns") or []
         out["schema"] = out.get("schema") or {}
         out["message"] = f"{out.get('message', '')} · schema probe: {e}".strip(" ·")
+        logger.warning(
+            "schema probe failed for %s table=%s: %s", fmt, endpoint.table, e, exc_info=e
+        )
 
 
 def _attach_batch_sample_rows(out: dict, batch: Any, *, preview: int = 100) -> None:

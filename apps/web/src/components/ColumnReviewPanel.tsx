@@ -498,6 +498,11 @@ export function ColumnReviewPanel({
                   <strong>Destination connection failed</strong>
                   {` — ${destConnectionError || "Could not reach the destination."} Open Destination and test the connector.`}
                 </>
+              ) : destConnectionError ? (
+                <>
+                  <strong>Destination schema could not be loaded</strong>
+                  {` — ${destConnectionError} Retry Destination/Map or choose a different table/schema.`}
+                </>
               ) : (
                 <>
                   <strong>Destination schema unknown</strong>
