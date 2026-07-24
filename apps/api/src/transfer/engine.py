@@ -276,16 +276,19 @@ def _persist_load_history_profile(
     job_id: str,
     dest_summary: dict[str, Any],
     row_count: int,
+    mappings: list[dict] | None = None,
 ) -> None:
     """Append this load to the route ring buffer (streaming-safe)."""
     try:
+        from services import pii_guard
         from services.data_quality_history import profile_batch, save_profile
 
         route = transfer_request_to_dict(request)
+        redacted_rows = pii_guard.redact_records(rows, mappings or []) if mappings else rows
         save_profile(
             route["source"],
             route["destination"],
-            profile_batch(rows, schema),
+            profile_batch(redacted_rows, schema),
             job_id=job_id,
             rejected_details=dest_summary.get("rejected_details") or [],
             rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
@@ -1711,6 +1714,10 @@ class UniversalTransferEngine:
                     reconciliation=recon,
                 )
 
+            from services import pii_guard
+            dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
+            recon = pii_guard.redact_reconciliation(recon, mappings)
+
             explanation = _build_explanation(
                 request, columns, schema, mappings, recon, dest_summary, pf, rows_written
             )
@@ -1758,7 +1765,9 @@ class UniversalTransferEngine:
                 pass
             if os.environ.get("DATAFLOW_POST_TRANSFER_TRAINING", "").lower() in {"1", "true", "on"}:
                 try:
-                    samples = {c: [cell_to_string(r.get(c, "")) for r in records[:5] if r.get(c) is not None] for c in columns}
+                    from services import pii_guard
+                    redacted_training = pii_guard.redact_records(records[:5], mappings)
+                    samples = {c: [cell_to_string(r.get(c, "")) for r in redacted_training if r.get(c) is not None] for c in columns}
                     schedule_training_on_transfer(
                         request.source_filename or dest_summary.get("table", "transfer"),
                         columns, len(records), samples,
@@ -1789,6 +1798,7 @@ class UniversalTransferEngine:
             _persist_load_history_profile(
                 request, records, schema,
                 job_id=job_id, dest_summary=dest_summary, row_count=len(records),
+                mappings=mappings,
             )
             finalize_contract(contract_id, success=True)
             return TransferResult(
@@ -2179,6 +2189,10 @@ class UniversalTransferEngine:
                     reconciliation=recon,
                 )
 
+            from services import pii_guard
+            dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
+            recon = pii_guard.redact_reconciliation(recon, mappings)
+
             explanation = _build_explanation(
                 request, columns, schema, mappings, recon, dest_summary, pf, rows_written
             )
@@ -2192,6 +2206,7 @@ class UniversalTransferEngine:
             _persist_load_history_profile(
                 request, sample_rows or [], schema,
                 job_id=job_id, dest_summary=dest_summary, row_count=rows_written or total_rows,
+                mappings=mappings,
             )
             _persist_job_quarantine(job_id, dest_summary, request)
             mongo.update_job_status(
@@ -2549,6 +2564,10 @@ class UniversalTransferEngine:
                     reconciliation=recon,
                 )
 
+            from services import pii_guard
+            dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
+            recon = pii_guard.redact_reconciliation(recon, mappings)
+
             explanation = _build_explanation(
                 request, columns, schema, mappings, recon, dest_summary, pf, rows_written
             )
@@ -2562,6 +2581,7 @@ class UniversalTransferEngine:
             _persist_load_history_profile(
                 request, sample_rows or [], schema,
                 job_id=job_id, dest_summary=dest_summary, row_count=rows_written or total_rows,
+                mappings=mappings,
             )
             _persist_job_quarantine(job_id, dest_summary, request)
             mongo.update_job_status(
