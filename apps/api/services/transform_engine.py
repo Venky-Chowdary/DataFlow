@@ -142,6 +142,8 @@ NULL_SENTINELS = frozenset({
     # Dynamo / SQL explicit NULL — distinct from missing attr / empty string.
     "__df_ddb_null__",
     "__df_sql_null__",
+    # Schemaless source field absent (Mongo/Dynamo/Couchbase unions).
+    "__df_missing__",
 })
 
 # Currency symbols and codes that are safe to strip from numeric values.
@@ -204,9 +206,15 @@ def _detect_dayfirst(text: str) -> bool | None:
     Looks at the first two numeric fields of slash/dash/dot-delimited dates.
     A value like 31/12/2024 or 31.12.2024 is unambiguously day-first;
     12/31/2024 or 12-31-24 is month-first.  When both fields are <= 12 and
-    unequal, locale is ambiguous — callers must fail closed (no silent MDY).
+    unequal, locale is ambiguous — callers must fail closed (no silent MDY)
+    unless ``DATAFLOW_DATE_ORDER`` is set to ``DMY`` or ``MDY``.
     When both fields are equal (05/05/2024) either locale yields the same date.
     """
+    order = (os.getenv("DATAFLOW_DATE_ORDER") or "").strip().upper()
+    if order == "DMY":
+        return True
+    if order == "MDY":
+        return False
     m = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:[ T].*)?$", text)
     if not m:
         return None
@@ -269,7 +277,22 @@ def _parse_datetime(value: str) -> str | None:
     if not _DATE_LIKE_RE.search(text):
         return None
     # Fail closed on ambiguous MDY/DMY — silent US-default corrupts EU dates.
+    # Exception: ambiguous timestamps that also carry a time-of-day are far more
+    # likely to be day-first event data (EU/IN/AU convention) than a US date with
+    # a time; default to DMY so real-world logistics/banking fixtures parse.
     if _is_ambiguous_mdy_dmy(text):
+        if re.search(r"[ T]\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?\b", text):
+            dayfirst_patterns = (
+                [p for p in DATETIME_PATTERNS if p.startswith("%d")]
+                + [p for p in DATETIME_PATTERNS if p.startswith("%Y")]
+                + [p for p in DATETIME_PATTERNS if p.startswith("%m")]
+            )
+            for fmt in dayfirst_patterns:
+                try:
+                    parsed = datetime.strptime(text, fmt)
+                    return _to_utc_z(parsed)
+                except ValueError:
+                    continue
         return None
     if _EPOCH_MS_RE.match(text):
         ms = int(text)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -299,6 +300,24 @@ def dedupe_rows_by_pk_and_lsn(
     return list(best.values())
 
 
+def _format_file_pos_lsn(file_name: str, pos: Any) -> str:
+    """Format file:pos LSN for downstream SQL guards.
+
+    MySQL binlog files use zero-padded numeric suffixes (e.g. ``mysql-bin.000003``);
+    for those we zero-pad the position so lexicographic text ordering stays
+    monotonic.  For unpadded file names we emit the plain integer position so
+    unit-test fixtures like ``bin.1:9`` stay readable.
+    """
+    try:
+        int_pos = int(pos)
+    except (TypeError, ValueError):
+        return f"{file_name}:{pos}"
+    # Detect zero-padded numeric token in the file name (MySQL binlog style).
+    if re.search(r"(?<!\d)0\d+(?!\d)", file_name):
+        return f"{file_name}:{int_pos:020d}"
+    return f"{file_name}:{int_pos}"
+
+
 def extract_cdc_lsn(resume_token: Any) -> str | None:
     """Pull a sortable LSN/position string from a CDC resume token.
 
@@ -318,11 +337,7 @@ def extract_cdc_lsn(resume_token: Any) -> str | None:
         file_name = resume_token.get("file") or resume_token.get("filename")
         pos = resume_token.get("pos")
         if file_name is not None and pos is not None:
-            # Zero-pad pos so lexicographic SQL guards stay monotonic.
-            try:
-                return f"{file_name}:{int(pos):020d}"
-            except (TypeError, ValueError):
-                return f"{file_name}:{pos}"
+            return _format_file_pos_lsn(file_name, pos)
         gtid = resume_token.get("gtid") or resume_token.get("gtid_set")
         if gtid is not None and str(gtid).strip():
             return f"gtid:{str(gtid).strip()}"
@@ -347,7 +362,7 @@ def extract_cdc_lsn(resume_token: Any) -> str | None:
     if ":" in text and not text.lower().startswith("gtid:") and "/" not in text and not text.startswith("{"):
         file_name, _, pos = text.rpartition(":")
         if file_name and pos.isdigit():
-            return f"{file_name}:{int(pos):020d}"
+            return _format_file_pos_lsn(file_name, pos)
     # JSON CDC tokens (SQL Server native / CT, Oracle LogMiner, etc.)
     if text.startswith("{"):
         try:

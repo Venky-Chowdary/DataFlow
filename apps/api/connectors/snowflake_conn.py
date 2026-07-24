@@ -22,6 +22,12 @@ def _fakesnow_exit_patch() -> None:
     global _fakesnow_refcount, _fakesnow_patch_cm
     with _fakesnow_lock:
         _fakesnow_refcount -= 1
+        # Keep the fakesnow mock active for the rest of the process when requested
+        # (test suites verify by issuing their own snowflake.connector.connect calls).
+        if os.getenv("DATAFLOW_FAKESNOW_KEEP_PATCH") == "1":
+            if _fakesnow_refcount < 0:
+                _fakesnow_refcount = 0
+            return
         if _fakesnow_refcount <= 0 and _fakesnow_patch_cm is not None:
             _fakesnow_patch_cm.__exit__(None, None, None)
             _fakesnow_patch_cm = None

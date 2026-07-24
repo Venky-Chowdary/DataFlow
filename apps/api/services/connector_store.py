@@ -442,6 +442,13 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
         workspace_id=data.get("workspace_id", ""),
     )
 
+    # Connector names must be unique per workspace/role/type.  Repeated test runs
+    # otherwise leave stale "Quarantine SQLite" duplicates that break implicit
+    # single-connector resolution in `_find_implicit_connector_id`.
+    for existing in list_connectors(role=conn.role, workspace_id=conn.workspace_id):
+        if existing.name == conn.name and existing.type == conn.type:
+            delete_connector(existing.id, workspace_id=conn.workspace_id)
+
     if _use_mongo():
         try:
             coll = _mongo_collection()

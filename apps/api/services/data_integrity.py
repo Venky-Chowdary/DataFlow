@@ -220,14 +220,22 @@ def _check_financial_precision(
         for raw in values[:100]:
             if not raw or raw in {"0", "0.0", "0.00"}:
                 continue
+            # Schemaless missing and SQL NULL sentinels are not financial values.
+            if raw in {"__DF_MISSING__", "__df_sql_null__"}:
+                continue
             converted, err = apply_transform(raw, transform)
             if err:
                 issues.append(f"{src}: unparseable financial value {raw!r}")
                 continue
+            # Null/missing sentinel coerced to None is a valid absence, not a parse failure.
+            if converted is None:
+                continue
             try:
                 original_parsed, original_err = apply_transform(raw, "decimal")
-                if original_parsed is None or original_err:
+                if original_err:
                     issues.append(f"{src}: unparseable financial value {raw!r}")
+                    continue
+                if original_parsed is None:
                     continue
                 original = Decimal(str(original_parsed))
                 result = Decimal(str(converted))

@@ -44,13 +44,16 @@ end
 
 local owner_ck = redis.call("GET", res_key)
 local prior_generation = 0
+-- lease_key = <prefix>df:cdc:lease:<cursor_key>; derive the prefix so we can look up
+-- other cursor keys under the same resource without hard-coding the key namespace.
+local base = string.sub(lease_key, 1, -(#cursor_key + 1))
 if owner_ck and owner_ck ~= cursor_key then
-  local other_key = "df:cdc:lease:" .. owner_ck
+  local other_key = base .. owner_ck
   local other_raw = redis.call("GET", other_key)
   if other_raw then
     local other = cjson.decode(other_raw)
     if not is_stale(other) and other["holder_id"] ~= holder then
-      return {err="conflict", holder=other["holder_id"], cursor=other["cursor_key"] or owner_ck, resource=other["resource"] or resource}
+      return {"err", "conflict", "holder", other["holder_id"], "cursor", other["cursor_key"] or owner_ck, "resource", other["resource"] or resource}
     end
     prior_generation = tonumber(other["generation"] or 0)
     redis.call("DEL", other_key)
@@ -64,7 +67,7 @@ local acquired_at = now
 if existing_raw then
   local existing = cjson.decode(existing_raw)
   if existing["holder_id"] ~= holder and not is_stale(existing) then
-    return {err="conflict", holder=existing["holder_id"], cursor=existing["cursor_key"] or cursor_key, resource=existing["resource"] or resource}
+    return {"err", "conflict", "holder", existing["holder_id"], "cursor", existing["cursor_key"] or cursor_key, "resource", existing["resource"] or resource}
   end
   if existing["holder_id"] == holder then
     generation = tonumber(existing["generation"] or 1)
@@ -91,7 +94,7 @@ local lease = {
 local payload = cjson.encode(lease)
 redis.call("SET", lease_key, payload, "EX", gc_ttl)
 redis.call("SET", res_key, cursor_key, "EX", gc_ttl)
-return {status="ok", payload=payload}
+return {"status", "ok", "payload", payload}
 """
 
 _REDIS_RENEW_SCRIPT = """
@@ -104,14 +107,14 @@ local gc_ttl = tonumber(ARGV[4])
 
 local raw = redis.call("GET", lease_key)
 if not raw then
-  return {err="missing"}
+  return {"err", "missing"}
 end
 local lease = cjson.decode(raw)
 if lease["holder_id"] ~= holder then
-  return {err="holder"}
+  return {"err", "holder"}
 end
 if tonumber(lease["generation"] or 0) ~= generation then
-  return {err="fence"}
+  return {"err", "fence"}
 end
 lease["heartbeat_at"] = now
 local payload = cjson.encode(lease)
@@ -119,7 +122,7 @@ redis.call("SET", lease_key, payload, "EX", gc_ttl)
 if res_key and res_key ~= "" then
   redis.call("SET", res_key, lease["cursor_key"], "EX", gc_ttl)
 end
-return {status="ok", payload=payload}
+return {"status", "ok", "payload", payload}
 """
 
 _REDIS_RELEASE_SCRIPT = """
@@ -130,21 +133,21 @@ local generation = tonumber(ARGV[2])
 
 local raw = redis.call("GET", lease_key)
 if not raw then
-  return {err="missing"}
+  return {"err", "missing"}
 end
 local lease = cjson.decode(raw)
 if lease["holder_id"] ~= holder then
-  return {err="holder"}
+  return {"err", "holder"}
 end
 if tonumber(lease["generation"] or 0) ~= generation then
-  return {err="fence"}
+  return {"err", "fence"}
 end
 redis.call("DEL", lease_key)
 local owner = redis.call("GET", res_key)
 if owner == lease["cursor_key"] then
   redis.call("DEL", res_key)
 end
-return {status="ok"}
+return {"status", "ok"}
 """
 
 

@@ -278,7 +278,7 @@ def expand_dynamo_documents(
         clean: dict[str, Any] = {}
         for k, v in doc.items():
             if v is DDB_EXPLICIT_NULL:
-                clean[k] = None
+                clean[k] = DDB_EXPLICIT_NULL
             elif isinstance(v, dict) and SET_KIND_KEY in v:
                 clean[k] = v.get("v", [])
             else:

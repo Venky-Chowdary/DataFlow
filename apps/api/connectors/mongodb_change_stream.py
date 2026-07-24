@@ -160,72 +160,77 @@ class MongodbChangeStreamCdc:
         (at-least-once; duplicates possible).
         """
         self._acquire_cdc_lease()
-        start_token: Any = None
         try:
-            with self.coll.watch(full_document=self.full_document, max_await_time_ms=100) as stream:
-                stream.try_next()
-                start_token = stream.resume_token
-        except Exception:
-            start_token = None
+            start_token: Any = None
+            try:
+                with self.coll.watch(full_document=self.full_document, max_await_time_ms=100) as stream:
+                    stream.try_next()
+                    start_token = stream.resume_token
+            except Exception:
+                start_token = None
 
-        last_id: str | None = None
-        legacy_offset: int | None = None
-        if isinstance(self.resume_token, dict) and self.resume_token.get("phase") == "snapshot":
-            raw_last = self.resume_token.get("last_id")
-            if raw_last not in (None, ""):
-                last_id = str(raw_last)
-            else:
-                # Pre-Wave Y offset tokens — honor once, then switch to _id keyset.
-                legacy_offset = int(self.resume_token.get("offset") or 0)
-            start_token = self.resume_token.get("token") or start_token
-        while True:
-            if legacy_offset is not None:
-                from connectors.mongodb_reader import read_collection_batch
+            last_id: str | None = None
+            legacy_offset: int | None = None
+            if isinstance(self.resume_token, dict) and self.resume_token.get("phase") == "snapshot":
+                raw_last = self.resume_token.get("last_id")
+                if raw_last not in (None, ""):
+                    last_id = str(raw_last)
+                else:
+                    # Pre-Wave Y offset tokens — honor once, then switch to _id keyset.
+                    legacy_offset = int(self.resume_token.get("offset") or 0)
+                start_token = self.resume_token.get("token") or start_token
+            while True:
+                if legacy_offset is not None:
+                    from connectors.mongodb_reader import read_collection_batch
 
-                batch = read_collection_batch(
-                    cfg=self.cfg,
-                    database=self.db_name,
-                    collection=self.collection,
-                    columns=self.columns,
-                    offset=legacy_offset,
-                    limit=self.batch_size,
+                    batch = read_collection_batch(
+                        cfg=self.cfg,
+                        database=self.db_name,
+                        collection=self.collection,
+                        columns=self.columns,
+                        offset=legacy_offset,
+                        limit=self.batch_size,
+                    )
+                    legacy_offset = None
+                else:
+                    # _id keyset is delete-safe; SKIP/LIMIT is not under concurrent deletes.
+                    batch = read_collection_cursor_batch(
+                        cfg=self.cfg,
+                        database=self.db_name,
+                        collection=self.collection,
+                        cursor_column="_id",
+                        cursor_after=last_id,
+                        cursor_type="STRING",
+                        columns=self.columns,
+                        limit=self.batch_size,
+                    )
+                if not batch.rows:
+                    break
+                records = [_doc_to_record(dict(zip(batch.headers, row)), self.columns) for row in batch.rows]
+                if "_id" in batch.headers:
+                    last_id = str(batch.rows[-1][batch.headers.index("_id")])
+                # Persist snapshot progress + change-stream handoff on every batch.
+                yield ChangeBatch(
+                    inserts=records,
+                    resume_token={
+                        "phase": "snapshot",
+                        "last_id": last_id,
+                        "token": start_token,
+                        "collection": self.collection,
+                    },
                 )
-                legacy_offset = None
+                if len(batch.rows) < self.batch_size:
+                    break
+            if start_token is not None:
+                yield ChangeBatch(resume_token=start_token)
             else:
-                # _id keyset is delete-safe; SKIP/LIMIT is not under concurrent deletes.
-                batch = read_collection_cursor_batch(
-                    cfg=self.cfg,
-                    database=self.db_name,
-                    collection=self.collection,
-                    cursor_column="_id",
-                    cursor_after=last_id,
-                    cursor_type="STRING",
-                    columns=self.columns,
-                    limit=self.batch_size,
+                yield ChangeBatch(
+                    resume_token={"phase": "streaming", "offset": 0, "collection": self.collection}
                 )
-            if not batch.rows:
-                break
-            records = [_doc_to_record(dict(zip(batch.headers, row)), self.columns) for row in batch.rows]
-            if "_id" in batch.headers:
-                last_id = str(batch.rows[-1][batch.headers.index("_id")])
-            # Persist snapshot progress + change-stream handoff on every batch.
-            yield ChangeBatch(
-                inserts=records,
-                resume_token={
-                    "phase": "snapshot",
-                    "last_id": last_id,
-                    "token": start_token,
-                    "collection": self.collection,
-                },
-            )
-            if len(batch.rows) < self.batch_size:
-                break
-        if start_token is not None:
-            yield ChangeBatch(resume_token=start_token)
-        else:
-            yield ChangeBatch(
-                resume_token={"phase": "streaming", "offset": 0, "collection": self.collection}
-            )
+        finally:
+            # Snapshot is a one-off backfill; release the lease so a resuming
+            # poll consumer (same or different process) can take over immediately.
+            self._lease.release()
 
     def _pk_value(self, doc: dict[str, Any]) -> str:
         from services.value_serializer import cell_to_string

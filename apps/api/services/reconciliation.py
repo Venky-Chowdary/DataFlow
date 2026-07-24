@@ -1540,13 +1540,37 @@ def sample_compare_rows(
             return val or (rec.get(target_columns[0]) if target_columns else None)
         return rec
 
+    def _sortable(value: Any) -> tuple:
+        """Return a stable, type-safe sort key that handles bson.Decimal128."""
+        if value is None:
+            return (0, Decimal(0))
+        if value.__class__.__name__ == "Decimal128":
+            try:
+                return (0, value.to_decimal())
+            except Exception:
+                return (1, str(value))
+        if isinstance(value, Decimal):
+            return (0, value)
+        if isinstance(value, bool):
+            return (0, Decimal(int(value)))
+        if isinstance(value, (int, float)):
+            try:
+                return (0, Decimal(value))
+            except Exception:
+                return (1, str(value))
+        text = str(value).strip()
+        try:
+            return (0, Decimal(text))
+        except Exception:
+            return (1, text.lower())
+
     source_sorted = sorted(
-        source_records, key=lambda r: _row_key(r, source_side=True) or 0
+        source_records, key=lambda r: _sortable(_row_key(r, source_side=True))
     )[:sample_size]
 
     mismatches: list[dict[str, str]] = []
     compared = 0
-    target_fallback = sorted(target_dicts, key=lambda d: _row_key(d) or 0)
+    target_fallback = sorted(target_dicts, key=lambda d: _sortable(_row_key(d)))
 
     for idx, src in enumerate(source_sorted):
         if sort_key and target_by_key:
@@ -1617,6 +1641,15 @@ def read_target_sample(
     cols = columns or ["*"]
     keys = [k for k in (key_values or []) if k is not None and k != ""][: max(1, int(limit or 50))]
 
+    def _row_names(description: Any) -> list[str]:
+        # When explicit columns were requested, trust the caller's keys so
+        # downstream mapping/reconciliation matches by the mapping target names.
+        # Cursor.description names may differ in case (e.g. fakesnow lower-cases
+        # quoted identifiers), which would make dict lookups fail for CURRENCY.
+        if cols and cols != ["*"]:
+            return list(cols)
+        return [d[0] for d in (description or [])]
+
     def _ssl_flag(default: bool = False) -> bool:
         # Match list/probe defaults — ssl=True here previously emptied samples on
         # local / non-TLS hosts while verify_target still counted rows.
@@ -1665,7 +1698,7 @@ def read_target_sample(
                                 f"SELECT {col_sql} FROM {table_ref} ORDER BY {order_sql} LIMIT %s",
                                 (limit,),
                             )
-                        names = [d[0] for d in cur.description]
+                        names = _row_names(cur.description)
                         rows = cur.fetchall()
                     conn.close()
                     return [dict(zip(names, row)) for row in rows]
@@ -1715,12 +1748,18 @@ def read_target_sample(
                         f"SELECT {mysql_col_sql} FROM {table_ref} ORDER BY {mysql_order} LIMIT %s",
                         (limit,),
                     )
-                names = [d[0] for d in cur.description]
+                names = _row_names(cur.description)
                 rows = cur.fetchall()
             conn.close()
             return [dict(zip(names, row)) for row in rows]
 
-        if db_type == "duckdb":
+        if db_type == "duckdb" or (
+            db_type == "generic_sql"
+            and (
+                "duckdb" in ((dest.get("connection_string") or dest.get("database") or "")).lower()
+                or (dest.get("connection_string") or dest.get("database") or "").lower().endswith((".duckdb", ".duck"))
+            )
+        ):
             import sqlalchemy as sa
             from connectors.generic_sql import get_sqlalchemy_engine
 
@@ -1793,6 +1832,14 @@ def read_target_sample(
                             widened.add(float(k))
                         except Exception:
                             pass
+                        # ObjectId keys from schemaless sources are serialized as hex strings.
+                        try:
+                            from bson import ObjectId
+
+                            if isinstance(k, str) and len(k) == 24 and all(c in "0123456789abcdefABCDEF" for c in k):
+                                widened.add(ObjectId(k))
+                        except Exception:
+                            pass
                     query_filter = {sort_key: {"$in": list(widened)}}
                 cursor = coll.find(query_filter)
                 if sort_key:
@@ -1801,10 +1848,22 @@ def read_target_sample(
             except Exception:
                 return []
 
-        if db_type == "sqlite":
+        if db_type == "sqlite" or (
+            db_type == "generic_sql"
+            and (
+                "sqlite" in ((dest.get("connection_string") or dest.get("database") or "")).lower()
+                or (dest.get("connection_string") or dest.get("database") or "").lower().endswith((".db", ".sqlite"))
+            )
+        ):
             import sqlite3
 
-            path = dest.get("connection_string") or dest.get("database", "")
+            from connectors.sqlite_common import sqlite_file_path
+
+            path = sqlite_file_path(
+                dest.get("database") or "",
+                dest.get("connection_string") or "",
+                dest.get("host") or "",
+            )
             if not path:
                 return []
             sqlite_col_sql = "*" if cols == ["*"] else quote_column_list(
@@ -1827,12 +1886,143 @@ def read_target_sample(
                     sql = f"SELECT {sqlite_col_sql} FROM {table_ref} ORDER BY {sqlite_order} LIMIT ?"
                     cur = conn.execute(sql, (int(limit),))
                 rows = cur.fetchall()
-                names = [d[0] for d in cur.description] if cur.description else []
+                names = _row_names(cur.description)
                 return [dict(zip(names, row)) for row in rows]
             except Exception:
                 return []
             finally:
                 conn.close()
+
+        if db_type == "redis":
+            from connectors.redis_reader import _decode, _redis_client
+            from connectors.sql_identifiers import sanitize_identifier
+
+            prefix = table_name or "dataflow"
+            cfg = {
+                "host": dest.get("host", ""),
+                "port": int(dest.get("port") or 6379),
+                "database": dest.get("database", "0"),
+                "username": dest.get("username", ""),
+                "password": dest.get("password", ""),
+                "connection_string": dest.get("connection_string", ""),
+                "ssl": bool(dest.get("ssl", False)),
+            }
+            try:
+                client = _redis_client(cfg)
+                key_set = set(str(k) for k in keys) if keys else set()
+                rows_out: list[dict[str, Any]] = []
+                if keys and sort_key:
+                    # Writer stores keys as ``prefix:<sanitized_id>``.
+                    key_names = [
+                        f"{prefix}:{sanitize_identifier(str(k), preserve_case=True)}"
+                        for k in keys
+                    ]
+                    for raw in client.mget(key_names):
+                        text = _decode(raw)
+                        if not text:
+                            continue
+                        try:
+                            payload = json.loads(text)
+                        except (json.JSONDecodeError, TypeError):
+                            payload = {"value": text}
+                        if isinstance(payload, dict):
+                            rows_out.append(payload)
+                        else:
+                            rows_out.append({"value": payload})
+                        if len(rows_out) >= limit:
+                            break
+                else:
+                    pattern = f"{prefix}:*" if prefix else "*"
+                    cursor = 0
+                    while True:
+                        cursor, batch = client.scan(cursor=cursor, match=pattern, count=500)
+                        for raw_key in batch:
+                            key = raw_key.decode() if isinstance(raw_key, bytes) else str(raw_key)
+                            raw = client.get(key)
+                            text = _decode(raw)
+                            try:
+                                payload = json.loads(text) if text.startswith("{") else {"value": text}
+                            except (json.JSONDecodeError, TypeError):
+                                payload = {"value": text}
+                            if isinstance(payload, dict):
+                                rows_out.append(payload)
+                            else:
+                                rows_out.append({"value": payload})
+                            if len(rows_out) >= limit:
+                                break
+                        if cursor == 0 or len(rows_out) >= limit:
+                            break
+                if columns:
+                    rows_out = [{k: v for k, v in row.items() if k in columns} for row in rows_out]
+                return rows_out[:limit]
+            except Exception:
+                return []
+
+        if db_type == "snowflake":
+            from connectors.snowflake_conn import (
+                get_connection,
+                normalize_account,
+                resolve_or_fold_snowflake_table,
+                snowflake_qualified_table,
+            )
+
+            try:
+                conn = get_connection(
+                    account=normalize_account(dest.get("host", "")),
+                    username=dest.get("username", ""),
+                    password=dest.get("password", ""),
+                    database=dest.get("database", ""),
+                    schema=schema or "PUBLIC",
+                    warehouse=dest.get("warehouse", ""),
+                    connection_string=dest.get("connection_string", ""),
+                )
+                from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
+
+                with conn.cursor() as cur:
+                    resolved = resolve_or_fold_snowflake_table(cur, schema or "PUBLIC", table_name)
+                    qualified_name = snowflake_qualified_table(schema or "PUBLIC", resolved)
+                    sf_col_sql = "*" if cols == ["*"] else quote_column_list(
+                        [require_safe_identifier(c, preserve_case=True) for c in cols]
+                    )
+                    sf_order = (
+                        quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
+                        if sort_key
+                        else "1"
+                    )
+                    if keys and sort_key:
+                        key_col = quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
+                        # Snowflake IN is type-sensitive; widen strings to ints/floats.
+                        widened: set[Any] = set()
+                        for k in keys:
+                            widened.add(k)
+                            try:
+                                if str(k).isdigit():
+                                    widened.add(int(k))
+                            except Exception:
+                                pass
+                            try:
+                                widened.add(float(k))
+                            except Exception:
+                                pass
+                        placeholders = ",".join(["%s"] * len(widened))
+                        cur.execute(
+                            f"SELECT {sf_col_sql} FROM {qualified_name} "
+                            f"WHERE {key_col} IN ({placeholders}) "
+                            f"ORDER BY {sf_order} LIMIT %s",
+                            (*widened, int(limit)),
+                        )
+                    else:
+                        cur.execute(
+                            f"SELECT {sf_col_sql} FROM {qualified_name} ORDER BY {sf_order} LIMIT %s",
+                            (int(limit),),
+                        )
+                    names = _row_names(cur.description)
+                    rows = cur.fetchall()
+                conn.close()
+                return [dict(zip(names, row)) for row in rows]
+            except Exception:
+                return []
+
     except Exception:
         return []
     return []
