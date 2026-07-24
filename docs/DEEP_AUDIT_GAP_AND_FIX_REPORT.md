@@ -694,3 +694,44 @@ pytest apps/api/tests/test_cdc_lsn_stamp.py \
 - **Lakehouse MERGE.** Iceberg/Delta MERGE semantics for idempotent writes are
   still a roadmap item.
 
+## 16. CDC Job-Level Resume Stress Test (this session)
+
+### Gap
+
+PK-sink LSN guards prove that stale redelivery cannot regress an individual row,
+but a full job-level resume across separate `run_cdc_database_transfer` calls
+— simulating a worker crash and restart — had not been exercised end-to-end with
+a real PostgreSQL logical-decoding slot.
+
+### Fixes this session
+
+| Fix | Root cause | Evidence |
+|-----|------------|----------|
+| New resume proof test | No test asserted that the second `run_cdc_database_transfer` resumes from the persisted LSN and streams only new changes | `apps/api/tests/test_cdc_postgres_resume_effectively_once.py` |
+
+### Verification this session
+
+```text
+pytest apps/api/tests/test_cdc_postgres_resume_effectively_once.py
+1 passed in 1.03s
+```
+
+The test creates a source table with 2 rows, runs the CDC transfer with `limit=2`,
+inserts 2 more rows, then runs the same transfer again with the same `job_id`.
+The first run snapshots and the second run resumes from the stored LSN; the
+destination ends with exactly 4 rows and no duplicates.
+
+### What is still NOT proven
+
+- **Multi-stream job-level resume.** The resume proof is single-table PostgreSQL
+  → PostgreSQL. Multi-table shared-reader resume and MySQL/MongoDB/SQL Server
+  equivalents still need stress tests.
+- **Cloud warehouse and real-service routes.** ~952 matrix tests still skip
+  because no live Snowflake/BigQuery/Redshift/GCS/ADLS/Salesforce/etc.
+  credentials or emulators are configured.
+- **BLE001 blind-except narrowing.** `except Exception as exc:` still triggers
+  `BLE001`; the MongoDB LSN prefetch catch was narrowed to
+  `pymongo.errors.PyMongoError`, but the broader ruff runway remains.
+- **Lakehouse MERGE.** Iceberg/Delta MERGE semantics for idempotent writes are
+  still a roadmap item.
+
