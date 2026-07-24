@@ -735,3 +735,61 @@ destination ends with exactly 4 rows and no duplicates.
 - **Lakehouse MERGE.** Iceberg/Delta MERGE semantics for idempotent writes are
   still a roadmap item.
 
+
+## 17. PostgreSQL Destination Schema “unknown” in Transfer Studio (this session)
+
+### Gap
+
+Mapping `MySQL jobs → PostgreSQL jobs` showed **Destination schema unknown** in
+Transfer Studio even though a connector and an existing table were supplied.
+`introspect_endpoint` returned `connected=False` / `table_exists=None`, so
+`_destination_schema_probe` returned `({}, None)` and the mapping engine refused to
+offer create-new identity mappings. The UI then rendered 56 "needs review" rows
+instead of telling the operator that the destination connection was failing.
+
+### Root cause
+
+For PostgreSQL, `ssl=True` forced `sslmode=require`. If the destination host did
+not advertise TLS (e.g. a local/Railway internal Postgres), the connection failed
+with *"server does not support SSL, but SSL was required"* and the schema probe
+returned `connected=False` without any visible remediation. The mapping UI only had
+a generic "Destination schema unknown" banner, not the actual connection error or
+a path back to Destination.
+
+### Fixes this session
+
+| Fix | Root cause | Evidence |
+|-----|------------|----------|
+| PostgreSQL `sslmode=require` fallback | `get_connection` treated `ssl=True` as a hard `require` and did not retry with `prefer` when the server does not support TLS | `apps/api/connectors/postgresql_conn.py` |
+| Map/ColumnReviewPanel connection-error banner | Unknown schema was shown as a generic message; the real `destination.connected`/`message` was never surfaced with a CTA | `apps/web/src/pages/TransferPage.tsx`, `apps/web/src/pages/transfer/TransferMapStep.tsx`, `apps/web/src/components/ColumnReviewPanel.tsx` |
+
+### Verification this session
+
+```text
+pytest apps/api/tests/test_execute_tracked_csv_to_postgres_upsert.py \
+       apps/api/tests/test_postgresql_to_postgresql_incremental.py \
+       apps/api/tests/test_cdc_postgres_resume_effectively_once.py
+3 passed in 7.12s
+
+npm run build in apps/web
+✓ built in 1.67s
+```
+
+Manual probe against the PostgreSQL host with `ssl=True` that previously failed:
+- Before fix: `connected=False`, `table_exists=None`, schema unknown.
+- After fix: `sslmode=require` falls back to `prefer`, connection succeeds, and the
+  correct `table_exists` (`True` if the table exists, `False` if it does not) is
+  returned. When the table is missing the mapper now offers create-new identity
+  mappings.
+
+### What is still NOT proven
+
+- **MySQL / SQL Server SSL mismatch fallback.** The same `ssl=True` hard-require
+  pattern may fail for MySQL (`pymysql` with `ssl={}`) and SQL Server if the server
+  does not support TLS; a typed fallback still needs to be added.
+- **Cloud warehouse and real-service routes.** ~952 matrix tests still skip because
+  no live Snowflake/BigQuery/Redshift/GCS/ADLS/Salesforce/etc. credentials or
+  emulators are configured.
+- **Full CDC end-to-end exactly-once job resume.** Multi-stream resume for
+  MySQL/MongoDB/SQL Server is still open.
+- **BLE001 blind-except narrowing.** The broader ruff runway remains.
