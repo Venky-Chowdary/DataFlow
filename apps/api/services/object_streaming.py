@@ -285,6 +285,7 @@ def stream_spilled_file_to_database(
     backfill_new_fields: bool = False,
     validation_mode: str = "strict",
     source_filter: dict[str, Any] | None = None,
+    skip_preflight: bool = False,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Stream a spilled object file to a database destination without loading it."""
     try:
@@ -307,4 +308,5 @@ def stream_spilled_file_to_database(
         backfill_new_fields=backfill_new_fields,
         validation_mode=validation_mode,
         source_filter=source_filter,
+        skip_preflight=skip_preflight,
     )

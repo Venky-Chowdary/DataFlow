@@ -654,6 +654,10 @@ def _apply_write_path_transform(value: str, transform: str | None) -> tuple[str 
             return None, "non_deterministic_transform"
         return out, None
     t = (transform or "none").strip() or "none"
+    # None values must stay None through the write-path transform so the G8 identity
+    # check treats SQL/Dynamo NULL and the literal empty string as distinct values.
+    if value is None:
+        return None, None
     result, err = apply_transform(value, t)
     if err:
         return None, err
@@ -686,11 +690,12 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
         if m.transform and str(m.transform).lower().strip() in _NON_DETERMINISTIC
     ]
 
-    def _serialize_for_write(value: Any) -> str:
+    def _serialize_for_write(value: Any) -> str | None:
         # Match readers/writers: lists/dicts become compact JSON, not Python repr.
         # Studio samples often keep native arrays; str([...]) falsely fails identity.
+        # Preserve None as None so apply_transform can produce SQL NULL, not "".
         if value is None:
-            return ""
+            return None
         try:
             from services.value_serializer import cell_to_string
 

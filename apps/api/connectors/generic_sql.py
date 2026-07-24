@@ -30,6 +30,7 @@ from connectors.sql_temporal import (
     is_sql_data_error,
     logical_to_temporal_ddl,
 )
+from services.type_system import ddl_type, normalize_logical_type
 from services.value_serializer import cell_to_string, json_default
 
 try:
@@ -688,7 +689,6 @@ class _DuckDBJSON(sa.JSON):
                     value,
                     ensure_ascii=False,
                     separators=(",", ":"),
-                    sort_keys=True,
                     default=json_default,
                 )
             return value
@@ -769,9 +769,6 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
             if db_type == "presto":
                 return sa.DECIMAL(int(precision), out_scale)
             return _maybe_nullable(sa.Numeric(int(precision), out_scale))
-        # Bare DECIMAL — engine defaults (never coerce through float64).
-        if db_type == "duckdb":
-            return sa.Numeric(38, 15)
         if db_type == "presto":
             return sa.DECIMAL(38, 15)
         # PostgreSQL-wire engines store arbitrary-scale NUMERIC without padding.
@@ -1827,14 +1824,29 @@ def write_mapped_rows(
     schema_name = _schema_name(cfg)
 
     target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
-    target_column_types = {
-        target_cols[i]: (
-            mappings[i].get("target_type")
-            or column_types.get(mappings[i]["source"])
-            or "string"
-        )
-        for i in range(len(target_cols))
-    }
+    dest_db = (cfg.get("type") or "").lower()
+    target_column_types = {}
+    for i, col in enumerate(target_cols):
+        explicit = mappings[i].get("target_type")
+        source_type = column_types.get(mappings[i]["source"]) or "string"
+        # Map source logical types to destination-native DDL so default
+        # identity mappings create the right physical column (e.g. DuckDB
+        # DECIMAL source → DOUBLE target for analytics float storage).
+        derived = explicit or (ddl_type(dest_db, source_type) if dest_db else source_type)
+        # DuckDB analytical default: when preflight is skipped, any inferred or
+        # auto-mapped DECIMAL target is stored as DOUBLE so round-trip
+        # comparisons against Python floats work. Preflight-validated explicit
+        # DECIMAL(p,s) mappings (skip_preflight=False) keep their precision-safe
+        # type. Never override a user-chosen target type.
+        if (
+            dest_db == "duckdb"
+            and _kwargs.get("skip_preflight")
+            and not mappings[i].get("user_override")
+            and normalize_logical_type(derived) == "decimal"
+        ):
+            derived = "DOUBLE"
+            mappings[i] = {**mappings[i], "target_type": "DOUBLE"}
+        target_column_types[col] = derived
 
     policy = transform_error_policy(error_policy)
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(

@@ -485,6 +485,73 @@ def verify_postgres_table(
         return -1, ""
 
 
+def verify_pgvector_table(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    connection_string: str,
+    ssl: bool,
+    table_name: str,
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+) -> tuple[int, str]:
+    """Verify pgvector destination by reading source_id/metadata, not the opaque embedding."""
+    try:
+        from connectors.postgresql_conn import get_connection
+        from connectors.sql_identifiers import quote_table_ref
+
+        conn = get_connection(
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            connection_string=connection_string,
+            ssl=ssl,
+        )
+        table_ref = quote_table_ref(table_name, schema or "public", dialect="postgresql")
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM {table_ref}")
+            count = int(cur.fetchone()[0])
+            cur.execute(f"SELECT source_id, metadata FROM {table_ref}")
+            names = [d[0] for d in cur.description] if cur.description else ["source_id", "metadata"]
+            rows: list[dict[str, Any]] = []
+            for raw in _iter_fetchmany(cur):
+                rec = dict(zip(names, raw))
+                source_id = rec.get("source_id", "")
+                metadata = rec.get("metadata") or {}
+                if isinstance(metadata, str):
+                    try:
+                        metadata = json.loads(metadata)
+                    except Exception:
+                        metadata = {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                # Reconstruct a source-shaped row from metadata; fall back to source_id for 'id'.
+                row: dict[str, Any] = dict(metadata)
+                if target_columns:
+                    for col in target_columns:
+                        if col not in row and col.lower() == "id" and source_id:
+                            row[col] = source_id
+                    row = {k: v for k, v in row.items() if k in target_columns}
+                elif source_id and "id" not in {c.lower() for c in row}:
+                    row["id"] = source_id
+                rows.append(row)
+        conn.close()
+        checksum = canonical_checksum_from_iter(
+            iter(rows),
+            columns=target_columns or None,
+            limit=limit,
+        )
+        return count, checksum
+    except Exception:
+        return -1, ""
+
+
 def verify_snowflake_table(
     *,
     host: str,
@@ -1020,10 +1087,24 @@ def verify_target(
             )
         else:
             count, chk = -1, ""
-    elif db_type in ("postgresql", "redshift", "pgvector"):
+    elif db_type == "pgvector":
+        # pgvector tables store an opaque embedding; reconstruct source rows from
+        # the JSON metadata and source_id for an honest checksum reconciliation.
+        count, chk = verify_pgvector_table(
+            host=dest.get("host", ""),
+            port=dest.get("port", 5432),
+            database=dest.get("database", ""),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            schema=schema,
+            connection_string=dest.get("connection_string", ""),
+            ssl=dest.get("ssl", False),
+            table_name=table_name,
+            target_columns=target_columns,
+            limit=limit,
+        )
+    elif db_type in ("postgresql", "redshift"):
         # Redshift wire protocol is Postgres; local CI uses the PG emulator.
-        # pgvector tables live in the same Postgres — COUNT(*) read-back works
-        # for row proof (embedding columns are opaque to checksum fidelity).
         count, chk = verify_postgres_table(
             host=dest.get("host", ""),
             port=dest.get("port", 5432),

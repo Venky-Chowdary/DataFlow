@@ -485,6 +485,7 @@ def _write_batch(
     close_connection: bool | None = None,
     skip_session_setup: bool = False,
     job_id: str | None = None,
+    skip_preflight: bool = False,
 ) -> tuple[int, str, dict]:
     if dest_type == "postgresql" or dest_type == "redshift":
         from connectors.postgresql_writer import write_mapped_rows
@@ -799,6 +800,7 @@ def _write_batch(
             auth_source=cfg.get("auth_source", ""),
             error_policy=error_policy,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
+            skip_preflight=skip_preflight,
         )
         if not result.ok:
             raise RuntimeError(result.error or f"{dest_type} batch write failed")
@@ -881,6 +883,7 @@ def stream_database_transfer(
     validation_mode: str = "strict",
     source_filter: dict[str, Any] | None = None,
     limit: int = 0,
+    skip_preflight: bool = False,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
@@ -1006,6 +1009,7 @@ def stream_database_transfer(
             backfill_new_fields=backfill_new_fields,
             validation_mode=validation_mode,
             source_filter=source_filter,
+            skip_preflight=skip_preflight,
         )
 
     # Memory-safe chunk sizing: sample a few rows, then size batches to keep
@@ -1515,6 +1519,7 @@ def stream_database_transfer(
             backfill_new_fields=backfill_new_fields,
             error_policy=stream_error_policy,
             job_id=job_id,
+            skip_preflight=skip_preflight,
             **write_kwargs,
         )
         batch_written, last_checksum, dest_summary = with_retry(
@@ -1824,6 +1829,7 @@ def run_non_cdc_multi_stream_sequential(
     validation_mode: str = "strict",
     source_filter: dict[str, Any] | None = None,
     limit: int = 0,
+    skip_preflight: bool = False,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Run full/incremental for N streams sequentially (one object at a time).
 
@@ -1856,6 +1862,7 @@ def run_non_cdc_multi_stream_sequential(
             validation_mode=validation_mode,
             source_filter=source_filter,
             limit=limit,
+            skip_preflight=skip_preflight,
         )
 
     total_rows = 0
@@ -1939,6 +1946,7 @@ def run_non_cdc_multi_stream_sequential(
                     validation_mode=validation_mode,
                     source_filter=source_filter,
                     limit=stream_limit,
+                    skip_preflight=skip_preflight,
                 )
                 ddl_log.extend(stream_ddl)
                 total_rows += rows
@@ -2124,6 +2132,7 @@ def stream_scd2_mirror_transfer(
     rows_written = 0
     dest_summary: dict[str, Any] = {
         "source_rows": rows_staged,
+        "source_row_count": rows_staged,
         "staging_table": staging_qualified,
         "sync_mode": effective_sync,
     }
@@ -2256,7 +2265,10 @@ def stream_scd2_mirror_transfer(
             pass
 
     ddl_log.append(f"{effective_sync.upper()} {staging_qualified} → {target_qualified}")
-    dest_summary["rejected_rows"] = max(0, rows_staged - rows_written)
+    # Rejected/coerced counts come from the staging write and the SCD2/mirror
+    # merge itself; they do NOT mean "unchanged rows" for idempotent modes.
+    dest_summary.setdefault("rejected_rows", stage_summary.get("rejected_rows", 0))
+    dest_summary.setdefault("coerced_null_rows", stage_summary.get("coerced_null_rows", 0))
     return rows_written, ddl_log, dest_summary, target_cols
 
 

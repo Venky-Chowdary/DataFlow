@@ -506,21 +506,33 @@ def _parse_boolean(value: str) -> bool | None:
     return None
 
 
-def _parse_json(value: str) -> str | None:
+def _parse_json(value: Any) -> str | None:
     """Normalize a cell into JSON-valid text for a semi-structured target.
 
     Valid JSON (objects, arrays, numbers, booleans, quoted strings) is preserved
-    and re-serialized compactly. A bare scalar that is not valid JSON on its own
-    — e.g. a plain word from a mixed MongoDB field that is an array in one
-    document and ``"single"`` in another — is losslessly wrapped as a JSON string
-    so it still loads into a VARIANT / JSON / SUPER column and stays queryable.
-    No value is ever dropped: the raw text is always representable as JSON.
+    and re-serialized compactly. Native Python containers are also serialized so
+    database drivers that return parsed JSON objects round-trip deterministically.
+    A bare scalar that is not valid JSON on its own is losslessly wrapped as a
+    JSON string literal so it still loads into a VARIANT / JSON / SUPER column.
     """
-    try:
-        parsed = json.loads(value, parse_constant=lambda v: None)
-    except (json.JSONDecodeError, ValueError):
-        parsed = value  # wrap the raw scalar as a JSON string literal
-    return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"), default=json_default, allow_nan=False)
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value, parse_constant=lambda v: None)
+        except (json.JSONDecodeError, ValueError):
+            parsed = value  # wrap the raw scalar as a JSON string literal
+    elif isinstance(value, (dict, list, tuple, set, frozenset)):
+        parsed = value
+    else:
+        parsed = value
+    return json.dumps(
+        parsed,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=json_default,
+        allow_nan=False,
+    )
 
 
 def _parse_uuid(value: str) -> str | None:
@@ -658,11 +670,20 @@ def infer_transform_for_mapping(
     """Pick transform from source/target logical types, column semantics, and samples."""
     from services.type_system import normalize_logical_type
 
+    from services.type_system import parse_numeric_precision_scale
+
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type) if target_type else None
     tgt_name = target_col.lower()
 
     semantic = detect_semantic_type(source_col, source_samples)
+
+    # Zero-scale DECIMAL/NUMBER targets (e.g. Snowflake NUMBER(38,0)) are integer
+    # carriers, so an integer source should be coerced with the integer transform.
+    if tgt == "decimal" and target_type:
+        _p, _s = parse_numeric_precision_scale(target_type)
+        if _s == 0 and src == "integer":
+            return "integer"
 
     # Explicit, non-generic target type wins; if the source is already numeric
     # use a direct numeric transform, otherwise apply semantic transforms.
@@ -798,7 +819,8 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
 
     # Identity / text transforms: empty string is a real value.
     _KEEP_EMPTY = frozenset({
-        "none", "identity", "upper", "lower", "trim", "trim_id",
+        "none", "identity", "passthrough", "string", "varchar", "text",
+        "upper", "lower", "trim", "trim_id",
         "strip_controls", "normalize_unicode",
     })
     if text == "" and transform_l in _KEEP_EMPTY:
@@ -848,7 +870,8 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         return parsed, None
 
     if transform == "json":
-        parsed_json = _parse_json(text)
+        json_input = raw if isinstance(raw, (dict, list, tuple, set, frozenset)) else text
+        parsed_json = _parse_json(json_input)
         if parsed_json is None:
             return None, f"Invalid JSON: {text!r}"
         return parsed_json, None

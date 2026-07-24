@@ -7,6 +7,11 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from services.reconciliation import _iter_fingerprints, checksum_rows
+from services.transform_engine import apply_transform
+from services.transform_resolver import resolve_transform
+from services.value_serializer import SQL_NULL_SENTINEL
+
 from connectors.sql_identifiers import (  # noqa: F401 — re-export canonical helpers
     quote_column_list,
     quote_sql_identifier,
@@ -14,9 +19,6 @@ from connectors.sql_identifiers import (  # noqa: F401 — re-export canonical h
     require_safe_identifier,
     sanitize_identifier,
 )
-from services.reconciliation import _iter_fingerprints, checksum_rows
-from services.transform_engine import apply_transform
-from services.transform_resolver import resolve_transform
 
 # Configurable batch size — default 20 000 rows per commit (enterprise scale)
 CHUNK_SIZE = int(os.getenv("DATAFLOW_CHUNK_SIZE", "20000"))
@@ -63,7 +65,11 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
         normalize_logical_type = lambda x: str(x or "").lower()  # type: ignore[assignment]
     ctype = normalize_logical_type(dest_types.get(col, "")) if dest_types else ""
     if ctype in {"date", "datetime", "time"}:
-        from connectors.sql_temporal import coerce_sql_temporal, format_wire_value, logical_to_temporal_ddl
+        from connectors.sql_temporal import (
+            coerce_sql_temporal,
+            format_wire_value,
+            logical_to_temporal_ddl,
+        )
 
         ddl = logical_to_temporal_ddl(ctype) or "DATETIME"
         coerced = coerce_sql_temporal(value, ddl)
@@ -120,7 +126,10 @@ def normalize_temporal_cells(
 
         return coerce_mapped_rows_snowflake(mapped_rows, types_list)
     if eng == "bigquery":
-        from connectors.warehouse_temporal import format_bigquery_bind, bigquery_temporal_ddl
+        from connectors.warehouse_temporal import (
+            bigquery_temporal_ddl,
+            format_bigquery_bind,
+        )
 
         out: list[tuple] = []
         for row in mapped_rows:
@@ -133,7 +142,11 @@ def normalize_temporal_cells(
             out.append(tuple(cells))
         return out
 
-    from connectors.sql_temporal import coerce_sql_temporal, is_temporal_ddl, logical_to_temporal_ddl
+    from connectors.sql_temporal import (
+        coerce_sql_temporal,
+        is_temporal_ddl,
+        logical_to_temporal_ddl,
+    )
 
     if not any(is_temporal_ddl(t) or logical_to_temporal_ddl(t) for t in types_list):
         return mapped_rows
@@ -626,7 +639,7 @@ def sample_values_by_source_from_batch(
         col_i = index[src]
         vals: list[str] = []
         for row in data_rows[:limit]:
-            if col_i < len(row) and row[col_i] not in (None, ""):
+            if col_i < len(row) and row[col_i] not in (None, "", SQL_NULL_SENTINEL):
                 vals.append(str(row[col_i]))
         if vals:
             out[src] = vals

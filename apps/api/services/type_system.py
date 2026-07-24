@@ -471,7 +471,7 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_STRING: "VARCHAR",
         LOGICAL_TEXT: "VARCHAR",
         LOGICAL_INTEGER: "BIGINT",
-        LOGICAL_DECIMAL: "DECIMAL(38,15)",
+        LOGICAL_DECIMAL: "DOUBLE",
         LOGICAL_BOOLEAN: "BOOLEAN",
         LOGICAL_DATE: "DATE",
         LOGICAL_DATETIME: "TIMESTAMP",
@@ -697,10 +697,10 @@ _DECIMAL_PARAM_TEMPLATES: Final[dict[str, str]] = {
     "generic_sql": "NUMERIC({p},{s})",
     "databricks": "DECIMAL({p},{s})",
     "iceberg": "decimal({p},{s})",
-    "duckdb": "DECIMAL({p},{s})",
     "clickhouse": "Decimal({p}, {s})",
     "trino": "decimal({p},{s})",
     "presto": "decimal({p},{s})",
+    "duckdb": "DECIMAL({p},{s})",
     "postgresql": "NUMERIC({p},{s})",
     "bigquery": "BIGNUMERIC({p},{s})",
 }
@@ -1040,10 +1040,11 @@ def _decimal_ddl_for_dest(db: str, inferred: str | None) -> str:
     precision, scale = parse_numeric_precision_scale(inferred)
     cap_p, cap_s = _DECIMAL_CAPS.get(db, (38, 37))
 
-    # No source params → platform default (PG stays bare NUMERIC; others use floor).
+    # No source params → platform default (PG stays bare NUMERIC; others use
+    # a generous floor so values never truncate at write time).
     if precision is None and scale is None:
         if db == "postgresql":
-            return default_ddl  # bare NUMERIC — unbounded until source declares (p,s)
+            return default_ddl
         if db == "bigquery":
             return default_ddl  # bare BIGNUMERIC when scale unknown
         default_s = min(_DECIMAL_DEFAULT_SCALE.get(db, 10), cap_s)

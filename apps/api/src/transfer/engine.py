@@ -1549,6 +1549,7 @@ class UniversalTransferEngine:
                         write_mode=write_mode,
                         conflict_columns=conflict_columns,
                         job_id=job_id,
+                        skip_preflight=request.skip_preflight,
                     )
 
                 if effective_sync_lower == "scd2" and conflict_columns:
@@ -1650,9 +1651,10 @@ class UniversalTransferEngine:
                 unique_name = f"export_{job_id}.{ext}"
 
                 output_path = request.destination.output_path.strip() if request.destination.output_path else ""
+                workspace_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
                 if output_path:
-                    export_path = os.path.abspath(output_path)
-                    if not export_path.startswith(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))):
+                    export_path = os.path.abspath(output_path) if os.path.isabs(output_path) else os.path.abspath(os.path.join(workspace_root, output_path))
+                    if not export_path.startswith(workspace_root):
                         mongo.update_job_status(job_id, "failed", error="File export path must be inside the application workspace", phase="failed")
                         return TransferResult(success=False, error="File export path must be inside the application workspace", job_id=job_id)
                     os.makedirs(os.path.dirname(export_path) or ".", exist_ok=True)
@@ -1686,7 +1688,7 @@ class UniversalTransferEngine:
                     records=records,
                     columns=columns,
                     rows_written=rows_written,
-                    writer_checksum=dest_summary.get("checksum", ""),
+                    writer_checksum=dest_summary.get("checksum") or dest_summary.get("active_checksum", ""),
                     dest_summary=dest_summary,
                     mappings=mappings,
                     source_schema=schema,
@@ -2131,6 +2133,7 @@ class UniversalTransferEngine:
                     validation_mode=request.validation_mode,
                     source_filter=request.source_filter,
                     limit=request.limit,
+                    skip_preflight=request.skip_preflight,
                 )
             else:
                 rows_written, ddl_log, dest_summary, _ = stream_database_transfer(
@@ -2148,6 +2151,7 @@ class UniversalTransferEngine:
                     validation_mode=request.validation_mode,
                     source_filter=request.source_filter,
                     limit=request.limit,
+                    skip_preflight=request.skip_preflight,
                 )
 
             with _reconcile_phase_heartbeat(
@@ -2161,7 +2165,7 @@ class UniversalTransferEngine:
                     records=[],
                     columns=columns,
                     rows_written=rows_written,
-                    writer_checksum=dest_summary.get("checksum", ""),
+                    writer_checksum=dest_summary.get("checksum") or dest_summary.get("active_checksum", ""),
                     dest_summary=dest_summary,
                     mappings=mappings,
                     source_schema=schema,
@@ -2523,6 +2527,7 @@ class UniversalTransferEngine:
                 backfill_new_fields=backfill_fields,
                 validation_mode=request.validation_mode,
                 source_filter=request.source_filter,
+                skip_preflight=request.skip_preflight,
             )
 
             with _reconcile_phase_heartbeat(
@@ -2536,7 +2541,7 @@ class UniversalTransferEngine:
                     records=[],
                     columns=columns,
                     rows_written=rows_written,
-                    writer_checksum=dest_summary.get("checksum", ""),
+                    writer_checksum=dest_summary.get("checksum") or dest_summary.get("active_checksum", ""),
                     dest_summary=dest_summary,
                     mappings=mappings,
                     source_schema=schema,

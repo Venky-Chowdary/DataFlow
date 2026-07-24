@@ -13,13 +13,14 @@ import json
 import os
 import sys
 import tempfile
+from collections.abc import Callable
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .models import EndpointConfig
-from .type_mapper import ddl_carrier_type, ddl_type, normalize_inferred
+from .type_mapper import ddl_carrier_type, ddl_type
 
 try:
     from services.checkpoint_service import Checkpoint, CheckpointService
@@ -38,24 +39,24 @@ _api_root = Path(__file__).resolve().parents[2]
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
-from connectors.writer_common import (  # noqa: E402
+from connectors.writer_common import (
     CHUNK_SIZE,
     build_mapped_rows,
     resolve_target_columns,
     row_fingerprints,
     transform_error_policy_for_validation_mode,
 )
-from services.reconciliation import FingerprintAccumulator  # noqa: E402
+from services.reconciliation import FingerprintAccumulator
 
 try:
-    from services.csv_profiler import (  # noqa: E402
+    from services.csv_profiler import (
         count_csv_rows,
         detect_delimiter,
         detect_encoding,
         parse_csv_preview,
     )
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
-    from src.services.csv_profiler import (  # noqa: E402
+    from src.services.csv_profiler import (
         count_csv_rows,
         detect_delimiter,
         detect_encoding,
@@ -371,7 +372,7 @@ def peek_file_source(
                     if name and name not in columns:
                         columns[name] = None
                 if len(sample_objs) < 100:
-                    sample_objs.append(obj)
+                    sample_objs.append(_json_empty_to_none(obj))
         if total == 0:
             raise ValueError("JSONL file is empty")
         headers = list(columns.keys())
@@ -388,7 +389,6 @@ def peek_file_source(
 
     if file_type == "parquet":
         import pyarrow.parquet as pq
-
         from services.arrow_schema import schema_from_arrow
 
         pf = pq.ParquetFile(content) if _is_path(content) else pq.ParquetFile(io.BytesIO(content))
@@ -403,14 +403,13 @@ def peek_file_source(
                 sample.extend(batch.to_pylist())
                 if len(sample) >= 100:
                     break
-            sample = sample[:100]
+            sample = [_json_empty_to_none(r) for r in sample[:100]]
         finally:
             pf.close()
         return headers, schema, total, sample
 
     if file_type == "orc":
-        import pyarrow.orc as orc
-
+        from pyarrow import orc
         from services.arrow_schema import schema_from_arrow
 
         if _is_path(content):
@@ -425,7 +424,6 @@ def peek_file_source(
 
     if file_type == "avro":
         import fastavro
-
         from services.avro_schema import schema_map_from_avro
 
         opener = open(content, "rb") if _is_path(content) else io.BytesIO(content)  # type: ignore[arg-type]
@@ -471,7 +469,7 @@ def peek_file_source(
                     total += 1
                     columns.update(obj.keys())
                     if len(sample_objs) < 100:
-                        sample_objs.append(obj)
+                        sample_objs.append(_json_empty_to_none(obj))
         else:
             raw = content if isinstance(content, (bytes, bytearray)) else None
             if raw is None:
@@ -479,7 +477,7 @@ def peek_file_source(
                     raw = bio.read()
             records = load_json_records(bytes(raw))
             total = len(records)
-            sample_objs = records[:100]
+            sample_objs = [_json_empty_to_none(r) for r in records[:100]]
             for obj in records:
                 if isinstance(obj, dict):
                     columns.update(obj.keys())
@@ -497,6 +495,17 @@ def peek_file_source(
 
 def _csv_empty_to_none(value: Any) -> Any:
     return None if value == "" else value
+
+
+def _json_empty_to_none(value: Any) -> Any:
+    """JSON/JSONL empty strings are conventionally missing values, not literals."""
+    if value == "":
+        return None
+    if isinstance(value, dict):
+        return {k: _json_empty_to_none(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_empty_to_none(v) for v in value]
+    return value
 
 
 def _iter_csv_batches(
@@ -537,7 +546,7 @@ def _iter_jsonl_batches(
                 raise ValueError(f"Invalid JSONL on line {line_no}: {exc}") from exc
             if not isinstance(obj, dict):
                 raise ValueError(_JSONL_SCALAR_ERROR)
-            batch.append(obj)
+            batch.append(_json_empty_to_none(obj))
             if len(batch) >= chunk_size:
                 yield batch
                 batch = []
@@ -551,7 +560,8 @@ def _iter_json_array_batches(
 ):
     from services.json_tabular import iter_json_record_dicts
 
-    yield from iter_json_record_dicts(_open_binary, content, chunk_size=chunk_size)
+    for batch in iter_json_record_dicts(_open_binary, content, chunk_size=chunk_size):
+        yield [_json_empty_to_none(r) for r in batch]
 
 
 def _batch_iterator_for_type(
@@ -583,7 +593,7 @@ def _batch_iterator_for_type(
                 for record_batch in pf.iter_batches(batch_size=batch_size):
                     # Arrow → pylist preserves nested types; pandas path fails on arrays.
                     for record in record_batch.to_pylist():
-                        batch.append(record)
+                        batch.append(_json_empty_to_none(record))
                         if len(batch) >= batch_size:
                             yield batch
                             batch = []
@@ -594,7 +604,7 @@ def _batch_iterator_for_type(
 
         return _parquet_batches()
     if file_type == "orc":
-        import pyarrow.orc as orc
+        from pyarrow import orc
 
         if _is_path(content):
             table = orc.ORCFile(content).read()
@@ -674,6 +684,7 @@ def stream_file_to_database(
     backfill_new_fields: bool = False,
     validation_mode: str = "strict",
     source_filter: dict[str, Any] | None = None,
+    skip_preflight: bool = False,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     try:
         from services.file_parser import FileParser
@@ -762,8 +773,14 @@ def stream_file_to_database(
         pk_target_cols = [
             map_source_to_target(col, mappings) for col in contract.primary_key_columns()
         ]
-    write_mode = "upsert" if requires_upsert(effective_sync) and pk_target_cols else "insert"
-    if requires_upsert(effective_sync) and not pk_target_cols:
+    # Object-store destinations (S3/GCS/ADLS) write a single object per call, so
+    # row-level upsert keys are not required and the object is overwritten.
+    object_store = dest_type in ("s3", "gcs", "adls")
+    if object_store and requires_upsert(effective_sync):
+        write_mode = "upsert"
+    else:
+        write_mode = "upsert" if requires_upsert(effective_sync) and pk_target_cols else "insert"
+    if requires_upsert(effective_sync) and not pk_target_cols and not object_store:
         raise ValueError(
             f"Sync mode `{effective_sync}` requires primary_key for upsert; "
             "refuse silent insert fallback (set primary_key on the stream contract)"
@@ -800,12 +817,12 @@ def stream_file_to_database(
     fp_accumulator = FingerprintAccumulator()
     batch_quality_enabled = validation_mode in ("strict", "maximum")
     try:
-        from services.data_quality import (  # noqa: E402
+        from services.data_quality import (
             BatchDriftDetector,
             run_integrity_audit,
         )
     except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
-        from src.services.data_quality import (  # noqa: E402
+        from src.services.data_quality import (
             BatchDriftDetector,
             run_integrity_audit,
         )
@@ -907,6 +924,7 @@ def stream_file_to_database(
             backfill_new_fields=backfill_new_fields,
             error_policy=stream_error_policy,
             job_id=job_id,
+            skip_preflight=skip_preflight,
         )
         batch_written, last_checksum, dest_summary = with_retry(
             write_op,
