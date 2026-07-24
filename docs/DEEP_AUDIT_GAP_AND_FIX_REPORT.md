@@ -396,13 +396,15 @@ pytest apps/api/tests  (with DATAFLOW_PII_HASH_KEY, DATAFLOW_FAKESNOW_KEEP_PATCH
 | Blind `except Exception: pass` in connector adapters | `resolve_connector_config` / `_introspect_table_schema` / `_find_implicit_connector_id` suppressed connector-store and schema-introspection errors, causing `localhost`/default fallbacks | `apps/api/src/transfer/adapters.py` |
 | Blind `except Exception: return -1, ""` in reconciliation | Every `read_target_sample` driver swallowed read-back errors, making Gate-8 silently report no-data instead of a verifiable failure | `apps/api/services/reconciliation.py` |
 | Blind `except Exception: pass` in preflight | `dry_run_sample` and MongoDB `auth_source` persistence suppressed validation/storage errors | `apps/api/services/preflight_service.py` |
+| Blind `except Exception: pass` in schema-drift DDL | `add_missing_columns` swallowed "already exists" rollback errors and re-raised without context; `_widen_existing_number_columns` silently aborted column widening | `apps/api/connectors/schema_drift.py`, `apps/api/connectors/snowflake_writer.py` |
+| Blind `except Exception: pass` in SQLite writer | `ALTER TABLE ADD COLUMN` suppressed `sqlite3.OperationalError` without context | `apps/api/connectors/sqlite_writer.py` |
 
 ### Implementation notes
 
-- Added `import logging` and `logger = logging.getLogger(__name__)` where missing (`engine.py`, `adapters.py`, `reconciliation.py`).
+- Added `import logging` and `logger = logging.getLogger(__name__)` where missing (`engine.py`, `adapters.py`, `reconciliation.py`, `schema_drift.py`, `sqlite_writer.py`).
 - Converted `except Exception:` and `except Exception: pass` in the critical data path to `except Exception as exc:` with structured `logger.warning` / `logger.debug` messages and `exc_info=exc`.
 - Preserved all existing fallback behavior (resume defaults, notification non-failure, cancellation tolerance) so the change is instrumentation-only.
-- `ruff format` was run on the four touched files; the functional delta is the exception-variable capture and logging calls.
+- `ruff format` was run on the touched files; the functional delta is the exception-variable capture and logging calls.
 
 ### Verification this session
 
