@@ -352,6 +352,8 @@ export function TransferPage({
   const [destColumns, setDestColumns] = useState<string[]>([]);
   const [destSchemaMap, setDestSchemaMap] = useState<Record<string, string>>({});
   const [destSchemaLoading, setDestSchemaLoading] = useState(false);
+  /** Table/collection names from the last destination introspect (picker + exists check). */
+  const [destObjectNames, setDestObjectNames] = useState<string[]>([]);
   const [destTableExists, setDestTableExists] = useState<boolean | null>(null);
   const [liveSourceTypes, setLiveSourceTypes] = useState<string[]>([]);
   const [liveDestTypes, setLiveDestTypes] = useState<{ id: string; label: string }[]>(
@@ -1258,7 +1260,7 @@ export function TransferPage({
     schema: Record<string, string>;
     tableExists: boolean | null;
   }> => {
-    if (destKindMode !== "database" || !targetCollection.trim()) {
+    if (destKindMode !== "database" || !connectorId) {
       return { columns: destColumns, schema: destSchemaMap, tableExists: destTableExists };
     }
     const gen = ++destSchemaGenRef.current;
@@ -1274,14 +1276,26 @@ export function TransferPage({
       if (gen !== destSchemaGenRef.current) {
         return { columns: destColumns, schema: destSchemaMap, tableExists: destTableExists };
       }
+      const objectNames = (destination.objects ?? [])
+        .map((o) => (o.name || "").trim())
+        .filter(Boolean);
+      setDestObjectNames(objectNames);
+
+      // No table typed yet — only refresh the picker list.
+      if (!targetCollection.trim()) {
+        setDestColumns([]);
+        setDestSchemaMap({});
+        setDestTableExists(null);
+        destSchemaTableKeyRef.current = tableKey;
+        return { columns: [], schema: {}, tableExists: null };
+      }
+
       const columns = destination.columns ?? [];
       const schema = destination.schema ?? {};
       const want = targetCollection.trim();
       const wantL = want.toLowerCase();
       const wantLeaf = wantL.split(".").pop() || wantL;
-      const listed = (destination.objects ?? []).some((o) => {
-        const raw = (o.name || "").trim();
-        if (!raw) return false;
+      const listed = objectNames.some((raw) => {
         const rawL = raw.toLowerCase();
         const rawLeaf = rawL.split(".").pop() || rawL;
         return (
@@ -1298,6 +1312,9 @@ export function TransferPage({
       if (listed || destination.table_exists === true || columns.length > 0) {
         resolvedExists = true;
       } else if (destination.table_exists === false) {
+        resolvedExists = false;
+      } else if (objectNames.length > 0 && want && !listed) {
+        // Connected + object list loaded + name not present → new table (create-on-write).
         resolvedExists = false;
       } else {
         resolvedExists = null;
@@ -1370,11 +1387,11 @@ export function TransferPage({
   useEffect(() => {
     if (!analysis?.columns.length || step !== STEP_MAP || analyzing) return;
     // Never invent create-new identity mappings for a database destination unless
-    // the object is confirmed missing. File destinations still use identity map.
+    // the object is confirmed missing OR unknown with no columns (operator-typed new table).
     if (
       destKindMode === "database"
       && !destColumns.length
-      && destTableExists !== false
+      && destTableExists === true
     ) {
       return;
     }
@@ -1382,8 +1399,8 @@ export function TransferPage({
   }, [validationMode, step, destColumns, destSchemaMap, destTableExists, destKindMode, analyzing]);
 
   useEffect(() => {
-    if (destKindMode !== "database" || !targetCollection.trim()) return;
-    // Load schema as soon as the table/collection is set — Destination, Map, or Validate.
+    if (destKindMode !== "database" || !connectorId) return;
+    // Load object list as soon as a connector is chosen; refine when table is set.
     if (step !== STEP_DESTINATION && step !== STEP_MAP && step !== STEP_VALIDATE) return;
     const t = window.setTimeout(() => { void loadDestinationSchema(); }, 350);
     return () => window.clearTimeout(t);
@@ -1428,6 +1445,8 @@ export function TransferPage({
     setDestColumns([]);
     setDestSchemaMap({});
     setDestTableExists(null);
+    setDestObjectNames([]);
+    destSchemaTableKeyRef.current = "";
     routeAnalyzedKeyRef.current = "";
   }, []);
 
@@ -2400,9 +2419,14 @@ export function TransferPage({
       bump(42, "Building transfer plan…");
       await loadTransferPlan();
       let mapped: EditableMapping[] = [];
-      // Only identity create-new when the destination object is confirmed missing.
+      // Create-new when the table is confirmed missing OR still unknown after probe
+      // (operator typed a name; Destination already promises CREATE IF NOT EXISTS).
+      // Only refuse inventing create-new when the table is confirmed present but
+      // columns failed to load — that needs a retry, not identity mapping.
       const canCreateNew =
-        destKindMode !== "database" || loadedTableExists === false;
+        destKindMode !== "database"
+        || loadedTableExists === false
+        || (loadedTableExists == null && freshDestCols.length === 0 && Boolean(targetCollection.trim()));
       const mapTargets =
         freshDestCols.length > 0
           ? freshDestCols
@@ -2411,17 +2435,46 @@ export function TransferPage({
             : null;
       if (mapTargets === null) {
         toast({
-          title:
-            loadedTableExists === true
-              ? "Existing table — columns not loaded"
-              : "Destination schema unavailable",
+          title: "Existing table — columns not loaded",
           message:
-            loadedTableExists === true
-              ? "Destination table is present, but schema metadata failed. Retry Destination/Map before matching columns (do not treat this as create-new)."
-              : "Could not confirm whether the destination table exists. Retry schema load before Map invents create-new fields.",
+            "Destination table is present, but schema metadata failed. Retry Destination/Map before matching columns (do not treat this as create-new).",
           tone: "warning",
         });
         mapped = columnMappings;
+      } else if (freshDestCols.length === 0 && canCreateNew) {
+        if (loadedTableExists === false) {
+          toast({
+            title: "New table — create on first write",
+            message: `${targetCollection.trim()} was not found. Mapping source columns as create-new fields.`,
+            tone: "info",
+          });
+        } else if (loadedTableExists == null) {
+          toast({
+            title: "Treating as new table",
+            message: `${targetCollection.trim()} was not confirmed on the destination. Mapping as create-new — DataFlow will CREATE TABLE on first write. If the table already exists, go back and retry schema load.`,
+            tone: "info",
+          });
+          setDestTableExists(false);
+        }
+        if (sourceKind === "file" && parsed) {
+          if (!analysis?.columns.length || !columnMappings.length) {
+            bump(58, "Profiling source columns…");
+            await runSourceColumnAnalysis(parsed, { manageAnalyzing: false });
+          }
+          bump(72, "Matching source to create-new fields…");
+          mapped = await applyPipelineMappings(undefined, {}) ?? [];
+        } else if (analysis?.columns.length || currentSourceColumns.length) {
+          bump(65, "Matching source to create-new fields…");
+          mapped = await applyPipelineMappings(undefined, {}) ?? [];
+        } else {
+          toast({
+            title: "Source schema required",
+            message: "Complete the source step before mapping columns.",
+            tone: "warning",
+          });
+          setStep(STEP_SOURCE);
+          return;
+        }
       } else if (sourceKind === "file" && parsed) {
         if (!analysis?.columns.length || !columnMappings.length) {
           bump(58, "Profiling source columns…");
@@ -4707,6 +4760,7 @@ export function TransferPage({
               <input
                 id="dest-col"
                 className="df2-input"
+                list={destObjectNames.length ? "df2-dest-table-list" : undefined}
                 value={targetCollection}
                 aria-busy={destSchemaLoading || undefined}
                 onChange={(e) => {
@@ -4714,6 +4768,7 @@ export function TransferPage({
                   // until the new table probe returns (avoids demo flicker).
                   setTargetCollection(e.target.value);
                   setPreflight(null);
+                  setValidatedContractKey(null);
                   setCellPreview(null);
                 }}
                 placeholder={
@@ -4729,9 +4784,21 @@ export function TransferPage({
                           ? "DataflowChunk"
                           : destDriverType === "qdrant" || destDriverType === "milvus"
                             ? "chunks"
-                            : "my_table"
+                            : "my_table — pick existing or type a new name"
                 }
               />
+              {destObjectNames.length > 0 && (
+                <datalist id="df2-dest-table-list">
+                  {destObjectNames.slice(0, 200).map((name) => (
+                    <option key={name} value={name} />
+                  ))}
+                </datalist>
+              )}
+              {destObjectNames.length > 0 && (
+                <small className="df2-label-hint">
+                  {destObjectNames.length} existing table{destObjectNames.length === 1 ? "" : "s"} found — pick one or type a new name to create.
+                </small>
+              )}
             </div>
             {(destDriverType === "snowflake"
               || destDriverType.includes("mssql")

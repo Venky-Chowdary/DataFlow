@@ -86,7 +86,9 @@ def introspect_endpoint(
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if endpoint.table and probe.ok:
-            _mark_table_listed_if_present(out, endpoint.table)
+            if not _mark_table_listed_if_present(out, endpoint.table):
+                # Explicit missing — Transfer Studio create-new (do not leave null).
+                out["table_exists"] = False
             _attach_db_sample(out, endpoint)
         return out
 
@@ -147,7 +149,8 @@ def introspect_endpoint(
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if endpoint.table and probe.ok:
-            _mark_table_listed_if_present(out, endpoint.table)
+            if not _mark_table_listed_if_present(out, endpoint.table):
+                out["table_exists"] = False
             _attach_db_sample(out, endpoint)
         return out
 
@@ -168,7 +171,8 @@ def introspect_endpoint(
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if endpoint.table and probe.ok:
-            _mark_table_listed_if_present(out, endpoint.table)
+            if not _mark_table_listed_if_present(out, endpoint.table):
+                out["table_exists"] = False
             _attach_db_sample(out, endpoint)
         return out
 
@@ -191,7 +195,8 @@ def introspect_endpoint(
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if endpoint.table and probe.ok:
-            _mark_table_listed_if_present(out, endpoint.table)
+            if not _mark_table_listed_if_present(out, endpoint.table):
+                out["table_exists"] = False
             _attach_db_sample(out, endpoint)
         return out
 
@@ -208,7 +213,8 @@ def introspect_endpoint(
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if endpoint.table and probe.ok:
-            _mark_table_listed_if_present(out, endpoint.table)
+            if not _mark_table_listed_if_present(out, endpoint.table):
+                out["table_exists"] = False
             _attach_db_sample(out, endpoint)
         return out
 
@@ -593,6 +599,25 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         listed = _mark_table_listed_if_present(out, table) or _object_name_match(
             _listed_object_names(out), table
         )
+        # Caller already stamped missing (not in SHOW TABLES) — do not probe
+        # INFORMATION_SCHEMA / SELECT (those throw and used to wipe False → null).
+        if not listed and out.get("table_exists") is False:
+            out["columns"] = []
+            out["schema"] = {}
+            purpose = str((endpoint.extra or {}).get("introspect_purpose") or "").lower()
+            if purpose == "source":
+                out["message"] = (
+                    f"Table `{table}` was not found on this source. "
+                    f"Check the name (and schema/database)."
+                )
+            else:
+                out["auto_create"] = list(out.get("auto_create") or []) + [
+                    f'CREATE TABLE IF NOT EXISTS "{table}" (from source schema on first write)'
+                ]
+                out["message"] = (
+                    f"Table `{table}` not found — it will be created automatically on first write"
+                )
+            return
         # Prefer the case-correct name from SHOW TABLES / information_schema list.
         resolve_table = listed or table
         schema_map = _introspect_table_schema(fmt, cfg, resolve_table, [])
@@ -650,9 +675,10 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                     f"Table `{table}` not found — it will be created automatically on first write"
                 )
     except Exception as e:
-        # Soft-fail: keep last-known existence. Never invent "missing → create-new"
-        # from a probe exception — unknown is safer than a false create promise.
-        if out.get("table_exists") is not True:
+        # Soft-fail sample/schema read. Never wipe an explicit False (new table →
+        # create-on-write) or True (listed) into null — that left Map stuck on
+        # "Destination schema unavailable" for brand-new tables.
+        if out.get("table_exists") not in (True, False):
             out["table_exists"] = None
         out["columns"] = out.get("columns") or []
         out["schema"] = out.get("schema") or {}
