@@ -14,9 +14,11 @@ from services.value_serializer import json_default
 
 from connectors.writer_common import (
     CHUNK_SIZE,
+    DF_LSN_COL,
     _coerced_null_row_count,
     _rejected_row_count,
     build_mapped_rows_with_details,
+    lsn_is_newer,
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
@@ -393,7 +395,29 @@ def write_mapped_rows(
                         rejected_details=rejected_details[:100],
                         warnings=transform_errors,
                     )
+
+                # Pre-fetch existing _df_lsn values for the batch keys so stale
+                # redelivery cannot regress destination state under CDC.
+                existing_lsn: dict[tuple, Any] = {}
+                use_lsn_guard = DF_LSN_COL in target_cols
+                if use_lsn_guard:
+                    try:
+                        batch_filters = []
+                        for doc in docs:
+                            filt = {c: doc.get(c) for c in pk_cols}
+                            if not any(v in (None, "") for v in filt.values()):
+                                batch_filters.append(filt)
+                        if batch_filters:
+                            projection = {DF_LSN_COL: 1}
+                            projection.update({c: 1 for c in pk_cols})
+                            for existing in coll.find({"$or": batch_filters}, projection):
+                                key = tuple(existing.get(c) for c in pk_cols)
+                                existing_lsn[key] = existing.get(DF_LSN_COL)
+                    except Exception as exc:
+                        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+
                 ops = []
+                skipped_stale = 0
                 for doc_idx, doc in enumerate(docs):
                     filt = {c: doc.get(c) for c in pk_cols}
                     if any(v in (None, "") for v in filt.values()):
@@ -425,10 +449,17 @@ def write_mapped_rows(
                                 warnings=transform_errors,
                             )
                         continue
+                    if use_lsn_guard:
+                        incoming_lsn = doc.get(DF_LSN_COL)
+                        key = tuple(doc.get(c) for c in pk_cols)
+                        prior_lsn = existing_lsn.get(key)
+                        if incoming_lsn is not None and not lsn_is_newer(incoming_lsn, prior_lsn):
+                            skipped_stale += 1
+                            continue
                     ops.append(ReplaceOne(filt, doc, upsert=True))
                 if ops:
                     coll.bulk_write(ops, ordered=False)
-                written += len(ops)
+                written += len(ops) + skipped_stale
             else:
                 written += _idempotent_insert_many(coll, docs)
             if on_checkpoint:
