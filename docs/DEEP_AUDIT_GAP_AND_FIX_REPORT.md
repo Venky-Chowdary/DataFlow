@@ -82,6 +82,22 @@ pytest apps/api/tests  (full suite after this session)
 | Reconciliation dict key case drift | `read_target_sample` used `cursor.description` names as dict keys; fakesnow/ Snowflake can return a different case than the mapping target, so `sample_compare_rows` looked up `CURRENCY` and got `None` | `apps/api/services/reconciliation.py` |
 | MongoDB CDC snapshot held lease forever | `MongodbChangeStreamCdc.snapshot()` acquired a CDC lease but never released it, so a resuming `poll()` (or a second test instance) got `CdcLeaseConflict` | `apps/api/connectors/mongodb_change_stream.py` |
 
+### Schema-drift type widening (this session)
+
+| Fix | Root cause | Evidence |
+|-----|------------|----------|
+| PostgreSQL native writer widen missing precision | `widen_existing_columns_native` received `target_types` equal to the existing catalog type (`NUMERIC(8,2)`) because `resolve_target_columns` reused the stale destination type; source `NUMERIC(12,2)` was never seen | `apps/api/connectors/postgresql_writer.py` now computes `desired_types` as the wider of mapping-proposed target DDL and `pg_type(source_type)` before issuing `ALTER COLUMN` |
+| MySQL native writer widen | Same pattern as PostgreSQL: no source-side comparison before `ALTER TABLE ... MODIFY COLUMN` | `apps/api/connectors/mysql_writer.py` now computes `desired_types` from `mysql_type(source_type)` and calls `widen_existing_columns_native` with `skip_cols=conflict_columns` |
+| Generic SQLAlchemy writer widen | `generic_sql.py` only ran `add_missing_columns`; existing columns were never widened, so DuckDB/SQL Server/Oracle could overflow or truncate | `apps/api/connectors/generic_sql.py` now has `_source_ddl_for_widen`, `_widen_existing_columns_sa`, and a pre-widen pass that picks the wider of `mapping.source_type` and raw `column_types` |
+| DECIMAL -> FLOAT not treated as widen | `is_wider_type('NUMERIC(8,2)', 'DOUBLE')` returned False, so an existing `NUMERIC(8,2)` column was never widened to `DOUBLE` when DuckDB/PG preferred approximate storage | `apps/api/connectors/schema_drift.py` now treats DECIMAL -> FLOAT as safe when the decimal precision fits the float mantissa (DOUBLE ~ 15 digits, REAL ~ 6) |
+| PK columns blocked `ALTER COLUMN TYPE` | DuckDB throws `Cannot change the type of a column with a UNIQUE/PRIMARY KEY constraint`; MySQL/Oracle also restrict key-column type changes | `widen_existing_columns_native` and `_widen_existing_columns_sa` accept `skip_cols` and skip `conflict_columns` |
+| Generic SQL pre-widen degraded concrete types | File sources report `column_types` as `TEXT` while `mapping.source_type` is `DECIMAL`; `is_wider_type('DOUBLE','VARCHAR')` treated the raw string as wider and downgraded `DOUBLE` to `VARCHAR` | `_source_ddl_for_widen` prefers mapping `source_type` when the raw catalog type is a generic string, but upgrades to the catalog type when the catalog is wider in the same logical family |
+
+```text
+pytest apps/api/tests/test_schema_drift.py apps/api/tests/test_execute_tracked_postgresql_to_postgresql_backfill_widen_fields.py apps/api/tests/test_execute_tracked_postgresql_to_postgresql_backfill_new_fields.py apps/api/tests/test_execute_tracked_mysql_to_mysql_backfill_new_fields.py apps/api/tests/test_execute_tracked_csv_to_duckdb.py apps/api/tests/test_execute_tracked_file_to_duckdb_formats.py apps/api/tests/test_currency_to_duckdb.py
+27 passed in 24.30s
+```
+
 ---
 
 ## 2. Audit Methodology
@@ -263,7 +279,7 @@ The buffered database path nests SCD2/mirror summaries under `dest_summary["scd2
 | Item | Why | Suggested approach |
 |------|-----|--------------------|
 | **6. MongoDB / PostgreSQL / MySQL CDC end-to-end** | CDC tests fail; competitors offer this as a core differentiator | Complete `stream_database_transfer` CDC path with snapshot + LSN/GTID/SCN cursors; persist per-stream `sync_cursor`; implement idempotent upsert MERGE |
-| **7. Schema drift / evolution** | No automatic `ALTER TABLE` or column-add handling | Wire `schema_policy` + `backfill_new_fields` into `generic_sql`/`*_writer` DDL; produce a Gate-3 remediation plan when columns are added/removed |
+| **7. Schema drift / evolution** | No automatic `ALTER TABLE` or column-add handling | ~~In progress~~: `widen_existing_columns_native` now covers PostgreSQL, MySQL, SQL Server, DuckDB, Oracle; `backfill_new_fields` widens source-side; remaining: column renames/drops, Gate-3 remediation UI, generic SQLAlchemy `_widen_existing_columns_sa` validation on SQL Server/Oracle emulators |
 | **8. Cloud warehouse stubs to real connectors** | Snowflake/BigQuery/Redshift skipped without credentials | Add `fakesnow`/BigQuery emulator tests that assert COPY/STREAMING behavior; secure scoped credentials for CI |
 | **9. Lakehouse MERGE (Iceberg/Delta)** | Iceberg is marked Planned | Implement `write_mapped_rows` for Iceberg REST catalog with `MERGE INTO` semantics |
 | **10. UI/UX remediation clarity** | Remediation text is often raw error messages | Add `next_action` field to every preflight/reconciliation failure; render a primary CTA in Transfer Studio |
