@@ -6,7 +6,10 @@ a destination schema when the source introduces new columns (backfill mode).
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def add_missing_columns(
@@ -43,7 +46,9 @@ def add_missing_columns(
 
     dialect = engine.dialect
     dialect_name = getattr(dialect, "name", "")
-    keyword = "ADD COLUMN" if dialect_name not in ("mssql", "oracle", "sybase") else "ADD"
+    keyword = (
+        "ADD COLUMN" if dialect_name not in ("mssql", "oracle", "sybase") else "ADD"
+    )
     supports_if_not_exists = dialect_name in {"postgresql", "duckdb"}
     # SQLite rejects "ADD COLUMN IF NOT EXISTS" (syntax error near EXISTS).
     if_not_exists = " IF NOT EXISTS" if supports_if_not_exists else ""
@@ -68,10 +73,12 @@ def add_missing_columns(
             if sa_type is None:
                 continue
             col_ddl = str(
-                sa.schema.CreateColumn(sa.Column(col, sa_type, quote=True)).compile(dialect=dialect)
+                sa.schema.CreateColumn(sa.Column(col, sa_type, quote=True)).compile(
+                    dialect=dialect
+                )
             )
             if quoted_schema:
-                qualified = f"{quoted_schema}.\"{table_name}\""
+                qualified = f'{quoted_schema}."{table_name}"'
             else:
                 qualified = f'"{table_name}"'
             alter = f"ALTER TABLE {qualified} {keyword}{if_not_exists} {col_ddl}"
@@ -83,9 +90,21 @@ def add_missing_columns(
                 if _column_exists_error(exc):
                     try:
                         conn.rollback()
-                    except Exception:
-                        pass
+                    except Exception as rollback_exc:
+                        logger.debug(
+                            "add-missing-columns rollback failed: %s",
+                            rollback_exc,
+                            exc_info=rollback_exc,
+                        )
+                    logger.debug(
+                        "add-missing-columns skipped existing column: %s",
+                        exc,
+                        exc_info=exc,
+                    )
                     continue
+                logger.warning(
+                    "add-missing-columns failed for %s: %s", col, exc, exc_info=exc
+                )
                 raise
 
     if connection is None:

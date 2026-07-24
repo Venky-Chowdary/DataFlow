@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 from connectors.sqlite_common import sqlite_file_path
 from services.value_serializer import json_default
@@ -48,7 +51,9 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
         return value
     if upper in {"JSON", "OBJECT", "ARRAY", "VARIANT"}:
         if isinstance(value, (dict, list)):
-            return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=json_default)
+            return json.dumps(
+                value, ensure_ascii=False, separators=(",", ":"), default=json_default
+            )
         return value
     if upper in {"BINARY", "BLOB", "BYTEA", "VARBINARY"}:
         if isinstance(value, bytes):
@@ -60,13 +65,23 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
                 return value.encode("utf-8")
         return value
     if upper in {
-        "DATETIME", "TIMESTAMP", "TIMESTAMP_TZ", "TIMESTAMPTZ",
-        "TIMESTAMP_LTZ", "TIMESTAMP_NTZ", "DATE", "TIME",
+        "DATETIME",
+        "TIMESTAMP",
+        "TIMESTAMP_TZ",
+        "TIMESTAMPTZ",
+        "TIMESTAMP_LTZ",
+        "TIMESTAMP_NTZ",
+        "DATE",
+        "TIME",
     }:
         from connectors.sql_temporal import coerce_sql_temporal, format_wire_value
 
-        coerced = coerce_sql_temporal(value, upper if upper != "TIMESTAMP_NTZ" else "TIMESTAMP")
-        wire = format_wire_value(value, upper if upper != "TIMESTAMP_NTZ" else "TIMESTAMP")
+        coerced = coerce_sql_temporal(
+            value, upper if upper != "TIMESTAMP_NTZ" else "TIMESTAMP"
+        )
+        wire = format_wire_value(
+            value, upper if upper != "TIMESTAMP_NTZ" else "TIMESTAMP"
+        )
         if wire is not None:
             return wire
         if isinstance(coerced, datetime):
@@ -114,7 +129,7 @@ def _sqlite_upsert_batch(
     if update_cols and DF_LSN_COL in target_cols:
         where_sql = sqlite_lsn_update_guard_sql(table_name)
         set_sql = ", ".join(
-            f'{quote_sql_identifier(c)}=excluded.{quote_sql_identifier(c)}'
+            f"{quote_sql_identifier(c)}=excluded.{quote_sql_identifier(c)}"
             for c in update_cols
         )
         insert_sql = (
@@ -198,8 +213,13 @@ def write_mapped_rows(
     path = sqlite_file_path(database, connection_string, host)
     if not path:
         return WriteResult(
-            ok=False, rows_written=0, table_name=table_name, target_schema=schema or "main",
-            checksum="", chunks_completed=0, error="SQLite path is required (database or connection_string).",
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "main",
+            checksum="",
+            chunks_completed=0,
+            error="SQLite path is required (database or connection_string).",
         )
 
     from connectors.writer_common import sample_values_by_source_from_batch
@@ -214,8 +234,13 @@ def write_mapped_rows(
     )
     if not target_cols:
         return WriteResult(
-            ok=False, rows_written=0, table_name=table_name, target_schema=schema or "main",
-            checksum="", chunks_completed=0, error="No column mappings",
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "main",
+            checksum="",
+            chunks_completed=0,
+            error="No column mappings",
         )
 
     table_name = sanitize_identifier(table_name, preserve_case=True)
@@ -231,15 +256,17 @@ def write_mapped_rows(
     transform_errors: list[str] = []
 
     try:
-        mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
-            headers=headers,
-            data_rows=data_rows,
-            mappings=mappings,
-            target_cols=target_cols,
-            column_types=column_types,
-            dest_types=dest_types,
-            error_policy=policy,
-            preserve_case=True,
+        mapped_rows, transform_errors, rejected_details = (
+            build_mapped_rows_with_details(
+                headers=headers,
+                data_rows=data_rows,
+                mappings=mappings,
+                target_cols=target_cols,
+                column_types=column_types,
+                dest_types=dest_types,
+                error_policy=policy,
+                preserve_case=True,
+            )
         )
 
         converted_rows = [
@@ -247,7 +274,9 @@ def write_mapped_rows(
             for row in mapped_rows
         ]
 
-        rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
+        rejected_rows = _rejected_row_count(
+            data_rows, mapped_rows, rejected_details, policy
+        )
         coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
         if transform_errors and policy == "fail":
             return WriteResult(
@@ -275,17 +304,32 @@ def write_mapped_rows(
             with conn:
                 cur = conn.cursor()
                 if create_table:
-                    col_defs = ", ".join(f"{quote_sql_identifier(c)} {t}" for c, t in zip(target_cols, target_types))
-                    cur.execute(f"CREATE TABLE IF NOT EXISTS {table_quoted} ({col_defs})")
+                    col_defs = ", ".join(
+                        f"{quote_sql_identifier(c)} {t}"
+                        for c, t in zip(target_cols, target_types)
+                    )
+                    cur.execute(
+                        f"CREATE TABLE IF NOT EXISTS {table_quoted} ({col_defs})"
+                    )
 
                 if backfill_new_fields:
-                    existing = {row[1] for row in cur.execute(f"PRAGMA table_info({table_quoted})")}
+                    existing = {
+                        row[1]
+                        for row in cur.execute(f"PRAGMA table_info({table_quoted})")
+                    }
                     for col, typ in zip(target_cols, target_types):
                         if col not in existing:
                             try:
-                                cur.execute(f"ALTER TABLE {table_quoted} ADD COLUMN {quote_sql_identifier(col)} {typ}")
-                            except sqlite3.OperationalError:
-                                pass
+                                cur.execute(
+                                    f"ALTER TABLE {table_quoted} ADD COLUMN {quote_sql_identifier(col)} {typ}"
+                                )
+                            except sqlite3.OperationalError as exc:
+                                logger.debug(
+                                    "sqlite add column skipped for %s: %s",
+                                    col,
+                                    exc,
+                                    exc_info=exc,
+                                )
 
             # Each chunk is a separate transaction so checkpoints are durable
             # and a failed chunk can be retried without writing partial data.
@@ -298,7 +342,9 @@ def write_mapped_rows(
                 with conn:
                     cur = conn.cursor()
                     if write_mode == "upsert" and conflict_cols:
-                        _sqlite_upsert_batch(cur, table_name, target_cols, batch, conflict_cols)
+                        _sqlite_upsert_batch(
+                            cur, table_name, target_cols, batch, conflict_cols
+                        )
                     else:
                         cur.executemany(insert, batch)
 
@@ -324,7 +370,12 @@ def write_mapped_rows(
             conn.close()
     except Exception as exc:
         return WriteResult(
-            ok=False, rows_written=written, table_name=table_name, target_schema=schema or "main",
-            checksum="", chunks_completed=chunks, error=str(exc),
-            rejected_details=rejected_details if 'rejected_details' in locals() else [],
+            ok=False,
+            rows_written=written,
+            table_name=table_name,
+            target_schema=schema or "main",
+            checksum="",
+            chunks_completed=chunks,
+            error=str(exc),
+            rejected_details=rejected_details if "rejected_details" in locals() else [],
         )

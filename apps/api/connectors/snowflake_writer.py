@@ -64,7 +64,10 @@ def sf_type(inferred: str) -> str:
 
 def _is_fakesnow_connection(conn: Any) -> bool:
     """Return True for the local fakesnow emulator — it does not support PUT/COPY."""
-    return getattr(conn, "__class__", None) is not None and conn.__class__.__name__ == "FakeSnowflakeConnection"
+    return (
+        getattr(conn, "__class__", None) is not None
+        and conn.__class__.__name__ == "FakeSnowflakeConnection"
+    )
 
 
 def _parse_number_type(sf_type_str: str) -> tuple[int, int] | None:
@@ -171,18 +174,20 @@ def _quarantine_unfit_decimals(
             if _fits_snowflake_number(cells[col_idx], precision, scale):
                 continue
             sample = cell_to_string(cells[col_idx])[:120]
-            rejected_details.append({
-                "row": row_idx + 1,
-                "column": target_cols[col_idx],
-                "target": target_cols[col_idx],
-                "value": sample,
-                "reason": (
-                    f"decimal does not fit Snowflake NUMBER({precision},{scale}) "
-                    "— quarantined (would raise decimal.Overflow)"
-                ),
-                "policy": "write_quarantine",
-                "chars": [],
-            })
+            rejected_details.append(
+                {
+                    "row": row_idx + 1,
+                    "column": target_cols[col_idx],
+                    "target": target_cols[col_idx],
+                    "value": sample,
+                    "reason": (
+                        f"decimal does not fit Snowflake NUMBER({precision},{scale}) "
+                        "— quarantined (would raise decimal.Overflow)"
+                    ),
+                    "policy": "write_quarantine",
+                    "chars": [],
+                }
+            )
             cells[col_idx] = None
             changed = True
         out.append(tuple(cells) if changed else row)
@@ -214,7 +219,10 @@ def _widen_existing_number_columns(
             str(row[0]).upper(): (int(row[1] or 0), int(row[2] or 0))
             for row in cur.fetchall()
         }
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "snowflake widen column introspection failed: %s", exc, exc_info=exc
+        )
         return
 
     for col, typ in zip(target_cols, target_types):
@@ -239,8 +247,10 @@ def _widen_existing_number_columns(
                 f'ALTER TABLE "{table_name}" ALTER COLUMN "{col}" '
                 f"SET DATA TYPE NUMBER({final_p},{final_scale})"
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "snowflake alter column %s failed: %s", col, exc, exc_info=exc
+            )
 
 
 def _format_write_error(exc: BaseException) -> str:
@@ -257,18 +267,32 @@ def _format_write_error(exc: BaseException) -> str:
     return msg
 
 
-def _write_temp_csv(path: Path, target_cols: list[str], mapped_rows: list[tuple]) -> None:
+def _write_temp_csv(
+    path: Path, target_cols: list[str], mapped_rows: list[tuple]
+) -> None:
     with path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.writer(fh, quoting=csv.QUOTE_ALL)
         writer.writerow(target_cols)
         for row in mapped_rows:
             # Temporal cells are already warehouse-normalized strings; other
             # types still go through cell_to_string for CSV safety.
-            writer.writerow(["" if v is None else (v if isinstance(v, str) else cell_to_string(v)) for v in row])
+            writer.writerow(
+                [
+                    ""
+                    if v is None
+                    else (v if isinstance(v, str) else cell_to_string(v))
+                    for v in row
+                ]
+            )
 
 
 def _is_json_type(sf_type: str) -> bool:
-    return sf_type and sf_type.split("(")[0].upper() in {"VARIANT", "JSON", "OBJECT", "ARRAY"}
+    return sf_type and sf_type.split("(")[0].upper() in {
+        "VARIANT",
+        "JSON",
+        "OBJECT",
+        "ARRAY",
+    }
 
 
 def _batch_insert_rows(
@@ -340,17 +364,19 @@ def _load_rows_into_table(
     """
     total = len(mapped_rows)
     use_copy = (
-        prefer_copy
-        and total >= COPY_THRESHOLD
-        and not _is_fakesnow_connection(conn)
+        prefer_copy and total >= COPY_THRESHOLD and not _is_fakesnow_connection(conn)
     )
     if use_copy:
-        fd, tmp_path = tempfile.mkstemp(suffix=".csv", prefix=f"df_sf_{table_name.lower()}_")
+        fd, tmp_path = tempfile.mkstemp(
+            suffix=".csv", prefix=f"df_sf_{table_name.lower()}_"
+        )
         os.close(fd)
         tmp = Path(tmp_path)
         try:
             _write_temp_csv(tmp, target_cols, mapped_rows)
-            written = _copy_into_table(cur, table_name, str(tmp.resolve()), target_cols, target_types)
+            written = _copy_into_table(
+                cur, table_name, str(tmp.resolve()), target_cols, target_types
+            )
             if written <= 0:
                 written = total
             return "copy_into"
@@ -394,11 +420,17 @@ def _merge_batch_via_temp(
     cur.execute(f"CREATE TEMPORARY TABLE {quote_sql_identifier(temp)} ({col_defs})")
     try:
         _load_rows_into_table(
-            cur, temp, target_cols, target_types, mapped_rows,
-            prefer_copy=prefer_copy, conn=conn,
+            cur,
+            temp,
+            target_cols,
+            target_types,
+            mapped_rows,
+            prefer_copy=prefer_copy,
+            conn=conn,
         )
         on_clause = " AND ".join(
-            f"t.{quote_sql_identifier(c)} = s.{quote_sql_identifier(c)}" for c in conflict
+            f"t.{quote_sql_identifier(c)} = s.{quote_sql_identifier(c)}"
+            for c in conflict
         )
         col_list = ", ".join(quote_sql_identifier(c) for c in target_cols)
         source_cols = ", ".join(f"s.{quote_sql_identifier(c)}" for c in target_cols)
@@ -412,7 +444,8 @@ def _merge_batch_via_temp(
         tmp_q = quote_sql_identifier(temp)
         if update_cols:
             set_clause = ", ".join(
-                f"t.{quote_sql_identifier(c)} = s.{quote_sql_identifier(c)}" for c in update_cols
+                f"t.{quote_sql_identifier(c)} = s.{quote_sql_identifier(c)}"
+                for c in update_cols
             )
             merge_sql = (
                 f"MERGE INTO {tgt_q} t "
@@ -437,7 +470,13 @@ def _merge_batch_via_temp(
             pass
 
 
-def _copy_into_table(cur, table_name: str, local_path: str, target_cols: list[str], target_types: list[str]) -> int:
+def _copy_into_table(
+    cur,
+    table_name: str,
+    local_path: str,
+    target_cols: list[str],
+    target_types: list[str],
+) -> int:
     # Use a unique stage per call so parallel threads/processes cannot overwrite
     # each other's staged files and load each other's data.
     stage_name = f"{table_name}_STAGE_{uuid.uuid4().hex}"
@@ -481,7 +520,9 @@ def _copy_into_table(cur, table_name: str, local_path: str, target_cols: list[st
                 if first_error is None and len(row) >= 7:
                     first_error = row[6]
         if errors_seen:
-            raise RuntimeError(f"COPY INTO loaded {loaded} rows with {errors_seen} errors: {first_error or 'unknown'}")
+            raise RuntimeError(
+                f"COPY INTO loaded {loaded} rows with {errors_seen} errors: {first_error or 'unknown'}"
+            )
         return loaded
     finally:
         try:
@@ -535,9 +576,15 @@ def write_mapped_rows(
 
         if not stub_writes_allowed():
             return WriteResult(
-                ok=False, rows_written=0, table_name=table_name, target_schema=schema or "PUBLIC",
-                checksum="", chunks_completed=0,
-                error=require_driver("snowflake.connector", "snowflake-connector-python"),
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or "PUBLIC",
+                checksum="",
+                chunks_completed=0,
+                error=require_driver(
+                    "snowflake.connector", "snowflake-connector-python"
+                ),
                 driver="none",
             )
         if not create_table:
@@ -552,12 +599,20 @@ def write_mapped_rows(
                 driver="none",
             )
         rows, checksum, chunks = simulate_stub_write(
-            data_rows=data_rows, table_name=table_name, target_schema=schema or "PUBLIC",
+            data_rows=data_rows,
+            table_name=table_name,
+            target_schema=schema or "PUBLIC",
             on_checkpoint=on_checkpoint,
         )
         return WriteResult(
-            ok=True, rows_written=rows, table_name=table_name, target_schema=schema or "PUBLIC",
-            checksum=checksum, chunks_completed=chunks, driver="stub", load_method="stub",
+            ok=True,
+            rows_written=rows,
+            table_name=table_name,
+            target_schema=schema or "PUBLIC",
+            checksum=checksum,
+            chunks_completed=chunks,
+            driver="stub",
+            load_method="stub",
         )
 
     batch_samples = sample_values_by_source_from_batch(headers, data_rows, mappings)
@@ -626,7 +681,9 @@ def write_mapped_rows(
         else:
             mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
 
-    rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
+    rejected_rows = _rejected_row_count(
+        data_rows, mapped_rows, rejected_details, policy
+    )
     coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
 
     if transform_errors and policy == "fail":
@@ -702,7 +759,9 @@ def write_mapped_rows(
             if not skip_session_setup:
                 if warehouse:
                     try:
-                        wh_q = quote_sql_identifier(sanitize_identifier(warehouse, preserve_case=True))
+                        wh_q = quote_sql_identifier(
+                            sanitize_identifier(warehouse, preserve_case=True)
+                        )
                         cur.execute(f"USE WAREHOUSE {wh_q}")
                     except Exception:
                         # fakesnow and some local mocks do not support USE WAREHOUSE.
@@ -717,11 +776,15 @@ def write_mapped_rows(
                             "The SNOWFLAKE database is read-only system data. "
                             "Please specify a user database (for example, DATAFLOW) in the connector."
                         )
-                    db_q = quote_sql_identifier(sanitize_identifier(database, preserve_case=True))
+                    db_q = quote_sql_identifier(
+                        sanitize_identifier(database, preserve_case=True)
+                    )
                     if create_table:
                         cur.execute(f"CREATE DATABASE IF NOT EXISTS {db_q}")
                     cur.execute(f"USE DATABASE {db_q}")
-                sch_q = quote_sql_identifier(sanitize_identifier(schema, preserve_case=True))
+                sch_q = quote_sql_identifier(
+                    sanitize_identifier(schema, preserve_case=True)
+                )
                 if create_table:
                     cur.execute(f"CREATE SCHEMA IF NOT EXISTS {sch_q}")
                 cur.execute(f"USE SCHEMA {sch_q}")
@@ -743,18 +806,23 @@ def write_mapped_rows(
                         "create_table is disabled"
                     ),
                 )
-            table_name = found if found is not None else snowflake_fold_identifier(table_name)
+            table_name = (
+                found if found is not None else snowflake_fold_identifier(table_name)
+            )
 
             if create_table:
                 col_defs = ", ".join(
-                    f"{quote_sql_identifier(c)} {t}" for c, t in zip(target_cols, target_types)
+                    f"{quote_sql_identifier(c)} {t}"
+                    for c, t in zip(target_cols, target_types)
                 )
                 cur.execute(
                     f"CREATE TABLE IF NOT EXISTS {quote_sql_identifier(table_name)} ({col_defs})"
                 )
 
             # Later stream chunks may need wider NUMBER than the first CREATE.
-            _widen_existing_number_columns(cur, schema, table_name, target_cols, target_types)
+            _widen_existing_number_columns(
+                cur, schema, table_name, target_cols, target_types
+            )
 
             if backfill_new_fields:
                 cur.execute(
@@ -780,8 +848,14 @@ def write_mapped_rows(
                 load_method = "merge_batch"
                 # Stage once (COPY when large enough) and MERGE the whole batch.
                 written = _merge_batch_via_temp(
-                    cur, table_name, target_cols, target_types, mapped_rows, conflict,
-                    prefer_copy=True, conn=conn,
+                    cur,
+                    table_name,
+                    target_cols,
+                    target_types,
+                    mapped_rows,
+                    conflict,
+                    prefer_copy=True,
+                    conn=conn,
                 )
                 if on_checkpoint:
                     on_checkpoint(1, 1, written)
@@ -789,8 +863,13 @@ def write_mapped_rows(
                 # Prefer COPY INTO for insert / full_refresh when the batch is large enough.
                 # fakesnow does not support PUT/COPY — falls back to INSERT.
                 load_method = _load_rows_into_table(
-                    cur, table_name, target_cols, target_types, mapped_rows,
-                    prefer_copy=True, conn=conn,
+                    cur,
+                    table_name,
+                    target_cols,
+                    target_types,
+                    mapped_rows,
+                    prefer_copy=True,
+                    conn=conn,
                 )
                 written = total
                 if on_checkpoint:
@@ -815,7 +894,9 @@ def write_mapped_rows(
             rows_written=written,
             table_name=table_name,
             target_schema=schema,
-            checksum=row_checksum(mapped_rows[:written], target_cols) if written else "",
+            checksum=row_checksum(mapped_rows[:written], target_cols)
+            if written
+            else "",
             chunks_completed=chunks if written else 0,
             error=_format_write_error(exc),
             rejected_rows=rejected_rows,
