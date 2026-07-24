@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from functools import lru_cache
 from typing import Any, Callable, Protocol
@@ -388,8 +389,8 @@ def vectorize_records(
             elif isinstance(raw, str):
                 try:
                     embedding = [float(x) for x in json.loads(raw)]
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
         source_id = str(rec.get("id", rec.get("_id", rec.get("source_id", ""))))
         metadata = rec.copy()

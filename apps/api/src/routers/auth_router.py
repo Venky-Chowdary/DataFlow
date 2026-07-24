@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from urllib.parse import urlencode
 
@@ -160,8 +161,8 @@ async def sso_callback(sso_type: str, code: str = "", state: str = "", error: st
                 level="success",
                 details={"provider": sso_type},
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
         redirect = f"{_web_origin()}/?sso_token={token}&expires_at={expires_at}&sso_email={email}"
         return RedirectResponse(redirect, status_code=302)
@@ -214,8 +215,8 @@ async def login(body: LoginRequest):
             actor=user["email"],
             level="success",
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     return {
         "token": token,
         "expires_at": expires_at,

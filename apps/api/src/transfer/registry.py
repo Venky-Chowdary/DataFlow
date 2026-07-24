@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 # Tabular formats for the cartesian LIVE_MATRIX fan-out (2-row fixture matrix).
 # Document formats (pdf/docx/html) remain transfer-live via chunking/OCR paths
 # and explicit PRODUCTION_SKU routes — they are not tabular matrix sources.
@@ -87,8 +89,8 @@ def validate_transfer(source_kind: str, source_format: str, dest_kind: str, dest
             )
             if not honest:
                 return False, honest_msg
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     def _resolve(fmt: str) -> str:
         try:

@@ -5,6 +5,7 @@ Handles all MongoDB operations for persistence and data transfer
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from datetime import datetime, timezone
@@ -217,7 +218,6 @@ class MongoDBService:
     def get_client_for_connector(self, connector_id: str):
         """Build MongoClient from saved connector config (file store or platform MongoDB)."""
         from pymongo import MongoClient
-
         from src.transfer.adapters import (
             _lookup_saved_connector,
             mongodb_connection_string,
@@ -297,8 +297,8 @@ class MongoDBService:
         try:
             from services.job_phases import initial_phases
             job_data["phases"] = initial_phases()
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
         result = collection.insert_one(job_data)
         return str(result.inserted_id)
@@ -350,8 +350,8 @@ class MongoDBService:
             from services.job_trust import attach_trust_to_updates
 
             attach_trust_to_updates(status, updates, previous=prev_doc)
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
         if status == "running":
             updates.setdefault("started_at", datetime.now(timezone.utc))
@@ -381,15 +381,15 @@ class MongoDBService:
                         prev_rows = int((prev_doc or {}).get("records_processed") or 0)
                         if rows_i > 0 and rows_i - prev_rows >= 10_000:
                             line_parts.append(f"{rows_i:,} rows processed")
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
                 if line_parts:
                     stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
                     for part in line_parts:
                         prev_log.append(f"{stamp} — {part}")
                     updates["event_log"] = prev_log[-200:]
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
         if phase_label:
             try:
@@ -409,8 +409,8 @@ class MongoDBService:
                 else:
                     phases = advance_phase(phases, mapped, status="active", message=message or "")
                 updates["phases"] = phases
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
         # Fencing: reject stale worker progress when lease_fence is provided.
         fence = updates.pop("lease_fence", None)
@@ -451,8 +451,8 @@ class MongoDBService:
                     quarantined=int(updates.get("rejected_rows") or (prev_doc or {}).get("rejected_rows") or 0),
                     reconcile_ok=reconcile_ok,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return ok
 
     def update_job_fields(self, job_id: str, fields: dict) -> bool:
@@ -723,8 +723,8 @@ class MemoryMongoDBService:
             from services.job_trust import attach_trust_to_updates
 
             attach_trust_to_updates(status, kwargs, previous=rec)
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
         prev_phase = rec.get("phase")
         prev_message = str(rec.get("message") or "").strip()
@@ -756,15 +756,15 @@ class MemoryMongoDBService:
                         rows_i = int(kwargs["records_processed"])
                         if rows_i > 0 and rows_i - prev_rows >= 10_000:
                             line_parts.append(f"{rows_i:,} rows processed")
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
                 if line_parts:
                     stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
                     for part in line_parts:
                         prev_log.append(f"{stamp} — {part}")
                     rec["event_log"] = prev_log[-200:]
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
         phase_label = kwargs.get("phase")
         if phase_label:
@@ -794,8 +794,8 @@ class MemoryMongoDBService:
                         message=kwargs.get("message", ""),
                     )
                 rec["phases"] = phases
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         try:
             from services.ops_metrics import record_terminal_job_transition
 
@@ -810,8 +810,8 @@ class MemoryMongoDBService:
                 quarantined=int(rec.get("rejected_rows") or 0),
                 reconcile_ok=reconcile_ok,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return True
 
     def update_job_fields(self, job_id: str, fields: dict) -> bool:

@@ -8,6 +8,7 @@ emit a signal → connector reads snapshot chunks interleaved with CDC events
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -83,8 +84,8 @@ def _load() -> list[dict[str, Any]]:
                     row["id"] = str(d["_id"])
                 out.append(row)
             return out
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     if not os.path.isfile(_PATH):
         return []
     try:
@@ -159,12 +160,12 @@ def _signal_store_lock() -> Iterator[None]:
                 import fcntl
 
                 fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
         try:
             lock_f.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
 
 
 def request_incremental_snapshot(
@@ -196,8 +197,8 @@ def list_signals(source_key: str = "", *, status: str = "") -> list[SnapshotSign
                 query["status"] = status
             docs = list(coll.find(query).sort("created_at", -1).limit(500))
             return [_doc_to_signal(d) for d in docs]
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     with _signal_store_lock():
         rows = _load()
     out = [SnapshotSignal.from_dict(r) for r in rows]
@@ -241,8 +242,8 @@ def claim_next_signal(source_key: str, table: str = "") -> SnapshotSignal | None
             if doc:
                 return _doc_to_signal(doc)
             return None
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     with _signal_store_lock():
         rows = _load()
         # 1) Resume running
@@ -284,8 +285,8 @@ def update_signal(signal_id: str, **fields: Any) -> SnapshotSignal | None:
             )
             if doc:
                 return _doc_to_signal(doc)
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     with _signal_store_lock():
         rows = _load()
         for i, r in enumerate(rows):
@@ -320,8 +321,8 @@ def mark_chunk(signal_id: str, *, last_pk: str, rows: int) -> SnapshotSignal | N
                 return _doc_to_signal(doc)
             existing = coll.find_one({"_id": signal_id})
             return _doc_to_signal(existing) if existing else None
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     with _signal_store_lock():
         rows_data = _load()
         for i, r in enumerate(rows_data):
@@ -360,8 +361,8 @@ def complete_signal(signal_id: str, *, error: str = "") -> SnapshotSignal | None
                 return_document=ReturnDocument.AFTER,
             )
             return _doc_to_signal(doc) if doc else None
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     with _signal_store_lock():
         rows = _load()
         for i, r in enumerate(rows):
@@ -387,8 +388,8 @@ def get_signal(signal_id: str) -> SnapshotSignal | None:
             doc = coll.find_one({"_id": signal_id}) or coll.find_one({"id": signal_id})
             if doc:
                 return _doc_to_signal(doc)
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     with _signal_store_lock():
         for r in _load():
             if r.get("id") == signal_id:
@@ -415,8 +416,8 @@ def cancel_signal(signal_id: str) -> SnapshotSignal | None:
                 return_document=ReturnDocument.AFTER,
             )
             return _doc_to_signal(doc) if doc else None
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     with _signal_store_lock():
         rows = _load()
         for i, r in enumerate(rows):

@@ -484,7 +484,10 @@ def _snowflake_list_schemas(cur: Any) -> list[str]:
 
 def _snowflake_resolve_schema(cur: Any, requested: str) -> tuple[str, list[str], str | None]:
     """Pick a usable schema. Returns (schema, available, warning_or_none)."""
-    from connectors.sql_identifiers import quote_sql_identifier, snowflake_fold_identifier
+    from connectors.sql_identifiers import (
+        quote_sql_identifier,
+        snowflake_fold_identifier,
+    )
 
     requested = (requested or "PUBLIC").strip() or "PUBLIC"
     # Snowflake unquoted identifiers fold to uppercase — never USE SCHEMA "public".
@@ -623,8 +626,8 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
 
                 try:
                     target_table = resolve_or_fold_snowflake_table(cur, schema, str(target_table))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
                 cur.execute(
                     """
                     SELECT column_name, data_type, is_nullable
@@ -656,8 +659,8 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
                             found_table = resolve_or_fold_snowflake_table(
                                 cur, found_schema, str(found_table)
                             )
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
                         cur.execute(
                             """
                             SELECT column_name, data_type, is_nullable
@@ -1218,7 +1221,6 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
     """Oracle ALL_TAB_COLUMNS introspect with NUMBER(p,s) / FLOAT honesty."""
     try:
         import sqlalchemy as sa
-
         from connectors.generic_sql import _engine
     except Exception:
         return {
@@ -1338,21 +1340,20 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                     elif inferred.startswith("decimal"):
                         col["inferred_type"] = col["inferred_type"].upper() if "(" in inferred else "DECIMAL"
                 return info
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
     finally:
         try:
             engine.dispose()
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
 def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
     """SQL Server INFORMATION_SCHEMA introspect with FLOAT≠DECIMAL honesty."""
     try:
         import sqlalchemy as sa
-
         from connectors.generic_sql import _engine
     except Exception:
         return {
@@ -1480,8 +1481,8 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
     finally:
         try:
             engine.dispose()
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
 def _sf_to_logical(dtype: str) -> str:
@@ -1642,9 +1643,8 @@ def _finalize_mongodb_type(type_counts: dict[str, int]) -> str:
 def _introspect_mongodb(**kwargs) -> dict[str, Any]:
     table = kwargs.get("table")
     try:
-        from pymongo import MongoClient
-
         from connectors.mongodb_common import normalize_mongodb_connection_string
+        from pymongo import MongoClient
 
         conn_str = normalize_mongodb_connection_string(
             kwargs.get("connection_string", ""),
@@ -1743,6 +1743,7 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
         # Sample real items — union every attribute (sparse keys) + native types.
         try:
             from connectors.dynamodb_reader import read_table_batch
+
             from services.schema_inference import infer_schema_map
 
             sample, _ = read_table_batch(cfg=cfg, table=table, limit=50)
@@ -1802,6 +1803,7 @@ def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
         return {"ok": False, "error": "Elasticsearch index name required", "columns": [], "tables": []}
     try:
         from connectors.elasticsearch_reader import _client
+
         from services.schema_inference import infer_column
 
         cfg = {
@@ -1919,8 +1921,8 @@ def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
                 hits = resp.get("hits", {}).get("hits") or []
                 if hits and hits[0].get("_id") is not None:
                     columns[0]["sample"] = str(hits[0].get("_id"))
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
             return {"ok": True, "tables": [index], "columns": columns, "schema": index}
         finally:
             client.close()

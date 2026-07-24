@@ -208,8 +208,8 @@ def poll_mongo_signal_collection(
         if ensure_index:
             try:
                 coll.create_index("id", unique=True, sparse=True)
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         cursor = coll.find({}).sort("id", 1).limit(limit)
         for doc in cursor:
             sid = str(doc.get("id") or doc.get("_id") or "")

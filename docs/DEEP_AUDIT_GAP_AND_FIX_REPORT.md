@@ -466,3 +466,43 @@ pytest apps/api/tests
 - **Cloud warehouse and real-service routes.** ~952 matrix tests skip because no live Snowflake/BigQuery/Redshift/GCS/ADLS/Salesforce/etc. credentials or emulators are configured.
 - **Schema-drift evolution, lakehouse MERGE, and semantic mapping** remain P1 backlog items.
 
+## 12. Service-Layer Blind-Except Instrumentation Pass (this session)
+
+### Fixes this session
+
+| Fix | Root cause | Evidence |
+|-----|------------|----------|
+| Blind `except Exception: pass` in service-layer modules | 107 `try_except_pass` blocks in `apps/api/services` swallowed schema inference, data quality, job/cursor/lease store, CDC signals, file parsing, reconciliation, preflight, and agentic repair failures without logging | `apps/api/services/*` |
+| Blind `except Exception: pass` in transfer/core routers and AI tooling | 61 remaining `try_except_pass` blocks in `apps/api/src/transfer`, routers, AI copilot tools, and `packages/preflight` suppressed CDC fallback metrics, endpoint intelligence, capability discovery, preflight gates, and MCP/API failures | `apps/api/src/*`, `packages/preflight/src/preflight/gates.py` |
+| Missing module loggers | Many service/router files had no `import logging`, so the new instrumentation had no sink | Added `import logging` to 33 services + 15 core/src files |
+
+### Implementation notes
+
+- Scanned `apps/api/services`, `apps/api/src`, and `packages/preflight/src` with `bandit -r ... -t B110` and instrumented every production `try_except_pass` occurrence.
+- Converted `except Exception:` / `except Exception: pass` to `except Exception as exc:` with `logging.getLogger(__name__).warning(..., exc_info=exc)` for data-path errors and `logging.getLogger(__name__).debug(..., exc_info=exc)` for cleanup/close/rollback/lock-release paths.
+- Preserved all existing fallback behavior; the change is instrumentation-only — no `except` bodies were removed, only `pass` statements replaced with a logging call.
+- Removed redundant `pass` statements (`PIE790`) and sorted imports on the touched files.
+- Reverted `ruff` import-sorting changes to non-instrumented files to keep the diff focused on the data-path instrumentation.
+
+### Verification this session
+
+```text
+bandit -r apps/api/services -t B110
+0 issues
+
+bandit -r apps/api/src packages/preflight -t B110
+0 issues
+
+py_compile over apps/api/services, apps/api/src, packages/preflight/src
+0 errors
+
+pytest apps/api/tests
+9052 passed, 1085 skipped, 0 failed  (run_id: /tmp/full_test_run_v7.log, 1079.05s)
+```
+
+### What is still NOT proven
+
+- **CDC end-to-end exactly-once.** CDC unit/integration tests pass with emulators; real slot/LSN persistence and production exactly-once semantics are not yet certified.
+- **Cloud warehouse and real-service routes.** ~952 matrix tests still skip because no live Snowflake/BigQuery/Redshift/GCS/ADLS/Salesforce/etc. credentials or emulators are configured.
+- **BLE001 blind-except reduction.** `except Exception as exc:` still triggers `BLE001`; the next pass should narrow `Exception` to concrete, source-specific exception families in the hot data path.
+

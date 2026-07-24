@@ -24,16 +24,16 @@ from datetime import datetime, timezone
 from typing import Any
 
 from bson import json_util
-
 from connectors.mongodb_change_stream import MongodbChangeStreamCdc
 from connectors.mysql_change_stream import MySqlChangeStreamCdc
 from connectors.oracle_change_stream import OracleFlashbackCdc
-from services.cdc_effectively_once import gate_cdc_destination
 from connectors.oracle_logminer import OracleLogMinerCdc
 from connectors.postgresql_change_stream import PostgreSqlChangeStreamCdc
 from connectors.sqlserver_cdc_native import SqlServerNativeCdc
 from connectors.sqlserver_change_stream import SqlServerChangeTrackingCdc
 from connectors.table_manager import delete_by_primary_keys
+from connectors.writer_common import DF_LSN_COL, extract_cdc_lsn
+from services.cdc_effectively_once import gate_cdc_destination
 from services.cdc_engine import (
     ChangeBatch,
     WatermarkType,
@@ -47,8 +47,6 @@ from services.cdc_snapshot_mode import (
     should_run_stream,
 )
 from services.error_handling import RetryBudget, with_retry
-from services.value_serializer import cell_to_string
-from connectors.writer_common import DF_LSN_COL, extract_cdc_lsn
 from services.sync_cursor import (
     build_cursor_key,
     get_watermark,
@@ -57,6 +55,7 @@ from services.sync_cursor import (
     resolve_sync_contract,
     set_watermark,
 )
+from services.value_serializer import cell_to_string
 
 try:
     from .adapters import resolve_connector_config, resolve_dest_table
@@ -90,8 +89,8 @@ def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
                 lag_bytes = meta.get("replication_lag_bytes")
             if meta.get("replication_lag_seconds") is not None:
                 lag_seconds = meta.get("replication_lag_seconds")
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     if hasattr(cdc, "replication_lag_bytes") and lag_bytes is None:
         try:
             lag_bytes = cdc.replication_lag_bytes()
@@ -136,8 +135,8 @@ def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
             ):
                 if key in meta:
                     lease_fields[key] = meta[key]
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     if hasattr(cdc, "cdc_metadata"):
         try:
             meta = cdc.cdc_metadata() or {}
@@ -145,8 +144,8 @@ def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
                 row_filter = meta.get("cdc_row_filter")
             elif meta.get("row_filter"):
                 row_filter = meta.get("row_filter")
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     if row_filter is None:
         row_filter = getattr(cdc, "row_filter", None)
     out: dict[str, Any] = {
@@ -674,8 +673,14 @@ def _run_cdc_shared_multi_table(
     Semantics remain **at-least-once upsert**. Shared LSN/GTID advances only after
     the demux barrier batch (``ack_barrier``) is applied.
     """
-    from services.cdc_multi_table import shared_route_cursor_key, should_ack_shared_batch
-    from services.cdc_resume_tokens import is_durable_log_resume_token, is_side_channel_resume_token
+    from services.cdc_multi_table import (
+        shared_route_cursor_key,
+        should_ack_shared_batch,
+    )
+    from services.cdc_resume_tokens import (
+        is_durable_log_resume_token,
+        is_side_channel_resume_token,
+    )
 
     src_type = resolve_driver_type(getattr(source, "format", "") or "")
     dest_type = resolve_driver_type(getattr(destination, "format", "") or "")
@@ -816,16 +821,16 @@ def _run_cdc_shared_multi_table(
         ha = attach_source_ha(cdc, src_cfg)
         if ha is not None:
             ddl_log.append(f"source_ha role={ha.role} topology={ha.topology}")
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     try:
         from services.cdc_retention_probe import attach_cdc_retention
 
         ret = attach_cdc_retention(cdc, src_cfg, table=tables[0] if tables else "")
         if ret is not None:
             ddl_log.append(f"cdc_retention status={ret.status}")
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     snapshot_mode = resolve_snapshot_mode(
         stream_contracts,
@@ -982,8 +987,8 @@ def _run_cdc_shared_multi_table(
         if hasattr(cdc, "close"):
             try:
                 cdc.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
 
     for h in stream_health.values():
         h["status"] = "completed"
@@ -1319,8 +1324,8 @@ def _run_cdc_single_stream(
                 from services.ops_metrics import record_cdc_poll
 
                 record_cdc_poll(used_query_fallback=True)
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     elif src_type in {"sqlserver", "mssql"}:
         from services.dialect_profiles import default_schema_for
 
@@ -1388,8 +1393,8 @@ def _run_cdc_single_stream(
                     from services.ops_metrics import record_cdc_poll
 
                     record_cdc_poll(used_query_fallback=True)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     elif src_type == "oracle":
         from services.dialect_profiles import normalize_schema as _norm_schema
 
@@ -1459,8 +1464,8 @@ def _run_cdc_single_stream(
                     from services.ops_metrics import record_cdc_poll
 
                     record_cdc_poll(used_query_fallback=True)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     else:
         cdc = CdcEngine(
             src_cfg,
@@ -1483,16 +1488,16 @@ def _run_cdc_single_stream(
         ha = attach_source_ha(cdc, src_cfg)
         if ha is not None:
             ddl_log.append(f"source_ha role={ha.role} topology={ha.topology}")
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     try:
         from services.cdc_retention_probe import attach_cdc_retention
 
         ret = attach_cdc_retention(cdc, src_cfg, table=table_name)
         if ret is not None:
             ddl_log.append(f"cdc_retention status={ret.status}")
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     state = CdcState(cursor_key=cursor_key, watermark=watermark)
     # Resume from durable job checkpoint watermark when present.
@@ -1608,8 +1613,8 @@ def _run_cdc_single_stream(
                 job_id=str(job_id or ""),
                 stream=str(table_name or ""),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         if state.running_cursor:
             set_watermark(
                 cursor_key,
@@ -1760,6 +1765,6 @@ def _run_cdc_single_stream(
     if hasattr(cdc, "close"):
         try:
             cdc.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
     return state.rows_written, ddl_log, summary, headers

@@ -5,6 +5,7 @@ Manage connector configurations and data transfers
 
 import asyncio
 import json
+import logging
 import os
 from typing import Any, Optional
 
@@ -21,7 +22,6 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from pymongo.errors import PyMongoError
-
 from services.team_store import can_read_workspace, can_write_workspace
 from services.value_serializer import json_default
 
@@ -248,8 +248,8 @@ async def test_connection(request: TestConnectionRequest):
                 payload["source_ha"] = ha.to_dict()
                 if ha.message:
                     payload["message"] = f"{msg} · {ha.message}"
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return payload
 
     except Exception as e:
@@ -313,8 +313,8 @@ async def create_connector(
             workspace_id=saved.workspace_id or "",
             role=getattr(saved, "role", None) or connector_data.get("role") or "both",
         )
-    except Exception:
-        pass  # fall through to MongoDB
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     try:
         mongo = get_mongodb_service()
@@ -376,8 +376,8 @@ async def list_connectors(
                 ],
                 "count": len(items),
             }
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     try:
         mongo = get_mongodb_service()
@@ -707,14 +707,15 @@ async def get_job_quarantine(job_id: str, request: Request):
     if payload and dest_dlq.get("table"):
         try:
             from services.dest_quarantine import count_open_dlq_rows
+
             from ..transfer.models import transfer_request_from_dict
 
             treq = transfer_request_from_dict(payload)
             open_info = count_open_dlq_rows(treq.destination, job_id=job_id)
             dest_dlq["open_rows"] = open_info.get("open_rows")
             dest_dlq["supported"] = open_info.get("supported")
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     return {
         "job_id": job_id,
@@ -956,8 +957,8 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
                     "status": status,
                 },
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return {
             "success": True,
             "job_id": child_job_id,
@@ -990,8 +991,8 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
                 correlation_id=child_job_id,
                 details={"parent_job_id": job_id, "child_job_id": child_job_id},
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         raise
     except Exception as e:
         mongo.update_job_status(child_job_id, "failed", phase="failed", message=str(e), error=str(e))
@@ -1015,8 +1016,8 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
                 correlation_id=child_job_id,
                 details={"parent_job_id": job_id, "error": str(e)[:500]},
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
@@ -1224,16 +1225,16 @@ async def transfer_data(
                 parsed = _json.loads(stream_contracts_json)
                 if isinstance(parsed, list):
                     request_obj.stream_contracts = parsed
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         if mappings_json.strip():
             try:
                 import json as _json
                 parsed = _json.loads(mappings_json)
                 if isinstance(parsed, list):
                     request_obj.mappings = parsed
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         engine = get_transfer_engine()
         job_id = engine._create_pending_job(request_obj)
 

@@ -6,6 +6,7 @@ Ingest schemas from uploaded files, connectors, and industry templates for AI tr
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -153,8 +154,8 @@ class UniversalDataFeeder:
         try:
             from .universal_source_registry import get_universal_schema_count
             registry_stats = get_universal_schema_count()
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return {
             "upload_dirs": self.upload_dirs,
             "total_schemas": len(schemas),

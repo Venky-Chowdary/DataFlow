@@ -19,6 +19,12 @@ from datetime import timezone
 from decimal import Decimal, InvalidOperation, Overflow
 from typing import Any, Iterable
 
+from services.transform_engine import (
+    _DATE_LIKE_RE,
+    _parse_date,
+    _parse_datetime,
+    apply_transform,
+)
 from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
@@ -31,13 +37,6 @@ SPILL_THRESHOLD = int(os.getenv("DATAFLOW_FINGERPRINT_SPILL_THRESHOLD", "1000000
 # the date regex for them.
 _NUMERIC_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 _DATE_LIKE_CHARS = frozenset("-:/T ")
-
-from services.transform_engine import (
-    _DATE_LIKE_RE,
-    _parse_date,
-    _parse_datetime,
-    apply_transform,
-)
 
 
 @dataclass
@@ -625,8 +624,8 @@ def verify_snowflake_table(
                 try:
                     wh = require_safe_identifier(warehouse, preserve_case=True)
                     cur.execute(f"USE WAREHOUSE {quote_sql_identifier(wh)}")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
             resolved = resolve_or_fold_snowflake_table(
                 cur, schema or "PUBLIC", table_name
             )
@@ -1307,8 +1306,8 @@ def normalize_cell(value: Any) -> str:
             re_encoded = base64.b64encode(decoded)
             if re_encoded == value:
                 return re_encoded.decode("ascii")
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return base64.b64encode(value).decode("ascii")
     if isinstance(value, (dict, list, tuple, set, frozenset)):
         return json.dumps(value, sort_keys=True, default=json_default)
@@ -1383,8 +1382,8 @@ def _checksum_datetime_utc_wall(iso_text: str, *, original: str | None = None) -
         aware_or_epoch = aware_or_epoch or bool(
             _EPOCH_MS_RE.match(src) or _EPOCH_S_RE.match(src)
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     try:
         iso = text[:-1] + "+00:00" if text.endswith("Z") else text
         obj = _datetime.fromisoformat(iso)
@@ -1961,12 +1960,12 @@ def read_target_sample(
                         try:
                             if str(k).isdigit():
                                 widened.add(int(k))
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
                         try:
                             widened.add(float(k))
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
                         # ObjectId keys from schemaless sources are serialized as hex strings.
                         try:
                             from bson import ObjectId
@@ -1977,8 +1976,8 @@ def read_target_sample(
                                 and all(c in "0123456789abcdefABCDEF" for c in k)
                             ):
                                 widened.add(ObjectId(k))
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
                     query_filter = {sort_key: {"$in": list(widened)}}
                 cursor = coll.find(query_filter)
                 if sort_key:
@@ -2179,12 +2178,12 @@ def read_target_sample(
                             try:
                                 if str(k).isdigit():
                                     widened.add(int(k))
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
                             try:
                                 widened.add(float(k))
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
                         placeholders = ",".join(["%s"] * len(widened))
                         cur.execute(
                             f"SELECT {sf_col_sql} FROM {qualified_name} "

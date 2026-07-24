@@ -8,12 +8,14 @@ they fall back to a JSON file in ``data_dir``.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from services.cron_schedule import CronError, next_run as _cron_next_run, validate_cron
+from services.cron_schedule import CronError, validate_cron
+from services.cron_schedule import next_run as _cron_next_run
 from services.platform_config import data_dir
 from services.value_serializer import json_default
 
@@ -90,8 +92,8 @@ def import_file_schedules_into_mongo(*, force: bool = False) -> int:
     try:
         if STORE_PATH.exists():
             STORE_PATH.replace(STORE_MIGRATED_PATH)
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     return len(file_schedules)
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import tempfile
 import time
 from typing import Any, Callable
@@ -466,8 +467,8 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                         start,
                         {"schemaless": True, "sync_mode": getattr(ctx.plan, "sync_mode", "")},
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
             dupes = ctx.probe_unique_constraint([pk_tgt])
             if dupes:
                 return _block(
@@ -629,8 +630,8 @@ def _dry_run_transform(value: str, transform: str | None) -> str | None:
             parsed = json.loads(value) if value.strip().startswith(("{", "[")) else value
             if isinstance(parsed, (dict, list)):
                 return json.dumps(parsed, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return value
     # Non-deterministic / one-way transforms break reconciliation previews.
     if t in {"uuid", "guid", "hash", "md5", "sha256", "mask", "redact", "pii_mask", "anonymize", "encrypt"}:

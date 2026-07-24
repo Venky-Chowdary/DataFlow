@@ -193,8 +193,8 @@ def _mongo_cursors():  # type: ignore[no-untyped-def]
             db = mongo.get_database()
             if db is not None:
                 return db["sync_cursors"]
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     return None
 
 

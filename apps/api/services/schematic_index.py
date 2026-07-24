@@ -7,6 +7,7 @@ Used by the semantic mapper for O(1) abbreviation / alias resolution.
 
 from __future__ import annotations
 
+import logging
 import pickle
 import re
 from functools import lru_cache
@@ -57,16 +58,16 @@ def _build_index() -> dict[str, str]:
                 cached = pickle.load(f)
             if isinstance(cached, dict) and len(cached) > 10_000:
                 return cached
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     index = _build_index_fresh()
     try:
         _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(_CACHE_PATH, "wb") as f:
             pickle.dump(index, f)
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     return index
 
 

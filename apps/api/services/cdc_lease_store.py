@@ -407,12 +407,12 @@ class FileLeaseStore(LeaseStore):
                         import fcntl
 
                         fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
                 try:
                     lock_f.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
 
         return _cm()
 

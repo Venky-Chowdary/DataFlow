@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Optional
@@ -18,7 +19,6 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
-
 from services.team_store import can_read_workspace, can_write_workspace
 from services.value_serializer import cell_to_string
 
@@ -49,6 +49,7 @@ def _stamp_job_mapping_artifacts(
 ) -> None:
     """Persist mapping_proof (+ plan linkage) on the job for Theater/Jobs deep-link."""
     from services.mapping_proof import mapping_proof_or_build
+
     from ..services.mongodb_service import get_mongodb_service
 
     proof = mapping_proof_or_build(
@@ -75,8 +76,8 @@ def _stamp_job_mapping_artifacts(
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id) or {}
         mongo.update_job_status(job_id, job.get("status") or status, **updates)
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
 def _destination_data_region(endpoint) -> str | None:
@@ -258,6 +259,7 @@ async def transfer_readiness():
 async def analyze_route(body: AnalyzeRequest):
     """Score a source → destination route with conversion and driver hints."""
     from services.universal_router import analyze_route as score_route
+
     from ..transfer.adapters import resolve_endpoint
     from ..transfer.models import EndpointConfig
 
@@ -663,8 +665,8 @@ async def execute_transfer_json(
                 "async": bool(body.async_mode),
             },
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     if body.plan_id and str(body.plan_id).strip():
         from services.transfer_plan_store import attach_job
@@ -810,8 +812,8 @@ async def run_universal_transfer(
             parsed = _json.loads(source_extra_json)
             if isinstance(parsed, dict):
                 source_extra.update(parsed)
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     source = EndpointConfig(
         kind=source_kind,
         format=src_fmt,
@@ -912,8 +914,8 @@ async def run_universal_transfer(
                 if isinstance(parsed_early, list):
                     form_mappings = parsed_early
                     request_obj.mappings = parsed_early
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         try:
             payload = merge_plan_into_run(
                 plan_id.strip(),
@@ -947,8 +949,8 @@ async def run_universal_transfer(
             parsed = _json.loads(mappings_json)
             if isinstance(parsed, list):
                 request_obj.mappings = parsed
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     elif mappings_json.strip() and plan_id and plan_id.strip():
         # Form mappings already applied above; keep explicit form wins.
         pass
@@ -974,8 +976,8 @@ async def run_universal_transfer(
             parsed = _json.loads(stream_contracts_json)
             if isinstance(parsed, list):
                 request_obj.stream_contracts = parsed
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     _residency_check(request, destination, region)
 
@@ -1003,8 +1005,8 @@ async def run_universal_transfer(
                 "async": async_mode.lower() in ("true", "1", "yes"),
             },
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     if plan_id and plan_id.strip():
         from services.transfer_plan_store import attach_job
@@ -1094,6 +1096,7 @@ async def get_transfer_explanation(job_id: str):
 async def get_transfer_mapping_proof(job_id: str):
     """Return persisted per-mapping evidence for Theater / Jobs deep-link."""
     from services.mapping_proof import mapping_proof_or_build
+
     from ..services.mongodb_service import get_mongodb_service
 
     try:
@@ -1120,8 +1123,8 @@ async def get_transfer_mapping_proof(job_id: str):
         if proof:
             try:
                 mongo.update_job_status(job_id, job.get("status") or "completed", mapping_proof=proof)
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     return {
         "job_id": job_id,
@@ -1147,7 +1150,11 @@ class JobCdcSnapshotBody(BaseModel):
 @router.get("/{job_id}/cdc/snapshots")
 async def list_job_cdc_snapshots(job_id: str, request: Request, status: str = ""):
     """List incremental snapshot signals for this job's CDC source fingerprint."""
-    from services.cdc_job_snapshots import list_signals_for_job, resolve_job_cdc_snapshot_context
+    from services.cdc_job_snapshots import (
+        list_signals_for_job,
+        resolve_job_cdc_snapshot_context,
+    )
+
     from ..services.mongodb_service import get_mongodb_service
 
     try:
@@ -1180,6 +1187,7 @@ async def list_job_cdc_snapshots(job_id: str, request: Request, status: str = ""
 async def request_job_cdc_snapshot(job_id: str, body: JobCdcSnapshotBody, request: Request):
     """Enqueue a Debezium-style incremental snapshot using the job's source_key."""
     from services.cdc_job_snapshots import request_snapshot_for_job
+
     from ..services.mongodb_service import get_mongodb_service
 
     try:
@@ -1205,6 +1213,7 @@ async def cancel_job_cdc_snapshot(job_id: str, signal_id: str, request: Request)
     """Cancel a pending/running incremental snapshot signal for this job."""
     from services.cdc_incremental_snapshot import cancel_signal, get_signal
     from services.cdc_job_snapshots import resolve_job_cdc_snapshot_context
+
     from ..services.mongodb_service import get_mongodb_service
 
     try:

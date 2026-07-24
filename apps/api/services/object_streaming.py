@@ -123,15 +123,15 @@ def download_object(
         if tmp_path and tmp_path.exists():
             try:
                 tmp_path.unlink()
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         with _SPILL_LOCK:
             _SPILL_CACHE.pop(cache_key, None)
             if final_path.exists():
                 try:
                     final_path.unlink()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         raise
 
 

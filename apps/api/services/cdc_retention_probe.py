@@ -10,6 +10,7 @@ failover; single-node cleanup produces the same gap class.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -185,8 +186,8 @@ def _resume_lsn_from_watermark(watermark: str | None) -> str:
         lsn = str(token.get("lsn") or "").strip()
         if lsn:
             return lsn
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     # Plain hex / 0x… watermark
     text = str(watermark).strip()
     if text.startswith("{"):
@@ -206,8 +207,8 @@ def _resume_scn_from_watermark(watermark: str | None) -> int:
             for key in ("scn", "resume_scn", "watermark"):
                 if data.get(key) is not None:
                     return int(data[key])
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     try:
         return int(text)
     except (TypeError, ValueError):
@@ -224,6 +225,7 @@ def probe_sqlserver_retention(
 ) -> RetentionProbeResult:
     """Live probe: watermark vs ``sys.fn_cdc_get_min_lsn`` for the capture instance."""
     from connectors.sqlserver_cdc_native import SqlServerNativeCdc
+
     from services.sync_cursor import get_watermark
 
     ck = (cursor_key or "").strip()
@@ -280,8 +282,8 @@ def probe_oracle_retention(
 ) -> RetentionProbeResult:
     """Live probe: watermark SCN vs oldest available redo."""
     import sqlalchemy as sa
-
     from connectors.generic_sql import _engine
+
     from services.sync_cursor import get_watermark
 
     ck = (cursor_key or "").strip()
@@ -376,8 +378,8 @@ def attach_cdc_retention(cdc: Any, src_cfg: dict[str, Any] | None, *, table: str
     )
     try:
         setattr(cdc, "_cdc_retention", probe)
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     return probe
 
 

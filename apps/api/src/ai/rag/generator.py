@@ -6,6 +6,7 @@ LLM prompt templates for schema analysis, mapping, and transformation.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from .retriever import RetrievalResult
@@ -136,8 +137,8 @@ class DataTransferRAGGenerator:
                         confidence=min(retrieval.confidence + 0.1, 0.99),
                         method="llm",
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
         # RAG-only fallback — prefer copilot training docs
         if retrieval.documents:

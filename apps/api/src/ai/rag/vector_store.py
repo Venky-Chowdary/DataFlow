@@ -7,13 +7,15 @@ Local vector storage using ChromaDB with in-memory fallback.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import uuid
 from dataclasses import dataclass
 from typing import Optional
 
-from .embedding_service import get_embedding_service
 from services.value_serializer import json_default
+
+from .embedding_service import get_embedding_service
 
 _vector_store: Optional["DataTransferVectorStore"] = None
 
@@ -179,8 +181,8 @@ class DataTransferVectorStore:
             client = chromadb.PersistentClient(path=self.persist_dir)
             try:
                 client.delete_collection(self.COLLECTION_NAME)
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
             self._collection = client.get_or_create_collection(
                 name=self.COLLECTION_NAME,
                 metadata={"hnsw:space": "cosine"},

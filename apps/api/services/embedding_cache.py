@@ -10,6 +10,7 @@ Operators can disable durable writes per transfer or clear the store from Studio
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -53,8 +54,8 @@ def _connect() -> sqlite3.Connection:
         if _CONN is not None:
             try:
                 _CONN.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
         path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(path), timeout=30, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
@@ -88,8 +89,8 @@ def reset_connection_for_tests() -> None:
         if _CONN is not None:
             try:
                 _CONN.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
         _CONN = None
         _DB_PATH = None
         _SESSION_HITS = 0
@@ -138,8 +139,8 @@ def cache_stats() -> CacheStats:
             row = conn.execute("SELECT COUNT(*), COUNT(DISTINCT model) FROM embeddings").fetchone()
             entries = int(row[0] or 0)
             models = int(row[1] or 0)
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     return CacheStats(
         path=str(path),
         entries=entries,
@@ -236,6 +237,6 @@ def clear_cache(*, model: str | None = None) -> dict[str, Any]:
         # Reclaim space opportunistically.
         try:
             conn.execute("VACUUM")
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     return {"deleted": deleted, "model": model or "*"}

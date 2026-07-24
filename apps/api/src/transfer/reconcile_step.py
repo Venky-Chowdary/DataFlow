@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from connectors.writer_common import build_mapped_rows, resolve_target_columns
@@ -182,8 +183,8 @@ def run_reconciliation(
                 column_types=source_schema,
                 dest_types={},
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     target_cols = _mapped_targets(mapping_dicts, columns)
     source_checksum = _compute_source_checksum(

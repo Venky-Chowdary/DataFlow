@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, FrozenSet
@@ -541,9 +542,9 @@ def get_capabilities(driver_type: str, catalog_id: str | None = None) -> dict[st
         if driver_type in _FILE_CAPS:
             caps = dict(_FILE_CAPS[driver_type])
             return caps if driver_available(driver_type, catalog_id) else {k: False for k in caps}
-    except Exception:
+    except Exception as exc:
         # Capability discovery should never crash the catalog; degrade gracefully.
-        pass
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     return {"test": False, "read": False, "write": False, "introspect": False, "preflight": False}
 
 

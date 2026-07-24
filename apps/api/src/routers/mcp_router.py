@@ -6,6 +6,7 @@ Supports:
 """
 
 import json
+import logging
 import time
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -225,8 +226,8 @@ async def mcp_status(http_request: Request):
         try:
             from ..services.mongodb_service import get_mongodb_service
             jobs_service = get_mongodb_service()
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         if jobs_service is None:
             from services.jobs import job_store
             jobs_service = job_store

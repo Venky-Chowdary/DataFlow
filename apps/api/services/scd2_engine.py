@@ -9,6 +9,7 @@ same source snapshot produces no new rows.
 from __future__ import annotations
 
 import hashlib
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -115,8 +116,8 @@ def _ensure_scd_columns(engine: Any, table_obj: Any, dialect_name: str) -> None:
         with engine.begin() as conn:
             try:
                 conn.execute(sa.text(ddl))
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
 def _build_scd_table(
@@ -129,7 +130,6 @@ def _build_scd_table(
 ) -> Any:
     """Build or reflect the destination table with SCD2 audit columns."""
     import sqlalchemy as sa
-
     from connectors.generic_sql import _build_table_for_write
 
     all_cols = list(dict.fromkeys(list(target_cols) + SCD2_COLUMNS))
@@ -172,7 +172,6 @@ def _fetch_current_rows(
 ) -> dict[str, str]:
     """Return {composite_key: row_hash} for current rows whose key is in ``keys``."""
     import sqlalchemy as sa
-
     from connectors.writer_common import quote_sql_identifier
 
     if not keys or not pk_columns:
@@ -215,7 +214,6 @@ def _expire_rows(
 ) -> int:
     """Mark the current versions of ``keys`` as historical."""
     import sqlalchemy as sa
-
     from connectors.writer_common import quote_sql_identifier
 
     if not keys or not pk_columns:
@@ -244,8 +242,8 @@ def _active_checksum(
 ) -> tuple[int, str]:
     """Read all current rows and compute an order-independent checksum."""
     import sqlalchemy as sa
-
     from connectors.writer_common import quote_sql_identifier
+
     from services.reconciliation import canonical_checksum
 
     current_quoted = quote_sql_identifier(IS_CURRENT_COLUMN)

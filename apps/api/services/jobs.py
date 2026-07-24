@@ -222,10 +222,10 @@ class JsonFileJobStore(MemoryJobStore):
                     try:
                         job = _job_record_from_dict(item)
                         self._jobs[job.job_id] = job
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                    except Exception as exc:
+                        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     def _persist(self) -> None:
         try:
@@ -234,8 +234,8 @@ class JsonFileJobStore(MemoryJobStore):
             tmp = self._path.with_suffix(self._path.suffix + ".tmp")
             tmp.write_text(json.dumps(snapshot, indent=2, default=json_default), encoding="utf-8")
             tmp.replace(self._path)
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     def create(self, **kwargs: Any) -> JobRecord:
         record = super().create(**kwargs)

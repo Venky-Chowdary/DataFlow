@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 from collections import Counter
@@ -228,8 +229,8 @@ def _profile_collection():
         mongo = get_mongodb_service()
         if mongo and getattr(mongo, "client", None) and type(mongo).__name__ != "MemoryMongoDBService":
             return mongo.get_database().get("quality_profiles")
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     return None
 
 
@@ -292,8 +293,8 @@ def _load_store(source: dict[str, Any], destination: dict[str, Any]) -> dict[str
             doc = coll.find_one({"_id": key})
             if doc:
                 return _normalize_store_doc(doc)
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     path = _profile_path(key)
     if not path.exists():
         return {"runs": []}
@@ -322,8 +323,8 @@ def _save_store(source: dict[str, Any], destination: dict[str, Any], store: dict
         try:
             coll.replace_one({"_id": key}, payload, upsert=True)
             return
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     write_json_atomic(_profile_path(key), {k: v for k, v in payload.items() if k != "_id"})
 
 

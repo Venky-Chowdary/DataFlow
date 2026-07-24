@@ -25,6 +25,7 @@ Semantics
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 import time
@@ -294,8 +295,8 @@ def force_release_lease(
                 "note": (reason or "")[:300],
             },
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     return result
 
 

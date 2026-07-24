@@ -3,21 +3,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
-
-from services.value_serializer import sanitize_json_value
-
-from fastapi import APIRouter, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
 
 from connectors.mongodb_common import (
     _mongo_client,
     mongodb_database_from_uri,
     normalize_mongodb_connection_string,
 )
+from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from services import connector_store
+from services.value_serializer import sanitize_json_value
 
 router = APIRouter(prefix="/query", tags=["query"])
 
@@ -254,10 +253,10 @@ def _export_to_connector(
     if not dest_connector:
         raise HTTPException(status_code=404, detail="Destination connector not found")
 
+    from services.dialect_profiles import normalize_schema
+
     from src.transfer.adapters import write_destination_database
     from src.transfer.models import EndpointConfig
-
-    from services.dialect_profiles import normalize_schema
 
     dest = EndpointConfig(
         kind="database",
@@ -513,5 +512,5 @@ def _run_snowflake_query(connector, body):
         if conn is not None:
             try:
                 conn.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)

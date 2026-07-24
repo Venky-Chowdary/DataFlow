@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import pickle
 import re
@@ -28,8 +29,8 @@ def _load_ml_baseline():
             with model_path.open("rb") as f:
                 _model_cache = pickle.load(f)
                 return _model_cache
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     return None
 
 

@@ -8,13 +8,15 @@ Feeds schemas, synthesizes conversations, updates RAG knowledge base.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+from services.value_serializer import json_default
+
 from ..knowledge.copilot_knowledge import get_copilot_documents
 from .conversation_synthesis import ConversationSynthesizer
-from services.value_serializer import json_default
 from .data_synthesis import DataTransferDataSynthesizer
 from .fine_tuning import DataTransferFineTuningPipeline
 from .universal_data_feeder import UniversalDataFeeder
@@ -70,8 +72,8 @@ class DataTransferTrainingAgent:
             from ..rag.vector_store import get_vector_store
             if get_vector_store().document_count >= min_docs:
                 return True
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return False
 
     def run_full_training(self, include_embedding_tune: bool = False, force: bool = False) -> TrainingRun:
@@ -109,8 +111,8 @@ class DataTransferTrainingAgent:
             try:
                 from .universal_source_registry import get_universal_schema_count
                 run.metrics["registry"] = get_universal_schema_count()
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
             # Phase 2: Synthesize conversation training (includes all 620 connector Q&A)
             conversations = self.conversation_synth.synthesize_full(schema_dicts)

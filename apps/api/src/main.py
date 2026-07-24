@@ -14,7 +14,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
-
 from services.health_service import aggregate_health
 from services.platform_config import (
     apply_railway_defaults,
@@ -37,14 +36,14 @@ from .routers.connectors_router import router as connectors_router
 from .routers.contracts_router import router as contracts_router
 from .routers.copilot_router import router as copilot_router
 from .routers.mcp_router import router as mcp_router
+from .routers.ops_router import router as ops_router
 from .routers.preflight_router import router as preflight_router
 from .routers.query_router import router as query_router
+from .routers.repair_router import router as repair_router
 from .routers.saved_connectors_router import router as saved_connectors_router
 from .routers.schedules_router import router as schedules_router
 from .routers.training_agent_router import router as training_agent_router
 from .routers.transfer_router import router as transfer_router
-from .routers.repair_router import router as repair_router
-from .routers.ops_router import router as ops_router
 from .routers.usage_router import router as usage_router
 from .routers.workspace_router import router as workspace_router
 from .services.rbac import RBACMiddleware
@@ -274,8 +273,8 @@ async def add_timing_header(request: Request, call_next):
                 correlation_id=correlation_id,
                 details={"status": response.status_code, "ms": round(process_time * 1000, 1)},
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     return response
 

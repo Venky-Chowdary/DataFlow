@@ -12,6 +12,7 @@ complete source snapshot to the destination.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 SOFT_DELETE_COLUMN = "_deleted"
@@ -80,7 +81,6 @@ def _ensure_soft_delete_column(
     soft_delete_column: str,
 ) -> None:
     import sqlalchemy as sa
-
     from connectors.writer_common import quote_sql_identifier
 
     col_quoted = quote_sql_identifier(soft_delete_column)
@@ -97,8 +97,8 @@ def _ensure_soft_delete_column(
         except Exception:
             try:
                 conn.rollback()
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
 
 
 def _update_deleted_batch(
@@ -110,7 +110,6 @@ def _update_deleted_batch(
     soft_delete_column: str,
 ) -> tuple[int, int]:
     import sqlalchemy as sa
-
     from connectors.writer_common import quote_sql_identifier
 
     col_quoted = quote_sql_identifier(soft_delete_column)
@@ -153,8 +152,8 @@ def _compute_active_checksum(
 ) -> tuple[int, str]:
     """Read active rows and return an order-independent checksum."""
     import sqlalchemy as sa
-
     from connectors.writer_common import quote_sql_identifier
+
     from services.reconciliation import canonical_checksum
 
     col_quoted = quote_sql_identifier(soft_delete_column)
@@ -240,7 +239,6 @@ def apply_inferred_soft_deletes(
     qualified = _qualified_name(table, schema_name)
 
     import sqlalchemy as sa
-
     from connectors.writer_common import quote_sql_identifier
 
     target_cols = _target_columns(columns, mappings, schema)

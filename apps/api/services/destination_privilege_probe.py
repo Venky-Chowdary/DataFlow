@@ -466,8 +466,8 @@ def _probe_postgres_family(
     finally:
         try:
             conn.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
 
 
 # ── MySQL ────────────────────────────────────────────────────────────────────
@@ -591,8 +591,8 @@ def _probe_mysql(
     finally:
         try:
             conn.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
 
 
 # ── Snowflake ────────────────────────────────────────────────────────────────
@@ -632,8 +632,8 @@ def _probe_snowflake(
                 row = cur.fetchone()
                 if row and row[0]:
                     current_role = str(row[0]).strip()
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
             grant_rows: list[tuple[Any, ...]] = []
             if current_role:
@@ -672,8 +672,8 @@ def _probe_snowflake(
     finally:
         try:
             conn.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
 
 
 def _snowflake_privileges_from_rows(rows: list[tuple[Any, ...]]) -> list[dict[str, str]]:
@@ -862,8 +862,8 @@ def _probe_sqlserver(
     table_exists: bool,
     need_update: bool,
 ) -> PrivilegeProbeResult:
-    from connectors.generic_sql import get_sqlalchemy_engine
     import sqlalchemy as sa
+    from connectors.generic_sql import get_sqlalchemy_engine
 
     engine = get_sqlalchemy_engine({
         "type": "sqlserver",
@@ -886,8 +886,8 @@ def _probe_sqlserver(
                     {"obj": f"{schema}.{table}"},
                 ).scalar()
                 exists = oid is not None
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
         insert_perm = False
         update_perm = False
@@ -950,8 +950,8 @@ def _probe_oracle(
     table_exists: bool,
     need_update: bool,
 ) -> PrivilegeProbeResult:
-    from connectors.generic_sql import get_sqlalchemy_engine
     import sqlalchemy as sa
+    from connectors.generic_sql import get_sqlalchemy_engine
 
     engine = get_sqlalchemy_engine({
         "type": "oracle",
@@ -979,8 +979,8 @@ def _probe_oracle(
                     {"owner": owner, "tbl": tbl_u},
                 ).scalar()
                 exists = int(cnt or 0) > 0
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
         session_privs = {
             str(r[0]).upper()
@@ -1110,8 +1110,8 @@ def _probe_sqlite(
                     exists = bool(row and row[0])
                 finally:
                     con.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         can_create = can_write_fs and parent_ok
         can_write = can_write_fs if exists else can_create
         return _finalize(
@@ -1155,7 +1155,10 @@ def _probe_mongodb(
     table_exists: bool,
     need_update: bool,
 ) -> PrivilegeProbeResult:
-    from connectors.mongodb_common import _mongo_client, normalize_mongodb_connection_string
+    from connectors.mongodb_common import (
+        _mongo_client,
+        normalize_mongodb_connection_string,
+    )
 
     db_name = (database or "").strip()
     if not db_name and connection_string:
@@ -1216,8 +1219,8 @@ def _probe_mongodb(
         try:
             names = set(client[db_name].list_collection_names())
             exists = collection in names
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     can_write, can_create = evaluate_mongodb_privileges(
         privileges,
@@ -1380,8 +1383,8 @@ def _probe_redis(
     finally:
         try:
             client.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
 
 
 def parse_redis_acl_getuser(raw: Any) -> tuple[list[str], list[str]]:
@@ -1538,8 +1541,8 @@ def _probe_kafka(
             try:
                 topics = admin.list_topics()
                 exists = topic in set(topics or [])
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
         acls: list[dict[str, str]] = []
         describe = getattr(admin, "describe_acls", None)
@@ -1564,9 +1567,9 @@ def _probe_kafka(
                     ACLFilter,
                     ACLOperation,
                     ACLPermissionType,
+                    ACLResourcePatternType,
                     ResourcePattern,
                     ResourceType,
-                    ACLResourcePatternType,
                 )
                 pattern = ResourcePattern(
                     ResourceType.TOPIC,
@@ -1635,8 +1638,8 @@ def _probe_kafka(
     finally:
         try:
             admin.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
 
 
 def normalize_kafka_acls(raw: Any, *, topic: str) -> list[dict[str, str]]:
@@ -1760,8 +1763,8 @@ def _probe_elasticsearch(
     exists = table_exists
     try:
         exists = bool(client.indices.exists(index=index))
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     try:
         resp = client.security.has_privileges(

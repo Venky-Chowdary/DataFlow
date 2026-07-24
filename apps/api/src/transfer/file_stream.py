@@ -10,6 +10,7 @@ import gzip
 import io
 import itertools
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -168,8 +169,8 @@ def _text_reader(content: bytes | str | os.PathLike, encoding: str | None = None
         if text is not None:
             try:
                 text.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
         else:
             binary.close()
 
@@ -291,8 +292,8 @@ def _decompress_bytes_if_gzip(data: bytes) -> bytes:
     if _is_gzip_bytes(data):
         try:
             return gzip.decompress(data)
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     return data
 
 

@@ -6,6 +6,7 @@ Never invents 0.99 confidence or silent-no-loss claims.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from services.type_system import ddl_type, is_lossy_coercion, normalize_logical_type
@@ -649,8 +650,8 @@ def build_mapping_proof(
                         "Use a PK upsert sink or set allow_append_only=true."
                     ),
                 })
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     avg_conf = round(sum(confidences) / len(confidences), 3) if confidences else 0.0
     max_conf = round(max(confidences), 3) if confidences else 0.0

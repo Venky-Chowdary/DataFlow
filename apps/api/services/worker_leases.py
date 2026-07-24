@@ -46,8 +46,8 @@ def requires_distributed_backend() -> bool:
 
         if is_railway() and is_production():
             return True
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     return False
 
 
@@ -85,8 +85,8 @@ class WorkerLeaseStore:
                 db = mongo.get_database()
                 if db is not None:
                     return db["worker_leases"]
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return None
 
     def _remember_fence(self, job_id: str, fence: int) -> None:
@@ -261,8 +261,8 @@ class WorkerLeaseStore:
                 doc = coll.find_one({"_id": job_id, "worker_id": self.worker_id})
                 if doc:
                     return int(doc.get("fence") or 0) or None
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         with self._lock:
             existing = self._memory.get(job_id)
             if existing and existing.get("worker_id") == self.worker_id:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sys
@@ -25,7 +26,10 @@ from connectors.writer_common import (  # noqa: E402
 )
 
 # Keep resilient batch/quarantine path importable for streaming callers.
-from services.resilience import ResilientBatcher, adaptive_chunk_size  # noqa: E402, F401
+from services.resilience import (  # noqa: E402, F401
+    ResilientBatcher,
+    adaptive_chunk_size,
+)
 
 from .adapters import (
     _introspect_table_schema,
@@ -1071,7 +1075,10 @@ def stream_database_transfer(
     # are never silently dropped from destination writes (Dynamo/Mongo/ES/Redis).
     def _absorb_schemaless_discovered_attrs(batch) -> None:
         nonlocal columns, mappings, column_types, schema, backfill_new_fields, target_cols
-        from connectors.header_union import SCHEMALESS_SOURCE_TYPES, union_attribute_keys
+        from connectors.header_union import (
+            SCHEMALESS_SOURCE_TYPES,
+            union_attribute_keys,
+        )
 
         if src_type not in SCHEMALESS_SOURCE_TYPES or not batch or not getattr(batch, "headers", None):
             return
@@ -1622,8 +1629,8 @@ def stream_database_transfer(
                     kafka_cursor = {**kafka_cursor, "pending_offsets": [], "committed": True}
                     checkpoint.kafka_cursor = kafka_cursor
                     checkpoint_service.save(checkpoint)
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         if on_checkpoint:
             on_checkpoint(idx, chunks, written, checkpoint.to_dict())
 
@@ -1678,8 +1685,8 @@ def stream_database_transfer(
         if conn is not None:
             try:
                 conn.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
             sf_conn_state["conn"] = None
 
     if written == 0 and incremental:
@@ -2058,7 +2065,6 @@ def stream_scd2_mirror_transfer(
     import math
 
     import sqlalchemy as sa
-
     from connectors.generic_sql import drop_table, get_sql_schema, get_sqlalchemy_engine
     from connectors.writer_common import quote_sql_identifier
     from services.sync_cursor import (
@@ -2261,8 +2267,8 @@ def stream_scd2_mirror_transfer(
         # Clean up the temporary staging table.
         try:
             drop_table(dest_cfg, staging.table, schema_name or None)
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     ddl_log.append(f"{effective_sync.upper()} {staging_qualified} → {target_qualified}")
     # Rejected/coerced counts come from the staging write and the SCD2/mirror
@@ -2281,7 +2287,6 @@ def _read_staging_batches(
 ):
     """Yield batches of dicts from the staging table using LIMIT/OFFSET."""
     import sqlalchemy as sa
-
     from connectors.generic_sql import get_sqlalchemy_engine
     from connectors.writer_common import quote_sql_identifier
 

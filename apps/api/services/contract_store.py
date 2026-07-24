@@ -6,6 +6,7 @@ works in unit tests and local runs without a real database.
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -101,8 +102,8 @@ class MongoContractStore(ContractStore):
                 {"$set": contract.to_dict()},
                 upsert=True,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return contract
 
     def get_contract(self, contract_id: str) -> DataContract | None:
@@ -113,8 +114,8 @@ class MongoContractStore(ContractStore):
                 if doc:
                     doc.pop("_id", None)
                     return DataContract.from_dict(doc)
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return self._fallback.get_contract(contract_id)
 
     def list_contracts(self, limit: int = 200) -> list[DataContract]:
@@ -129,8 +130,8 @@ class MongoContractStore(ContractStore):
                     doc.pop("_id", None)
                     c = DataContract.from_dict(doc)
                     by_id[c.id] = c
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         items = sorted(
             by_id.values(),
             key=lambda c: c.updated_at or c.created_at or "",
@@ -149,8 +150,8 @@ class MongoContractStore(ContractStore):
                 {"$set": breaker.to_dict()},
                 upsert=True,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     def get_breaker(self, contract_id: str) -> CircuitBreaker:
         db = self._get_db()
@@ -160,8 +161,8 @@ class MongoContractStore(ContractStore):
                 if doc:
                     doc.pop("_id", None)
                     return CircuitBreaker.from_dict(doc)
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return self._fallback.get_breaker(contract_id)
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -623,8 +624,8 @@ class DataPilotTools:
                     "database": d.get("database"),
                     "status": d.get("status", "saved"),
                 })
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         if not summary:
             try:
                 from ...services.mongodb_service import get_mongodb_service
@@ -639,8 +640,8 @@ class DataPilotTools:
                         "database": c.get("database"),
                         "status": c.get("status", "unknown"),
                     })
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return ToolResult(
             name="list_connectors",
             success=True,
@@ -992,14 +993,14 @@ class DataPilotTools:
             ds = self._list_datasets()
             if ds.success:
                 datasets = (ds.output or {}).get("datasets", [])[:8]
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         try:
             lc = self._list_connectors()
             if lc.success:
                 connectors = (lc.output or {}).get("connectors", [])[:8]
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return ToolResult(
             name="describe_pilot",
             success=True,

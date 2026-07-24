@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from connectors.mongodb_common import _mongo_client
+from services.value_serializer import cell_to_string
 
 from .adapters import (
     _introspect_table_schema,
@@ -15,7 +17,6 @@ from .adapters import (
 from .connector_capabilities import resolve_driver_type
 from .models import EndpointConfig
 from .type_mapper import ddl_type
-from services.value_serializer import cell_to_string
 
 
 def introspect_endpoint(
@@ -405,7 +406,6 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             import json
 
             from pymongo import MongoClient
-
             from services.schema_inference import infer_schema_map
 
             coll_name = endpoint.collection
@@ -602,8 +602,8 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                     if client is not None:
                         try:
                             client.close()
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
                 result = read_index_batch(cfg=cfg, index=index, offset=0, limit=sample_limit)
                 batch = result[0] if isinstance(result, tuple) else result
                 out["columns"] = batch.headers
@@ -827,8 +827,8 @@ def build_transfer_plan(source: EndpointConfig, destination: EndpointConfig, sou
             try:
                 cfg = resolve_connector_config(endpoint)
                 return cfg.get("type") or endpoint.format or fallback
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return endpoint.format or fallback
 
     src_fmt = _resolved_fmt(source, "csv" if source.kind == "file" else source.format or "json")
@@ -896,8 +896,8 @@ def build_transfer_plan(source: EndpointConfig, destination: EndpointConfig, sou
                     "to": dst_fmt,
                     "supported": can_convert(src_fmt, dst_fmt),
                 }
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     if columns:
         try:
@@ -920,8 +920,8 @@ def build_transfer_plan(source: EndpointConfig, destination: EndpointConfig, sou
             )
             plan["mapping_preview"] = preview["mappings"][:20]
             plan["mapping_agents"] = preview.get("agents_used", [])
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     return plan
 

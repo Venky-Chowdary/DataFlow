@@ -6,6 +6,7 @@ import csv
 import gzip
 import io
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,8 +49,8 @@ def _load_registry() -> None:
                 row["file_id"] = fid
                 _file_registry[fid] = row
             return
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     if not REGISTRY_PATH.exists():
         return
     try:
@@ -80,8 +81,8 @@ def _save_registry() -> None:
                 doc["_id"] = fid
                 coll.replace_one({"_id": fid}, doc, upsert=True)
             return
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "files": [_registry_record_for_disk(r) for r in _file_registry.values()],
@@ -302,8 +303,8 @@ def get_file(file_id: str) -> dict | None:
                     row["file_id"] = file_id
                     _file_registry[file_id] = row
                     record = row
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     if not record:
         return None
     path = Path(record.get("path") or "")
@@ -352,6 +353,7 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
                 yield headers, chunk
     elif fmt == "json":
         import json
+
         from services.json_tabular import extract_json_records
 
         with open(path, "r", encoding="utf-8") as f:
@@ -498,8 +500,8 @@ class FileParser:
                 return "html"
             if doc_kind:
                 return doc_kind
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
         # Content sniffing — decompress a gzip prefix if needed.
         sample_bytes: bytes = b""
@@ -831,7 +833,10 @@ class FileParser:
 
             import fastavro
 
-            from services.avro_schema import columns_from_avro_schema, schema_map_from_avro
+            from services.avro_schema import (
+                columns_from_avro_schema,
+                schema_map_from_avro,
+            )
 
             reader = fastavro.reader(io.BytesIO(content))
             writer_schema = getattr(reader, "writer_schema", None) or getattr(reader, "schema", None)
@@ -896,7 +901,10 @@ class FileParser:
             # without the pyarrow package attribute cache shadowing the override.
             orc = importlib.import_module("pyarrow.orc")
 
-            from services.arrow_schema import columns_from_arrow_schema, schema_from_arrow
+            from services.arrow_schema import (
+                columns_from_arrow_schema,
+                schema_from_arrow,
+            )
 
             table = orc.read_table(io.BytesIO(content))
             schema_map = schema_from_arrow(table.schema)
@@ -1104,8 +1112,8 @@ class FileParser:
         if isinstance(content, bytes) and raw_bytes[:2] == b"\x1f\x8b":
             try:
                 raw_bytes = gzip.decompress(raw_bytes)
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
         file_type = cls.detect_file_type(filename, raw_bytes)
 
@@ -1171,7 +1179,10 @@ class FileParser:
     ) -> ParseResult:
         """Parse PDF / Word / HTML into provenance-aware chunk rows."""
         try:
-            from services.document_chunking import document_columns, extract_document_chunks
+            from services.document_chunking import (
+                document_columns,
+                extract_document_chunks,
+            )
 
             rows = extract_document_chunks(
                 content,

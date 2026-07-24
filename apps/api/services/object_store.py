@@ -101,8 +101,8 @@ def _get_client() -> Any | None:
             )
             _backend = "minio"
             return _client
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     if _s3_env_configured() or os.getenv("MINIO_ENDPOINT"):
         client = _get_boto3_client()
         if client is not None:

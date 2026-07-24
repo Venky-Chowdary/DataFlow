@@ -123,8 +123,8 @@ def _resolve_connector(connector_id: str) -> dict | None:
             data["id"] = conn.id
             data["type"] = conn.type
             return data
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     try:
         from services.mongodb_service import get_mongodb_service
@@ -301,7 +301,11 @@ def _job_doc(job_id: str) -> dict | None:
 
 def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datetime) -> None:
     """Handle a finished scheduled run: retry on failure, else record + notify."""
-    from services.schedule_store import get_schedule, mark_schedule_run, record_run_history
+    from services.schedule_store import (
+        get_schedule,
+        mark_schedule_run,
+        record_run_history,
+    )
 
     sched = get_schedule(schedule_id)
     if not sched:
@@ -334,9 +338,10 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
 
 def _dispatch_transfer(schedule_id: str, attempt: int = 0) -> str | None:
     """Build and submit the transfer for a schedule attempt (used for retries too)."""
-    from services.schedule_store import get_schedule, mark_schedule_run
     from src.transfer.background import run_transfer_async
     from src.transfer.engine import get_transfer_engine
+
+    from services.schedule_store import get_schedule, mark_schedule_run
 
     sched = get_schedule(schedule_id)
     if not sched or not sched.enabled:
@@ -399,7 +404,11 @@ def _dispatch_transfer(schedule_id: str, attempt: int = 0) -> str | None:
 
 
 def _run_schedule(schedule_id: str) -> str | None:
-    from services.schedule_store import clear_schedule_running, get_schedule, mark_schedule_running
+    from services.schedule_store import (
+        clear_schedule_running,
+        get_schedule,
+        mark_schedule_running,
+    )
 
     sched = get_schedule(schedule_id)
     if not sched or not sched.enabled:

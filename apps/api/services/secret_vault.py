@@ -45,8 +45,8 @@ def _fernet_key() -> bytes:
             decoded = base64.urlsafe_b64decode(raw + "==")
             if len(decoded) == 32:
                 return base64.urlsafe_b64encode(decoded)
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         if len(raw.encode()) >= 32:
             return base64.urlsafe_b64encode(hashlib.sha256(raw.encode()).digest())
     auth = os.getenv("DATAFLOW_AUTH_SECRET", "dev-change-me-before-production")

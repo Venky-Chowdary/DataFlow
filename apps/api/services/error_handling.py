@@ -8,6 +8,7 @@ quarantine for malformed records, and resume/replay support.
 
 from __future__ import annotations
 
+import logging
 import os
 import random
 import re
@@ -419,8 +420,8 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
                 "resource": error.resource,
                 "cursor_key": error.cursor_key,
             }
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     try:
         from services.cdc_cursor_gap import CdcCursorGapError
 
@@ -448,8 +449,8 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
                 "retained": error.retained,
                 "dialect": error.dialect,
             }
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     try:
         from services.cdc_effectively_once import CdcAppendOnlySinkError
 
@@ -468,8 +469,8 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
                 "retriable": False,
                 "confidence": "high",
             }
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     classification = classify_error(error)
     matched: dict[str, str] | None = None
     for needles, payload in _OPERATOR_FAILURE_RULES:
@@ -583,8 +584,8 @@ def classify_error(error: Exception | str) -> dict[str, Any]:
                 "class": exc_name,
                 **error.to_dict(),
             }
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     for sig in RETRIABLE_EXCEPTIONS:
         if sig in text or sig in exc_name:

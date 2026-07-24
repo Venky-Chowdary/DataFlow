@@ -7,6 +7,7 @@ restarts, and background work is scheduled on the durable transfer executor.
 
 from __future__ import annotations
 
+import logging
 import threading
 from enum import Enum
 from typing import Any, Callable
@@ -38,9 +39,9 @@ def _persist_phase(job_id: str, phase: WorkflowPhase, message: str) -> None:
         job_store.set_workflow_phase(job_id, phase.value)
         if message:
             job_store.set_message(job_id, message)
-    except Exception:
+    except Exception as exc:
         # Job store may not be available during tests or early import.
-        pass
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
 def set_phase(job_id: str, phase: WorkflowPhase, message: str = "") -> None:
@@ -61,8 +62,8 @@ def get_phase(job_id: str) -> dict[str, Any] | None:
         job = job_store.get(job_id)
         if job:
             return {"phase": job.workflow_phase, "message": job.message}
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     return None
 
 
@@ -82,6 +83,6 @@ def simulate_chunk_delay(chunk: int, total_chunks: int) -> None:
 
         if is_production():
             return
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     time.sleep(0.15)

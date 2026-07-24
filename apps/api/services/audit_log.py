@@ -8,6 +8,7 @@ local JSONL file.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -51,8 +52,8 @@ def _mongo_collection():
         mongo = get_mongodb_service()
         if mongo and getattr(mongo, "client", None) and type(mongo).__name__ != "MemoryMongoDBService":
             return mongo.get_database().get("audit_events")
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     return None
 
 
@@ -83,8 +84,8 @@ def append_audit_event(
         try:
             coll.insert_one(event)
             return event
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     # Remove MongoDB-specific _id before writing to file
@@ -112,8 +113,8 @@ def list_audit_events(
                 query["actor"] = actor
             cursor = coll.find(query).sort("time", -1).limit(limit)
             return [{k: v for k, v in doc.items() if k != "_id"} for doc in cursor]
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     if not STORE_PATH.exists():
         return []

@@ -7,6 +7,7 @@ Auto-apply is limited to additive/safe fixes; breaking changes require approval.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -63,8 +64,8 @@ def _audit(event: str, payload: dict[str, Any]) -> None:
         try:
             coll.insert_one(dict(row))
             return
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     os.makedirs(_DATA_DIR, exist_ok=True)
     with _LOCK:
         with open(_AUDIT_PATH, "a", encoding="utf-8") as f:
@@ -84,8 +85,8 @@ def _load_proposals() -> list[dict[str, Any]]:
                     row["id"] = str(d["_id"])
                 out.append(row)
             return out
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     if not os.path.isfile(_PROPOSALS_PATH):
         return []
     try:
@@ -272,8 +273,8 @@ def get_proposal(proposal_id: str) -> RepairProposal | None:
                 row.pop("_id", None)
                 row.setdefault("id", proposal_id)
                 return _proposal_from_row(row)
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     with _LOCK:
         for r in _load_proposals():
             if r.get("id") == proposal_id:
@@ -299,8 +300,8 @@ def list_proposals(*, job_id: str = "", status: str = "") -> list[RepairProposal
                     row["id"] = str(d["_id"])
                 out.append(_proposal_from_row(row))
             return out
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     with _LOCK:
         rows = _load_proposals()
     out = [_proposal_from_row(r) for r in rows]

@@ -6,6 +6,7 @@ Do not invent parallel SQL. Every probe goes through:
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 
@@ -123,8 +124,8 @@ def _connector_dict(connector_id: str = "", name: str = "") -> dict[str, Any] | 
             return _pick_connector(needle, pool)
     except AmbiguousConnectorError:
         raise
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     try:
         from services.mongodb_service import get_mongodb_service
@@ -139,8 +140,8 @@ def _connector_dict(connector_id: str = "", name: str = "") -> dict[str, Any] | 
             return _pick_connector(needle, [c for c in pool if isinstance(c, dict)])
     except AmbiguousConnectorError:
         raise
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     return None
 
 
@@ -276,9 +277,10 @@ def introspect_connector_schema(
     if err:
         return err
     try:
+        from services.schema_introspect import introspect_schema
+
         from src.transfer.adapters import resolve_connector_config
         from src.transfer.connector_capabilities import resolve_driver_type
-        from services.schema_introspect import introspect_schema
 
         endpoint = _endpoint_from_connector(conn, table=table)
         cfg = resolve_connector_config(endpoint)

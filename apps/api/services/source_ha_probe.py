@@ -11,6 +11,7 @@ Continuous CDC across an AG/DG retention gap remains fail-closed via
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -256,6 +257,6 @@ def attach_source_ha(cdc: Any, src_cfg: dict[str, Any] | None) -> SourceHaProbe 
     probe = probe_source_ha_safe(src_cfg)
     try:
         setattr(cdc, "_source_ha", probe)
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     return probe

@@ -7,6 +7,7 @@ null-rate spikes, and low-cardinality anomalies before a transfer commits.
 
 from __future__ import annotations
 
+import logging
 import statistics
 from collections import Counter
 from dataclasses import dataclass, field
@@ -320,12 +321,15 @@ def run_integrity_audit(
             if hit:
                 # Schemaless dests: only _id counts as identity.
                 try:
-                    from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
+                    from services.db_type_utils import (
+                        SCHEMALESS_DESTS,
+                        normalize_dest_kind,
+                    )
 
                     if normalize_dest_kind(dest_kind) in SCHEMALESS_DESTS and key != "_id":
                         continue
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
                 pk_source = hit
                 break
 

@@ -7,6 +7,7 @@ about columns, values, PII, quality — not just transfer steps.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 
@@ -259,8 +260,8 @@ class CopilotDataAnalyst:
                     lines.extend(["", "Strong mapping candidates I see:"])
                     for m in high:
                         lines.append(f"• `{m.source_column}` → `{m.target_column}` ({m.confidence * 100:.0f}%)")
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
         return "\n".join(lines)
 
