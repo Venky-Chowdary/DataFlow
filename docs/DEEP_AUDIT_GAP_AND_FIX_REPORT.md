@@ -284,17 +284,17 @@ The buffered database path nests SCD2/mirror summaries under `dest_summary["scd2
 ```text
 ruff check apps/api/src apps/api/services apps/api/connectors --statistics
 Top issues:
-  777 BLE001 blind-except
-  246 S110  try-except-pass
-  156 I001  unsorted-imports
+  688 BLE001 blind-except
+  166 S110  try-except-pass
+   96 I001  unsorted-imports
   142 UP045 non-pep604-annotation-optional
-   61 UP035 deprecated-import
-   47 SIM102 collapsible-if
+   60 UP035 deprecated-import
+   48 SIM102 collapsible-if
    42 FURB167 regex-flag-alias
    41 PIE810 multiple-starts-ends-with
    33 SIM117 multiple-with-statements
    30 ISC004 implicit-string-concatenation-in-collection-literal
-Total: 1,872 errors
+Total: 1,639 errors
 ```
 
 The blind-exception patterns are the biggest risk: they swallow conversion errors, connection failures, and data-shape mismatches, making silent data loss possible.
@@ -430,9 +430,38 @@ pytest apps/api/tests
 9052 passed, 1085 skipped, 0 failed
 ```
 
+## 11. Connector Driver Blind-Except Instrumentation Pass (this session)
+
+### Fixes this session
+
+| Fix | Root cause | Evidence |
+|-----|------------|----------|
+| Blind `except Exception: pass` in connector drivers | 41+ connector files swallowed connectivity, cursor/connection cleanup, schema introspection, CDC poll, and write-batch failures without logging | `apps/api/connectors/*` |
+| Broken logger placement after import sorting | Automated logger insertion placed `logger = logging.getLogger(__name__)` before imports, causing E402 warnings and, in multi-line `def`/`class` headers, syntax errors | `apps/api/connectors/{snowflake,dynamodb,oracle_change_stream,oracle_logminer,kafka_debezium_bridge,sqlserver_change_stream,sftp_common,schema_drift}.py` |
+| Unnecessary `pass` statements after logging | `PIE790` flagged `pass` in `except` blocks that now contain a logging call | `apps/api/connectors/*` |
+| Unsorted imports after logger insertion | `isort`/`ruff` I001 reported out-of-order imports once `import logging` was added | `apps/api/connectors/*` |
+
+### Implementation notes
+
+- Scanned `apps/api/connectors` with `bandit -r apps/api/connectors -t B110` and instrumented every `try_except_pass` occurrence.
+- Added or reused a module logger (`logger` / `_logger`) in each affected file.
+- Converted `except Exception:`/`except Exception: pass` to `except Exception as exc:` with `logger.warning(..., exc_info=exc)` for data-path errors and `logger.debug(..., exc_info=exc)` for cleanup/close/rollback/lock-release paths.
+- Preserved all fallback behavior; the change is instrumentation-only.
+- Removed redundant `pass` statements and sorted imports on the touched files.
+
+### Verification this session
+
+```text
+bandit -r apps/api/connectors -t B110
+0 issues
+
+pytest apps/api/tests
+9052 passed, 1085 skipped, 0 failed  (run_id: /tmp/full_test_run_v5.log, 1013.14s)
+```
+
 ### What is still NOT proven
 
-- **Broader blind-except cleanup.** Only the core orchestration, adapters, reconciliation, and preflight were instrumented. Many connector drivers and service modules still contain `except Exception: pass` patterns.
+- **Service-layer blind-except cleanup.** Connector drivers are now instrumented; `apps/api/services` still contains ~107 `try_except_pass` patterns.
 - **CDC end-to-end.** CDC tests pass with emulators but real production handoff (slot/LSN persistence, exactly-once semantics) is not yet certified.
 - **Cloud warehouse and real-service routes.** ~952 matrix tests skip because no live Snowflake/BigQuery/Redshift/GCS/ADLS/Salesforce/etc. credentials or emulators are configured.
 - **Schema-drift evolution, lakehouse MERGE, and semantic mapping** remain P1 backlog items.
