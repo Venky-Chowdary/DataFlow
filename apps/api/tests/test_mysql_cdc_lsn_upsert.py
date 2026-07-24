@@ -76,7 +76,9 @@ def test_mysql_upsert_rejects_older_lsn():
     )
     try:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT amount, `{DF_LSN_COL}` FROM `{table_name}` WHERE id = 1")
+            cur.execute(
+                f"SELECT amount, `{DF_LSN_COL}` FROM `{table_name}` WHERE id = 1"
+            )
             row = cur.fetchone()
             cur.execute(f"DROP TABLE IF EXISTS `{table_name}`")
         conn.commit()

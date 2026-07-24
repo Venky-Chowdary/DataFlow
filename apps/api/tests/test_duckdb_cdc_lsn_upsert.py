@@ -1,4 +1,4 @@
-"""Integration: older CDC LSN must not overwrite a newer DuckDB row (generic SQL path)."""
+"""Integration: older CDC LSN must not overwrite a newer DuckDB row."""
 
 from __future__ import annotations
 
