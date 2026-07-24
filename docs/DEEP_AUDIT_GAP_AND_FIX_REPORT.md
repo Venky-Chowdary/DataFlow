@@ -638,8 +638,53 @@ pytest apps/api/tests/test_validate_failfast_critical_hazards.py \
 
 ### What is still NOT proven
 
-- **CDC end-to-end exactly-once.** CDC unit/integration tests pass with emulators; real slot/LSN persistence and production exactly-once semantics are not yet certified.
+- **Full CDC end-to-end exactly-once job resume.** PK-sink LSN guards are now proven for PostgreSQL, MySQL, DuckDB, and MongoDB; the remaining work is full job-level resume across slot/LSN persistence and multi-stream handoff with real services.
 - **Cloud warehouse and real-service routes.** ~952 matrix tests still skip because no live Snowflake/BigQuery/Redshift/GCS/ADLS/Salesforce/etc. credentials or emulators are configured.
 - **BLE001 blind-except narrowing.** `except Exception as exc:` still triggers `BLE001`; the next pass should narrow `Exception` to concrete, source-specific exception families in the hot data path.
 - **Lakehouse MERGE.** Iceberg/Delta MERGE semantics for idempotent writes are still a roadmap item.
+
+## 15. CDC LSN Guard for PK Sinks (this session)
+
+### Gap
+MongoDB upsert used `ReplaceOne(..., upsert=True)` without checking the
+incoming `_df_lsn` against the destination's stored `_df_lsn`. Under CDC
+redelivery an older batch could overwrite newer destination state, regressing
+row values. PostgreSQL, MySQL, and DuckDB already had LSN guards in their
+writers, but there were no real-service integration tests proving the guard for
+the other three engines.
+
+### Fixes this session
+
+| Fix | Root cause | Evidence |
+|-----|------------|----------|
+| MongoDB `ReplaceOne` lacked LSN check | `mongodb_writer.py` built `ReplaceOne` filters only from PK columns; `_df_lsn` was ignored | `apps/api/connectors/mongodb_writer.py` now pre-fetches existing `_df_lsn` for batch PKs and skips rows where `lsn_is_newer(incoming, existing)` is False |
+| Missing proof artifacts | No integration test exercised the guard for DuckDB/MySQL/MongoDB | New `test_duckdb_cdc_lsn_upsert.py`, `test_mysql_cdc_lsn_upsert.py`, `test_mongodb_cdc_lsn_upsert.py` |
+
+### Verification this session
+
+```text
+pytest apps/api/tests/test_cdc_lsn_stamp.py \
+       apps/api/tests/test_cdc_snapshot_lsn_handoff.py \
+       apps/api/tests/test_postgresql_cdc_lsn_upsert.py \
+       apps/api/tests/test_mysql_cdc_lsn_upsert.py \
+       apps/api/tests/test_duckdb_cdc_lsn_upsert.py \
+       apps/api/tests/test_mongodb_cdc_lsn_upsert.py \
+       apps/api/tests/test_writer_common_cdc_lsn.py
+12 passed in 0.76s
+```
+
+### What is still NOT proven
+
+- **Full CDC end-to-end exactly-once job resume.** PK-sink LSN guards are now
+  proven for PostgreSQL, MySQL, DuckDB, and MongoDB; the remaining work is
+  full job-level resume across slot/LSN persistence and multi-stream handoff
+  with real services.
+- **Cloud warehouse and real-service routes.** ~952 matrix tests still skip
+  because no live Snowflake/BigQuery/Redshift/GCS/ADLS/Salesforce/etc.
+  credentials or emulators are configured.
+- **BLE001 blind-except narrowing.** `except Exception as exc:` still triggers
+  `BLE001`; the next pass should narrow `Exception` to concrete,
+  source-specific exception families in the hot data path.
+- **Lakehouse MERGE.** Iceberg/Delta MERGE semantics for idempotent writes are
+  still a roadmap item.
 
