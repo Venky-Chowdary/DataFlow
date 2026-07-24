@@ -31,6 +31,10 @@ try:
     from services.mirror_engine import apply_inferred_soft_deletes
     from services.mongodb_service import get_mongodb_service
     from services.pipeline_explanation import build_pipeline_explanation
+    from services.transform_engine import (
+        reset_active_date_locale,
+        set_active_date_locale,
+    )
     from services.value_serializer import cell_to_string
     from services.preflight_service import (
         apply_policy_gates,
@@ -62,6 +66,10 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
     from src.services.mirror_engine import apply_inferred_soft_deletes
     from src.services.mongodb_service import get_mongodb_service
     from src.services.pipeline_explanation import build_pipeline_explanation
+    from src.services.transform_engine import (
+        reset_active_date_locale,
+        set_active_date_locale,
+    )
     from src.services.value_serializer import cell_to_string
     from src.services.preflight_service import (
         apply_policy_gates,
@@ -1100,19 +1108,23 @@ class UniversalTransferEngine:
     def execute_tracked(self, request: TransferRequest, job_id: str, resume: bool = False) -> TransferResult:
         """Timed wrapper around the core transfer engine."""
         self._resolve_saved_connectors(request)
-        start = time.monotonic()
-        start_mem = self._peak_memory_bytes()
-        result = self._execute_tracked_core(request, job_id, resume=resume)
-        elapsed = time.monotonic() - start
-        result.elapsed_seconds = round(elapsed, 3)
-        result.records_per_second = round(result.records_transferred / elapsed, 3) if elapsed > 0 else 0.0
-        result.peak_memory_bytes = max(self._peak_memory_bytes() - start_mem, 0)
-        # Surface SLA metrics in the destination summary for the UI / API consumers.
-        result.destination_summary["elapsed_seconds"] = result.elapsed_seconds
-        result.destination_summary["records_per_second"] = result.records_per_second
-        result.destination_summary["peak_memory_bytes"] = result.peak_memory_bytes
-        self._notify_job_status(request, result)
-        return result
+        locale_token = set_active_date_locale(request.date_locale)
+        try:
+            start = time.monotonic()
+            start_mem = self._peak_memory_bytes()
+            result = self._execute_tracked_core(request, job_id, resume=resume)
+            elapsed = time.monotonic() - start
+            result.elapsed_seconds = round(elapsed, 3)
+            result.records_per_second = round(result.records_transferred / elapsed, 3) if elapsed > 0 else 0.0
+            result.peak_memory_bytes = max(self._peak_memory_bytes() - start_mem, 0)
+            # Surface SLA metrics in the destination summary for the UI / API consumers.
+            result.destination_summary["elapsed_seconds"] = result.elapsed_seconds
+            result.destination_summary["records_per_second"] = result.records_per_second
+            result.destination_summary["peak_memory_bytes"] = result.peak_memory_bytes
+            self._notify_job_status(request, result)
+            return result
+        finally:
+            reset_active_date_locale(locale_token)
 
     def _notify_job_status(self, request: TransferRequest, result: TransferResult) -> None:
         """Fire workspace notifications for failed or partially-quarantined jobs."""
@@ -1356,6 +1368,7 @@ class UniversalTransferEngine:
                     source_filename=request.source_filename or "",
                     schema_policy=request.schema_policy,
                     backfill_new_fields=request.backfill_new_fields,
+                    date_locale=request.date_locale,
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -1913,6 +1926,7 @@ class UniversalTransferEngine:
                     source_filename=request.source_filename or "",
                     schema_policy=request.schema_policy,
                     backfill_new_fields=request.backfill_new_fields,
+                    date_locale=request.date_locale,
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -2371,6 +2385,7 @@ class UniversalTransferEngine:
                     source_filename=request.source_filename or "",
                     schema_policy=request.schema_policy,
                     backfill_new_fields=request.backfill_new_fields,
+                    date_locale=request.date_locale,
                 )
                 pf = apply_policy_gates(
                     pf,

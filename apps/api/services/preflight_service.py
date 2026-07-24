@@ -31,8 +31,24 @@ from services.connector_capability_registry import (
     recommended_batch_size,
 )
 from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
+from services.transform_engine import (
+    reset_active_date_locale,
+    set_active_date_locale,
+)
 from services.value_serializer import cell_to_string
 from services.validation_plan import build_validation_plan
+
+
+def _with_date_locale(fn):
+    """Set the active date_locale context for the duration of the call."""
+    def wrapper(*args, **kwargs):
+        locale = kwargs.get("date_locale", "")
+        token = set_active_date_locale(locale)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            reset_active_date_locale(token)
+    return wrapper
 
 
 class FilePreflightContext(PreflightContext):
@@ -478,6 +494,7 @@ def apply_policy_gates(
     }
 
 
+@_with_date_locale
 def run_file_preflight(
     *,
     columns: list[str],
@@ -511,8 +528,10 @@ def run_file_preflight(
     stored_target_fp: str = "",
     contract_primary_key: str | None = None,
     destination_pk_columns: list[str] | None = None,
+    date_locale: str = "",
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G8 + integrity)."""
+
     if row_count <= 0 and sample_rows:
         row_count = len(sample_rows)
 

@@ -907,10 +907,10 @@ PREFLIGHT_GATES: list[tuple[GateId, GateFn]] = [
     (GateId.G3_SCHEMA_CONTRACT, gate_g3_schema_contract),
     (GateId.G4_MAPPING_CONFIDENCE, gate_g4_mapping_confidence),
     (GateId.G5_DRY_RUN, gate_g5_dry_run),
-    (GateId.G9_DATA_INTEGRITY, gate_g9_data_integrity),
     (GateId.G6_TARGET_DDL, gate_g6_target_ddl),
     (GateId.G7_CAPACITY, gate_g7_capacity),
     (GateId.G8_RECONCILIATION, gate_g8_reconciliation),
+    (GateId.G9_DATA_INTEGRITY, gate_g9_data_integrity),
 ]
 
 

@@ -181,6 +181,8 @@ class ExecuteTransferRequest(BaseModel):
     contract_id: str = ""
     enforce_contract: bool = True
     require_signed_contract: bool = False
+    # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian), 'MDY' (US), or ''.
+    date_locale: str = ""
 
 
 class MapColumnsRequest(BaseModel):
@@ -603,6 +605,7 @@ async def execute_transfer_json(
         contract_id=body.contract_id or "",
         enforce_contract=bool(body.enforce_contract),
         require_signed_contract=bool(body.require_signed_contract),
+        date_locale=body.date_locale,
         triggered_by=_actor_email(request),
     )
     from services.batch_progress import effective_backfill_new_fields
@@ -770,6 +773,7 @@ async def run_universal_transfer(
     source_extra_json: str = Form(""),
     stream_contracts_json: str = Form(""),
     data_region: str = Form(""),
+    date_locale: str = Form(""),
     request: Request = None,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
@@ -885,6 +889,7 @@ async def run_universal_transfer(
         data_region=region,
         backfill_new_fields=backfill_new_fields.lower() in ("true", "1", "yes"),
         write_via_staging=write_via_staging.lower() in ("true", "1", "yes"),
+        date_locale=date_locale,
         triggered_by=_actor_email(request),
     )
     # Explicit form fields win over stored plan policies (plan used to force

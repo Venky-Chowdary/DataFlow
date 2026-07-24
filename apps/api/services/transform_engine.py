@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextvars
 import functools
 import hashlib
 import hmac
@@ -146,6 +147,28 @@ NULL_SENTINELS = frozenset({
     "__df_missing__",
 })
 
+# Per-request date locale for ambiguous MDY/DMY parsing.  The engine and
+# preflight service set this via :func:`set_active_date_locale` so every
+# coerce / dry-run / preview path resolves dates with the operator-chosen
+# locale without threading the value through every helper signature.
+_DATE_LOCALE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar("date_locale", default="")
+
+
+def _active_date_locale(explicit: str = "") -> str:
+    """Return 'DMY' or 'MDY' from explicit > context > env, or '' if unset."""
+    loc = (explicit or _DATE_LOCALE_VAR.get() or os.getenv("DATAFLOW_DATE_ORDER") or "").strip().upper()
+    return loc if loc in {"DMY", "MDY"} else ""
+
+
+def set_active_date_locale(locale: str) -> contextvars.Token[str]:
+    """Set the active date locale for the current request context."""
+    return _DATE_LOCALE_VAR.set((locale or "").strip().upper())
+
+
+def reset_active_date_locale(token: contextvars.Token[str]) -> None:
+    """Restore the previous date locale."""
+    _DATE_LOCALE_VAR.reset(token)
+
 # Currency symbols and codes that are safe to strip from numeric values.
 _CURRENCY_SYMBOLS = "".join({
     "$", "€", "£", "¥", "₹", "₩", "₽", "₺", "₴", "₱", "₫", "₭", "₦", "₲",
@@ -200,17 +223,18 @@ def _to_utc_z(dt: datetime) -> str:
     return _format_datetime(dt)
 
 
-def _detect_dayfirst(text: str) -> bool | None:
+def _detect_dayfirst(text: str, date_locale: str = "") -> bool | None:
     """Return True for day-first ordering, False for month-first, or None if ambiguous.
 
     Looks at the first two numeric fields of slash/dash/dot-delimited dates.
     A value like 31/12/2024 or 31.12.2024 is unambiguously day-first;
     12/31/2024 or 12-31-24 is month-first.  When both fields are <= 12 and
     unequal, locale is ambiguous — callers must fail closed (no silent MDY)
-    unless ``DATAFLOW_DATE_ORDER`` is set to ``DMY`` or ``MDY``.
+    unless an explicit ``date_locale`` (or ``DATAFLOW_DATE_ORDER`` env var) is
+    set to ``DMY`` or ``MDY``.
     When both fields are equal (05/05/2024) either locale yields the same date.
     """
-    order = (os.getenv("DATAFLOW_DATE_ORDER") or "").strip().upper()
+    order = _active_date_locale(date_locale)
     if order == "DMY":
         return True
     if order == "MDY":
@@ -228,13 +252,13 @@ def _detect_dayfirst(text: str) -> bool | None:
     return None
 
 
-def _is_ambiguous_mdy_dmy(text: str) -> bool:
+def _is_ambiguous_mdy_dmy(text: str, date_locale: str = "") -> bool:
     """True when slash/dash/dot date could be either MDY or DMY with different results."""
-    return _detect_dayfirst(text) is None and bool(
+    return _detect_dayfirst(text, date_locale) is None and bool(
         re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:[ T].*)?$", text.strip())
     )
 
-def _reorder_date_patterns(text: str, patterns: tuple[str, ...]) -> list[str]:
+def _reorder_date_patterns(text: str, patterns: tuple[str, ...], date_locale: str = "") -> list[str]:
     """Move the most likely day/month ordering patterns to the front.
 
     Year-first patterns only use 4-digit years (`%Y`).  Two-digit year-last
@@ -242,7 +266,7 @@ def _reorder_date_patterns(text: str, patterns: tuple[str, ...]) -> list[str]:
     month/day letter so that day-first vs month-first disambiguation works
     correctly and two-digit years cannot be mistaken for the first field.
     """
-    dayfirst = _detect_dayfirst(text)
+    dayfirst = _detect_dayfirst(text, date_locale)
     if dayfirst is None:
         return list(patterns)
     year_first = [p for p in patterns if p.startswith("%Y")]
@@ -255,14 +279,15 @@ def _reorder_date_patterns(text: str, patterns: tuple[str, ...]) -> list[str]:
 
 def _is_lossless_temporal_normalize(raw: str, out: str, transform: str) -> bool:
     """True when coerce is only canonical ISO formatting of the same instant/date."""
+    locale = _active_date_locale()
     try:
         if transform == "datetime":
-            a = _parse_datetime(raw)
-            b = _parse_datetime(out)
+            a = _parse_datetime(raw, date_locale=locale)
+            b = _parse_datetime(out, date_locale=locale)
             return bool(a and b and a == b)
         if transform == "date":
-            a = _parse_date(raw, with_time=True) or _parse_date(raw)
-            b = _parse_date(out)
+            a = _parse_date(raw, with_time=True, date_locale=locale) or _parse_date(raw, date_locale=locale)
+            b = _parse_date(out, date_locale=locale)
             return bool(a and b and a == b)
         if transform == "time":
             return raw.strip()[:8] == out.strip()[:8] or raw.strip() == out.strip()
@@ -271,8 +296,12 @@ def _is_lossless_temporal_normalize(raw: str, out: str, transform: str) -> bool:
     return False
 
 
+_EPOCH_MS_RE = re.compile(r"^\d{13}$")
+_EPOCH_S_RE = re.compile(r"^\d{10}$")
+
+
 @functools.lru_cache(maxsize=4096)
-def _parse_datetime(value: str) -> str | None:
+def _parse_datetime_worker(value: str, date_locale: str) -> str | None:
     text = value.strip()
     if not _DATE_LIKE_RE.search(text):
         return None
@@ -280,7 +309,7 @@ def _parse_datetime(value: str) -> str | None:
     # Exception: ambiguous timestamps that also carry a time-of-day are far more
     # likely to be day-first event data (EU/IN/AU convention) than a US date with
     # a time; default to DMY so real-world logistics/banking fixtures parse.
-    if _is_ambiguous_mdy_dmy(text):
+    if _is_ambiguous_mdy_dmy(text, date_locale):
         if re.search(r"[ T]\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?\b", text):
             dayfirst_patterns = (
                 [p for p in DATETIME_PATTERNS if p.startswith("%d")]
@@ -304,22 +333,22 @@ def _parse_datetime(value: str) -> str | None:
         return _to_utc_z(datetime.fromisoformat(iso))
     except ValueError:
         pass
-    for fmt in _reorder_date_patterns(text, DATETIME_PATTERNS):
+    for fmt in _reorder_date_patterns(text, DATETIME_PATTERNS, date_locale):
         try:
             parsed = datetime.strptime(text, fmt)
             return _to_utc_z(parsed)
         except ValueError:
             continue
-    parsed = _parse_date(text)
+    parsed = _parse_date(text, date_locale=date_locale)
     return f"{parsed}T00:00:00Z" if parsed else None
 
 
-_EPOCH_MS_RE = re.compile(r"^\d{13}$")
-_EPOCH_S_RE = re.compile(r"^\d{10}$")
+def _parse_datetime(value: str, date_locale: str = "") -> str | None:
+    return _parse_datetime_worker(value, _active_date_locale(date_locale))
 
 
 @functools.lru_cache(maxsize=4096)
-def _parse_date(value: str, *, with_time: bool = False) -> str | None:
+def _parse_date_worker(value: str, with_time: bool, date_locale: str) -> str | None:
     text = value.strip()
     if not text:
         return None
@@ -328,7 +357,7 @@ def _parse_date(value: str, *, with_time: bool = False) -> str | None:
     if text.lower() in NULL_SENTINELS:
         return None
     # Fail closed when 05/06/2024 could be May 6 or June 5 depending on locale.
-    if _is_ambiguous_mdy_dmy(text):
+    if _is_ambiguous_mdy_dmy(text, date_locale):
         return None
     # Plain YYYYMMDD integer
     if re.match(r"^\d{8}$", text):
@@ -336,15 +365,19 @@ def _parse_date(value: str, *, with_time: bool = False) -> str | None:
             return datetime.strptime(text, "%Y%m%d").strftime("%Y-%m-%d")
         except ValueError:
             pass
-    patterns = _reorder_date_patterns(text, DATE_PATTERNS)
+    patterns = _reorder_date_patterns(text, DATE_PATTERNS, date_locale)
     if with_time:
-        patterns += _reorder_date_patterns(text, DATE_WITH_TIME_PATTERNS)
+        patterns += _reorder_date_patterns(text, DATE_WITH_TIME_PATTERNS, date_locale)
     for fmt in patterns:
         try:
             return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
         except ValueError:
             continue
     return None
+
+
+def _parse_date(value: str, *, with_time: bool = False, date_locale: str = "") -> str | None:
+    return _parse_date_worker(value, with_time, _active_date_locale(date_locale))
 
 def _normalize_numeric_text(value: str) -> str:
     """Normalize unicode spaces, currency markers, accounting negatives, and percent signs."""

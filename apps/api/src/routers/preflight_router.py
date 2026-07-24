@@ -66,6 +66,8 @@ class PreflightRequest(BaseModel):
     backfill_new_fields: bool = False
     stream_contracts: list[dict[str, Any]] = Field(default_factory=list)
     destination_column_types: dict[str, str] = Field(default_factory=dict)
+    # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian), 'MDY' (US), or ''.
+    date_locale: str = ""
     dest_schema: Optional[str] = None
     dest_warehouse: Optional[str] = None
     dest_auth_source: Optional[str] = None
@@ -213,6 +215,7 @@ async def run_preflight(body: PreflightRequest):
         backfill_new_fields=body.backfill_new_fields,
         contract_primary_key=contract_pk,
         destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
+        date_locale=body.date_locale,
     )
     gated = apply_policy_gates(
         result,
@@ -327,6 +330,7 @@ class CellPreviewRequest(BaseModel):
     mappings: list[dict[str, Any]] = Field(default_factory=list)
     column_types: dict[str, str] = Field(default_factory=dict)
     sample_size: int = Field(25, ge=1, le=200)
+    date_locale: str = ""
 
 
 @router.post("/preview-cells")
@@ -335,13 +339,22 @@ async def preview_quarantine_cells(body: CellPreviewRequest):
     from services.transform_engine import preview_quarantine_cells as _preview
 
     try:
-        rows = [[("" if c is None else str(c)) for c in row] for row in body.sample_rows]
-        return _preview(
-            headers=body.headers,
-            sample_rows=rows,
-            mappings=body.mappings,
-            column_types=body.column_types,
-            sample_size=body.sample_size,
+        from services.transform_engine import (
+            reset_active_date_locale,
+            set_active_date_locale,
         )
+
+        locale_token = set_active_date_locale(body.date_locale)
+        try:
+            rows = [[("" if c is None else str(c)) for c in row] for row in body.sample_rows]
+            return _preview(
+                headers=body.headers,
+                sample_rows=rows,
+                mappings=body.mappings,
+                column_types=body.column_types,
+                sample_size=body.sample_size,
+            )
+        finally:
+            reset_active_date_locale(locale_token)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

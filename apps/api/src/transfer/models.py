@@ -119,6 +119,9 @@ class TransferRequest:
     require_signed_contract: bool = False
     # Operator identity for Jobs audit (email / subject).
     triggered_by: str = ""
+    # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian),
+    # 'MDY' (US), or '' to infer from env DATAFLOW_DATE_ORDER / fail closed.
+    date_locale: str = ""
 
     @property
     def operation(self) -> str:
@@ -188,6 +191,7 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "enforce_contract": request.enforce_contract,
         "require_signed_contract": request.require_signed_contract,
         "triggered_by": request.triggered_by,
+        "date_locale": request.date_locale,
         "requires_file_reupload": request.source.kind == "file" and bool(request.source_content),
     }
 
@@ -219,6 +223,7 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         enforce_contract=bool(data.get("enforce_contract", True)),
         require_signed_contract=bool(data.get("require_signed_contract", False)),
         triggered_by=(data.get("triggered_by") or "").strip(),
+        date_locale=(data.get("date_locale") or "").strip().upper(),
     )
 
 

@@ -234,10 +234,10 @@ The buffered database path nests SCD2/mirror summaries under `dest_summary["scd2
 
 ### 4.2 Data-loss / accuracy gaps found
 
-1. **Ambiguous locale dates — partially mitigated.** Pure ambiguous dates like `05/06/2024` still fail closed as required by `test_data_rule_scenario_matrix` and `test_transform_engine`.  Ambiguous timestamps that carry a time-of-day (e.g. `04/07/2024 16:30:00`) now default to day-first, allowing the logistics/banking real-world fixtures to complete.  A UI-level `date_locale` contract is still needed for explicit mixed-locale sources.
+1. **Ambiguous locale dates — resolved with per-transfer contract.** Pure ambiguous dates like `05/06/2024` still fail closed as required by `test_data_rule_scenario_matrix` and `test_transform_engine`. Ambiguous timestamps that carry a time-of-day (e.g. `04/07/2024 16:30:00`) continue to default to day-first. `TransferRequest` and all API entry points now accept `date_locale: "DMY" | "MDY" | ""`; the engine, preflight, and transform engine resolve this through a request-scoped `ContextVar`. The Studio UI still needs a visible locale selector.
 2. **DuckDB / generic SQL JSON null handling.** ~~Empty JSON source values can be written as the string `"null"` and then read back as the string `"null"`, while the source had `None`. Reconciliation sees a mismatch.~~ **Fixed on this branch:** `_DuckDBJSON` stores compact JSON text and binds `None` as SQL NULL.
 3. **PII leakage in job summaries.** ~~`test_pii_is_masked_in_healthcare_transfer` fails because the original SSN/email/phone still appear inside `result.destination_summary` / `result.explanation` even when `mask_pii` is applied.~~ **Fixed on this branch:** redaction helpers `redact_destination_summary` / `redact_reconciliation` / `redact_records` now mask sensitive source columns in operator-facing output.
-4. **Preflight gate ordering.** `G9_DATA_INTEGRITY` is placed before `G6_TARGET_DDL`, `G7_CAPACITY`, and `G8_RECONCILIATION`. Data-integrity checks should run after the target DDL and capacity are validated, otherwise they may run against a table that does not exist or cannot be created.
+4. **Preflight gate ordering — fixed.** `G9_DATA_INTEGRITY` is now the last gate, running after `G6_TARGET_DDL`, `G7_CAPACITY`, and `G8_RECONCILIATION`.
 5. **Blind exception handling.** `ruff check` reports 1,872 lint issues; the largest buckets are `BLE001` (blind `except`) and `S110`/`S112` (try-except-pass/continue). These patterns hide data-loss bugs in production paths.
 6. **Mapping confidence is brittle.** `_column_entailed` prunes mappings using token-set equality against known destination columns. Semantic matches like `first_name` → `fname` or `delivered_at` → `delivered_timestamp` are likely dropped, hurting intelligent cross-schema mapping.
 7. **CDC is not proven end-to-end.** Oracle LogMiner UPDATE parsing, Redis lease Lua serialization, and MySQL binlog privilege setup were fixed in this pass.  Live MySQL/MongoDB/PostgreSQL CDC still depends on CI service configuration and is not yet exercised through the full `stream_database_transfer` path.
@@ -253,9 +253,9 @@ The buffered database path nests SCD2/mirror summaries under `dest_summary["scd2
 
 | Item | Why | Suggested approach |
 |------|-----|--------------------|
-| **1. Locale-aware date/datetime parsing** | `real_world` scenarios and many customer datasets fail on ambiguous `DD/MM` | Add a `date_locale` field to `TransferRequest` / stream contract; default `MM/DD` for US, `DD/MM` for others; use `dateutil.parser` with explicit `dayfirst` as a final fallback, and surface the chosen locale in the UI |
+| **1. Locale-aware date/datetime parsing** | `real_world` scenarios and many customer datasets fail on ambiguous `DD/MM` | ~~Done~~: `date_locale` field added to `TransferRequest`/routers; `transform_engine` resolves explicit → context var → `DATAFLOW_DATE_ORDER` env; still needs UI field |
 | **2. DuckDB type-fidelity test assertions** | `test_execute_tracked_csv_to_duckdb`, `test_execute_tracked_file_to_duckdb_formats`, and `test_currency_to_duckdb` assert Python `float` / `pytest.approx(float)` equality against fixed-point `DECIMAL` columns; these are incompatible with exact numeric semantics | Update tests to use `Decimal('...')` / `pytest.approx(Decimal('...'))`, or document that `DOUBLE` columns are required for float comparison |
-| **3. Re-order preflight gates** | `G9_DATA_INTEGRITY` runs before DDL/capacity/reconciliation | Move `G9_DATA_INTEGRITY` to after `G8_RECONCILIATION` in `PREFLIGHT_GATES` |
+| **3. Re-order preflight gates** | `G9_DATA_INTEGRITY` runs before DDL/capacity/reconciliation | ~~Done~~: `G9_DATA_INTEGRITY` is now the last gate |
 | **4. Replace blind `except: pass` in data paths** | 777 `BLE001` and 246 `S110` hide data-loss bugs | Introduce typed `DataFlowError` exceptions; log structured evidence; fail closed in strict mode |
 
 ### P1 — close the next parity gap
@@ -345,3 +345,41 @@ python -m pytest apps/api/tests --tb=line -q
 - **`test_quarantine_api.py` now relies on implicit saved-connector resolution.** When an endpoint has no `connector_id` and no explicit credentials, the engine resolves a single matching saved connector of the same type in the workspace. This fixes the test, but long-term the UI/API should always send `connector_id`.
 
 The goal is to keep iterating on the prioritized backlog until every route in `PRODUCTION_SKU` passes with reconciliation proof and zero silent data loss.
+
+---
+
+## 9. Latest Session Addendum (2026-07-19)
+
+### Fixes this session
+
+| Fix | Root cause | Evidence |
+|-----|------------|----------|
+| Railway `DataFlow-Api` deployment build failure | `Dockerfile.api` set `ENV DATAFLOW_REQUIRE_AUTH=1`; Railway's build lint treats `AUTH` as a secret and fails the image build. The runtime flag is already set by `services/platform_config.py` `apply_railway_defaults()` | `Dockerfile.api` |
+| Preflight gate ordering | `G9_DATA_INTEGRITY` ran before `G6_TARGET_DDL`, `G7_CAPACITY`, and `G8_RECONCILIATION`, so integrity checks could execute before the target table/DDL/capacity/reconciliation were validated | `packages/preflight/src/preflight/gates.py` |
+| `date_locale` contract for ambiguous dates | Mixed-locale sources (`DD/MM/YYYY` vs `MM/DD/YYYY`) were either silently mis-parsed or failed closed. A per-transfer `date_locale` (`DMY`/`MDY`) now propagates from `TransferRequest` through preflight, dry-run, and all write paths | `apps/api/src/transfer/models.py`, `apps/api/src/transfer/engine.py`, `apps/api/services/transform_engine.py`, `apps/api/services/preflight_service.py`, `apps/api/src/routers/preflight_router.py`, `apps/api/src/routers/transfer_router.py` |
+
+### `date_locale` implementation notes
+
+- Added `date_locale: str` to `TransferRequest` and to the JSON/multipart/preflight router request models.
+- `engine.execute_tracked()` sets a `ContextVar` before the transfer and resets it in `finally`, so every preflight, dry-run, schema inference, write, and reconciliation step shares the same locale.
+- `services.transform_engine._parse_date` / `_parse_datetime` resolve the locale from explicit argument → context var → `DATAFLOW_DATE_ORDER` env → fail-closed heuristics. Ambiguous pure dates (`05/06/2024`) still fail closed unless a locale is supplied; ambiguous timestamps with a time-of-day continue to prefer day-first.
+- `run_file_preflight()` is decorated with `_with_date_locale`, so the Validate step uses the same contract as the run step.
+
+### Verification this session
+
+```text
+pytest apps/api/tests/test_transform_engine.py apps/api/tests/test_preflight_transform_validation.py
+32 passed
+
+pytest apps/api/tests/test_e2e_pipeline.py
+30 passed
+
+pytest apps/api/tests/test_execute_tracked_universal_matrix.py
+380 passed, 952 skipped
+
+pytest apps/api/tests/test_preflight_policy_gates.py apps/api/tests/test_data_integrity_p0.py apps/api/tests/test_execute_tracked_schema_mapping_matrix.py
+32 passed
+
+pytest apps/api/tests  (with DATAFLOW_PII_HASH_KEY, DATAFLOW_FAKESNOW_KEEP_PATCH, DATAFLOW_ALLOW_STUB_WRITES)
+9052 passed, 1085 skipped, 0 failed  (4 tests initially failed without the env flags; re-run with flags passed)
+```
