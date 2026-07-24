@@ -506,3 +506,58 @@ pytest apps/api/tests
 - **Cloud warehouse and real-service routes.** ~952 matrix tests still skip because no live Snowflake/BigQuery/Redshift/GCS/ADLS/Salesforce/etc. credentials or emulators are configured.
 - **BLE001 blind-except reduction.** `except Exception as exc:` still triggers `BLE001`; the next pass should narrow `Exception` to concrete, source-specific exception families in the hot data path.
 
+## 13. Schema-Drift Type Widening (this session)
+
+### Gap
+`backfill_new_fields` only added missing columns. When a source column widened
+(e.g. `VARCHAR(5)` → `VARCHAR(50)`, `NUMERIC(8,2)` → `NUMERIC(12,2)`), the
+destination table kept its old narrow type and the transfer failed with a
+truncation/overflow error. This is a silent data-loss path because the engine
+did not evolve the destination DDL to match the wider source.
+
+### Fixes this session
+
+| Fix | Root cause | Evidence |
+|-----|------------|----------|
+| Destination column widen on drift | No code existed to issue `ALTER COLUMN TYPE` / `MODIFY COLUMN` when the target DDL was wider than the existing catalog type | `apps/api/connectors/schema_drift.py` |
+| Source DDL used for widen decisions | `resolve_target_columns` sometimes matched the existing destination type and produced a target DDL no wider than the current column | `apps/api/connectors/postgresql_writer.py` |
+| Type-wide comparison engine | `is_wider_type` now compares string lengths, numeric precision/scale, integer bit-width, float mantissa, and cross-logical safe promotions | `apps/api/connectors/schema_drift.py` |
+
+### Implementation notes
+
+- Added `is_wider_type`, `_information_schema_type_to_str`, `_fetch_existing_columns`,
+  `_build_widen_ddl`, and `widen_existing_columns_native` to `connectors/schema_drift.py`.
+- The widen helper introspects `information_schema.columns` / `all_tab_columns` /
+  `PRAGMA table_info` for PostgreSQL, MySQL, SQL Server, DuckDB, Oracle, and SQLite.
+- PostgreSQL native writer now chooses the wider of (mapping-proposed target DDL,
+  freshly introspected source DDL) before calling `widen_existing_columns_native`,
+  and updates `target_types` so downstream conversions use the widened type.
+- Implemented first for the PostgreSQL native writer; MySQL / SQL Server / DuckDB /
+  Oracle / generic SQL routes use the same helper and are wired next.
+
+### Verification this session
+
+```text
+pytest apps/api/tests/test_schema_drift.py
+17 passed
+
+pytest apps/api/tests/test_execute_tracked_postgresql_to_postgresql_backfill_new_fields.py
+1 passed
+
+pytest apps/api/tests/test_execute_tracked_postgresql_to_postgresql_backfill_widen_fields.py
+1 passed
+
+pytest apps/api/tests -k 'postgresql_to_postgresql'
+4 passed, 10134 deselected
+```
+
+### What is still NOT proven
+
+- **Other SQL writers.** MySQL, SQL Server, SQLite, DuckDB, Oracle, and generic SQL
+  writers still need to call `widen_existing_columns_native` and pass the wider of
+  source/target DDL.
+- **Production exactly-once CDC / slot-LSN handoff.** CDC integration tests pass
+  with emulators; real production semantics remain to be certified.
+- **Lakehouse MERGE and cloud warehouse live routes.** Still require live credentials
+  or emulators for full matrix proof.
+
