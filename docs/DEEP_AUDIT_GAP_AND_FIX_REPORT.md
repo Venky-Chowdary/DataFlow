@@ -850,3 +850,34 @@ This confirms that when the destination schema is successfully loaded, the
 universal mapping engine is accurate: exact-name columns map at 99% confidence,
 types are preserved across MySQL → PostgreSQL, and the reconciliation checksum
 verifies zero silent data loss.
+
+### Duplicate identity keys now blocked at Validate (not Run)
+
+**Problem surfaced by operator:** MySQL `jobs` → PostgreSQL `jobs` with 75,556 rows
+failed at Execute with *Duplicate identity-key values in a write batch*. Preflight
+(G9) was not catching this because the duplicate-key check was only active for
+sync modes that "need" a unique identity contract (`upsert`, `cdc`, `scd2`,
+`mirror`, etc.) and was skipped for `full_refresh_overwrite` / `append`.
+
+**Fix:** `services/data_integrity.py` `_check_duplicate_keys` now always reports
+and blocks when a resolved identity key has duplicates, regardless of sync mode.
+A destination primary key (or explicit stream-contract key) cannot accept repeated
+values even in overwrite, so this is a Validate-time hard blocker.
+
+**Verification:**
+
+```text
+pytest apps/api/tests/test_data_integrity.py tests/test_data_quality.py \
+       tests/test_error_handling.py tests/test_preflight_policy_gates.py \
+       tests/test_preflight_transform_validation.py \
+       tests/test_execute_tracked_csv_to_postgres_upsert.py \
+       tests/test_postgresql_to_postgresql_incremental.py
+56 passed in 6.67s
+
+Live MySQL jobs_dup (id='abc123' repeated) → PostgreSQL full_refresh_overwrite:
+TransferResult(success=False)
+G9 Data integrity: block — "id: duplicate key values (abc123×2)"
+```
+
+The operator will now see the duplicate-key issue on the Validate step with a
+*Review mappings / fix data integrity* CTA, instead of a failed Run.
