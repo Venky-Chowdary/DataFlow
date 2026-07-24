@@ -302,7 +302,7 @@ def _normalize_sqlite_url(url: str) -> str:
     absolute paths, so this normalizes only when the path component is absolute.
     """
     if url.startswith("sqlite:///") and not url.startswith("sqlite:////"):
-        path = url[len("sqlite:///"):]
+        path = url[len("sqlite:///") :]
         if path and (path.startswith("/") or (len(path) > 1 and path[1] == ":")):
             return f"sqlite:////{path}"
     return url
@@ -337,8 +337,9 @@ def _normalize_sqlalchemy_url_string(url: str, db_type: str = "") -> str:
             continue
         if src == dst:
             return raw
-        return dst + raw[len(src):]
+        return dst + raw[len(src) :]
     return raw
+
 
 def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
     """Build a SQLAlchemy URL from host/port or use the explicit connection string."""
@@ -346,12 +347,18 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
     db_type = (cfg.get("type") or "").lower().strip()
 
     if connection_string:
-        if connection_string.startswith("duckdb:") or connection_string.startswith("sqlite:"):
+        if connection_string.startswith("duckdb:") or connection_string.startswith(
+            "sqlite:"
+        ):
             if connection_string.startswith("sqlite:"):
                 return _normalize_sqlite_url(connection_string)
             return connection_string
         if db_type == "duckdb":
-            return f"duckdb:////{connection_string}" if connection_string.startswith("/") else f"duckdb:///{connection_string}"
+            return (
+                f"duckdb:////{connection_string}"
+                if connection_string.startswith("/")
+                else f"duckdb:///{connection_string}"
+            )
         if db_type == "sqlite":
             return _normalize_sqlite_url(f"sqlite:///{connection_string}")
         return _normalize_sqlalchemy_url_string(connection_string, db_type)
@@ -380,7 +387,11 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
 
     if drivername == "duckdb":
         database = cfg.get("database") or ""
-        return f"duckdb:////{database}" if database.startswith("/") else f"duckdb:///{database or ':memory:'}"
+        return (
+            f"duckdb:////{database}"
+            if database.startswith("/")
+            else f"duckdb:///{database or ':memory:'}"
+        )
 
     if drivername in ("presto", "trino"):
         # Trino/Presto URLs require catalog/schema in the path.
@@ -406,7 +417,9 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
             multi = cfg.get("MultiSubnetFailover")
         if multi in (True, 1, "1", "true", "True", "yes", "Yes", "YES"):
             query["MultiSubnetFailover"] = "Yes"
-        intent = str(cfg.get("application_intent") or cfg.get("ApplicationIntent") or "").strip()
+        intent = str(
+            cfg.get("application_intent") or cfg.get("ApplicationIntent") or ""
+        ).strip()
         if intent:
             # ReadOnly routes to a readable secondary when the AG allows it.
             query["ApplicationIntent"] = intent
@@ -430,7 +443,11 @@ def _engine(cfg: dict[str, Any]) -> Any:
     # DuckDB and SQLite are file-based; use NullPool so the file lock is released
     # after each operation and external readers can open the database.
     try:
-        if db_type in ("duckdb", "sqlite") or "duckdb" in connection_string or "sqlite://" in connection_string:
+        if (
+            db_type in ("duckdb", "sqlite")
+            or "duckdb" in connection_string
+            or "sqlite://" in connection_string
+        ):
             from sqlalchemy.pool import NullPool
 
             engine = create_engine(url, poolclass=NullPool)
@@ -491,7 +508,9 @@ def _schema_name(cfg: dict[str, Any]) -> str | None:
     if not db_type or db_type == "generic_sql":
         if connection_string.startswith("mysql") or "mariadb" in connection_string:
             db_type = "mysql"
-        elif connection_string.startswith("postgresql") or connection_string.startswith("postgres"):
+        elif connection_string.startswith("postgresql") or connection_string.startswith(
+            "postgres"
+        ):
             db_type = "postgresql"
         elif "sqlserver" in connection_string or "mssql" in connection_string:
             db_type = "sqlserver"
@@ -516,7 +535,9 @@ def _dialect_key(cfg: dict[str, Any]) -> str:
     connection_string = (cfg.get("connection_string") or "").lower()
     if connection_string.startswith("mysql") or "mariadb" in connection_string:
         return "mysql"
-    if connection_string.startswith("postgresql") or connection_string.startswith("postgres"):
+    if connection_string.startswith("postgresql") or connection_string.startswith(
+        "postgres"
+    ):
         return "postgresql"
     if "sqlserver" in connection_string or "mssql" in connection_string:
         return "sqlserver"
@@ -582,12 +603,18 @@ def _logical_type_from_sa(col_type: Any) -> str:
     # IEEE floats must stay FLOAT — never collapse into DECIMAL/NUMBER.
     if isinstance(col_type, (sa.Float, sa.Double, sa.REAL)):
         return "float"
-    if any(tok in repr_ for tok in ("float", "double", "real", "binary_float", "binary_double")):
+    if any(
+        tok in repr_
+        for tok in ("float", "double", "real", "binary_float", "binary_double")
+    ):
         if "decimal" not in repr_ and "numeric" not in repr_ and "number" not in repr_:
             return "float"
 
     if isinstance(col_type, (sa.Numeric,)):
-        from services.type_system import zero_scale_fits_signed_bigint, zero_scale_numeric_carrier
+        from services.type_system import (
+            zero_scale_fits_signed_bigint,
+            zero_scale_numeric_carrier,
+        )
 
         precision = getattr(col_type, "precision", None)
         scale = getattr(col_type, "scale", None)
@@ -638,10 +665,15 @@ def _logical_type_from_sa(col_type: Any) -> str:
         return "array"
     if "uuid" in repr_ or "guid" in repr_ or "uniqueidentifier" in repr_:
         return "uuid"
-    if any(x in repr_ for x in ("binary", "blob", "bytea", "varbinary", "image", "raw", "rowversion")):
+    if any(
+        x in repr_
+        for x in ("binary", "blob", "bytea", "varbinary", "image", "raw", "rowversion")
+    ):
         return "binary"
     # FLOAT before DECIMAL — "float" must not fall into the numeric/decimal bucket.
-    if any(x in repr_ for x in ("binary_float", "binary_double", "float", "double", "real")):
+    if any(
+        x in repr_ for x in ("binary_float", "binary_double", "float", "double", "real")
+    ):
         if not any(x in repr_ for x in ("numeric", "decimal", "number(", "money")):
             return "float"
     if any(x in repr_ for x in ("numeric", "decimal", "number", "money", "smallmoney")):
@@ -692,9 +724,12 @@ class _DuckDBJSON(sa.JSON):
                     default=json_default,
                 )
             return value
+
         return process
 
-    def result_processor(self, dialect: Any, coltype: Any) -> Callable[[Any], Any] | None:
+    def result_processor(
+        self, dialect: Any, coltype: Any
+    ) -> Callable[[Any], Any] | None:
         # DuckDB returns JSON values as text.  Keep them as text so the
         # downstream value serializer can apply the same canonical compact JSON.
         return lambda value: value
@@ -787,7 +822,9 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
             return sa.DateTime()
         # Preserve timezone metadata when the target dialect supports it.
         if dialect_name == "clickhouse":
-            return _maybe_nullable(ChDateTime64(3) if ChDateTime64 is not None else sa.DateTime())
+            return _maybe_nullable(
+                ChDateTime64(3) if ChDateTime64 is not None else sa.DateTime()
+            )
         if db_type == "trino" and TrinoTimestamp is not None:
             return TrinoTimestamp(precision=3, timezone=True)
         if db_type == "presto":
@@ -800,7 +837,11 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
     if t == LOGICAL_TIME:
         # ClickHouse, QuestDB and Presto (PyHive) do not bind Python time objects
         # reliably; store as string in these engines.
-        if dialect_name == "clickhouse" or db_type in ("clickhouse", "questdb", "presto"):
+        if dialect_name == "clickhouse" or db_type in (
+            "clickhouse",
+            "questdb",
+            "presto",
+        ):
             return _maybe_nullable(sa.String())
         return _maybe_nullable(sa.Time())
     if t == LOGICAL_UUID:
@@ -824,7 +865,9 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
                 match = re.match(r"^(?:ARRAY|LIST)<(.+)>$", raw, re.IGNORECASE)
                 if match:
                     element = match.group(1).strip()
-                    return sa.ARRAY(_sa_type_for_logical(element, dialect_name, db_type))
+                    return sa.ARRAY(
+                        _sa_type_for_logical(element, dialect_name, db_type)
+                    )
             return _DuckDBJSON(none_as_null=True)
         if db_type in ("oracle", "clickhouse", "trino", "questdb", "presto"):
             return _maybe_nullable(sa.Text())
@@ -850,7 +893,13 @@ def _is_string_type(sa_type: Any) -> bool:
     return False
 
 
-def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: str = "", db_type: str = "") -> Any:
+def _to_sa_value(
+    value: Any,
+    logical: str,
+    sa_type: Any = None,
+    dialect_name: str = "",
+    db_type: str = "",
+) -> Any:
     """Convert transform-engine output values to Python objects SQLAlchemy accepts."""
     if value is None:
         return None
@@ -878,7 +927,13 @@ def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: st
         if isinstance(parsed, (dict, list)):
             if _is_string_type(sa_type):
                 from services.value_serializer import json_default
-                return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"), default=json_default)
+
+                return json.dumps(
+                    parsed,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=json_default,
+                )
             return parsed
         if isinstance(value, str):
             return value
@@ -949,9 +1004,8 @@ def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: st
             or "timestamp_tz" in raw_lower
             or "timestamp with time zone" in raw_lower
         )
-        use_naive = (
-            not is_tz_aware
-            and (db_type in {"questdb", "sqlserver", "mssql"} or dialect_name == "mssql")
+        use_naive = not is_tz_aware and (
+            db_type in {"questdb", "sqlserver", "mssql"} or dialect_name == "mssql"
         )
         if isinstance(coerced, datetime):
             return _naive_utc(coerced) if use_naive else _ensure_utc(coerced)
@@ -1167,7 +1221,9 @@ def _infer_logical_from_samples(values: list[Any], field_name: str = "") -> str 
             "TEXT": "string",
         }
         samples = [cell_to_string(v, preserve_sql_null=True) for v in values]
-        return mapped.get(str(infer_column(samples, field_name=field_name)["logical_type"]))
+        return mapped.get(
+            str(infer_column(samples, field_name=field_name)["logical_type"])
+        )
     except Exception:
         return None
 
@@ -1184,7 +1240,12 @@ def _sample_raw_table(
     qualified = quote_table_ref(table, schema, dialect=dialect)
     dialect_l = (dialect or "ansi").lower()
     # SQL Server / Sybase reject LIMIT — use TOP.
-    if dialect_l in {"mssql", "sqlserver", "microsoft_sql_server", "azure_sql_database"}:
+    if dialect_l in {
+        "mssql",
+        "sqlserver",
+        "microsoft_sql_server",
+        "azure_sql_database",
+    }:
         stmt = f"SELECT TOP 200 * FROM {qualified}"
     else:
         stmt = f"SELECT * FROM {qualified} LIMIT 200"
@@ -1200,7 +1261,12 @@ def introspect_table_schema(
 ) -> dict[str, Any]:
     """Return schema metadata for the table using SQLAlchemy reflection."""
     if not SQLALCHEMY_AVAILABLE:
-        return {"ok": False, "error": "SQLAlchemy is not installed", "columns": [], "tables": []}
+        return {
+            "ok": False,
+            "error": "SQLAlchemy is not installed",
+            "columns": [],
+            "tables": [],
+        }
     engine = _engine(cfg)
     try:
         schema = _schema_name(cfg)
@@ -1213,6 +1279,7 @@ def introspect_table_schema(
             try:
                 with engine.connect() as conn:
                     from services.type_system import normalize_logical_type
+
                     schema_expr = "current_schema()" if schema is None else ":schema"
                     params: dict = {"table": table}
                     if schema is not None:
@@ -1244,15 +1311,28 @@ def introspect_table_schema(
                                     idx = name_to_idx.get(col["name"])
                                     if idx is None:
                                         continue
-                                    values = [row[idx] for row in sample_rows if idx < len(row)]
-                                    inferred = _infer_logical_from_samples(values, field_name=col["name"])
+                                    values = [
+                                        row[idx]
+                                        for row in sample_rows
+                                        if idx < len(row)
+                                    ]
+                                    inferred = _infer_logical_from_samples(
+                                        values, field_name=col["name"]
+                                    )
                                     if inferred and inferred != "string":
                                         col["inferred_type"] = inferred
-                        return {"ok": True, "columns": result, "tables": [table], "schema": schema or ""}
+                        return {
+                            "ok": True,
+                            "columns": result,
+                            "tables": [table],
+                            "schema": schema or "",
+                        }
             except Exception:
                 logger.warning(
                     "generic_sql inspector path failed for %s.%s; falling back to sample",
-                    schema, table, exc_info=True,
+                    schema,
+                    table,
+                    exc_info=True,
                 )
 
             with engine.connect() as conn:
@@ -1270,10 +1350,17 @@ def introspect_table_schema(
                 if sample_rows:
                     for idx, col in enumerate(result):
                         values = [row[idx] for row in sample_rows if idx < len(row)]
-                        inferred = _infer_logical_from_samples(values, field_name=col["name"])
+                        inferred = _infer_logical_from_samples(
+                            values, field_name=col["name"]
+                        )
                         if inferred:
                             col["inferred_type"] = inferred
-                return {"ok": True, "columns": result, "tables": [table], "schema": schema or ""}
+                return {
+                    "ok": True,
+                    "columns": result,
+                    "tables": [table],
+                    "schema": schema or "",
+                }
 
         result = []
         for col in columns:
@@ -1295,15 +1382,25 @@ def introspect_table_schema(
                     for idx, col in enumerate(result):
                         if col["inferred_type"] == "string":
                             values = [row[idx] for row in sample_rows if idx < len(row)]
-                            inferred = _infer_logical_from_samples(values, field_name=col["name"])
+                            inferred = _infer_logical_from_samples(
+                                values, field_name=col["name"]
+                            )
                             if inferred and inferred != "string":
                                 col["inferred_type"] = inferred
         except Exception:
             logger.warning(
-                "generic_sql sample refine failed for %s.%s", schema, table, exc_info=True,
+                "generic_sql sample refine failed for %s.%s",
+                schema,
+                table,
+                exc_info=True,
             )
 
-        return {"ok": True, "columns": result, "tables": [table], "schema": schema or ""}
+        return {
+            "ok": True,
+            "columns": result,
+            "tables": [table],
+            "schema": schema or "",
+        }
     except Exception as exc:
         logger.warning("generic_sql introspect failed", exc_info=True)
         return {
@@ -1421,7 +1518,10 @@ def _read_table_raw(
         sql = f"{base} ORDER BY {order_col} LIMIT {int(limit)} OFFSET {int(offset)}"
     result = conn.execute(sa.text(sql))
     headers = list(result.keys())
-    rows = [[cell_to_string(value, preserve_sql_null=True) for value in row] for row in result.fetchall()]
+    rows = [
+        [cell_to_string(value, preserve_sql_null=True) for value in row]
+        for row in result.fetchall()
+    ]
     return headers, rows
 
 
@@ -1464,7 +1564,15 @@ def read_table_batch(
         raise RuntimeError("SQLAlchemy is not installed")
 
     cfg = _cfg_from_params(
-        host, port, database, username, password, schema, connection_string, ssl, type=type
+        host,
+        port,
+        database,
+        username,
+        password,
+        schema,
+        connection_string,
+        ssl,
+        type=type,
     )
     engine = _engine(cfg)
     schema_name = _schema_name(cfg)
@@ -1480,21 +1588,36 @@ def read_table_batch(
                 table_obj = _reflect_table(engine, table, schema_name, columns)
                 selected_cols = list(table_obj.c)
                 if columns:
-                    selected_cols = [table_obj.c[c] for c in columns if c in table_obj.c]
+                    selected_cols = [
+                        table_obj.c[c] for c in columns if c in table_obj.c
+                    ]
                 else:
                     columns = selected_cols = list(table_obj.c)
 
                 stmt = sa.select(*selected_cols)
                 # Stable order from page 0 — unordered OFFSET pages skip/duplicate under concurrent writes.
-                pk_cols = [c for c in table_obj.primary_key.columns] if table_obj.primary_key is not None else []
-                order_cols = list(pk_cols) if pk_cols else [selected_cols[0]] if selected_cols else []
+                pk_cols = (
+                    [c for c in table_obj.primary_key.columns]
+                    if table_obj.primary_key is not None
+                    else []
+                )
+                order_cols = (
+                    list(pk_cols)
+                    if pk_cols
+                    else [selected_cols[0]]
+                    if selected_cols
+                    else []
+                )
                 if order_cols:
                     stmt = stmt.order_by(*order_cols)
                 stmt = stmt.offset(offset).limit(limit)
 
                 fetched = conn.execute(stmt).fetchall()
                 headers = [c.name for c in selected_cols]
-                rows = [[cell_to_string(value, preserve_sql_null=True) for value in row] for row in fetched]
+                rows = [
+                    [cell_to_string(value, preserve_sql_null=True) for value in row]
+                    for row in fetched
+                ]
 
                 if known_total_rows is not None:
                     total = known_total_rows
@@ -1513,7 +1636,9 @@ def read_table_batch(
                 if known_total_rows is not None:
                     total = known_total_rows
                 else:
-                    total = _count_table_raw(conn, table, schema_name, dialect=_dialect_key(cfg))
+                    total = _count_table_raw(
+                        conn, table, schema_name, dialect=_dialect_key(cfg)
+                    )
 
         return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     finally:
@@ -1547,7 +1672,15 @@ def read_table_cursor_batch(
         raise RuntimeError("SQLAlchemy is not installed")
 
     cfg = _cfg_from_params(
-        host, port, database, username, password, schema, connection_string, ssl, type=type
+        host,
+        port,
+        database,
+        username,
+        password,
+        schema,
+        connection_string,
+        ssl,
+        type=type,
     )
     engine = _engine(cfg)
     schema_name = _schema_name(cfg)
@@ -1559,7 +1692,9 @@ def read_table_cursor_batch(
                     conn.execute(sa.text("FLUSH"))
             table_obj = _reflect_table(engine, table, schema_name, columns)
             if cursor_column not in table_obj.c:
-                raise ValueError(f"Cursor column '{cursor_column}' not found in table {table}")
+                raise ValueError(
+                    f"Cursor column '{cursor_column}' not found in table {table}"
+                )
             cursor_col = table_obj.c[cursor_column]
             selected_cols = list(table_obj.c)
             if columns:
@@ -1568,7 +1703,11 @@ def read_table_cursor_batch(
                 columns = selected_cols = list(table_obj.c)
 
             pk = (cursor_primary_key or "").strip()
-            pk_col = table_obj.c[pk] if pk and pk != cursor_column and pk in table_obj.c else None
+            pk_col = (
+                table_obj.c[pk]
+                if pk and pk != cursor_column and pk in table_obj.c
+                else None
+            )
 
             stmt = sa.select(*selected_cols)
             if cursor_after:
@@ -1600,7 +1739,10 @@ def read_table_cursor_batch(
 
             fetched = conn.execute(stmt).fetchall()
             headers = [c.name for c in selected_cols]
-            rows = [[cell_to_string(value, preserve_sql_null=True) for value in row] for row in fetched]
+            rows = [
+                [cell_to_string(value, preserve_sql_null=True) for value in row]
+                for row in fetched
+            ]
 
         return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=None)
     finally:
@@ -1626,10 +1768,16 @@ def _delete_by_keys(
     for i in range(0, len(rows), chunk_size):
         chunk = rows[i : i + chunk_size]
         clauses = [
-            sa.and_(*[
-                (table_obj.c[c].is_(None) if row[c] is None else table_obj.c[c] == row[c])
-                for c in conflict_cols
-            ])
+            sa.and_(
+                *[
+                    (
+                        table_obj.c[c].is_(None)
+                        if row[c] is None
+                        else table_obj.c[c] == row[c]
+                    )
+                    for c in conflict_cols
+                ]
+            )
             for row in chunk
         ]
         conn.execute(sa.delete(table_obj).where(sa.or_(*clauses)))
@@ -1669,7 +1817,10 @@ def _upsert_batch(
             if dialect_name == "postgresql":
                 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-                from connectors.writer_common import DF_LSN_COL, postgres_lsn_update_guard_sql
+                from connectors.writer_common import (
+                    DF_LSN_COL,
+                    postgres_lsn_update_guard_sql,
+                )
 
                 stmt = pg_insert(table_obj).values(rows)
                 if update_cols:
@@ -1691,7 +1842,10 @@ def _upsert_batch(
             if dialect_name == "sqlite":
                 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-                from connectors.writer_common import DF_LSN_COL, sqlite_lsn_update_guard_sql
+                from connectors.writer_common import (
+                    DF_LSN_COL,
+                    sqlite_lsn_update_guard_sql,
+                )
 
                 stmt = sqlite_insert(table_obj).values(rows)
                 if update_cols:
@@ -1712,7 +1866,10 @@ def _upsert_batch(
             if dialect_name in ("mysql", "mariadb"):
                 from sqlalchemy.dialects.mysql import insert as mysql_insert
 
-                from connectors.writer_common import DF_LSN_COL, mysql_lsn_values_newer_sql
+                from connectors.writer_common import (
+                    DF_LSN_COL,
+                    mysql_lsn_values_newer_sql,
+                )
 
                 stmt = mysql_insert(table_obj).values(rows)
                 if update_cols:
@@ -1720,9 +1877,7 @@ def _upsert_batch(
                         # Emulate IF(newer, VALUES(c), c) via CASE for each column.
                         newer = mysql_lsn_values_newer_sql(DF_LSN_COL, quote="`")
                         set_map = {
-                            c: sa.text(
-                                f"IF({newer}, VALUES(`{c}`), `{c}`)"
-                            )
+                            c: sa.text(f"IF({newer}, VALUES(`{c}`), `{c}`)")
                             for c in update_cols
                         }
                         stmt = stmt.on_duplicate_key_update(set_map)
@@ -1738,7 +1893,9 @@ def _upsert_batch(
             # Native upsert can fail if the table lacks the required unique
             # index/constraint.  Roll back the aborted transaction so the
             # delete+insert fallback can run cleanly.
-            logger.debug("native upsert unavailable; using delete+insert fallback", exc_info=True)
+            logger.debug(
+                "native upsert unavailable; using delete+insert fallback", exc_info=True
+            )
             try:
                 conn.rollback()
             except Exception:
@@ -1818,7 +1975,15 @@ def write_mapped_rows(
         )
 
     cfg = _cfg_from_params(
-        host, port, database, username, password, schema, connection_string, ssl, type=type
+        host,
+        port,
+        database,
+        username,
+        password,
+        schema,
+        connection_string,
+        ssl,
+        type=type,
     )
     engine = _engine(cfg)
     schema_name = _schema_name(cfg)
@@ -1832,7 +1997,9 @@ def write_mapped_rows(
         # Map source logical types to destination-native DDL so default
         # identity mappings create the right physical column (e.g. DuckDB
         # DECIMAL source → DOUBLE target for analytics float storage).
-        derived = explicit or (ddl_type(dest_db, source_type) if dest_db else source_type)
+        derived = explicit or (
+            ddl_type(dest_db, source_type) if dest_db else source_type
+        )
         # DuckDB analytical default: when preflight is skipped, any inferred or
         # auto-mapped DECIMAL target is stored as DOUBLE so round-trip
         # comparisons against Python floats work. Preflight-validated explicit
@@ -1869,7 +2036,9 @@ def write_mapped_rows(
             checksum="",
             chunks_completed=0,
             error=f"Transform errors: {'; '.join(transform_errors[:3])}",
-            rejected_rows=_rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
+            rejected_rows=_rejected_row_count(
+                data_rows, mapped_rows, rejected_details, policy
+            ),
             rejected_details=rejected_details,
             warnings=transform_errors,
         )
@@ -1885,12 +2054,26 @@ def write_mapped_rows(
     )
 
     dialect_name = engine.dialect.name if engine.dialect else ""
-    sa_col_types = {col: _sa_type_for_logical(target_column_types.get(col, "string"), dialect_name, cfg.get("type", "")) for col in target_cols}
+    sa_col_types = {
+        col: _sa_type_for_logical(
+            target_column_types.get(col, "string"), dialect_name, cfg.get("type", "")
+        )
+        for col in target_cols
+    }
 
     converted_rows: list[dict] = []
     for row in mapped_rows:
         converted_rows.append(
-            {target_cols[i]: _to_sa_value(row[i], target_column_types.get(target_cols[i], "string"), sa_col_types.get(target_cols[i]), dialect_name, cfg.get("type", "")) for i in range(len(target_cols))}
+            {
+                target_cols[i]: _to_sa_value(
+                    row[i],
+                    target_column_types.get(target_cols[i], "string"),
+                    sa_col_types.get(target_cols[i]),
+                    dialect_name,
+                    cfg.get("type", ""),
+                )
+                for i in range(len(target_cols))
+            }
         )
 
     written = 0
@@ -1928,11 +2111,19 @@ def write_mapped_rows(
                 try:
                     if db_type == "questdb":
                         # QuestDB supports TIMESTAMP but not the PG "WITHOUT TIME ZONE" clause.
-                        ddl = str(sa.schema.CreateTable(table_obj, if_not_exists=True).compile(dialect=engine.dialect))
-                        ddl = ddl.replace("TIMESTAMP WITHOUT TIME ZONE", "TIMESTAMP").replace("TIMESTAMP WITH TIME ZONE", "TIMESTAMP")
+                        ddl = str(
+                            sa.schema.CreateTable(
+                                table_obj, if_not_exists=True
+                            ).compile(dialect=engine.dialect)
+                        )
+                        ddl = ddl.replace(
+                            "TIMESTAMP WITHOUT TIME ZONE", "TIMESTAMP"
+                        ).replace("TIMESTAMP WITH TIME ZONE", "TIMESTAMP")
                         conn.execute(sa.text(ddl))
                     else:
-                        conn.execute(sa.schema.CreateTable(table_obj, if_not_exists=True))
+                        conn.execute(
+                            sa.schema.CreateTable(table_obj, if_not_exists=True)
+                        )
                     conn.commit()
                 except Exception as exc:
                     # If the dialect does not support IF NOT EXISTS and the table
@@ -1964,7 +2155,14 @@ def write_mapped_rows(
 
                 try:
                     if write_mode == "upsert" and conflict_columns:
-                        _upsert_batch(conn, table_obj, batch, conflict_columns, target_cols, dialect_name)
+                        _upsert_batch(
+                            conn,
+                            table_obj,
+                            batch,
+                            conflict_columns,
+                            target_cols,
+                            dialect_name,
+                        )
                     else:
                         conn.execute(table_obj.insert(), batch)
                     conn.commit()
@@ -1972,17 +2170,29 @@ def write_mapped_rows(
                 except Exception as chunk_exc:
                     try:
                         conn.rollback()
-                    except Exception:
-                        pass
+                    except Exception as rollback_exc:
+                        logger.debug(
+                            "chunk rollback failed: %s",
+                            rollback_exc,
+                            exc_info=rollback_exc,
+                        )
                     # One bad temporal/numeric cell must not abort the whole chunk:
                     # quarantine unfit rows (same contract as MySQL/Postgres writers).
-                    if is_sql_data_error(chunk_exc) and policy in {"quarantine", "coerce_null"}:
+                    if is_sql_data_error(chunk_exc) and policy in {
+                        "quarantine",
+                        "coerce_null",
+                    }:
                         chunk_written = 0
                         for row_i, row in enumerate(batch):
                             try:
                                 if write_mode == "upsert" and conflict_columns:
                                     _upsert_batch(
-                                        conn, table_obj, [row], conflict_columns, target_cols, dialect_name
+                                        conn,
+                                        table_obj,
+                                        [row],
+                                        conflict_columns,
+                                        target_cols,
+                                        dialect_name,
                                     )
                                 else:
                                     conn.execute(table_obj.insert(), [row])
@@ -1991,21 +2201,27 @@ def write_mapped_rows(
                             except Exception as row_exc:
                                 try:
                                     conn.rollback()
-                                except Exception:
-                                    pass
+                                except Exception as rollback_exc:
+                                    logger.debug(
+                                        "row rollback failed: %s",
+                                        rollback_exc,
+                                        exc_info=rollback_exc,
+                                    )
                                 if not is_sql_data_error(row_exc):
                                     raise
                                 col_name = extract_column_from_sql_error(row_exc) or "*"
                                 sample_val = ""
                                 if col_name != "*" and col_name in row:
                                     sample_val = str(row.get(col_name, ""))[:120]
-                                rejected_details.append({
-                                    "row": start + row_i,
-                                    "column": col_name,
-                                    "value": sample_val,
-                                    "reason": str(row_exc)[:300],
-                                    "policy": policy,
-                                })
+                                rejected_details.append(
+                                    {
+                                        "row": start + row_i,
+                                        "column": col_name,
+                                        "value": sample_val,
+                                        "reason": str(row_exc)[:300],
+                                        "policy": policy,
+                                    }
+                                )
                                 transform_errors.append(str(row_exc)[:200])
                         written += chunk_written
                     elif policy == "fail" or not is_sql_data_error(chunk_exc):
@@ -2041,7 +2257,9 @@ def write_mapped_rows(
             checksum=row_checksum(mapped_rows, target_cols) if mapped_rows else "",
             chunks_completed=chunks_completed,
             error=str(exc),
-            rejected_rows=_rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
+            rejected_rows=_rejected_row_count(
+                data_rows, mapped_rows, rejected_details, policy
+            ),
             rejected_details=rejected_details,
             warnings=transform_errors,
         )
