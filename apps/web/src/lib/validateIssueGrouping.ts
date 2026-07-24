@@ -9,6 +9,7 @@ import type {
   PreflightGate,
   PreflightResult,
   ValidationIssue,
+  ValidationSuggestedAction,
 } from "./types.js";
 
 const DUPLICATE_GATE_IDS = new Set([
@@ -63,6 +64,7 @@ export interface DisplayBlocker {
   issues?: string[];
   fix?: string;
   why?: string;
+  suggested_actions?: ValidationSuggestedAction[];
   /** Original blocker for dry-run / encoding action hooks. */
   source?: PreflightResult["blockers"][number];
 }
@@ -354,6 +356,7 @@ export function buildDisplayBlockers(
         : undefined,
       fix: b.guidance?.fix,
       why: b.guidance?.why,
+      suggested_actions: b.guidance?.suggested_actions,
       source: b,
     });
   }

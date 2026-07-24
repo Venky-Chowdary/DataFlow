@@ -55,6 +55,9 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
             "S3 bucket not found → verify the bucket name, region, and access key.",
             "CSV parse error → open the file in a text editor and remove malformed quoted lines.",
         ],
+        "suggested_actions": [
+            {"kind": "check_connection", "label": "Check source connection"},
+        ],
     },
     "g2_destination": {
         "title": "Destination write access",
@@ -80,6 +83,9 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
             "Redis ACL: +@write ~prefix:*  |  Elasticsearch: index/create_index privileges.",
             "S3: s3:PutObject on the bucket/prefix (GetBucketAcl may be unavailable under BucketOwnerEnforced).",
         ],
+        "suggested_actions": [
+            {"kind": "check_connection", "label": "Check destination privileges"},
+        ],
     },
     "g3_schema_contract": {
         "title": "Schema contract / type coercion",
@@ -91,6 +97,9 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
             "TIMESTAMP → DATE truncates the time. Use DATE only if the time is not needed.",
             "DECIMAL → INTEGER drops fractional cents. Use DECIMAL or NUMERIC for money.",
         ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Open Map to fix type coercion"},
+        ],
     },
     "g4_mapping_confidence": {
         "title": "Mapping confidence",
@@ -100,6 +109,9 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         "examples": [
             "'amt' mapped to 'amount' with low confidence → approve if they are the same concept.",
             "'created' mapped to 'updated' → verify which timestamp the business actually needs.",
+        ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Review & approve mappings"},
         ],
     },
     "g5_dry_run": {
@@ -115,6 +127,9 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
             "population (VARCHAR) → population (NUMBER(38,0)) — remap off the typed column or keep cast when samples are clean numbers.",
             "'2024-13-01' cannot be parsed as a date → correct the date or use a string target.",
             "A required identifier is null → remove the row or relax the source constraint.",
+        ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Open Map to fix transform"},
         ],
     },
     "g6_target_ddl": {
@@ -133,6 +148,9 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
             "Decimal capacity overflow → widen NUMBER/DECIMAL or map to VARCHAR.",
             "Could not load destination schema → refresh Map destination columns.",
         ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Open Map to fix target DDL"},
+        ],
     },
     "g7_capacity": {
         "title": "Capacity / staging",
@@ -141,6 +159,9 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         "fix": "Free disk space on the DataFlow host, reduce the batch size, or write directly to the destination without local staging.",
         "examples": [
             "A 100 GB export needs at least 300 GB staging free space. Clear old exports or mount a larger volume.",
+        ],
+        "suggested_actions": [
+            {"kind": "rerun_mapping", "label": "Reduce batch size and re-run"},
         ],
     },
     "g8_reconciliation": {
@@ -164,6 +185,9 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
             "Duplicate id in sample → dedupe source before Run.",
             "decimal transform failed on 'N/A' → quarantine or remap to VARCHAR.",
         ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Open Map to fix identity/reconcile"},
+        ],
     },
     "g9_data_integrity": {
         "title": "Data integrity audit",
@@ -181,6 +205,9 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
             "Primary key has duplicates → deduplicate the source or use a composite key.",
             "An amount field lost a decimal place → use DECIMAL with the same precision as the source.",
         ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Open Map to fix data integrity"},
+        ],
     },
     "proof_bundle": {
         "title": "Proof bundle decision",
@@ -191,6 +218,9 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
             "Semantic confidence 0.61 < threshold 0.75 → approve mappings manually or improve column naming.",
             "Reconciliation mismatch → investigate the row count or key set difference.",
         ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Review proof and mappings"},
+        ],
     },
     "schema_drift": {
         "title": "Schema drift",
@@ -200,6 +230,9 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         "examples": [
             "A new 'deleted_at' column appeared in the source → add it to the mapping or ignore it.",
             "A target column type changed from VARCHAR to INTEGER → re-run preflight and update the contract.",
+        ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Re-map drifted columns"},
         ],
     },
 }
@@ -578,6 +611,7 @@ def explain_issue(
         ),
         "examples": entry.get("examples", []),
         "severity": entry.get("severity", "warning"),
+        "suggested_actions": [],
     }
 
 
@@ -593,6 +627,7 @@ def explain_gate(gate_id: str, message: str, details: dict[str, Any] | None = No
         "why": rule["why"],
         "fix": rule["fix"],
         "examples": rule["examples"],
+        "suggested_actions": rule.get("suggested_actions", []),
     }
 
 

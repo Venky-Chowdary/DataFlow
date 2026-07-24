@@ -107,7 +107,7 @@ import { runLocalFileExport } from "../lib/localFileExport";
 import { runLocalPreflight } from "../lib/localPreflight";
 import { readJobEventLog } from "../lib/jobEventLog";
 import { schemaIntrospectionFailureMessage } from "../lib/preflightMessages";
-import { findDuplicateKeyRoot } from "../lib/validateIssueGrouping";
+import { buildDisplayBlockers, findDuplicateKeyRoot } from "../lib/validateIssueGrouping";
 import { suggestUniqueKeyCandidates } from "../lib/uniqueKeySuggestions";
 import {
   buildStreamContracts,
@@ -3254,6 +3254,40 @@ export function TransferPage({
     }
   };
 
+  const primaryFix = useMemo(() => {
+    if (duplicateKeyRoot) {
+      return {
+        onPrimaryFix: openIdentitySettings,
+        primaryFixLabel: duplicateKeyRoot.primaryKey
+          ? `Fix identity (${duplicateKeyRoot.primaryKey})`
+          : "Fix identity / sync mode",
+      };
+    }
+    if (!preflight) return { onPrimaryFix: undefined, primaryFixLabel: undefined };
+    const firstBlocker = buildDisplayBlockers(preflight, syncMode)[0];
+    const action = firstBlocker?.suggested_actions?.[0];
+    if (!action) return { onPrimaryFix: undefined, primaryFixLabel: undefined };
+
+    switch (action.kind) {
+      case "review_mappings":
+      case "change_target_type":
+      case "add_transform":
+      case "map_column":
+      case "normalize_control_chars":
+      case "open_bad_data_fix":
+        return { onPrimaryFix: () => setStep(STEP_MAP), primaryFixLabel: action.label };
+      case "rerun_mapping":
+      case "quarantine_and_rerun":
+        return { onPrimaryFix: () => executePreflight(), primaryFixLabel: action.label };
+      case "check_connection":
+        return { onPrimaryFix: () => setStep(STEP_SOURCE), primaryFixLabel: action.label };
+      case "fix_source_keys":
+        return { onPrimaryFix: openIdentitySettings, primaryFixLabel: action.label };
+      default:
+        return { onPrimaryFix: undefined, primaryFixLabel: undefined };
+    }
+  }, [duplicateKeyRoot, openIdentitySettings, preflight, syncMode, executePreflight]);
+
   const executeTransfer = async () => {
     if (multiStreamUnsupportedMode) {
       toast({
@@ -5453,18 +5487,8 @@ export function TransferPage({
           onExecute={() => void executeTransfer()}
           onOpenJobTheater={openJobTheater}
           onSaveAsContract={() => void handleSaveAsContract()}
-          onPrimaryFix={
-            duplicateKeyRoot
-              ? openIdentitySettings
-              : undefined
-          }
-          primaryFixLabel={
-            duplicateKeyRoot
-              ? duplicateKeyRoot.primaryKey
-                ? `Fix identity (${duplicateKeyRoot.primaryKey})`
-                : "Fix identity / sync mode"
-              : undefined
-          }
+          onPrimaryFix={primaryFix.onPrimaryFix}
+          primaryFixLabel={primaryFix.primaryFixLabel}
         />
       )}
       </div>

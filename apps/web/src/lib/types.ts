@@ -506,7 +506,7 @@ export interface PreflightResult {
   /** Stable ID for this validation run — surface in UI and feed Data Pilot. */
   run_id?: string;
   gates: PreflightGate[];
-  blockers: { id: string; message: string; details?: Record<string, unknown>; guidance?: { gate?: string; title?: string; category?: string; why?: string; fix?: string; examples?: string[] } }[];
+  blockers: { id: string; message: string; details?: Record<string, unknown>; guidance?: { gate?: string; title?: string; category?: string; why?: string; fix?: string; examples?: string[]; suggested_actions?: ValidationSuggestedAction[] } }[];
   /** Top-level privilege probe from destination inspect (also on g2_destination.details). */
   privilege_probe?: {
     status?: string;
