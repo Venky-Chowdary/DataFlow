@@ -793,3 +793,39 @@ Manual probe against the PostgreSQL host with `ssl=True` that previously failed:
 - **Full CDC end-to-end exactly-once job resume.** Multi-stream resume for
   MySQL/MongoDB/SQL Server is still open.
 - **BLE001 blind-except narrowing.** The broader ruff runway remains.
+
+### Additional insight from operator report (connector test green, destination schema unknown)
+
+The source-side probe and the connector test only verify reachability (a TCP
+connection + `SELECT 1` or listing tables). The destination-side probe then runs
+a second, table-specific phase (`_attach_db_sample`) that tries to read the
+actual column metadata and a bounded sample for the named table. If the connector
+test is green but the destination schema is unknown, the failure is almost always in
+that second phase, not the connection itself.
+
+Common causes:
+- The `jobs` table is not in the schema the connector saved (e.g. saved
+  `schema=public`, but the table lives in `hr` or another schema).
+- The connector saved `ssl=True` and the test happened to succeed, but the
+  table-level `sslmode=require` path fails due to a proxy/TLS handshake quirk.
+- The saved connector points to a different `database` than the one containing
+  `jobs`.
+- The destination table name is case-sensitive / quoted and the introspection
+  probe cannot resolve it.
+
+The updated UI now renders the exact backend message (for example
+`schema probe: relation "jobs" does not exist` or `SSL connection failed`) in the
+Map banner instead of the generic "Destination schema unknown" text, and provides
+a **Retry Destination/Map** CTA. Server logs also emit the full stack trace for
+`schema probe failed`.
+
+### Verification after UI/logging update
+
+```text
+pytest apps/api/tests/test_execute_tracked_csv_to_postgres_upsert.py \
+       apps/api/tests/test_postgresql_to_postgresql_incremental.py
+2 passed in 5.93s
+
+npm run build in apps/web
+✓ built in 1.71s
+```
