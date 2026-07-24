@@ -121,6 +121,7 @@ def write_mapped_rows(
 ) -> WriteResult:
     del backfill_new_fields
     try:
+        import pymongo
         from pymongo import MongoClient  # noqa: F401
     except ImportError:
         from connectors.driver_guard import require_driver, stub_writes_allowed
@@ -413,8 +414,8 @@ def write_mapped_rows(
                             for existing in coll.find({"$or": batch_filters}, projection):
                                 key = tuple(existing.get(c) for c in pk_cols)
                                 existing_lsn[key] = existing.get(DF_LSN_COL)
-                    except Exception as exc:
-                        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+                    except pymongo.errors.PyMongoError as exc:
+                        logger.warning("MongoDB LSN prefetch failed: %s", exc, exc_info=exc)
 
                 ops = []
                 skipped_stale = 0
