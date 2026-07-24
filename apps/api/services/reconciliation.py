@@ -1640,7 +1640,8 @@ def read_target_sample(
             return [dict(zip(names, row)) for row in rows]
 
         if db_type == "duckdb":
-            import duckdb
+            import sqlalchemy as sa
+            from connectors.generic_sql import get_sqlalchemy_engine
 
             path = dest.get("connection_string") or dest.get("database", "")
             if not path:
@@ -1654,24 +1655,29 @@ def read_target_sample(
                 if sort_key
                 else "1"
             )
-            conn = duckdb.connect(str(path))
-            if keys and sort_key:
-                key_col = quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
-                placeholders = ",".join(["?"] * len(keys))
-                rows = conn.execute(
-                    f"SELECT {duckdb_col_sql} FROM {table_ref} "
-                    f"WHERE {key_col} IN ({placeholders}) "
-                    f"ORDER BY {duckdb_order} LIMIT ?",
-                    [*keys, int(limit)],
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    f"SELECT {duckdb_col_sql} FROM {table_ref} ORDER BY {duckdb_order} LIMIT ?",
-                    (int(limit),),
-                ).fetchall()
-            names = [d[0] for d in conn.description]
-            conn.close()
-            return [dict(zip(names, row)) for row in rows]
+            try:
+                engine = get_sqlalchemy_engine({"type": "duckdb", "connection_string": path})
+            except Exception:
+                return []
+            with engine.connect() as conn:
+                if keys and sort_key:
+                    key_col = quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
+                    params: dict[str, Any] = {f"k{i}": k for i, k in enumerate(keys)}
+                    params["lim"] = int(limit)
+                    placeholders = ",".join(f":k{i}" for i in range(len(keys)))
+                    sql = (
+                        f"SELECT {duckdb_col_sql} FROM {table_ref} "
+                        f"WHERE {key_col} IN ({placeholders}) "
+                        f"ORDER BY {duckdb_order} LIMIT :lim"
+                    )
+                else:
+                    params = {"lim": int(limit)}
+                    sql = f"SELECT {duckdb_col_sql} FROM {table_ref} ORDER BY {duckdb_order} LIMIT :lim"
+                try:
+                    result = conn.execute(sa.text(sql), params)
+                    return [dict(row) for row in result.mappings().all()]
+                except Exception:
+                    return []
 
         if db_type == "mongodb":
             from connectors.mongodb_common import _mongo_client, normalize_mongodb_connection_string

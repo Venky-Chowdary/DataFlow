@@ -137,11 +137,15 @@ def parse_file_route_sample(
     return result.columns, schema, result.row_count
 
 
-def _matrix_cell(value: Any) -> str:
+def _matrix_cell(value: Any) -> Any:
+    # Preserve SQL NULL / missing distinctly from the literal empty string so
+    # downstream writers can tell the difference.
+    if value is None:
+        return None
     return cell_to_string(value)
 
 
-def records_to_matrix(records: list[dict], columns: list[str]) -> tuple[list[str], list[list[str]]]:
+def records_to_matrix(records: list[dict], columns: list[str]) -> tuple[list[str], list[list[Any]]]:
     headers = columns or (list(records[0].keys()) if records else [])
     rows = [[_matrix_cell(rec.get(h)) for h in headers] for rec in records]
     return headers, rows

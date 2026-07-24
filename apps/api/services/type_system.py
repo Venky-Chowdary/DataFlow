@@ -477,8 +477,10 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_DATETIME: "TIMESTAMP",
         LOGICAL_TIME: "TIME",
         LOGICAL_UUID: "UUID",
-        LOGICAL_JSON: "JSON",
-        LOGICAL_ARRAY: "VARCHAR[]",
+        # VARCHAR preserves the exact JSON text (no DuckDB native re-spacing)
+        # and lets Python None bind as SQL NULL instead of the JSON null literal.
+        LOGICAL_JSON: "VARCHAR",
+        LOGICAL_ARRAY: "VARCHAR",
         LOGICAL_BINARY: "BLOB",
     },
     "clickhouse": {

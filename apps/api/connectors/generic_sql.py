@@ -777,13 +777,11 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
     if t in (LOGICAL_JSON, LOGICAL_ARRAY):
         # DuckDB advertises VARCHAR[] / JSON in type_system — honor that at bind time.
         if db_type == "duckdb":
-            if t == LOGICAL_ARRAY:
-                import re
-
-                match = re.match(r"^(?:ARRAY|LIST)<(.+)>$", raw, re.IGNORECASE)
-                element = match.group(1).strip() if match else "string"
-                return sa.ARRAY(_sa_type_for_logical(element, dialect_name, db_type))
-            return sa.JSON()
+            # DuckDB native JSON/VARCHAR[] re-serializes with spaces and binds
+            # Python None as the JSON null literal. Store semi-structured values
+            # as VARCHAR so the exact source text round-trips and None becomes
+            # SQL NULL.
+            return _maybe_nullable(sa.Text())
         if db_type in ("oracle", "clickhouse", "trino", "questdb", "presto"):
             return _maybe_nullable(sa.Text())
         if dialect_name == "postgresql":

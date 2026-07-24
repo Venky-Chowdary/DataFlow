@@ -321,7 +321,10 @@ def peek_file_source(
             if not headers:
                 raise ValueError("CSV file has no header row")
             total = count_csv_rows(raw)
-            sample = [dict(zip(headers, row)) for row in rows[:100]]
+            sample = [
+                dict(zip(headers, (_csv_empty_to_none(c) for c in row)))
+                for row in rows[:100]
+            ]
             schema = FileParser.infer_schema(sample)
             return headers, schema, total, sample
 
@@ -341,7 +344,7 @@ def peek_file_source(
             for i, row in enumerate(reader):
                 total += 1
                 if i < 100:
-                    preview_rows.append(row)
+                    preview_rows.append([_csv_empty_to_none(c) for c in row])
         sample = [dict(zip(headers, row)) for row in preview_rows]
         schema = FileParser.infer_schema(sample)
         return headers, schema, total, sample
@@ -492,6 +495,10 @@ def peek_file_source(
     raise ValueError(f"File type '{file_type}' does not support streaming ingest")
 
 
+def _csv_empty_to_none(value: Any) -> Any:
+    return None if value == "" else value
+
+
 def _iter_csv_batches(
     content: bytes | str | os.PathLike,
     chunk_size: int,
@@ -504,7 +511,7 @@ def _iter_csv_batches(
         reader = csv.DictReader(reader_file, delimiter=delim)
         batch: list[dict] = []
         for row in reader:
-            batch.append(dict(row))
+            batch.append({k: _csv_empty_to_none(v) for k, v in dict(row).items()})
             if len(batch) >= chunk_size:
                 yield batch
                 batch = []
