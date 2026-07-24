@@ -634,6 +634,9 @@ pytest apps/api/tests/test_validate_failfast_critical_hazards.py \
        apps/api/tests/test_data_rule_scenario_matrix.py \
        apps/api/tests/test_create_new_all_destinations_matrix.py
 3806 passed in 4.52s
+
+pytest apps/api/tests/test_execute_tracked_universal_matrix.py -k 'not snowflake'
+342 passed, 918 skipped, 72 deselected in 542.32s
 ```
 
 ### What is still NOT proven
