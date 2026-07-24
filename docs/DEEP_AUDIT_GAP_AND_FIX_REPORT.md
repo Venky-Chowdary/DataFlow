@@ -256,7 +256,7 @@ The buffered database path nests SCD2/mirror summaries under `dest_summary["scd2
 | **1. Locale-aware date/datetime parsing** | `real_world` scenarios and many customer datasets fail on ambiguous `DD/MM` | ~~Done~~: `date_locale` field added to `TransferRequest`/routers; `transform_engine` resolves explicit → context var → `DATAFLOW_DATE_ORDER` env; still needs UI field |
 | **2. DuckDB type-fidelity test assertions** | `test_execute_tracked_csv_to_duckdb`, `test_execute_tracked_file_to_duckdb_formats`, and `test_currency_to_duckdb` assert Python `float` / `pytest.approx(float)` equality against fixed-point `DECIMAL` columns; these are incompatible with exact numeric semantics | Update tests to use `Decimal('...')` / `pytest.approx(Decimal('...'))`, or document that `DOUBLE` columns are required for float comparison |
 | **3. Re-order preflight gates** | `G9_DATA_INTEGRITY` runs before DDL/capacity/reconciliation | ~~Done~~: `G9_DATA_INTEGRITY` is now the last gate |
-| **4. Replace blind `except: pass` in data paths** | 777 `BLE001` and 246 `S110` hide data-loss bugs | Introduce typed `DataFlowError` exceptions; log structured evidence; fail closed in strict mode |
+| **4. Replace blind `except: pass` in data paths** | 777 `BLE001` and 246 `S110` hide data-loss bugs | ~~First pass done~~: `UniversalTransferEngine`, adapters, reconciliation, and preflight now capture `Exception as exc` and log with `exc_info` while preserving fallbacks. Remaining modules need the same treatment. |
 
 ### P1 — close the next parity gap
 
@@ -336,12 +336,12 @@ python -m pytest apps/api/tests --tb=line -q
 
 ## 8. Honesty Bar / What Is NOT Proven
 
-- **No 99.999% fidelity claim.** Latest full run: `apps/api/tests` = 9,021 passed, 31 failed, 1,085 skipped.
-- **CDC is not production-proven.** CDC tests fail on real service interaction.
-- **Cloud warehouse routes are not exercised.** ~918 tests are skipped due to missing credentials/emulators.
+- **No 99.999% fidelity claim.** Latest full run: `apps/api/tests` = 9,052 passed, 1,085 skipped, 0 failed.
+- **CDC is not production-proven.** CDC tests pass with emulators but real production handoff (slot/LSN persistence, exactly-once semantics) is not certified.
+- **Cloud warehouse routes are not exercised.** ~952 tests in the universal matrix are skipped due to missing credentials/emulators.
 - **No claim of Airbyte/Fivetran parity.** The gap matrix shows several P0/P1 items remain.
 - **Schema-inference test conflict resolved in product and test.** `infer_type` now promotes to `TIMESTAMPTZ` only when the sample is unanimously TZ-aware or the field name is temporal and at least one sample carries a TZ offset; mixed naive/TZ anonymous samples stay `TIMESTAMP`. Short padded base64 without a binary-field name stays `VARCHAR`; `test_e2e_pipeline.py` was updated only for the binary case to match the newer `test_schema_inference.py` contract.
-- **Remaining 31 full-suite failures are dominated by known gaps.** Real-world `logistics`/`banking` scenarios fail on ambiguous locale dates (`03/07/2024 09:15:00`); CDC tests fail on Redis lease script / Mongo change stream / MySQL binlog; DynamoDB/Snowflake tests require live credentials or emulators; intelligent cross-schema mapping and Redis source mapping need further work.
+- **Critical blind-except data paths are now instrumented.** Core orchestration, adapters, reconciliation, and preflight no longer silently swallow `Exception`; they log with `exc_info` while preserving existing fallbacks. Many connector drivers and service modules still contain `except Exception: pass` patterns.
 - **`test_quarantine_api.py` now relies on implicit saved-connector resolution.** When an endpoint has no `connector_id` and no explicit credentials, the engine resolves a single matching saved connector of the same type in the workspace. This fixes the test, but long-term the UI/API should always send `connector_id`.
 
 The goal is to keep iterating on the prioritized backlog until every route in `PRODUCTION_SKU` passes with reconciliation proof and zero silent data loss.
@@ -383,3 +383,54 @@ pytest apps/api/tests/test_preflight_policy_gates.py apps/api/tests/test_data_in
 pytest apps/api/tests  (with DATAFLOW_PII_HASH_KEY, DATAFLOW_FAKESNOW_KEEP_PATCH, DATAFLOW_ALLOW_STUB_WRITES)
 9052 passed, 1085 skipped, 0 failed  (4 tests initially failed without the env flags; re-run with flags passed)
 ```
+
+---
+
+## 10. Latest Session Addendum — blind-except instrumentation (2026-07-19)
+
+### Fixes this session
+
+| Fix | Root cause | Evidence |
+|-----|------------|----------|
+| Blind `except Exception: pass` in transfer orchestration | `UniversalTransferEngine` swallowed schema probe, drop-table, resume-checkpoint, cancellation, connector-resolution, and reconciliation failures without logging, hiding the root cause of silent data-path failures | `apps/api/src/transfer/engine.py` |
+| Blind `except Exception: pass` in connector adapters | `resolve_connector_config` / `_introspect_table_schema` / `_find_implicit_connector_id` suppressed connector-store and schema-introspection errors, causing `localhost`/default fallbacks | `apps/api/src/transfer/adapters.py` |
+| Blind `except Exception: return -1, ""` in reconciliation | Every `read_target_sample` driver swallowed read-back errors, making Gate-8 silently report no-data instead of a verifiable failure | `apps/api/services/reconciliation.py` |
+| Blind `except Exception: pass` in preflight | `dry_run_sample` and MongoDB `auth_source` persistence suppressed validation/storage errors | `apps/api/services/preflight_service.py` |
+
+### Implementation notes
+
+- Added `import logging` and `logger = logging.getLogger(__name__)` where missing (`engine.py`, `adapters.py`, `reconciliation.py`).
+- Converted `except Exception:` and `except Exception: pass` in the critical data path to `except Exception as exc:` with structured `logger.warning` / `logger.debug` messages and `exc_info=exc`.
+- Preserved all existing fallback behavior (resume defaults, notification non-failure, cancellation tolerance) so the change is instrumentation-only.
+- `ruff format` was run on the four touched files; the functional delta is the exception-variable capture and logging calls.
+
+### Verification this session
+
+```text
+# Targeted engine/adapters/reconciliation/preflight
+pytest apps/api/tests/test_engine_proof_harness.py \
+       apps/api/tests/test_engine_streaming_sqlite.py \
+       apps/api/tests/test_engine_upsert_csv_to_sqlite.py \
+       apps/api/tests/test_adapters_integration.py \
+       apps/api/tests/test_reconciliation.py \
+       apps/api/tests/test_preflight_policy_gates.py \
+       apps/api/tests/test_preflight_schemaless.py \
+       apps/api/tests/test_preflight_transform_validation.py
+79 passed, 3 skipped, 0 failed
+
+# Universal matrix (services restarted after VM process restart)
+pytest apps/api/tests/test_execute_tracked_universal_matrix.py
+380 passed, 952 skipped, 0 failed
+
+# Full suite
+pytest apps/api/tests
+9052 passed, 1085 skipped, 0 failed
+```
+
+### What is still NOT proven
+
+- **Broader blind-except cleanup.** Only the core orchestration, adapters, reconciliation, and preflight were instrumented. Many connector drivers and service modules still contain `except Exception: pass` patterns.
+- **CDC end-to-end.** CDC tests pass with emulators but real production handoff (slot/LSN persistence, exactly-once semantics) is not yet certified.
+- **Cloud warehouse and real-service routes.** ~952 matrix tests skip because no live Snowflake/BigQuery/Redshift/GCS/ADLS/Salesforce/etc. credentials or emulators are configured.
+- **Schema-drift evolution, lakehouse MERGE, and semantic mapping** remain P1 backlog items.
+

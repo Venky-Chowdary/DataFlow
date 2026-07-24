@@ -41,6 +41,7 @@ from services.validation_plan import build_validation_plan
 
 def _with_date_locale(fn):
     """Set the active date_locale context for the duration of the call."""
+
     def wrapper(*args, **kwargs):
         locale = kwargs.get("date_locale", "")
         token = set_active_date_locale(locale)
@@ -48,6 +49,7 @@ def _with_date_locale(fn):
             return fn(*args, **kwargs)
         finally:
             reset_active_date_locale(token)
+
     return wrapper
 
 
@@ -77,7 +79,9 @@ class FilePreflightContext(PreflightContext):
             "sample_cap": sample_size,
         }
         column_types = {c.name: c.inferred_type for c in self.plan.source.columns}
-        dest_types_by_name = {c.name: c.inferred_type for c in self.plan.destination.target_columns}
+        dest_types_by_name = {
+            c.name: c.inferred_type for c in self.plan.destination.target_columns
+        }
         mapping_dicts = [
             {
                 "source": m.source,
@@ -97,11 +101,14 @@ class FilePreflightContext(PreflightContext):
                 mappings=mapping_dicts,
                 column_types=column_types,
             )
-        except Exception:
+        except Exception as exc:
+            logger.debug("dry-run sample failed: %s", exc, exc_info=exc)
             errors: list[str] = []
             for i, row in enumerate(self.sample_rows[:sample_size]):
                 for m in self.plan.mappings:
-                    if m.source not in row and m.source in {c.name for c in self.plan.source.columns}:
+                    if m.source not in row and m.source in {
+                        c.name for c in self.plan.source.columns
+                    }:
                         errors.append(f"Row {i}: missing source column '{m.source}'")
                         if len(errors) >= 10:
                             return False, errors
@@ -121,7 +128,9 @@ class FilePreflightContext(PreflightContext):
             from services.coercion_probe import analyze_coercion
 
             source_types = {c.name: c.inferred_type for c in self.plan.source.columns}
-            dest_types = {c.name: c.inferred_type for c in self.plan.destination.target_columns}
+            dest_types = {
+                c.name: c.inferred_type for c in self.plan.destination.target_columns
+            }
             mapping_dicts = [
                 {
                     "source": m.source,
@@ -137,10 +146,14 @@ class FilePreflightContext(PreflightContext):
                 source_types=source_types,
                 dest_types=dest_types,
                 dest_db_type=self.plan.destination.db_type,
-                table_exists=bool(getattr(self.plan.destination, "table_exists", False)),
+                table_exists=bool(
+                    getattr(self.plan.destination, "table_exists", False)
+                ),
             )
-        except Exception:
-            logger.warning("coercion probe failed during preflight", exc_info=True)
+        except Exception as exc:
+            logger.warning(
+                "coercion probe failed during preflight: %s", exc, exc_info=exc
+            )
             report = {}
         self._coercion_report_cache = report
         return report
@@ -176,7 +189,11 @@ class FilePreflightContext(PreflightContext):
                 "transform": m.transform,
                 "requires_review": m.requires_review,
                 "target_type": next(
-                    (c.inferred_type for c in self.plan.destination.target_columns if c.name == m.target),
+                    (
+                        c.inferred_type
+                        for c in self.plan.destination.target_columns
+                        if c.name == m.target
+                    ),
                     None,
                 ),
             }
@@ -201,8 +218,10 @@ class FilePreflightContext(PreflightContext):
             validation_mode=mode,
             destination_db_type=self.plan.destination.db_type,
             sync_mode=sync_mode,
-            contract_primary_key=getattr(self.plan, "contract_primary_key", None) or None,
-            destination_pk_columns=getattr(self.plan, "destination_pk_columns", None) or None,
+            contract_primary_key=getattr(self.plan, "contract_primary_key", None)
+            or None,
+            destination_pk_columns=getattr(self.plan, "destination_pk_columns", None)
+            or None,
         )
 
 
@@ -214,7 +233,9 @@ VALIDATION_CONFIDENCE_THRESHOLDS = {
 
 
 def confidence_threshold_for_mode(validation_mode: str | None) -> float:
-    return VALIDATION_CONFIDENCE_THRESHOLDS.get((validation_mode or "strict").lower(), 0.85)
+    return VALIDATION_CONFIDENCE_THRESHOLDS.get(
+        (validation_mode or "strict").lower(), 0.85
+    )
 
 
 def run_transfer_policy_gates(
@@ -232,7 +253,13 @@ def run_transfer_policy_gates(
     schema = (schema_policy or "manual_review").lower()
     validation = (validation_mode or "strict").lower()
     requires_cursor = sync in {"incremental_append", "incremental_deduped", "cdc"}
-    requires_primary_key = sync in {"upsert", "incremental_deduped", "cdc", "scd2", "mirror"}
+    requires_primary_key = sync in {
+        "upsert",
+        "incremental_deduped",
+        "cdc",
+        "scd2",
+        "mirror",
+    }
 
     missing_cursor = [
         c.get("name") or c.get("stream") or "stream"
@@ -246,7 +273,9 @@ def run_transfer_policy_gates(
     ]
 
     # Live column check — typo'd cursor/PK names must fail at Validate, not mid-run.
-    source_col_set = {str(c).strip().lower() for c in (source_columns or []) if str(c).strip()}
+    source_col_set = {
+        str(c).strip().lower() for c in (source_columns or []) if str(c).strip()
+    }
     unknown_cursor: list[str] = []
     unknown_pk: list[str] = []
     if source_col_set:
@@ -269,7 +298,9 @@ def run_transfer_policy_gates(
     if missing_cursor:
         sync_issues.append(f"Missing cursor field for {', '.join(missing_cursor[:5])}")
     if missing_primary_key:
-        sync_issues.append(f"Missing primary key for {', '.join(missing_primary_key[:5])}")
+        sync_issues.append(
+            f"Missing primary key for {', '.join(missing_primary_key[:5])}"
+        )
     if unknown_cursor:
         sync_issues.append(
             f"Cursor field not in source schema: {', '.join(unknown_cursor[:5])}"
@@ -280,26 +311,30 @@ def run_transfer_policy_gates(
         )
 
     if sync_issues:
-        gates.append({
-            "id": "g9_sync_contract",
-            "status": GateStatus.BLOCK.value,
-            "message": "Sync mode contract incomplete",
-            "duration_ms": 0,
-            "details": {"issues": sync_issues, "sync_mode": sync},
-        })
+        gates.append(
+            {
+                "id": "g9_sync_contract",
+                "status": GateStatus.BLOCK.value,
+                "message": "Sync mode contract incomplete",
+                "duration_ms": 0,
+                "details": {"issues": sync_issues, "sync_mode": sync},
+            }
+        )
     else:
-        gates.append({
-            "id": "g9_sync_contract",
-            "status": GateStatus.PASS.value,
-            "message": f"Sync contract valid for {sync.replace('_', ' ')}",
-            "duration_ms": 0,
-            "details": {
-                "sync_mode": sync,
-                "streams": len(contracts),
-                "requires_cursor": requires_cursor,
-                "requires_primary_key": requires_primary_key,
-            },
-        })
+        gates.append(
+            {
+                "id": "g9_sync_contract",
+                "status": GateStatus.PASS.value,
+                "message": f"Sync contract valid for {sync.replace('_', ' ')}",
+                "duration_ms": 0,
+                "details": {
+                    "sync_mode": sync,
+                    "streams": len(contracts),
+                    "requires_cursor": requires_cursor,
+                    "requires_primary_key": requires_primary_key,
+                },
+            }
+        )
 
     schema_issues: list[str] = []
     allowed_schema = {
@@ -335,40 +370,50 @@ def run_transfer_policy_gates(
     }.get(schema, "pause_for_manual_review")
 
     if schema_issues:
-        gates.append({
-            "id": "g10_schema_policy",
-            "status": GateStatus.BLOCK.value,
-            "message": "Schema change policy incomplete",
-            "duration_ms": 0,
-            "details": {"issues": schema_issues, "schema_policy": schema},
-        })
+        gates.append(
+            {
+                "id": "g10_schema_policy",
+                "status": GateStatus.BLOCK.value,
+                "message": "Schema change policy incomplete",
+                "duration_ms": 0,
+                "details": {"issues": schema_issues, "schema_policy": schema},
+            }
+        )
     else:
-        gates.append({
-            "id": "g10_schema_policy",
+        gates.append(
+            {
+                "id": "g10_schema_policy",
+                "status": GateStatus.PASS.value,
+                "message": (
+                    f"Schema policy set to {schema.replace('_', ' ')}"
+                    + (
+                        " (aligned backfill with propagate columns)"
+                        if policy_coerced
+                        else ""
+                    )
+                ),
+                "duration_ms": 0,
+                "details": {
+                    "schema_policy": schema,
+                    "backfill_new_fields": backfill_new_fields,
+                    "breaking_changes": breaking,
+                    "policy_coerced_from_manual_review": policy_coerced,
+                },
+            }
+        )
+
+    gates.append(
+        {
+            "id": "g11_validation_posture",
             "status": GateStatus.PASS.value,
-            "message": (
-                f"Schema policy set to {schema.replace('_', ' ')}"
-                + (" (aligned backfill with propagate columns)" if policy_coerced else "")
-            ),
+            "message": f"Validation posture {validation} uses confidence threshold {confidence_threshold_for_mode(validation):.2f}",
             "duration_ms": 0,
             "details": {
-                "schema_policy": schema,
-                "backfill_new_fields": backfill_new_fields,
-                "breaking_changes": breaking,
-                "policy_coerced_from_manual_review": policy_coerced,
+                "validation_mode": validation,
+                "confidence_threshold": confidence_threshold_for_mode(validation),
             },
-        })
-
-    gates.append({
-        "id": "g11_validation_posture",
-        "status": GateStatus.PASS.value,
-        "message": f"Validation posture {validation} uses confidence threshold {confidence_threshold_for_mode(validation):.2f}",
-        "duration_ms": 0,
-        "details": {
-            "validation_mode": validation,
-            "confidence_threshold": confidence_threshold_for_mode(validation),
-        },
-    })
+        }
+    )
 
     return gates
 
@@ -404,7 +449,8 @@ def apply_policy_gates(
         active_proof_blockers = list(proof_blockers)
     else:
         active_proof_blockers = [
-            b for b in proof_blockers
+            b
+            for b in proof_blockers
             if "PII/compliance" not in b and "compliance review" not in b.lower()
         ]
 
@@ -431,7 +477,9 @@ def apply_policy_gates(
     total_gates = len(gates)
     has_blocks = any(g.get("status") == GateStatus.BLOCK.value for g in gates)
 
-    proof_blocks = transfer_decision in {"block", "review"} or proof_bundle.get("passed") is False
+    proof_blocks = (
+        transfer_decision in {"block", "review"} or proof_bundle.get("passed") is False
+    )
     if proof_blocks and not is_strict:
         if active_proof_blockers:
             proof_blocks = True
@@ -454,20 +502,27 @@ def apply_policy_gates(
             proof_bundle["transfer_decision"] = {
                 "decision": "block",
                 "blockers": decision_blockers,
-                "reason": "; ".join(decision_blockers) if decision_blockers else "Preflight gates blocked the transfer",
+                "reason": "; ".join(decision_blockers)
+                if decision_blockers
+                else "Preflight gates blocked the transfer",
                 "warnings": [],
             }
         else:
             # No hard gate blocks; downgrade proof decision to review/approve and surface
             # compliance warnings so the UI shows the risk without disabling the transfer.
             warnings = [b for b in proof_blockers if b not in active_proof_blockers]
-            decision = "review" if (transfer_decision in {"block", "review"} or compliance_only) else "approve"
+            decision = (
+                "review"
+                if (transfer_decision in {"block", "review"} or compliance_only)
+                else "approve"
+            )
             proof_bundle["passed"] = True
             proof_bundle["transfer_decision"] = {
                 "decision": decision,
                 "blockers": [],
                 "reason": (
-                    "No blocking issues detected" if not warnings
+                    "No blocking issues detected"
+                    if not warnings
                     else "; ".join(warnings)
                 ),
                 "warnings": warnings,
@@ -548,15 +603,23 @@ def run_file_preflight(
     # being treated as all-VARCHAR against a typed warehouse target.
     if sample_rows and columns:
         generic_types = {"", "varchar", "text", "string"}
-        if not column_types or all((column_types.get(c) or "").lower() in generic_types for c in columns):
+        if not column_types or all(
+            (column_types.get(c) or "").lower() in generic_types for c in columns
+        ):
             try:
                 from services.file_parser import FileParser
 
                 inferred = FileParser.infer_schema(sample_rows)
                 if inferred:
-                    column_types = {**column_types, **{c: inferred.get(c, column_types.get(c, "VARCHAR")) for c in columns}}
-            except Exception:
-                pass
+                    column_types = {
+                        **column_types,
+                        **{
+                            c: inferred.get(c, column_types.get(c, "VARCHAR"))
+                            for c in columns
+                        },
+                    }
+            except Exception as exc:
+                logger.debug("preflight schema inference failed: %s", exc, exc_info=exc)
 
     source_cols = [
         ColumnSchema(name=c, inferred_type=column_types.get(c, "VARCHAR").upper())
@@ -584,7 +647,9 @@ def run_file_preflight(
             requires_review=bool(m.get("requires_review", False)),
             score_gap=float(m.get("score_gap", 1.0)),
             struct_policy=m.get("struct_policy") or m.get("structPolicy"),
-            struct_derived=bool(m.get("struct_derived") or m.get("structDerived", False)),
+            struct_derived=bool(
+                m.get("struct_derived") or m.get("structDerived", False)
+            ),
             struct_parent=m.get("struct_parent") or m.get("structParent"),
         )
         for m in mappings
@@ -597,9 +662,19 @@ def run_file_preflight(
     if available_staging_bytes is None:
         available_staging_bytes = _available_staging_bytes(est_bytes)
 
-    dest_can_create = destination_can_create if destination_can_create is not None else destination_connected
-    dest_can_write = destination_can_write if destination_can_write is not None else destination_connected
-    dest_table_exists = destination_table_exists if destination_table_exists is not None else False
+    dest_can_create = (
+        destination_can_create
+        if destination_can_create is not None
+        else destination_connected
+    )
+    dest_can_write = (
+        destination_can_write
+        if destination_can_write is not None
+        else destination_connected
+    )
+    dest_table_exists = (
+        destination_table_exists if destination_table_exists is not None else False
+    )
 
     from services.ddl_compatibility import evaluate_ddl_compatibility
     from services.schema_drift import detect_schema_drift
@@ -643,7 +718,9 @@ def run_file_preflight(
     if sample_rows and columns:
         from services.sample_quality import analyze_dataset_quality
 
-        sample_quality = analyze_dataset_quality(columns, sample_rows, schema=column_types, dest_kind=dest_kind)
+        sample_quality = analyze_dataset_quality(
+            columns, sample_rows, schema=column_types, dest_kind=dest_kind
+        )
         # Sample-quality findings (high null rates, outliers, etc.) describe the data,
         # not the target schema.  They are surfaced by the data-integrity gate (G9);
         # conflating them with DDL compatibility causes false "Target DDL incompatible"
@@ -702,7 +779,11 @@ def run_file_preflight(
             {
                 "name": c,
                 "inferred_type": column_types.get(c, "VARCHAR").upper(),
-                "samples": [cell_to_string(row.get(c, "")) for row in (sample_rows or [])[:20] if row.get(c) is not None],
+                "samples": [
+                    cell_to_string(row.get(c, ""))
+                    for row in (sample_rows or [])[:20]
+                    if row.get(c) is not None
+                ],
             }
             for c in columns
         ],
@@ -748,7 +829,9 @@ def run_file_preflight(
         "passed": result.passed,
         "passed_count": result.passed_count,
         "total_gates": result.total_gates,
-        "readiness_score": round(result.passed_count / max(result.total_gates, 1) * 100, 1),
+        "readiness_score": round(
+            result.passed_count / max(result.total_gates, 1) * 100, 1
+        ),
         "gates": [
             {
                 "id": g.gate_id.value,
@@ -814,17 +897,19 @@ def run_file_preflight(
     if drift.get("severity") == "breaking" and drift.get("issues"):
         policy = (schema_policy or "manual_review").strip().lower()
         if schemaless:
-            out.setdefault("warnings", []).append({
-                "id": "schema_drift",
-                "message": (
-                    "Mapping/schema fingerprint changed on a schemaless destination — "
-                    "informational only (no DDL to invalidate)."
-                ),
-                "details": {
-                    "issues": list(drift.get("issues") or []),
-                    "severity": "warning",
-                },
-            })
+            out.setdefault("warnings", []).append(
+                {
+                    "id": "schema_drift",
+                    "message": (
+                        "Mapping/schema fingerprint changed on a schemaless destination — "
+                        "informational only (no DDL to invalidate)."
+                    ),
+                    "details": {
+                        "issues": list(drift.get("issues") or []),
+                        "severity": "warning",
+                    },
+                }
+            )
         elif policy == "pause_on_change":
             drift_msg = str(drift["issues"][0])
             drift_gate = {
@@ -843,15 +928,25 @@ def run_file_preflight(
             }
             out["gates"] = [*out["gates"], drift_gate]
             drift_blocker = enrich_blockers(
-                [{"id": "schema_drift", "message": drift_msg, "details": drift_gate["details"]}],
+                [
+                    {
+                        "id": "schema_drift",
+                        "message": drift_msg,
+                        "details": drift_gate["details"],
+                    }
+                ],
                 dest_kind=dest_kind,
                 validation_mode=validation_mode,
             )
             out["blockers"] = [*out["blockers"], *drift_blocker]
             out["passed"] = False
-            out["passed_count"] = sum(1 for g in out["gates"] if g.get("status") == "pass")
+            out["passed_count"] = sum(
+                1 for g in out["gates"] if g.get("status") == "pass"
+            )
             out["total_gates"] = len(out["gates"])
-            out["readiness_score"] = round(out["passed_count"] / max(out["total_gates"], 1) * 100, 1)
+            out["readiness_score"] = round(
+                out["passed_count"] / max(out["total_gates"], 1) * 100, 1
+            )
         else:
             # manual_review / propagate_*: surface as a non-blocking gate so G10
             # policy remains the operator control, not a false DDL failure.
@@ -1078,10 +1173,13 @@ def inspect_destination_for_preflight(
                     "database": getattr(endpoint, "database", "") or "",
                     "username": getattr(endpoint, "username", "") or "",
                     "password": getattr(endpoint, "password", "") or "",
-                    "connection_string": getattr(endpoint, "connection_string", "") or "",
+                    "connection_string": getattr(endpoint, "connection_string", "")
+                    or "",
                     "schema": getattr(endpoint, "schema", "") or "",
                     "type": out.get("db_type") or "",
-                    "warehouse": getattr(endpoint, "warehouse", "") or dest_warehouse or "",
+                    "warehouse": getattr(endpoint, "warehouse", "")
+                    or dest_warehouse
+                    or "",
                     "role": getattr(endpoint, "auth_role", "") or dest_auth_role or "",
                     "service_account": getattr(endpoint, "service_account", "")
                     or dest_service_account
@@ -1115,7 +1213,10 @@ def inspect_destination_for_preflight(
                 table_exists=bool(out.get("table_exists")),
                 ssl=bool(cfg.get("ssl") or False),
                 warehouse=str(
-                    cfg.get("warehouse") or dest_warehouse or getattr(endpoint, "warehouse", "") or ""
+                    cfg.get("warehouse")
+                    or dest_warehouse
+                    or getattr(endpoint, "warehouse", "")
+                    or ""
                 ),
                 role=str(
                     cfg.get("role")
@@ -1125,9 +1226,7 @@ def inspect_destination_for_preflight(
                     or ""
                 ),
                 account=str(cfg.get("account") or cfg.get("host") or ""),
-                project_id=str(
-                    cfg.get("project_id") or cfg.get("database") or ""
-                ),
+                project_id=str(cfg.get("project_id") or cfg.get("database") or ""),
                 dataset=str(cfg.get("dataset") or probe_schema),
                 service_account=str(
                     cfg.get("service_account")
@@ -1142,7 +1241,9 @@ def inspect_destination_for_preflight(
                     or getattr(endpoint, "auth_source", "")
                     or ""
                 ),
-                api_key=str(cfg.get("api_key") or getattr(endpoint, "api_key", "") or ""),
+                api_key=str(
+                    cfg.get("api_key") or getattr(endpoint, "api_key", "") or ""
+                ),
             )
             can_write, can_create, priv_meta = resolve_write_flags(True, probe)
             out["can_write"] = can_write
@@ -1162,7 +1263,11 @@ def inspect_destination_for_preflight(
             }
     # Persist auto-resolved Mongo authSource so Validate/Execute match Connectors Test.
     resolved_auth = (getattr(endpoint, "auth_source", "") or "").strip()
-    if out["connected"] and resolved_auth and (out.get("db_type") or "").lower() == "mongodb":
+    if (
+        out["connected"]
+        and resolved_auth
+        and (out.get("db_type") or "").lower() == "mongodb"
+    ):
         out["auth_source"] = resolved_auth
         if connector_id:
             try:
@@ -1171,6 +1276,8 @@ def inspect_destination_for_preflight(
                 conn = get_connector(connector_id)
                 if conn and (conn.auth_source or "") != resolved_auth:
                     update_connector(connector_id, {"auth_source": resolved_auth})
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(
+                    "mongodb auth_source persistence failed: %s", exc, exc_info=exc
+                )
     return out

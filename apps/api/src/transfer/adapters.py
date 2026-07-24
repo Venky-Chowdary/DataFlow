@@ -5,11 +5,14 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import re
 import sys
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 # Legacy connectors live under apps/api/
 _API_ROOT = Path(__file__).resolve().parents[2]
@@ -18,17 +21,23 @@ if str(_API_ROOT) not in sys.path:
 
 try:
     from services.file_parser import FileParser
-except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+except (
+    ImportError
+):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.file_parser import FileParser
 
 try:
     from services.mongodb_service import get_mongodb_service
-except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+except (
+    ImportError
+):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.mongodb_service import get_mongodb_service
 
 try:
     from services.value_serializer import cell_to_string, json_default
-except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+except (
+    ImportError
+):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.value_serializer import cell_to_string, json_default
 
 from .connector_registry import run_probe
@@ -36,7 +45,9 @@ from .models import EndpointConfig
 from .type_mapper import ddl_carrier_type, ddl_type, normalize_inferred
 
 
-def resolve_dest_table(dest_type: str, destination: EndpointConfig, fallback_name: str = "import") -> str:
+def resolve_dest_table(
+    dest_type: str, destination: EndpointConfig, fallback_name: str = "import"
+) -> str:
     """Resolve destination object name — table, key, index, or collection."""
     base = re.sub(
         r"[^a-zA-Z0-9_]",
@@ -45,15 +56,35 @@ def resolve_dest_table(dest_type: str, destination: EndpointConfig, fallback_nam
     )[:40]
     dt = dest_type.lower()
     if dt == "dynamodb":
-        return destination.table or destination.collection or destination.database or f"dt_{base}"
+        return (
+            destination.table
+            or destination.collection
+            or destination.database
+            or f"dt_{base}"
+        )
     if dt in ("s3", "gcs"):
-        return destination.table or destination.collection or destination.schema or f"exports/dt_{base}.json"
+        return (
+            destination.table
+            or destination.collection
+            or destination.schema
+            or f"exports/dt_{base}.json"
+        )
     if dt == "elasticsearch":
         # Elasticsearch uses an index name; prefer the table name (UI's destination name)
         # and fall back to the database field when it is intentionally supplied.
-        return destination.table or destination.collection or destination.database or f"dt_{base}"
+        return (
+            destination.table
+            or destination.collection
+            or destination.database
+            or f"dt_{base}"
+        )
     if dt == "kafka":
-        return destination.table or destination.collection or destination.database or f"dataflow.{base}"
+        return (
+            destination.table
+            or destination.collection
+            or destination.database
+            or f"dataflow.{base}"
+        )
     if dt in ("iceberg", "salesforce", "hubspot"):
         # Preserve case for CRM objects / lakehouse table identifiers.
         return destination.table or destination.collection or f"dt_{base}"
@@ -82,8 +113,12 @@ def _apply_vector_extra(common: dict[str, Any], endpoint: EndpointConfig) -> Non
     common["metadata_columns"] = extra.get("metadata_columns")
     common["exclude_pii_columns"] = extra.get("exclude_pii_columns")
     common["embedding_model"] = extra.get("embedding_model")
-    common["chunk_size"] = int(extra.get("chunk_size", 512)) if extra.get("chunk_size") else 512
-    common["chunk_overlap"] = int(extra.get("chunk_overlap", 50)) if extra.get("chunk_overlap") else 50
+    common["chunk_size"] = (
+        int(extra.get("chunk_size", 512)) if extra.get("chunk_size") else 512
+    )
+    common["chunk_overlap"] = (
+        int(extra.get("chunk_overlap", 50)) if extra.get("chunk_overlap") else 50
+    )
     common["skip_chunking"] = bool(extra.get("skip_chunking"))
     if "durable_embedding_cache" in extra:
         common["durable_embedding_cache"] = bool(extra.get("durable_embedding_cache"))
@@ -119,21 +154,31 @@ def parse_file_route_sample(
         )
 
         enc = detect_encoding(content)
-        headers, rows, _enc, _delim = parse_csv_preview(content, encoding=enc, preview_rows=preview_rows)
+        headers, rows, _enc, _delim = parse_csv_preview(
+            content, encoding=enc, preview_rows=preview_rows
+        )
         if not headers:
             raise ValueError("CSV/TSV has no header row")
         records = [
             {headers[i]: (row[i] if i < len(row) else "") for i in range(len(headers))}
             for row in rows[:preview_rows]
         ]
-        schema = FileParser.infer_schema(records) if records else {h: "string" for h in headers}
+        schema = (
+            FileParser.infer_schema(records)
+            if records
+            else {h: "string" for h in headers}
+        )
         return headers, schema, count_csv_rows(content, enc)
 
     result = FileParser.parse(content, filename, enable_ocr=enable_ocr)
     if not result.success:
         raise ValueError(result.error or "File parse failed")
     sample = result.data[:preview_rows]
-    schema = FileParser.infer_schema(sample) if sample else {c: "string" for c in result.columns}
+    schema = (
+        FileParser.infer_schema(sample)
+        if sample
+        else {c: "string" for c in result.columns}
+    )
     return result.columns, schema, result.row_count
 
 
@@ -145,7 +190,9 @@ def _matrix_cell(value: Any) -> Any:
     return cell_to_string(value)
 
 
-def records_to_matrix(records: list[dict], columns: list[str]) -> tuple[list[str], list[list[Any]]]:
+def records_to_matrix(
+    records: list[dict], columns: list[str]
+) -> tuple[list[str], list[list[Any]]]:
     headers = columns or (list(records[0].keys()) if records else [])
     rows = [[_matrix_cell(rec.get(h)) for h in headers] for rec in records]
     return headers, rows
@@ -242,14 +289,12 @@ def _find_implicit_connector_id(
         from services.connector_store import list_connectors
 
         candidates = [
-            c
-            for c in list_connectors(workspace_id=workspace_id)
-            if c.type == driver
+            c for c in list_connectors(workspace_id=workspace_id) if c.type == driver
         ]
         if len(candidates) == 1:
             return candidates[0].id
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("implicit connector resolution failed: %s", exc, exc_info=exc)
     return None
 
 
@@ -258,24 +303,57 @@ def resolve_connector_config(
 ) -> dict[str, Any]:
     """Merge saved connector with inline overrides."""
     from .connector_capabilities import resolve_driver_type
+
     driver = resolve_driver_type(endpoint.format or "")
     fmt = driver
     default_port = (
-        27017 if fmt == "mongodb" else
-        3306 if fmt == "mysql" else
-        1433 if fmt == "sqlserver" else
-        1521 if fmt == "oracle" else
-        9092 if fmt == "kafka" else
-        6379 if fmt == "redis" else
-        9200 if fmt == "elasticsearch" else
-        5439 if fmt == "redshift" else
-        0 if fmt in ("sqlite", "generic_sql", "iceberg") else
-        22 if fmt == "sftp" else
-        587 if fmt == "email" else
-        6333 if fmt == "qdrant" else
-        8080 if fmt == "weaviate" else
-        19530 if fmt == "milvus" else
-        443 if fmt in ("snowflake", "bigquery", "dynamodb", "s3", "gcs", "adls", "salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase", "pinecone") else 5432
+        27017
+        if fmt == "mongodb"
+        else 3306
+        if fmt == "mysql"
+        else 1433
+        if fmt == "sqlserver"
+        else 1521
+        if fmt == "oracle"
+        else 9092
+        if fmt == "kafka"
+        else 6379
+        if fmt == "redis"
+        else 9200
+        if fmt == "elasticsearch"
+        else 5439
+        if fmt == "redshift"
+        else 0
+        if fmt in ("sqlite", "generic_sql", "iceberg")
+        else 22
+        if fmt == "sftp"
+        else 587
+        if fmt == "email"
+        else 6333
+        if fmt == "qdrant"
+        else 8080
+        if fmt == "weaviate"
+        else 19530
+        if fmt == "milvus"
+        else 443
+        if fmt
+        in (
+            "snowflake",
+            "bigquery",
+            "dynamodb",
+            "s3",
+            "gcs",
+            "adls",
+            "salesforce",
+            "hubspot",
+            "stripe",
+            "rest_api",
+            "influxdb",
+            "neo4j",
+            "couchbase",
+            "pinecone",
+        )
+        else 5432
     )
     from services.dialect_profiles import normalize_schema
 
@@ -305,7 +383,9 @@ def resolve_connector_config(
     # Keep "role" as the canonical key used by Snowflake connector functions.
     cfg["role"] = endpoint.auth_role or ""
     cfg.update(endpoint.extra)
-    connector_id = endpoint.connector_id or _find_implicit_connector_id(endpoint, cfg, fmt, workspace_id=workspace_id)
+    connector_id = endpoint.connector_id or _find_implicit_connector_id(
+        endpoint, cfg, fmt, workspace_id=workspace_id
+    )
     if connector_id:
         conn_dict = _lookup_saved_connector(connector_id, workspace_id=workspace_id)
         if not conn_dict:
@@ -321,11 +401,18 @@ def resolve_connector_config(
             if fmt == "mongodb" and not saved_database:
                 from connectors.mongodb_common import mongodb_database_from_uri
 
-                saved_database = mongodb_database_from_uri(conn_dict.get("connection_string", "")) or ""
+                saved_database = (
+                    mongodb_database_from_uri(conn_dict.get("connection_string", ""))
+                    or ""
+                )
             chosen_database = saved_database or inline_database
 
         def _pick(inline: Any, saved: Any) -> Any:
-            return inline if inline not in (None, "", 0) else (saved if saved is not None else "")
+            return (
+                inline
+                if inline not in (None, "", 0)
+                else (saved if saved is not None else "")
+            )
 
         merged_cfg = {
             "host": _pick(cfg.get("host"), conn_dict.get("host")),
@@ -334,17 +421,25 @@ def resolve_connector_config(
             "schema": _pick(cfg.get("schema"), conn_dict.get("schema")),
             "username": _pick(cfg.get("username"), conn_dict.get("username")),
             "password": _pick(cfg.get("password"), conn_dict.get("password")),
-            "connection_string": _pick(cfg.get("connection_string"), conn_dict.get("connection_string")),
+            "connection_string": _pick(
+                cfg.get("connection_string"), conn_dict.get("connection_string")
+            ),
             "warehouse": _pick(cfg.get("warehouse"), conn_dict.get("warehouse")),
-            "ssl": conn_dict.get("ssl") if cfg.get("ssl") is None or cfg.get("ssl") is False else cfg.get("ssl"),
+            "ssl": conn_dict.get("ssl")
+            if cfg.get("ssl") is None or cfg.get("ssl") is False
+            else cfg.get("ssl"),
             "type": conn_dict.get("type") or endpoint.format or "",
             "auth_mode": _pick(cfg.get("auth_mode"), conn_dict.get("auth_mode")),
             "auth_role": _pick(cfg.get("auth_role"), conn_dict.get("auth_role")),
             "auth_source": _pick(cfg.get("auth_source"), conn_dict.get("auth_source")),
             "api_key": _pick(cfg.get("api_key"), conn_dict.get("api_key")),
-            "service_account": _pick(cfg.get("service_account"), conn_dict.get("service_account")),
+            "service_account": _pick(
+                cfg.get("service_account"), conn_dict.get("service_account")
+            ),
             "private_key": _pick(cfg.get("private_key"), conn_dict.get("private_key")),
-            "endpoint_url": _pick(cfg.get("endpoint_url"), conn_dict.get("endpoint_url")),
+            "endpoint_url": _pick(
+                cfg.get("endpoint_url"), conn_dict.get("endpoint_url")
+            ),
             # EndpointConfig defaults path_style=False; do not clobber a saved
             # MinIO connector that requires path-style addressing.
             "path_style": (
@@ -380,7 +475,9 @@ def resolve_connector_config(
     if fmt == "mongodb" and not cfg.get("database"):
         from connectors.mongodb_common import mongodb_database_from_uri
 
-        cfg["database"] = mongodb_database_from_uri(cfg.get("connection_string", "")) or ""
+        cfg["database"] = (
+            mongodb_database_from_uri(cfg.get("connection_string", "")) or ""
+        )
     return cfg
 
 
@@ -434,12 +531,13 @@ def _lookup_saved_connector(
                 "path_style": getattr(conn, "path_style", False),
                 "role": getattr(conn, "auth_role", ""),
             }
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("connector store lookup failed: %s", exc, exc_info=exc)
     try:
         mongo = get_mongodb_service()
         return mongo.get_connector(connector_id)
-    except Exception:
+    except Exception as exc:
+        logger.debug("mongodb connector lookup failed: %s", exc, exc_info=exc)
         return None
 
 
@@ -458,8 +556,8 @@ def _introspect_table_schema(
             info = introspect_table_schema(cfg, table)
             if info.get("ok") and info.get("columns"):
                 return {c["name"]: c["inferred_type"] for c in info["columns"]}
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("table schema introspection failed: %s", exc, exc_info=exc)
 
     from services.dialect_profiles import schema_from_cfg
     from services.schema_introspect import introspect_schema
@@ -467,13 +565,20 @@ def _introspect_table_schema(
     info = introspect_schema(
         db_type,
         host=cfg.get("host", ""),
-        port=int(cfg.get("port") or (
-            3306 if db_type == "mysql" else
-            1433 if db_type == "sqlserver" else
-            1521 if db_type == "oracle" else
-            5439 if db_type == "redshift" else
-            5432
-        )),
+        port=int(
+            cfg.get("port")
+            or (
+                3306
+                if db_type == "mysql"
+                else 1433
+                if db_type == "sqlserver"
+                else 1521
+                if db_type == "oracle"
+                else 5439
+                if db_type == "redshift"
+                else 5432
+            )
+        ),
         database=cfg.get("database", ""),
         username=cfg.get("username", ""),
         password=cfg.get("password", ""),
@@ -495,18 +600,30 @@ def _introspect_table_schema(
 
     # Retry once with flipped SSL when the first probe failed (common when the
     # connector ssl flag does not match the host's TLS requirement).
-    if not info.get("ok") and db_type in ("postgresql", "redshift", "mysql", "sqlserver"):
+    if not info.get("ok") and db_type in (
+        "postgresql",
+        "redshift",
+        "mysql",
+        "sqlserver",
+    ):
         flipped = not bool(cfg.get("ssl", False))
         info_retry = introspect_schema(
             db_type,
             host=cfg.get("host", ""),
-            port=int(cfg.get("port") or (
-                3306 if db_type == "mysql" else
-                1433 if db_type == "sqlserver" else
-                1521 if db_type == "oracle" else
-                5439 if db_type == "redshift" else
-                5432
-            )),
+            port=int(
+                cfg.get("port")
+                or (
+                    3306
+                    if db_type == "mysql"
+                    else 1433
+                    if db_type == "sqlserver"
+                    else 1521
+                    if db_type == "oracle"
+                    else 5439
+                    if db_type == "redshift"
+                    else 5432
+                )
+            ),
             database=cfg.get("database", ""),
             username=cfg.get("username", ""),
             password=cfg.get("password", ""),
@@ -532,8 +649,8 @@ def _introspect_table_schema(
             inferred = FileParser.infer_schema(records)
             if inferred:
                 return {h: inferred.get(h, "TEXT") for h in headers}
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("record schema inference failed: %s", exc, exc_info=exc)
     return {h: "TEXT" for h in headers}
 
 
@@ -558,6 +675,7 @@ def read_source_database(
     raise_on_truncate: bool = True,
 ) -> tuple[list[dict], list[str], dict[str, str]]:
     from .connector_capabilities import resolve_driver_type
+
     cfg = resolve_connector_config(endpoint)
     # Prefer the saved connector's driver type over any inline format string.
     db_type = resolve_driver_type(cfg.get("type") or endpoint.format or "")
@@ -584,7 +702,9 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema("postgresql", cfg, table, batch.headers, records=records)
+        schema = _introspect_table_schema(
+            "postgresql", cfg, table, batch.headers, records=records
+        )
         return records, batch.headers, schema
 
     if db_type == "mongodb":
@@ -610,7 +730,9 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, "mongodb", coll_name)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema("mongodb", cfg, coll_name, batch.headers, records=records)
+        schema = _introspect_table_schema(
+            "mongodb", cfg, coll_name, batch.headers, records=records
+        )
         return records, batch.headers, schema
 
     if db_type == "mysql":
@@ -634,7 +756,9 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema(db_type, cfg, table, batch.headers, records=records)
+        schema = _introspect_table_schema(
+            db_type, cfg, table, batch.headers, records=records
+        )
         return records, batch.headers, schema
 
     if db_type == "bigquery":
@@ -660,7 +784,9 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema(db_type, cfg, table, batch.headers, records=records)
+        schema = _introspect_table_schema(
+            db_type, cfg, table, batch.headers, records=records
+        )
         return records, batch.headers, schema
 
     if db_type == "snowflake":
@@ -685,7 +811,9 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema(db_type, cfg, table, batch.headers, records=records)
+        schema = _introspect_table_schema(
+            db_type, cfg, table, batch.headers, records=records
+        )
         return records, batch.headers, schema
 
     if db_type == "gcs":
@@ -694,12 +822,18 @@ def read_source_database(
         bucket = cfg["database"]
         key = endpoint.table or endpoint.collection or endpoint.schema or ""
         if not bucket or not key:
-            raise ValueError("GCS source requires bucket (database) and object key (table/collection)")
+            raise ValueError(
+                "GCS source requires bucket (database) and object key (table/collection)"
+            )
         batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=limit)
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, key)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = FileParser.infer_schema(records) if records else {c: "string" for c in batch.headers}
+        schema = (
+            FileParser.infer_schema(records)
+            if records
+            else {c: "string" for c in batch.headers}
+        )
         return records, batch.headers, schema
 
     if db_type == "adls":
@@ -708,12 +842,18 @@ def read_source_database(
         container = cfg["database"]
         key = endpoint.table or endpoint.collection or endpoint.schema or ""
         if not container or not key:
-            raise ValueError("Azure Blob source requires container (database) and blob key (table/collection)")
+            raise ValueError(
+                "Azure Blob source requires container (database) and blob key (table/collection)"
+            )
         batch = read_object(cfg=cfg, bucket=container, key=key, offset=0, limit=limit)
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, key)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = FileParser.infer_schema(records) if records else {c: "string" for c in batch.headers}
+        schema = (
+            FileParser.infer_schema(records)
+            if records
+            else {c: "string" for c in batch.headers}
+        )
         return records, batch.headers, schema
 
     if db_type == "s3":
@@ -722,12 +862,18 @@ def read_source_database(
         bucket = cfg["database"]
         key = endpoint.table or endpoint.collection or endpoint.schema or ""
         if not bucket or not key:
-            raise ValueError("S3 source requires bucket (database) and object key (table/collection)")
+            raise ValueError(
+                "S3 source requires bucket (database) and object key (table/collection)"
+            )
         batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=limit)
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, key)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = FileParser.infer_schema(records) if records else {c: "string" for c in batch.headers}
+        schema = (
+            FileParser.infer_schema(records)
+            if records
+            else {c: "string" for c in batch.headers}
+        )
         return records, batch.headers, schema
 
     if db_type == "dynamodb":
@@ -740,7 +886,11 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = FileParser.infer_schema(records) if records else {c: "string" for c in batch.headers}
+        schema = (
+            FileParser.infer_schema(records)
+            if records
+            else {c: "string" for c in batch.headers}
+        )
         return records, batch.headers, schema
 
     if db_type == "elasticsearch":
@@ -748,12 +898,18 @@ def read_source_database(
 
         index = endpoint.table or endpoint.database or endpoint.collection
         if not index:
-            raise ValueError("Elasticsearch index name required (table or database field)")
+            raise ValueError(
+                "Elasticsearch index name required (table or database field)"
+            )
         batch, _ = read_index_batch(cfg=cfg, index=index, limit=limit)
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, index)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = FileParser.infer_schema(records) if records else {c: "string" for c in batch.headers}
+        schema = (
+            FileParser.infer_schema(records)
+            if records
+            else {c: "string" for c in batch.headers}
+        )
         return records, batch.headers, schema
 
     if db_type == "redis":
@@ -766,7 +922,11 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, pattern)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = FileParser.infer_schema(records) if records else {c: "string" for c in batch.headers}
+        schema = (
+            FileParser.infer_schema(records)
+            if records
+            else {c: "string" for c in batch.headers}
+        )
         return records, batch.headers, schema
 
     if db_type == "sqlite":
@@ -790,7 +950,9 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema(db_type, cfg, table, batch.headers, records=records)
+        schema = _introspect_table_schema(
+            db_type, cfg, table, batch.headers, records=records
+        )
         return records, batch.headers, schema
 
     if db_type == "generic_sql":
@@ -815,7 +977,9 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema(db_type, cfg, table, batch.headers, records=records)
+        schema = _introspect_table_schema(
+            db_type, cfg, table, batch.headers, records=records
+        )
         return records, batch.headers, schema
 
     if db_type in ("sqlserver", "oracle"):
@@ -828,14 +992,22 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema(db_type, cfg, table, batch.headers, records=records)
+        schema = _introspect_table_schema(
+            db_type, cfg, table, batch.headers, records=records
+        )
         return records, batch.headers, schema
 
     if db_type == "sftp":
         from connectors.sftp_reader import read_object
 
-        if not endpoint.table and not endpoint.connection_string and not endpoint.database:
-            raise ValueError("SFTP source requires a remote file path (connection_string, database, or table field)")
+        if (
+            not endpoint.table
+            and not endpoint.connection_string
+            and not endpoint.database
+        ):
+            raise ValueError(
+                "SFTP source requires a remote file path (connection_string, database, or table field)"
+            )
         batch = read_object(
             cfg=cfg,
             bucket=endpoint.database,
@@ -844,12 +1016,28 @@ def read_source_database(
             limit=limit,
         )
         if raise_on_truncate:
-            _guard_truncated_read(batch, db_type, endpoint.table or endpoint.database or endpoint.connection_string)
+            _guard_truncated_read(
+                batch,
+                db_type,
+                endpoint.table or endpoint.database or endpoint.connection_string,
+            )
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = FileParser.infer_schema(records) if records else {c: "string" for c in batch.headers}
+        schema = (
+            FileParser.infer_schema(records)
+            if records
+            else {c: "string" for c in batch.headers}
+        )
         return records, batch.headers, schema
 
-    if db_type in ("salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase"):
+    if db_type in (
+        "salesforce",
+        "hubspot",
+        "stripe",
+        "rest_api",
+        "influxdb",
+        "neo4j",
+        "couchbase",
+    ):
         from connectors.saas_common import ReadBatch
 
         mod = __import__(f"connectors.{db_type}", fromlist=["read_object"])
@@ -859,7 +1047,11 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, sobject or db_type)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = FileParser.infer_schema(records) if records else {c: "string" for c in batch.headers}
+        schema = (
+            FileParser.infer_schema(records)
+            if records
+            else {c: "string" for c in batch.headers}
+        )
         return records, batch.headers, schema
 
     if db_type == "singer_tap":
@@ -878,7 +1070,9 @@ def read_source_database(
         return records, headers, schema or {c: "string" for c in headers}
 
     if db_type == "email":
-        raise ValueError("Email cannot be a transfer source; configure it as a destination only.")
+        raise ValueError(
+            "Email cannot be a transfer source; configure it as a destination only."
+        )
 
     raise ValueError(f"Database source '{db_type}' read not implemented")
 
@@ -906,6 +1100,7 @@ def write_destination_database(
     ddl_log: list[str] = []
 
     from connectors.writer_common import transform_error_policy_for_validation_mode
+
     error_policy = transform_error_policy_for_validation_mode(validation_mode)
 
     headers, data_rows = records_to_matrix(records, columns)
@@ -919,19 +1114,33 @@ def write_destination_database(
 
     common = {
         "host": cfg["host"],
-        "port": cfg["port"] or (
-            5439 if db_type == "redshift" else
-            5432 if db_type == "postgresql" else
-            3306 if db_type == "mysql" else
-            1433 if db_type == "sqlserver" else
-            1521 if db_type == "oracle" else
-            9092 if db_type == "kafka" else
-            6333 if db_type == "qdrant" else
-            8080 if db_type == "weaviate" else
-            19530 if db_type == "milvus" else
-            22 if db_type == "sftp" else
-            587 if db_type == "email" else
-            0 if db_type in ("generic_sql", "iceberg", "sqlite") else 443
+        "port": cfg["port"]
+        or (
+            5439
+            if db_type == "redshift"
+            else 5432
+            if db_type == "postgresql"
+            else 3306
+            if db_type == "mysql"
+            else 1433
+            if db_type == "sqlserver"
+            else 1521
+            if db_type == "oracle"
+            else 9092
+            if db_type == "kafka"
+            else 6333
+            if db_type == "qdrant"
+            else 8080
+            if db_type == "weaviate"
+            else 19530
+            if db_type == "milvus"
+            else 22
+            if db_type == "sftp"
+            else 587
+            if db_type == "email"
+            else 0
+            if db_type in ("generic_sql", "iceberg", "sqlite")
+            else 443
         ),
         "database": cfg["database"],
         "username": cfg.get("username", ""),
@@ -954,29 +1163,46 @@ def write_destination_database(
         "error_policy": error_policy,
         "backfill_new_fields": backfill_new_fields,
         "job_id": job_id,
-        "write_batch_key": build_write_batch_key(table_name=table_name, file_batch_idx=0),
+        "write_batch_key": build_write_batch_key(
+            table_name=table_name, file_batch_idx=0
+        ),
         "file_batch_idx": 0,
         "skip_preflight": skip_preflight,
     }
 
     if db_type == "snowflake":
         from connectors.snowflake_writer import write_mapped_rows
+
         common["schema"] = schema_from_cfg("snowflake", cfg)
         common["warehouse"] = cfg.get("warehouse", "")
         for col in columns:
-            ddl_log.append(f"SNOWFLAKE COLUMN {col} {ddl_type('snowflake', schema.get(col, 'string'))}")
-        result = write_mapped_rows(**common, write_mode=write_mode, conflict_columns=conflict_columns or [])
+            ddl_log.append(
+                f"SNOWFLAKE COLUMN {col} {ddl_type('snowflake', schema.get(col, 'string'))}"
+            )
+        result = write_mapped_rows(
+            **common, write_mode=write_mode, conflict_columns=conflict_columns or []
+        )
         if not result.ok:
             raise RuntimeError(result.error or "Snowflake write failed")
-        ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {result.target_schema}.{result.table_name}")
-        return result.rows_written, ddl_log, {
-            "type": "snowflake", "schema": result.target_schema, "table": result.table_name,
-            "checksum": result.checksum, "driver": result.driver,
-            **_writer_diagnostics(result),
-        }
+        ddl_log.insert(
+            0, f"CREATE TABLE IF NOT EXISTS {result.target_schema}.{result.table_name}"
+        )
+        return (
+            result.rows_written,
+            ddl_log,
+            {
+                "type": "snowflake",
+                "schema": result.target_schema,
+                "table": result.table_name,
+                "checksum": result.checksum,
+                "driver": result.driver,
+                **_writer_diagnostics(result),
+            },
+        )
 
     if db_type == "postgresql" or db_type == "redshift":
         from connectors.postgresql_writer import write_mapped_rows
+
         common["schema"] = schema_from_cfg(db_type, cfg)
         if db_type == "redshift":
             common["port"] = cfg["port"] or 5439
@@ -992,32 +1218,56 @@ def write_destination_database(
         )
         if not result.ok:
             raise RuntimeError(result.error or f"{db_type} write failed")
-        ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {result.target_schema}.{result.table_name}")
-        return result.rows_written, ddl_log, {
-            "type": db_type, "schema": result.target_schema, "table": result.table_name,
-            "checksum": result.checksum, "driver": result.driver,
-            **_writer_diagnostics(result),
-        }
+        ddl_log.insert(
+            0, f"CREATE TABLE IF NOT EXISTS {result.target_schema}.{result.table_name}"
+        )
+        return (
+            result.rows_written,
+            ddl_log,
+            {
+                "type": db_type,
+                "schema": result.target_schema,
+                "table": result.table_name,
+                "checksum": result.checksum,
+                "driver": result.driver,
+                **_writer_diagnostics(result),
+            },
+        )
 
     if db_type == "mysql":
         from connectors.mysql_writer import write_mapped_rows
+
         for col in columns:
-            ddl_log.append(f"MYSQL COLUMN {col} {ddl_type('mysql', schema.get(col, 'string'))}")
-        result = write_mapped_rows(**common, write_mode=write_mode, conflict_columns=conflict_columns or [])
+            ddl_log.append(
+                f"MYSQL COLUMN {col} {ddl_type('mysql', schema.get(col, 'string'))}"
+            )
+        result = write_mapped_rows(
+            **common, write_mode=write_mode, conflict_columns=conflict_columns or []
+        )
         if not result.ok:
             raise RuntimeError(result.error or "MySQL write failed")
         ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {result.table_name}")
-        return result.rows_written, ddl_log, {
-            "type": "mysql", "database": cfg["database"], "table": result.table_name,
-            "checksum": result.checksum, "driver": result.driver,
-            **_writer_diagnostics(result),
-        }
+        return (
+            result.rows_written,
+            ddl_log,
+            {
+                "type": "mysql",
+                "database": cfg["database"],
+                "table": result.table_name,
+                "checksum": result.checksum,
+                "driver": result.driver,
+                **_writer_diagnostics(result),
+            },
+        )
 
     if db_type == "bigquery":
         from connectors.bigquery_writer import write_mapped_rows
+
         common["schema"] = cfg.get("schema", "dataflow")
         for col in columns:
-            ddl_log.append(f"BQ COLUMN {col} {ddl_type('bigquery', schema.get(col, 'string'))}")
+            ddl_log.append(
+                f"BQ COLUMN {col} {ddl_type('bigquery', schema.get(col, 'string'))}"
+            )
         result = write_mapped_rows(
             **common,
             warehouse=cfg.get("warehouse", ""),
@@ -1026,12 +1276,23 @@ def write_destination_database(
         )
         if not result.ok:
             raise RuntimeError(result.error or "BigQuery write failed")
-        ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {cfg['database']}.{result.target_schema}.{result.table_name}")
-        return result.rows_written, ddl_log, {
-            "type": "bigquery", "project": cfg["database"], "dataset": result.target_schema, "table": result.table_name,
-            "checksum": result.checksum, "driver": result.driver,
-            **_writer_diagnostics(result),
-        }
+        ddl_log.insert(
+            0,
+            f"CREATE TABLE IF NOT EXISTS {cfg['database']}.{result.target_schema}.{result.table_name}",
+        )
+        return (
+            result.rows_written,
+            ddl_log,
+            {
+                "type": "bigquery",
+                "project": cfg["database"],
+                "dataset": result.target_schema,
+                "table": result.table_name,
+                "checksum": result.checksum,
+                "driver": result.driver,
+                **_writer_diagnostics(result),
+            },
+        )
 
     if db_type == "mongodb":
         from connectors.mongodb_writer import write_mapped_rows
@@ -1045,228 +1306,373 @@ def write_destination_database(
         common["schema"] = cfg.get("schema", "db")
         for col in columns:
             ddl_log.append(f"MONGODB FIELD {col} string")
-        result = write_mapped_rows(**common, write_mode=write_mode, conflict_columns=conflict_columns or [])
+        result = write_mapped_rows(
+            **common, write_mode=write_mode, conflict_columns=conflict_columns or []
+        )
         if not result.ok:
             raise RuntimeError(result.error or "MongoDB write failed")
-        ddl_log.insert(0, f"CREATE COLLECTION IF NOT EXISTS {result.target_schema}.{result.table_name}")
-        return result.rows_written, ddl_log, {
-            "type": "mongodb", "database": result.target_schema, "collection": result.table_name,
-            "checksum": result.checksum, "driver": result.driver,
-            **_writer_diagnostics(result),
-        }
+        ddl_log.insert(
+            0,
+            f"CREATE COLLECTION IF NOT EXISTS {result.target_schema}.{result.table_name}",
+        )
+        return (
+            result.rows_written,
+            ddl_log,
+            {
+                "type": "mongodb",
+                "database": result.target_schema,
+                "collection": result.table_name,
+                "checksum": result.checksum,
+                "driver": result.driver,
+                **_writer_diagnostics(result),
+            },
+        )
 
     if db_type == "gcs":
         from connectors.gcs_writer import write_mapped_rows
+
         for col in columns:
             ddl_log.append(f"GCS FIELD {col}")
         result = write_mapped_rows(**common)
         if not result.ok:
             raise RuntimeError(result.error or "GCS write failed")
         ddl_log.insert(0, f"PUT gs://{cfg['database']}/{result.table_name}")
-        return result.rows_written, ddl_log, {
-            "type": "gcs", "bucket": cfg["database"], "key": result.table_name,
-            "checksum": result.checksum, "driver": result.driver,
-            **_writer_diagnostics(result),
-        }
+        return (
+            result.rows_written,
+            ddl_log,
+            {
+                "type": "gcs",
+                "bucket": cfg["database"],
+                "key": result.table_name,
+                "checksum": result.checksum,
+                "driver": result.driver,
+                **_writer_diagnostics(result),
+            },
+        )
 
     if db_type == "adls":
         from connectors.adls_writer import write_mapped_rows
+
         for col in columns:
             ddl_log.append(f"ADLS FIELD {col}")
         result = write_mapped_rows(**common)
         if not result.ok:
             raise RuntimeError(result.error or "Azure Blob write failed")
         ddl_log.insert(0, f"PUT abfs://{cfg['database']}/{result.table_name}")
-        return result.rows_written, ddl_log, {
-            "type": "adls", "container": cfg["database"], "key": result.table_name,
-            "checksum": result.checksum, "driver": result.driver,
-            **_writer_diagnostics(result),
-        }
+        return (
+            result.rows_written,
+            ddl_log,
+            {
+                "type": "adls",
+                "container": cfg["database"],
+                "key": result.table_name,
+                "checksum": result.checksum,
+                "driver": result.driver,
+                **_writer_diagnostics(result),
+            },
+        )
 
     if db_type == "s3":
         from connectors.s3_writer import write_mapped_rows
+
         for col in columns:
             ddl_log.append(f"S3 FIELD {col}")
         result = write_mapped_rows(**common)
         if not result.ok:
             raise RuntimeError(result.error or "S3 write failed")
         ddl_log.insert(0, f"PUT s3://{cfg['database']}/{result.table_name}")
-        return result.rows_written, ddl_log, {
-            "type": "s3", "bucket": cfg["database"], "key": result.table_name,
-            "checksum": result.checksum, "driver": result.driver,
-            **_writer_diagnostics(result),
-        }
+        return (
+            result.rows_written,
+            ddl_log,
+            {
+                "type": "s3",
+                "bucket": cfg["database"],
+                "key": result.table_name,
+                "checksum": result.checksum,
+                "driver": result.driver,
+                **_writer_diagnostics(result),
+            },
+        )
 
     if db_type == "dynamodb":
         from connectors.dynamodb_writer import write_mapped_rows
+
         for col in columns:
             ddl_log.append(f"DYNAMODB ATTR {col}")
         result = write_mapped_rows(**common)
         if not result.ok:
             raise RuntimeError(result.error or "DynamoDB write failed")
         ddl_log.insert(0, f"BATCH WRITE DynamoDB table {result.table_name}")
-        return result.rows_written, ddl_log, {
-            "type": "dynamodb", "table": result.table_name, "region": result.target_schema,
-            "checksum": result.checksum, "driver": result.driver,
-            **_writer_diagnostics(result),
-        }
+        return (
+            result.rows_written,
+            ddl_log,
+            {
+                "type": "dynamodb",
+                "table": result.table_name,
+                "region": result.target_schema,
+                "checksum": result.checksum,
+                "driver": result.driver,
+                **_writer_diagnostics(result),
+            },
+        )
 
     if db_type == "elasticsearch":
         from connectors.elasticsearch_writer import write_mapped_rows
+
         for col in columns:
             ddl_log.append(f"ES FIELD {col}")
         result = write_mapped_rows(**common)
         if not result.ok:
             raise RuntimeError(result.error or "Elasticsearch write failed")
         ddl_log.insert(0, f"BULK INDEX {result.table_name}")
-        return result.rows_written, ddl_log, {
-            "type": "elasticsearch", "index": result.table_name,
-            "checksum": result.checksum, "driver": result.driver,
-            **_writer_diagnostics(result),
-        }
+        return (
+            result.rows_written,
+            ddl_log,
+            {
+                "type": "elasticsearch",
+                "index": result.table_name,
+                "checksum": result.checksum,
+                "driver": result.driver,
+                **_writer_diagnostics(result),
+            },
+        )
 
     if db_type == "redis":
         from connectors.redis_writer import write_mapped_rows
+
         for col in columns:
             ddl_log.append(f"REDIS FIELD {col}")
         result = write_mapped_rows(**common)
         if not result.ok:
             raise RuntimeError(result.error or "Redis write failed")
         ddl_log.insert(0, f"SET keys under prefix {result.table_name}")
-        return result.rows_written, ddl_log, {
-            "type": "redis", "prefix": result.table_name,
-            "checksum": result.checksum, "driver": result.driver,
-            **_writer_diagnostics(result),
-        }
+        return (
+            result.rows_written,
+            ddl_log,
+            {
+                "type": "redis",
+                "prefix": result.table_name,
+                "checksum": result.checksum,
+                "driver": result.driver,
+                **_writer_diagnostics(result),
+            },
+        )
 
     if db_type == "sqlite":
         from connectors.sqlite_writer import write_mapped_rows
+
         for col in columns:
-            ddl_log.append(f"SQLITE COLUMN {col} {ddl_type('sqlite', schema.get(col, 'string'))}")
-        result = write_mapped_rows(**common, write_mode=write_mode, conflict_columns=conflict_columns or [])
+            ddl_log.append(
+                f"SQLITE COLUMN {col} {ddl_type('sqlite', schema.get(col, 'string'))}"
+            )
+        result = write_mapped_rows(
+            **common, write_mode=write_mode, conflict_columns=conflict_columns or []
+        )
         if not result.ok:
             raise RuntimeError(result.error or "SQLite write failed")
         ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {result.table_name}")
-        return result.rows_written, ddl_log, {
-            "type": "sqlite", "database": cfg["database"], "table": result.table_name,
-            "checksum": result.checksum, "driver": result.driver,
-            **_writer_diagnostics(result),
-        }
+        return (
+            result.rows_written,
+            ddl_log,
+            {
+                "type": "sqlite",
+                "database": cfg["database"],
+                "table": result.table_name,
+                "checksum": result.checksum,
+                "driver": result.driver,
+                **_writer_diagnostics(result),
+            },
+        )
 
     if db_type == "generic_sql":
         from connectors.generic_sql import write_mapped_rows
+
         for col in columns:
-            ddl_log.append(f"GENERIC_SQL COLUMN {col} {ddl_type('generic_sql', schema.get(col, 'string'))}")
+            ddl_log.append(
+                f"GENERIC_SQL COLUMN {col} {ddl_type('generic_sql', schema.get(col, 'string'))}"
+            )
         common["type"] = cfg.get("type", "")
-        result = write_mapped_rows(**common, write_mode=write_mode, conflict_columns=conflict_columns or [])
+        result = write_mapped_rows(
+            **common, write_mode=write_mode, conflict_columns=conflict_columns or []
+        )
         if not result.ok:
             raise RuntimeError(result.error or "Generic SQL write failed")
-        ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {result.target_schema}.{result.table_name}")
-        return result.rows_written, ddl_log, {
-            "type": "generic_sql", "driver": result.driver,
-            "schema": result.target_schema, "table": result.table_name,
-            "checksum": result.checksum, **_writer_diagnostics(result),
-        }
+        ddl_log.insert(
+            0, f"CREATE TABLE IF NOT EXISTS {result.target_schema}.{result.table_name}"
+        )
+        return (
+            result.rows_written,
+            ddl_log,
+            {
+                "type": "generic_sql",
+                "driver": result.driver,
+                "schema": result.target_schema,
+                "table": result.table_name,
+                "checksum": result.checksum,
+                **_writer_diagnostics(result),
+            },
+        )
 
     if db_type == "sftp":
         from connectors.sftp_writer import write_mapped_rows
+
         for col in columns:
             ddl_log.append(f"SFTP FIELD {col}")
-        if not common.get("table_name") and not endpoint.connection_string and not endpoint.database:
-            raise ValueError("SFTP destination requires a remote file path (connection_string, database, or table field)")
+        if (
+            not common.get("table_name")
+            and not endpoint.connection_string
+            and not endpoint.database
+        ):
+            raise ValueError(
+                "SFTP destination requires a remote file path (connection_string, database, or table field)"
+            )
         result = write_mapped_rows(**common)
         if not result.ok:
             raise RuntimeError(result.error or "SFTP write failed")
         ddl_log.insert(0, f"PUT sftp://{cfg.get('host', '')}/{result.table_name}")
-        return result.rows_written, ddl_log, {
-            "type": "sftp", "host": cfg.get("host", ""), "path": result.table_name,
-            "checksum": result.checksum, "driver": result.driver,
-            **_writer_diagnostics(result),
-        }
+        return (
+            result.rows_written,
+            ddl_log,
+            {
+                "type": "sftp",
+                "host": cfg.get("host", ""),
+                "path": result.table_name,
+                "checksum": result.checksum,
+                "driver": result.driver,
+                **_writer_diagnostics(result),
+            },
+        )
 
     if db_type == "email":
         from connectors.email import write_mapped_rows
+
         for col in columns:
             ddl_log.append(f"EMAIL FIELD {col}")
         result = write_mapped_rows(**common)
         if not result.ok:
             raise RuntimeError(result.error or "Email send failed")
         ddl_log.insert(0, f"EMAIL {result.table_name} via {cfg.get('host', '')}")
-        return result.rows_written, ddl_log, {
-            "type": "email", "host": cfg.get("host", ""), "subject": result.table_name,
-            "checksum": result.checksum, "driver": result.driver,
-            **_writer_diagnostics(result),
-        }
+        return (
+            result.rows_written,
+            ddl_log,
+            {
+                "type": "email",
+                "host": cfg.get("host", ""),
+                "subject": result.table_name,
+                "checksum": result.checksum,
+                "driver": result.driver,
+                **_writer_diagnostics(result),
+            },
+        )
 
     if db_type == "pgvector":
         from connectors.pgvector_writer import write_mapped_rows
+
         _apply_vector_extra(common, endpoint)
         result = write_mapped_rows(**common)
         if not result.ok:
             raise RuntimeError(result.error or "pgvector write failed")
         ddl_log.insert(0, f"UPSERT pgvector {result.target_schema}.{result.table_name}")
-        return result.rows_written, ddl_log, {
-            "type": "pgvector", "schema": result.target_schema, "table": result.table_name,
-            "checksum": result.checksum, "driver": result.driver,
-            "load_method": getattr(result, "load_method", None) or "pgvector_upsert",
-            **_writer_diagnostics(result),
-        }
+        return (
+            result.rows_written,
+            ddl_log,
+            {
+                "type": "pgvector",
+                "schema": result.target_schema,
+                "table": result.table_name,
+                "checksum": result.checksum,
+                "driver": result.driver,
+                "load_method": getattr(result, "load_method", None)
+                or "pgvector_upsert",
+                **_writer_diagnostics(result),
+            },
+        )
 
     if db_type == "qdrant":
         from connectors.qdrant_writer import write_mapped_rows
+
         _apply_vector_extra(common, endpoint)
         result = write_mapped_rows(**common)
         if not result.ok:
             raise RuntimeError(result.error or "Qdrant write failed")
         ddl_log.insert(0, f"UPSERT qdrant collection {result.table_name}")
-        return result.rows_written, ddl_log, {
-            "type": "qdrant", "collection": result.table_name,
-            "checksum": result.checksum, "driver": result.driver,
-            "load_method": getattr(result, "load_method", None) or "qdrant_upsert",
-            **_writer_diagnostics(result),
-        }
+        return (
+            result.rows_written,
+            ddl_log,
+            {
+                "type": "qdrant",
+                "collection": result.table_name,
+                "checksum": result.checksum,
+                "driver": result.driver,
+                "load_method": getattr(result, "load_method", None) or "qdrant_upsert",
+                **_writer_diagnostics(result),
+            },
+        )
 
     if db_type == "weaviate":
         from connectors.weaviate_writer import write_mapped_rows
+
         _apply_vector_extra(common, endpoint)
         result = write_mapped_rows(**common)
         if not result.ok:
             raise RuntimeError(result.error or "Weaviate write failed")
         ddl_log.insert(0, f"UPSERT weaviate class {result.table_name}")
-        return result.rows_written, ddl_log, {
-            "type": "weaviate", "collection": result.table_name,
-            "checksum": result.checksum, "driver": result.driver,
-            "load_method": getattr(result, "load_method", None) or "weaviate_upsert",
-            **_writer_diagnostics(result),
-        }
+        return (
+            result.rows_written,
+            ddl_log,
+            {
+                "type": "weaviate",
+                "collection": result.table_name,
+                "checksum": result.checksum,
+                "driver": result.driver,
+                "load_method": getattr(result, "load_method", None)
+                or "weaviate_upsert",
+                **_writer_diagnostics(result),
+            },
+        )
 
     if db_type == "pinecone":
         from connectors.pinecone_writer import write_mapped_rows
+
         _apply_vector_extra(common, endpoint)
         result = write_mapped_rows(**common)
         if not result.ok:
             raise RuntimeError(result.error or "Pinecone write failed")
         ddl_log.insert(0, f"UPSERT pinecone namespace {result.table_name}")
-        return result.rows_written, ddl_log, {
-            "type": "pinecone", "collection": result.table_name,
-            "checksum": result.checksum, "driver": result.driver,
-            "load_method": getattr(result, "load_method", None) or "pinecone_upsert",
-            **_writer_diagnostics(result),
-        }
+        return (
+            result.rows_written,
+            ddl_log,
+            {
+                "type": "pinecone",
+                "collection": result.table_name,
+                "checksum": result.checksum,
+                "driver": result.driver,
+                "load_method": getattr(result, "load_method", None)
+                or "pinecone_upsert",
+                **_writer_diagnostics(result),
+            },
+        )
 
     if db_type == "milvus":
         from connectors.milvus_writer import write_mapped_rows
+
         _apply_vector_extra(common, endpoint)
         result = write_mapped_rows(**common)
         if not result.ok:
             raise RuntimeError(result.error or "Milvus write failed")
         ddl_log.insert(0, f"UPSERT milvus collection {result.table_name}")
-        return result.rows_written, ddl_log, {
-            "type": "milvus", "collection": result.table_name,
-            "checksum": result.checksum, "driver": result.driver,
-            "load_method": getattr(result, "load_method", None) or "milvus_upsert",
-            **_writer_diagnostics(result),
-        }
+        return (
+            result.rows_written,
+            ddl_log,
+            {
+                "type": "milvus",
+                "collection": result.table_name,
+                "checksum": result.checksum,
+                "driver": result.driver,
+                "load_method": getattr(result, "load_method", None) or "milvus_upsert",
+                **_writer_diagnostics(result),
+            },
+        )
 
     # Registry-driven path: sqlserver, oracle, iceberg, kafka, salesforce, hubspot, …
     from .connector_dispatch import has_writer, write_via_registry
@@ -1297,14 +1703,18 @@ def write_destination_database(
         if not result.ok:
             raise RuntimeError(result.error or f"{db_type} write failed")
         ddl_log.insert(0, f"WRITE {db_type} → {result.table_name}")
-        return result.rows_written, ddl_log, {
-            "type": db_type,
-            "schema": result.target_schema,
-            "table": result.table_name,
-            "checksum": result.checksum,
-            "driver": result.driver,
-            **_writer_diagnostics(result),
-        }
+        return (
+            result.rows_written,
+            ddl_log,
+            {
+                "type": db_type,
+                "schema": result.target_schema,
+                "table": result.table_name,
+                "checksum": result.checksum,
+                "driver": result.driver,
+                **_writer_diagnostics(result),
+            },
+        )
 
     raise ValueError(f"Database destination '{db_type}' write not implemented")
 
@@ -1343,7 +1753,9 @@ def write_destination_file(
 
     if mappings:
         headers = columns
-        data_rows = [[cell_to_string(rec.get(col, "")) for col in headers] for rec in records]
+        data_rows = [
+            [cell_to_string(rec.get(col, "")) for col in headers] for rec in records
+        ]
         target_cols, _ = resolve_target_columns(mappings, types)
         mapped_rows, transform_errors = build_mapped_rows(
             headers=headers,
@@ -1353,35 +1765,48 @@ def write_destination_file(
             column_types=types,
         )
         export_columns = target_cols
-        export_records = [
-            dict(zip(target_cols, row))
-            for row in mapped_rows
-        ]
+        export_records = [dict(zip(target_cols, row)) for row in mapped_rows]
 
-    grid = [[cell_to_string(rec.get(col, "")) for col in export_columns] for rec in export_records]
+    grid = [
+        [cell_to_string(rec.get(col, "")) for col in export_columns]
+        for rec in export_records
+    ]
 
     if can_convert(src_fmt, fmt) and grid:
-        content, mime = convert_rows(export_columns, grid, source_format=src_fmt, target_format=fmt)
+        content, mime = convert_rows(
+            export_columns, grid, source_format=src_fmt, target_format=fmt
+        )
         ext = (
-            "tsv" if fmt == "tsv"
-            else "xlsx" if fmt == "excel"
-            else "parquet" if fmt == "parquet"
-            else "avro" if fmt == "avro"
-            else "orc" if fmt == "orc"
-            else "xml" if fmt == "xml"
-            else fmt if fmt in ("csv", "jsonl")
+            "tsv"
+            if fmt == "tsv"
+            else "xlsx"
+            if fmt == "excel"
+            else "parquet"
+            if fmt == "parquet"
+            else "avro"
+            if fmt == "avro"
+            else "orc"
+            if fmt == "orc"
+            else "xml"
+            if fmt == "xml"
+            else fmt
+            if fmt in ("csv", "jsonl")
             else "json"
         )
         filename = f"export.{ext}"
-        return content, filename, {
-            "format": fmt,
-            "filename": filename,
-            "rows": len(export_records),
-            "mime": mime,
-            "converted_from": src_fmt if src_fmt != fmt else None,
-            "transform_errors": transform_errors[:10],
-            "mapped": bool(mappings),
-        }
+        return (
+            content,
+            filename,
+            {
+                "format": fmt,
+                "filename": filename,
+                "rows": len(export_records),
+                "mime": mime,
+                "converted_from": src_fmt if src_fmt != fmt else None,
+                "transform_errors": transform_errors[:10],
+                "mapped": bool(mappings),
+            },
+        )
 
     def _to_json_value(value: Any, col: str) -> Any:
         if value is None:
@@ -1393,13 +1818,26 @@ def write_destination_file(
             ctype = normalize_inferred(types.get(col, "string")).lower()
             if ctype in {"json", "array", "object", "struct"}:
                 try:
-                    return json.loads(text, parse_float=Decimal, parse_constant=lambda v: None)
+                    return json.loads(
+                        text, parse_float=Decimal, parse_constant=lambda v: None
+                    )
                 except json.JSONDecodeError:
                     return value
-            if ctype in {"text", "string", "varchar", "uuid", "binary", "date", "datetime", "time"}:
+            if ctype in {
+                "text",
+                "string",
+                "varchar",
+                "uuid",
+                "binary",
+                "date",
+                "datetime",
+                "time",
+            }:
                 return value
             try:
-                return json.loads(text, parse_float=Decimal, parse_constant=lambda v: None)
+                return json.loads(
+                    text, parse_float=Decimal, parse_constant=lambda v: None
+                )
             except json.JSONDecodeError:
                 return value
         return value
@@ -1408,41 +1846,66 @@ def write_destination_file(
         buf = io.StringIO()
         writer = csv.DictWriter(buf, fieldnames=export_columns, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows([{c: cell_to_string(v) for c, v in r.items()} for r in export_records])
+        writer.writerows(
+            [{c: cell_to_string(v) for c, v in r.items()} for r in export_records]
+        )
         content = buf.getvalue().encode("utf-8")
         filename = "export.csv"
     elif fmt == "tsv":
         buf = io.StringIO()
-        writer = csv.DictWriter(buf, fieldnames=export_columns, delimiter="\t", extrasaction="ignore")
+        writer = csv.DictWriter(
+            buf, fieldnames=export_columns, delimiter="\t", extrasaction="ignore"
+        )
         writer.writeheader()
-        writer.writerows([{c: cell_to_string(v) for c, v in r.items()} for r in export_records])
+        writer.writerows(
+            [{c: cell_to_string(v) for c, v in r.items()} for r in export_records]
+        )
         content = buf.getvalue().encode("utf-8")
         filename = "export.tsv"
     elif fmt == "jsonl":
-        records = [{c: _to_json_value(v, c) for c, v in r.items()} for r in export_records]
-        lines = [json.dumps(r, default=json_default, ensure_ascii=False, allow_nan=False) for r in records]
+        records = [
+            {c: _to_json_value(v, c) for c, v in r.items()} for r in export_records
+        ]
+        lines = [
+            json.dumps(r, default=json_default, ensure_ascii=False, allow_nan=False)
+            for r in records
+        ]
         content = "\n".join(lines).encode("utf-8")
         filename = "export.jsonl"
     elif fmt == "excel":
-        content, _ = convert_rows(export_columns, grid, source_format="csv", target_format=fmt)
+        content, _ = convert_rows(
+            export_columns, grid, source_format="csv", target_format=fmt
+        )
         filename = "export.xlsx"
     elif fmt == "parquet":
-        content, _ = convert_rows(export_columns, grid, source_format="csv", target_format=fmt)
+        content, _ = convert_rows(
+            export_columns, grid, source_format="csv", target_format=fmt
+        )
         filename = "export.parquet"
     else:
-        records = [{c: _to_json_value(v, c) for c, v in r.items()} for r in export_records]
-        content = json.dumps(records, indent=2, default=json_default, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        records = [
+            {c: _to_json_value(v, c) for c, v in r.items()} for r in export_records
+        ]
+        content = json.dumps(
+            records, indent=2, default=json_default, ensure_ascii=False, allow_nan=False
+        ).encode("utf-8")
         filename = "export.json"
-    return content, filename, {
-        "format": fmt,
-        "filename": filename,
-        "rows": len(export_records),
-        "transform_errors": transform_errors[:10],
-        "mapped": bool(mappings),
-    }
+    return (
+        content,
+        filename,
+        {
+            "format": fmt,
+            "filename": filename,
+            "rows": len(export_records),
+            "transform_errors": transform_errors[:10],
+            "mapped": bool(mappings),
+        },
+    )
 
 
-def resolve_endpoint_dict(endpoint_dict: dict[str, Any], workspace_id: str | None = None) -> dict[str, Any]:
+def resolve_endpoint_dict(
+    endpoint_dict: dict[str, Any], workspace_id: str | None = None
+) -> dict[str, Any]:
     """Resolve a saved connector into a plain endpoint dict (format, credentials, etc.)."""
     from .models import EndpointConfig, endpoint_to_dict
 

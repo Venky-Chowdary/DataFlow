@@ -6,6 +6,7 @@ import base64
 import hashlib
 import heapq
 import json
+import logging
 import os
 import re
 import struct
@@ -19,6 +20,8 @@ from decimal import Decimal, InvalidOperation, Overflow
 from typing import Any, Iterable
 
 from services.value_serializer import json_default
+
+logger = logging.getLogger(__name__)
 
 SPILL_THRESHOLD = int(os.getenv("DATAFLOW_FINGERPRINT_SPILL_THRESHOLD", "1000000"))
 
@@ -106,7 +109,13 @@ def _iter_fingerprints(
                     f"{c.lower()}={normalize_cell(row[col_index[c]] if col_index[c] < len(row) else None)}"
                     for c in sorted_cols
                 ]
-                row_key = normalize_cell(row[sort_idx] if sort_idx >= 0 and sort_idx < len(row) else None) if sort_key else ""
+                row_key = (
+                    normalize_cell(
+                        row[sort_idx] if sort_idx >= 0 and sort_idx < len(row) else None
+                    )
+                    if sort_key
+                    else ""
+                )
             fingerprint = "\x1f".join(parts)
             yield (row_key, fingerprint)
     else:
@@ -115,7 +124,11 @@ def _iter_fingerprints(
                 keys = sorted(row.keys(), key=lambda x: x.lower())
                 parts = [f"{k.lower()}={normalize_cell(row.get(k))}" for k in keys]
                 fingerprint = "\x1f".join(parts)
-                row_key = normalize_cell(_get_case_insensitive(row, sort_key)) if sort_key else ""
+                row_key = (
+                    normalize_cell(_get_case_insensitive(row, sort_key))
+                    if sort_key
+                    else ""
+                )
             else:
                 fingerprint = "|".join(sorted(normalize_cell(v) for v in row))
                 row_key = ""
@@ -244,7 +257,9 @@ def canonical_checksum(
     """
     if not rows:
         return hashlib.sha256(b"").hexdigest()[:16]
-    return _hash_fingerprints(list(_iter_fingerprints(rows, columns, sort_key=sort_key)))
+    return _hash_fingerprints(
+        list(_iter_fingerprints(rows, columns, sort_key=sort_key))
+    )
 
 
 def canonical_checksum_from_iter(
@@ -260,7 +275,9 @@ def canonical_checksum_from_iter(
     A limit of 0 means process all rows.
     """
     fingerprints: list[tuple[str, str]] = []
-    for i, (row_key, fp) in enumerate(_iter_fingerprints(rows, columns, sort_key=sort_key)):
+    for i, (row_key, fp) in enumerate(
+        _iter_fingerprints(rows, columns, sort_key=sort_key)
+    ):
         if limit and i >= limit:
             break
         fingerprints.append((row_key, fp))
@@ -305,7 +322,11 @@ def reconcile(
         allow_extra_rows and target_rows >= expected_rows
     )
     if not row_count_ok:
-        extra_note = f" (target has {target_rows - expected_rows} extra rows)" if target_rows > expected_rows else ""
+        extra_note = (
+            f" (target has {target_rows - expected_rows} extra rows)"
+            if target_rows > expected_rows
+            else ""
+        )
         return ReconciliationReport(
             passed=False,
             source_rows=source_rows,
@@ -471,17 +492,22 @@ def verify_postgres_table(
         )
         from connectors.sql_identifiers import quote_table_ref
 
-        table_ref = quote_table_ref(table_name, schema or "public", dialect="postgresql")
+        table_ref = quote_table_ref(
+            table_name, schema or "public", dialect="postgresql"
+        )
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")
             count = int(cur.fetchone()[0])
             cur.execute(f"SELECT * FROM {table_ref}")
             names = [d[0] for d in cur.description] if cur.description else []
             columns = names or target_columns or []
-            checksum = canonical_checksum_from_iter(_iter_fetchmany(cur), columns, limit=limit)
+            checksum = canonical_checksum_from_iter(
+                _iter_fetchmany(cur), columns, limit=limit
+            )
         conn.close()
         return count, checksum
-    except Exception:
+    except Exception as exc:
+        logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
 
 
@@ -513,12 +539,18 @@ def verify_pgvector_table(
             connection_string=connection_string,
             ssl=ssl,
         )
-        table_ref = quote_table_ref(table_name, schema or "public", dialect="postgresql")
+        table_ref = quote_table_ref(
+            table_name, schema or "public", dialect="postgresql"
+        )
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")
             count = int(cur.fetchone()[0])
             cur.execute(f"SELECT source_id, metadata FROM {table_ref}")
-            names = [d[0] for d in cur.description] if cur.description else ["source_id", "metadata"]
+            names = (
+                [d[0] for d in cur.description]
+                if cur.description
+                else ["source_id", "metadata"]
+            )
             rows: list[dict[str, Any]] = []
             for raw in _iter_fetchmany(cur):
                 rec = dict(zip(names, raw))
@@ -548,7 +580,8 @@ def verify_pgvector_table(
             limit=limit,
         )
         return count, checksum
-    except Exception:
+    except Exception as exc:
+        logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
 
 
@@ -582,7 +615,10 @@ def verify_snowflake_table(
             warehouse=warehouse,
             connection_string=connection_string,
         )
-        from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
+        from connectors.sql_identifiers import (
+            quote_sql_identifier,
+            require_safe_identifier,
+        )
 
         with conn.cursor() as cur:
             if warehouse:
@@ -591,17 +627,22 @@ def verify_snowflake_table(
                     cur.execute(f"USE WAREHOUSE {quote_sql_identifier(wh)}")
                 except Exception:
                     pass
-            resolved = resolve_or_fold_snowflake_table(cur, schema or "PUBLIC", table_name)
+            resolved = resolve_or_fold_snowflake_table(
+                cur, schema or "PUBLIC", table_name
+            )
             qualified_name = snowflake_qualified_table(schema or "PUBLIC", resolved)
             cur.execute(f"SELECT COUNT(*) FROM {qualified_name}")
             count = int(cur.fetchone()[0])
             cur.execute(f"SELECT * FROM {qualified_name}")
             names = [d[0] for d in cur.description] if cur.description else []
             columns = names or target_columns or []
-            checksum = canonical_checksum_from_iter(_iter_fetchmany(cur), columns, limit=limit)
+            checksum = canonical_checksum_from_iter(
+                _iter_fetchmany(cur), columns, limit=limit
+            )
         conn.close()
         return count, checksum
-    except Exception:
+    except Exception as exc:
+        logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
 
 
@@ -622,9 +663,13 @@ def verify_mysql_table(
         from connectors.mysql_conn import get_connection
 
         conn = get_connection(
-            host=host, port=port, database=database,
-            username=username, password=password,
-            connection_string=connection_string, ssl=ssl,
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            connection_string=connection_string,
+            ssl=ssl,
         )
         from connectors.sql_identifiers import quote_table_ref
 
@@ -635,10 +680,13 @@ def verify_mysql_table(
             cur.execute(f"SELECT * FROM {table_ref}")
             names = [d[0] for d in cur.description] if cur.description else []
             columns = names or target_columns or []
-            checksum = canonical_checksum_from_iter(_iter_fetchmany(cur), columns, limit=limit)
+            checksum = canonical_checksum_from_iter(
+                _iter_fetchmany(cur), columns, limit=limit
+            )
         conn.close()
         return count, checksum
-    except Exception:
+    except Exception as exc:
+        logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
 
 
@@ -669,8 +717,11 @@ def verify_bigquery_table(
                 yield list(row.values()) if hasattr(row, "values") else list(row)
                 yielded += 1
 
-        return int(count), canonical_checksum_from_iter(_row_iter(), columns, limit=limit)
-    except Exception:
+        return int(count), canonical_checksum_from_iter(
+            _row_iter(), columns, limit=limit
+        )
+    except Exception as exc:
+        logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
 
 
@@ -750,7 +801,8 @@ def verify_s3_object(
         rows, headers = _rows_from_object_bytes(body, key, target_columns)
         columns = headers or target_columns or []
         return len(rows), canonical_checksum_from_iter(rows, columns, limit=limit)
-    except Exception:
+    except Exception as exc:
+        logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
 
 
@@ -779,7 +831,8 @@ def verify_gcs_blob(
         rows, headers = _rows_from_object_bytes(body, key, target_columns)
         columns = headers or target_columns or []
         return len(rows), canonical_checksum_from_iter(rows, columns, limit=limit)
-    except Exception:
+    except Exception as exc:
+        logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
 
 
@@ -811,7 +864,9 @@ def verify_sqlite_table(
         cur.execute(f"SELECT * FROM {table_ref}")
         names = [d[0] for d in cur.description] if cur.description else []
         columns = names or target_columns or []
-        checksum = canonical_checksum_from_iter(_iter_fetchmany(cur), columns, limit=limit)
+        checksum = canonical_checksum_from_iter(
+            _iter_fetchmany(cur), columns, limit=limit
+        )
         conn.close()
         return int(count), checksum
     except sqlite3.OperationalError as exc:
@@ -820,7 +875,8 @@ def verify_sqlite_table(
         if "no such table" in str(exc).lower():
             return 0, ""
         return -1, ""
-    except Exception:
+    except Exception as exc:
+        logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
 
 
@@ -847,10 +903,13 @@ def verify_duckdb_table(
         cur = conn.execute(f"SELECT * FROM {table_ref}")
         names = [d[0] for d in cur.description] if cur.description else []
         columns = names or target_columns or []
-        checksum = canonical_checksum_from_iter(_iter_fetchmany(cur), columns, limit=limit)
+        checksum = canonical_checksum_from_iter(
+            _iter_fetchmany(cur), columns, limit=limit
+        )
         conn.close()
         return int(count), checksum
-    except Exception:
+    except Exception as exc:
+        logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
 
 
@@ -870,7 +929,10 @@ def verify_mongodb_collection(
 ) -> tuple[int, str]:
     """Reconcile a MongoDB target by counting and fingerprinting documents."""
     try:
-        from connectors.mongodb_common import _mongo_client, normalize_mongodb_connection_string
+        from connectors.mongodb_common import (
+            _mongo_client,
+            normalize_mongodb_connection_string,
+        )
 
         conn_str = normalize_mongodb_connection_string(
             connection_string or "",
@@ -900,7 +962,8 @@ def verify_mongodb_collection(
         )
         checksum = canonical_checksum_from_iter(_doc_iter(), columns, limit=limit)
         return int(count), checksum
-    except Exception:
+    except Exception as exc:
+        logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
 
 
@@ -947,7 +1010,9 @@ def verify_redis_prefix(
                 raw = client.get(key)
                 text = _decode(raw)
                 try:
-                    payload = json.loads(text) if text.startswith("{") else {"value": text}
+                    payload = (
+                        json.loads(text) if text.startswith("{") else {"value": text}
+                    )
                 except (json.JSONDecodeError, TypeError):
                     payload = {"value": text}
                 if isinstance(payload, dict):
@@ -961,7 +1026,8 @@ def verify_redis_prefix(
             columns = sorted(sample.keys()) if sample else ["value"]
         checksum = canonical_checksum_from_iter(_row_iter(), columns, limit=limit)
         return len(keys), checksum
-    except Exception:
+    except Exception as exc:
+        logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
 
 
@@ -989,9 +1055,10 @@ def verify_dynamodb_table(
             region_name="us-east-1",
         )
         paginator = client.get_paginator("scan")
-        count = sum(page["Count"] for page in paginator.paginate(
-            TableName=table_name, Select="COUNT"
-        ))
+        count = sum(
+            page["Count"]
+            for page in paginator.paginate(TableName=table_name, Select="COUNT")
+        )
 
         deserializer = TypeDeserializer()
 
@@ -1005,8 +1072,11 @@ def verify_dynamodb_table(
                     yielded += 1
 
         columns = target_columns or []
-        return int(count), canonical_checksum_from_iter(_item_iter(), columns, limit=limit)
-    except Exception:
+        return int(count), canonical_checksum_from_iter(
+            _item_iter(), columns, limit=limit
+        )
+    except Exception as exc:
+        logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
 
 
@@ -1113,7 +1183,9 @@ def verify_target(
             password=dest.get("password", ""),
             schema=schema,
             connection_string=dest.get("connection_string", ""),
-            ssl=dest.get("ssl", False) if db_type == "postgresql" else dest.get("ssl", False),
+            ssl=dest.get("ssl", False)
+            if db_type == "postgresql"
+            else dest.get("ssl", False),
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,
@@ -1282,7 +1354,9 @@ def normalize_cell(value: Any) -> str:
             # Fold offsets/Z to UTC wall-clock; keep naive strings as wall-clock.
             # Do not keep a trailing Z — that falsely fails NTZ sink readback
             # against TIMESTAMPTZ sources that share the same UTC components.
-            return _checksum_datetime_utc_wall(dtm if isinstance(dtm, str) else str(dtm), original=text)
+            return _checksum_datetime_utc_wall(
+                dtm if isinstance(dtm, str) else str(dtm), original=text
+            )
         dt = _parse_date(text)
         if dt:
             return f"{dt}T00:00:00"
@@ -1301,8 +1375,7 @@ def _checksum_datetime_utc_wall(iso_text: str, *, original: str | None = None) -
         return ""
     src = (original or text).strip()
     aware_or_epoch = bool(
-        src.endswith(("Z", "z"))
-        or re.search(r"[+-]\d{2}:?\d{2}\s*$", src)
+        src.endswith(("Z", "z")) or re.search(r"[+-]\d{2}:?\d{2}\s*$", src)
     )
     try:
         from services.transform_engine import _EPOCH_MS_RE, _EPOCH_S_RE
@@ -1404,12 +1477,32 @@ def build_reconciliation_proof(
             "verification_mode": "unproven_identity",
         }
 
-    source_keys = {normalize_cell(row.get(key_col)) for row in source_records if row.get(key_col) is not None}
-    target_keys = {normalize_cell(row.get(key_col)) for row in target_records if row.get(key_col) is not None}
+    source_keys = {
+        normalize_cell(row.get(key_col))
+        for row in source_records
+        if row.get(key_col) is not None
+    }
+    target_keys = {
+        normalize_cell(row.get(key_col))
+        for row in target_records
+        if row.get(key_col) is not None
+    }
     # Null / blank keys cannot prove uniqueness — fail closed on fidelity claims.
-    source_null_keys = sum(1 for row in source_records if row.get(key_col) is None or normalize_cell(row.get(key_col)) == "")
-    target_null_keys = sum(1 for row in target_records if row.get(key_col) is None or normalize_cell(row.get(key_col)) == "")
-    if source_null_keys or target_null_keys or len(source_keys) < max(1, len(source_records) - source_null_keys):
+    source_null_keys = sum(
+        1
+        for row in source_records
+        if row.get(key_col) is None or normalize_cell(row.get(key_col)) == ""
+    )
+    target_null_keys = sum(
+        1
+        for row in target_records
+        if row.get(key_col) is None or normalize_cell(row.get(key_col)) == ""
+    )
+    if (
+        source_null_keys
+        or target_null_keys
+        or len(source_keys) < max(1, len(source_records) - source_null_keys)
+    ):
         # Duplicate or null identity → positional comparison only, never high confidence.
         sample_compare = sample_compare_rows(
             source_records,
@@ -1455,7 +1548,12 @@ def build_reconciliation_proof(
     extra_key_count = len(extra_keys)
     total_keys = max(len(source_keys), 1)
     row_fidelity_score = round(
-        max(0.0, 1.0 - (missing_key_count / total_keys) - (extra_key_count / total_keys) * 0.25),
+        max(
+            0.0,
+            1.0
+            - (missing_key_count / total_keys)
+            - (extra_key_count / total_keys) * 0.25,
+        ),
         4,
     )
 
@@ -1499,7 +1597,10 @@ def sample_compare_rows(
         if isinstance(tgt_raw, dict):
             return tgt_raw
         if target_columns and isinstance(tgt_raw, (list, tuple)):
-            return {col: tgt_raw[i] if i < len(tgt_raw) else None for i, col in enumerate(target_columns)}
+            return {
+                col: tgt_raw[i] if i < len(tgt_raw) else None
+                for i, col in enumerate(target_columns)
+            }
         return None
 
     target_dicts = [d for d in (_as_dict(t) for t in target_rows) if d is not None]
@@ -1593,13 +1694,15 @@ def sample_compare_rows(
             tgt_val = normalize_cell(tgt.get(tgt_col))
             compared += 1
             if src_val != tgt_val:
-                mismatches.append({
-                    "row": str(idx),
-                    "source": src_col,
-                    "target": tgt_col,
-                    "source_value": src_val[:120],
-                    "target_value": tgt_val[:120],
-                })
+                mismatches.append(
+                    {
+                        "row": str(idx),
+                        "source": src_col,
+                        "target": tgt_col,
+                        "source_value": src_val[:120],
+                        "target_value": tgt_val[:120],
+                    }
+                )
                 if len(mismatches) >= 10:
                     return {
                         "passed": False,
@@ -1639,7 +1742,9 @@ def read_target_sample(
     )
 
     cols = columns or ["*"]
-    keys = [k for k in (key_values or []) if k is not None and k != ""][: max(1, int(limit or 50))]
+    keys = [k for k in (key_values or []) if k is not None and k != ""][
+        : max(1, int(limit or 50))
+    ]
 
     def _row_names(description: Any) -> list[str]:
         # When explicit columns were requested, trust the caller's keys so
@@ -1659,12 +1764,20 @@ def read_target_sample(
         if db_type == "postgresql":
             from connectors.postgresql_conn import get_connection
 
-            col_sql = "*" if cols == ["*"] else quote_column_list(
-                [require_safe_identifier(c, preserve_case=True) for c in cols]
+            col_sql = (
+                "*"
+                if cols == ["*"]
+                else quote_column_list(
+                    [require_safe_identifier(c, preserve_case=True) for c in cols]
+                )
             )
-            table_ref = quote_table_ref(table_name, schema or "public", dialect="postgresql")
+            table_ref = quote_table_ref(
+                table_name, schema or "public", dialect="postgresql"
+            )
             order_sql = (
-                quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
+                quote_sql_identifier(
+                    require_safe_identifier(sort_key, preserve_case=True)
+                )
                 if sort_key
                 else "1"
             )
@@ -1712,13 +1825,19 @@ def read_target_sample(
         if db_type == "mysql":
             from connectors.mysql_conn import get_connection
 
-            mysql_col_sql = "*" if cols == ["*"] else quote_column_list(
-                [require_safe_identifier(c, preserve_case=True) for c in cols],
-                quote_char="`",
+            mysql_col_sql = (
+                "*"
+                if cols == ["*"]
+                else quote_column_list(
+                    [require_safe_identifier(c, preserve_case=True) for c in cols],
+                    quote_char="`",
+                )
             )
             table_ref = quote_table_ref(table_name, dialect="mysql")
             mysql_order = (
-                quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True), "`")
+                quote_sql_identifier(
+                    require_safe_identifier(sort_key, preserve_case=True), "`"
+                )
                 if sort_key
                 else "1"
             )
@@ -1756,8 +1875,11 @@ def read_target_sample(
         if db_type == "duckdb" or (
             db_type == "generic_sql"
             and (
-                "duckdb" in ((dest.get("connection_string") or dest.get("database") or "")).lower()
-                or (dest.get("connection_string") or dest.get("database") or "").lower().endswith((".duckdb", ".duck"))
+                "duckdb"
+                in (dest.get("connection_string") or dest.get("database") or "").lower()
+                or (dest.get("connection_string") or dest.get("database") or "")
+                .lower()
+                .endswith((".duckdb", ".duck"))
             )
         ):
             import sqlalchemy as sa
@@ -1766,22 +1888,32 @@ def read_target_sample(
             path = dest.get("connection_string") or dest.get("database", "")
             if not path:
                 return []
-            duckdb_col_sql = "*" if cols == ["*"] else quote_column_list(
-                [require_safe_identifier(c, preserve_case=True) for c in cols]
+            duckdb_col_sql = (
+                "*"
+                if cols == ["*"]
+                else quote_column_list(
+                    [require_safe_identifier(c, preserve_case=True) for c in cols]
+                )
             )
             table_ref = quote_table_ref(table_name, dialect="duckdb")
             duckdb_order = (
-                quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
+                quote_sql_identifier(
+                    require_safe_identifier(sort_key, preserve_case=True)
+                )
                 if sort_key
                 else "1"
             )
             try:
-                engine = get_sqlalchemy_engine({"type": "duckdb", "connection_string": path})
+                engine = get_sqlalchemy_engine(
+                    {"type": "duckdb", "connection_string": path}
+                )
             except Exception:
                 return []
             with engine.connect() as conn:
                 if keys and sort_key:
-                    key_col = quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
+                    key_col = quote_sql_identifier(
+                        require_safe_identifier(sort_key, preserve_case=True)
+                    )
                     params: dict[str, Any] = {f"k{i}": k for i, k in enumerate(keys)}
                     params["lim"] = int(limit)
                     placeholders = ",".join(f":k{i}" for i in range(len(keys)))
@@ -1800,7 +1932,10 @@ def read_target_sample(
                     return []
 
         if db_type == "mongodb":
-            from connectors.mongodb_common import _mongo_client, normalize_mongodb_connection_string
+            from connectors.mongodb_common import (
+                _mongo_client,
+                normalize_mongodb_connection_string,
+            )
 
             try:
                 conn_str = normalize_mongodb_connection_string(
@@ -1836,7 +1971,11 @@ def read_target_sample(
                         try:
                             from bson import ObjectId
 
-                            if isinstance(k, str) and len(k) == 24 and all(c in "0123456789abcdefABCDEF" for c in k):
+                            if (
+                                isinstance(k, str)
+                                and len(k) == 24
+                                and all(c in "0123456789abcdefABCDEF" for c in k)
+                            ):
                                 widened.add(ObjectId(k))
                         except Exception:
                             pass
@@ -1851,8 +1990,11 @@ def read_target_sample(
         if db_type == "sqlite" or (
             db_type == "generic_sql"
             and (
-                "sqlite" in ((dest.get("connection_string") or dest.get("database") or "")).lower()
-                or (dest.get("connection_string") or dest.get("database") or "").lower().endswith((".db", ".sqlite"))
+                "sqlite"
+                in (dest.get("connection_string") or dest.get("database") or "").lower()
+                or (dest.get("connection_string") or dest.get("database") or "")
+                .lower()
+                .endswith((".db", ".sqlite"))
             )
         ):
             import sqlite3
@@ -1866,19 +2008,27 @@ def read_target_sample(
             )
             if not path:
                 return []
-            sqlite_col_sql = "*" if cols == ["*"] else quote_column_list(
-                [require_safe_identifier(c, preserve_case=True) for c in cols]
+            sqlite_col_sql = (
+                "*"
+                if cols == ["*"]
+                else quote_column_list(
+                    [require_safe_identifier(c, preserve_case=True) for c in cols]
+                )
             )
             table_ref = quote_table_ref(table_name, dialect="sqlite")
             sqlite_order = (
-                quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
+                quote_sql_identifier(
+                    require_safe_identifier(sort_key, preserve_case=True)
+                )
                 if sort_key
                 else "1"
             )
             conn = sqlite3.connect(str(path))
             try:
                 if keys and sort_key:
-                    key_col = quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
+                    key_col = quote_sql_identifier(
+                        require_safe_identifier(sort_key, preserve_case=True)
+                    )
                     placeholders = ",".join(["?"] * len(keys))
                     sql = f"SELECT {sqlite_col_sql} FROM {table_ref} WHERE {key_col} IN ({placeholders}) ORDER BY {sqlite_order} LIMIT ?"
                     cur = conn.execute(sql, [*keys, int(limit)])
@@ -1935,13 +2085,23 @@ def read_target_sample(
                     pattern = f"{prefix}:*" if prefix else "*"
                     cursor = 0
                     while True:
-                        cursor, batch = client.scan(cursor=cursor, match=pattern, count=500)
+                        cursor, batch = client.scan(
+                            cursor=cursor, match=pattern, count=500
+                        )
                         for raw_key in batch:
-                            key = raw_key.decode() if isinstance(raw_key, bytes) else str(raw_key)
+                            key = (
+                                raw_key.decode()
+                                if isinstance(raw_key, bytes)
+                                else str(raw_key)
+                            )
                             raw = client.get(key)
                             text = _decode(raw)
                             try:
-                                payload = json.loads(text) if text.startswith("{") else {"value": text}
+                                payload = (
+                                    json.loads(text)
+                                    if text.startswith("{")
+                                    else {"value": text}
+                                )
                             except (json.JSONDecodeError, TypeError):
                                 payload = {"value": text}
                             if isinstance(payload, dict):
@@ -1953,7 +2113,10 @@ def read_target_sample(
                         if cursor == 0 or len(rows_out) >= limit:
                             break
                 if columns:
-                    rows_out = [{k: v for k, v in row.items() if k in columns} for row in rows_out]
+                    rows_out = [
+                        {k: v for k, v in row.items() if k in columns}
+                        for row in rows_out
+                    ]
                 return rows_out[:limit]
             except Exception:
                 return []
@@ -1976,21 +2139,39 @@ def read_target_sample(
                     warehouse=dest.get("warehouse", ""),
                     connection_string=dest.get("connection_string", ""),
                 )
-                from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
+                from connectors.sql_identifiers import (
+                    quote_sql_identifier,
+                    require_safe_identifier,
+                )
 
                 with conn.cursor() as cur:
-                    resolved = resolve_or_fold_snowflake_table(cur, schema or "PUBLIC", table_name)
-                    qualified_name = snowflake_qualified_table(schema or "PUBLIC", resolved)
-                    sf_col_sql = "*" if cols == ["*"] else quote_column_list(
-                        [require_safe_identifier(c, preserve_case=True) for c in cols]
+                    resolved = resolve_or_fold_snowflake_table(
+                        cur, schema or "PUBLIC", table_name
+                    )
+                    qualified_name = snowflake_qualified_table(
+                        schema or "PUBLIC", resolved
+                    )
+                    sf_col_sql = (
+                        "*"
+                        if cols == ["*"]
+                        else quote_column_list(
+                            [
+                                require_safe_identifier(c, preserve_case=True)
+                                for c in cols
+                            ]
+                        )
                     )
                     sf_order = (
-                        quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
+                        quote_sql_identifier(
+                            require_safe_identifier(sort_key, preserve_case=True)
+                        )
                         if sort_key
                         else "1"
                     )
                     if keys and sort_key:
-                        key_col = quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
+                        key_col = quote_sql_identifier(
+                            require_safe_identifier(sort_key, preserve_case=True)
+                        )
                         # Snowflake IN is type-sensitive; widen strings to ints/floats.
                         widened: set[Any] = set()
                         for k in keys:

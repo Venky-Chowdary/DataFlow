@@ -54,7 +54,9 @@ try:
         resolve_sync_contract,
         should_drop_destination_for_sync,
     )
-except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+except (
+    ImportError
+):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services import lineage_telemetry as lineage
     from src.services.data_quality_history import validate_batch_against_history
     from src.services.error_handling import (
@@ -132,7 +134,9 @@ except ImportError:  # pragma: no cover - compatibility for tests
     )
 try:
     from ai.training.training_scheduler import schedule_training_on_transfer
-except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+except (
+    ImportError
+):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.ai.training.training_scheduler import schedule_training_on_transfer
 
 from connectors.writer_common import CHUNK_SIZE
@@ -144,7 +148,9 @@ from services.batch_progress import (
 
 try:
     from services import schema_registry
-except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+except (
+    ImportError
+):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services import schema_registry
 from services.checkpoint_service import (
     Checkpoint,
@@ -243,7 +249,10 @@ def _compare_and_publish_load_history(
         quality_anomalies = list(load_history_report.get("anomalies") or [])
         if quality_anomalies:
             mongo.update_job_status(
-                job_id, "running", phase="quality_check", progress_pct=20,
+                job_id,
+                "running",
+                phase="quality_check",
+                progress_pct=20,
                 message="; ".join(quality_anomalies[:5]),
                 load_history_report=load_history_report,
             )
@@ -255,7 +264,8 @@ def _compare_and_publish_load_history(
                 }
         else:
             mongo.update_job_status(
-                job_id, "running",
+                job_id,
+                "running",
                 load_history_report=load_history_report,
             )
     except Exception as hist_exc:
@@ -267,12 +277,13 @@ def _compare_and_publish_load_history(
         }
         try:
             mongo.update_job_status(
-                job_id, "running",
+                job_id,
+                "running",
                 load_history_report=load_history_report,
                 message=load_history_report["warning"],
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("load-history status update failed: %s", exc, exc_info=exc)
     return load_history_report
 
 
@@ -292,7 +303,9 @@ def _persist_load_history_profile(
         from services.data_quality_history import profile_batch, save_profile
 
         route = transfer_request_to_dict(request)
-        redacted_rows = pii_guard.redact_records(rows, mappings or []) if mappings else rows
+        redacted_rows = (
+            pii_guard.redact_records(rows, mappings or []) if mappings else rows
+        )
         save_profile(
             route["source"],
             route["destination"],
@@ -302,8 +315,8 @@ def _persist_load_history_profile(
             rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
             row_count=row_count,
         )
-    except Exception:
-        logger.debug("load-history save_profile skipped", exc_info=True)
+    except Exception as exc:
+        logger.debug("load-history save_profile skipped: %s", exc, exc_info=exc)
 
 
 def _validation_plan_for_result(pf: dict | None) -> dict:
@@ -329,7 +342,9 @@ def _fail_job_preflight(mongo, job_id: str, pf: dict, *, lineage) -> tuple[str, 
     from services.quarantine_from_preflight import quarantine_rows_from_preflight
 
     decision = (pf.get("proof_bundle") or {}).get("transfer_decision", {}) or {}
-    blocker_reasons = [b.get("message") for b in pf.get("blockers", []) if isinstance(b, dict)]
+    blocker_reasons = [
+        b.get("message") for b in pf.get("blockers", []) if isinstance(b, dict)
+    ]
     qrows = quarantine_rows_from_preflight(pf)
     row_ids = {d.get("row") for d in qrows if d.get("row") is not None}
     rejected_rows = len(row_ids) if row_ids else len(qrows)
@@ -349,10 +364,14 @@ def _fail_job_preflight(mongo, job_id: str, pf: dict, *, lineage) -> tuple[str, 
         "proof_bundle": {
             "decision": decision.get("decision"),
             "reason": decision.get("reason"),
-            "semantic_mapping_score": pf.get("proof_bundle", {}).get("semantic_mapping_score"),
+            "semantic_mapping_score": pf.get("proof_bundle", {}).get(
+                "semantic_mapping_score"
+            ),
             "min_confidence": pf.get("proof_bundle", {}).get("min_confidence"),
             "quality_score": pf.get("proof_bundle", {}).get("quality_score"),
-            "compliance_risk": (pf.get("proof_bundle", {}).get("compliance") or {}).get("risk_score"),
+            "compliance_risk": (pf.get("proof_bundle", {}).get("compliance") or {}).get(
+                "risk_score"
+            ),
         },
         "readiness_score": pf.get("readiness_score"),
         "validation_plan": _validation_plan_for_result(pf),
@@ -360,19 +379,27 @@ def _fail_job_preflight(mongo, job_id: str, pf: dict, *, lineage) -> tuple[str, 
         "quarantine_issue_count": len(qrows),
         "quarantine_row_count": rejected_rows,
     }
-    error_message = decision.get("reason") or "; ".join(str(x) for x in blocker_reasons if x) or "Preflight blocked transfer"
+    error_message = (
+        decision.get("reason")
+        or "; ".join(str(x) for x in blocker_reasons if x)
+        or "Preflight blocked transfer"
+    )
     lineage.emit_preflight_completed(
-        run_id=job_id, passed=False,
+        run_id=job_id,
+        passed=False,
         readiness_score=pf.get("readiness_score", 0),
         blockers=pf.get("blockers", []),
         validation_plan=_validation_plan_for_result(pf),
     )
     lineage.emit_run_failed(
-        run_id=job_id, job_id=job_id, error=error_message,
+        run_id=job_id,
+        job_id=job_id,
+        error=error_message,
         error_details=error_details,
     )
     mongo.update_job_status(
-        job_id, "failed",
+        job_id,
+        "failed",
         error=error_message,
         phase="failed",
         progress_pct=0,
@@ -504,11 +531,19 @@ def _destination_schema_probe(
         else:
             exists = None
         return schema, exists
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "Destination schema probe failed for %s: %s",
+            getattr(destination, "format", ""),
+            exc,
+            exc_info=exc,
+        )
         return {}, None
 
 
-def _destination_schema_types(destination: EndpointConfig, sync_mode: str = "") -> dict[str, str]:
+def _destination_schema_types(
+    destination: EndpointConfig, sync_mode: str = ""
+) -> dict[str, str]:
     """Introspect destination column types for schema-aware preflight and transforms.
 
     For full-refresh overwrite sync modes the destination table will be dropped
@@ -528,7 +563,9 @@ def _infer_primary_key(columns: list[str], mappings: list[dict[str, Any]]) -> st
     """
     if not columns:
         return ""
-    mapping_dict = {m.get("source", ""): m.get("target", m.get("source", "")) for m in mappings}
+    mapping_dict = {
+        m.get("source", ""): m.get("target", m.get("source", "")) for m in mappings
+    }
     candidates = [c for c in columns if c.lower() == "id" or c.lower().endswith("_id")]
     if not candidates:
         # Fall back to the first short, non-nullable-looking column name.
@@ -551,7 +588,9 @@ def _checkpoint_has_progress(checkpoint: Any) -> bool:
     )
 
 
-def _persist_job_quarantine(job_id: str, dest_summary: dict[str, Any], request: Any = None) -> None:
+def _persist_job_quarantine(
+    job_id: str, dest_summary: dict[str, Any], request: Any = None
+) -> None:
     """Best-effort durable DLQ write for rejected rows; never hide transfer success.
 
     Writes control-plane JSONL **and** (when supported) a destination
@@ -566,7 +605,9 @@ def _persist_job_quarantine(job_id: str, dest_summary: dict[str, Any], request: 
         persist_rejected_rows(
             job_id=job_id,
             rejected_details=details,
-            workspace_id=str(getattr(request, "workspace_id", "") or "") if request else "",
+            workspace_id=str(getattr(request, "workspace_id", "") or "")
+            if request
+            else "",
             source="universal_engine",
         )
     except Exception as exc:
@@ -591,7 +632,9 @@ def _persist_job_quarantine(job_id: str, dest_summary: dict[str, Any], request: 
                 dest_summary["dest_quarantine_rows"] = dest_result.get("rows_written")
         except Exception as exc:
             dest_summary["dest_quarantine_error"] = str(exc)[:300]
-            dest_summary.setdefault("dest_quarantine", {"ok": False, "error": str(exc)[:300]})
+            dest_summary.setdefault(
+                "dest_quarantine", {"ok": False, "error": str(exc)[:300]}
+            )
 
 
 _CDC_JOB_FIELDS = (
@@ -651,7 +694,11 @@ def _promote_cdc_job_fields(checkpoint: dict[str, Any], update: dict[str, Any]) 
     if isinstance(streams, list) and streams:
         update["streams"] = streams
     summary_streams = (checkpoint.get("destination_summary") or {}).get("streams")
-    if isinstance(summary_streams, list) and summary_streams and "streams" not in update:
+    if (
+        isinstance(summary_streams, list)
+        and summary_streams
+        and "streams" not in update
+    ):
         update["streams"] = summary_streams
 
 
@@ -688,12 +735,14 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
         if isinstance(exc, CdcLeaseConflict):
             details.update(exc.to_dict())
             details["retriable"] = False
-            extras.update({
-                "cdc_lease_conflict": True,
-                "cdc_lease_holder": exc.holder_id or None,
-                "cdc_lease_resource": exc.resource or None,
-                "cdc_lease_cursor_key": exc.cursor_key or None,
-            })
+            extras.update(
+                {
+                    "cdc_lease_conflict": True,
+                    "cdc_lease_holder": exc.holder_id or None,
+                    "cdc_lease_resource": exc.resource or None,
+                    "cdc_lease_cursor_key": exc.cursor_key or None,
+                }
+            )
         elif isinstance(exc, LeaseStoreError):
             details["code"] = "cdc_lease_store_unavailable"
             details["retriable"] = True  # Redis blip — safe to retry once store is back
@@ -701,36 +750,43 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
         elif isinstance(exc, CdcTxnBufferOverflow):
             details.update(exc.to_dict())
             details["retriable"] = False
-            extras.update({
-                "cdc_txn_buffer_overflow": True,
-                "cdc_txn_xid": exc.xid or None,
-                "cdc_txn_max_events": exc.max_events or None,
-            })
+            extras.update(
+                {
+                    "cdc_txn_buffer_overflow": True,
+                    "cdc_txn_xid": exc.xid or None,
+                    "cdc_txn_max_events": exc.max_events or None,
+                }
+            )
         elif isinstance(exc, CdcToastIncompleteError):
             details.update(exc.to_dict())
             details["retriable"] = False
-            extras.update({
-                "cdc_toast_incomplete": True,
-                "cdc_toast_table": exc.table or None,
-            })
-    except Exception:
-        pass
+            extras.update(
+                {
+                    "cdc_toast_incomplete": True,
+                    "cdc_toast_table": exc.table or None,
+                }
+            )
+    except Exception as exc:
+        logger.debug("cdc toast classification skipped: %s", exc, exc_info=exc)
     try:
         from services.cdc_cursor_gap import CdcCursorGapError
 
         if isinstance(exc, CdcCursorGapError):
             details.update(exc.to_dict())
             details["retriable"] = False
-            extras.update({
-                "cdc_cursor_gap": True,
-                "cdc_cursor_gap_code": exc.code,
-                "cdc_cursor_gap_dialect": exc.dialect or None,
-                "cdc_cursor_gap_resume": exc.resume or None,
-                "cdc_cursor_gap_retained": exc.retained or None,
-                "cdc_lease_cursor_key": exc.cursor_key or extras.get("cdc_lease_cursor_key"),
-            })
-    except Exception:
-        pass
+            extras.update(
+                {
+                    "cdc_cursor_gap": True,
+                    "cdc_cursor_gap_code": exc.code,
+                    "cdc_cursor_gap_dialect": exc.dialect or None,
+                    "cdc_cursor_gap_resume": exc.resume or None,
+                    "cdc_cursor_gap_retained": exc.retained or None,
+                    "cdc_lease_cursor_key": exc.cursor_key
+                    or extras.get("cdc_lease_cursor_key"),
+                }
+            )
+    except Exception as exc:
+        logger.debug("cdc cursor gap classification skipped: %s", exc, exc_info=exc)
     try:
         from services.cdc_effectively_once import CdcAppendOnlySinkError
 
@@ -738,8 +794,10 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
             details["code"] = "cdc_append_only_sink"
             details["retriable"] = False
             extras["cdc_append_only_sink"] = True
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(
+            "cdc append-only sink classification skipped: %s", exc, exc_info=exc
+        )
     return details, extras
 
 
@@ -757,16 +815,19 @@ def _fail_runtime_job(
     prev = {}
     try:
         prev = mongo.get_job(job_id) or {}
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "failed to load prior job state for %s: %s", job_id, exc, exc_info=exc
+        )
         prev = {}
     prev_phase = str(prev.get("phase") or "").strip().lower()
     failed_at_phase = (
-        prev_phase if prev_phase and prev_phase not in {"failed", "cancelled", "queued", ""} else "load"
+        prev_phase
+        if prev_phase and prev_phase not in {"failed", "cancelled", "queued", ""}
+        else "load"
     )
     operator_msg = str(
-        lease_extras.pop("operator_error", None)
-        or error_details.get("message")
-        or exc
+        lease_extras.pop("operator_error", None) or error_details.get("message") or exc
     )
     display = str(exc) if cancelled else operator_msg
     mongo.update_job_status(
@@ -825,7 +886,8 @@ def _drop_destination_table(destination: EndpointConfig) -> bool:
         table_name = resolve_dest_table(db_type, destination)
         schema = cfg.get("schema")
         return drop_table(db_type, cfg, table_name, schema)
-    except Exception:
+    except Exception as exc:
+        logger.warning("Drop destination table failed: %s", exc, exc_info=exc)
         return False
 
 
@@ -838,7 +900,8 @@ def _schema_for_endpoint(destination: EndpointConfig) -> str | None:
 
         cfg = resolve_connector_config(destination)
         return get_sql_schema(cfg)
-    except Exception:
+    except Exception as exc:
+        logger.warning("Destination schema resolution failed: %s", exc, exc_info=exc)
         return None
 
 
@@ -857,8 +920,8 @@ def _enrich_mappings_with_types(
             column_types=column_types or {},
             dest_types=dest_types or {},
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Transform enrichment failed: %s", exc, exc_info=exc)
     out = []
     for m in mappings:
         enriched = dict(m)
@@ -895,7 +958,8 @@ def _auto_map(
             mappings = default_mappings(columns)
         else:
             target_schema, dest_exists = _destination_schema_probe(
-                request.destination, sync_mode=sync_mode,
+                request.destination,
+                sync_mode=sync_mode,
             )
             if not target_schema:
                 # Empty columns: only invent identity create-new when the object
@@ -907,12 +971,18 @@ def _auto_map(
                         {
                             "name": c,
                             "inferred_type": schema.get(c, "string"),
-                            "samples": [cell_to_string(r.get(c, "")) for r in (sample_rows or [])[:8]],
+                            "samples": [
+                                cell_to_string(r.get(c, ""))
+                                for r in (sample_rows or [])[:8]
+                            ],
                         }
                         for c in columns
                     ]
                     source_samples = {
-                        c: [cell_to_string(r.get(c, "")) for r in (sample_rows or [])[:8]]
+                        c: [
+                            cell_to_string(r.get(c, ""))
+                            for r in (sample_rows or [])[:8]
+                        ]
                         for c in columns
                     }
                     result = run_mapping_pipeline(
@@ -921,7 +991,9 @@ def _auto_map(
                         source_schemas=source_schemas,
                         target_schemas=None,
                         file_format=request.source.format,
-                        confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
+                        confidence_threshold=confidence_threshold_for_mode(
+                            request.validation_mode
+                        ),
                         source_samples=source_samples,
                         validation_mode=request.validation_mode,
                         use_llm=False,
@@ -930,7 +1002,11 @@ def _auto_map(
                         destination_table_exists=dest_exists,
                     )
                     auto = result.get("mappings")
-                    if auto and isinstance(auto, list) and any(m.get("source") for m in auto):
+                    if (
+                        auto
+                        and isinstance(auto, list)
+                        and any(m.get("source") for m in auto)
+                    ):
                         mappings = auto
                     elif dest_exists is False:
                         mappings = default_mappings(columns)
@@ -949,7 +1025,9 @@ def _auto_map(
                     and not is_overwrite_sync(sync_mode)
                     and "_id" not in columns
                 ):
-                    target_schema = {k: v for k, v in target_schema.items() if k != "_id"}
+                    target_schema = {
+                        k: v for k, v in target_schema.items() if k != "_id"
+                    }
 
                 try:
                     from services.mapping_pipeline import run_mapping_pipeline
@@ -958,17 +1036,27 @@ def _auto_map(
                         {
                             "name": c,
                             "inferred_type": schema.get(c, "string"),
-                            "samples": [cell_to_string(r.get(c, "")) for r in (sample_rows or [])[:8]],
+                            "samples": [
+                                cell_to_string(r.get(c, ""))
+                                for r in (sample_rows or [])[:8]
+                            ],
                         }
                         for c in columns
                     ]
                     target_columns = list(target_schema.keys())
                     target_schemas = [
-                        {"name": c, "inferred_type": target_schema.get(c, "string"), "samples": []}
+                        {
+                            "name": c,
+                            "inferred_type": target_schema.get(c, "string"),
+                            "samples": [],
+                        }
                         for c in target_columns
                     ]
                     source_samples = {
-                        c: [cell_to_string(r.get(c, "")) for r in (sample_rows or [])[:8]]
+                        c: [
+                            cell_to_string(r.get(c, ""))
+                            for r in (sample_rows or [])[:8]
+                        ]
                         for c in columns
                     }
                     result = run_mapping_pipeline(
@@ -977,22 +1065,33 @@ def _auto_map(
                         source_schemas=source_schemas,
                         target_schemas=target_schemas,
                         file_format=request.source.format,
-                        confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
+                        confidence_threshold=confidence_threshold_for_mode(
+                            request.validation_mode
+                        ),
                         source_samples=source_samples,
                         validation_mode=request.validation_mode,
                         use_llm=False,
                         schema_policy=request.schema_policy,
                     )
                     auto = result.get("mappings")
-                    if auto and isinstance(auto, list) and any(m.get("source") for m in auto):
+                    if (
+                        auto
+                        and isinstance(auto, list)
+                        and any(m.get("source") for m in auto)
+                    ):
                         mapped_sources = {str(m.get("source")) for m in auto}
                         if request.backfill_new_fields:
                             for c in columns:
                                 if c not in mapped_sources:
-                                    auto.append({"source": c, "target": c, "confidence": 0.95})
+                                    auto.append(
+                                        {"source": c, "target": c, "confidence": 0.95}
+                                    )
                         mappings = auto
                 except Exception as exc:
-                    logger.warning("Auto-mapping failed: %s; falling back to identity mappings", exc)
+                    logger.warning(
+                        "Auto-mapping failed: %s; falling back to identity mappings",
+                        exc,
+                    )
 
     if mappings is None:
         mappings = default_mappings(columns)
@@ -1051,11 +1150,13 @@ def _record_schema_and_lineage(
         tgt = str(m.get("target", "")).strip()
         if not src or not tgt:
             continue
-        target_columns.append({
-            "name": tgt,
-            "type": schema.get(src, "string"),
-            "primary_key": False,
-        })
+        target_columns.append(
+            {
+                "name": tgt,
+                "type": schema.get(src, "string"),
+                "primary_key": False,
+            }
+        )
     if target_columns:
         schema_registry.register_schema(
             columns=target_columns,
@@ -1065,8 +1166,16 @@ def _record_schema_and_lineage(
             job_id=job_id,
         )
         schema_registry.record_lineage(
-            source={"connector_type": request.source.format, "connector_id": src_id, "object_name": src_object},
-            target={"connector_type": request.destination.format, "connector_id": dst_id, "object_name": dst_object},
+            source={
+                "connector_type": request.source.format,
+                "connector_id": src_id,
+                "object_name": src_object,
+            },
+            target={
+                "connector_type": request.destination.format,
+                "connector_id": dst_id,
+                "object_name": dst_object,
+            },
             mappings=mappings,
             job_id=job_id,
         )
@@ -1093,19 +1202,27 @@ class UniversalTransferEngine:
         """Return the maximum resident set size (bytes) for this process so far."""
         try:
             return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
-        except Exception:
+        except Exception as exc:
+            logger.debug("peak memory read failed: %s", exc, exc_info=exc)
             return 0
 
     def _resolve_saved_connectors(self, request: TransferRequest) -> None:
         """Expand connector_id references into full host/port/credentials before execution."""
         try:
             from .adapters import resolve_endpoint
-        except Exception:
+        except Exception as exc:
+            logger.warning("resolve_endpoint import failed: %s", exc, exc_info=exc)
             return
-        request.source = resolve_endpoint(request.source, workspace_id=request.workspace_id)
-        request.destination = resolve_endpoint(request.destination, workspace_id=request.workspace_id)
+        request.source = resolve_endpoint(
+            request.source, workspace_id=request.workspace_id
+        )
+        request.destination = resolve_endpoint(
+            request.destination, workspace_id=request.workspace_id
+        )
 
-    def execute_tracked(self, request: TransferRequest, job_id: str, resume: bool = False) -> TransferResult:
+    def execute_tracked(
+        self, request: TransferRequest, job_id: str, resume: bool = False
+    ) -> TransferResult:
         """Timed wrapper around the core transfer engine."""
         self._resolve_saved_connectors(request)
         locale_token = set_active_date_locale(request.date_locale)
@@ -1115,7 +1232,9 @@ class UniversalTransferEngine:
             result = self._execute_tracked_core(request, job_id, resume=resume)
             elapsed = time.monotonic() - start
             result.elapsed_seconds = round(elapsed, 3)
-            result.records_per_second = round(result.records_transferred / elapsed, 3) if elapsed > 0 else 0.0
+            result.records_per_second = (
+                round(result.records_transferred / elapsed, 3) if elapsed > 0 else 0.0
+            )
             result.peak_memory_bytes = max(self._peak_memory_bytes() - start_mem, 0)
             # Surface SLA metrics in the destination summary for the UI / API consumers.
             result.destination_summary["elapsed_seconds"] = result.elapsed_seconds
@@ -1126,7 +1245,9 @@ class UniversalTransferEngine:
         finally:
             reset_active_date_locale(locale_token)
 
-    def _notify_job_status(self, request: TransferRequest, result: TransferResult) -> None:
+    def _notify_job_status(
+        self, request: TransferRequest, result: TransferResult
+    ) -> None:
         """Fire workspace notifications for failed or partially-quarantined jobs."""
         rejected = result.destination_summary.get("rejected_rows", 0) or 0
         coerced = result.destination_summary.get("coerced_null_rows", 0) or 0
@@ -1162,19 +1283,21 @@ class UniversalTransferEngine:
             )
             results = notify_workspace(request.workspace_id or "", payload)
             log_job_notifications(result.job_id, results)
-        except Exception:
+        except Exception as exc:
             # Notifications must never fail a transfer.
-            pass
+            logger.debug("job status notification suppressed: %s", exc, exc_info=exc)
 
-    def _execute_tracked_core(self, request: TransferRequest, job_id: str, resume: bool = False) -> TransferResult:
+    def _execute_tracked_core(
+        self, request: TransferRequest, job_id: str, resume: bool = False
+    ) -> TransferResult:
         mongo = get_mongodb_service()
         checkpoint_service = CheckpointService(mongo)
         checkpoint = None
         if resume:
             try:
                 checkpoint = resume_or_create_checkpoint(job_id, checkpoint_service)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("resume checkpoint load failed: %s", exc, exc_info=exc)
         if not resume:
             checkpoint = Checkpoint(job_id=job_id)
         lineage.emit_run_started(
@@ -1188,19 +1311,28 @@ class UniversalTransferEngine:
         src_fmt = request.source.format or "csv"
         dst_fmt = request.destination.format or "mongodb"
         ok, msg = validate_transfer(
-            request.source.kind, src_fmt,
-            request.destination.kind, dst_fmt,
+            request.source.kind,
+            src_fmt,
+            request.destination.kind,
+            dst_fmt,
         )
         if not ok:
             from .connector_capabilities import transfer_live_driver_types
+
             live = ", ".join(transfer_live_driver_types())
             msg = f"{msg}. Transfer-live drivers: {live}."
-            mongo.update_job_status(job_id, "failed", error=msg, phase="failed", progress_pct=0)
+            mongo.update_job_status(
+                job_id, "failed", error=msg, phase="failed", progress_pct=0
+            )
             lineage.emit_run_failed(
-                run_id=job_id, job_id=job_id, error=msg,
+                run_id=job_id,
+                job_id=job_id,
+                error=msg,
                 error_details={"reason": "Unsupported route", "supported": live},
             )
-            return TransferResult(success=False, error=msg, operation=request.operation, job_id=job_id)
+            return TransferResult(
+                success=False, error=msg, operation=request.operation, job_id=job_id
+            )
 
         if (
             supports_streaming(request.source, request.destination)
@@ -1209,7 +1341,10 @@ class UniversalTransferEngine:
         ):
             try:
                 return self._execute_streaming(
-                    request, job_id, mongo, src_fmt,
+                    request,
+                    job_id,
+                    mongo,
+                    src_fmt,
                     resume=resume,
                     checkpoint=checkpoint,
                     checkpoint_service=checkpoint_service,
@@ -1220,7 +1355,11 @@ class UniversalTransferEngine:
                 # to the buffered path which supports all destinations.
                 pass
 
-        non_streaming_mode = request.sync_mode.lower() in ("full_refresh_mirror", "mirror", "scd2")
+        non_streaming_mode = request.sync_mode.lower() in (
+            "full_refresh_mirror",
+            "mirror",
+            "scd2",
+        )
         if (
             request.source.kind == "file"
             and request.destination.kind == "database"
@@ -1236,7 +1375,10 @@ class UniversalTransferEngine:
             )
         ):
             return self._execute_file_streaming(
-                request, job_id, mongo, src_fmt,
+                request,
+                job_id,
+                mongo,
+                src_fmt,
                 resume=resume,
                 checkpoint=checkpoint,
                 checkpoint_service=checkpoint_service,
@@ -1246,12 +1388,17 @@ class UniversalTransferEngine:
         contract_id = ""
         try:
             mongo.update_job_status(
-                job_id, "running", phase="reading", progress_pct=5,
+                job_id,
+                "running",
+                phase="reading",
+                progress_pct=5,
                 message="Reading source data…",
             )
             records, columns, schema = with_retry(
                 lambda: self._read_source(request),
-                budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
+                budget=RetryBudget(
+                    max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0
+                ),
             )
             if request.source_filter:
                 records = apply_row_filter(records, request.source_filter)
@@ -1262,17 +1409,29 @@ class UniversalTransferEngine:
                 request.limit,
             )
             if not records and request.source.kind != "database":
-                mongo.update_job_status(job_id, "failed", error="No records to transfer", phase="failed")
-                return TransferResult(success=False, error="No records to transfer", operation=request.operation, job_id=job_id)
+                mongo.update_job_status(
+                    job_id, "failed", error="No records to transfer", phase="failed"
+                )
+                return TransferResult(
+                    success=False,
+                    error="No records to transfer",
+                    operation=request.operation,
+                    job_id=job_id,
+                )
 
             total_rows = len(records)
-            mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
+            mongo.update_job_status(
+                job_id, "running", total_rows=total_rows, records_processed=0
+            )
 
             dest_schema_types, dest_table_exists_flag = _destination_schema_probe(
-                request.destination, sync_mode=request.sync_mode,
+                request.destination,
+                sync_mode=request.sync_mode,
             )
             mappings = _enrich_mappings_with_types(
-                _auto_map(request, columns, schema, sample_rows=records[:100], job_id=job_id),
+                _auto_map(
+                    request, columns, schema, sample_rows=records[:100], job_id=job_id
+                ),
                 column_types=schema,
                 dest_types=dest_schema_types,
             )
@@ -1287,9 +1446,14 @@ class UniversalTransferEngine:
             conflict_columns: list[str] = []
             if contract and contract.primary_key:
                 conflict_columns = [
-                    map_source_to_target(col, mappings) for col in contract.primary_key_columns()
+                    map_source_to_target(col, mappings)
+                    for col in contract.primary_key_columns()
                 ]
-            if not conflict_columns and effective_sync_lower in ("full_refresh_mirror", "mirror", "scd2"):
+            if not conflict_columns and effective_sync_lower in (
+                "full_refresh_mirror",
+                "mirror",
+                "scd2",
+            ):
                 inferred_pk = _infer_primary_key(columns, mappings)
                 if inferred_pk:
                     conflict_columns = [inferred_pk]
@@ -1312,7 +1476,9 @@ class UniversalTransferEngine:
                     or "",
                     primary_key=conflict_columns or ["id"],
                     field_map={
-                        str(m.get("source") or ""): str(m.get("target") or m.get("source") or "")
+                        str(m.get("source") or ""): str(
+                            m.get("target") or m.get("source") or ""
+                        )
                         for m in (mappings or [])
                         if m.get("source")
                     },
@@ -1334,7 +1500,10 @@ class UniversalTransferEngine:
                 )
 
             mongo.update_job_status(
-                job_id, "running", phase="preflight", progress_pct=15,
+                job_id,
+                "running",
+                phase="preflight",
+                progress_pct=15,
                 message="Validating mapping and schema…",
             )
             if not request.skip_preflight and request.destination.kind == "database":
@@ -1350,9 +1519,15 @@ class UniversalTransferEngine:
                     source_format=request.source.format,
                     sync_mode=request.sync_mode,
                     sample_rows=records[:100],
-                    confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
+                    confidence_threshold=confidence_threshold_for_mode(
+                        request.validation_mode
+                    ),
                     destination_column_types=dest_schema_types,
-                    destination_table_exists=(dest_table_exists_flag if dest_table_exists_flag is not None else bool(dest_schema_types)),
+                    destination_table_exists=(
+                        dest_table_exists_flag
+                        if dest_table_exists_flag is not None
+                        else bool(dest_schema_types)
+                    ),
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
@@ -1363,7 +1538,9 @@ class UniversalTransferEngine:
                         or ""
                     ),
                     destination_table=(
-                        request.destination.table or request.destination.collection or ""
+                        request.destination.table
+                        or request.destination.collection
+                        or ""
                     ),
                     source_filename=request.source_filename or "",
                     schema_policy=request.schema_policy,
@@ -1385,13 +1562,17 @@ class UniversalTransferEngine:
                 )
                 if not dest_ok:
                     mongo.update_job_status(
-                        job_id, "failed",
+                        job_id,
+                        "failed",
                         error=f"Destination unreachable: {dest_msg}",
-                        phase="failed", progress_pct=0,
+                        phase="failed",
+                        progress_pct=0,
                     )
                     line_msg = f"Destination unreachable: {dest_msg}"
                     lineage.emit_run_failed(
-                        run_id=job_id, job_id=job_id, error=line_msg,
+                        run_id=job_id,
+                        job_id=job_id,
+                        error=line_msg,
                         error_details={"reason": "Destination unreachable"},
                     )
                     return TransferResult(
@@ -1401,7 +1582,9 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
                 if not pf["passed"]:
-                    error_message, error_details = _fail_job_preflight(mongo, job_id, pf, lineage=lineage)
+                    error_message, error_details = _fail_job_preflight(
+                        mongo, job_id, pf, lineage=lineage
+                    )
                     return TransferResult(
                         success=False,
                         error=error_message,
@@ -1413,14 +1596,18 @@ class UniversalTransferEngine:
                     )
 
             if pf:
-                mongo.update_job_status(job_id, "running", phase="preflight", progress_pct=15, preflight=pf)
+                mongo.update_job_status(
+                    job_id, "running", phase="preflight", progress_pct=15, preflight=pf
+                )
 
             # Data contract / circuit breaker enforcement.
             try:
                 contract_id = enforce_or_create_contract(request, schema, mappings, pf)
             except ContractViolation as cv:
                 msg = cv.message
-                mongo.update_job_status(job_id, "failed", error=msg, phase="failed", progress_pct=0)
+                mongo.update_job_status(
+                    job_id, "failed", error=msg, phase="failed", progress_pct=0
+                )
                 return TransferResult(
                     success=False,
                     error=msg,
@@ -1432,7 +1619,11 @@ class UniversalTransferEngine:
             # History-aware data quality: compare this load to the last N runs
             # for the same source→destination route (null-rate, volume, mean MAD).
             load_history_report = _compare_and_publish_load_history(
-                mongo, job_id, records, request, schema,
+                mongo,
+                job_id,
+                records,
+                request,
+                schema,
                 validation_mode=request.validation_mode,
                 row_count_hint=len(records),
             )
@@ -1440,7 +1631,11 @@ class UniversalTransferEngine:
                 anomalies = list(load_history_report.get("anomalies") or [])
                 msg = "Data quality anomaly: " + "; ".join(anomalies[:8])
                 mongo.update_job_status(
-                    job_id, "failed", error=msg, phase="failed", progress_pct=0,
+                    job_id,
+                    "failed",
+                    error=msg,
+                    phase="failed",
+                    progress_pct=0,
                     load_history_report=load_history_report,
                 )
                 return TransferResult(
@@ -1457,8 +1652,13 @@ class UniversalTransferEngine:
             rows_written = 0
 
             mongo.update_job_status(
-                job_id, "running", phase="writing",
-                progress_pct=compute_transfer_progress_pct(phase="writing", rows_processed=0, total_rows=total_rows) or 5,
+                job_id,
+                "running",
+                phase="writing",
+                progress_pct=compute_transfer_progress_pct(
+                    phase="writing", rows_processed=0, total_rows=total_rows
+                )
+                or 5,
                 message=f"Writing {total_rows:,} rows…",
             )
 
@@ -1469,10 +1669,12 @@ class UniversalTransferEngine:
                         raise TransferCancelled("Transfer cancelled by user")
                 except TransferCancelled:
                     raise
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Cancellation check failed: %s", exc, exc_info=exc)
 
-            def on_checkpoint(chunk: int, chunks: int, rows: int, checkpoint: dict | None = None) -> None:
+            def on_checkpoint(
+                chunk: int, chunks: int, rows: int, checkpoint: dict | None = None
+            ) -> None:
                 _check_cancelled()
                 pct = compute_transfer_progress_pct(
                     phase="writing",
@@ -1494,7 +1696,9 @@ class UniversalTransferEngine:
                     update["destination_summary"] = {
                         "checksum": checkpoint.get("checksum", ""),
                         "rejected_rows": checkpoint.get("rejected_rows", 0),
-                        "rejected_details": (checkpoint.get("rejected_details") or [])[:50],
+                        "rejected_details": (checkpoint.get("rejected_details") or [])[
+                            :50
+                        ],
                     }
                     _promote_cdc_job_fields(checkpoint, update)
                 mongo.update_job_status(job_id, "running", **update)
@@ -1511,13 +1715,10 @@ class UniversalTransferEngine:
                 # full-refresh DROP when resuming with a durable checkpoint that
                 # already wrote progress (avoids wiping destination on resume).
                 checkpoint_has_progress = _checkpoint_has_progress(checkpoint)
-                should_drop_full_refresh = (
-                    should_drop_destination_for_sync(
-                        request_sync_mode=request.sync_mode,
-                        contract_sync_mode=contract.sync_mode if contract else None,
-                    )
-                    and not (resume and checkpoint_has_progress)
-                )
+                should_drop_full_refresh = should_drop_destination_for_sync(
+                    request_sync_mode=request.sync_mode,
+                    contract_sync_mode=contract.sync_mode if contract else None,
+                ) and not (resume and checkpoint_has_progress)
                 if resume and checkpoint_has_progress and write_mode == "insert":
                     # Non-idempotent resume would duplicate; force upsert when PK known.
                     if conflict_columns:
@@ -1534,9 +1735,13 @@ class UniversalTransferEngine:
                     use_staging = bool(getattr(request, "write_via_staging", False))
                     # Mirror/SCD2 already use their own staging algorithm.
                     if use_staging and effective_sync_lower not in (
-                        "scd2", "full_refresh_mirror", "mirror",
+                        "scd2",
+                        "full_refresh_mirror",
+                        "mirror",
                     ):
-                        from services.pre_ingestion_staging import write_via_pre_ingestion_staging
+                        from services.pre_ingestion_staging import (
+                            write_via_pre_ingestion_staging,
+                        )
 
                         return write_via_pre_ingestion_staging(
                             request.destination,
@@ -1555,7 +1760,11 @@ class UniversalTransferEngine:
                     if should_drop_full_refresh:
                         _drop_destination_table(request.destination)
                     return write_destination_database(
-                        request.destination, records, columns, schema, mappings,
+                        request.destination,
+                        records,
+                        columns,
+                        schema,
+                        mappings,
                         on_checkpoint=throttled_checkpoint,
                         validation_mode=request.validation_mode,
                         backfill_new_fields=backfill_fields,
@@ -1575,10 +1784,15 @@ class UniversalTransferEngine:
                             mappings,
                             conflict_columns,
                         ),
-                        budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
+                        budget=RetryBudget(
+                            max_attempts=3,
+                            base_delay_seconds=0.5,
+                            max_delay_seconds=5.0,
+                        ),
                     )
                     dest_summary = {
-                        "table": request.destination.table or request.destination.collection,
+                        "table": request.destination.table
+                        or request.destination.collection,
                         "schema": _schema_for_endpoint(request.destination),
                         "checksum": scd2_summary.get("active_checksum", ""),
                         "scd2": scd2_summary,
@@ -1591,13 +1805,19 @@ class UniversalTransferEngine:
                 else:
                     rows_written, ddl_log, dest_summary = with_retry(
                         _write_destination_with_drop,
-                        budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
+                        budget=RetryBudget(
+                            max_attempts=3,
+                            base_delay_seconds=0.5,
+                            max_delay_seconds=5.0,
+                        ),
                     )
                     if dest_summary.get("promote_blocked"):
                         # Strict/maximum + staging: primary untouched; persist DLQ then fail.
                         _persist_job_quarantine(job_id, dest_summary, request)
                         block_msg = (
-                            (dest_summary.get("pre_ingestion_staging") or {}).get("blocked_reason")
+                            (dest_summary.get("pre_ingestion_staging") or {}).get(
+                                "blocked_reason"
+                            )
                             or "Pre-ingestion staging blocked promote due to validation failures"
                         )
                         mongo.update_job_status(
@@ -1608,7 +1828,9 @@ class UniversalTransferEngine:
                             message=block_msg,
                             records_processed=0,
                             rejected_rows=int(dest_summary.get("rejected_rows") or 0),
-                            rejected_details=(dest_summary.get("rejected_details") or [])[:2000],
+                            rejected_details=(
+                                dest_summary.get("rejected_details") or []
+                            )[:2000],
                             destination_summary=dest_summary,
                             ddl_log=list(ddl_log or [])[:500],
                         )
@@ -1625,7 +1847,10 @@ class UniversalTransferEngine:
                             f"reverse-ETL: {n}" for n in activation_notes
                         ]
                         dest_summary["reverse_etl"] = {"notes": activation_notes}
-                    if effective_sync_lower in ("full_refresh_mirror", "mirror") and conflict_columns:
+                    if (
+                        effective_sync_lower in ("full_refresh_mirror", "mirror")
+                        and conflict_columns
+                    ):
                         mirror_summary = apply_inferred_soft_deletes(
                             request.destination,
                             records,
@@ -1645,7 +1870,11 @@ class UniversalTransferEngine:
                     job_id,
                     "running",
                     records_processed=rows_written,
-                    **({"progress_pct": write_done_pct} if write_done_pct is not None else {}),
+                    **(
+                        {"progress_pct": write_done_pct}
+                        if write_done_pct is not None
+                        else {}
+                    ),
                 )
             elif request.destination.kind == "file_export":
                 export_bytes, export_name, dest_summary = with_retry(
@@ -1657,38 +1886,78 @@ class UniversalTransferEngine:
                         mappings=mappings,
                         column_types=request.column_types or schema,
                     ),
-                    budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
+                    budget=RetryBudget(
+                        max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0
+                    ),
                 )
                 rows_written = len(records)
-                ext = os.path.splitext(export_name)[1].lstrip(".") or (request.destination.format or "json")
+                ext = os.path.splitext(export_name)[1].lstrip(".") or (
+                    request.destination.format or "json"
+                )
                 unique_name = f"export_{job_id}.{ext}"
 
-                output_path = request.destination.output_path.strip() if request.destination.output_path else ""
-                workspace_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+                output_path = (
+                    request.destination.output_path.strip()
+                    if request.destination.output_path
+                    else ""
+                )
+                workspace_root = os.path.abspath(
+                    os.path.join(os.path.dirname(__file__), "..", "..")
+                )
                 if output_path:
-                    export_path = os.path.abspath(output_path) if os.path.isabs(output_path) else os.path.abspath(os.path.join(workspace_root, output_path))
+                    export_path = (
+                        os.path.abspath(output_path)
+                        if os.path.isabs(output_path)
+                        else os.path.abspath(os.path.join(workspace_root, output_path))
+                    )
                     if not export_path.startswith(workspace_root):
-                        mongo.update_job_status(job_id, "failed", error="File export path must be inside the application workspace", phase="failed")
-                        return TransferResult(success=False, error="File export path must be inside the application workspace", job_id=job_id)
+                        mongo.update_job_status(
+                            job_id,
+                            "failed",
+                            error="File export path must be inside the application workspace",
+                            phase="failed",
+                        )
+                        return TransferResult(
+                            success=False,
+                            error="File export path must be inside the application workspace",
+                            job_id=job_id,
+                        )
                     os.makedirs(os.path.dirname(export_path) or ".", exist_ok=True)
                     with open(export_path, "wb") as f:
                         f.write(export_bytes)
                     dest_summary["filename"] = os.path.basename(export_path)
                     dest_summary["path"] = export_path
-                    dest_summary["download_url"] = f"/api/v1/transfer/download/{os.path.basename(export_path)}"
+                    dest_summary["download_url"] = (
+                        f"/api/v1/transfer/download/{os.path.basename(export_path)}"
+                    )
                 else:
-                    export_dir = os.path.join(os.path.dirname(__file__), "..", "..", "exports")
+                    export_dir = os.path.join(
+                        os.path.dirname(__file__), "..", "..", "exports"
+                    )
                     os.makedirs(export_dir, exist_ok=True)
                     export_path = os.path.join(export_dir, unique_name)
                     with open(export_path, "wb") as f:
                         f.write(export_bytes)
                     dest_summary["filename"] = unique_name
                     dest_summary["path"] = export_path
-                    dest_summary["download_url"] = f"/api/v1/transfer/download/{unique_name}"
-                ddl_log.append(f"Exported {rows_written} rows to {dest_summary['filename']}")
+                    dest_summary["download_url"] = (
+                        f"/api/v1/transfer/download/{unique_name}"
+                    )
+                ddl_log.append(
+                    f"Exported {rows_written} rows to {dest_summary['filename']}"
+                )
             else:
-                mongo.update_job_status(job_id, "failed", error=f"Unknown destination: {request.destination.kind}", phase="failed")
-                return TransferResult(success=False, error=f"Unknown destination kind: {request.destination.kind}", job_id=job_id)
+                mongo.update_job_status(
+                    job_id,
+                    "failed",
+                    error=f"Unknown destination: {request.destination.kind}",
+                    phase="failed",
+                )
+                return TransferResult(
+                    success=False,
+                    error=f"Unknown destination kind: {request.destination.kind}",
+                    job_id=job_id,
+                )
 
             with _reconcile_phase_heartbeat(
                 mongo,
@@ -1701,7 +1970,8 @@ class UniversalTransferEngine:
                     records=records,
                     columns=columns,
                     rows_written=rows_written,
-                    writer_checksum=dest_summary.get("checksum") or dest_summary.get("active_checksum", ""),
+                    writer_checksum=dest_summary.get("checksum")
+                    or dest_summary.get("active_checksum", ""),
                     dest_summary=dest_summary,
                     mappings=mappings,
                     source_schema=schema,
@@ -1709,7 +1979,8 @@ class UniversalTransferEngine:
                 )
             if not recon.get("passed"):
                 mongo.update_job_status(
-                    job_id, "failed",
+                    job_id,
+                    "failed",
                     error=recon.get("message", "Reconciliation failed"),
                     phase="failed",
                     progress_pct=99,
@@ -1717,7 +1988,9 @@ class UniversalTransferEngine:
                     reconciliation=recon,
                     destination_summary=dest_summary,
                     rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
-                    coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
+                    coerced_null_rows=int(
+                        dest_summary.get("coerced_null_rows", 0) or 0
+                    ),
                 )
                 return TransferResult(
                     success=False,
@@ -1730,28 +2003,43 @@ class UniversalTransferEngine:
                 )
 
             from services import pii_guard
+
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
 
             explanation = _build_explanation(
-                request, columns, schema, mappings, recon, dest_summary, pf, rows_written
+                request,
+                columns,
+                schema,
+                mappings,
+                recon,
+                dest_summary,
+                pf,
+                rows_written,
             )
             from services.job_status import terminal_status_for
 
             terminal_status = terminal_status_for(
-                dest_summary.get("rejected_rows", 0), dest_summary.get("coerced_null_rows", 0)
+                dest_summary.get("rejected_rows", 0),
+                dest_summary.get("coerced_null_rows", 0),
             )
             if load_history_report:
                 dest_summary["load_history_report"] = load_history_report
             _persist_job_quarantine(job_id, dest_summary, request)
             mongo.update_job_status(
-                job_id, terminal_status,
+                job_id,
+                terminal_status,
                 records_processed=rows_written,
                 progress_pct=100,
                 phase="completed",
-                message=recon.get("message", f"Transferred {rows_written:,} rows successfully"),
-                destination_database=dest_summary.get("database", request.destination.database or ""),
-                destination_collection=dest_summary.get("collection") or dest_summary.get("table", ""),
+                message=recon.get(
+                    "message", f"Transferred {rows_written:,} rows successfully"
+                ),
+                destination_database=dest_summary.get(
+                    "database", request.destination.database or ""
+                ),
+                destination_collection=dest_summary.get("collection")
+                or dest_summary.get("table", ""),
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
                 coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:2000],
@@ -1776,22 +2064,40 @@ class UniversalTransferEngine:
                     source_type=request.source.format,
                     dest_type=request.destination.format,
                 )
-            except Exception:
-                pass
-            if os.environ.get("DATAFLOW_POST_TRANSFER_TRAINING", "").lower() in {"1", "true", "on"}:
+            except Exception as exc:
+                logger.debug("usage metering suppressed: %s", exc, exc_info=exc)
+            if os.environ.get("DATAFLOW_POST_TRANSFER_TRAINING", "").lower() in {
+                "1",
+                "true",
+                "on",
+            }:
                 try:
                     from services import pii_guard
+
                     redacted_training = pii_guard.redact_records(records[:5], mappings)
-                    samples = {c: [cell_to_string(r.get(c, "")) for r in redacted_training if r.get(c) is not None] for c in columns}
+                    samples = {
+                        c: [
+                            cell_to_string(r.get(c, ""))
+                            for r in redacted_training
+                            if r.get(c) is not None
+                        ]
+                        for c in columns
+                    }
                     schedule_training_on_transfer(
-                        request.source_filename or dest_summary.get("table", "transfer"),
-                        columns, len(records), samples,
+                        request.source_filename
+                        or dest_summary.get("table", "transfer"),
+                        columns,
+                        len(records),
+                        samples,
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(
+                        "post-transfer training suppressed: %s", exc, exc_info=exc
+                    )
 
             lineage.emit_preflight_completed(
-                run_id=job_id, passed=True,
+                run_id=job_id,
+                passed=True,
                 readiness_score=pf.get("readiness_score", 100) if pf else 100,
                 validation_plan=_validation_plan_for_result(pf),
             )
@@ -1799,20 +2105,37 @@ class UniversalTransferEngine:
                 run_id=job_id,
                 source_dataset=f"{request.source.kind}/{src_fmt}/{request.source.table or request.source.collection}",
                 target_dataset=f"{request.destination.kind}/{dst_fmt}/{request.destination.table or request.destination.collection}",
-                mappings=[{"source": m.get("source"), "target": m.get("target"), "confidence": m.get("confidence")} for m in mappings],
+                mappings=[
+                    {
+                        "source": m.get("source"),
+                        "target": m.get("target"),
+                        "confidence": m.get("confidence"),
+                    }
+                    for m in mappings
+                ],
             )
             lineage.emit_run_completed(
-                run_id=job_id, job_id=job_id,
+                run_id=job_id,
+                job_id=job_id,
                 records_transferred=rows_written,
-                source_summary={"kind": request.source.kind, "format": src_fmt, "columns": len(columns), "rows": len(records)},
+                source_summary={
+                    "kind": request.source.kind,
+                    "format": src_fmt,
+                    "columns": len(columns),
+                    "rows": len(records),
+                },
                 destination_summary=dest_summary,
             )
             # Append this load to the route ring buffer (last-N multi-load intelligence).
             if load_history_report:
                 dest_summary["load_history_report"] = load_history_report
             _persist_load_history_profile(
-                request, records, schema,
-                job_id=job_id, dest_summary=dest_summary, row_count=len(records),
+                request,
+                records,
+                schema,
+                job_id=job_id,
+                dest_summary=dest_summary,
+                row_count=len(records),
                 mappings=mappings,
             )
             finalize_contract(contract_id, success=True)
@@ -1839,7 +2162,9 @@ class UniversalTransferEngine:
             )
         except Exception as e:
             finalize_contract(contract_id, success=False)
-            display, error_details = _fail_runtime_job(mongo, job_id, e, lineage=lineage)
+            display, error_details = _fail_runtime_job(
+                mongo, job_id, e, lineage=lineage
+            )
             return TransferResult(
                 success=False,
                 job_id=job_id,
@@ -1866,33 +2191,50 @@ class UniversalTransferEngine:
         load_history_report: dict[str, Any] = {}
         try:
             mongo.update_job_status(
-                job_id, "running", phase="reading", progress_pct=5,
+                job_id,
+                "running",
+                phase="reading",
+                progress_pct=5,
                 message="Analyzing source table…",
             )
-            columns, schema, total_rows, sample_rows = peek_stream_source(request.source)
+            columns, schema, total_rows, sample_rows = peek_stream_source(
+                request.source
+            )
             if request.limit > 0:
                 total_rows = min(total_rows, request.limit)
             if total_rows == 0:
-                mongo.update_job_status(job_id, "failed", error="Source table is empty", phase="failed")
+                mongo.update_job_status(
+                    job_id, "failed", error="Source table is empty", phase="failed"
+                )
                 return TransferResult(
-                    success=False, error="Source table is empty",
-                    operation=request.operation, job_id=job_id,
+                    success=False,
+                    error="Source table is empty",
+                    operation=request.operation,
+                    job_id=job_id,
                 )
 
             if request.source_filter:
                 sample_rows = apply_row_filter(sample_rows, request.source_filter)
 
-            mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
+            mongo.update_job_status(
+                job_id, "running", total_rows=total_rows, records_processed=0
+            )
             dest_schema_types, dest_table_exists_flag = _destination_schema_probe(
-                request.destination, sync_mode=request.sync_mode,
+                request.destination,
+                sync_mode=request.sync_mode,
             )
             mappings = _enrich_mappings_with_types(
-                _auto_map(request, columns, schema, sample_rows=sample_rows, job_id=job_id),
+                _auto_map(
+                    request, columns, schema, sample_rows=sample_rows, job_id=job_id
+                ),
                 column_types=schema,
                 dest_types=dest_schema_types,
             )
             mongo.update_job_status(
-                job_id, "running", phase="preflight", progress_pct=15,
+                job_id,
+                "running",
+                phase="preflight",
+                progress_pct=15,
                 message="Validating mapping and schema…",
             )
             if not request.skip_preflight:
@@ -1908,9 +2250,15 @@ class UniversalTransferEngine:
                     source_format=request.source.format,
                     sync_mode=request.sync_mode,
                     sample_rows=sample_rows,
-                    confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
+                    confidence_threshold=confidence_threshold_for_mode(
+                        request.validation_mode
+                    ),
                     destination_column_types=dest_schema_types,
-                    destination_table_exists=(dest_table_exists_flag if dest_table_exists_flag is not None else bool(dest_schema_types)),
+                    destination_table_exists=(
+                        dest_table_exists_flag
+                        if dest_table_exists_flag is not None
+                        else bool(dest_schema_types)
+                    ),
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
@@ -1921,7 +2269,9 @@ class UniversalTransferEngine:
                         or ""
                     ),
                     destination_table=(
-                        request.destination.table or request.destination.collection or ""
+                        request.destination.table
+                        or request.destination.collection
+                        or ""
                     ),
                     source_filename=request.source_filename or "",
                     schema_policy=request.schema_policy,
@@ -1943,13 +2293,17 @@ class UniversalTransferEngine:
                 )
                 if not dest_ok:
                     mongo.update_job_status(
-                        job_id, "failed",
+                        job_id,
+                        "failed",
                         error=f"Destination unreachable: {dest_msg}",
-                        phase="failed", progress_pct=0,
+                        phase="failed",
+                        progress_pct=0,
                     )
                     line_msg = f"Destination unreachable: {dest_msg}"
                     lineage.emit_run_failed(
-                        run_id=job_id, job_id=job_id, error=line_msg,
+                        run_id=job_id,
+                        job_id=job_id,
+                        error=line_msg,
                         error_details={"reason": "Destination unreachable"},
                     )
                     return TransferResult(
@@ -1959,7 +2313,9 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
                 if not pf["passed"]:
-                    error_message, error_details = _fail_job_preflight(mongo, job_id, pf, lineage=lineage)
+                    error_message, error_details = _fail_job_preflight(
+                        mongo, job_id, pf, lineage=lineage
+                    )
                     return TransferResult(
                         success=False,
                         error=error_message,
@@ -1971,14 +2327,18 @@ class UniversalTransferEngine:
                     )
 
             if pf:
-                mongo.update_job_status(job_id, "running", phase="preflight", progress_pct=15, preflight=pf)
+                mongo.update_job_status(
+                    job_id, "running", phase="preflight", progress_pct=15, preflight=pf
+                )
 
             # Data contract / circuit breaker enforcement.
             try:
                 contract_id = enforce_or_create_contract(request, schema, mappings, pf)
             except ContractViolation as cv:
                 msg = cv.message
-                mongo.update_job_status(job_id, "failed", error=msg, phase="failed", progress_pct=0)
+                mongo.update_job_status(
+                    job_id, "failed", error=msg, phase="failed", progress_pct=0
+                )
                 return TransferResult(
                     success=False,
                     error=msg,
@@ -1989,7 +2349,11 @@ class UniversalTransferEngine:
 
             # Sample-based history compare (full table never loaded in streaming path).
             load_history_report = _compare_and_publish_load_history(
-                mongo, job_id, sample_rows or [], request, schema,
+                mongo,
+                job_id,
+                sample_rows or [],
+                request,
+                schema,
                 validation_mode=request.validation_mode,
                 row_count_hint=total_rows,
             )
@@ -1997,7 +2361,11 @@ class UniversalTransferEngine:
                 anomalies = list(load_history_report.get("anomalies") or [])
                 msg = "Data quality anomaly: " + "; ".join(anomalies[:8])
                 mongo.update_job_status(
-                    job_id, "failed", error=msg, phase="failed", progress_pct=0,
+                    job_id,
+                    "failed",
+                    error=msg,
+                    phase="failed",
+                    progress_pct=0,
                     load_history_report=load_history_report,
                 )
                 return TransferResult(
@@ -2016,10 +2384,12 @@ class UniversalTransferEngine:
                         raise TransferCancelled("Transfer cancelled by user")
                 except TransferCancelled:
                     raise
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Cancellation check failed: %s", exc, exc_info=exc)
 
-            def on_checkpoint(chunk: int, chunks: int, rows: int, checkpoint: dict | None = None) -> None:
+            def on_checkpoint(
+                chunk: int, chunks: int, rows: int, checkpoint: dict | None = None
+            ) -> None:
                 _check_cancelled()
                 # CDC has no finite denominator — never invent a percentage.
                 sync_l = (request.sync_mode or "").lower()
@@ -2055,7 +2425,9 @@ class UniversalTransferEngine:
                     update["destination_summary"] = {
                         "checksum": checkpoint.get("checksum", ""),
                         "rejected_rows": checkpoint.get("rejected_rows", 0),
-                        "rejected_details": (checkpoint.get("rejected_details") or [])[:50],
+                        "rejected_details": (checkpoint.get("rejected_details") or [])[
+                            :50
+                        ],
                     }
                     _promote_cdc_job_fields(checkpoint, update)
                 mongo.update_job_status(job_id, "running", **update)
@@ -2068,8 +2440,13 @@ class UniversalTransferEngine:
             )
 
             mongo.update_job_status(
-                job_id, "running", phase="writing",
-                progress_pct=compute_transfer_progress_pct(phase="writing", rows_processed=0, total_rows=total_rows) or 5,
+                job_id,
+                "running",
+                phase="writing",
+                progress_pct=compute_transfer_progress_pct(
+                    phase="writing", rows_processed=0, total_rows=total_rows
+                )
+                or 5,
                 message=f"Streaming {total_rows:,} rows in batches…",
             )
 
@@ -2079,14 +2456,17 @@ class UniversalTransferEngine:
             multi_non_cdc = len(selected_streams) > 1
             # Overwrite DROP once on primary is wrong for multi-stream — sequential
             # path drops each remapped destination instead.
-            if (
-                not multi_non_cdc
-                and should_drop_destination_for_sync(
-                    request_sync_mode=request.sync_mode,
-                    contract_sync_mode=stream_contract.sync_mode if stream_contract else None,
-                )
+            if not multi_non_cdc and should_drop_destination_for_sync(
+                request_sync_mode=request.sync_mode,
+                contract_sync_mode=stream_contract.sync_mode
+                if stream_contract
+                else None,
             ):
-                if not resume or not is_streaming or not _checkpoint_has_progress(checkpoint):
+                if (
+                    not resume
+                    or not is_streaming
+                    or not _checkpoint_has_progress(checkpoint)
+                ):
                     _drop_destination_table(request.destination)
 
             effective_sync = resolve_effective_sync_mode(
@@ -2131,23 +2511,25 @@ class UniversalTransferEngine:
                     limit=request.limit,
                 )
             elif multi_non_cdc:
-                rows_written, ddl_log, dest_summary, _ = run_non_cdc_multi_stream_sequential(
-                    request.source,
-                    request.destination,
-                    mappings,
-                    schema,
-                    on_checkpoint=throttled_checkpoint,
-                    sync_mode=request.sync_mode,
-                    stream_contracts=request.stream_contracts,
-                    selected=selected_streams,
-                    job_id=job_id,
-                    checkpoint=checkpoint,
-                    checkpoint_service=checkpoint_service,
-                    backfill_new_fields=backfill_fields,
-                    validation_mode=request.validation_mode,
-                    source_filter=request.source_filter,
-                    limit=request.limit,
-                    skip_preflight=request.skip_preflight,
+                rows_written, ddl_log, dest_summary, _ = (
+                    run_non_cdc_multi_stream_sequential(
+                        request.source,
+                        request.destination,
+                        mappings,
+                        schema,
+                        on_checkpoint=throttled_checkpoint,
+                        sync_mode=request.sync_mode,
+                        stream_contracts=request.stream_contracts,
+                        selected=selected_streams,
+                        job_id=job_id,
+                        checkpoint=checkpoint,
+                        checkpoint_service=checkpoint_service,
+                        backfill_new_fields=backfill_fields,
+                        validation_mode=request.validation_mode,
+                        source_filter=request.source_filter,
+                        limit=request.limit,
+                        skip_preflight=request.skip_preflight,
+                    )
                 )
             else:
                 rows_written, ddl_log, dest_summary, _ = stream_database_transfer(
@@ -2179,7 +2561,8 @@ class UniversalTransferEngine:
                     records=[],
                     columns=columns,
                     rows_written=rows_written,
-                    writer_checksum=dest_summary.get("checksum") or dest_summary.get("active_checksum", ""),
+                    writer_checksum=dest_summary.get("checksum")
+                    or dest_summary.get("active_checksum", ""),
                     dest_summary=dest_summary,
                     mappings=mappings,
                     source_schema=schema,
@@ -2187,7 +2570,8 @@ class UniversalTransferEngine:
                 )
             if not recon.get("passed"):
                 mongo.update_job_status(
-                    job_id, "failed",
+                    job_id,
+                    "failed",
                     error=recon.get("message", "Reconciliation failed"),
                     phase="failed",
                     progress_pct=99,
@@ -2195,7 +2579,9 @@ class UniversalTransferEngine:
                     reconciliation=recon,
                     destination_summary=dest_summary,
                     rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
-                    coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
+                    coerced_null_rows=int(
+                        dest_summary.get("coerced_null_rows", 0) or 0
+                    ),
                 )
                 return TransferResult(
                     success=False,
@@ -2208,33 +2594,52 @@ class UniversalTransferEngine:
                 )
 
             from services import pii_guard
+
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
 
             explanation = _build_explanation(
-                request, columns, schema, mappings, recon, dest_summary, pf, rows_written
+                request,
+                columns,
+                schema,
+                mappings,
+                recon,
+                dest_summary,
+                pf,
+                rows_written,
             )
             from services.job_status import terminal_status_for
 
             terminal_status = terminal_status_for(
-                dest_summary.get("rejected_rows", 0), dest_summary.get("coerced_null_rows", 0)
+                dest_summary.get("rejected_rows", 0),
+                dest_summary.get("coerced_null_rows", 0),
             )
             if load_history_report:
                 dest_summary["load_history_report"] = load_history_report
             _persist_load_history_profile(
-                request, sample_rows or [], schema,
-                job_id=job_id, dest_summary=dest_summary, row_count=rows_written or total_rows,
+                request,
+                sample_rows or [],
+                schema,
+                job_id=job_id,
+                dest_summary=dest_summary,
+                row_count=rows_written or total_rows,
                 mappings=mappings,
             )
             _persist_job_quarantine(job_id, dest_summary, request)
             mongo.update_job_status(
-                job_id, terminal_status,
+                job_id,
+                terminal_status,
                 records_processed=rows_written,
                 progress_pct=100,
                 phase="completed",
-                message=recon.get("message", f"Transferred {rows_written:,} rows successfully"),
-                destination_database=dest_summary.get("database", request.destination.database or ""),
-                destination_collection=dest_summary.get("collection") or dest_summary.get("table", ""),
+                message=recon.get(
+                    "message", f"Transferred {rows_written:,} rows successfully"
+                ),
+                destination_database=dest_summary.get(
+                    "database", request.destination.database or ""
+                ),
+                destination_collection=dest_summary.get("collection")
+                or dest_summary.get("table", ""),
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
                 coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:2000],
@@ -2252,7 +2657,8 @@ class UniversalTransferEngine:
             )
 
             lineage.emit_preflight_completed(
-                run_id=job_id, passed=True,
+                run_id=job_id,
+                passed=True,
                 readiness_score=pf.get("readiness_score", 100) if pf else 100,
                 validation_plan=_validation_plan_for_result(pf),
             )
@@ -2260,12 +2666,26 @@ class UniversalTransferEngine:
                 run_id=job_id,
                 source_dataset=f"{request.source.kind}/{src_fmt}/{request.source.table or request.source.collection}",
                 target_dataset=f"{request.destination.kind}/{dst_fmt}/{request.destination.table or request.destination.collection}",
-                mappings=[{"source": m.get("source"), "target": m.get("target"), "confidence": m.get("confidence")} for m in mappings],
+                mappings=[
+                    {
+                        "source": m.get("source"),
+                        "target": m.get("target"),
+                        "confidence": m.get("confidence"),
+                    }
+                    for m in mappings
+                ],
             )
             lineage.emit_run_completed(
-                run_id=job_id, job_id=job_id,
+                run_id=job_id,
+                job_id=job_id,
                 records_transferred=rows_written,
-                source_summary={"kind": request.source.kind, "format": src_fmt, "columns": len(columns), "rows": total_rows, "streaming": True},
+                source_summary={
+                    "kind": request.source.kind,
+                    "format": src_fmt,
+                    "columns": len(columns),
+                    "rows": total_rows,
+                    "streaming": True,
+                },
                 destination_summary=dest_summary,
             )
             finalize_contract(contract_id, success=True)
@@ -2293,7 +2713,9 @@ class UniversalTransferEngine:
             )
         except Exception as e:
             finalize_contract(contract_id, success=False)
-            display, error_details = _fail_runtime_job(mongo, job_id, e, lineage=lineage)
+            display, error_details = _fail_runtime_job(
+                mongo, job_id, e, lineage=lineage
+            )
             return TransferResult(
                 success=False,
                 job_id=job_id,
@@ -2327,31 +2749,48 @@ class UniversalTransferEngine:
             )
 
             mongo.update_job_status(
-                job_id, "running", phase="reading", progress_pct=5,
+                job_id,
+                "running",
+                phase="reading",
+                progress_pct=5,
                 message="Analyzing uploaded file…",
             )
-            columns, schema, total_rows, sample_rows = peek_file_source(content, filename)
+            columns, schema, total_rows, sample_rows = peek_file_source(
+                content, filename
+            )
             if total_rows == 0:
-                mongo.update_job_status(job_id, "failed", error="File contains no records", phase="failed")
+                mongo.update_job_status(
+                    job_id, "failed", error="File contains no records", phase="failed"
+                )
                 return TransferResult(
-                    success=False, error="File contains no records",
-                    operation=request.operation, job_id=job_id,
+                    success=False,
+                    error="File contains no records",
+                    operation=request.operation,
+                    job_id=job_id,
                 )
 
             if request.source_filter:
                 sample_rows = apply_row_filter(sample_rows, request.source_filter)
 
-            mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
+            mongo.update_job_status(
+                job_id, "running", total_rows=total_rows, records_processed=0
+            )
             dest_schema_types, dest_table_exists_flag = _destination_schema_probe(
-                request.destination, sync_mode=request.sync_mode,
+                request.destination,
+                sync_mode=request.sync_mode,
             )
             mappings = _enrich_mappings_with_types(
-                _auto_map(request, columns, schema, sample_rows=sample_rows, job_id=job_id),
+                _auto_map(
+                    request, columns, schema, sample_rows=sample_rows, job_id=job_id
+                ),
                 column_types=schema,
                 dest_types=dest_schema_types,
             )
             mongo.update_job_status(
-                job_id, "running", phase="preflight", progress_pct=15,
+                job_id,
+                "running",
+                phase="preflight",
+                progress_pct=15,
                 message="Validating mapping and schema…",
             )
             if not request.skip_preflight:
@@ -2367,9 +2806,15 @@ class UniversalTransferEngine:
                     source_format=request.source.format,
                     sync_mode=request.sync_mode,
                     sample_rows=sample_rows,
-                    confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
+                    confidence_threshold=confidence_threshold_for_mode(
+                        request.validation_mode
+                    ),
                     destination_column_types=dest_schema_types,
-                    destination_table_exists=(dest_table_exists_flag if dest_table_exists_flag is not None else bool(dest_schema_types)),
+                    destination_table_exists=(
+                        dest_table_exists_flag
+                        if dest_table_exists_flag is not None
+                        else bool(dest_schema_types)
+                    ),
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
@@ -2380,7 +2825,9 @@ class UniversalTransferEngine:
                         or ""
                     ),
                     destination_table=(
-                        request.destination.table or request.destination.collection or ""
+                        request.destination.table
+                        or request.destination.collection
+                        or ""
                     ),
                     source_filename=request.source_filename or "",
                     schema_policy=request.schema_policy,
@@ -2402,13 +2849,17 @@ class UniversalTransferEngine:
                 )
                 if not dest_ok:
                     mongo.update_job_status(
-                        job_id, "failed",
+                        job_id,
+                        "failed",
                         error=f"Destination unreachable: {dest_msg}",
-                        phase="failed", progress_pct=0,
+                        phase="failed",
+                        progress_pct=0,
                     )
                     line_msg = f"Destination unreachable: {dest_msg}"
                     lineage.emit_run_failed(
-                        run_id=job_id, job_id=job_id, error=line_msg,
+                        run_id=job_id,
+                        job_id=job_id,
+                        error=line_msg,
                         error_details={"reason": "Destination unreachable"},
                     )
                     return TransferResult(
@@ -2418,7 +2869,9 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
                 if not pf["passed"]:
-                    error_message, error_details = _fail_job_preflight(mongo, job_id, pf, lineage=lineage)
+                    error_message, error_details = _fail_job_preflight(
+                        mongo, job_id, pf, lineage=lineage
+                    )
                     return TransferResult(
                         success=False,
                         error=error_message,
@@ -2430,14 +2883,18 @@ class UniversalTransferEngine:
                     )
 
             if pf:
-                mongo.update_job_status(job_id, "running", phase="preflight", progress_pct=15, preflight=pf)
+                mongo.update_job_status(
+                    job_id, "running", phase="preflight", progress_pct=15, preflight=pf
+                )
 
             # Data contract / circuit breaker enforcement.
             try:
                 contract_id = enforce_or_create_contract(request, schema, mappings, pf)
             except ContractViolation as cv:
                 msg = cv.message
-                mongo.update_job_status(job_id, "failed", error=msg, phase="failed", progress_pct=0)
+                mongo.update_job_status(
+                    job_id, "failed", error=msg, phase="failed", progress_pct=0
+                )
                 return TransferResult(
                     success=False,
                     error=msg,
@@ -2448,7 +2905,11 @@ class UniversalTransferEngine:
 
             # Sample-based history compare (file is streamed; full table never loaded).
             load_history_report = _compare_and_publish_load_history(
-                mongo, job_id, sample_rows or [], request, schema,
+                mongo,
+                job_id,
+                sample_rows or [],
+                request,
+                schema,
                 validation_mode=request.validation_mode,
                 row_count_hint=total_rows,
             )
@@ -2456,7 +2917,11 @@ class UniversalTransferEngine:
                 anomalies = list(load_history_report.get("anomalies") or [])
                 msg = "Data quality anomaly: " + "; ".join(anomalies[:8])
                 mongo.update_job_status(
-                    job_id, "failed", error=msg, phase="failed", progress_pct=0,
+                    job_id,
+                    "failed",
+                    error=msg,
+                    phase="failed",
+                    progress_pct=0,
                     load_history_report=load_history_report,
                 )
                 return TransferResult(
@@ -2475,10 +2940,12 @@ class UniversalTransferEngine:
                         raise TransferCancelled("Transfer cancelled by user")
                 except TransferCancelled:
                     raise
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Cancellation check failed: %s", exc, exc_info=exc)
 
-            def on_checkpoint(chunk: int, chunks: int, rows: int, checkpoint: dict | None = None) -> None:
+            def on_checkpoint(
+                chunk: int, chunks: int, rows: int, checkpoint: dict | None = None
+            ) -> None:
                 _check_cancelled()
                 pct = compute_transfer_progress_pct(
                     phase="writing",
@@ -2500,7 +2967,9 @@ class UniversalTransferEngine:
                     update["destination_summary"] = {
                         "checksum": checkpoint.get("checksum", ""),
                         "rejected_rows": checkpoint.get("rejected_rows", 0),
-                        "rejected_details": (checkpoint.get("rejected_details") or [])[:50],
+                        "rejected_details": (checkpoint.get("rejected_details") or [])[
+                            :50
+                        ],
                     }
                     _promote_cdc_job_fields(checkpoint, update)
                 mongo.update_job_status(job_id, "running", **update)
@@ -2513,8 +2982,13 @@ class UniversalTransferEngine:
             )
 
             mongo.update_job_status(
-                job_id, "running", phase="writing",
-                progress_pct=compute_transfer_progress_pct(phase="writing", rows_processed=0, total_rows=total_rows) or 5,
+                job_id,
+                "running",
+                phase="writing",
+                progress_pct=compute_transfer_progress_pct(
+                    phase="writing", rows_processed=0, total_rows=total_rows
+                )
+                or 5,
                 message=f"Streaming {total_rows:,} rows in batches…",
             )
 
@@ -2522,9 +2996,15 @@ class UniversalTransferEngine:
             stream_contract = resolve_sync_contract(request.stream_contracts)
             if should_drop_destination_for_sync(
                 request_sync_mode=request.sync_mode,
-                contract_sync_mode=stream_contract.sync_mode if stream_contract else None,
+                contract_sync_mode=stream_contract.sync_mode
+                if stream_contract
+                else None,
             ):
-                if not resume or not is_streaming or not _checkpoint_has_progress(checkpoint):
+                if (
+                    not resume
+                    or not is_streaming
+                    or not _checkpoint_has_progress(checkpoint)
+                ):
                     _drop_destination_table(request.destination)
 
             rows_written, ddl_log, dest_summary, _ = stream_file_to_database(
@@ -2556,7 +3036,8 @@ class UniversalTransferEngine:
                     records=[],
                     columns=columns,
                     rows_written=rows_written,
-                    writer_checksum=dest_summary.get("checksum") or dest_summary.get("active_checksum", ""),
+                    writer_checksum=dest_summary.get("checksum")
+                    or dest_summary.get("active_checksum", ""),
                     dest_summary=dest_summary,
                     mappings=mappings,
                     source_schema=schema,
@@ -2564,7 +3045,8 @@ class UniversalTransferEngine:
                 )
             if not recon.get("passed"):
                 mongo.update_job_status(
-                    job_id, "failed",
+                    job_id,
+                    "failed",
                     error=recon.get("message", "Reconciliation failed"),
                     phase="failed",
                     progress_pct=99,
@@ -2572,7 +3054,9 @@ class UniversalTransferEngine:
                     reconciliation=recon,
                     destination_summary=dest_summary,
                     rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
-                    coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
+                    coerced_null_rows=int(
+                        dest_summary.get("coerced_null_rows", 0) or 0
+                    ),
                 )
                 return TransferResult(
                     success=False,
@@ -2585,33 +3069,52 @@ class UniversalTransferEngine:
                 )
 
             from services import pii_guard
+
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
 
             explanation = _build_explanation(
-                request, columns, schema, mappings, recon, dest_summary, pf, rows_written
+                request,
+                columns,
+                schema,
+                mappings,
+                recon,
+                dest_summary,
+                pf,
+                rows_written,
             )
             from services.job_status import terminal_status_for
 
             terminal_status = terminal_status_for(
-                dest_summary.get("rejected_rows", 0), dest_summary.get("coerced_null_rows", 0)
+                dest_summary.get("rejected_rows", 0),
+                dest_summary.get("coerced_null_rows", 0),
             )
             if load_history_report:
                 dest_summary["load_history_report"] = load_history_report
             _persist_load_history_profile(
-                request, sample_rows or [], schema,
-                job_id=job_id, dest_summary=dest_summary, row_count=rows_written or total_rows,
+                request,
+                sample_rows or [],
+                schema,
+                job_id=job_id,
+                dest_summary=dest_summary,
+                row_count=rows_written or total_rows,
                 mappings=mappings,
             )
             _persist_job_quarantine(job_id, dest_summary, request)
             mongo.update_job_status(
-                job_id, terminal_status,
+                job_id,
+                terminal_status,
                 records_processed=rows_written,
                 progress_pct=100,
                 phase="completed",
-                message=recon.get("message", f"Transferred {rows_written:,} rows successfully"),
-                destination_database=dest_summary.get("database", request.destination.database or ""),
-                destination_collection=dest_summary.get("collection") or dest_summary.get("table", ""),
+                message=recon.get(
+                    "message", f"Transferred {rows_written:,} rows successfully"
+                ),
+                destination_database=dest_summary.get(
+                    "database", request.destination.database or ""
+                ),
+                destination_collection=dest_summary.get("collection")
+                or dest_summary.get("table", ""),
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
                 coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:2000],
@@ -2628,7 +3131,8 @@ class UniversalTransferEngine:
             )
 
             lineage.emit_preflight_completed(
-                run_id=job_id, passed=True,
+                run_id=job_id,
+                passed=True,
                 readiness_score=pf.get("readiness_score", 100) if pf else 100,
                 validation_plan=_validation_plan_for_result(pf),
             )
@@ -2636,12 +3140,26 @@ class UniversalTransferEngine:
                 run_id=job_id,
                 source_dataset=f"{request.source.kind}/{src_fmt}/{request.source_filename}",
                 target_dataset=f"{request.destination.kind}/{dst_fmt}/{request.destination.table or request.destination.collection}",
-                mappings=[{"source": m.get("source"), "target": m.get("target"), "confidence": m.get("confidence")} for m in mappings],
+                mappings=[
+                    {
+                        "source": m.get("source"),
+                        "target": m.get("target"),
+                        "confidence": m.get("confidence"),
+                    }
+                    for m in mappings
+                ],
             )
             lineage.emit_run_completed(
-                run_id=job_id, job_id=job_id,
+                run_id=job_id,
+                job_id=job_id,
                 records_transferred=rows_written,
-                source_summary={"kind": "file", "format": src_fmt, "columns": len(columns), "rows": total_rows, "streaming": True},
+                source_summary={
+                    "kind": "file",
+                    "format": src_fmt,
+                    "columns": len(columns),
+                    "rows": total_rows,
+                    "streaming": True,
+                },
                 destination_summary=dest_summary,
             )
             finalize_contract(contract_id, success=True)
@@ -2669,7 +3187,9 @@ class UniversalTransferEngine:
             )
         except Exception as e:
             finalize_contract(contract_id, success=False)
-            display, error_details = _fail_runtime_job(mongo, job_id, e, lineage=lineage)
+            display, error_details = _fail_runtime_job(
+                mongo, job_id, e, lineage=lineage
+            )
             return TransferResult(
                 success=False,
                 job_id=job_id,
@@ -2704,7 +3224,9 @@ class UniversalTransferEngine:
             "destination_type": request.destination.format,
             "destination_kind": request.destination.kind,
             "destination_database": request.destination.database or "",
-            "destination_collection": request.destination.collection or request.destination.table or "",
+            "destination_collection": request.destination.collection
+            or request.destination.table
+            or "",
             "operation": request.operation,
             "records_processed": 0,
             "total_rows": 0,
@@ -2725,7 +3247,9 @@ class UniversalTransferEngine:
             job_doc["mapping_proof"] = proof
         return mongo.create_transfer_job(job_doc)
 
-    def _read_source(self, request: TransferRequest) -> tuple[list, list[str], dict[str, str]]:
+    def _read_source(
+        self, request: TransferRequest
+    ) -> tuple[list, list[str], dict[str, str]]:
         if request.source.kind == "file":
             if not request.source_content:
                 raise ValueError("File content required for file source")
@@ -2769,7 +3293,9 @@ class UniversalTransferEngine:
             plan["source_schema"] = source_info["schema"]
         src_fmt = self._resolved_format(source)
         dst_fmt = self._resolved_format(destination)
-        plan["route_analysis"] = analyze_route(source.kind, src_fmt, destination.kind, dst_fmt)
+        plan["route_analysis"] = analyze_route(
+            source.kind, src_fmt, destination.kind, dst_fmt
+        )
         return plan
 
     def _resolved_format(self, endpoint: EndpointConfig) -> str:
@@ -2778,8 +3304,8 @@ class UniversalTransferEngine:
             try:
                 cfg = resolve_connector_config(endpoint)
                 return (cfg.get("type") or endpoint.format or "").lower()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("resolved connector config failed: %s", exc, exc_info=exc)
         if endpoint.kind == "file":
             return (endpoint.format or "csv").lower()
         if endpoint.kind == "file_export":
