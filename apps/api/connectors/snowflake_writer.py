@@ -13,7 +13,8 @@ from decimal import Decimal, InvalidOperation, Overflow
 from pathlib import Path
 from typing import Any, Callable
 
-logger = logging.getLogger(__name__)
+from services.type_system import ddl_type, normalize_logical_type
+from services.value_serializer import cell_to_string
 
 from connectors.driver_guard import stub_writes_allowed
 from connectors.snowflake_conn import (
@@ -31,19 +32,19 @@ from connectors.writer_common import (
     build_mapped_rows_with_details,
     dedupe_rows,
     dedupe_rows_by_pk_and_lsn,
+    quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
     sample_values_by_source_from_batch,
-    quote_sql_identifier,
     sanitize_identifier,
     snowflake_lsn_match_predicate,
     transform_error_policy,
 )
-from services.value_serializer import cell_to_string
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
-from services.type_system import ddl_type, normalize_logical_type
+
+logger = logging.getLogger(__name__)
 
 # Prefer COPY INTO for modest stream batches — 2000 was too high when wide Mongo
 # rows shrink stream chunks below the threshold and force slow INSERT loops.
@@ -466,8 +467,8 @@ def _merge_batch_via_temp(
     finally:
         try:
             cur.execute(f'DROP TABLE IF EXISTS "{temp}"')
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
 def _copy_into_table(
@@ -527,8 +528,8 @@ def _copy_into_table(
     finally:
         try:
             cur.execute(f'DROP STAGE IF EXISTS "{stage_name}"')
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
 def write_mapped_rows(
@@ -909,5 +910,5 @@ def write_mapped_rows(
         if close_connection and conn is not None:
             try:
                 conn.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Exception suppressed: %s", exc, exc_info=exc)

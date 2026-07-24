@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
@@ -9,6 +10,8 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 # single client per connection string removes per-batch connection handshake
 # overhead, which is the dominant cost for large streaming transfers.
 _mongo_client_cache: dict[str, Any] = {}
+
+logger = logging.getLogger(__name__)
 
 
 def _mongo_client(conn_str: str) -> Any:
@@ -44,8 +47,8 @@ def mongodb_database_from_uri(uri: str) -> str:
         path = (parsed.path or "").strip("/")
         if path and not path.startswith("?"):
             return path
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
     return ""
 
 

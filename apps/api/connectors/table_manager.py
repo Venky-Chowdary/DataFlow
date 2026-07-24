@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from connectors.mongodb_common import (
@@ -9,6 +10,8 @@ from connectors.mongodb_common import (
     mongodb_database_from_uri,
     normalize_mongodb_connection_string,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def drop_table(
@@ -81,8 +84,8 @@ def _drop_snowflake(cfg: dict[str, Any], table_name: str, schema: str | None) ->
             if cfg.get("warehouse"):
                 try:
                     cur.execute(f'USE WAREHOUSE "{cfg["warehouse"]}"')
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Exception suppressed: %s", exc, exc_info=exc)
             cur.execute(f'DROP TABLE IF EXISTS "{table_name}"')
         return True
     except Exception:
@@ -91,8 +94,8 @@ def _drop_snowflake(cfg: dict[str, Any], table_name: str, schema: str | None) ->
         if conn is not None:
             try:
                 conn.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
 def _drop_mysql(cfg: dict[str, Any], table_name: str, schema: str | None) -> bool:

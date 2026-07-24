@@ -59,8 +59,8 @@ def decode_sqlserver_resume_token(token: str | None) -> dict[str, Any]:
                 "offset": int(data.get("offset") or 0),
                 "table": str(data.get("table") or ""),
             }
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
     try:
         return {"version": int(raw), "phase": "streaming", "offset": 0, "table": ""}
     except Exception:

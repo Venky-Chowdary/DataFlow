@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import logging
+
 from connectors.base import ConnectResult
 from connectors.snowflake_conn import get_connection, normalize_account
+
+logger = logging.getLogger(__name__)
 
 
 def test_snowflake(
@@ -66,5 +70,5 @@ def test_snowflake(
         if conn is not None:
             try:
                 conn.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Exception suppressed: %s", exc, exc_info=exc)

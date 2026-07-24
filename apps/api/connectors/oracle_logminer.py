@@ -18,6 +18,7 @@ from services.cdc_engine import ChangeBatch
 
 logger = logging.getLogger(__name__)
 
+
 _OP_MAP = {
     "INSERT": "insert",
     "UPDATE": "update",
@@ -43,8 +44,8 @@ def decode_logminer_token(token: str | None) -> dict[str, Any]:
                 "phase": str(data.get("phase") or "streaming"),
                 "table": str(data.get("table") or ""),
             }
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
     return {"scn": 0, "phase": "initial", "table": ""}
 
 
@@ -611,8 +612,8 @@ class OracleLogMinerCdc:
                             events.append({"op": "u", "row": row})
                     try:
                         cur.execute("BEGIN DBMS_LOGMNR.END_LOGMNR; END;")
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
         except Exception:
             return events
         return events
@@ -709,8 +710,8 @@ class OracleLogMinerCdc:
                             updates.append(row)
                     try:
                         cur.execute("BEGIN DBMS_LOGMNR.END_LOGMNR; END;")
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
                     self.scn = max(next_scn, end_scn)
         except CdcScnGapError:
             raise
@@ -818,8 +819,8 @@ class OracleLogMinerCdc:
                         tagged.append((xid_key, scn, table_name, op, parsed))
                     try:
                         cur.execute("BEGIN DBMS_LOGMNR.END_LOGMNR; END;")
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
         except CdcScnGapError:
             raise
         except Exception as exc:

@@ -5,10 +5,14 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import logging
 import time
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Callable
+
+from services.type_system import ddl_type
+from services.value_serializer import json_default
 
 from connectors.postgresql_conn import get_connection
 from connectors.sql_temporal import (
@@ -28,7 +32,6 @@ from connectors.write_resilience import (
     should_retry_connection_lost,
     write_chunk_size,
 )
-from services.value_serializer import json_default
 from connectors.writer_common import (
     DF_LSN_COL,
     _coerced_null_row_count,
@@ -45,7 +48,8 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
-from services.type_system import ddl_type
+
+logger = logging.getLogger(__name__)
 
 
 def uses_pg_on_conflict_upsert(engine: str) -> bool:
@@ -85,8 +89,8 @@ def _redshift_delete_by_keys(
             conflict_cols=conflict_cols,
             batch=batch,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
     conflict_idxs = [target_cols.index(c) for c in conflict_cols]
     lsn_idx = target_cols.index(DF_LSN_COL) if DF_LSN_COL in target_cols else None
@@ -238,8 +242,8 @@ def _redshift_stage_delete(
         )
     try:
         cursor.execute(sql_mod.SQL("DROP TABLE IF EXISTS {}").format(sql_mod.Identifier(stage)))
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
     return to_write
 
 
@@ -634,8 +638,8 @@ def write_mapped_rows(
                 except Exception as setup_exc:
                     try:
                         conn.rollback()
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Cleanup exception suppressed: %s", exc, exc_info=exc)
                     setup_attempt += 1
                     if not is_connection_lost(setup_exc) or not should_retry_connection_lost(
                         attempt=setup_attempt, started_at=setup_started, proxy=proxy_dest
@@ -706,8 +710,8 @@ def write_mapped_rows(
                     except Exception as chunk_exc:
                         try:
                             conn.rollback()
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
                         if is_sql_data_error(chunk_exc) and policy in {"quarantine", "coerce_null"}:
                             if insert is None:
                                 insert = _build_insert()
@@ -731,8 +735,8 @@ def write_mapped_rows(
                                 except Exception as row_exc:
                                     try:
                                         conn.rollback()
-                                    except Exception:
-                                        pass
+                                    except Exception as exc:
+                                        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
                                     if is_connection_lost(row_exc):
                                         raise
                                     col_name = extract_column_from_sql_error(row_exc) or "*"
@@ -761,8 +765,8 @@ def write_mapped_rows(
                                         rows_written=chunk_written,
                                     )
                                     conn.commit()
-                                except Exception:
-                                    pass
+                                except Exception as exc:
+                                    logger.warning("Exception suppressed: %s", exc, exc_info=exc)
                             break
                         attempt += 1
                         if not is_connection_lost(chunk_exc) or not should_retry_connection_lost(
@@ -781,8 +785,8 @@ def write_mapped_rows(
         finally:
             try:
                 cur.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
         close_quietly(conn)
         return WriteResult(

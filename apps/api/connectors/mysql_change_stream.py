@@ -17,8 +17,6 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any
 
-from connectors.mysql_conn import get_connection
-from connectors.mysql_reader import _cell, read_table_batch
 from services.cdc_engine import ChangeBatch
 from services.cdc_schema_history import (
     connection_fingerprint,
@@ -27,11 +25,15 @@ from services.cdc_schema_history import (
     record_ddl,
 )
 
-_logger = logging.getLogger(__name__)
+from connectors.mysql_conn import get_connection
+from connectors.mysql_reader import _cell, read_table_batch
+
 _DDL_RE = re.compile(
     r"\b(ALTER|CREATE|DROP|RENAME)\s+TABLE\b",
     re.IGNORECASE,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 def _serialize(value: Any) -> str:
@@ -201,9 +203,9 @@ class MySqlChangeStreamCdc:
 
                 stream = BinLogStreamReader(**kwargs)
                 stream.close()
-            except Exception:
+            except Exception as exc:
                 # Vars OK — treat as available; poll will raise with detail.
-                pass
+                _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
             return True
         except Exception:
             return False
@@ -308,15 +310,15 @@ class MySqlChangeStreamCdc:
             row = cur.fetchone()
             if row and row[0]:
                 return str(row[0])
-        except Exception:
-            pass
+        except Exception as exc:
+            _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
         try:
             cur.execute("SHOW GLOBAL VARIABLES LIKE 'gtid_executed'")
             row = cur.fetchone()
             if row and len(row) > 1 and row[1]:
                 return str(row[1])
-        except Exception:
-            pass
+        except Exception as exc:
+            _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
         return None
 
     def _current_binlog_position(self) -> dict[str, Any] | None:
@@ -406,8 +408,8 @@ class MySqlChangeStreamCdc:
             if conn is not None:
                 try:
                     conn.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
     def _fetch_live_schema(self) -> dict[str, Any]:
         columns: dict[str, str] = {}
@@ -573,7 +575,10 @@ class MySqlChangeStreamCdc:
 
     def _fetch_incremental_chunk(self, sig: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
         """PK-ordered chunk reader for Debezium-style incremental snapshots."""
-        from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
+        from connectors.sql_identifiers import (
+            quote_sql_identifier,
+            require_safe_identifier,
+        )
 
         pk_name = sig.primary_key or self.primary_key
         pk = quote_sql_identifier(require_safe_identifier(pk_name, preserve_case=True))
@@ -664,8 +669,8 @@ class MySqlChangeStreamCdc:
         finally:
             try:
                 stream.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
         return events
 
     def poll(self) -> Iterator[ChangeBatch]:
@@ -723,8 +728,8 @@ class MySqlChangeStreamCdc:
                 if not token.get("file") and current.get("file"):
                     token["file"] = current["file"]
                     token["pos"] = current.get("pos")
-            except Exception:
-                pass
+            except Exception as exc:
+                _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
             return token
 
         def _emit_commit():

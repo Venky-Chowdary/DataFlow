@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from connectors.base import ReadBatch
-from connectors.sql_identifiers import quote_column_list, quote_table_ref, require_safe_identifier
+from connectors.sql_identifiers import (
+    quote_column_list,
+    quote_table_ref,
+    require_safe_identifier,
+)
 
 _api_root = Path(__file__).resolve().parents[1]
 if str(_api_root) not in sys.path:

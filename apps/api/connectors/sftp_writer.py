@@ -5,11 +5,14 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from services.value_serializer import cell_to_string, json_default
 
 from connectors.sftp_common import connect_sftp, parse_sftp_config, split_remote_path
 from connectors.writer_common import WriteResult as _WriteResult
@@ -21,7 +24,8 @@ from connectors.writer_common import (
     to_json_value,
     transform_error_policy,
 )
-from services.value_serializer import cell_to_string, json_default
+
+logger = logging.getLogger(__name__)
 
 _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
@@ -164,14 +168,14 @@ def write_mapped_rows(
                 else:
                     try:
                         sftp.remove(cfg.path)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
                     sftp.rename(temp_path, cfg.path)
             except Exception:
                 try:
                     sftp.remove(temp_path)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Exception suppressed: %s", exc, exc_info=exc)
                 raise
         finally:
             sftp.close()

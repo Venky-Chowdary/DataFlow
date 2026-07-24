@@ -18,10 +18,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
-logger = logging.getLogger(__name__)
-
 # Runtime registry of SDK-loaded connectors (name -> cls)
 _SDK_REGISTRY: dict[str, type["BaseConnector"]] = {}
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -296,8 +296,8 @@ class SingerTapBridge(BaseConnector):
             proc.kill()
             try:
                 proc.wait(timeout=5)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
 register_connector(SingerTapBridge)

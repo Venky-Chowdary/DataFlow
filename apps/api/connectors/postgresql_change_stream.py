@@ -16,7 +16,6 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any
 
-from connectors.postgresql_conn import get_connection
 from services.cdc_engine import ChangeBatch
 from services.cdc_schema_history import (
     connection_fingerprint,
@@ -25,11 +24,13 @@ from services.cdc_schema_history import (
     record_ddl,
 )
 
-_logger = logging.getLogger(__name__)
+from connectors.postgresql_conn import get_connection
 
 # test_decoding value rendering uses type suffixes like [text]:'value' or [int4]:1.
 # The first colon separates column info from value; the value may itself contain colons.
 _VALUE_RE = re.compile(r"^\s*(\w+)\[(\w+)\]:(.+)$")
+
+_logger = logging.getLogger(__name__)
 _OLD_KEY_PREFIX = "old-key:"
 _NEW_TUPLE_PREFIX = "new-tuple:"
 
@@ -498,8 +499,8 @@ class PostgreSqlChangeStreamCdc:
         if self._lease.acquired:
             try:
                 self._lease.renew()
-            except Exception:
-                pass
+            except Exception as exc:
+                _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
         try:
             with self._conn() as conn:
                 with conn.cursor() as cur:
@@ -706,14 +707,14 @@ class PostgreSqlChangeStreamCdc:
             except Exception:
                 try:
                     conn.rollback()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
                 raise
             finally:
                 try:
                     conn.autocommit = prev_autocommit
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
         self.phase = "streaming"
         yield ChangeBatch(
@@ -763,8 +764,8 @@ class PostgreSqlChangeStreamCdc:
                         except Exception:
                             try:
                                 conn.rollback()
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                _logger.debug("Cleanup exception suppressed: %s", exc, exc_info=exc)
             conn.commit()
         with self._conn() as conn:
             with conn.cursor() as cur:
@@ -836,7 +837,10 @@ class PostgreSqlChangeStreamCdc:
 
     def _fetch_incremental_chunk(self, sig: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
         """PK-ordered chunk reader for Debezium-style incremental snapshots."""
-        from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
+        from connectors.sql_identifiers import (
+            quote_sql_identifier,
+            require_safe_identifier,
+        )
 
         pk = quote_sql_identifier(
             require_safe_identifier(sig.primary_key or self.primary_key, preserve_case=True)

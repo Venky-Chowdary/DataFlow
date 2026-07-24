@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from connectors.base import ReadBatch
 from services.object_streaming import (
     download_for_object_store,
     download_object,
     read_rows_from_spill,
 )
+
+from connectors.base import ReadBatch
 
 __all__ = ["ReadBatch", "read_object_from_store", "_object_version_token"]
 

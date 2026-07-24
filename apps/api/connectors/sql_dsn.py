@@ -6,7 +6,6 @@ import re
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-
 _MYSQL_SCHEMES = frozenset({"mysql", "mysql+pymysql", "mariadb"})
 _PG_SCHEMES = frozenset({"postgresql", "postgres", "postgresql+psycopg2", "pgsql"})
 

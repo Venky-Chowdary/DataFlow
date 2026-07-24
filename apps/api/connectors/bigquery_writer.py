@@ -6,6 +6,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from services.type_system import ddl_type
+
 from connectors.driver_guard import stub_writes_allowed
 from connectors.stub_writer import simulate_stub_write
 from connectors.writer_common import (
@@ -24,7 +26,6 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
-from services.type_system import ddl_type
 
 
 @dataclass

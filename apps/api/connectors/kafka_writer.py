@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import ssl
 from typing import Any, Callable
+
+from services.value_serializer import json_default
 
 from connectors.writer_common import (
     WriteResult,
@@ -19,7 +22,8 @@ from connectors.writer_common import (
     resolve_target_columns,
     transform_error_policy,
 )
-from services.value_serializer import json_default
+
+logger = logging.getLogger(__name__)
 
 
 def _bootstrap(host: str, port: int, connection_string: str) -> str:
@@ -210,7 +214,10 @@ def write_mapped_rows(
     )
     registered_schema_id: int | None = None
     if registry.startswith("http"):
-        from connectors.confluent_schema_registry import SchemaRegistryError, register_json_schema
+        from connectors.confluent_schema_registry import (
+            SchemaRegistryError,
+            register_json_schema,
+        )
 
         schema_obj = {
             "type": "object",
@@ -284,8 +291,8 @@ def write_mapped_rows(
     finally:
         try:
             producer.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
     return WriteResult(
         ok=True,

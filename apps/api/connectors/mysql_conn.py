@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from connectors.sql_dsn import private_cloud_host_hint, resolve_sql_endpoint
@@ -12,6 +13,8 @@ def _parse_mysql_url(url: str) -> dict[str, Any]:
     from connectors.sql_dsn import parse_sql_url
 
     return parse_sql_url(url, family="mysql")
+
+logger = logging.getLogger(__name__)
 
 
 def get_connection(
@@ -74,8 +77,8 @@ def get_connection(
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
             if hasattr(socket, "TCP_KEEPCNT"):
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
     from connectors.write_resilience import apply_mysql_session_guards
 

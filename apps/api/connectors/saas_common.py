@@ -6,10 +6,10 @@ import re
 from typing import Any, NoReturn
 
 import requests
-
-from connectors.base import ReadBatch
 from services.error_handling import RetryBudget, with_retry
 from services.value_serializer import cell_to_string
+
+from connectors.base import ReadBatch
 
 
 def base_url(host: str, default: str) -> str:

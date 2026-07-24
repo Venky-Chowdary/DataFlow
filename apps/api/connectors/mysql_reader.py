@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,8 @@ from connectors.sql_identifiers import (
     quote_table_ref,
     require_safe_identifier,
 )
+
+logger = logging.getLogger(__name__)
 
 _api_root = Path(__file__).resolve().parents[1]
 if str(_api_root) not in sys.path:
@@ -38,8 +41,8 @@ def _primary_key_columns(cur, table: str) -> list[str] | None:
         rows = cur.fetchall()
         if rows:
             return [r[0] for r in rows]
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
     return None
 
 

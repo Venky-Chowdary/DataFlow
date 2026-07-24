@@ -13,8 +13,8 @@ _api_root = Path(__file__).resolve().parents[1]
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
-from services.value_serializer import cell_to_string
 from services.json_intelligence import expand_mongo_documents
+from services.value_serializer import cell_to_string
 
 from .mongodb_common import _mongo_client
 
@@ -25,7 +25,6 @@ def _cast_cursor_value(value: str, cursor_type: str | None = None) -> Any:
     from decimal import InvalidOperation, Overflow
 
     from bson.decimal128 import Decimal128
-
     from services.cdc_engine import WatermarkType, infer_watermark_type
 
     if not value:

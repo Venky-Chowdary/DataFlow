@@ -11,10 +11,10 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Callable
 
-logger = logging.getLogger(__name__)
+from services.type_system import ddl_type
+from services.value_serializer import json_default
 
 from connectors.sqlite_common import sqlite_file_path
-from services.value_serializer import json_default
 from connectors.writer_common import (
     CHUNK_SIZE,
     _coerced_null_row_count,
@@ -29,7 +29,8 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
-from services.type_system import ddl_type
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -139,9 +140,9 @@ def _sqlite_upsert_batch(
         try:
             cur.executemany(insert_sql, rows)
             return
-        except Exception:
+        except Exception as exc:
             # Missing UNIQUE on conflict cols — fall through to delete+insert.
-            pass
+            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
     # delete+insert fallback: skip keys where existing LSN is newer/equal.
     if DF_LSN_COL in target_cols and conflict_cols:

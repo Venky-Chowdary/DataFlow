@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,8 @@ from connectors.driver_guard import require_driver
 from connectors.postgresql_conn import get_connection
 
 _api_root = Path(__file__).resolve().parents[1]
+
+logger = logging.getLogger(__name__)
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
@@ -86,8 +89,8 @@ def _primary_key_columns(cur, schema: str, table: str) -> list[str] | None:
         rows = cur.fetchall()
         if rows:
             return [r[0] for r in rows]
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
     return None
 
 

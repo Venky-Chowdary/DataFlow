@@ -8,8 +8,11 @@ This module is a thin bridge — not required for native PG/MySQL/Mongo CDC.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Iterator
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -126,7 +129,7 @@ class KafkaDebeziumConsumer:
             self.connect()
         assert self._consumer is not None
         try:
-            from kafka import TopicPartition, OffsetAndMetadata  # type: ignore
+            from kafka import OffsetAndMetadata, TopicPartition  # type: ignore
         except ImportError:
             return
         payload = offsets if offsets is not None else self.pending_offsets()
@@ -150,7 +153,10 @@ class KafkaDebeziumConsumer:
         if self._consumer is None:
             self.connect()
         assert self._consumer is not None
-        from connectors.confluent_schema_registry import SchemaRegistryError, decode_kafka_value
+        from connectors.confluent_schema_registry import (
+            SchemaRegistryError,
+            decode_kafka_value,
+        )
 
         registry_url = str(self.config.get("schema_registry_url") or "").strip()
         batch = self._consumer.poll(timeout_ms=timeout_ms, max_records=max_records)
@@ -197,7 +203,7 @@ class KafkaDebeziumConsumer:
         if self._consumer is not None:
             try:
                 self._consumer.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
             self._consumer = None
             self._pending_offsets.clear()

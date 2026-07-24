@@ -10,6 +10,7 @@ after the final checkpoint). Crash mid-write redelivers — at-least-once.
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,8 @@ from connectors.header_union import union_attribute_keys
 from connectors.kafka_debezium_bridge import KafkaDebeziumConsumer
 
 _api_root = Path(__file__).resolve().parents[1]
+
+logger = logging.getLogger(__name__)
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
@@ -161,8 +164,8 @@ def read_topic_batch(
                     elif prev != lt:
                         native_types[k] = "TEXT"
             batch.meta = {"native_types": native_types}
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
         return batch, next_cursor
     finally:
         consumer.close()

@@ -57,8 +57,8 @@ def decode_oracle_resume_token(token: str | None) -> dict[str, Any]:
                 "offset": int(data.get("offset") or 0),
                 "table": str(data.get("table") or ""),
             }
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
     try:
         return {"scn": int(raw), "phase": "streaming", "offset": 0, "table": ""}
     except Exception:

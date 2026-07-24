@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import threading
 import unittest.mock
 from typing import Any
 
-
 # fakesnow patches snowflake.connector.connect globally; keep a process-wide
 # refcount so multiple nested get_connection() calls (e.g. count + read) can
 # share one patch and the last close tears it down.  This prevents the "already
 # patched" leaks that break downstream tests.
 _fakesnow_lock = threading.Lock()
+
+logger = logging.getLogger(__name__)
 _fakesnow_refcount = 0
 _fakesnow_patch_cm: Any | None = None
 
@@ -102,8 +104,8 @@ def resolve_snowflake_table_name(cur: Any, schema: str, table: str) -> str | Non
         row = cur.fetchone()
         if row and row[0]:
             return str(row[0])
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
     return None
 
@@ -120,7 +122,10 @@ def resolve_or_fold_snowflake_table(cur: Any, schema: str, table: str) -> str:
 
 def snowflake_qualified_table(schema: str, table: str) -> str:
     """Quote schema.table using the exact stored/folded names (no second fold)."""
-    from connectors.sql_identifiers import quote_sql_identifier, snowflake_fold_identifier
+    from connectors.sql_identifiers import (
+        quote_sql_identifier,
+        snowflake_fold_identifier,
+    )
 
     sch = snowflake_fold_identifier((schema or "PUBLIC").strip() or "PUBLIC")
     # ``table`` must already be the resolved information_schema name, or a

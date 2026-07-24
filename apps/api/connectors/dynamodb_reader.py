@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -24,6 +25,8 @@ from connectors.base import ReadBatch
 from connectors.header_union import union_attribute_keys
 
 _api_root = Path(__file__).resolve().parents[1]
+
+logger = logging.getLogger(__name__)
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
@@ -159,8 +162,8 @@ def infer_logical_from_native(value: Any) -> str | None:
         try:
             if value == value.to_integral_value() and abs(value) <= Decimal("9223372036854775807"):
                 return "INTEGER"
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
         return "DECIMAL"
     if isinstance(value, float):
         return "FLOAT"
@@ -237,8 +240,8 @@ def describe_table_schema(cfg: dict[str, Any], table: str) -> tuple[list[str], d
         else:
             for header in sample.headers:
                 types.setdefault(header, "VARCHAR")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
     return columns, types
 
@@ -257,7 +260,10 @@ def read_table_batch(
     """Scan one page. When ``columns`` is set, still **union** any new keys found
     on this page into headers so sparse attributes are never silently dropped.
     """
-    from services.json_intelligence import expand_dynamo_documents, mongo_flatten_enabled
+    from services.json_intelligence import (
+        expand_dynamo_documents,
+        mongo_flatten_enabled,
+    )
 
     client = boto3_client("dynamodb", cfg)
     scan_kwargs: dict[str, Any] = {"TableName": table, "Limit": limit}

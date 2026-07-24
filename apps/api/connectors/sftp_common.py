@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 
 class SFTPConfig:
@@ -105,8 +108,8 @@ def connect_sftp(cfg: SFTPConfig):
             try:
                 pkey = key_cls.from_private_key(file_obj=__import__("io").StringIO(key_text))
                 break
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
     transport = paramiko.Transport((cfg.host, cfg.port))
     transport.connect(username=cfg.username, password=cfg.password or None, pkey=pkey)

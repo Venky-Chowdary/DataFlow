@@ -24,13 +24,14 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
+from services.value_serializer import json_default
+
 from connectors.writer_common import (
     WriteResult,
     build_mapped_rows_with_details,
     resolve_target_columns,
     transform_error_policy,
 )
-from services.value_serializer import json_default
 
 
 def _warehouse_root(host: str, database: str, connection_string: str) -> Path:

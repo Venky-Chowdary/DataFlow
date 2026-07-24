@@ -139,7 +139,7 @@ def write_mapped_rows(
         except Exception as exc:
             # Only treat true NotFound as create-trigger; auth/transient must surface.
             try:
-                from google.api_core.exceptions import NotFound, Forbidden
+                from google.api_core.exceptions import Forbidden, NotFound
             except ImportError:
                 NotFound = type(None)  # type: ignore[misc,assignment]
                 Forbidden = type(None)  # type: ignore[misc,assignment]

@@ -14,9 +14,10 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from connectors.writer_common import WriteResult as _WriteResult
 from services.value_serializer import cell_to_string, json_default, sanitize_json_value
 from services.vectorization import vectorize_records
+
+from connectors.writer_common import WriteResult as _WriteResult
 
 
 def _requests_session() -> Any:

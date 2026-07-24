@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import base64
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
+
+from services.type_system import ddl_type
 
 from connectors.mysql_conn import get_connection
 from connectors.sql_temporal import (
@@ -41,7 +44,8 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
-from services.type_system import ddl_type
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -362,8 +366,8 @@ def write_mapped_rows(
                 except Exception as setup_exc:
                     try:
                         conn.rollback()
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Cleanup exception suppressed: %s", exc, exc_info=exc)
                     setup_attempt += 1
                     if not is_connection_lost(setup_exc) or not should_retry_connection_lost(
                         attempt=setup_attempt, started_at=setup_started, proxy=proxy_dest
@@ -413,8 +417,8 @@ def write_mapped_rows(
                     except Exception as chunk_exc:
                         try:
                             conn.rollback()
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
                         # Bad cells: write row-by-row and quarantine failures so one
                         # Incorrect datetime cannot abort a 100k-row transfer.
                         if is_sql_data_error(chunk_exc) and policy in {"quarantine", "coerce_null"}:
@@ -426,8 +430,8 @@ def write_mapped_rows(
                                 except Exception as row_exc:
                                     try:
                                         conn.rollback()
-                                    except Exception:
-                                        pass
+                                    except Exception as exc:
+                                        logger.debug("Cleanup exception suppressed: %s", exc, exc_info=exc)
                                     if is_connection_lost(row_exc):
                                         raise
                                     source_row = start + row_i
@@ -456,8 +460,8 @@ def write_mapped_rows(
                                         rows_written=chunk_written,
                                     )
                                     conn.commit()
-                                except Exception:
-                                    pass
+                                except Exception as exc:
+                                    logger.warning("Exception suppressed: %s", exc, exc_info=exc)
                             break
                         attempt += 1
                         if not is_connection_lost(chunk_exc) or not should_retry_connection_lost(
@@ -474,8 +478,8 @@ def write_mapped_rows(
         finally:
             try:
                 cur.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
         close_quietly(conn)
         return WriteResult(

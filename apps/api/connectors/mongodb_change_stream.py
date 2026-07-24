@@ -13,11 +13,13 @@ this module raises ``OperationFailure``.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Iterator
 from typing import Any
 
 from bson import json_util
+from services.cdc_engine import ChangeBatch
 
 from connectors.mongodb_common import _mongo_client
 from connectors.mongodb_reader import (
@@ -25,7 +27,8 @@ from connectors.mongodb_reader import (
     _serialize,
     read_collection_cursor_batch,
 )
-from services.cdc_engine import ChangeBatch
+
+logger = logging.getLogger(__name__)
 
 
 def _database_name(cfg: dict[str, Any]) -> str:
@@ -263,19 +266,19 @@ class MongodbChangeStreamCdc:
             )
             self._signal_index_ready = True
             self._last_signal_poll_at = now
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
     def close(self) -> None:
         """Release the CDC lease and MongoClient — required under multi-job load."""
         try:
             self._lease.release()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
         try:
             self.client.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
     def _peek_stream_events_during_chunk(self, sig: Any) -> list[dict[str, Any]]:
         """Non-acking change-stream peek for DDD-3 stream-wins during incremental snapshot."""

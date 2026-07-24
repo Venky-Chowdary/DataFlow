@@ -20,7 +20,8 @@ from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from typing import Any, Callable
 
-logger = logging.getLogger(__name__)
+from services.type_system import ddl_type, normalize_logical_type
+from services.value_serializer import cell_to_string, json_default
 
 from connectors.base import ReadBatch
 from connectors.schema_drift import add_missing_columns
@@ -30,8 +31,8 @@ from connectors.sql_temporal import (
     is_sql_data_error,
     logical_to_temporal_ddl,
 )
-from services.type_system import ddl_type, normalize_logical_type
-from services.value_serializer import cell_to_string, json_default
+
+logger = logging.getLogger(__name__)
 
 try:
     import sqlalchemy as sa
@@ -1480,8 +1481,9 @@ def _read_table_raw(
     dialect: str = "ansi",
 ) -> tuple[list[str], list[list[Any]]]:
     """Fallback read for engines whose SQLAlchemy reflection is incomplete."""
-    from connectors.sql_identifiers import quote_table_ref
     from services.dialect_profiles import quote_char_for
+
+    from connectors.sql_identifiers import quote_table_ref
 
     qualified = quote_table_ref(table, schema, dialect=dialect)
     base = f"SELECT * FROM {qualified}"
@@ -1898,8 +1900,8 @@ def _upsert_batch(
             )
             try:
                 conn.rollback()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
             return False
         return False
 

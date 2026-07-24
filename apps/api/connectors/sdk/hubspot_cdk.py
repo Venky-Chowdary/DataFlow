@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Iterator
 
-from connectors.sdk import BaseConnector, RecordBatch, StreamSchema, register_connector
 from connectors.saas_common import base_url, humanize_http_error, request, token
+from connectors.sdk import BaseConnector, RecordBatch, StreamSchema, register_connector
 
 DEFAULT_HOST = "api.hubapi.com"
 

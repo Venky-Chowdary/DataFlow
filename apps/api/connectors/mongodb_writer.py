@@ -5,9 +5,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Callable
+
+from services.value_serializer import json_default
 
 from connectors.writer_common import (
     CHUNK_SIZE,
@@ -22,7 +25,8 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
-from services.value_serializer import json_default
+
+logger = logging.getLogger(__name__)
 
 # MongoDB commands handle ~1000-document batches most reliably through proxies
 # and serverless tiers. 20k-document single calls can hit socket/proxy limits.
@@ -364,8 +368,8 @@ def write_mapped_rows(
                     if len(v) == 24 and ObjectId.is_valid(v):
                         try:
                             doc["_id"] = ObjectId(v)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
             if write_mode == "upsert" and conflict_columns:
                 from pymongo import ReplaceOne

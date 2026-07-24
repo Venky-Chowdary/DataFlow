@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from connectors.generic_sql import WriteResult, write_mapped_rows as _write
+from connectors.generic_sql import WriteResult
+from connectors.generic_sql import write_mapped_rows as _write
 
 
 def write_mapped_rows(**kwargs: Any) -> WriteResult:

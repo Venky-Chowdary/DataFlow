@@ -13,9 +13,9 @@ import json
 from typing import Any
 
 import requests
+from services.value_serializer import cell_to_string, json_default
 
 from connectors.saas_common import ReadBatch, humanize_http_error
-from services.value_serializer import cell_to_string, json_default
 
 
 def _url(host: str, port: int, ssl: bool, database: str) -> str:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -16,6 +17,8 @@ from connectors.writer_common import (
     row_checksum,
     transform_error_policy,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -194,8 +197,8 @@ def write_mapped_rows(
         written, bulk_errors = bulk(client, actions, raise_on_error=False)
         try:
             client.indices.refresh(index=index)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
         if on_checkpoint:
             on_checkpoint(1, 1, written)
 
@@ -284,5 +287,5 @@ def write_mapped_rows(
     finally:
         try:
             client.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Exception suppressed: %s", exc, exc_info=exc)

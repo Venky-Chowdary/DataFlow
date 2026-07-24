@@ -9,14 +9,17 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from typing import Any
 
 import requests
-
-from connectors.saas_common import ReadBatch, base_url, token
 from services.value_serializer import cell_to_string
 
+from connectors.saas_common import ReadBatch, base_url, token
+
 COMMON_DATA_PATHS = ["data", "results", "items", "records", "values", "contacts", "accounts", "list", "objects"]
+
+logger = logging.getLogger(__name__)
 COMMON_TOTAL_PATHS = ["total", "count", "total_count", "meta.total_count", "meta.count", "page.total_elements"]
 COMMON_NEXT_PATHS = ["next", "paging.next", "meta.next", "links.next"]
 
@@ -146,8 +149,8 @@ def _parse_json_config(cfg: dict[str, Any]) -> dict[str, Any]:
     if raw.startswith("{"):
         try:
             overrides = json.loads(raw)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
     if isinstance(cfg.get("extra"), dict):
         overrides.update(cfg["extra"])
     return overrides

@@ -13,10 +13,11 @@ import json
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from connectors.postgresql_conn import get_connection
-from connectors.writer_common import WriteResult as _WriteResult
 from services.value_serializer import sanitize_json_value
 from services.vectorization import vectorize_records
+
+from connectors.postgresql_conn import get_connection
+from connectors.writer_common import WriteResult as _WriteResult
 
 
 @dataclass

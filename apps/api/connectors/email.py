@@ -15,6 +15,8 @@ from email.mime.text import MIMEText
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+from services.value_serializer import cell_to_string, json_default
+
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
     _rejected_row_count,
@@ -24,7 +26,6 @@ from connectors.writer_common import (
     to_json_value,
     transform_error_policy,
 )
-from services.value_serializer import cell_to_string, json_default
 
 
 @dataclass

@@ -11,6 +11,7 @@ long-lived sockets mid-transfer. Writers must:
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from typing import Any
@@ -41,6 +42,8 @@ CONNECTION_LOST_SIGNALS: tuple[str, ...] = (
     "connection not open",
     "server closed the connection unexpectedly",
 )
+
+logger = logging.getLogger(__name__)
 
 PUBLIC_PROXY_HOST_MARKERS: tuple[str, ...] = (
     "proxy.rlwy.net",
@@ -151,8 +154,8 @@ def close_quietly(conn: Any) -> None:
         return
     try:
         conn.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
 def apply_postgres_session_guards(conn: Any) -> None:
@@ -168,8 +171,8 @@ def apply_postgres_session_guards(conn: Any) -> None:
     except Exception:
         try:
             conn.autocommit = False
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
 def apply_mysql_session_guards(conn: Any) -> None:
@@ -180,8 +183,8 @@ def apply_mysql_session_guards(conn: Any) -> None:
             cur.execute("SET SESSION interactive_timeout = 28800")
             cur.execute("SET SESSION net_read_timeout = 600")
             cur.execute("SET SESSION net_write_timeout = 600")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
 def ensure_postgres_write_ledger(cur: Any, schema: str = "public") -> None:
@@ -309,8 +312,9 @@ def cleanup_write_ledger(
     dest = (dest_type or "").lower()
     try:
         if dest in {"postgresql", "redshift"}:
-            from connectors.postgresql_conn import get_connection
             from psycopg2 import sql
+
+            from connectors.postgresql_conn import get_connection
 
             conn = get_connection(
                 host=cfg.get("host", ""),
@@ -357,6 +361,6 @@ def cleanup_write_ledger(
                 conn.commit()
             finally:
                 close_quietly(conn)
-    except Exception:
+    except Exception as exc:
         # Ledger cleanup must never fail a successful transfer.
-        pass
+        logger.warning("Exception suppressed: %s", exc, exc_info=exc)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from connectors.aws_common import (
     boto3_client,
     is_local_endpoint,
@@ -9,6 +11,8 @@ from connectors.aws_common import (
     resolve_region,
 )
 from connectors.base import ConnectResult
+
+logger = logging.getLogger(__name__)
 
 
 def _cfg(host: str, port: int, username: str, password: str, connection_string: str) -> dict:
@@ -75,8 +79,8 @@ def test_dynamodb(
             discovered = list_tables(cfg)
             if table in discovered:
                 tables = sorted(set(discovered))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Exception swallowed: %s", exc, exc_info=exc)
         target = endpoint or region
         mode = "DynamoDB Local" if local else "AWS DynamoDB"
         return ConnectResult(

@@ -25,10 +25,10 @@ from typing import Any, Iterator
 from services.cdc_cursor_gap import CdcLsnGapError
 from services.cdc_engine import ChangeBatch
 
-logger = logging.getLogger(__name__)
-
 # Re-export for existing ``from connectors.sqlserver_cdc_native import CdcLsnGapError``.
 __all_gap__ = ("CdcLsnGapError",)
+
+logger = logging.getLogger(__name__)
 
 
 def encode_mssql_cdc_token(
@@ -84,8 +84,8 @@ def decode_mssql_cdc_token(token: str | None) -> dict[str, Any]:
                 "seqval": str(data.get("seqval") or ""),
                 "capture_instance": str(data.get("capture_instance") or ""),
             }
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
     return {
         "lsn": "",
         "phase": "initial",

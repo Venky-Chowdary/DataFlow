@@ -9,9 +9,9 @@ from __future__ import annotations
 from typing import Any
 
 import requests
+from services.value_serializer import cell_to_string
 
 from connectors.saas_common import ReadBatch, humanize_http_error
-from services.value_serializer import cell_to_string
 
 
 def _url(host: str, port: int, ssl: bool) -> str:

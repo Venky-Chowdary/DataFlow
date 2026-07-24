@@ -6,8 +6,9 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from connectors.base import ReadBatch
 from services.value_serializer import cell_to_string, json_default
+
+from connectors.base import ReadBatch
 
 
 @dataclass
