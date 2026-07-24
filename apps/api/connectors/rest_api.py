@@ -35,17 +35,27 @@ def _deep_get(obj: Any, path: str) -> Any:
 
 
 def _extract_records(body: Any, data_path: str = "") -> list[dict[str, Any]]:
+    def _as_records(records: list[Any]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for r in records:
+            if isinstance(r, dict):
+                out.append(r)
+            else:
+                # Scalar arrays are valid payloads — wrap rather than silently drop.
+                out.append({"value": r})
+        return out
+
     if isinstance(body, list):
-        return [r for r in body if isinstance(r, dict)]
+        return _as_records(body)
     if isinstance(body, dict):
         if data_path:
             records = _deep_get(body, data_path)
             if isinstance(records, list):
-                return [r for r in records if isinstance(r, dict)]
+                return _as_records(records)
         for path in COMMON_DATA_PATHS:
             records = _deep_get(body, path)
             if isinstance(records, list):
-                return [r for r in records if isinstance(r, dict)]
+                return _as_records(records)
     return []
 
 
@@ -156,6 +166,24 @@ def _resolve_config(cfg: dict[str, Any]) -> dict[str, Any]:
 
     object_path = (merged.get("table") or merged.get("database") or merged.get("object") or "").strip()
     merged["object_path"] = object_path
+
+    # Brand-native pagination — do not invent offset for cursor/Link APIs.
+    saas_defaults: dict[str, dict[str, str]] = {
+        "airtable": {
+            "pagination_type": "cursor",
+            "cursor_param": "offset",
+            "next_path": "offset",
+            "data_path": "records",
+        },
+        "shopify": {"pagination_type": "link"},
+        "zendesk": {"pagination_type": "link"},
+    }
+    for key, value in saas_defaults.get(catalog_id, {}).items():
+        if not merged.get(key):
+            merged[key] = value
+    if catalog_id == "zendesk" and not merged.get("data_path") and object_path:
+        # /api/v2/tickets → tickets list key
+        merged["data_path"] = object_path.rsplit("/", 1)[-1]
 
     pagination_type = (merged.get("pagination_type") or merged.get("pagination") or "offset").lower()
     if pagination_type not in {"offset", "page", "cursor", "link", "none"}:
@@ -282,6 +310,8 @@ def read_object(
     all_rows: list[dict[str, Any]] = []
     next_url: str | None = None
     page_index = 0
+    prev_fingerprint: tuple[str, ...] | None = None
+    seen_cursors: set[str] = set()
     offset_param = cfg["offset_param"]
     limit_param = cfg["limit_param"]
     page_param = cfg["page_param"]
@@ -294,30 +324,76 @@ def read_object(
             all_rows.extend(records)
             break
         elif pagination_type == "offset":
+            # Offset APIs rarely return a next cursor — continue while the page is full.
             start = offset + (page_index * 100)
             pagination = {offset_param: start, limit_param: page_limit}
-            records, _, has_more = _read_page(cfg, pagination, None)
+            records, _, _ = _read_page(cfg, pagination, None)
+            if not records:
+                break
+            # Repeated-page fingerprint guard (misconfigured offset that returns same rows).
+            fingerprint = tuple(
+                json.dumps(r, sort_keys=True, default=str) for r in records[:3]
+            )
+            if page_index > 0 and fingerprint == prev_fingerprint:
+                raise RuntimeError(
+                    "REST pagination returned a repeated page — refuse silent partial ingest "
+                    "(check offset/page parameters)"
+                )
+            prev_fingerprint = fingerprint
             all_rows.extend(records)
-            if not has_more or not records or len(records) < page_limit:
+            if len(records) < page_limit:
                 break
         elif pagination_type == "page":
-            page = offset + page_index + 1
+            # ``offset`` is a row offset (same contract as SQL sources). Convert to
+            # 1-based page index — treating it as a page number requests page 101
+            # when resuming at row 100 and silently skips data.
+            page = (offset // page_limit) + page_index + 1
             pagination = {page_param: page, limit_param: page_limit}
-            records, _, has_more = _read_page(cfg, pagination, None)
+            records, _, _ = _read_page(cfg, pagination, None)
+            if not records:
+                break
+            fingerprint = tuple(
+                json.dumps(r, sort_keys=True, default=str) for r in records[:3]
+            )
+            if page_index > 0 and fingerprint == prev_fingerprint:
+                raise RuntimeError(
+                    "REST pagination returned a repeated page — refuse silent partial ingest "
+                    "(check page parameters)"
+                )
+            prev_fingerprint = fingerprint
             all_rows.extend(records)
-            if not has_more or not records or len(records) < page_limit:
+            if len(records) < page_limit:
                 break
         elif pagination_type == "cursor":
             pagination: dict[str, Any] = {limit_param: page_limit}
             if next_url:
-                # next_url is a cursor value in this branch (set below).
-                pagination[cursor_param] = next_url
-            records, next_cursor, has_more = _read_page(cfg, pagination, None)
+                if next_url in seen_cursors:
+                    raise RuntimeError(
+                        "REST cursor pagination repeated a cursor — refuse "
+                        "duplicate or partial ingest"
+                    )
+                seen_cursors.add(next_url)
+                # Absolute next URLs (RFC 5988 / JSON next) must be followed as
+                # URLs — stuffing them into ?cursor= silently breaks SaaS Link pagers.
+                if next_url.startswith(("https://", "http://")):
+                    records, next_cursor, _ = _read_page(cfg, {}, next_url)
+                else:
+                    pagination[cursor_param] = next_url
+                    records, next_cursor, _ = _read_page(cfg, pagination, None)
+            else:
+                records, next_cursor, _ = _read_page(cfg, pagination, None)
             all_rows.extend(records)
             next_url = next_cursor or ""
             if not next_url or not records:
                 break
         elif pagination_type == "link":
+            if next_url and next_url in seen_cursors:
+                raise RuntimeError(
+                    "REST link pagination repeated a next URL — refuse "
+                    "duplicate or partial ingest"
+                )
+            if next_url:
+                seen_cursors.add(next_url)
             records, next_url, _ = _read_page(cfg, {limit_param: page_limit}, next_url)
             all_rows.extend(records)
             if not next_url or not records:
@@ -343,7 +419,10 @@ def read_object(
         flattened.append({k: cell_to_string(v) for k, v in flat.items()})
 
     rows = [[r.get(k, "") for k in keys] for r in flattened]
-    return ReadBatch(headers=keys, rows=rows, offset=0, total_rows=len(rows))
+    # Paginated REST never publishes authoritative object cardinality — page
+    # length ≠ source size (same stream early-stop trap HubSpot hit).
+    total_rows = len(rows) if pagination_type == "none" else None
+    return ReadBatch(headers=keys, rows=rows, offset=0, total_rows=total_rows)
 
 
 # Source-only connector: writes are not supported.

@@ -116,12 +116,29 @@ def test_create_new_identity_why_contains_new_table_language():
             {"name": "email", "inferred_type": "VARCHAR", "samples": ["a@b.com"]},
         ],
         destination_db_type="snowflake",
+        destination_table_exists=False,
     )
     assert all(m["assignment_strategy"] == "identity_passthrough" for m in mappings)
     assert all("New destination table" in m["reasoning"] for m in mappings)
     assert all("CREATE on first write" in m["reasoning"] for m in mappings)
     assert mappings[0]["target_type"] == "NUMBER(38,0)"
     assert mappings[0]["confidence"] <= 0.95
+
+
+def test_existing_table_empty_columns_never_invents_create_new():
+    """Shared SQL/warehouse failure mode: table exists, columns []. Must not claim CREATE."""
+    for exists in (True, None):
+        mappings = map_columns(
+            ["id", "title"],
+            [],
+            destination_db_type="postgresql",
+            destination_table_exists=exists,
+        )
+        assert mappings
+        assert all(m.get("create_new") is False for m in mappings)
+        assert all(m.get("assignment_strategy") == "pending_dest_schema" for m in mappings)
+        assert all("New destination table" not in m["reasoning"] for m in mappings)
+        assert all(m.get("requires_review") is True for m in mappings)
 
 
 def test_refine_mappings_with_quality():

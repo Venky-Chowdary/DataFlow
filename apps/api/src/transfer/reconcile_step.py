@@ -54,12 +54,77 @@ def _mapped_targets(mappings: list[dict], columns: list[str]) -> list[str]:
     return targets or columns
 
 
-def _sort_key_for_columns(targets: list[str]) -> str | None:
-    """Pick a stable key for sample alignment."""
-    return next(
-        (c for c in targets if c.lower() == "id" or c.lower().endswith("_id")),
-        targets[0] if targets else None,
+def _sort_key_for_columns(targets: list[str], mappings: list[dict] | None = None) -> str | None:
+    """Pick a stable key for sample alignment.
+
+    Prefer real identity columns (id / *_id / code / uuid) over the first mapped
+    column — airports-like tables have no id, and aligning on ``city`` is weak
+    when the destination already holds prior append loads.
+    """
+    if not targets:
+        return None
+    lower_map = {c.lower(): c for c in targets}
+    # Operator / contract primary key from mapping metadata.
+    for m in mappings or []:
+        for key in ("primary_key", "is_primary_key", "identity"):
+            if m.get(key) in (True, "true", "1", 1):
+                tgt = str(m.get("target") or "").strip()
+                if tgt and tgt.lower() in lower_map:
+                    return lower_map[tgt.lower()]
+    preferred = (
+        "id",
+        "uuid",
+        "guid",
+        "code",
+        "pk",
+        "airport_code",
+        "iata",
+        "icao",
     )
+    for name in preferred:
+        if name in lower_map:
+            return lower_map[name]
+    for c in targets:
+        cl = c.lower()
+        if cl.endswith("_id") or cl.endswith("_uuid") or cl.endswith("_code"):
+            return c
+    return targets[0]
+
+
+def _source_key_values(
+    records: list[dict],
+    *,
+    sort_key: str | None,
+    mappings: list[dict],
+    limit: int = 50,
+) -> list[Any]:
+    """Extract distinct source-side key values for keyed destination sample reads."""
+    if not sort_key or not records:
+        return []
+    source_sort_key = sort_key
+    sk = sort_key.lower()
+    for m in mappings:
+        if str(m.get("target") or "").lower() == sk and m.get("source"):
+            source_sort_key = str(m["source"])
+            break
+    seen: set[str] = set()
+    values: list[Any] = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        raw = rec.get(source_sort_key)
+        if raw is None and source_sort_key != sort_key:
+            raw = rec.get(sort_key)
+        if raw is None or raw == "":
+            continue
+        marker = str(raw)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        values.append(raw)
+        if len(values) >= limit:
+            break
+    return values
 
 
 def run_reconciliation(
@@ -163,25 +228,40 @@ def run_reconciliation(
 
     strict_checksum = validation_mode in ("strict", "maximum")
 
+    # Streaming transfers pass records=[] — use the bounded sample the writer
+    # stashed so append/upsert Gate-8 can still prove key-aligned fidelity.
+    sample_records = list(records or [])
+    if not sample_records:
+        stashed = dest_summary.get("reconcile_sample") or dest_summary.get("sample_records") or []
+        if isinstance(stashed, list):
+            sample_records = [r for r in stashed if isinstance(r, dict)]
+
     sample_compare = None
-    if records and table_name and target_cols:
-        sort_key = _sort_key_for_columns(target_cols)
+    if sample_records and table_name and target_cols:
+        sort_key = _sort_key_for_columns(target_cols, mapping_dicts)
+        key_values = _source_key_values(
+            sample_records,
+            sort_key=sort_key,
+            mappings=mapping_dicts,
+            limit=min(50, len(sample_records)),
+        )
         target_sample = read_target_sample(
             db_type,
             cfg,
             schema=schema,
             table_name=table_name,
             columns=target_cols[:20] or None,
-            limit=min(50, len(records)),
+            limit=min(50, len(sample_records)),
             sort_key=sort_key,
+            key_values=key_values or None,
         )
         if target_sample:
             sample_compare = sample_compare_rows(
-                records,
+                sample_records,
                 target_sample,
                 mapping_dicts,
                 target_columns=target_cols,
-                sample_size=min(50, len(records)),
+                sample_size=min(50, len(sample_records)),
                 sort_key=sort_key,
             )
 

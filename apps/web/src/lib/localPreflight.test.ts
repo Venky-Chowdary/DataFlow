@@ -23,7 +23,7 @@ describe("runLocalPreflight file export honesty", () => {
     assert.ok(pf.run_id?.startsWith("pf_local_"));
     const byId = Object.fromEntries(pf.gates.map((g) => [g.id, g]));
     assert.equal(byId.g2_destination?.status, "skip");
-    assert.equal(byId.g6_ddl?.status, "skip");
+    assert.equal(byId.g6_target_ddl?.status, "skip");
     assert.equal(byId.g8_reconciliation?.status, "skip");
     assert.equal(pf.proof_bundle?.quality_grade, "review");
     assert.equal(pf.proof_bundle?.transfer_decision?.decision, "review");

@@ -38,6 +38,13 @@ def test_attach_transforms_to_all_mappings():
 
 def test_engine_to_ui_coverage():
     assert ENGINE_TO_UI["decimal"] == "cast_number"
+    assert ENGINE_TO_UI["integer"] == "cast_integer"
     assert ENGINE_TO_UI["datetime"] == "date_iso"
+    assert ENGINE_TO_UI["json"] == "parse_json"
+    assert ENGINE_TO_UI["binary"] == "binary"
+    assert ENGINE_TO_UI["phone"] == "phone"
     assert ENGINE_TO_UI["none"] == "none"
     assert ENGINE_TO_UI["identity"] == "none"
+    assert UI_TO_ENGINE["cast_integer"] == "integer"
+    assert UI_TO_ENGINE["parse_json"] == "json"
+    assert UI_TO_ENGINE["identity_specialty"] == "none"

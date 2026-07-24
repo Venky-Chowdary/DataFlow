@@ -161,9 +161,8 @@ def test_fidelity_csv_to_sqlite_rich_types(tmp_path: Path) -> None:
             source_filename="fidelity.csv",
             destination=dest,
             sync_mode="full_refresh_overwrite",
-            skip_preflight=True,
             validation_mode="strict",
-            mappings=[{"source": c, "target": c} for c in FIDELITY_COLUMNS],
+            mappings=[{"source": c, "target": c, "confidence": 0.99} for c in FIDELITY_COLUMNS],
         ),
         job_id=f"proof-fidelity-{uuid.uuid4().hex[:8]}",
     )
@@ -209,7 +208,7 @@ def test_fidelity_sqlite_to_sqlite_db2db(tmp_path: Path) -> None:
     source = _sqlite_endpoint(src_path, "edge_src")
     dest = _sqlite_endpoint(dst_path, "edge_dst")
 
-    identity = [{"source": c, "target": c} for c in FIDELITY_COLUMNS]
+    identity = [{"source": c, "target": c, "confidence": 0.99} for c in FIDELITY_COLUMNS]
     # Writers expect stringable cells; convert None → ""
     seed_records = [{k: ("" if v is None else v) for k, v in r.items()} for r in FIDELITY_RECORDS]
     written, _, summary = write_destination_database(
@@ -224,7 +223,6 @@ def test_fidelity_sqlite_to_sqlite_db2db(tmp_path: Path) -> None:
             source=source,
             destination=dest,
             sync_mode="full_refresh_overwrite",
-            skip_preflight=True,
             validation_mode="strict",
             mappings=identity,
         ),
@@ -286,7 +284,6 @@ def test_scale_csv_to_dest_with_proof(tmp_path: Path, dest_format: str) -> None:
             source_filename=csv_path.name,
             destination=dest,
             sync_mode="full_refresh_overwrite",
-            skip_preflight=True,
             validation_mode="strict",
         ),
         job_id=f"proof-scale-{uuid.uuid4().hex[:8]}",
@@ -378,9 +375,8 @@ def test_scale_sqlite_to_sqlite_db2db_with_proof(tmp_path: Path) -> None:
             source=source,
             destination=dest,
             sync_mode="full_refresh_overwrite",
-            skip_preflight=True,
             validation_mode="strict",
-            mappings=[{"source": c, "target": c} for c in columns],
+            mappings=[{"source": c, "target": c, "confidence": 0.99} for c in columns],
         ),
         job_id=f"proof-db2db-scale-{uuid.uuid4().hex[:8]}",
     )
@@ -446,8 +442,11 @@ def test_production_sku_fidelity_smoke(tmp_path: Path) -> None:
                 source_filename=csv_path.name,
                 destination=dest,
                 sync_mode="full_refresh_overwrite",
-                skip_preflight=True,
                 validation_mode="strict",
+                mappings=[
+                    {"source": "id", "target": "id", "confidence": 0.99},
+                    {"source": "amount", "target": "amount", "confidence": 0.99},
+                ],
             )
         elif src_fmt == "sqlite" and dest_fmt == "sqlite":
             src = _sqlite_endpoint(tmp_path / "sku_src.db", "sku_src")
@@ -457,15 +456,14 @@ def test_production_sku_fidelity_smoke(tmp_path: Path) -> None:
                 [{"id": "1", "amount": "1"}, {"id": "2", "amount": "2"}],
                 ["id", "amount"],
                 {"id": "INTEGER", "amount": "DECIMAL"},
-                [{"source": "id", "target": "id"}, {"source": "amount", "target": "amount"}],
+                [{"source": "id", "target": "id", "confidence": 0.99}, {"source": "amount", "target": "amount", "confidence": 0.99}],
             )
             req = TransferRequest(
                 source=src,
                 destination=dest,
                 sync_mode="full_refresh_overwrite",
-                skip_preflight=True,
                 validation_mode="strict",
-                mappings=[{"source": "id", "target": "id"}, {"source": "amount", "target": "amount"}],
+                mappings=[{"source": "id", "target": "id", "confidence": 0.99}, {"source": "amount", "target": "amount", "confidence": 0.99}],
             )
         else:
             continue

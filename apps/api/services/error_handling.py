@@ -197,6 +197,52 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
         },
     ),
     (
+        (
+            "incorrect datetime value",
+            "(1292,",
+            " 1292,",
+            "error 1292",
+            "er_truncated_value",
+        ),
+        {
+            "code": "mysql_incorrect_datetime",
+            "category": "data_type",
+            "confidence": "high",
+            "title": "MySQL rejected a datetime literal (1292)",
+            "fix": (
+                "MySQL DATETIME/TIMESTAMP does not accept ISO-8601 with 'T'/'Z' "
+                "(e.g. 2026-07-04T06:57:37Z). DataFlow should normalize to a Python "
+                "datetime before bind using the destination column type. Confirm the "
+                "Map target for that column is DATETIME (not TEXT), then Resume. If this "
+                "persists after upgrade, open Validate → review that column's wire form."
+            ),
+        },
+    ),
+    (
+        (
+            "duplicate primary key",
+            "keys repeat",
+            "duplicate key values",
+            "failed data-quality audit: duplicate",
+        ),
+        {
+            "code": "duplicate_primary_key",
+            "category": "data_quality",
+            "confidence": "high",
+            "title": "Duplicate identity-key values in a write batch",
+            "fix": (
+                "DataFlow blocked the batch because the identity key repeats inside it "
+                "(same rule Validate uses: `_id` on Mongo/Redis/Dynamo; `id`/`_id` on SQL). "
+                "Business fields named `id` that are not the document key are not treated as "
+                "primary keys on schemaless routes. To proceed: (1) Open Validate — if this "
+                "was a false `id` block on Mongo→Redis, restart API and Resume; (2) If the "
+                "identity key truly duplicates, dedupe the source or switch sync mode to "
+                "upsert with that key; (3) Or set an explicit stream-contract primary_key. "
+                "No rows from the failed batch were committed."
+            ),
+        },
+    ),
+    (
         ("disk full", "no space left", "enospc"),
         {
             "code": "destination_disk_full",
@@ -443,6 +489,11 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
             message = (
                 f"{title}. {raw}. "
                 "Concurrent CDC consumers are blocked — release or wait for the holder, then retry."
+            )
+        elif matched.get("code") == "mysql_incorrect_datetime":
+            message = (
+                f"{title}. Driver reported: {raw}. "
+                "ISO 'T'/'Z' literals must be normalized before MySQL DATETIME bind."
             )
         else:
             message = (

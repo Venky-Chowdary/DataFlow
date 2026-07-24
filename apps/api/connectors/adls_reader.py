@@ -26,4 +26,4 @@ def read_object(
 def list_objects(cfg: dict[str, Any], bucket: str, prefix: str = "") -> list[str]:
     client = blob_service_client(cfg)
     container = client.get_container_client(bucket)
-    return [b.name for b in itertools.islice(container.list_blobs(prefix=prefix or ""), 100)]
+    return [b.name for b in itertools.islice(container.list_blobs(prefix=prefix or ""), 2000)]

@@ -12,10 +12,13 @@ if str(_API_ROOT) not in sys.path:
 
 
 def test_dlq_table_name_stable():
-    from services.dest_quarantine import dlq_table_name
+    from services.dest_quarantine import DEST_DLQ_SUPPORTED, dest_supports_dlq_table, dlq_table_name
 
     assert dlq_table_name("users") == "users_df_quarantine"
     assert dlq_table_name("public.orders") == "public_orders_df_quarantine"
+    for driver in ("mongodb", "bigquery", "duckdb", "postgresql"):
+        assert dest_supports_dlq_table(driver), driver
+        assert driver in DEST_DLQ_SUPPORTED or driver == "postgresql"
 
 
 def test_write_dest_quarantine_sqlite_and_promote(tmp_path: Path):

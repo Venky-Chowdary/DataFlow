@@ -227,3 +227,33 @@ def test_mongodb_explicit_id_mapping_still_blocks_duplicate_id_values():
     )
     assert not ok
     assert any("duplicate" in i.lower() for i in issues)
+
+
+def test_float_to_decimal_not_soft_passed_by_samples():
+    """IEEE→fixed-point stays a hard DDL issue even when head samples coerce."""
+    ok, issues = evaluate_ddl_compatibility(
+        mappings=[{"source": "amt", "target": "amt", "confidence": 0.99}],
+        source_schema={"amt": "FLOAT"},
+        target_schema={"amt": "DECIMAL(12,4)"},
+        table_exists=True,
+        dest_connected=True,
+        dest_db_type="postgresql",
+        sample_rows=[{"amt": "1.5"}, {"amt": "2.25"}],
+    )
+    assert not ok
+    assert any("float→decimal" in i.lower() or "float->decimal" in i.lower() or "ieee" in i.lower() for i in issues)
+
+
+def test_datetime_to_date_not_soft_passed_by_samples():
+    """datetime→date truncates time-of-day — hard issue even if samples look date-only."""
+    ok, issues = evaluate_ddl_compatibility(
+        mappings=[{"source": "ts", "target": "d", "confidence": 0.99}],
+        source_schema={"ts": "TIMESTAMPTZ"},
+        target_schema={"d": "DATE"},
+        table_exists=True,
+        dest_connected=True,
+        dest_db_type="postgresql",
+        sample_rows=[{"ts": "2024-06-01"}, {"ts": "2024-07-01"}],
+    )
+    assert not ok
+    assert any("datetime→date" in i.lower() or "time-of-day" in i.lower() for i in issues)

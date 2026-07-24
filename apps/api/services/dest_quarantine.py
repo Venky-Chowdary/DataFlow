@@ -23,7 +23,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Destinations that can host a durable DLQ table via the SQL writer path.
+# Destinations that can host a durable DLQ table/collection via the writer path.
 DEST_DLQ_SUPPORTED = frozenset({
     "sqlite",
     "postgresql",
@@ -35,6 +35,9 @@ DEST_DLQ_SUPPORTED = frozenset({
     "snowflake",
     "redshift",
     "generic_sql",
+    "duckdb",
+    "bigquery",
+    "mongodb",
 })
 
 META_COLUMNS = (

@@ -103,6 +103,15 @@ def _check_coercion_safety(
             continue
         src = str(issue.get("source") or "")
         mapping = next((m for m in mappings if str(m.get("source") or "") == src), None)
+        # Never sample-clear IEEE/precision collapses — head rows can look clean.
+        from services.type_system import is_precision_collapse_coercion
+
+        src_t = str(source_types.get(src) or "")
+        tgt_name = str((mapping or {}).get("target") or "")
+        tgt_t = str(target_types.get(tgt_name) or "")
+        if mapping and is_precision_collapse_coercion(src_t, tgt_t):
+            hardened.append(issue)
+            continue
         if mapping and samples_coerce_mapping(
             mapping,
             source_types=source_types,
@@ -224,7 +233,9 @@ def _check_financial_precision(
                 result = Decimal(str(converted))
                 if original != 0 and result != 0:
                     ratio = abs(result / original)
-                    if ratio < 0.01 or ratio > 100:
+                    # Catch cents↔units (~100x) and similar scale bugs; 10x is the
+                    # industry-safe floor (Airbyte/Fivetran-class precision guards).
+                    if ratio < 0.1 or ratio > 10:
                         issues.append(
                             f"{src}: magnitude shift {raw!r} → {converted} (ratio {ratio:.4f})"
                         )
@@ -314,39 +325,28 @@ def _check_duplicate_keys(
     dest_kind: str = "",
     primary_key: str | None = None,
 ) -> dict[str, Any]:
+    """Duplicate check on the resolved identity key only (same as write-time audit)."""
     issues: list[str] = []
-    schemaless = dest_kind in SCHEMALESS_DESTS
     if not primary_key:
         return {
             "check": "duplicate_keys",
             "passed": True,
             "blocks_transfer": False,
             "issues": [],
+            "primary_key": None,
         }
-    pk_targets = set()
-    for m in mappings:
-        if m.get("source", "") == primary_key:
-            pk_targets.add(m.get("target", "").lower())
-    if not pk_targets:
-        pk_targets = {primary_key.lower()}
-    for m in mappings:
-        tgt = m.get("target", "").lower()
-        src = m.get("source", "")
-        if schemaless and tgt != "_id":
+    # Check the source identity column directly — do not re-filter by schemaless
+    # target name in a way that skips the resolved key or invents another.
+    seen: dict[str, int] = {}
+    for row in rows:
+        val = cell_to_string(row.get(primary_key, "")).strip()
+        if not val:
             continue
-        if not schemaless and tgt not in pk_targets:
-            continue
-        seen: dict[str, int] = {}
-        for row in rows:
-            val = cell_to_string(row.get(src, "")).strip()
-            if not val:
-                continue
-            seen[val] = seen.get(val, 0) + 1
-        dupes = [(v, c) for v, c in seen.items() if c > 1]
-        if dupes:
-            sample = ", ".join(f"{v}×{c}" for v, c in dupes[:3])
-            issues.append(f"{src}: duplicate key values ({sample})")
-    # Duplicate primary key values are only a hard blocker in strict/maximum modes.
+        seen[val] = seen.get(val, 0) + 1
+    dupes = [(v, c) for v, c in seen.items() if c > 1]
+    if dupes:
+        sample = ", ".join(f"{v}×{c}" for v, c in dupes[:3])
+        issues.append(f"{primary_key}: duplicate key values ({sample})")
     mode = (validation_mode or "strict").strip().lower()
     blocks = len(issues) > 0 and mode in {"strict", "maximum"}
     return {
@@ -354,6 +354,8 @@ def _check_duplicate_keys(
         "passed": not blocks,
         "blocks_transfer": blocks,
         "issues": issues[:15],
+        "primary_key": primary_key,
+        "dest_kind": dest_kind,
     }
 
 
@@ -391,11 +393,10 @@ def _check_mapping_confidence(
     confidence_min: float,
     validation_mode: str = "strict",
 ) -> dict[str, Any]:
-    # In strict/maximum mode, hold mappings to the full configured threshold.
-    # In balanced mode, align with the preflight G4 confidence floor so a
-    # mapping that is accepted by the mapping gate is not rejected again here.
+    # Keep G9 aligned with the published/preflight mode floors:
+    # maximum=0.95, strict=0.85, balanced=0.75.
     mode = (validation_mode or "strict").strip().lower()
-    floor = confidence_min if mode in {"strict", "maximum"} else max(0.55, confidence_min - 0.3)
+    floor = confidence_min
     issues: list[str] = []
     warnings: list[str] = []
     for m in mappings:
@@ -445,9 +446,9 @@ def _check_encoding_anomalies(
 ) -> dict[str, Any]:
     """Flag replacement / format-control chars that break warehouse loads.
 
-    Always blocks at Validate when findings exist — operators must apply
-    ``strip_controls`` (or clean the source) before Run. Columns already mapped
-    with ``strip_controls`` / ``normalize_unicode`` are skipped.
+    Strict/maximum: block at Validate. Balanced: warn + strip_controls path
+    (never silent-pass). Columns already mapped with ``strip_controls`` /
+    ``normalize_unicode`` are skipped.
     """
     sanitized_cols = {
         str(m.get("source") or "").lower()
@@ -500,11 +501,29 @@ def _check_encoding_anomalies(
             break
 
     mode = (validation_mode or "strict").strip().lower()
-    # Control/format characters break Snowflake/PG/MySQL loads — always block at
-    # Validate with an explicit strip_controls fix path (never discover at Run).
-    del mode
-    blocks = bool(findings)
+    # Strict/maximum: always block — control chars break Snowflake/PG/MySQL loads.
+    # Balanced: surface findings as warnings + strip_controls fix path so a single
+    # U+200B in legacy data does not hard-stop Validate; never silent-pass.
     issue_payload: list[Any] = findings[:12] if findings else []
+    if mode == "balanced" and findings:
+        return {
+            "check": "encoding_anomalies",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+            "warnings": [
+                (
+                    f"{f.get('column')}: {f.get('message')} — apply strip_controls "
+                    "or quarantine before Run"
+                )
+                for f in issue_payload
+            ],
+            "values_checked": checked,
+            "affected_columns": sorted({f["column"] for f in findings}),
+            "suggested_transform": "strip_controls",
+            "encoding_findings": issue_payload,
+        }
+    blocks = bool(findings)
     return {
         "check": "encoding_anomalies",
         "passed": not blocks,
@@ -514,6 +533,7 @@ def _check_encoding_anomalies(
         "values_checked": checked,
         "affected_columns": sorted({f["column"] for f in findings}),
         "suggested_transform": "strip_controls" if findings else None,
+        "encoding_findings": issue_payload,
     }
 
 
@@ -529,6 +549,9 @@ def run_integrity_audit(
     sample_rows: list[dict] | None = None,
     validation_mode: str = "strict",
     schema_policy: str = "manual_review",
+    sync_mode: str = "",
+    contract_primary_key: str | None = None,
+    destination_pk_columns: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Run all critical data integrity checks in one pass.
@@ -550,30 +573,39 @@ def run_integrity_audit(
 
     rows = _rows_from_samples(source_columns, source_samples, sample_rows)
 
-    # Primary-key heuristic: exact canonical key columns (`_id`, `id`, `uuid`,
-    # `pk`, `key`) are always treated as required/unique. In strict/maximum mode
-    # we also treat `*_id` columns as keys so high-assurance transfers enforce
-    # completeness, while balanced/review modes allow sparse foreign keys such as
-    # `user_id` or `account_id` in NoSQL/CRM extracts.
+    # Canonical identity key — same helper as G6/G8. Schemaless → `_id` only;
+    # SQL required-nulls include `*_id` only in strict/maximum.
+    from services.primary_key import resolve_primary_key_source
+
     mode = (validation_mode or "strict").strip().lower()
-    pk = None
-    preferred = ("_id", "id", "uuid", "pk", "key") if dest_kind not in SCHEMALESS_DESTS else ("_id",)
-    for key in preferred:
-        for m in mappings:
-            if (m.get("target") or "").lower() == key:
-                pk = m.get("source")
-                break
-        if not pk:
-            pk = next((c for c in source_columns if c.lower() == key), None)
-        if pk:
-            break
-    if not pk and mode in {"strict", "maximum"}:
-        for col in source_columns:
-            if col.lower().endswith("_id"):
-                pk = col
-                break
+    pk = resolve_primary_key_source(
+        mappings,
+        source_columns,
+        dest_kind,
+        validation_mode=mode,
+        purpose="required_nulls",
+        destination_pk_columns=destination_pk_columns,
+        contract_primary_key=contract_primary_key,
+    )
 
     checks: list[dict[str, Any]] = []
+
+    # Validation without a schema or a representative sample proves nothing.
+    # Fail closed instead of returning a green "No integrity checks run" report.
+    if not source_columns:
+        checks.append({
+            "check": "source_columns_available",
+            "passed": False,
+            "blocks_transfer": True,
+            "issues": ["No source columns available for integrity validation"],
+        })
+    if not rows:
+        checks.append({
+            "check": "sample_available",
+            "passed": False,
+            "blocks_transfer": True,
+            "issues": ["No sample rows available for integrity validation"],
+        })
 
     if mappings:
         checks.append(
@@ -599,7 +631,12 @@ def run_integrity_audit(
         )
         checks.append(_check_financial_precision(mappings, source_types, rows))
         checks.append(_check_required_nulls(mappings, rows, null_rate_max=cfg["null_rate_max"], dest_kind=dest_kind, primary_key=pk, validation_mode=validation_mode))
-        checks.append(_check_duplicate_keys(mappings, rows, validation_mode, dest_kind=dest_kind, primary_key=pk))
+        # Append/overwrite do not require a unique identity contract — do not
+        # invent a hard block from inferred ``id`` duplicates (operator confusion).
+        from services.primary_key import sync_requires_unique_identity
+
+        dup_pk = pk if sync_requires_unique_identity(sync_mode) else None
+        checks.append(_check_duplicate_keys(mappings, rows, validation_mode, dest_kind=dest_kind, primary_key=dup_pk))
         checks.append(
             _check_mapping_confidence(mappings, confidence_min=cfg["confidence"], validation_mode=validation_mode)
         )
@@ -623,6 +660,7 @@ def run_integrity_audit(
             primary_key=pk,
             dest_kind=dest_kind,
             validation_mode=validation_mode,
+            sync_mode=sync_mode,
         )
         checks.append({
             "check": "expectations_suite",

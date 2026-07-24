@@ -84,7 +84,7 @@ def test_e2e_upload_to_preflight(filename: str) -> None:
         sample_rows=sample_rows,
         estimated_bytes=record.get("file_size_bytes", 0),
     )
-    assert pf["total_gates"] == 8
+    assert pf["total_gates"] == 9
     assert pf["passed_count"] >= 4, f"Expected at least G1/G3/G4/G8 to pass for {filename}, got {pf['passed_count']}"
     gate_ids = {g["id"] for g in pf["gates"]}
     assert "g1_source" in gate_ids

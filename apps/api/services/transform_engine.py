@@ -139,6 +139,9 @@ NULL_SENTINELS = frozenset({
     "null", "none", "nil", "undefined", "n/a", "na", "nan", "",
     "-", "--", "—", "empty", "blank", "missing", "not available",
     "not applicable", "not_applicable",
+    # Dynamo / SQL explicit NULL — distinct from missing attr / empty string.
+    "__df_ddb_null__",
+    "__df_sql_null__",
 })
 
 # Currency symbols and codes that are safe to strip from numeric values.
@@ -172,12 +175,27 @@ _CURRENCY_RE = re.compile(
 )
 
 
-def _to_utc_z(dt: datetime) -> str:
+def _format_datetime(dt: datetime) -> str:
+    """Canonical datetime wire form.
+
+    - Naive values are treated as UTC and emitted with ``Z``.
+    - UTC-aware values use ``Z`` (same instant, canonical form).
+    - Non-UTC aware values keep their original offset (instant + offset fidelity).
+      Destination NTZ writers (MySQL DATETIME, Snowflake TIMESTAMP_NTZ) normalize
+      at bind time — never erase offset on the shared transform wire.
+    """
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    else:
-        dt = dt.astimezone(timezone.utc)
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    offset = dt.utcoffset()
+    if offset is not None and offset.total_seconds() == 0:
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return dt.isoformat(timespec="seconds")
+
+
+def _to_utc_z(dt: datetime) -> str:
+    """Backward-compatible alias — prefer :func:`_format_datetime` for new code."""
+    return _format_datetime(dt)
 
 
 def _detect_dayfirst(text: str) -> bool | None:
@@ -185,8 +203,9 @@ def _detect_dayfirst(text: str) -> bool | None:
 
     Looks at the first two numeric fields of slash/dash/dot-delimited dates.
     A value like 31/12/2024 or 31.12.2024 is unambiguously day-first;
-    12/31/2024 or 12-31-24 is month-first.  When both fields are <= 12 we keep
-    the default (month-first) to stay compatible with existing data.
+    12/31/2024 or 12-31-24 is month-first.  When both fields are <= 12 and
+    unequal, locale is ambiguous — callers must fail closed (no silent MDY).
+    When both fields are equal (05/05/2024) either locale yields the same date.
     """
     m = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:[ T].*)?$", text)
     if not m:
@@ -196,8 +215,16 @@ def _detect_dayfirst(text: str) -> bool | None:
         return True
     if second > 12:
         return False
+    if first == second:
+        return False  # same calendar date either way — prefer month-first patterns
     return None
 
+
+def _is_ambiguous_mdy_dmy(text: str) -> bool:
+    """True when slash/dash/dot date could be either MDY or DMY with different results."""
+    return _detect_dayfirst(text) is None and bool(
+        re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:[ T].*)?$", text.strip())
+    )
 
 def _reorder_date_patterns(text: str, patterns: tuple[str, ...]) -> list[str]:
     """Move the most likely day/month ordering patterns to the front.
@@ -241,6 +268,9 @@ def _parse_datetime(value: str) -> str | None:
     text = value.strip()
     if not _DATE_LIKE_RE.search(text):
         return None
+    # Fail closed on ambiguous MDY/DMY — silent US-default corrupts EU dates.
+    if _is_ambiguous_mdy_dmy(text):
+        return None
     if _EPOCH_MS_RE.match(text):
         ms = int(text)
         return _to_utc_z(datetime.fromtimestamp(ms / 1000, tz=timezone.utc))
@@ -274,6 +304,9 @@ def _parse_date(value: str, *, with_time: bool = False) -> str | None:
         return None
     if text.lower() in NULL_SENTINELS:
         return None
+    # Fail closed when 05/06/2024 could be May 6 or June 5 depending on locale.
+    if _is_ambiguous_mdy_dmy(text):
+        return None
     # Plain YYYYMMDD integer
     if re.match(r"^\d{8}$", text):
         try:
@@ -289,7 +322,6 @@ def _parse_date(value: str, *, with_time: bool = False) -> str | None:
         except ValueError:
             continue
     return None
-
 
 def _normalize_numeric_text(value: str) -> str:
     """Normalize unicode spaces, currency markers, accounting negatives, and percent signs."""
@@ -463,14 +495,6 @@ _STRICT_BOOL_TRUE = frozenset({"true", "t", "yes", "y", "1", "on"})
 _STRICT_BOOL_FALSE = frozenset({"false", "f", "no", "n", "0", "off"})
 
 
-# Strict boolean tokens only. Words like "active"/"inactive"/"enabled" are
-# status *enums* in real datasets (Mongo sessions, CRM, auth) — treating them
-# as booleans caused new Snowflake tables to CREATE status BOOLEAN, then
-# hard-fail on values like "invalidated".
-_STRICT_BOOL_TRUE = frozenset({"true", "t", "yes", "y", "1", "on"})
-_STRICT_BOOL_FALSE = frozenset({"false", "f", "no", "n", "0", "off"})
-
-
 def _parse_boolean(value: str) -> bool | None:
     text = value.strip().lower()
     if text in NULL_SENTINELS:
@@ -508,8 +532,20 @@ def _parse_uuid(value: str) -> str | None:
 
 
 def _hash_pii(value: str) -> str:
-    secret = os.getenv("DATAFLOW_PII_HASH_KEY", os.getenv("DATAFLOW_SECRET", "dataflow-dev-key"))
-    digest = hmac.new(secret.encode("utf-8"), value.encode("utf-8"), hashlib.sha256).hexdigest()
+    """HMAC-SHA256 digest for PII masking. Requires DATAFLOW_PII_HASH_KEY in prod."""
+    secret = os.getenv("DATAFLOW_PII_HASH_KEY") or os.getenv("DATAFLOW_SECRET")
+    if not secret:
+        # Fail closed — never hash with a shared public default (would be reversible
+        # across tenants that ship the same binary).
+        raise ValueError(
+            "hash_pii requires DATAFLOW_PII_HASH_KEY (or DATAFLOW_SECRET) — "
+            "refusing insecure default key"
+        )
+    digest = hmac.new(
+        secret.encode("utf-8"),
+        value.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
     return digest[:32]
 
 
@@ -644,6 +680,9 @@ def infer_transform_for_mapping(
             if src in {"string", "text", "unknown"} and semantic == "percentage":
                 return "percentage"
             return "decimal"
+        if tgt == "float":
+            # Wire as decimal transform — IEEE float DDL is chosen by type_system.
+            return "decimal"
         if tgt == "boolean":
             return "boolean"
         if tgt in {"json", "array"}:
@@ -658,11 +697,16 @@ def infer_transform_for_mapping(
             return "time"
         if tgt == "uuid":
             return "uuid"
+        # Specialty types travel as identity text/binary payloads — never invent a cast.
+        if tgt in {"interval", "geography", "vector"}:
+            return "none"
 
     # Source type is the pivot when the target is generic (e.g., VARCHAR).
     if src == "integer":
         return "integer"
     if src == "decimal":
+        return "decimal"
+    if src == "float":
         return "decimal"
     if src == "boolean":
         return "boolean"
@@ -678,6 +722,8 @@ def infer_transform_for_mapping(
         return "time"
     if src == "uuid":
         return "uuid"
+    if src in {"interval", "geography", "vector"}:
+        return "none"
 
     # Semantic column names drive the transform for generic string targets.
     # For string/unknown targets, preserve currency/percentage as text to avoid
@@ -733,15 +779,35 @@ def infer_transform_for_mapping(
 
 
 def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
-    """Returns (value, error). Empty string becomes None for nullable columns."""
+    """Returns (value, error).
+
+    Explicit SQL/Dynamo NULL sentinels → None. Empty string is preserved for
+    identity/string transforms so ``''`` ≠ SQL NULL on VARCHAR round-trips;
+    typed transforms still coerce empty → None.
+    """
     if raw is None:
         return None, None
-    text = str(raw).strip()
+    raw_s = str(raw)
+    lowered = raw_s.strip().lower()
+    # Explicit NULL sentinels must never land as literal strings in any dest.
+    if lowered in {"__df_sql_null__", "__df_ddb_null__"}:
+        return None, None
+
+    text = raw_s.strip()
+    transform_l = (transform or "none").strip().lower()
+
+    # Identity / text transforms: empty string is a real value.
+    _KEEP_EMPTY = frozenset({
+        "none", "identity", "upper", "lower", "trim", "trim_id",
+        "strip_controls", "normalize_unicode",
+    })
+    if text == "" and transform_l in _KEEP_EMPTY:
+        return "", None
     if text == "":
         return None, None
 
     # Null/missing sentinels for typed transforms are treated as None.
-    if transform in {"decimal", "integer", "boolean", "date", "datetime", "time", "json", "uuid", "binary"}:
+    if transform_l in {"decimal", "integer", "boolean", "date", "datetime", "time", "json", "uuid", "binary"}:
         if text.lower() in NULL_SENTINELS:
             return None, None
 
@@ -823,7 +889,10 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         return text.lower(), None
 
     if transform == "hash_pii":
-        return _hash_pii(text), None
+        try:
+            return _hash_pii(text), None
+        except ValueError as exc:
+            return None, str(exc)
 
     if transform == "mask_pii":
         return pii_mask(text), None
@@ -862,7 +931,13 @@ def dry_run_sample(
     mappings: list[dict],
     column_types: dict[str, str],
     sample_size: int = 100,
+    max_errors_per_mapping: int = 5,
 ) -> tuple[bool, list[str]]:
+    """Apply write-path transforms to the sample window.
+
+    Collects up to ``max_errors_per_mapping`` failures per column so sporadic
+    bad values mid-sample cannot slip past Validate while early rows look clean.
+    """
     if not sample_rows:
         return False, ["No sample rows available for dry-run validation"]
 
@@ -885,14 +960,26 @@ def dry_run_sample(
         # Resolve UI aliases (cast_number → decimal) before dry-run — never leave
         # Unknown transform: 'cast_number' as a false quarantine signal.
         transform = resolve_transform(m, column_types=column_types, dest_types=dest_types)
+        mapping_errors = 0
+        scanned = 0
         for row in sample_rows[:sample_size]:
+            scanned += 1
             raw = row[idx] if idx < len(row) else ""
             _, err = apply_transform(raw, transform)
             if err:
                 errors.append(f"{m['source']}→{m['target']}: {err}")
-                break
+                mapping_errors += 1
+                if mapping_errors >= max_errors_per_mapping:
+                    remaining = max(0, min(len(sample_rows), sample_size) - scanned)
+                    if remaining:
+                        errors.append(
+                            f"{m['source']}→{m['target']}: "
+                            f"+{remaining} sample row(s) not fully reported "
+                            f"(stopped after {max_errors_per_mapping} errors)"
+                        )
+                    break
 
-    return len(errors) == 0, errors[:25]
+    return len(errors) == 0, errors[:40]
 
 
 def preview_quarantine_cells(

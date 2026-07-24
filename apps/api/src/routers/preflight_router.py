@@ -35,6 +35,10 @@ class MappingItem(BaseModel):
     create_new: bool = False
     assignment_strategy: str | None = None
     semantic_role: str | None = None
+    # STRUCT/JSON Map choice — write path materializes flatten_top_level_keys.
+    struct_policy: str | None = None
+    struct_derived: bool = False
+    struct_parent: str | None = None
 
 
 class PreflightRequest(BaseModel):
@@ -109,15 +113,11 @@ def _probe_inline_destination(body: PreflightRequest) -> tuple[bool, str]:
 
 
 def _probe_saved_connector(connector_id: str) -> tuple[bool, str]:
-    """Live connectivity probe for any saved connector type."""
-    from ..transfer.adapters import _lookup_saved_connector
+    """Live connectivity probe for any saved connector type — same as Connectors Test."""
+    from services.connector_probe import probe_saved_connector
 
-    conn = _lookup_saved_connector(connector_id)
-    if not conn:
-        return False, f"Connector '{connector_id}' not found"
-
-    db_type = (conn.get("type") or "").lower()
-    return run_probe(db_type, conn)
+    ok, msg, _cfg = probe_saved_connector(connector_id)
+    return ok, msg
 
 
 @router.post("/run")
@@ -175,6 +175,16 @@ async def run_preflight(body: PreflightRequest):
 
     dest_column_types = body.destination_column_types or dest_meta.get("column_types") or {}
 
+    from services.primary_key import extract_contract_primary_key
+
+    contract_pk = extract_contract_primary_key(
+        body.stream_contracts,
+        stream_name=body.dest_table or body.dest_collection or "",
+    )
+    # Prefer primary stream contract when dest name does not match a stream name.
+    if not contract_pk:
+        contract_pk = extract_contract_primary_key(body.stream_contracts)
+
     result = run_file_preflight(
         columns=body.columns,
         column_types=body.column_types,
@@ -193,12 +203,16 @@ async def run_preflight(body: PreflightRequest):
         destination_column_types=dest_column_types,
         destination_table_exists=dest_meta.get("table_exists"),
         destination_can_create=dest_meta.get("can_create_table"),
+        destination_can_write=dest_meta.get("can_write"),
+        privilege_probe=dest_meta.get("privilege_probe"),
         destination_db_type=(dest_meta.get("db_type") or body.dest_type or "postgresql").lower(),
         source_table="",
         destination_table=(body.dest_table or body.dest_collection or ""),
         source_filename="",
         schema_policy=body.schema_policy,
         backfill_new_fields=body.backfill_new_fields,
+        contract_primary_key=contract_pk,
+        destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
     )
     gated = apply_policy_gates(
         result,
@@ -208,6 +222,7 @@ async def run_preflight(body: PreflightRequest):
             validation_mode=body.validation_mode,
             stream_contracts=body.stream_contracts,
             backfill_new_fields=body.backfill_new_fields,
+            source_columns=body.columns,
         ),
         validation_mode=body.validation_mode,
     )

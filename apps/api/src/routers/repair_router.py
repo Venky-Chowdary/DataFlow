@@ -73,11 +73,10 @@ async def get_repair_proposal(proposal_id: str) -> dict[str, Any]:
 
 @router.post("/repair/proposals/{proposal_id}/decide")
 async def decide_repair(proposal_id: str, body: DecideBody) -> dict[str, Any]:
-    from services.agentic_repair import apply_actions_to_mappings, decide_proposal
+    from services.agentic_repair import apply_actions_with_report, decide_proposal
 
     def _apply(actions: list[dict[str, Any]]) -> dict[str, Any]:
-        updated = apply_actions_to_mappings(body.mappings, actions)
-        return {"applied": True, "mappings": updated}
+        return apply_actions_with_report(body.mappings, actions)
 
     # Only apply when the caller supplies mappings — approve-without-mappings is audit-only.
     apply_fn = _apply if body.approve and body.mappings else None

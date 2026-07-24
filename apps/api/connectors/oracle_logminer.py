@@ -124,20 +124,108 @@ def fetch_oldest_available_scn(cur: Any) -> int | None:
 _SET_RE = re.compile(r'"?(\w+)"?\s*=\s*(?:\'([^\']*)\'|([^\s,]+))')
 
 
+def _split_sql_csv_aware(text: str) -> list[str]:
+    """Split a SQL list on commas outside quotes and parentheses.
+
+    Handles ``'a,b'``, ``''`` escapes, and ``TO_DATE('…','…')`` so LogMiner
+    INSERT/UPDATE parsing does not corrupt valid CDC rows (Airbyte-class gap).
+    """
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    in_str = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if in_str:
+            buf.append(ch)
+            if ch == "'":
+                if i + 1 < len(text) and text[i + 1] == "'":
+                    buf.append(text[i + 1])
+                    i += 2
+                    continue
+                in_str = False
+            i += 1
+            continue
+        if ch == "'":
+            in_str = True
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "(":
+            depth += 1
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == ")":
+            depth = max(0, depth - 1)
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "," and depth == 0:
+            parts.append("".join(buf).strip())
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail or parts:
+        parts.append(tail)
+    return parts
+
+
+def _unquote_sql_literal(value: str) -> str:
+    v = (value or "").strip()
+    if not v or v.upper() == "NULL":
+        return ""
+    if len(v) >= 2 and v[0] == "'" and v[-1] == "'":
+        return v[1:-1].replace("''", "'")
+    return v
+
+
 def _parse_sql_redo(sql_redo: str, *, op: str) -> dict[str, str]:
-    """Best-effort column extraction from LogMiner SQL_REDO text."""
+    """Column extraction from LogMiner SQL_REDO text (quoted / function-aware)."""
     out: dict[str, str] = {}
     if not sql_redo:
         return out
     text = sql_redo
     if op == "insert" and "VALUES" in text.upper():
-        # INSERT INTO t("A","B") VALUES('1','2')
-        cols_m = re.search(r"\(([^)]+)\)\s*VALUES\s*\(([^)]+)\)", text, re.I)
+        # INSERT INTO t("A","B") VALUES('1','a,b') / TO_DATE(...)
+        cols_m = re.search(r"\((.*)\)\s*VALUES\s*\((.*)\)\s*$", text, re.I | re.S)
+        if not cols_m:
+            # Fallback: first (...) VALUES (...) pair (legacy LogMiner shapes).
+            cols_m = re.search(r"\(([^;]+)\)\s*VALUES\s*\(([^;]+)\)", text, re.I | re.S)
         if cols_m:
-            cols = [c.strip().strip('"') for c in cols_m.group(1).split(",")]
-            vals = [v.strip().strip("'") for v in cols_m.group(2).split(",")]
+            cols = [c.strip().strip('"') for c in _split_sql_csv_aware(cols_m.group(1))]
+            vals = [_unquote_sql_literal(v) for v in _split_sql_csv_aware(cols_m.group(2))]
+            if len(cols) != len(vals):
+                # Refuse to invent misaligned columns — surface as unparsed.
+                return {
+                    "_df_unparsed_sql_redo": "1",
+                    "_df_parse_error": f"insert col/val mismatch ({len(cols)} vs {len(vals)})",
+                }
             for c, v in zip(cols, vals):
-                out[c.upper()] = "" if v.upper() == "NULL" else v
+                if c:
+                    out[c.upper()] = v
+            return out
+    # UPDATE … SET "COL"=… / DELETE … WHERE "COL"=…
+    # Prefer CSV-aware SET split when present.
+    set_m = re.search(r"\bSET\s+(.+?)(?:\s+WHERE\b|$)", text, re.I | re.S)
+    where_m = re.search(r"\bWHERE\s+(.+)$", text, re.I | re.S)
+    chunks: list[str] = []
+    if set_m:
+        chunks.extend(_split_sql_csv_aware(set_m.group(1)))
+    if where_m and op == "delete":
+        chunks.extend(_split_sql_csv_aware(where_m.group(1)))
+    if chunks:
+        for chunk in chunks:
+            m = re.match(r'"?(\w+)"?\s*=\s*(.+)$', chunk.strip(), re.I | re.S)
+            if not m:
+                continue
+            col = m.group(1).upper()
+            out[col] = _unquote_sql_literal(m.group(2).strip())
+        if out:
             return out
     for m in _SET_RE.finditer(text):
         col = m.group(1).upper()

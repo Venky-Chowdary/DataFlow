@@ -118,6 +118,47 @@ def test_mongo_aliases_treated_as_schemaless_in_drift_engine():
     assert report["severity"] == "none"
 
 
+def test_redis_target_fingerprint_churn_is_not_breaking():
+    """Schemaless dests synthesize target columns from mappings — fingerprint churn ≠ DDL break."""
+    cols = ["id", "skills"]
+    schema = {"id": "VARCHAR", "skills": "ARRAY"}
+    mappings = [
+        {"source": "id", "target": "id", "confidence": 0.99},
+        {"source": "skills", "target": "skills", "confidence": 0.93},
+    ]
+    old_target_fp = fingerprint_schema(["id"], {"id": "VARCHAR"})
+    report = detect_schema_drift(
+        source_columns=cols,
+        source_schema=schema,
+        target_columns=["id", "skills"],
+        target_schema={},
+        stored_target_fp=old_target_fp,
+        mappings=mappings,
+        destination_db_type="redis",
+    )
+    assert report["target_changed"] is False
+    assert report["severity"] == "none"
+    assert not any("Destination schema changed" in i for i in report["issues"])
+
+
+def test_snowflake_target_fingerprint_churn_is_breaking():
+    cols = ["id"]
+    schema = {"id": "INTEGER"}
+    old_fp = fingerprint_schema(["id"], {"id": "VARCHAR"})
+    report = detect_schema_drift(
+        source_columns=cols,
+        source_schema=schema,
+        target_columns=["id"],
+        target_schema={"id": "INTEGER"},
+        stored_target_fp=old_fp,
+        mappings=[{"source": "id", "target": "id", "confidence": 1.0}],
+        destination_db_type="snowflake",
+    )
+    assert report["target_changed"] is True
+    assert report["severity"] == "breaking"
+    assert any("Destination schema changed" in i for i in report["issues"])
+
+
 def test_classify_no_change():
     schema = {
         "columns": {"id": "INTEGER", "name": "VARCHAR"},
@@ -189,6 +230,24 @@ def test_classify_rename_as_breaking():
     report = classify_schema_change(old, new)
     assert report["severity"] == "breaking"
     assert any(c["kind"] == "rename" for c in report["breaking"])
+
+
+def test_classify_multi_column_renames_not_as_drops_and_adds():
+    old = {
+        "columns": {"cust_id": "INTEGER", "full_name": "VARCHAR", "amt": "DECIMAL"},
+        "nullable": {"cust_id": False, "full_name": True, "amt": True},
+        "primary_key": ["cust_id"],
+    }
+    new = {
+        "columns": {"customer_id": "INTEGER", "name": "VARCHAR", "amount": "DECIMAL"},
+        "nullable": {"customer_id": False, "name": True, "amount": True},
+        "primary_key": ["customer_id"],
+    }
+    report = classify_schema_change(old, new)
+    kinds = [c["kind"] for c in report["breaking"]]
+    assert kinds.count("rename") == 3
+    assert "drop" not in kinds
+    assert "add_column" not in {c["kind"] for c in report["additive"]}
 
 
 def test_classify_add_not_null_is_breaking():

@@ -67,6 +67,22 @@ describe("buildStreamContracts", () => {
     });
     assert.equal(contracts[0].snapshot_mode, "never");
   });
+
+  it("still emits primary_key on append when the operator set one", () => {
+    const contracts = buildStreamContracts({
+      streamNames: ["jobs"],
+      syncMode: "full_refresh_append",
+      schemaPolicy: "manual_review",
+      validationMode: "strict",
+      fieldCount: 4,
+      requiresCursor: false,
+      requiresPrimaryKey: false,
+      defaultCursor: "",
+      defaultPrimaryKey: "job_uuid",
+      streamFields: {},
+    });
+    assert.equal(contracts[0].primary_key, "job_uuid");
+  });
 });
 
 describe("streamContractsNeedReview", () => {

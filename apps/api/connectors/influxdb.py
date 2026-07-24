@@ -40,20 +40,51 @@ def _query(url_base: str, database: str, q: str, username: str = "", password: s
 
 
 def _extract_rows(body: Any) -> tuple[list[str], list[list[str]]]:
+    """Union all InfluxQL series (one per tag set) — never drop after the first."""
     if not isinstance(body, dict):
         return [], []
     results = body.get("results") or []
     if not isinstance(results, list):
         return [], []
+
+    records: list[dict[str, Any]] = []
+    header_order: list[str] = []
+    seen: set[str] = set()
+
+    def _note(name: str) -> None:
+        if name not in seen:
+            seen.add(name)
+            header_order.append(name)
+
     for result in results:
+        if not isinstance(result, dict):
+            continue
         series_list = result.get("series") or []
-        if series_list:
-            series = series_list[0]
-            columns = series.get("columns") or []
-            values = series.get("values") or []
-            rows = [[cell_to_string(v) for v in row] for row in values]
-            return list(columns), rows
-    return [], []
+        if not isinstance(series_list, list):
+            continue
+        for series in series_list:
+            if not isinstance(series, dict):
+                continue
+            columns = [str(c) for c in (series.get("columns") or [])]
+            tags = series.get("tags") or {}
+            if not isinstance(tags, dict):
+                tags = {}
+            for tag_name in sorted(str(k) for k in tags.keys()):
+                _note(tag_name)
+            for col in columns:
+                _note(col)
+            for values in series.get("values") or []:
+                if not isinstance(values, (list, tuple)):
+                    continue
+                record: dict[str, Any] = {str(k): v for k, v in tags.items()}
+                for i, col in enumerate(columns):
+                    record[col] = values[i] if i < len(values) else None
+                records.append(record)
+
+    if not header_order:
+        return [], []
+    rows = [[cell_to_string(rec.get(h)) for h in header_order] for rec in records]
+    return header_order, rows
 
 
 def test_connection(
@@ -104,10 +135,18 @@ def read_object(
     password = merged.get("password") or ""
     # InfluxQL identifiers must be double-quoted if they contain special chars.
     quoted = measurement.replace('"', '\\"')
-    q = f'SELECT * FROM "{quoted}" LIMIT {limit} OFFSET {offset}'
+    # ORDER BY time makes OFFSET pagination deterministic across series.
+    q = (
+        f'SELECT * FROM "{quoted}" '
+        f"ORDER BY time ASC "
+        f"LIMIT {int(limit)} OFFSET {int(offset)}"
+    )
     body = _query(url_base, database, q, username, password)
     headers, rows = _extract_rows(body)
-    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=len(rows))
+    # InfluxQL has no reliable universal COUNT across sparse series — never
+    # report the fetched page length as the complete measurement (that stops
+    # the transfer loop after page one when the page is full).
+    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=None)
 
 
 # Source-only connector

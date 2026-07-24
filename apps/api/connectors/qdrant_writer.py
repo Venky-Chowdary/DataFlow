@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -110,6 +109,68 @@ def _ensure_collection(
         raise RuntimeError(f"Qdrant create collection failed: {resp.status_code} {resp.text}")
 
 
+def build_qdrant_points(
+    vector_rows: list[dict[str, Any]],
+    *,
+    dimension: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Map vector rows to Qdrant points. Returns ``(points, rejected)``.
+
+    Missing embeddings → quarantine (never zero vectors). Missing ids →
+    deterministic UUID over source_id+chunk+content (retry-safe), else reject.
+    """
+    import hashlib
+    import uuid as uuid_mod
+
+    from services.vector_embedding import coerce_embedding
+
+    points: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for row in vector_rows:
+        values, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
+        if err or values is None:
+            rejected.append({
+                "row": cell_to_string(row.get("id") or ""),
+                "column": "embedding",
+                "target": "vector",
+                "value": "",
+                "reason": err or "invalid embedding",
+                "policy": "quarantine",
+            })
+            continue
+        raw_id = row.get("id")
+        if raw_id not in (None, ""):
+            point_id: str | None = cell_to_string(raw_id)
+        else:
+            source = cell_to_string(row.get("source_id", ""))
+            chunk = int(row.get("chunk_index") or 0)
+            content = str(row.get("content") or "")
+            if not source and not content:
+                rejected.append({
+                    "row": "",
+                    "column": "id",
+                    "target": "id",
+                    "value": "",
+                    "reason": "missing id — refuse random UUID (non-idempotent)",
+                    "policy": "quarantine",
+                })
+                continue
+            digest = hashlib.sha256(f"{source}\0{chunk}\0{content}".encode("utf-8")).hexdigest()
+            point_id = str(uuid_mod.UUID(digest[:32]))
+        payload = sanitize_json_value(row.get("metadata") or {}) or {}
+        if not isinstance(payload, dict):
+            payload = {"_meta": payload}
+        payload["content"] = row.get("content", "")
+        payload["source_id"] = cell_to_string(row.get("source_id", ""))
+        payload["chunk_index"] = row.get("chunk_index", 0)
+        points.append({
+            "id": point_id,
+            "vector": sanitize_json_value(values),
+            "payload": payload,
+        })
+    return points, rejected
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -193,6 +254,35 @@ def write_mapped_rows(
             dimension = len(row["embedding"])
             break
 
+    points, rejected = build_qdrant_points(vector_rows, dimension=dimension)
+    if not points and rejected:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name or "dataflow_vectors",
+            target_schema=schema or "",
+            checksum="",
+            chunks_completed=0,
+            error=rejected[0].get("reason") or "all embeddings rejected",
+            rejected_details=rejected,
+            rejected_rows=len(rejected),
+        )
+    from connectors.writer_common import reject_on_strict_policy
+
+    strict_error = reject_on_strict_policy(error_policy, rejected, "Qdrant")
+    if strict_error:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name or "dataflow_vectors",
+            target_schema=schema or "",
+            checksum="",
+            chunks_completed=0,
+            error=strict_error,
+            rejected_details=rejected,
+            rejected_rows=len(rejected),
+        )
+
     collection = table_name or "dataflow_vectors"
     api_key = password or username or ""
     base_url = connection_string if connection_string else _base_url(host, port, ssl)
@@ -201,30 +291,24 @@ def write_mapped_rows(
     try:
         session = _requests_session()
         hdrs = _headers(api_key)
-        if create_table:
+        exists = session.get(
+            f"{base_url}/collections/{collection}", headers=hdrs, timeout=10
+        )
+        if exists.status_code != 200:
+            if not create_table:
+                raise RuntimeError(
+                    f"Qdrant collection '{collection}' is missing and "
+                    "create_table is disabled"
+                )
             _ensure_collection(session, base_url, collection, dimension, hdrs)
 
         batch_size = 100
-        total = len(vector_rows)
+        total = len(points)
         for i in range(0, total, batch_size):
-            batch = vector_rows[i : i + batch_size]
-            points = []
-            for row in batch:
-                raw_id = row.get("id")
-                point = {
-                    "id": cell_to_string(raw_id) if raw_id else str(uuid.uuid4()),
-                    "vector": sanitize_json_value(row.get("embedding") or [0.0] * dimension),
-                    "payload": sanitize_json_value(row.get("metadata") or {}),
-                }
-                # Qdrant payload must be JSON serializable.
-                point["payload"]["content"] = row.get("content", "")
-                point["payload"]["source_id"] = cell_to_string(row.get("source_id", ""))
-                point["payload"]["chunk_index"] = row.get("chunk_index", 0)
-                points.append(point)
-
+            batch = points[i : i + batch_size]
             resp = session.put(
                 f"{base_url}/collections/{collection}/points?wait=true",
-                data=json.dumps({"points": points}, default=sanitize_json_value),
+                data=json.dumps({"points": batch}, default=sanitize_json_value),
                 headers=hdrs,
                 timeout=30,
             )
@@ -242,6 +326,8 @@ def write_mapped_rows(
             checksum="",
             chunks_completed=(inserted + 99) // 100,
             error=str(exc),
+            rejected_details=rejected,
+            rejected_rows=len(rejected),
         )
 
     return WriteResult(
@@ -251,4 +337,7 @@ def write_mapped_rows(
         target_schema=schema or "",
         checksum="",
         chunks_completed=(inserted + 99) // 100,
+        rejected_details=rejected,
+        rejected_rows=len(rejected),
+        warnings=[r.get("reason") or "" for r in rejected[:10] if r.get("reason")],
     )

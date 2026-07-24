@@ -17,12 +17,17 @@ from services.db_type_utils import SCHEMALESS_DESTS
 # ═══════════════════════════════════════════════════════════════════════════
 # Gate taxonomy
 # ═══════════════════════════════════════════════════════════════════════════
+# Soft gates are still fail-closed on Validate (Execute stays disabled until
+# fixed). "Soft" means the failure is often remediable by review/approve or
+# capacity ops — not that Run proceeds while blocked. G8 identity is HARD:
+# altered values are a data-rule failure, not a soft warning.
 HARD_GATE_IDS = {
     "g1_source",
     "g2_destination",
     "g3_schema_contract",
     "g5_dry_run",
     "g6_target_ddl",
+    "g8_reconciliation",
     "g9_data_integrity",
     "g9_sync_contract",
     "schema_drift",
@@ -32,7 +37,6 @@ HARD_GATE_IDS = {
 SOFT_GATE_IDS = {
     "g4_mapping_confidence",
     "g7_capacity",
-    "g8_reconciliation",
     "g10_schema_policy",
     "g11_validation_posture",
 }
@@ -53,13 +57,28 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         ],
     },
     "g2_destination": {
-        "title": "Destination connectivity",
+        "title": "Destination write access",
         "category": "hard",
-        "why": "DataFlow can read the source but cannot reach the destination. Writes would fail silently.",
-        "fix": "Check the destination host, port, credentials, and write permissions. For object stores, verify the bucket/container exists and the account can write.",
+        "why": (
+            "DataFlow can connect but cannot prove write privileges on the destination "
+            "(INSERT/CREATE, index/write, SET, produce, PutObject). Writes would fail or "
+            "silently skip. Privilege probes never mutate operator data."
+        ),
+        "fix": (
+            "If the gate message names a missing privilege (INSERT, CREATE, ACL, IAM), "
+            "grant that privilege to the connector user/role — do not only re-test connectivity. "
+            "Open Connectors → Test to confirm login still works, then Re-validate. "
+            "If the message says privilege catalog unavailable, create-new is blocked "
+            "until grants are readable (or target an existing table). Append to an "
+            "existing table may still proceed with a connectivity warning — confirm "
+            "IAM/ACL manually before Execute."
+        ),
         "examples": [
-            "MongoDB auth failed → use the correct username/password and auth database.",
-            "Snowflake warehouse suspended → resume the warehouse or choose an active one.",
+            "PostgreSQL: GRANT INSERT, UPDATE ON TABLE … TO role; GRANT CREATE ON SCHEMA …",
+            "Snowflake: GRANT INSERT ON TABLE … / GRANT CREATE TABLE ON SCHEMA … TO ROLE …",
+            "MongoDB: grant insert/update (or readWrite) on the target database/collection.",
+            "Redis ACL: +@write ~prefix:*  |  Elasticsearch: index/create_index privileges.",
+            "S3: s3:PutObject on the bucket/prefix (GetBucketAcl may be unavailable under BucketOwnerEnforced).",
         ],
     },
     "g3_schema_contract": {
@@ -124,15 +143,43 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
             "A 100 GB export needs at least 300 GB staging free space. Clear old exports or mount a larger volume.",
         ],
     },
+    "g8_reconciliation": {
+        "title": "Dry-run reconciliation (pre-write sample)",
+        "category": "hard",
+        "why": (
+            "Sample rows do not survive the write-path identity check: either the "
+            "declared identity transform changed values, a transform errored, or "
+            "the identity key has duplicates in the sample. This is a pre-write "
+            "fingerprint — not a post-load destination checksum (that runs after Execute)."
+        ),
+        "fix": (
+            "Read each issue line (row · column). For 'identity transform altered value' "
+            "on arrays/objects, ensure the mapping uses an explicit json/none path that "
+            "matches cell_to_string — do NOT use Strip controls. For duplicate keys, "
+            "dedupe the source or pick the real primary key. For transform errors, fix "
+            "the mapping type or clean the cell."
+        ),
+        "examples": [
+            "categories list → JSON string mismatch — fixed by canonical serializer, not Strip.",
+            "Duplicate id in sample → dedupe source before Run.",
+            "decimal transform failed on 'N/A' → quarantine or remap to VARCHAR.",
+        ],
+    },
     "g9_data_integrity": {
         "title": "Data integrity audit",
         "category": "hard",
         "why": "The sample violates one or more integrity rules: duplicate keys, required nulls, financial precision loss, or encoding anomalies.",
-        "fix": "Clean the source data, adjust the mapping, or switch validation mode to 'balanced' for non-critical fields.",
+        "fix": (
+            "Read the concrete rule on each finding. Encoding (U+200B / control chars) → "
+            "Strip controls or Quarantine. Required nulls / duplicate keys → clean source "
+            "or adjust identity mapping. Financial precision → widen DECIMAL. "
+            "Balanced mode softens encoding and some confidence thresholds — it does not "
+            "invent type casts."
+        ),
         "examples": [
+            "description: format-control character (U+200B) → Strip controls & re-run.",
             "Primary key has duplicates → deduplicate the source or use a composite key.",
             "An amount field lost a decimal place → use DECIMAL with the same precision as the source.",
-            "A required 'user_id' is 50% null → fix the source or exclude the rows.",
         ],
     },
     "proof_bundle": {
@@ -189,6 +236,26 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         "why": "The target table or collection cannot accept the mapped data as-is.",
         "fix": "Allow table creation, widen the target column, change the target type, remove duplicate primary keys, or map to a compatible existing column.",
         "examples": ["VARCHAR(10) cannot store a 50-char string."],
+    },
+    {
+        "keywords": ["identity transform altered", "identity mapping altered"],
+        "gate": "g8_reconciliation",
+        "why": (
+            "An identity/rename mapping changed the sample value on the write path. "
+            "This is a pre-write fingerprint failure — not encoding and not a post-load checksum."
+        ),
+        "fix": (
+            "Review the listed row/column. Prefer an explicit transform if mutation is intended. "
+            "Do not use Strip controls — that only removes format-control characters."
+        ),
+        "examples": ["row 1 categories→categories: identity transform altered value"],
+    },
+    {
+        "keywords": ["duplicate target key"],
+        "gate": "g8_reconciliation",
+        "why": "The sample contains duplicate values for the identity key that the destination would reject.",
+        "fix": "Deduplicate the source on the real primary key (id/_id). Foreign-key columns like user_id are not treated as PKs.",
+        "examples": ["Dry-run reconciliation failed — 2 duplicate target key(s) on id"],
     },
     {
         "keywords": ["ambiguous mapping"],

@@ -54,7 +54,7 @@ def write_mapped_rows(
     backfill_new_fields: bool = False,
     **_kwargs: Any,
 ) -> WriteResult:
-    del ssl, create_table, username, backfill_new_fields
+    del ssl, username, backfill_new_fields
     policy = transform_error_policy(error_policy)
     bucket = database
     if not bucket:
@@ -90,6 +90,19 @@ def write_mapped_rows(
         preserve_case=True,
         error_policy=policy,
     )
+    if errors and policy == "fail":
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=key,
+            target_schema=database,
+            checksum="",
+            chunks_completed=0,
+            error=f"Transform errors: {'; '.join(errors[:3])}",
+            warnings=errors[:10],
+            rejected_rows=len({d.get("row") for d in rejected_details if d.get("row") is not None}),
+            rejected_details=rejected_details[:100],
+        )
 
     records = [{c: to_json_value(v, c, dest_types) for c, v in zip(target_cols, row)} for row in mapped_rows]
 
@@ -116,9 +129,39 @@ def write_mapped_rows(
         bucket_obj = client.bucket(bucket)
         try:
             if not bucket_obj.exists():
+                if not create_table:
+                    raise RuntimeError(
+                        f"GCS bucket {bucket!r} is missing and create_table is disabled"
+                    )
                 bucket_obj.create()
-        except Exception:
-            pass
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            # Only treat true NotFound as create-trigger; auth/transient must surface.
+            try:
+                from google.api_core.exceptions import NotFound, Forbidden
+            except ImportError:
+                NotFound = type(None)  # type: ignore[misc,assignment]
+                Forbidden = type(None)  # type: ignore[misc,assignment]
+            if isinstance(exc, Forbidden) or "403" in str(exc) or "Forbidden" in type(exc).__name__:
+                raise RuntimeError(
+                    f"Cannot verify GCS bucket {bucket!r}: permission denied"
+                ) from exc
+            if isinstance(exc, NotFound) or "404" in str(exc) or "NotFound" in type(exc).__name__:
+                if not create_table:
+                    raise RuntimeError(
+                        f"GCS bucket {bucket!r} is missing and create_table is disabled"
+                    ) from exc
+                try:
+                    bucket_obj.create()
+                except Exception as create_exc:
+                    raise RuntimeError(
+                        f"Cannot create GCS bucket {bucket!r}: {create_exc}"
+                    ) from create_exc
+            else:
+                raise RuntimeError(
+                    f"Cannot verify GCS bucket {bucket!r}: {exc}"
+                ) from exc
         blob = bucket_obj.blob(key)
         blob.upload_from_string(body, content_type=content_type)
         checksum = row_checksum(mapped_rows, target_cols)

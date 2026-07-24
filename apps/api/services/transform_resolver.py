@@ -7,22 +7,6 @@ from typing import Any
 from services.transform_engine import infer_transform_for_mapping
 from services.type_system import normalize_logical_type
 
-# Frontend MappingTransform → engine transform id
-UI_TO_ENGINE: dict[str, str] = {
-    "none": "none",
-    "trim": "trim",
-    "upper": "upper",
-    "lower": "lower",
-    "date_iso": "datetime",
-    "hash_pii": "hash_pii",
-    "mask_pii": "mask_pii",
-    "cast_number": "decimal",
-    "cast_boolean": "boolean",
-    "strip_controls": "strip_controls",
-    "normalize_unicode": "normalize_unicode",
-    "parse_json": "json",
-}
-
 ENGINE_TO_UI: dict[str, str] = {
     "none": "none",
     "identity": "none",
@@ -33,13 +17,46 @@ ENGINE_TO_UI: dict[str, str] = {
     "lower": "lower",
     "date": "date_iso",
     "datetime": "date_iso",
+    "time": "time_iso",
+    "timestamp": "date_iso",
     "decimal": "cast_number",
-    "integer": "cast_number",
+    "integer": "cast_integer",
     "boolean": "cast_boolean",
-    "json": "none",
-    "binary": "none",
+    "json": "parse_json",
+    "binary": "binary",
+    "hash_pii": "hash_pii",
+    # Studio has no separate mask control — align with FE hash_pii.
+    "mask_pii": "hash_pii",
+    "strip_controls": "strip_controls",
+    "normalize_unicode": "strip_controls",
+    "phone": "phone",
+    "email": "email",
+    "currency": "currency",
+    "percentage": "percentage",
+}
+
+# Frontend MappingTransform → engine transform id
+UI_TO_ENGINE: dict[str, str] = {
+    "none": "none",
+    "trim": "trim",
+    "upper": "upper",
+    "lower": "lower",
+    "date_iso": "datetime",
+    "time_iso": "time",
     "hash_pii": "hash_pii",
     "mask_pii": "mask_pii",
+    "cast_number": "decimal",
+    "cast_integer": "integer",
+    "cast_boolean": "boolean",
+    "strip_controls": "strip_controls",
+    "normalize_unicode": "normalize_unicode",
+    "parse_json": "json",
+    "binary": "binary",
+    "phone": "phone",
+    "email": "email",
+    "currency": "currency",
+    "percentage": "percentage",
+    "identity_specialty": "none",
 }
 
 # Transforms that naturally produce string output and are safe for string targets.
@@ -47,7 +64,7 @@ _STRING_TRANSFORMS: frozenset[str] = {
     "trim", "trim_id", "upper", "lower", "uuid", "hash_pii", "mask_pii", "none",
     "date", "datetime", "json", "binary", "decimal",
     "phone", "email", "url", "iban", "postal",
-    "currency", "percentage", "base64",
+    "currency", "percentage", "base64", "strip_controls", "normalize_unicode",
 }
 
 
@@ -75,7 +92,7 @@ def _type_compatible_transform(target_type: str, raw: str) -> bool:
     if t == "uuid":
         return raw in {"uuid", "trim", "trim_id"}
     if t == "time":
-        return raw in {"date", "datetime"}
+        return raw in {"time", "date", "datetime"}
     return raw in _STRING_TRANSFORMS
 
 

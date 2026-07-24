@@ -162,6 +162,24 @@ def write_mapped_rows(
         client = _mongo_client(conn_str)
 
         db = client[db_name]
+        if not create_table:
+            # Mongo creates collections on first write — deny-create must probe first.
+            existing = set(
+                db.list_collection_names(filter={"name": collection_name})
+            )
+            if collection_name not in existing:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=collection_name,
+                    target_schema=db_name,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"MongoDB collection {collection_name!r} is missing "
+                        "and create_table is disabled"
+                    ),
+                )
         coll = db[collection_name]
 
         mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
@@ -208,13 +226,44 @@ def write_mapped_rows(
             upper = stype.upper()
             # An explicit mapping transform overrides the inferred source type so
             # values like decimal strings are stored as the correct BSON type.
-            if transform in {"decimal", "currency", "percentage"} or upper in {"DECIMAL", "NUMERIC"}:
-                return Decimal128(str(value))
-            if transform == "integer" or upper in {"INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT", "LONG", "SERIAL", "BIGSERIAL"}:
+            if upper in {"FLOAT", "DOUBLE", "FLOAT64", "REAL"}:
                 try:
-                    iv = int(value)
+                    return float(value)
                 except (ValueError, TypeError):
                     return value
+            if transform in {"decimal", "currency", "percentage"} or upper in {"DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC"}:
+                return Decimal128(str(value))
+            if transform == "integer" or upper in {"INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT", "LONG", "SERIAL", "BIGSERIAL"}:
+                from decimal import Decimal
+
+                if isinstance(value, bool):
+                    iv = int(value)
+                elif isinstance(value, int):
+                    iv = value
+                elif isinstance(value, float):
+                    if not value.is_integer():
+                        raise ValueError(
+                            f"cannot coerce non-integral float {value!r} to INTEGER "
+                            "without truncation"
+                        )
+                    iv = int(value)
+                elif isinstance(value, Decimal):
+                    if value != value.to_integral_value():
+                        raise ValueError(
+                            f"cannot coerce non-integral decimal {value!r} to INTEGER "
+                            "without truncation"
+                        )
+                    iv = int(value)
+                elif isinstance(value, str):
+                    try:
+                        iv = int(value)
+                    except (ValueError, TypeError):
+                        return value
+                else:
+                    try:
+                        iv = int(value)
+                    except (ValueError, TypeError):
+                        return value
                 # BSON supports signed 64-bit ints; fall back to Decimal128 or
                 # string when a value overflows.
                 if iv > 2**63 - 1 or iv < -(2**63):
@@ -298,8 +347,13 @@ def write_mapped_rows(
             if not batch:
                 break
 
-            # Convert row tuples to documents
-            docs = [dict(zip(target_cols, row)) for row in batch]
+            # Convert row tuples to documents; omit missing-field sentinels.
+            from services.value_serializer import is_missing_sentinel
+
+            docs = [
+                {k: v for k, v in dict(zip(target_cols, row)).items() if not is_missing_sentinel(v)}
+                for row in batch
+            ]
 
             # Preserve MongoDB ObjectId identity when a 24-char hex _id is present.
             from bson.objectid import ObjectId
@@ -316,18 +370,61 @@ def write_mapped_rows(
             if write_mode == "upsert" and conflict_columns:
                 from pymongo import ReplaceOne
 
-                pk = conflict_columns[0]
-                if pk in target_cols:
-                    ops = [
-                        ReplaceOne({pk: doc[pk]}, doc, upsert=True)
-                        for doc in docs
-                        if doc.get(pk) not in (None, "")
-                    ]
-                    if ops:
-                        coll.bulk_write(ops, ordered=False)
-                    written += len(ops)
-                else:
-                    written += _idempotent_insert_many(coll, docs)
+                requested_keys = [str(c) for c in conflict_columns if str(c)]
+                pk_cols = [c for c in requested_keys if c in target_cols]
+                missing_keys = [c for c in requested_keys if c not in target_cols]
+                if not pk_cols or missing_keys:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=collection_name,
+                        target_schema=db_name,
+                        checksum="",
+                        chunks_completed=chunk_idx,
+                        error=(
+                            "MongoDB upsert requires mapped conflict columns; missing: "
+                            f"{missing_keys or requested_keys}"
+                        ),
+                        rejected_rows=len(rejected_details),
+                        rejected_details=rejected_details[:100],
+                        warnings=transform_errors,
+                    )
+                ops = []
+                for doc_idx, doc in enumerate(docs):
+                    filt = {c: doc.get(c) for c in pk_cols}
+                    if any(v in (None, "") for v in filt.values()):
+                        missing_cols = [c for c, v in filt.items() if v in (None, "")]
+                        detail = {
+                            "row": start + doc_idx + 1,
+                            "column": ",".join(missing_cols),
+                            "target": ",".join(pk_cols),
+                            "value": "",
+                            "reason": (
+                                "Mongo upsert skipped — incomplete conflict key "
+                                f"{missing_cols}; refuse silent omit"
+                            ),
+                            "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                            "chars": [],
+                        }
+                        rejected_details.append(detail)
+                        if policy == "fail":
+                            return WriteResult(
+                                ok=False,
+                                rows_written=written,
+                                table_name=collection_name,
+                                target_schema=db_name,
+                                checksum="",
+                                chunks_completed=chunk_idx,
+                                error=detail["reason"],
+                                rejected_rows=len(rejected_details),
+                                rejected_details=rejected_details[:100],
+                                warnings=transform_errors,
+                            )
+                        continue
+                    ops.append(ReplaceOne(filt, doc, upsert=True))
+                if ops:
+                    coll.bulk_write(ops, ordered=False)
+                written += len(ops)
             else:
                 written += _idempotent_insert_many(coll, docs)
             if on_checkpoint:

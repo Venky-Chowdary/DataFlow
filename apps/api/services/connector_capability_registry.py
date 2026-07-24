@@ -1,9 +1,11 @@
-"""Connector capability registry.
+"""Connector capability registry (sidecar — NOT transfer-liveness SSOT).
 
-A structured sidecar of connector capabilities, tier priorities, rate limits,
-CDC prerequisites, write semantics, and idempotency properties.  Used by the
-universal orchestrator, the catalog service, and the preflight engine to make
-connector-aware decisions rather than assume a one-size-fits-all path.
+Holds CDC notes, rate limits, batch sizes, and orchestrator hints.
+
+``transfer_ready`` on static ``CAPABILITY_REGISTRY`` entries is marketing-only
+and is **always overwritten** by ``get_connector_capability`` from
+``src.transfer.connector_capabilities`` (driver/file caps + package probes).
+Never read ``CAPABILITY_REGISTRY[k]["transfer_ready"]`` directly for catalog UI.
 """
 
 from __future__ import annotations
@@ -188,10 +190,16 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_upsert": True,
         "supports_append": True,
         "supports_overwrite": True,
-        "supports_merge": True,
+        # Native MERGE not yet wired; upsert uses delete+insert (at-least-once).
+        "supports_merge": False,
         "requires_schema": True,
         "supports_binary": True,
-        "common_issues": ["VARCHAR columns without length may truncate. Use VARCHAR(max) or SUPER for JSON."],
+        "common_issues": [
+            "VARCHAR without length maps to VARCHAR(65535) — still truncates beyond that.",
+            "JSON/ARRAY land as SUPER; binary as VARBYTE.",
+            "Upsert is delete+insert with optional _df_lsn guard (no ON CONFLICT); not exactly-once. Native MERGE not yet wired.",
+            "DISTKEY/SORTKEY are operator-owned — DataFlow does not invent them.",
+        ],
         "recommended_batch_size": 5000,
     },
     "databricks": {
@@ -300,7 +308,8 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "pattern": "batch",
         "supports_cdc": False,
         "supports_streaming": False,
-        "supports_upsert": True,
+        # Object PutObject is overwrite-by-key — not row-level upsert/MERGE.
+        "supports_upsert": False,
         "supports_append": True,
         "supports_overwrite": True,
         "supports_merge": False,
@@ -309,7 +318,8 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_unstructured": True,
         "common_issues": [
             "Use the region-specific endpoint and verify bucket permissions.",
-            "Large objects should be split into parts. S3 has no native UPDATE.",
+            "Large objects should be split into parts. S3 has no native UPDATE — "
+            "upsert sync modes are not supported (overwrite object key only).",
         ],
         "recommended_batch_size": 1000,
     },
@@ -319,14 +329,18 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "pattern": "batch",
         "supports_cdc": False,
         "supports_streaming": False,
-        "supports_upsert": True,
+        "supports_upsert": False,
         "supports_append": True,
         "supports_overwrite": True,
         "supports_merge": False,
         "requires_schema": False,
         "supports_binary": True,
         "supports_unstructured": True,
-        "common_issues": ["Use HMAC keys or service-account JSON for authentication.", "Bucket names are global and unique."],
+        "common_issues": [
+            "Use HMAC keys or service-account JSON for authentication.",
+            "Bucket names are global and unique.",
+            "Object overwrite only — no row-level upsert/MERGE.",
+        ],
         "recommended_batch_size": 1000,
     },
     "adls": {
@@ -335,14 +349,17 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "pattern": "batch",
         "supports_cdc": False,
         "supports_streaming": False,
-        "supports_upsert": True,
+        "supports_upsert": False,
         "supports_append": True,
         "supports_overwrite": True,
         "supports_merge": False,
         "requires_schema": False,
         "supports_binary": True,
         "supports_unstructured": True,
-        "common_issues": ["Use Azure Storage Account key or service principal.", "Append to blobs requires read-modify-write."],
+        "common_issues": [
+            "Object overwrite only — no row-level upsert/MERGE.",
+            "Use Azure Storage Account key or service principal.",
+        ],
         "recommended_batch_size": 1000,
     },
     "minio": {
@@ -351,14 +368,18 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "pattern": "batch",
         "supports_cdc": False,
         "supports_streaming": False,
-        "supports_upsert": True,
+        "supports_upsert": False,
         "supports_append": True,
         "supports_overwrite": True,
         "supports_merge": False,
         "requires_schema": False,
         "supports_binary": True,
         "supports_unstructured": True,
-        "common_issues": ["MinIO is S3-compatible; use the MinIO endpoint and region.", "Bucket policies may differ from AWS S3."],
+        "common_issues": [
+            "MinIO is S3-compatible; use the MinIO endpoint and region.",
+            "Bucket policies may differ from AWS S3.",
+            "Object overwrite only — no row-level upsert/MERGE.",
+        ],
         "recommended_batch_size": 1000,
     },
     # File formats
@@ -472,11 +493,12 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "requires_schema": False,
         "supports_binary": True,
         "supports_unstructured": True,
-        "cdc_prerequisites": "Kafka is a destination (JSON produce). Optional Schema Registry hook. Native DB CDC does not require Kafka; Debezium envelope bridge is available for existing Connect estates.",
+        "cdc_prerequisites": "Kafka is a destination (JSON produce) and optional Debezium source. When schema_registry_url is set, register/decode are fail-closed Confluent wire (magic+id+JSON). Native DB CDC does not require Kafka.",
         "common_issues": [
             "At-least-once produce with acks=all; exactly-once needs transactional IDs.",
             "Vault SASL username/password via connector secret fields.",
-            "Schema Registry URL may be passed as schema_registry_url or an http(s) connection_string.",
+            "Schema Registry URL may be passed as schema_registry_url or an http(s) connection_string — register failures abort the write.",
+            "Empty topics do not invent TEXT columns; introspect waits for samples.",
         ],
         "recommended_batch_size": 1000,
     },
@@ -944,11 +966,16 @@ def recommended_batch_size(key: str) -> int:
 
 
 STRUCTURED_FILE_FORMATS: set[str] = {
-    "csv", "tsv", "parquet", "avro", "excel", "xlsx", "xls", "ods", "feather", "arrow", "ipc", "orc"
+    # Only formats with complete parse + stream support. Feather/Arrow/IPC stay
+    # out until native ingest exists — catalog must not claim structured fidelity.
+    "csv", "tsv", "parquet", "avro", "excel", "xlsx", "xls", "ods", "orc",
 }
 
+# Detected as file formats in some catalogs but not yet parse/stream-ready.
+UNIMPLEMENTED_FILE_FORMATS: set[str] = {"feather", "arrow", "ipc", "protobuf"}
+
 SEMI_STRUCTURED_FILE_FORMATS: set[str] = {
-    "json", "jsonl", "ndjson", "xml", "yaml", "yml", "toml", "bson", "msgpack", "protobuf"
+    "json", "jsonl", "ndjson", "xml", "yaml", "yml", "toml", "bson", "msgpack",
 }
 
 
@@ -975,6 +1002,11 @@ def classify_payload(
 
     src_key = _normalize_connector_id(source_format)
     tgt_key = _normalize_connector_id(target_format)
+    if src_key in UNIMPLEMENTED_FILE_FORMATS or tgt_key in UNIMPLEMENTED_FILE_FORMATS:
+        return {
+            "shape": "unstructured",
+            "note": "File format not yet parse/stream ready — refuse structured fidelity claims",
+        }
     if src_key in STRUCTURED_FILE_FORMATS or tgt_key in STRUCTURED_FILE_FORMATS:
         return {"shape": "structured", "note": "Tabular file payload with rows and columns"}
     if src_key in SEMI_STRUCTURED_FILE_FORMATS or tgt_key in SEMI_STRUCTURED_FILE_FORMATS:

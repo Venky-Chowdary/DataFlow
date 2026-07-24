@@ -74,6 +74,8 @@ interface DestinationAdvancedDrawerProps {
   /** Heuristic suggestions for empty cursor / PK selects. */
   suggestedCursor?: string;
   suggestedPrimaryKey?: string;
+  /** Sample-unique PK candidates (honest: preview sample only). */
+  uniqueKeySuggestions?: Array<{ column: string; sampleRows: number; uniqueCount: number }>;
   /** Debezium-compatible snapshot mode (CDC). */
   snapshotMode?: string;
   onSnapshotModeChange?: (mode: string) => void;
@@ -174,6 +176,7 @@ export function DestinationAdvancedDrawer({
   onStreamPrimaryKeyChange,
   suggestedCursor = "",
   suggestedPrimaryKey = "",
+  uniqueKeySuggestions = [],
   snapshotMode = "initial",
   onSnapshotModeChange,
   priorityColumn = "",
@@ -298,7 +301,7 @@ export function DestinationAdvancedDrawer({
           </div>
         </div>
 
-        {(requiresCursor || requiresPrimaryKey) && (suggestedCursor || suggestedPrimaryKey) && (
+        {((requiresCursor || requiresPrimaryKey) && (suggestedCursor || suggestedPrimaryKey || uniqueKeySuggestions.length > 0)) && (
           <div className="df2-adv-suggest-row">
             {requiresCursor && suggestedCursor && !defaultCursor && (
               <button
@@ -315,9 +318,24 @@ export function DestinationAdvancedDrawer({
                 className="df2-adv-suggest-chip"
                 onClick={() => onStreamPrimaryKeyChange(names[0], suggestedPrimaryKey)}
               >
-                Use suggested primary key · <strong>{suggestedPrimaryKey}</strong>
+                Use name heuristic · <strong>{suggestedPrimaryKey}</strong>
               </button>
             )}
+            {requiresPrimaryKey &&
+              uniqueKeySuggestions
+                .filter((s) => s.column !== defaultPrimaryKey)
+                .slice(0, 3)
+                .map((s) => (
+                  <button
+                    key={s.column}
+                    type="button"
+                    className="df2-adv-suggest-chip"
+                    title={`Unique in ${s.sampleRows}-row sample (${s.uniqueCount} values) — not full-table proof`}
+                    onClick={() => onStreamPrimaryKeyChange(names[0], s.column)}
+                  >
+                    Unique in sample · <strong>{s.column}</strong>
+                  </button>
+                ))}
           </div>
         )}
 
@@ -643,6 +661,13 @@ export function DestinationAdvancedDrawer({
               {sourceColumns.length} discovered fields
             </span>
           </div>
+          <p className="df2-adv-identity-note">
+            {requiresPrimaryKey
+              ? "Primary key is required for this sync mode (upsert / CDC / mirror / SCD2)."
+              : "Full refresh · Append / Overwrite does not require a unique primary key. "
+                + "You can still set one for documentation; duplicate id values will not block Validate."}
+            {requiresCursor ? " Cursor is required for incremental / CDC." : ""}
+          </p>
           {names.length > 1 && (
             <p className="df2-label-hint" style={{ margin: "0 0 10px" }}>
               Each stream keeps its own cursor and primary key. Sync mode and schema policy apply to all streams.
@@ -705,12 +730,14 @@ export function DestinationAdvancedDrawer({
                       <td>
                         <select
                           className="df2-input df2-select df2-stream-select"
-                          value={requiresPrimaryKey ? fields.primaryKeyField : ""}
-                          disabled={!requiresPrimaryKey || sourceColumns.length === 0}
+                          value={fields.primaryKeyField}
+                          disabled={sourceColumns.length === 0}
                           onChange={(e) => onStreamPrimaryKeyChange(streamName, e.target.value)}
                           aria-label={`Primary key for ${streamName}`}
                         >
-                          <option value="">{requiresPrimaryKey ? "Select key" : "Not required"}</option>
+                          <option value="">
+                            {requiresPrimaryKey ? "Select key" : "Optional (append)"}
+                          </option>
                           {sourceColumns.map((col) => (
                             <option key={col} value={col}>
                               {col}{sourceSchema[col] ? ` · ${sourceSchema[col]}` : ""}

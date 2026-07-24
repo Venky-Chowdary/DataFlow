@@ -22,7 +22,7 @@ def test_txn_dt_maps_to_transaction_date():
 
 
 def test_infers_target_when_no_targets():
-    mappings = map_columns(["PAY_AMT"], [])
+    mappings = map_columns(["PAY_AMT"], [], destination_table_exists=False)
     assert mappings[0]["target"] == "payment_amount"
     assert mappings[0]["confidence"] >= 0.72
 
@@ -90,3 +90,5 @@ def test_ambiguous_generic_id_requires_review():
     assert by_source["customer_id"]["target"] == "customer_id"
     assert by_source["id"]["requires_review"] is True
     assert by_source["id"]["score_gap"] < 0.08
+    # Near-tie confidence must stay below strict auto-approve (0.85).
+    assert by_source["id"]["confidence"] <= 0.84

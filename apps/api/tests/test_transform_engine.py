@@ -32,6 +32,19 @@ def test_apply_date_resolves_unambiguous_day_month_order():
     assert val2 == "2024-12-31"
 
 
+def test_apply_date_fails_closed_on_ambiguous_mdy_dmy():
+    """05/06/2024 is May 6 (US) or June 5 (EU) — never silently pick MDY."""
+    val, err = apply_transform("05/06/2024", "date")
+    assert val is None
+    assert err and "Invalid date" in err
+    val2, err2 = apply_transform("05/06/2024", "datetime")
+    assert val2 is None
+    assert err2
+    # Equal day/month is unambiguous either locale.
+    val3, err3 = apply_transform("05/05/2024", "date")
+    assert err3 is None
+    assert val3 == "2024-05-05"
+
 def test_apply_json_and_boolean():
     val, err = apply_transform('{"b": 2, "a": 1}', "json")
     assert err is None
@@ -71,13 +84,36 @@ def test_dry_run_catches_bad_decimal():
     assert errors
 
 
-def test_apply_hash_pii_is_deterministic():
+def test_dry_run_reports_multiple_errors_per_mapping():
+    """Sporadic mid-sample bad values must not hide behind first-error-only break."""
+    rows = [["1.00"], ["2.00"], ["bad-a"], ["3.00"], ["bad-b"], ["bad-c"], ["4.00"]]
+    ok, errors = dry_run_sample(
+        headers=["AMT"],
+        sample_rows=rows,
+        mappings=[{"source": "AMT", "target": "payment_amount", "transform": "decimal"}],
+        column_types={"AMT": "DECIMAL"},
+        max_errors_per_mapping=3,
+    )
+    assert not ok
+    assert sum(1 for e in errors if "Invalid decimal" in e) >= 3
+
+
+def test_apply_hash_pii_is_deterministic(monkeypatch):
+    monkeypatch.setenv("DATAFLOW_PII_HASH_KEY", "unit-test-pii-key")
     val, err = apply_transform("secret@email.com", "hash_pii")
     assert err is None
     assert val
     assert len(val) == 32
     again, _ = apply_transform("secret@email.com", "hash_pii")
     assert again == val
+
+
+def test_hash_pii_fails_closed_without_secret(monkeypatch):
+    monkeypatch.delenv("DATAFLOW_PII_HASH_KEY", raising=False)
+    monkeypatch.delenv("DATAFLOW_SECRET", raising=False)
+    val, err = apply_transform("secret@email.com", "hash_pii")
+    assert val is None
+    assert err and "DATAFLOW_PII_HASH_KEY" in err
 
 
 def test_apply_uuid_validates():

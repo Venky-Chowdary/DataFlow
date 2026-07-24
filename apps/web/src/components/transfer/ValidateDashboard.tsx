@@ -11,58 +11,45 @@ import type {
   ValidationSuggestedAction,
 } from "../../lib/types";
 import { isLocalPreflight } from "../../lib/localPreflight";
+import {
+  CORE_ENGINE_GATE_IDS,
+  GATE_CATALOG,
+  gateCatalogEntry,
+  gateLabel,
+} from "../../lib/preflightGates";
+import {
+  buildDisplayBlockers,
+  buildExecutiveSummary,
+  findDuplicateKeyRoot,
+  partitionCoercionColumns,
+  partitionExplainIssues,
+} from "../../lib/validateIssueGrouping";
 import { BadDataFixDrawer, type BadDataIssue } from "./BadDataFixDrawer";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
 import { RepairProposalDrawer } from "./RepairProposalDrawer";
 
-interface GateMeta {
+type GateMeta = {
   key: string;
   label: string;
   icon: string;
   rule: string;
-}
+};
 
-/** Labels for engine gate IDs — keys MUST match backend GateId values exactly. */
-const GATE_META: GateMeta[] = [
-  { key: "g1_source", label: "Source readable", icon: "database", rule: "Source endpoint connects and rows can be read." },
-  { key: "g2_destination", label: "Destination reachable", icon: "server", rule: "Destination accepts a connection and is writable." },
-  { key: "g3_schema_contract", label: "Schema contract", icon: "layers", rule: "Source and target schemas are compatible." },
-  { key: "g4_mapping_confidence", label: "Column mappings", icon: "sparkle", rule: "Every column maps above the confidence threshold." },
-  { key: "g5_dry_run", label: "Dry-run / integrity", icon: "code", rule: "Sample rows pass transforms and integrity checks cleanly." },
-  { key: "g6_target_ddl", label: "Target DDL", icon: "scan", rule: "Any required CREATE / ALTER statements are valid." },
-  { key: "g7_capacity", label: "Staging capacity", icon: "trend", rule: "Destination has headroom for the row volume." },
-  { key: "g8_reconciliation", label: "Reconciliation", icon: "activity", rule: "Post-transfer checksums are compared source ↔ target." },
-  { key: "g9_sync_contract", label: "Sync contract", icon: "transfer", rule: "Cursor and primary-key contract satisfy the sync mode." },
-  { key: "g10_schema_policy", label: "Schema change policy", icon: "gate", rule: "Detected drift is allowed by the schema policy." },
-  { key: "g11_validation_posture", label: "Validation posture", icon: "lock", rule: "Overall posture meets the selected validation mode." },
-];
+const GATE_META: GateMeta[] = GATE_CATALOG.map((g) => ({
+  key: g.id,
+  label: g.label,
+  icon: g.icon,
+  rule: g.rule,
+}));
 
 function metaForGate(id: string): GateMeta {
-  const exact = GATE_META.find((m) => m.key === id);
-  if (exact) return exact;
-  // Legacy aliases from older UI keys
-  const aliases: Record<string, string> = {
-    g3_schema: "g3_schema_contract",
-    g4_mapping: "g4_mapping_confidence",
-    g5_transform: "g5_dry_run",
-    g6_ddl: "g6_target_ddl",
-    g9_data_integrity: "g5_dry_run",
-  };
-  const mapped = aliases[id];
-  if (mapped) {
-    const hit = GATE_META.find((m) => m.key === mapped);
-    if (hit) return hit;
-  }
-  return {
-    key: id,
-    label: id.replace(/^g\d+_/, "").replace(/_/g, " "),
-    icon: "gate",
-    rule: "Validation rule enforced before transfer.",
-  };
+  const entry = gateCatalogEntry(id);
+  return { key: entry.id, label: entry.label, icon: entry.icon, rule: entry.rule };
 }
 
-/** Core engine gates (G1–G8). Extra policy gates may appear after the run. */
-const CORE_GATE_META = GATE_META.filter((g) => /^g[1-8]_/.test(g.key));
+/** Core engine gates shown while Validate is pending / running. */
+const CORE_ENGINE_KEYS = new Set<string>(CORE_ENGINE_GATE_IDS);
+const CORE_GATE_META = GATE_META.filter((g) => CORE_ENGINE_KEYS.has(g.key));
 
 function formatDuration(ms: number | undefined): string {
   if (ms == null || Number.isNaN(ms)) return "";
@@ -99,7 +86,61 @@ function issueTextsFromDetails(details?: Record<string, unknown> | null): string
   if (Array.isArray(issues)) {
     return issues.map((e) => (typeof e === "string" ? e : String((e as { message?: string })?.message ?? e))).filter(Boolean).slice(0, 12);
   }
-  return [];
+  // Privilege probe honesty on G2
+  const probe = details.privilege_probe;
+  if (probe && typeof probe === "object") {
+    const p = probe as Record<string, unknown>;
+    const lines: string[] = [];
+    if (p.method) lines.push(`Probe: ${String(p.method)}`);
+    if (p.status) lines.push(`Privilege status: ${String(p.status)}`);
+    if (p.engine) lines.push(`Engine: ${String(p.engine)}`);
+    if (p.detail && String(p.status) !== "ok") lines.push(String(p.detail));
+    if (lines.length) return lines.slice(0, 8);
+  }
+  // G4 / G6 structured detail keys that are not named "issues"
+  const extras: string[] = [];
+  for (const key of ["low_confidence", "ambiguous_mappings", "unmapped", "sample_duplicates", "encoding_issues"] as const) {
+    const arr = details[key];
+    if (!Array.isArray(arr)) continue;
+    for (const item of arr.slice(0, 6)) {
+      if (typeof item === "string") extras.push(item);
+      else if (item && typeof item === "object") {
+        const row = item as Record<string, unknown>;
+        const src = String(row.source ?? row.column ?? row.field ?? "");
+        const msg = String(row.message ?? row.reason ?? row.target ?? JSON.stringify(item));
+        extras.push(src ? `${src}: ${msg}` : msg);
+      }
+    }
+  }
+  return extras.filter(Boolean).slice(0, 12);
+}
+
+type PrivilegeProbeMeta = {
+  status?: string;
+  method?: string;
+  engine?: string;
+  detail?: string;
+  can_write?: boolean | null;
+  can_create_table?: boolean | null;
+};
+
+function privilegeProbeFromDetails(details?: Record<string, unknown> | null): PrivilegeProbeMeta | null {
+  const raw = details?.privilege_probe;
+  if (!raw || typeof raw !== "object") return null;
+  const p = raw as Record<string, unknown>;
+  return {
+    status: p.status != null ? String(p.status) : undefined,
+    method: p.method != null ? String(p.method) : undefined,
+    engine: p.engine != null ? String(p.engine) : undefined,
+    detail: p.detail != null ? String(p.detail) : undefined,
+    can_write: typeof p.can_write === "boolean" ? p.can_write : p.can_write == null ? null : Boolean(p.can_write),
+    can_create_table:
+      typeof p.can_create_table === "boolean"
+        ? p.can_create_table
+        : p.can_create_table == null
+          ? null
+          : Boolean(p.can_create_table),
+  };
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -116,19 +157,33 @@ interface ValidateDashboardProps {
   confidenceThreshold?: number;
   destType?: string;
   validationMode?: string;
+  /** Current sync mode — duplicate-key copy must not tell append operators to "switch to append". */
+  syncMode?: string;
   /** Apply a one-click AI suggestion to the Studio (change type, add transform, navigate). */
   onApplyAction?: (action: ValidationSuggestedAction) => void;
-  /** Apply strip_controls across mappings and re-run preflight. */
-  onStripControlChars?: () => void | Promise<void>;
+  /** Apply strip_controls across mappings and re-run preflight. Returns what changed. */
+  onStripControlChars?: () => void | Promise<RemediationOpResult | void>;
   /** True when text mappings already carry strip_controls (Execute will sanitize). */
   stripControlsApplied?: boolean;
-  /** Soften to quarantine-friendly posture and re-run. */
-  onQuarantineAndRerun?: () => void | Promise<void>;
-  /** Cell-level will-quarantine / will-coerce preview from sample rows. */
+  /** Soften to quarantine-friendly posture, strip, and re-run. Returns what changed. */
+  onQuarantineAndRerun?: () => void | Promise<RemediationOpResult | void>;  /** Cell-level will-quarantine / will-coerce preview from sample rows. */
   cellPreview?: CellPreviewResult | null;
-  /** Jump back to Map so the operator can fix coerced column mappings. */
-  onReviewMappings?: () => void;
-  /** Open Mapping proof drawer — how columns match, confidence evidence, fidelity risks. */
+  /** Jump back to Map so the operator can fix coerced / identity column mappings. */
+  onReviewMappings?: (opts?: { focusSource?: string }) => void;
+  /**
+   * Open Destination → Advanced settings where primary key and sync mode live.
+   * Used for duplicate-identity blockers (Map alone cannot change the sync contract).
+   */
+  onOpenIdentitySettings?: () => void;
+  /** Sample-unique key suggestions (honest: Validate sample only). */
+  uniqueKeySuggestions?: Array<{
+    column: string;
+    uniqueCount: number;
+    sampleRows: number;
+  }>;
+  /** Apply a suggested primary key, then open Advanced / re-validate. */
+  onApplyPrimaryKey?: (column: string) => void;
+  /** Open Mapping proof drawer — evidence only (Column matches card). */
   onOpenMappingProof?: () => void;
   /** Compact Map proof KPIs for Validate (exact overlaps / risks / mode). */
   mappingProofSummary?: {
@@ -153,6 +208,20 @@ interface ValidateDashboardProps {
   /** Clear seed after the drawer has opened (or failed). */
   onSeedRepairConsumed?: () => void;
 }
+
+/** Plain-language report of what a Validate remediation button just did. */
+export type RemediationOpResult = {
+  kind: "strip_controls" | "quarantine_strip";
+  /** Human title for the log. */
+  title: string;
+  /** Ordered steps the operator can read (what / why / next). */
+  steps: string[];
+  /** Columns that received strip_controls (source → target). */
+  columnsChanged: string[];
+  /** Encoding columns that triggered the remediation. */
+  columnsFlagged?: string[];
+  validationMode?: string;
+};
 
 function extractBadDataIssues(preflight: PreflightResult | null): BadDataIssue[] {
   if (!preflight) return [];
@@ -219,22 +288,26 @@ const SEVERITY_LABEL: Record<string, string> = {
 const ACTION_ICON: Record<string, string> = {
   change_target_type: "layers",
   add_transform: "code",
-  review_mappings: "sparkle",
+  map_column: "layers",
+  review_mappings: "layers",
   rerun_mapping: "transfer",
   check_connection: "server",
   normalize_control_chars: "layers",
   quarantine_and_rerun: "shield",
   open_bad_data_fix: "shield",
+  fix_source_keys: "settings",
 };
 
 /** Per-column value-aware coercion table with expandable offending-value rows. */
 function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [showAllConversions, setShowAllConversions] = useState(false);
+  const [showIsoNormalize, setShowIsoNormalize] = useState(false);
   // Clean string→typed conversions (severity ok) stay collapsed by default so
   // Strip/Quarantine are not buried — detail is one click away.
-  const actionable = columns.filter((c) => c.severity === "block" || c.severity === "warn");
-  const clean = columns.filter((c) => c.severity === "ok");
+  // ISO timestamp wire-normalize warns are grouped (not six separate dramas).
+  const { isoNormalize, otherActionable, clean } = partitionCoercionColumns(columns);
+  const actionable = [...otherActionable, ...(showIsoNormalize ? isoNormalize : [])];
   const visible = showAllConversions ? columns : actionable;
   const toggle = (key: string) =>
     setExpanded((prev) => {
@@ -247,18 +320,21 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
   if (columns.length === 0) return null;
 
   return (
-    <div className={`df2-vd-coerce${actionable.length === 0 ? " is-clean" : ""}`}>
+    <div className={`df2-vd-coerce${otherActionable.length === 0 && isoNormalize.length === 0 ? " is-clean" : ""}`}>
       <div className="df2-vd-coerce-head">
-        <DtIcon name={actionable.length ? "scan" : "check"} size={15} />
+        <DtIcon name={otherActionable.length ? "scan" : "check"} size={15} />
         <strong>Type coercion preview</strong>
         <span>
-          {actionable.length > 0
-            ? `${actionable.length} column${actionable.length === 1 ? "" : "s"} need review`
+          {otherActionable.length > 0
+            ? `${otherActionable.length} column${otherActionable.length === 1 ? "" : "s"} need review`
             : `${clean.length} column${clean.length === 1 ? "" : "s"} convert cleanly on the sample`}
-          {clean.length > 0 && actionable.length > 0
+          {isoNormalize.length > 0
+            ? ` · ${isoNormalize.length} timestamp normalize (informational)`
+            : ""}
+          {clean.length > 0 && otherActionable.length > 0
             ? ` · ${clean.length} convert cleanly`
             : ""}
-          {actionable.length > 0 ? " — expand a row for offending values / wire form." : "."}
+          {otherActionable.length > 0 ? " — expand a row for offending values / wire form." : "."}
         </span>
         {clean.length > 0 && (
           <button
@@ -270,10 +346,36 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
           </button>
         )}
       </div>
-      {visible.length === 0 ? (
+      {isoNormalize.length > 0 && !showAllConversions && (
+        <div className="df2-vd-iso-group" role="status">
+          <div className="df2-vd-iso-group-head">
+            <DtIcon name="activity" size={14} />
+            <strong>Timestamp normalize at write</strong>
+            <span>{isoNormalize.length} column{isoNormalize.length === 1 ? "" : "s"} · no data loss expected</span>
+          </div>
+          <p className="df2-vd-iso-group-note">ISO-8601 → destination TIMESTAMP bind</p>
+          <div className="df2-vd-chip-row">
+            {isoNormalize.map((col) => (
+              <span key={`${col.source}-${col.target}`} className="df2-vd-chip is-static">{col.source}</span>
+            ))}
+          </div>
+          <button
+            type="button"
+            className="df2-btn df2-btn-ghost df2-btn-sm"
+            onClick={() => setShowIsoNormalize((v) => !v)}
+          >
+            {showIsoNormalize ? "Hide per-column normalize rows" : "Show per-column normalize rows"}
+          </button>
+        </div>
+      )}
+      {visible.length === 0 && isoNormalize.length === 0 ? (
         <p className="df2-vd-coerce-empty-hint">
           No blocking coercions. Use <strong>Show all type conversions</strong> to inspect
           raw → destination wire forms (for example ISO timestamps → DATETIME).
+        </p>
+      ) : visible.length === 0 ? (
+        <p className="df2-vd-coerce-empty-hint">
+          No blocking coercions — timestamp normalize notes are informational above.
         </p>
       ) : (
       <div className="df2-vd-coerce-table-wrap">
@@ -447,12 +549,16 @@ export function ValidateDashboard({
   confidenceThreshold = 0.85,
   destType,
   validationMode,
+  syncMode,
   onApplyAction,
   onStripControlChars,
   stripControlsApplied = false,
   onQuarantineAndRerun,
   cellPreview = null,
   onReviewMappings,
+  onOpenIdentitySettings,
+  uniqueKeySuggestions = [],
+  onApplyPrimaryKey,
   onOpenMappingProof,
   mappingProofSummary = null,
   onRunPreflight,
@@ -475,10 +581,11 @@ export function ValidateDashboard({
   const [assistExpanded, setAssistExpanded] = useState(true);
   const [copiedRunId, setCopiedRunId] = useState(false);
   const [remediationLog, setRemediationLog] = useState<
-    Array<{ at: string; action: string; detail: string; outcome: string }>
+    Array<{ at: string; action: string; detail: string; outcome: string; steps?: string[] }>
   >([]);
   const pendingVerifyRef = useRef(false);
   const verifiedRunRef = useRef<string | null>(null);
+  const lastOpRef = useRef<RemediationOpResult | null>(null);
   const badDataIssues = useMemo(() => extractBadDataIssues(preflight), [preflight]);
   const hasEncodingIssue = badDataIssues.length > 0;
   const runId = preflight?.run_id;
@@ -518,24 +625,48 @@ export function ValidateDashboard({
         /invalid (decimal|integer|boolean)|cannot be cast|does not safely become|lossy type/i.test(b.message),
       ),
     );
+  const isPrivilegeBlock = Boolean(
+    preflight?.blockers.some((b) => {
+      const probe = privilegeProbeFromDetails(b.details);
+      return (
+        (b.id === "g2_destination" || /g2_destination/i.test(b.id || ""))
+        && (probe?.status === "denied"
+          || /privilege|INSERT|CREATE|ACL|IAM|PutObject|has_privileges|GRANT/i.test(b.message || ""))
+      );
+    })
+    || preflight?.gates.some((g) => {
+      if (g.id !== "g2_destination" || g.status !== "block") return false;
+      const probe = privilegeProbeFromDetails(g.details);
+      return probe?.status === "denied"
+        || /privilege|INSERT|CREATE|ACL|IAM|PutObject|has_privileges|GRANT/i.test(g.message || "");
+    }),
+  );
   const isConnectionBlock = Boolean(
-    preflight?.blockers.some((b) =>
-      /g2_destination|g1_source/i.test(b.id || "")
-      || /authentication failed|destination error|source error|not reachable|connection refused|credential/i.test(b.message || ""),
-    )
-    || preflight?.gates.some((g) =>
-      (g.id === "g2_destination" || g.id === "g1_source")
-      && g.status === "block",
+    !isPrivilegeBlock && (
+      preflight?.blockers.some((b) =>
+        /g1_source/i.test(b.id || "")
+        || /authentication failed|destination error|source error|not reachable|connection refused|credential/i.test(b.message || ""),
+      )
+      || preflight?.gates.some((g) =>
+        (g.id === "g1_source")
+        && g.status === "block",
+      )
+      || preflight?.gates.some((g) =>
+        g.id === "g2_destination"
+        && g.status === "block"
+        && !privilegeProbeFromDetails(g.details)?.status
+        && /not reachable|destination error|authentication|connection refused/i.test(g.message || ""),
+      )
     ),
   );
 
-  const pushRemediation = (action: string, detail: string, outcome: string) => {
-    setRemediationLog((prev) => [
+  const pushRemediation = (action: string, detail: string, outcome: string, steps?: string[]) => {    setRemediationLog((prev) => [
       {
         at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
         action,
         detail,
         outcome,
+        steps,
       },
       ...prev,
     ].slice(0, 8));
@@ -544,8 +675,7 @@ export function ValidateDashboard({
     preflight?.blockers.some((b) => /format-control|replacement character|encoding/i.test(b.message))
     || preflight?.gates.some((g) => g.status === "block" && /format-control|replacement|encoding/i.test(g.message)),
   );
-  const showEncodingRemediation = !isTypeMismatchBlock && !isConnectionBlock && (hasEncodingIssue || encodingBlocks);
-
+  const showEncodingRemediation = !isTypeMismatchBlock && !isConnectionBlock && !isPrivilegeBlock && (hasEncodingIssue || encodingBlocks);
   // Auto-open the Fix bad data drawer when dry-run is blocked by encoding/control chars.
   useEffect(() => {
     if (!running && encodingBlocks && hasEncodingIssue) {
@@ -611,14 +741,34 @@ export function ValidateDashboard({
     pendingVerifyRef.current = false;
     const dry = preflight.gates?.find((g) => /dry_run|integrity/i.test(g.id));
     const cleared = Boolean(preflight.passed || dry?.status === "pass");
-    const outcome = cleared ? "Verified OK" : "Still blocked — remap columns on Map";
+    const outcome = cleared ? "Verified OK — ready to Execute" : "Still blocked — remap columns on Map";
+    const op = lastOpRef.current;
+    const resultSteps: string[] = [];
+    if (op?.steps?.length) {
+      resultSteps.push(...op.steps);
+    }
+    if (cleared) {
+      resultSteps.push(
+        `Re-validation: ${preflight.passed_count ?? 0}/${preflight.total_gates ?? 0} gates passed.`,
+        op?.kind === "strip_controls" || op?.kind === "quarantine_strip"
+          ? "Jobs quarantine stays empty unless cells still fail during Execute — Strip cleaned them before write."
+          : "Execute is unlocked when all gates pass.",
+      );
+    } else {
+      resultSteps.push(
+        `Still blocked: ${dry?.message || "see Validation rules"}.`,
+        "Quarantine/Strip cannot fix wrong column type mappings — use Map.",
+      );
+    }
     const detail = cleared
-      ? "Dry-run / integrity now passes — Execute unlocks when all gates pass."
-      : `Dry-run still blocked: ${dry?.message || "see Validation rules"}. Quarantine cannot fix wrong type mappings.`;
+      ? (op
+        ? `${op.title} succeeded. ${op.columnsChanged.length} mapping(s) now use strip_controls.`
+        : "Dry-run / integrity now passes — Execute unlocks when all gates pass.")
+      : `Dry-run still blocked: ${dry?.message || "see Validation rules"}.`;
     setRemediationLog((prev) => {
       const next = prev.map((row, idx) =>
         idx === 0 && /waiting for re-validation/i.test(row.outcome)
-          ? { ...row, detail, outcome }
+          ? { ...row, detail, outcome, steps: resultSteps }
           : row,
       );
       if (next[0]?.outcome === outcome && /waiting for re-validation/i.test(prev[0]?.outcome || "")) {
@@ -630,11 +780,12 @@ export function ValidateDashboard({
           action: "Re-validation result",
           detail,
           outcome,
+          steps: resultSteps,
         },
         ...next,
       ].slice(0, 8);
     });
-  }, [preflight?.run_id, preflight?.passed, preflight?.passed_count, preflight?.gates, running]);
+  }, [preflight, running]);
 
   const copyRunId = async () => {
     if (!runId) return;
@@ -742,46 +893,101 @@ export function ValidateDashboard({
   const sampleScanned = Number(dryGate?.details?.sample_rows_scanned ?? dryGate?.details?.sample_size ?? 0) || null;
   const engineMsTotal = (preflight?.gates ?? []).reduce((sum, g) => sum + (Number(g.duration_ms) || 0), 0);
 
+  const executiveSummary = useMemo(
+    () => buildExecutiveSummary(preflight, syncMode),
+    [preflight, syncMode],
+  );
+  const duplicateRoot = useMemo(
+    () => findDuplicateKeyRoot(preflight, syncMode),
+    [preflight, syncMode],
+  );
+  const displayBlockers = useMemo(
+    () => (preflight ? buildDisplayBlockers(preflight, syncMode) : []),
+    [preflight, syncMode],
+  );
+  const explainParts = useMemo(
+    () => (explain?.issues?.length ? partitionExplainIssues(explain.issues) : null),
+    [explain],
+  );
+
   // While validating: all gates pending/queued — never fake a green "pass" mid-flight.
   // After results: reveal in order using real duration_ms.
   const statusForGate = (
     meta: GateMeta,
     index: number,
-  ): { status: string; message: string; issues: string[]; durationMs?: number } => {
+  ): { status: string; message: string; issues: string[]; durationMs?: number; privilegeProbe: PrivilegeProbeMeta | null } => {
     const gate = gateByKey.get(meta.key) ?? gateByKey.get(meta.key.replace(/^g\d+_/, ""));
     if (running) {
       return {
         status: "pending",
         message: "Queued — engine returns all gate results when the pass finishes",
         issues: [],
+        privilegeProbe: null,
       };
     }
     if (gate) {
       const revealed = index < revealCount;
       if (!revealed && revealCount < (preflight?.gates?.length ?? 0)) {
-        return { status: "pending", message: "Result ready — revealing…", issues: [] };
+        return { status: "pending", message: "Result ready — revealing…", issues: [], privilegeProbe: null };
+      }
+      const privilegeProbe = privilegeProbeFromDetails(gate.details);
+      const issues = gate.status === "block" ? issueTextsFromDetails(gate.details) : [];
+      // On pass, still surface probe method/status as non-blocking issues for G2 honesty.
+      if (gate.status === "pass" && privilegeProbe?.method && meta.key === "g2_destination") {
+        const soft: string[] = [`Probe: ${privilegeProbe.method}`];
+        if (privilegeProbe.status === "unavailable" && privilegeProbe.detail) {
+          soft.push(privilegeProbe.detail);
+        }
+        return {
+          status: gate.status,
+          message: gate.message,
+          issues: soft,
+          durationMs: gate.duration_ms,
+          privilegeProbe,
+        };
       }
       return {
         status: gate.status,
         message: gate.message,
-        issues: gate.status === "block" ? issueTextsFromDetails(gate.details) : [],
+        issues,
         durationMs: gate.duration_ms,
+        privilegeProbe,
       };
     }
-    return { status: "pending", message: "Awaiting validation run.", issues: [] };
+    return { status: "pending", message: "Awaiting validation run.", issues: [], privilegeProbe: null };
   };
 
   const runStrip = async () => {
     if (!onStripControlChars) return;
     setRemediating(true);
     pendingVerifyRef.current = true;
-    pushRemediation(
-      "Strip control characters",
-      "Applied strip_controls on text mappings and re-running validation (removes U+200B / format-control chars before Snowflake write).",
-      "Applied — waiting for re-validation",
-    );
+    const flagged = badDataIssues.map((i) => i.column).filter(Boolean);
     try {
-      await onStripControlChars();
+      const result = await onStripControlChars();
+      if (result) {
+        lastOpRef.current = result;
+        pushRemediation(
+          result.title,
+          result.columnsChanged.length
+            ? `Updated ${result.columnsChanged.length} mapping(s): ${result.columnsChanged.slice(0, 12).join(", ")}${result.columnsChanged.length > 12 ? "…" : ""}.`
+            : "No text mappings needed strip_controls (typed casts left unchanged).",
+          "Applied — waiting for re-validation",
+          result.steps,
+        );
+      } else {
+        pushRemediation(
+          "Strip control characters",
+          flagged.length
+            ? `Removing format-control chars from flagged columns: ${flagged.slice(0, 8).join(", ")}${flagged.length > 8 ? "…" : ""}.`
+            : "Applied strip_controls on text mappings and re-running validation.",
+          "Applied — waiting for re-validation",
+          [
+            "Set transform = strip_controls on non-typed mappings.",
+            "Re-run Validate with the updated mappings.",
+            "Jobs quarantine only if cells still fail at write after Strip.",
+          ],
+        );
+      }
       setBadDataOpen(false);
     } finally {
       setRemediating(false);
@@ -792,13 +998,37 @@ export function ValidateDashboard({
     if (!onQuarantineAndRerun) return;
     setRemediating(true);
     pendingVerifyRef.current = true;
-    pushRemediation(
-      "Quarantine + strip controls",
-      "Balanced validation + strip_controls. After Run, quarantined rows appear on the job (Inspect Quarantine) and can be exported as CSV — they are never silently dropped.",
-      "Applied — waiting for re-validation",
-    );
+    const flagged = badDataIssues.map((i) => i.column).filter(Boolean);
     try {
-      await onQuarantineAndRerun();
+      const result = await onQuarantineAndRerun();
+      if (result) {
+        lastOpRef.current = result;
+        pushRemediation(
+          result.title,
+          [
+            result.validationMode ? `Mode: ${result.validationMode}.` : null,
+            result.columnsChanged.length
+              ? `${result.columnsChanged.length} mapping(s) updated: ${result.columnsChanged.slice(0, 12).join(", ")}${result.columnsChanged.length > 12 ? "…" : ""}.`
+              : "No strip_controls changes (typed casts left as-is).",
+          ].filter(Boolean).join(" "),
+          "Applied — waiting for re-validation",
+          result.steps,
+        );
+      } else {
+        // Handler navigated to Map (type mismatch) — no strip applied.
+        pendingVerifyRef.current = false;
+        pushRemediation(
+          "Quarantine + strip controls",
+          flagged.length
+            ? `Could not auto-fix flagged columns (${flagged.slice(0, 6).join(", ")}). Remap types on Map instead.`
+            : "Blocked by a type/mapping issue — quarantine cannot change column types. Open Map to remap.",
+          "Redirected to Map",
+          [
+            "Quarantine/Strip only sanitize encoding (U+200B / control chars).",
+            "Wrong target types (e.g. text → NUMBER) must be remapped on Map, then Validate again.",
+          ],
+        );
+      }
       setBadDataOpen(false);
     } finally {
       setRemediating(false);
@@ -848,6 +1078,22 @@ export function ValidateDashboard({
       setBadDataOpen(true);
       return;
     }
+    if (action.kind === "fix_source_keys") {
+      if (onOpenIdentitySettings) {
+        onOpenIdentitySettings();
+        return;
+      }
+      onReviewMappings?.(
+        action.column ? { focusSource: action.column } : undefined,
+      );
+      return;
+    }
+    if (action.kind === "review_mappings" || action.kind === "rerun_mapping") {
+      onReviewMappings?.(
+        action.column ? { focusSource: action.column } : undefined,
+      );
+      return;
+    }
     pendingVerifyRef.current = true;
     pushRemediation(
       action.label || action.kind,
@@ -858,6 +1104,15 @@ export function ValidateDashboard({
         action.to_type ? `Type → ${action.to_type}` : null,
       ].filter(Boolean).join(" · ") || "AI suggested fix applied to mappings.",
       "Applied — re-running validation",
+      [
+        `Action: ${action.kind.replace(/_/g, " ")}.`,
+        action.column || action.target
+          ? `Scope: ${[action.column, action.target].filter(Boolean).join(" → ")}.`
+          : "Scope: matching Studio mappings.",
+        action.to_type ? `Set destination type to ${action.to_type}.` : null,
+        action.transform ? `Set transform to ${action.transform}.` : null,
+        "Re-validate after apply — Execute unlocks only when gates pass.",
+      ].filter(Boolean) as string[],
     );
     onApplyAction?.(action);
   };
@@ -902,9 +1157,7 @@ export function ValidateDashboard({
               {running
                 ? "Engine running G1–G8…"
                 : preflight
-                  ? preflight.passed
-                    ? "Ready to transfer"
-                    : "Action needed before transfer"
+                  ? executiveSummary?.title ?? (preflight.passed ? "Ready to transfer" : "Action needed before transfer")
                   : "Run validation to check this route"}
             </h3>
           </div>
@@ -915,6 +1168,26 @@ export function ValidateDashboard({
             <span className="df2-vd-count skip"><strong>{skippedCount}</strong> skipped</span>
             <span className="df2-vd-count total"><strong>{totalGates}</strong> total rules</span>
           </div>
+
+          {!running && preflight && executiveSummary && !preflight.passed && (
+            <div className="df2-vd-exec-summary" role="alert">
+              <p className="df2-vd-exec-summary-sub">{executiveSummary.subtitle}</p>
+              {executiveSummary.untilLines.length > 0 && (
+                <div className="df2-vd-exec-until">
+                  <span className="df2-vd-exec-until-label">Cannot execute until</span>
+                  <ul>
+                    {executiveSummary.untilLines.map((line) => (
+                      <li key={line}>{line}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              <p className="df2-vd-readiness-caption">{executiveSummary.readinessCaption}</p>
+            </div>
+          )}
+          {!running && preflight?.passed && executiveSummary && (
+            <p className="df2-vd-readiness-caption">{executiveSummary.readinessCaption}</p>
+          )}
 
           {!running && preflight && (qualityGrade || confidenceBand) && (
             <div className="df2-vd-proof-chips" aria-label="Proof grade">
@@ -990,130 +1263,205 @@ export function ValidateDashboard({
         </div>
       )}
 
-      {/* Context-aware remediation: type mismatches → Remap/Widen; encoding → Strip/Quarantine. */}
+      {/* One root cause → real Button CTAs (no Mapping proof here — evidence lives on Column matches). */}
       {!running && preflight && !preflight.passed && (
         <div className="df2-vd-assist-actions df2-vd-assist-remediate df2-vd-remediate-bar" aria-label="Suggested fixes">
           <span className="df2-vd-assist-actions-title">Suggested fixes</span>
-          <div className="df2-vd-chip-row">
-            {isConnectionBlock && (
-              <button
-                type="button"
-                className="df2-vd-chip kind-check_connection"
-                disabled={remediating}
-                onClick={() => {
-                  window.location.hash = "#/connectors";
-                }}
-              >
-                <DtIcon name="server" size={13} />
-                Fix connector credentials
-              </button>
-            )}
-            {isConnectionBlock && onRunPreflight && (
-              <button
-                type="button"
-                className="df2-vd-chip kind-rerun"
-                disabled={remediating || running}
-                onClick={() => void onRunPreflight()}
-              >
-                <DtIcon name="activity" size={13} />
-                Re-test &amp; re-validate
-              </button>
-            )}
-            {isTypeMismatchBlock && typeMismatchColumns.slice(0, 4).map((col) => (
-              <button
-                key={`${col.source}-${col.target}`}
-                type="button"
-                className="df2-vd-chip kind-change_target_type"
-                disabled={remediating || !onApplyAction}
-                onClick={() =>
-                  onApplyAction?.({
-                    kind: "change_target_type",
-                    label: `Remap ${col.source} → VARCHAR`,
-                    column: col.source,
-                    target: col.target,
-                    to_type: "VARCHAR",
-                  })
-                }
-              >
-                <DtIcon name="layers" size={13} />
-                Remap {col.source} → VARCHAR
-              </button>
-            ))}
-            {isTypeMismatchBlock && onReviewMappings && (
-              <button
-                type="button"
-                className="df2-vd-chip kind-review_mappings"
-                onClick={onReviewMappings}
-                disabled={remediating}
-              >
-                <DtIcon name="layers" size={13} />
-                Review mappings
-              </button>
-            )}
-            {showEncodingRemediation && onStripControlChars && (
-              <button
-                type="button"
-                className="df2-vd-chip kind-normalize_control_chars"
-                onClick={() => void runStrip()}
-                disabled={remediating}
-              >
-                <DtIcon name="layers" size={13} />
-                Strip controls &amp; re-run
-              </button>
-            )}
-            {showEncodingRemediation && onQuarantineAndRerun && (
-              <button
-                type="button"
-                className="df2-vd-chip kind-quarantine_and_rerun"
-                onClick={() => void runQuarantine()}
-                disabled={remediating}
-              >
-                <DtIcon name="shield" size={13} />
-                Quarantine &amp; re-run
-              </button>
-            )}
-            {showEncodingRemediation && (
-              <button
-                type="button"
-                className="df2-vd-chip kind-open_bad_data_fix"
-                onClick={() => setBadDataOpen(true)}
-                disabled={remediating}
-              >
-                <DtIcon name="shield" size={13} />
-                Fix bad data…
-              </button>
-            )}
-            {onOpenMappingProof && (
-              <button
-                type="button"
-                className="df2-vd-chip kind-mapping_proof"
-                onClick={onOpenMappingProof}
-                disabled={remediating}
-              >
-                <DtIcon name="sparkle" size={13} />
-                Mapping proof
-              </button>
-            )}
-            {!isTypeMismatchBlock && onReviewMappings && (
-              <button
-                type="button"
-                className="df2-vd-chip kind-review_mappings"
-                onClick={onReviewMappings}
-                disabled={remediating}
-              >
-                <DtIcon name="layers" size={13} />
-                Review mappings
-              </button>
+          <div className="df2-vd-fix-actions">
+            {duplicateRoot ? (
+              <>
+                {onOpenIdentitySettings && (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={remediating}
+                    leadingIcon={<DtIcon name="settings" size={14} />}
+                    onClick={onOpenIdentitySettings}
+                  >
+                    {(() => {
+                      const appendLike = /append|overwrite/.test((syncMode || "").toLowerCase());
+                      if (appendLike) {
+                        return duplicateRoot.primaryKey
+                          ? `Re-run Validate (append · ${duplicateRoot.primaryKey} dupes are warnings)`
+                          : "Re-run Validate (append does not require unique keys)";
+                      }
+                      return duplicateRoot.primaryKey
+                        ? `Change primary key (${duplicateRoot.primaryKey}) or sync mode`
+                        : "Change primary key or sync mode";
+                    })()}
+                  </Button>
+                )}
+                {uniqueKeySuggestions && uniqueKeySuggestions.length > 0 && onApplyPrimaryKey && (
+                  <>
+                    {uniqueKeySuggestions.slice(0, 2).map((s) => (
+                      <Button
+                        key={s.column}
+                        size="sm"
+                        variant="secondary"
+                        disabled={remediating}
+                        leadingIcon={<DtIcon name="check" size={14} />}
+                        onClick={() => onApplyPrimaryKey(s.column)}
+                        title={`Unique in ${s.sampleRows}-row sample`}
+                      >
+                        Try PK · {s.column}
+                      </Button>
+                    ))}
+                  </>
+                )}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={remediating || repairBusy || !preflight}
+                  leadingIcon={<DtIcon name="sparkle" size={14} />}
+                  onClick={() => void proposeDurableRepair()}
+                >
+                  Propose durable repair
+                </Button>
+              </>
+            ) : (
+              <>
+                {isPrivilegeBlock && (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={remediating}
+                    leadingIcon={<DtIcon name="shield" size={14} />}
+                    onClick={() => {
+                      window.location.hash = "#/connectors";
+                    }}
+                  >
+                    Grant write privilege
+                  </Button>
+                )}
+                {isPrivilegeBlock && onRunPreflight && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={remediating || running}
+                    leadingIcon={<DtIcon name="activity" size={14} />}
+                    onClick={() => void onRunPreflight()}
+                  >
+                    Re-validate after grant
+                  </Button>
+                )}
+                {isConnectionBlock && (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={remediating}
+                    leadingIcon={<DtIcon name="server" size={14} />}
+                    onClick={() => {
+                      window.location.hash = "#/connectors";
+                    }}
+                  >
+                    Fix connector credentials
+                  </Button>
+                )}
+                {isConnectionBlock && onRunPreflight && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={remediating || running}
+                    leadingIcon={<DtIcon name="activity" size={14} />}
+                    onClick={() => void onRunPreflight()}
+                  >
+                    Re-test &amp; re-validate
+                  </Button>
+                )}
+                {isTypeMismatchBlock && typeMismatchColumns.slice(0, 4).map((col) => (
+                  <Button
+                    key={`${col.source}-${col.target}`}
+                    size="sm"
+                    variant="primary"
+                    disabled={remediating || !onApplyAction}
+                    leadingIcon={<DtIcon name="layers" size={14} />}
+                    onClick={() =>
+                      onApplyAction?.({
+                        kind: "change_target_type",
+                        label: `Remap ${col.source} → VARCHAR`,
+                        column: col.source,
+                        target: col.target,
+                        to_type: "VARCHAR",
+                      })
+                    }
+                  >
+                    Remap {col.source} → VARCHAR
+                  </Button>
+                ))}
+                {isTypeMismatchBlock && onReviewMappings && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={remediating}
+                    leadingIcon={<DtIcon name="layers" size={14} />}
+                    onClick={() => onReviewMappings()}
+                  >
+                    Open Map
+                  </Button>
+                )}
+                {showEncodingRemediation && onStripControlChars && (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={remediating}
+                    leadingIcon={<DtIcon name="layers" size={14} />}
+                    onClick={() => void runStrip()}
+                  >
+                    Strip controls &amp; re-run
+                  </Button>
+                )}
+                {showEncodingRemediation && onQuarantineAndRerun && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={remediating}
+                    leadingIcon={<DtIcon name="shield" size={14} />}
+                    onClick={() => void runQuarantine()}
+                  >
+                    Quarantine &amp; re-run
+                  </Button>
+                )}
+                {showEncodingRemediation && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={remediating}
+                    leadingIcon={<DtIcon name="shield" size={14} />}
+                    onClick={() => setBadDataOpen(true)}
+                  >
+                    Fix bad data…
+                  </Button>
+                )}
+                {!isTypeMismatchBlock
+                  && !showEncodingRemediation
+                  && !isPrivilegeBlock
+                  && !isConnectionBlock
+                  && onReviewMappings && (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={remediating}
+                    leadingIcon={<DtIcon name="layers" size={14} />}
+                    onClick={() => onReviewMappings()}
+                  >
+                    Open Map to fix
+                  </Button>
+                )}
+              </>
             )}
           </div>
           <p className="df2-vd-cell-preview-hint">
-            {isConnectionBlock
-              ? "Destination (or source) authentication failed. Open Connectors, set Auth source (often admin for Railway/Atlas Mongo), click Test until it passes, then Re-validate here. Strip/Quarantine cannot fix credentials."
+            {duplicateRoot
+              ? `Duplicate values on ${duplicateRoot.primaryKey || "the identity column"} block Execute. Pick a unique primary key or a sync mode that does not require uniqueness, clean the source, then Re-run Validate. Mapping proof is evidence only — it does not remove duplicates.`
+              : isPrivilegeBlock
+              ? "Write privilege is denied (or CREATE is missing). Grant the privilege named in the G2 gate on the destination — then Re-validate."
+              : isConnectionBlock
+              ? "Authentication failed. Fix the connector, Test until it passes, then return here and Re-validate."
               : isTypeMismatchBlock
-              ? "This block is a type mismatch (e.g. text → NUMBER). Remap/Widen to VARCHAR — Strip controls and Quarantine cannot change column types. After Remap, Validate again; Execute unlocks when gates pass."
+              ? "Type mismatch — Remap/Widen below. Strip/Quarantine cannot change column types."
               : showEncodingRemediation
-                ? "Strip controls removes format-control characters, then re-validates. Quarantine keeps unfit cells out of the destination after Validate passes (never silent drop)."
-                : "Open Review mappings or Mapping proof. Strip/Quarantine only apply to encoding issues."}
+                ? "Strip controls removes format-control characters, then re-validates. Quarantine keeps unfit cells out of the destination (never silent drop)."
+                : "Use the action above for this root cause, then Re-run Validate."}
           </p>
         </div>
       )}
@@ -1132,6 +1480,13 @@ export function ValidateDashboard({
                 <div>
                   <strong>{entry.action}</strong>
                   <p>{entry.detail}</p>
+                  {entry.steps && entry.steps.length > 0 && (
+                    <ul className="df2-vd-remediation-steps">
+                      {entry.steps.map((step, si) => (
+                        <li key={si}>{step}</li>
+                      ))}
+                    </ul>
+                  )}
                   <em>{entry.outcome}</em>
                 </div>
               </li>
@@ -1205,40 +1560,37 @@ export function ValidateDashboard({
               ))}
             </ul>
             <div className="df2-vd-cell-preview-actions">
-              {onOpenMappingProof && (
-                <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={onOpenMappingProof}>
-                  <DtIcon name="sparkle" size={14} /> Mapping proof
-                </button>
-              )}
-              {onReviewMappings && (
-                <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={onReviewMappings}>
-                  <DtIcon name="layers" size={14} /> Review mappings
-                </button>
-              )}
-              {onRunPreflight && !preflight && !running && (
-                <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={onRunPreflight}>
-                  <DtIcon name="gate" size={14} /> Run preflight
-                </button>
-              )}
-              {onStripControlChars && (
-                <button
-                  type="button"
-                  className="df2-btn df2-btn-sm df2-btn-ghost"
+              {onStripControlChars && showEncodingRemediation && (
+                <Button
+                  size="sm"
+                  variant="secondary"
                   onClick={() => void runStrip()}
                   disabled={remediating}
+                  leadingIcon={<DtIcon name="layers" size={14} />}
                 >
-                  <DtIcon name="layers" size={14} /> Strip controls &amp; re-run
-                </button>
+                  Strip controls &amp; re-run
+                </Button>
               )}
-              {onQuarantineAndRerun && (
-                <button
-                  type="button"
-                  className="df2-btn df2-btn-sm df2-btn-ghost"
+              {onQuarantineAndRerun && showEncodingRemediation && (
+                <Button
+                  size="sm"
+                  variant="ghost"
                   onClick={() => void runQuarantine()}
                   disabled={remediating}
+                  leadingIcon={<DtIcon name="shield" size={14} />}
                 >
-                  <DtIcon name="shield" size={14} /> Quarantine &amp; re-check
-                </button>
+                  Quarantine &amp; re-check
+                </Button>
+              )}
+              {onRunPreflight && !preflight && !running && (
+                <Button
+                  size="sm"
+                  variant="primary"
+                  onClick={onRunPreflight}
+                  leadingIcon={<DtIcon name="gate" size={14} />}
+                >
+                  Run preflight
+                </Button>
               )}
             </div>
           </div>
@@ -1253,14 +1605,21 @@ export function ValidateDashboard({
               <span>
                 {mappingProofSummary.destMode === "create_new"
                   ? "Create-new — DDL on first write"
-                  : "Matched to destination schema"}
+                  : mappingProofSummary.destMode === "schema_pending"
+                    ? "Schema pending — confirm destination before create-new"
+                    : "Matched to destination schema"}
                 {" · "}
                 every pair has confidence evidence and fidelity risks
               </span>
             </div>
-            <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={onOpenMappingProof}>
-              <DtIcon name="sparkle" size={14} /> Open mapping proof
-            </button>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={onOpenMappingProof}
+              leadingIcon={<DtIcon name="sparkle" size={14} />}
+            >
+              Open mapping proof
+            </Button>
           </div>
           <div className="df2-vd-map-proof-kpis">
             <div>
@@ -1320,10 +1679,12 @@ export function ValidateDashboard({
                 <strong>Explain &amp; fix with AI</strong>
                 <span>
                   {assistExpanded
-                    ? "Plain-language explanation with one-click fixes."
+                    ? (executiveSummary?.aiPromptHint
+                      || "Plain-language explanation with one-click fixes.")
                     : explain
                       ? "Analysis ready — open to review suggested fixes."
-                      : "Open to analyze this validation result."}
+                      : executiveSummary?.aiPromptHint
+                        || "Open to analyze this validation result."}
                 </span>
               </span>
               <span className={`df2-vd-assist-chevron${assistExpanded ? " is-open" : ""}`} aria-hidden>
@@ -1418,7 +1779,16 @@ export function ValidateDashboard({
                 </div>
               )}
 
-              {explain && (
+              {explain && preflight?.passed && /validation blocked|integrity failed/i.test(explain.summary || "") && (
+                <div className="df2-vd-assist-body">
+                  <p className="df2-vd-assist-clean">
+                    Gates are green after remediation. The prior “blocked” explanation was from before Strip / Quarantine —
+                    click Re-analyze for an updated summary. ISO→DATETIME notes are bind normalizations (0 failed), not blockers.
+                  </p>
+                </div>
+              )}
+
+              {explain && !(preflight?.passed && /validation blocked|integrity failed/i.test(explain.summary || "")) && (
                 <div className="df2-vd-assist-body">
                   <div className="df2-vd-assist-meta">
                     <span className={`df2-vd-provider provider-${explain.assistant_provider === "deterministic" ? "det" : "llm"}`}>
@@ -1434,32 +1804,114 @@ export function ValidateDashboard({
                       ))}
                     </div>
                   )}
-                  {(explain.issues?.length ?? 0) > 0 && (
+                  {(explainParts && (
+                    (explainParts.blockers.length > 0)
+                    || (explainParts.warnings.length > 0)
+                    || explainParts.isoGroup
+                    || (proofWarnings.length > 0)
+                  )) && (
                     <div className="df2-vd-explain-issues" aria-label="Validation issues">
-                      <span className="df2-vd-assist-actions-title">Issues</span>
-                      <ul>
-                        {explain.issues.map((issue, i) => (
-                          <li key={`${issue.gate}-${issue.title}-${i}`} className={`sev-${issue.severity}`}>
-                            <strong>{issue.title}</strong>
-                            <span className="df2-vd-explain-gate">{issue.gate}</span>
-                            {issue.what && <p>{issue.what}</p>}
-                            {issue.why && <p className="df2-vd-explain-why"><em>Why:</em> {issue.why}</p>}
-                            {issue.fix && <p className="df2-vd-explain-fix"><em>Fix:</em> {issue.fix}</p>}
-                            {issue.columns?.length > 0 && (
-                              <div className="df2-vd-chip-row">
-                                {issue.columns.slice(0, 8).map((col) => (
-                                  <span key={col} className="df2-vd-chip is-static">{col}</span>
-                                ))}
-                              </div>
+                      {explainParts.blockers.length > 0 && (
+                        <>
+                          <span className="df2-vd-assist-actions-title">Blockers</span>
+                          <ul>
+                            {explainParts.blockers.map((issue, i) => (
+                              <li key={`block-${issue.gate}-${issue.title}-${i}`} className="sev-block">
+                                <strong>{issue.title || gateLabel(issue.gate)}</strong>
+                                <span className="df2-vd-explain-gate is-muted" title={issue.gate}>
+                                  {gateLabel(issue.gate)}
+                                  <code>{issue.gate}</code>
+                                </span>
+                                {issue.what && <p>{issue.what}</p>}
+                                {issue.why && <p className="df2-vd-explain-why"><em>Why:</em> {issue.why}</p>}
+                                {issue.fix && <p className="df2-vd-explain-fix"><em>Fix:</em> {issue.fix}</p>}
+                                {issue.columns?.length > 0 && (
+                                  <div className="df2-vd-chip-row">
+                                    {issue.columns.slice(0, 8).map((col) => (
+                                      <span key={col} className="df2-vd-chip is-static">{col}</span>
+                                    ))}
+                                  </div>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
+                        </>
+                      )}
+                      {(explainParts.isoGroup || explainParts.warnings.length > 0 || proofWarnings.length > 0) && (
+                        <>
+                          <span className="df2-vd-assist-actions-title">Warnings</span>
+                          <ul className="df2-vd-explain-warnings">
+                            {explainParts.isoGroup && (
+                              <li className="sev-warning df2-vd-iso-issue">
+                                <strong>{explainParts.isoGroup.title}</strong>
+                                <span className="df2-vd-explain-gate is-muted">{explainParts.isoGroup.subtitle}</span>
+                                <p>{explainParts.isoGroup.wireNote}</p>
+                                {explainParts.isoGroup.columns.length > 0 && (
+                                  <div className="df2-vd-chip-row">
+                                    {explainParts.isoGroup.columns.map((col) => (
+                                      <span key={col} className="df2-vd-chip is-static">{col}</span>
+                                    ))}
+                                  </div>
+                                )}
+                              </li>
                             )}
-                          </li>
-                        ))}
-                      </ul>
+                            {explainParts.warnings.map((issue, i) => (
+                              <li key={`warn-${issue.gate}-${issue.title}-${i}`} className={`sev-${issue.severity}`}>
+                                <strong>{issue.title || gateLabel(issue.gate)}</strong>
+                                <span className="df2-vd-explain-gate is-muted" title={issue.gate}>
+                                  {gateLabel(issue.gate)}
+                                  <code>{issue.gate}</code>
+                                </span>
+                                {issue.what && <p>{issue.what}</p>}
+                                {issue.why && <p className="df2-vd-explain-why"><em>Why:</em> {issue.why}</p>}
+                                {issue.fix && <p className="df2-vd-explain-fix"><em>Fix:</em> {issue.fix}</p>}
+                                {issue.columns?.length > 0 && (
+                                  <div className="df2-vd-chip-row">
+                                    {issue.columns.slice(0, 8).map((col) => (
+                                      <span key={col} className="df2-vd-chip is-static">{col}</span>
+                                    ))}
+                                  </div>
+                                )}
+                              </li>
+                            ))}
+                            {proofWarnings.map((w, i) => (
+                              <li key={`proof-warn-${i}`} className="sev-warning">
+                                <strong>Proof warning</strong>
+                                <p>{w}</p>
+                              </li>
+                            ))}
+                          </ul>
+                        </>
+                      )}
                     </div>
                   )}
-                  {(explain.column_fixes?.length ?? 0) > 0 && (
+                  {(explain.column_fixes?.length ?? 0) > 0 && (() => {
+                    const isoFixRe = /ISO timestamps?/i;
+                    const actionableFixes = explain.column_fixes.filter(
+                      (fix) => !(fix.failed === 0 && isoFixRe.test(fix.suggested_fix || "")),
+                    );
+                    const isoFixes = explain.column_fixes.filter(
+                      (fix) => fix.failed === 0 && isoFixRe.test(fix.suggested_fix || ""),
+                    );
+                    if (actionableFixes.length === 0 && isoFixes.length === 0) return null;
+                    return (
                     <div className="df2-vd-column-fixes" aria-label="Column fixes">
                       <span className="df2-vd-assist-actions-title">Column fixes</span>
+                      {isoFixes.length > 0 && (
+                        <div className="df2-vd-iso-group" role="status">
+                          <div className="df2-vd-iso-group-head">
+                            <DtIcon name="activity" size={14} />
+                            <strong>Timestamp normalize</strong>
+                            <span>{isoFixes.length} column{isoFixes.length === 1 ? "" : "s"} · informational</span>
+                          </div>
+                          <div className="df2-vd-chip-row">
+                            {isoFixes.map((fix) => (
+                              <span key={fix.column} className="df2-vd-chip is-static">{fix.column}</span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {actionableFixes.length > 0 && (
                       <div className="df2-vd-column-fixes-table-wrap">
                         <table className="df2-vd-column-fixes-table">
                           <thead>
@@ -1472,7 +1924,7 @@ export function ValidateDashboard({
                             </tr>
                           </thead>
                           <tbody>
-                            {explain.column_fixes.map((fix) => (
+                            {actionableFixes.map((fix) => (
                               <tr key={`${fix.column}-${fix.target ?? ""}`} className={`sev-${fix.severity}`}>
                                 <td>
                                   <strong>{fix.column}</strong>
@@ -1510,55 +1962,73 @@ export function ValidateDashboard({
                           </tbody>
                         </table>
                       </div>
+                      )}
                     </div>
-                  )}
+                    );
+                  })()}
                   {explain.suggested_actions.length > 0 && (
                     <div className="df2-vd-assist-actions">
                       <span className="df2-vd-assist-actions-title">Suggested fixes</span>
-                      <div className="df2-vd-chip-row">
-                        {explain.suggested_actions.map((action, i) => (
-                          <button
+                      <div className="df2-vd-fix-actions">
+                        {explain.suggested_actions
+                          .filter((action) =>
+                            action.kind !== "open_mapping_proof"
+                            && action.kind !== "mapping_proof"
+                            // Identity CTAs already live in Suggested fixes bar + rail.
+                            && !(duplicateRoot && action.kind === "fix_source_keys")
+                          )
+                          .map((action, i) => (
+                          <Button
                             key={`${action.kind}-${action.column ?? ""}-${i}`}
-                            type="button"
-                            className={`df2-vd-chip kind-${action.kind}`}
+                            size="sm"
+                            variant={i === 0 ? "primary" : "secondary"}
                             onClick={() => handleSuggestedAction(action)}
                             disabled={
                               !onApplyAction
                               && action.kind !== "open_bad_data_fix"
                               && action.kind !== "normalize_control_chars"
                               && action.kind !== "quarantine_and_rerun"
+                              && action.kind !== "fix_source_keys"
+                              && action.kind !== "review_mappings"
                             }
                             title={action.label}
+                            leadingIcon={<DtIcon name={ACTION_ICON[action.kind] ?? "sparkle"} size={14} />}
                           >
-                            <DtIcon name={ACTION_ICON[action.kind] ?? "sparkle"} size={13} />
                             {action.label}
-                          </button>
+                          </Button>
                         ))}
-                        <button
-                          type="button"
-                          className="df2-vd-chip kind-review_mappings"
-                          onClick={() => void proposeDurableRepair()}
-                          disabled={repairBusy || !preflight}
-                          title="Persist a human-gated repair proposal with audit trail"
-                        >
-                          <DtIcon name="sparkle" size={13} />
-                          {repairBusy ? "Proposing…" : "Propose durable repair"}
-                        </button>
+                        {/* Propose lives in Suggested fixes bar for duplicate identity. */}
+                        {!duplicateRoot && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => void proposeDurableRepair()}
+                            disabled={repairBusy || !preflight}
+                            title="Persist a human-gated repair proposal with audit trail"
+                            leadingIcon={<DtIcon name="sparkle" size={14} />}
+                            loading={repairBusy}
+                            loadingLabel="Proposing…"
+                          >
+                            Propose durable repair
+                          </Button>
+                        )}
                       </div>
                     </div>
                   )}
-                  {explain.suggested_actions.length === 0 && !explain.passed && (
+                  {explain.suggested_actions.length === 0 && !explain.passed && !duplicateRoot && (
                     <div className="df2-vd-assist-actions">
-                      <div className="df2-vd-chip-row">
-                        <button
-                          type="button"
-                          className="df2-vd-chip kind-review_mappings"
+                      <div className="df2-vd-fix-actions">
+                        <Button
+                          size="sm"
+                          variant="secondary"
                           onClick={() => void proposeDurableRepair()}
                           disabled={repairBusy || !preflight}
+                          leadingIcon={<DtIcon name="sparkle" size={14} />}
+                          loading={repairBusy}
+                          loadingLabel="Proposing…"
                         >
-                          <DtIcon name="sparkle" size={13} />
-                          {repairBusy ? "Proposing…" : "Propose durable repair"}
-                        </button>
+                          Propose durable repair
+                        </Button>
                       </div>
                     </div>
                   )}
@@ -1594,7 +2064,7 @@ export function ValidateDashboard({
         </div>
         <div className="df2-vd-rules-grid">
           {displayGates.map((meta, index) => {
-            const { status, message, issues, durationMs } = statusForGate(meta, index);
+            const { status, message, issues, durationMs, privilegeProbe } = statusForGate(meta, index);
             return (
               <article key={`${meta.key}-${index}`} className={`df2-vd-rule status-${status}`}>
                 <div className="df2-vd-rule-top">
@@ -1609,6 +2079,19 @@ export function ValidateDashboard({
                 <strong className="df2-vd-rule-label">{meta.label}</strong>
                 <p className="df2-vd-rule-desc">{meta.rule}</p>
                 {status !== "pending" && message && <p className="df2-vd-rule-msg">{message}</p>}
+                {status !== "pending" && privilegeProbe && (privilegeProbe.method || privilegeProbe.status) && (
+                  <div className={`df2-vd-priv-probe status-${privilegeProbe.status || "unknown"}`}>
+                    {privilegeProbe.status && (
+                      <span className="df2-vd-priv-chip">{privilegeProbe.status}</span>
+                    )}
+                    {privilegeProbe.method && (
+                      <span className="df2-vd-priv-method">{privilegeProbe.method}</span>
+                    )}
+                    {privilegeProbe.engine && (
+                      <span className="df2-vd-priv-engine">{privilegeProbe.engine}</span>
+                    )}
+                  </div>
+                )}
                 {status !== "pending" && durationMs != null && durationMs > 0 && (
                   <p className="df2-vd-rule-dur">Engine time {formatDuration(durationMs)}</p>
                 )}
@@ -1681,27 +2164,81 @@ export function ValidateDashboard({
         </div>
       )}
 
-      {preflight && preflight.blockers.length > 0 && !running && (
+      {preflight && displayBlockers.length > 0 && !running && (
         <div className="df2-vd-blockers">
           <div className="df2-vd-blockers-head">
             <DtIcon name="alert" size={15} />
             <strong>Fix before Run</strong>
-            <span>{preflight.blockers.length}</span>
+            <span>{displayBlockers.length}</span>
           </div>
           <p className="df2-vd-blocker-precaution">
             Schema mismatches, bad data, and type hazards are blocked here on purpose.
-            Resolve each item below (why + fix), re-validate, then Execute — Run should
+            Resolve each root cause below (why + fix), re-validate, then Execute — Run should
             only surface operational issues like timeouts or connectivity.
+            {duplicateRoot
+              ? " Duplicate identity keys may fail several gates; they are grouped as one cause here while each gate card below still records its own check."
+              : ""}
           </p>
           <ul>
-            {preflight.blockers.map((b) => {
+            {displayBlockers.map((item) => {
+              if (item.kind === "duplicate_root") {
+                return (
+                  <li key={item.key} className="df2-vd-blocker-root">
+                    <strong>{item.title}</strong>
+                    {item.impact && <span className="df2-vd-blocker-impact">{item.impact}</span>}
+                    <span>{item.message}</span>
+                    {item.gateChips && item.gateChips.length > 0 && (
+                      <div className="df2-vd-root-gates" aria-label="Affected checks">
+                        <span className="df2-vd-root-gates-label">Affected checks</span>
+                        <div className="df2-vd-chip-row">
+                          {item.gateChips.map((chip) => (
+                            <span key={chip.id} className="df2-vd-chip is-static" title={chip.id}>
+                              {chip.label}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {item.issues && item.issues.length > 0 && (
+                      <ul className="df2-vd-blocker-issues">
+                        {item.issues.slice(0, 4).map((issue) => (
+                          <li key={issue}>{issue}</li>
+                        ))}
+                      </ul>
+                    )}
+                    <div className="df2-vd-blocker-actions df2-vd-fix-actions">
+                      {/* One primary place for identity: Suggested fixes bar + rail. */}
+                      {onOpenIdentitySettings && (
+                        <Button
+                          size="sm"
+                          variant="primary"
+                          leadingIcon={<DtIcon name="settings" size={14} />}
+                          onClick={onOpenIdentitySettings}
+                        >
+                          {/append|overwrite/.test((syncMode || "").toLowerCase())
+                            ? "Open Advanced · then Re-run Validate"
+                            : duplicateRoot?.primaryKey
+                              ? `Change primary key (${duplicateRoot.primaryKey})`
+                              : "Change primary key or sync mode"}
+                        </Button>
+                      )}
+                    </div>
+                    {item.fix && (
+                      <p className="df2-vd-blocker-fix-note">{item.fix}</p>
+                    )}
+                    {item.why && <span className="df2-vd-blocker-why">{item.why}</span>}
+                  </li>
+                );
+              }
+
+              const b = item.source!;
               const issues = issueTextsFromDetails(b.details);
               const blockingCols = (preflight.coercion_report?.columns ?? []).filter((c) => c.severity === "block");
               const showIssueList = issues.length > 0 && !(b.id.includes("dry_run") && blockingCols.length > 0);
               return (
-                <li key={b.id}>
-                  <strong>{metaForGate(b.id).label}</strong>
-                  <span>{b.message}</span>
+                <li key={item.key}>
+                  <strong>{item.title}</strong>
+                  <span>{item.message}</span>
                   {showIssueList && (
                     <ul className="df2-vd-blocker-issues">
                       {issues.slice(0, 6).map((issue) => (
@@ -1714,17 +2251,18 @@ export function ValidateDashboard({
                       <span className="df2-vd-assist-actions-title">
                         Fix on Validate (remaps off incompatible typed columns)
                       </span>
-                      <div className="df2-vd-chip-row">
+                      <div className="df2-vd-fix-actions">
                         {blockingCols.slice(0, 6).map((col) => (
-                          <button
+                          <Button
                             key={`${col.source}-${col.target}`}
-                            type="button"
-                            className="df2-vd-chip kind-change_target_type"
+                            size="sm"
+                            variant="primary"
                             disabled={!onApplyAction || !col.suggested_target_type}
                             title={
                               col.suggested_fix
                               || `Remap ${col.source} to a ${col.suggested_target_type} column (Widen alone does not ALTER DDL)`
                             }
+                            leadingIcon={<DtIcon name="layers" size={14} />}
                             onClick={() =>
                               onApplyAction?.({
                                 kind: "change_target_type",
@@ -1735,31 +2273,28 @@ export function ValidateDashboard({
                               })
                             }
                           >
-                            <DtIcon name="layers" size={13} />
                             Remap {col.source} → {col.suggested_target_type ?? "VARCHAR"}
-                          </button>
+                          </Button>
                         ))}
                       </div>
                     </div>
                   )}
-                  {b.guidance?.fix && (
-                    <span className="df2-vd-blocker-fix">
-                      <DtIcon name="check" size={12} /> {b.guidance.fix}
-                    </span>
+                  {item.fix && (
+                    <p className="df2-vd-blocker-fix-note">{item.fix}</p>
                   )}
-                  {b.guidance?.why && !b.id.includes("dry_run") && (
-                    <span className="df2-vd-blocker-why">{b.guidance.why}</span>
+                  {item.why && !b.id.includes("dry_run") && (
+                    <span className="df2-vd-blocker-why">{item.why}</span>
                   )}
                   {(encodingBlocks || hasEncodingIssue) && (b.id.includes("dry_run") || /format-control|replacement character/i.test(b.message)) && (
-                    <div className="df2-vd-blocker-actions">
-                      <button
-                        type="button"
-                        className="df2-vd-chip kind-open_bad_data_fix"
+                    <div className="df2-vd-blocker-actions df2-vd-fix-actions">
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        leadingIcon={<DtIcon name="shield" size={14} />}
                         onClick={() => setBadDataOpen(true)}
                       >
-                        <DtIcon name="shield" size={13} />
                         Fix bad data…
-                      </button>
+                      </Button>
                     </div>
                   )}
                   {isTypeMismatchBlock && b.id.includes("dry_run") && typeMismatchColumns.length > 0 && (
@@ -1767,13 +2302,14 @@ export function ValidateDashboard({
                       <span className="df2-vd-assist-actions-title">
                         Type mismatch — Remap (Strip/Quarantine will not clear this)
                       </span>
-                      <div className="df2-vd-chip-row">
+                      <div className="df2-vd-fix-actions">
                         {typeMismatchColumns.slice(0, 6).map((col) => (
-                          <button
+                          <Button
                             key={`block-${col.source}-${col.target}`}
-                            type="button"
-                            className="df2-vd-chip kind-change_target_type"
+                            size="sm"
+                            variant="primary"
                             disabled={!onApplyAction}
+                            leadingIcon={<DtIcon name="layers" size={14} />}
                             onClick={() =>
                               onApplyAction?.({
                                 kind: "change_target_type",
@@ -1784,9 +2320,8 @@ export function ValidateDashboard({
                               })
                             }
                           >
-                            <DtIcon name="layers" size={13} />
                             Remap {col.source} → VARCHAR
-                          </button>
+                          </Button>
                         ))}
                       </div>
                     </div>
@@ -1815,19 +2350,29 @@ export function ValidateDashboard({
         proposal={repairProposal}
         mappings={repairMappings}
         onClose={() => setRepairOpen(false)}
+        onOpenIdentitySettings={onOpenIdentitySettings}
+        onOpenMap={() =>
+          onReviewMappings?.(
+            duplicateRoot?.primaryKey
+              ? { focusSource: duplicateRoot.primaryKey }
+              : undefined,
+          )
+        }
         onApplied={(updated) => {
           onRepairMappingsApplied?.(updated);
           pendingVerifyRef.current = true;
           pushRemediation(
             "Repair applied",
             `${updated.length} mapping(s) updated from approved proposal ${repairProposal?.id || ""}`,
-            "Applied — re-run Validate",
+            "Applied — re-running validation",
           );
         }}
         onDecided={(p) => {
           pushRemediation(
-            p.status === "rejected" ? "Repair rejected" : "Repair approved",
-            p.summary || p.id,
+            p.status === "rejected" ? "Repair rejected" : "Repair reviewed",
+            p.apply_result?.message
+              || p.summary
+              || p.id,
             p.status,
           );
         }}

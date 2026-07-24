@@ -39,8 +39,9 @@ from services.transform_engine import (
 
 # Logical types emitted to mapping / preflight / DDL layers
 LOGICAL_TYPES = frozenset({
-    "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "TIMESTAMP", "TIME",
-    "VARCHAR", "TEXT", "UUID", "JSON", "BINARY",
+    "INTEGER", "DECIMAL", "FLOAT", "BOOLEAN", "DATE", "TIMESTAMP", "TIMESTAMPTZ", "TIME",
+    "VARCHAR", "TEXT", "UUID", "JSON", "ARRAY", "BINARY",
+    "INTERVAL", "GEOGRAPHY", "VECTOR",
 })
 
 # Tokens that may become BOOLEAN only when the field name looks like a flag.
@@ -89,6 +90,40 @@ _BASE64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _ENUM_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_\-./]{0,63}$")
 
+# WKT geometry — identity payload; no invented SRID/cast.
+_WKT_RE = re.compile(
+    r"^\s*(?:SRID=\d+;)?\s*"
+    r"(MULTI)?(POINT|LINESTRING|POLYGON|GEOMETRYCOLLECTION)\s*"
+    r"(Z|M|ZM)?\s*\(",
+    re.I,
+)
+_GEOJSON_TYPES = frozenset({
+    "Point", "MultiPoint", "LineString", "MultiLineString",
+    "Polygon", "MultiPolygon", "GeometryCollection", "Feature", "FeatureCollection",
+})
+# ISO-8601 durations (P1D, PT15M, P1Y2M3DT4H) — identity INTERVAL.
+# Require at least one numeric component (reject bare "P" / "PT").
+_ISO_INTERVAL_RE = re.compile(
+    r"^P(?=\d|T\d)"
+    r"(?:\d+Y)?(?:\d+M)?(?:\d+W)?(?:\d+D)?"
+    r"(?:T(?:\d+H)?(?:\d+M)?(?:\d+(?:\.\d+)?S)?)?$",
+    re.I,
+)
+_SQL_INTERVAL_RE = re.compile(
+    r"^\d+\s+(?:year|years|month|months|day|days|hour|hours|minute|minutes|second|seconds)"
+    r"(?:\s+\d+\s+(?:year|years|month|months|day|days|hour|hours|minute|minutes|second|seconds))*$",
+    re.I,
+)
+_VECTOR_FIELD_RE = re.compile(
+    r"(?:^|_)(?:embed(?:ding)?|vector|vec|latent|encoding)(?:$|_)",
+    re.I,
+)
+
+# Minimum homogeneous float-array length to treat as VECTOR without a vector-ish name.
+_VECTOR_MIN_DIM_DEFAULT = 8
+# Absolute floor even with a vector-ish name (avoids [lat,lon] → VECTOR(2) by accident).
+_VECTOR_MIN_DIM_NAMED = 3
+
 
 def _is_base64(value: str) -> bool:
     s = value.strip()
@@ -103,6 +138,25 @@ def _is_base64(value: str) -> bool:
     if all(c in "0123456789abcdefABCDEF" for c in s):
         return False
     return True
+
+
+def _looks_like_binary_payload(value: str, *, field_name: str | None = None) -> bool:
+    """Promote to BINARY only with name evidence or strong payload evidence.
+
+    Short base64-looking tokens (session ids, opaque keys) must stay VARCHAR —
+    never invent BINARY DDL from a single 12–20 char sample (Airbyte trap).
+    """
+    if not _is_base64(value):
+        return False
+    if _is_binary_field_name(field_name or ""):
+        return True
+    s = value.strip()
+    # Strong evidence without a binary-ish name: longer payload + padding or high entropy.
+    if len(s) < 32:
+        return False
+    if s.endswith("=") or s.endswith("=="):
+        return True
+    return len(set(s)) >= 12
 
 
 # Binary payloads only — not generic "data"/"key"/"token" (those are often IDs/JWTs).
@@ -175,6 +229,88 @@ def _looks_like_string_enum(samples: list[str]) -> bool:
     return False
 
 
+def _is_vector_field_name(name: str) -> bool:
+    return bool(_VECTOR_FIELD_RE.search(name or ""))
+
+
+def _parse_vector_array(value: str) -> list[float] | None:
+    """Return float list when value is a homogeneous numeric JSON array; else None."""
+    s = (value or "").strip()
+    if not (s.startswith("[") and s.endswith("]")):
+        return None
+    try:
+        parsed = json.loads(s)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, list) or len(parsed) < 2:
+        return None
+    out: list[float] = []
+    for item in parsed:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            return None
+        out.append(float(item))
+    return out
+
+
+def _looks_like_geojson(obj: Any) -> bool:
+    if not isinstance(obj, dict):
+        return False
+    t = obj.get("type")
+    if not isinstance(t, str) or t not in _GEOJSON_TYPES:
+        return False
+    if t in {"Feature", "FeatureCollection"}:
+        return True
+    return "coordinates" in obj or "geometries" in obj
+
+
+def _looks_like_interval(value: str) -> bool:
+    s = (value or "").strip()
+    if not s:
+        return False
+    if _ISO_INTERVAL_RE.match(s) and s.upper() != "P":
+        return True
+    if _SQL_INTERVAL_RE.match(s):
+        return True
+    # Python timedelta wire from cell_to_string: "1 day, 0:00:01" / "0:00:01"
+    if re.fullmatch(r"\d+:\d{2}:\d{2}(?:\.\d+)?", s):
+        # Ambiguous with TIME — only treat as INTERVAL when hours can exceed 23
+        # or when prefixed with day count elsewhere. Keep TIME for HH:MM:SS.
+        parts = s.split(":")
+        try:
+            return int(parts[0]) > 23
+        except ValueError:
+            return False
+    if " day" in s.lower() or " days" in s.lower():
+        return True
+    return False
+
+
+def _classify_jsonish(value: str, *, field_name: str | None = None) -> str | None:
+    """Classify JSON / array / GeoJSON / VECTOR candidates. None → not JSON-shaped."""
+    s = value.strip()
+    if not ((s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]"))):
+        return None
+    try:
+        parsed = json.loads(s)
+    except json.JSONDecodeError:
+        return None
+
+    if isinstance(parsed, dict):
+        if _looks_like_geojson(parsed):
+            return "GEOGRAPHY"
+        return "JSON"
+
+    if isinstance(parsed, list):
+        vec = _parse_vector_array(s)
+        if vec is not None:
+            min_dim = _VECTOR_MIN_DIM_NAMED if _is_vector_field_name(field_name or "") else _VECTOR_MIN_DIM_DEFAULT
+            if len(vec) >= min_dim:
+                # Provisional — infer_column promotes to VECTOR(n) when dims agree.
+                return "VECTOR"
+        return "ARRAY"
+    return "JSON"
+
+
 def _classify_value(value: str, *, field_name: str | None = None) -> str:
     s = value.strip()
     if not s or s.lower() in NULL_SENTINELS:
@@ -184,17 +320,20 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
     if s.lower() in _STATUS_ENUM_TOKENS:
         return "VARCHAR"
 
-    if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
-        try:
-            json.loads(s)
-            return "JSON"
-        except json.JSONDecodeError:
-            pass
+    # Specialty identity types — detect before generic JSON / string widen.
+    if _WKT_RE.match(s):
+        return "GEOGRAPHY"
+    if _looks_like_interval(s):
+        return "INTERVAL"
+
+    jsonish = _classify_jsonish(s, field_name=field_name)
+    if jsonish:
+        return jsonish
 
     if _UUID_RE.match(s):
         return "UUID"
 
-    if _is_base64(s):
+    if _looks_like_binary_payload(s, field_name=field_name):
         return "BINARY"
 
     boolean_parsed = _parse_boolean(s)
@@ -216,6 +355,9 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
         return "DATE"
 
     if _parse_datetime(s) is not None:
+        # Preserve TZ awareness when the sample carries Z / offset — never invent SRID/cast.
+        if re.search(r"(Z|[+-]\d{2}:?\d{2})$", s, re.I):
+            return "TIMESTAMPTZ"
         return "TIMESTAMP"
 
     for fmt in ("%H:%M:%S", "%H:%M:%S.%f", "%H:%M:%S%z"):
@@ -320,6 +462,7 @@ def safe_ddl_logical_type(
     *,
     field_name: str | None = None,
     source_type: str | None = None,
+    honor_explicit: bool = False,
 ) -> str:
     """For new-table DDL: never emit a tight type samples cannot all coerce to.
 
@@ -327,16 +470,46 @@ def safe_ddl_logical_type(
     is canonicalized to a logical type first. Without that, identity mappings that
     already projected ``ddl_type(dest, TIMESTAMP)`` were treated as unknown and
     wrongly widened to VARCHAR — CREATE TABLE then stored ISO strings as TEXT.
+
+    When ``honor_explicit`` is True (operator set ``target_type`` on the mapping),
+    never *tighten* TEXT/VARCHAR into DECIMAL/BOOLEAN/… — only widen if samples
+    cannot fit the chosen type. Explicit TEXT is how operators keep high-precision
+    money / opaque payloads lossless.
     """
-    from services.type_system import normalize_logical_type
+    from services.type_system import (
+        LOGICAL_DECIMAL,
+        ddl_carrier_type,
+        normalize_logical_type,
+        parse_numeric_precision_scale,
+        parse_vector_dimension,
+    )
 
     proposed_u = (proposed or source_type or "VARCHAR").upper()
     if proposed_u in {"STRING", "CHAR", "CHARACTER", "CHARACTER VARYING"}:
         proposed_u = "VARCHAR"
+    # Preserve DECIMAL(p,s) / VECTOR(n) / FLOAT carriers before class-level collapse.
+    carrier_src = ddl_carrier_type(proposed or source_type or "VARCHAR")
+    if normalize_logical_type(carrier_src) == LOGICAL_DECIMAL:
+        precision, _scale = parse_numeric_precision_scale(carrier_src)
+        if precision is not None:
+            if not samples or samples_fit_logical_type(
+                samples, "DECIMAL", field_name=field_name
+            ):
+                return carrier_src
+    if normalize_logical_type(carrier_src) == "vector":
+        dim = parse_vector_dimension(carrier_src)
+        # Keep declared width even when samples are opaque float arrays as text.
+        if dim is not None:
+            return carrier_src
+    if normalize_logical_type(carrier_src) == "float":
+        if not samples or samples_fit_logical_type(samples, "FLOAT", field_name=field_name):
+            return "FLOAT"
+
     # Map dest-native / alias DDL → canonical logical vocabulary used by writers.
     _NORM_TO_LOGICAL = {
         "integer": "INTEGER",
         "decimal": "DECIMAL",
+        "float": "FLOAT",
         "boolean": "BOOLEAN",
         "date": "DATE",
         "datetime": "TIMESTAMP",
@@ -345,8 +518,12 @@ def safe_ddl_logical_type(
         "text": "TEXT",
         "uuid": "UUID",
         "json": "JSON",
-        "array": "JSON",
+        "array": "ARRAY",
         "binary": "BINARY",
+        "interval": "INTERVAL",
+        "geography": "GEOGRAPHY",
+        "vector": "VECTOR",
+        "timestamptz": "TIMESTAMPTZ",
     }
     canonical = _NORM_TO_LOGICAL.get(normalize_logical_type(proposed_u))
     if canonical:
@@ -356,6 +533,13 @@ def safe_ddl_logical_type(
         if proposed_u == "BOOLEAN" and source_type and str(source_type).upper() in {"VARCHAR", "TEXT", "STRING"}:
             return "VARCHAR"
         return proposed_u if proposed_u in LOGICAL_TYPES else "VARCHAR"
+    # Explicit operator target_type: keep TEXT/VARCHAR as-is; only widen on misfit.
+    if honor_explicit:
+        if proposed_u in {"VARCHAR", "TEXT"}:
+            return proposed_u
+        if samples_fit_logical_type(samples, proposed_u, field_name=field_name):
+            return proposed_u if proposed_u in LOGICAL_TYPES else "VARCHAR"
+        return infer_type(samples, field_name=field_name)
     # Loose text proposals: upgrade when every sample coerces to a tighter type.
     # Without this, CREATE TABLE stays VARCHAR and writers skip type transforms
     # (e.g. "true"/"false"/"1" never become BOOLEAN).
@@ -423,8 +607,10 @@ def infer_column(
     if types <= {"INTEGER", "DECIMAL"}:
         inferred = "DECIMAL" if "DECIMAL" in types else "INTEGER"
         role = "numeric"
-    elif types <= {"DATE", "TIMESTAMP", "TIME"}:
-        if counts.get("TIMESTAMP", 0) >= counts.get("DATE", 0) and counts.get("TIMESTAMP", 0) >= counts.get("TIME", 0):
+    elif types <= {"DATE", "TIMESTAMP", "TIMESTAMPTZ", "TIME"}:
+        if counts.get("TIMESTAMPTZ", 0) > 0:
+            inferred = "TIMESTAMPTZ"
+        elif counts.get("TIMESTAMP", 0) >= counts.get("DATE", 0) and counts.get("TIMESTAMP", 0) >= counts.get("TIME", 0):
             inferred = "TIMESTAMP"
         elif counts.get("DATE", 0) >= counts.get("TIME", 0):
             inferred = "DATE"
@@ -437,17 +623,61 @@ def infer_column(
             "BOOLEAN": "boolean_flag",
             "UUID": "identifier",
             "JSON": "semi_structured",
+            "ARRAY": "semi_structured",
             "BINARY": "binary",
             "TEXT": "text",
             "VARCHAR": "text",
+            "VECTOR": "embedding",
+            "GEOGRAPHY": "geography",
+            "INTERVAL": "duration",
+            "TIMESTAMPTZ": "temporal",
         }.get(inferred, "unknown")
     else:
-        if "TEXT" in counts and max(len(s) for s in non_empty if _classify_value(s, field_name=field_name) == "TEXT") > 255:
+        # Specialty + JSON/ARRAY: prefer specialty when mixed with structural leftovers.
+        specialty = types & {"VECTOR", "GEOGRAPHY", "INTERVAL"}
+        if len(specialty) == 1 and types <= specialty | {"JSON", "ARRAY", "VARCHAR"}:
+            inferred = next(iter(specialty))
+            role = {
+                "VECTOR": "embedding",
+                "GEOGRAPHY": "geography",
+                "INTERVAL": "duration",
+            }[inferred]
+            notes.append(f"majority specialty {inferred} — identity payload")
+        elif types <= {"JSON", "ARRAY"}:
+            inferred = "ARRAY" if counts.get("ARRAY", 0) >= counts.get("JSON", 0) else "JSON"
+            role = "semi_structured"
+        elif "TEXT" in counts and max(len(s) for s in non_empty if _classify_value(s, field_name=field_name) == "TEXT") > 255:
             inferred = "TEXT"
+            role = "text"
+            notes.append("mixed sample types — widened to lossless text")
         else:
             inferred = "VARCHAR"
-        role = "text"
-        notes.append("mixed sample types — widened to lossless text")
+            role = "text"
+            notes.append("mixed sample types — widened to lossless text")
+
+    # VECTOR: promote to VECTOR(n) only when every sample agrees on dims — never invent.
+    if inferred == "VECTOR":
+        dims: list[int] = []
+        ok = True
+        for s in non_empty:
+            vec = _parse_vector_array(s)
+            if vec is None:
+                ok = False
+                break
+            dims.append(len(vec))
+        if ok and dims and len(set(dims)) == 1:
+            n = dims[0]
+            inferred = f"VECTOR({n})"
+            role = "embedding"
+            notes.append(f"homogeneous float array → VECTOR({n}) (dims from samples)")
+        else:
+            inferred = "ARRAY"
+            role = "semi_structured"
+            notes.append("float arrays with disagreeing/invalid dims — ARRAY (no invented VECTOR dim)")
+
+    # GEOGRAPHY / INTERVAL stay identity — no invented SRID or cast.
+    if inferred in {"GEOGRAPHY", "INTERVAL"}:
+        notes.append(f"{inferred} — identity payload (no invented cast)")
 
     # 0/1 → BOOLEAN only on flag-shaped names
     if (

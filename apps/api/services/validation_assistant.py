@@ -73,6 +73,27 @@ def _is_encoding_blocker(text: str) -> bool:
     )
 
 
+def _is_duplicate_key_blocker(text: str, gate_ids: set[str] | None = None) -> bool:
+    """True when uniqueness/identity-key collisions are the root preflight failure."""
+    t = (text or "").lower()
+    if any(
+        k in t
+        for k in (
+            "duplicate key",
+            "duplicate target key",
+            "keys repeat",
+            "primary key candidate",
+            "expect_column_unique",
+            "duplicate value(s) in source sample",
+        )
+    ):
+        return True
+    ids = gate_ids or set()
+    if {"g6_target_ddl", "g8_reconciliation", "g9_data_integrity"} & ids and "duplicate" in t:
+        return True
+    return False
+
+
 def _is_type_mismatch_blocker(text: str) -> bool:
     t = (text or "").lower()
     if _parse_type_mismatch_columns(text):
@@ -139,6 +160,39 @@ def _suggested_actions(
     )
     blocker_lower = blocker_text.lower()
 
+    # Duplicate identity keys cannot be healed by mapping transforms / Approve&apply.
+    # Emit an explicit non-mutative remediation — never pretend review_mappings applies.
+    if _is_duplicate_key_blocker(blocker_text, gate_ids):
+        actions = [
+            a for a in actions
+            if a.get("kind") not in {
+                "open_bad_data_fix",
+                "normalize_control_chars",
+                "quarantine_and_rerun",
+                "review_mappings",
+            }
+        ]
+        if not any(a.get("kind") == "fix_source_keys" for a in actions):
+            actions.insert(0, {
+                "kind": "fix_source_keys",
+                "label": (
+                    "Duplicate identity keys — cannot auto-apply. "
+                    "Dedupe the source on id, map a different unique key, "
+                    "or change sync mode if uniqueness is not required — then Re-run Validate."
+                ),
+                "mapping_applyable": False,
+            })
+        if not any(a.get("kind") == "review_mappings" for a in actions):
+            actions.append({
+                "kind": "review_mappings",
+                "label": (
+                    "Open Map to change which column is treated as identity "
+                    "(Approve & apply will not remove source duplicates)"
+                ),
+                "mapping_applyable": False,
+            })
+        return actions
+
     # Declared-type / dry-run type mismatches → Widen/remap, never Strip-first.
     if _is_type_mismatch_blocker(blocker_text):
         for src, tgt in _parse_type_mismatch_columns(blocker_text):
@@ -184,28 +238,42 @@ def _suggested_actions(
                 "kind": "open_bad_data_fix",
                 "label": "Open Fix bad data dialog",
             })
+    elif "g8_reconciliation" in gate_ids or "identity transform" in blocker_lower or "identity mapping" in blocker_lower:
+        if not any(a.get("kind") == "review_mappings" for a in actions):
+            actions.append({
+                "kind": "review_mappings",
+                "label": "Review mappings — identity/fingerprint mismatch (not Strip)",
+            })
     elif any(
         gid in gate_ids or (gid or "").startswith("g5")
         for gid in ("g5_dry_run", "g5_transform", "g9_data_integrity", "dry_run")
-    ) or "dry-run" in blocker_lower or "integrity" in blocker_lower:
-        # Generic G5 without type/encoding signal — still offer Map review,
-        # but do NOT advertise Strip as the primary fix (operators click it
-        # and see the same type block again).
+    ) or "dry-run" in blocker_lower:
+        # Generic dry-run / integrity without encoding — Map review only.
+        # Never open the encoding-centric Bad Data drawer as the default CTA.
         if not _is_type_mismatch_blocker(blocker_text):
-            if not any(a.get("kind") == "open_bad_data_fix" for a in actions):
-                actions.append({
-                    "kind": "open_bad_data_fix",
-                    "label": "Open Fix bad data dialog",
-                })
             if not any(a.get("kind") == "review_mappings" for a in actions):
                 actions.append({
                     "kind": "review_mappings",
                     "label": "Review mappings",
                 })
-
+            if "integrity" in blocker_lower and not any(a.get("kind") == "open_bad_data_fix" for a in actions):
+                # Only offer Fix bad data when the text still looks integrity-related
+                # but not encoding (e.g. required nulls) — drawer may still help.
+                actions.append({
+                    "kind": "open_bad_data_fix",
+                    "label": "Inspect integrity findings",
+                })
     if "g4_mapping_confidence" in gate_ids:
         if not any(a.get("kind") == "review_mappings" for a in actions):
             actions.append({"kind": "review_mappings", "label": "Review and approve low-confidence mappings"})
+    if "g6_target_ddl" in gate_ids:
+        if not any(a.get("kind") == "review_mappings" for a in actions):
+            actions.append({
+                "kind": "review_mappings",
+                "label": "Fix DDL / remap — not an encoding issue (Strip will not help)",
+            })
+        # Never push Fix-bad-data for DDL.
+        actions = [a for a in actions if a.get("kind") not in {"open_bad_data_fix", "normalize_control_chars", "quarantine_and_rerun"}]
     if "schema_drift" in gate_ids:
         actions.append({"kind": "rerun_mapping", "label": "Re-run mapping to accept the new schema"})
     if {"g1_source", "g2_destination"} & gate_ids:
@@ -224,7 +292,31 @@ def _deterministic_narrative(
     if passed:
         return "All preflight gates passed. This transfer is safe to run."
     lines: list[str] = []
-    gate_titles = [i["title"] for i in issues if i.get("severity") != "warning"]
+    hard_issues = [i for i in issues if i.get("severity") != "warning"]
+    warn_issues = [i for i in issues if i.get("severity") == "warning"]
+    gate_titles = [i["title"] for i in hard_issues]
+    blocker_blob = " ".join(
+        f"{i.get('title')} {i.get('what')} {i.get('why')}" for i in hard_issues
+    )
+    if _is_duplicate_key_blocker(blocker_blob):
+        lines.append(
+            "Root cause: duplicate identity keys in the Validate sample. "
+            "Data integrity, Target DDL, and Sample reconciliation all failed for the same reason. "
+            "Mapping Approve & apply cannot dedupe source rows — fix the source key, "
+            "pick a different identity column on Map, or adjust sync mode, then Re-run Validate."
+        )
+        for i in hard_issues[:3]:
+            what = str(i.get("what") or i.get("title") or "").strip()
+            if what:
+                lines.append(f"• {what}")
+        warn_cols = [c for c in column_fixes if c.get("severity") == "warn"]
+        if warn_cols:
+            cols = ", ".join(str(c.get("column") or "?") for c in warn_cols[:8])
+            lines.append(
+                f"Warnings (not blockers): timestamp normalize at write for {cols}."
+            )
+        return "\n".join(lines)
+
     if gate_titles:
         lines.append(
             "This transfer is blocked by "
@@ -236,12 +328,17 @@ def _deterministic_narrative(
         fails = c.get("sample_failures") or []
         example = f" First failing value: {fails[0]['value']!r} (row {fails[0]['row']})." if fails else ""
         lines.append(f"• {c['suggested_fix']}{example}")
-    for c in warn_cols:
-        lines.append(f"• {c['suggested_fix']}")
+    if warn_cols and not hard_cols:
+        for c in warn_cols:
+            lines.append(f"• {c['suggested_fix']}")
+    elif warn_cols:
+        cols = ", ".join(str(c.get("column") or "?") for c in warn_cols[:8])
+        lines.append(f"Warnings (not blockers): {len(warn_cols)} column note(s) — {cols}.")
     if not hard_cols and not warn_cols:
-        for i in issues:
-            if i.get("severity") != "warning":
-                lines.append(f"• {i['title']}: {i['why']} Fix: {i['fix']}")
+        for i in hard_issues:
+            lines.append(f"• {i['title']}: {i['why']} Fix: {i['fix']}")
+        for i in warn_issues[:3]:
+            lines.append(f"• Warning — {i['title']}: {i.get('what') or i.get('why')}")
     return "\n".join(lines) if lines else "Preflight reported issues — review the gate details."
 
 

@@ -33,12 +33,25 @@ class WriteResult(_WriteResult):
 
 
 def _ensure_bucket(client, bucket: str, cfg: dict[str, Any]) -> None:
-    """Create the S3 bucket if it does not already exist."""
+    """Create the S3 bucket if it does not already exist.
+
+    Auth / network failures must not be treated as "bucket missing" — that would
+    hide the real operator action behind a false create attempt.
+    """
+    from botocore.exceptions import ClientError
+
     try:
         client.head_bucket(Bucket=bucket)
         return
-    except Exception:
-        pass
+    except ClientError as exc:
+        code = str((exc.response or {}).get("Error", {}).get("Code") or "")
+        http = str((exc.response or {}).get("ResponseMetadata", {}).get("HTTPStatusCode") or "")
+        if code not in {"404", "NoSuchBucket", "NotFound"} and http != "404":
+            raise RuntimeError(
+                f"Cannot verify S3 bucket {bucket!r}: {code or http or exc}"
+            ) from exc
+    except Exception as exc:
+        raise RuntimeError(f"Cannot verify S3 bucket {bucket!r}: {exc}") from exc
     try:
         if is_local_endpoint(cfg):
             client.create_bucket(Bucket=bucket)
@@ -80,7 +93,7 @@ def write_mapped_rows(
     path_style: bool = False,
     **_kwargs: Any,
 ) -> WriteResult:
-    del create_table, backfill_new_fields
+    del backfill_new_fields
     policy = transform_error_policy(error_policy)
     bucket = database
     if not bucket:
@@ -120,6 +133,19 @@ def write_mapped_rows(
         error_policy=policy,
         preserve_case=True,
     )
+    if errors and policy == "fail":
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=key,
+            target_schema=bucket,
+            checksum="",
+            chunks_completed=0,
+            error=f"Transform errors: {'; '.join(errors[:3])}",
+            warnings=errors[:10],
+            rejected_rows=len({d.get("row") for d in rejected_details if d.get("row") is not None}),
+            rejected_details=rejected_details[:100],
+        )
 
     records = [{c: to_json_value(v, c, dest_types) for c, v in zip(target_cols, row)} for row in mapped_rows]
 
@@ -143,7 +169,15 @@ def write_mapped_rows(
 
     try:
         client = boto3_client("s3", cfg)
-        _ensure_bucket(client, bucket, cfg)
+        if create_table:
+            _ensure_bucket(client, bucket, cfg)
+        else:
+            try:
+                client.head_bucket(Bucket=bucket)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"S3 bucket {bucket!r} is missing or inaccessible and create_table is disabled"
+                ) from exc
         client.put_object(Bucket=bucket, Key=key, Body=body, ContentType=content_type)
         checksum = row_checksum(mapped_rows, target_cols)
         if on_checkpoint:

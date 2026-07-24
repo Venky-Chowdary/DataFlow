@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
 
 from .connector_registry import run_probe
 from .models import EndpointConfig
-from .type_mapper import ddl_type, normalize_inferred
+from .type_mapper import ddl_carrier_type, ddl_type, normalize_inferred
 
 
 def resolve_dest_table(dest_type: str, destination: EndpointConfig, fallback_name: str = "import") -> str:
@@ -321,7 +321,13 @@ def resolve_connector_config(
     if endpoint.connector_id:
         cfg["connector_id"] = endpoint.connector_id
     # Apply driver defaults for fields that are still missing.
-    cfg["host"] = cfg["host"] or "localhost"
+    # Never invent localhost when a connection string already carries host/auth —
+    # that caused Validate to AUTH against the wrong endpoint while Connectors Test
+    # still passed via the URI.
+    if not (cfg.get("connection_string") or "").strip():
+        cfg["host"] = cfg["host"] or "localhost"
+    else:
+        cfg["host"] = cfg.get("host") or ""
     cfg["port"] = cfg["port"] or default_port
     driver_type = (cfg.get("type") or fmt or "").lower()
     # Always resolve against the *merged* driver — never the pre-merge fmt default alone.
@@ -420,20 +426,60 @@ def _introspect_table_schema(
     info = introspect_schema(
         db_type,
         host=cfg.get("host", ""),
-        port=int(cfg.get("port", 5432) or 5432),
+        port=int(cfg.get("port") or (
+            3306 if db_type == "mysql" else
+            1433 if db_type == "sqlserver" else
+            1521 if db_type == "oracle" else
+            5439 if db_type == "redshift" else
+            5432
+        )),
         database=cfg.get("database", ""),
         username=cfg.get("username", ""),
         password=cfg.get("password", ""),
         schema=schema_from_cfg(db_type, cfg),
         connection_string=cfg.get("connection_string", ""),
-        ssl=cfg.get("ssl", False),
+        # Prefer connector ssl exactly as list/probe use it. Do not default True
+        # when the key is missing — that caused managed vs local mismatch where
+        # SHOW TABLES succeeded (ssl=False) but INFORMATION_SCHEMA failed (ssl=True),
+        # leaving Map with "destination schema unavailable" for an existing table.
+        ssl=bool(cfg.get("ssl", False)),
         warehouse=cfg.get("warehouse", ""),
         table=table,
         catalog_type=cfg.get("type", ""),
         auth_source=cfg.get("auth_source", ""),
+        api_key=cfg.get("api_key", ""),
     )
     if info.get("ok") and info.get("columns"):
         return {c["name"]: c["inferred_type"] for c in info["columns"]}
+
+    # Retry once with flipped SSL when the first probe failed (common when the
+    # connector ssl flag does not match the host's TLS requirement).
+    if not info.get("ok") and db_type in ("postgresql", "redshift", "mysql", "sqlserver"):
+        flipped = not bool(cfg.get("ssl", False))
+        info_retry = introspect_schema(
+            db_type,
+            host=cfg.get("host", ""),
+            port=int(cfg.get("port") or (
+                3306 if db_type == "mysql" else
+                1433 if db_type == "sqlserver" else
+                1521 if db_type == "oracle" else
+                5439 if db_type == "redshift" else
+                5432
+            )),
+            database=cfg.get("database", ""),
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=schema_from_cfg(db_type, cfg),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=flipped,
+            warehouse=cfg.get("warehouse", ""),
+            table=table,
+            catalog_type=cfg.get("type", ""),
+            auth_source=cfg.get("auth_source", ""),
+            api_key=cfg.get("api_key", ""),
+        )
+        if info_retry.get("ok") and info_retry.get("columns"):
+            return {c["name"]: c["inferred_type"] for c in info_retry["columns"]}
 
     # Fallback: infer logical types from the sample records we already have in hand.
     # This is essential for schemaless sources (MongoDB, DynamoDB, Redis) whose
@@ -821,7 +867,7 @@ def write_destination_database(
     error_policy = transform_error_policy_for_validation_mode(validation_mode)
 
     headers, data_rows = records_to_matrix(records, columns)
-    column_types = {c: normalize_inferred(schema.get(c, "string")).upper() for c in columns}
+    column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in columns}
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
 
@@ -892,8 +938,15 @@ def write_destination_database(
         if db_type == "redshift":
             common["port"] = cfg["port"] or 5439
         for col in columns:
-            ddl_log.append(f"PG COLUMN {col} {ddl_type('postgresql', schema.get(col, 'string'))}")
-        result = write_mapped_rows(**common, write_mode=write_mode, conflict_columns=conflict_columns or [])
+            ddl_log.append(
+                f"{db_type.upper()} COLUMN {col} {ddl_type(db_type, schema.get(col, 'string'))}"
+            )
+        result = write_mapped_rows(
+            **common,
+            write_mode=write_mode,
+            conflict_columns=conflict_columns or [],
+            engine=db_type,
+        )
         if not result.ok:
             raise RuntimeError(result.error or f"{db_type} write failed")
         ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {result.target_schema}.{result.table_name}")

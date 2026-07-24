@@ -60,7 +60,8 @@ export function SchemaRouteBanner({
           <strong className="df2-schema-route-name" title={destLabel}>{destLabel}</strong>
           {destSchemaLoading ? (
             <span className="df2-schema-route-detail df2-schema-route-loading">
-              <Spinner /> Loading existing schema from connector…
+              <Spinner size="sm" label="Loading destination schema" />
+              Reading destination schema…
             </span>
           ) : (
             <span className="df2-schema-route-detail">{destSubtitle}</span>

@@ -18,3 +18,5 @@ class ReadBatch:
     rows: list[list[str]]
     offset: int = 0
     total_rows: int | None = 0
+    # Optional reader metadata (e.g. DynamoDB native_types) — never required.
+    meta: dict | None = None

@@ -27,13 +27,25 @@ def test_build_milvus_entities_maps_rows():
             "metadata": {"page": "2", "heading": "Intro", "filename": "doc.pdf"},
         }
     ]
-    entities = build_milvus_entities(rows, dimension=3)
+    entities, rejected = build_milvus_entities(rows, dimension=3)
+    assert rejected == []
     assert len(entities) == 1
     assert entities[0]["id"] == "abc123"
     assert entities[0]["vector"] == [0.1, 0.2, 0.3]
     assert entities[0]["content"] == "hello milvus"
     assert entities[0]["page"] == "2"
     assert entities[0]["heading"] == "Intro"
+
+
+def test_build_milvus_entities_refuses_zero_vector():
+    entities, rejected = build_milvus_entities(
+        [{"id": "x", "content": "c", "embedding": None}],
+        dimension=3,
+    )
+    assert entities == []
+    assert rejected
+    reason = (rejected[0].get("reason") or "").lower()
+    assert "embedding" in reason or "refuse" in reason
 
 
 def test_milvus_probe_unreachable_fail_closed():

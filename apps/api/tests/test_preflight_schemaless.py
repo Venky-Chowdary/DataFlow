@@ -40,6 +40,40 @@ def test_preflight_passes_high_null_rate_for_schemaless(dest_type: str) -> None:
     assert gate_status.get("g5_dry_run") == "pass"
 
 
+def test_preflight_redis_ignores_stale_target_fingerprint() -> None:
+    """Mapping revision on Redis must not fail G6 with 'Destination schema changed'."""
+    from services.schema_fingerprint import fingerprint_schema
+
+    sample_rows = [
+        {"_id": "1", "skills": ["python", "sql"], "countries": ["US"]},
+        {"_id": "2", "skills": ["go"], "countries": ["CA", "UK"]},
+    ]
+    columns = list(sample_rows[0].keys())
+    mappings = [{"source": c, "target": c, "confidence": 0.95, "transform": "none"} for c in columns]
+    stale_fp = fingerprint_schema(["_id"], {"_id": "VARCHAR"})
+
+    result = run_file_preflight(
+        columns=columns,
+        column_types={c: "VARCHAR" for c in columns},
+        row_count=len(sample_rows),
+        mappings=mappings,
+        destination_connected=True,
+        source_connected=True,
+        source_kind="database",
+        sample_rows=sample_rows,
+        destination_column_types={},
+        destination_table_exists=False,
+        destination_can_create=True,
+        destination_db_type="redis",
+        validation_mode="strict",
+        stored_target_fp=stale_fp,
+    )
+    assert result["passed"] is True, result.get("blockers")
+    gate_status = {g["id"]: g["status"] for g in result["gates"]}
+    assert gate_status.get("g6_target_ddl") == "pass"
+    assert gate_status.get("g8_reconciliation") == "pass"
+
+
 def test_preflight_allows_duplicate_user_id_for_mongodb() -> None:
     """Non-primary *_id fields in MongoDB are foreign keys and may repeat."""
     sample_rows = [

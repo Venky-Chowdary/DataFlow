@@ -200,7 +200,19 @@ class CdcState:
 
 
 def _records_to_matrix(records: list[dict[str, Any]], headers: list[str]) -> list[list[str]]:
-    return [[cell_to_string(r.get(h, "")) for h in headers] for r in records]
+    """CDC matrix with SQL NULL ≠ empty string; absent keys stay missing sentinels."""
+    from services.value_serializer import DF_MISSING_SENTINEL
+
+    rows: list[list[str]] = []
+    for r in records:
+        row: list[str] = []
+        for h in headers:
+            if h not in r:
+                row.append(DF_MISSING_SENTINEL)
+            else:
+                row.append(cell_to_string(r.get(h), preserve_sql_null=True))
+        rows.append(row)
+    return rows
 
 
 def _source_headers(headers: list[str], mappings: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
@@ -263,7 +275,9 @@ class CdcEngine:
         """Yield (headers, rows) batches from the source table."""
         offset = 0
         cursor_type = None
-        if cursor_after:
+        # Empty-string watermarks are valid (e.g. '' cursor after coalesce) —
+        # truthiness checks would re-snapshot forever.
+        if cursor_after is not None:
             samples = [cursor_after]
             inferred = infer_watermark_type(samples)
             cursor_type = inferred.value
@@ -276,7 +290,7 @@ class CdcEngine:
                     self.columns or None,
                     offset,
                     self.batch_size,
-                    cursor_column=self.cursor_field if cursor_after else "",
+                    cursor_column=self.cursor_field if cursor_after is not None else "",
                     cursor_after=cursor_after,
                     cursor_type=cursor_type,
                     database=self.src_cfg.get("database", ""),
@@ -326,7 +340,7 @@ class CdcEngine:
 
     def poll(self) -> Iterator[ChangeBatch]:
         """Yield changes since the last watermark."""
-        if not self.watermark:
+        if self.watermark is None:
             yield from self.snapshot()
             return
         yield from self._yield_batches(self._read(cursor_after=self.watermark))
@@ -1193,7 +1207,12 @@ def _run_cdc_single_stream(
     if src_type == "mongodb":
         try:
             cdc: CdcEngine | MongodbChangeStreamCdc | MySqlChangeStreamCdc | PostgreSqlChangeStreamCdc = MongodbChangeStreamCdc(
-                src_cfg,
+                {
+                    **src_cfg,
+                    "job_id": job_id,
+                    "cursor_key": cursor_key,
+                    "lease_holder_id": "",
+                },
                 collection=table_name,
                 primary_key=primary_key,
                 columns=headers,
@@ -1484,8 +1503,10 @@ def _run_cdc_single_stream(
         elif hasattr(checkpoint, "to_dict"):
             cp_dict = checkpoint.to_dict()  # type: ignore[assignment]
     if cp_dict:
-        cp_wm = cp_dict.get("watermark") or (cp_dict.get("cdc") or {}).get("watermark")
-        if cp_wm:
+        cp_wm = cp_dict.get("watermark")
+        if cp_wm is None and isinstance(cp_dict.get("cdc"), dict):
+            cp_wm = cp_dict["cdc"].get("watermark")
+        if cp_wm is not None:
             state.running_cursor = str(cp_wm)
             state.watermark = str(cp_wm)
             watermark = str(cp_wm)
@@ -1685,9 +1706,9 @@ def _run_cdc_single_stream(
                     if idle_polls >= max_idle_polls:
                         break
 
-    final_watermark = state.running_cursor or watermark
+    final_watermark = state.running_cursor if state.running_cursor is not None else watermark
     lag_fields = _cdc_lag_fields(cdc)
-    if final_watermark:
+    if final_watermark is not None:
         set_watermark(
             cursor_key,
             final_watermark,

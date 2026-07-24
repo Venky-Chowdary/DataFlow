@@ -1,0 +1,30 @@
+---
+description: Enterprise transfer proof bar — never ship one-pair fixes as robustness; prove top connectors, zero silent loss, operator-clear actions
+alwaysApply: true
+---
+
+# Enterprise Transfer Proof Bar
+
+Clients are Google / Microsoft / Accenture / JPMorgan class. One pasted MySQL→Postgres error is a **signal**, not the scope.
+
+## Non-negotiable
+- **0.001% silent data loss is failure.** Quarantine + surface; never drop quietly.
+- **One bug ⇒ matrix.** Fix the algorithm/path for all affected source×dest×schema×sync modes — not the pair in the screenshot.
+- **Claims need artifacts.** Pass/fail/skip counts, run_id, reconcile checksum, or pytest node ids. Chat confidence ≠ proof.
+- **Catalog count ≠ live.** Only `TRANSFER_READY` / `PRODUCTION_SKU` evidence counts as transfer-live.
+
+## Every non-trivial task — architect checklist
+1. **Blast radius:** Which top ~20 connectors share this code path (introspect, map, preflight, write, reconcile, UX)?
+2. **Data rules:** Types, nullability, PK/identity, encoding, precision, JSON/array, timezone, CDC at-least-once.
+3. **Algorithms:** Prefer proven patterns (idempotent MERGE, snapshot+LSN handoff, fail-fast preflight, quarantine/replay).
+4. **UX:** One root cause → one primary Button with a real destination. No duplicate CTAs; no “fix” prose that isn’t a control.
+5. **Proof:** Extend or run a matrix; report numbers. If env can’t run live, say skip reasons — do not invent green.
+
+## Forbidden
+- “Works for the route you pasted” as a done criterion.
+- Fake create-new / identity 93% when the destination object exists.
+- Approve/apply that claims to fix source duplicates or DDL it cannot change.
+- Degrading product polish while claiming engine progress.
+
+## When stuck
+Prefer deeper schema/engine honesty over more UI chrome. Defend the wedge: semantic mapping · preflight · quarantine · reconcile · contracts.

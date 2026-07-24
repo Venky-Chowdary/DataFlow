@@ -111,3 +111,59 @@ def test_g5_block_message_includes_concrete_issue():
     )
     assert "age: cannot cast 'abc' to NUMBER" in msg
     assert "+1 more" in msg
+
+
+def test_g2_blocks_when_can_write_false():
+    plan = _happy_plan()
+    plan.destination.can_write = False
+    plan.destination.table_exists = True
+    result = PreflightEngine().run(PreflightContext(plan=plan))
+    assert not result.passed
+    assert any(b.gate_id.value == "g2_destination" for b in result.blockers)
+    g2 = next(g for g in result.gates if g.gate_id.value == "g2_destination")
+    assert g2.status == GateStatus.BLOCK
+    assert "write" in g2.message.lower() or "insert" in g2.message.lower() or "permission" in g2.message.lower()
+
+
+def test_g2_blocks_create_denied_for_missing_table():
+    plan = _happy_plan()
+    plan.destination.can_write = False
+    plan.destination.can_create_table = False
+    plan.destination.table_exists = False
+    result = PreflightEngine().run(PreflightContext(plan=plan))
+    assert not result.passed
+    g2 = next(g for g in result.gates if g.gate_id.value == "g2_destination")
+    assert "create" in g2.message.lower()
+
+
+def test_g2_blocks_unavailable_probe_on_create_new():
+    """Connectivity-only fallback must not green-light create-new."""
+    plan = _happy_plan()
+    plan.destination.table_exists = False
+    plan.destination.can_write = True
+    plan.destination.can_create_table = True
+    plan.destination.privilege_probe = {
+        "status": "unavailable",
+        "detail": "ACL describe unavailable",
+        "method": "",
+    }
+    result = PreflightEngine().run(PreflightContext(plan=plan))
+    assert not result.passed
+    g2 = next(g for g in result.gates if g.gate_id.value == "g2_destination")
+    assert g2.status == GateStatus.BLOCK
+    assert "unavailable" in g2.message.lower()
+    assert "create" in g2.message.lower()
+
+
+def test_g2_passes_unavailable_probe_when_table_exists():
+    plan = _happy_plan()
+    plan.destination.table_exists = True
+    plan.destination.can_write = True
+    plan.destination.privilege_probe = {
+        "status": "unavailable",
+        "detail": "ACL describe unavailable",
+    }
+    result = PreflightEngine().run(PreflightContext(plan=plan))
+    g2 = next(g for g in result.gates if g.gate_id.value == "g2_destination")
+    assert g2.status == GateStatus.PASS
+    assert "unavailable" in g2.message.lower()

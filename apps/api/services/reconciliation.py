@@ -337,21 +337,45 @@ def reconcile(
 
     if source_checksum != target_checksum:
         # When the target legitimately contains extra rows (append/upsert),
-        # whole-table checksums are not comparable; rely on the key-aligned
-        # sample compare already validated above.
+        # whole-table checksums are not comparable; require a key-aligned
+        # sample compare that actually compared rows (fail-closed otherwise).
         if allow_extra_rows and target_rows > expected_rows:
+            compared = int((sample_compare or {}).get("compared") or 0)
+            sample_ok = (
+                bool(sample_compare)
+                and bool(sample_compare.get("passed", False))
+                and compared > 0
+            )
+            if sample_ok:
+                return ReconciliationReport(
+                    passed=True,
+                    source_rows=source_rows,
+                    target_rows=target_rows,
+                    source_checksum=source_checksum,
+                    target_checksum=target_checksum,
+                    message=(
+                        f"Transfer verified by key-aligned sample ({compared} compared; "
+                        f"{target_rows} rows"
+                        + (f", {rejected_rows} rejected" if rejected_rows else "")
+                        + f"; {target_rows - expected_rows} pre-existing rows skipped in checksum)"
+                    ),
+                    rejected_rows=rejected_rows,
+                    sample_compare=sample_compare,
+                )
             return ReconciliationReport(
-                passed=True,
+                passed=False,
                 source_rows=source_rows,
                 target_rows=target_rows,
                 source_checksum=source_checksum,
                 target_checksum=target_checksum,
                 message=(
-                    f"Transfer verified by key-aligned sample ({target_rows} rows"
-                    + (f", {rejected_rows} rejected" if rejected_rows else "")
-                    + f"; {target_rows - expected_rows} pre-existing rows skipped in checksum)"
+                    "Checksum mismatch with extra destination rows: key-aligned "
+                    "sample compare with compared>0 is required (fail-closed; "
+                    "whole-table checksums are not comparable under append/upsert)"
                 ),
                 rejected_rows=rejected_rows,
+                coerced_null_rows=coerced_null_rows,
+                sample_compare=sample_compare,
             )
         if strict_checksum:
             return ReconciliationReport(
@@ -1008,7 +1032,7 @@ def verify_target(
             password=dest.get("password", ""),
             schema=schema,
             connection_string=dest.get("connection_string", ""),
-            ssl=dest.get("ssl", True) if db_type == "postgresql" else dest.get("ssl", False),
+            ssl=dest.get("ssl", False) if db_type == "postgresql" else dest.get("ssl", False),
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,
@@ -1094,17 +1118,26 @@ def verify_target(
 
 def normalize_cell(value: Any) -> str:
     if value is None:
-        return ""
+        # Distinct from empty string — SQL/Dynamo NULL must not checksum as "".
+        return "\x00NULL\x00"
+    if isinstance(value, str) and value.strip().lower() in {
+        "__df_sql_null__",
+        "__df_ddb_null__",
+    }:
+        return "\x00NULL\x00"
     if isinstance(value, bool):
         return "1" if value else "0"
     if isinstance(value, _datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        else:
-            value = value.astimezone(timezone.utc)
-        return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        # Canonical form is UTC wall-clock without a Z marker so TIMESTAMPTZ
+        # sources match NTZ sinks that stored the same UTC components, while
+        # offset-aware values still differ from a different naive wall clock.
+        if value.microsecond:
+            return value.strftime("%Y-%m-%dT%H:%M:%S.%f").rstrip("0").rstrip(".")
+        return value.strftime("%Y-%m-%dT%H:%M:%S")
     if isinstance(value, _date):
-        return _datetime.combine(value, _time.min, tzinfo=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return _datetime.combine(value, _time.min).strftime("%Y-%m-%dT%H:%M:%S")
     if isinstance(value, float):
         return _canonicalize_number(str(value)) or "nan"
     if isinstance(value, int):
@@ -1131,9 +1164,14 @@ def normalize_cell(value: Any) -> str:
     if not text:
         return ""
     lowered = text.lower()
-    if lowered in {"true", "t", "yes", "y", "on", "enabled", "active", "ok", "aye", "positive", "1"}:
+    # Align with transform_engine strict boolean tokens only. Status enums
+    # ("active"/"enabled"/…) must NOT collide with true/false in checksums —
+    # that falsely claimed 100% fidelity when status strings met bool columns.
+    from services.transform_engine import _STRICT_BOOL_FALSE, _STRICT_BOOL_TRUE
+
+    if lowered in _STRICT_BOOL_TRUE:
         return "1"
-    if lowered in {"false", "f", "no", "n", "off", "disabled", "inactive", "nope", "negative", "0"}:
+    if lowered in _STRICT_BOOL_FALSE:
         return "0"
     # Numeric fast path: only attempt Decimal normalization for strings that look
     # like numbers, avoiding the expensive exception path for names, emails, codes.
@@ -1160,11 +1198,63 @@ def normalize_cell(value: Any) -> str:
     ):
         dtm = _parse_datetime(text)
         if dtm:
-            return dtm
+            # Fold offsets/Z to UTC wall-clock; keep naive strings as wall-clock.
+            # Do not keep a trailing Z — that falsely fails NTZ sink readback
+            # against TIMESTAMPTZ sources that share the same UTC components.
+            return _checksum_datetime_utc_wall(dtm if isinstance(dtm, str) else str(dtm), original=text)
         dt = _parse_date(text)
         if dt:
-            return f"{dt}T00:00:00Z"
+            return f"{dt}T00:00:00"
     return text
+
+
+def _checksum_datetime_utc_wall(iso_text: str, *, original: str | None = None) -> str:
+    """Canonical UTC wall-clock for checksum equality (no Z marker).
+
+    Aware/offset/Z strings fold to UTC components. Naive wall-clock strings
+    stay as-is. That equates TIMESTAMPTZ→DATETIME UTC storage without equating
+    ``12:00+05:30`` (06:30 UTC) to naive ``12:00``.
+    """
+    text = (iso_text or "").strip()
+    if not text:
+        return ""
+    src = (original or text).strip()
+    aware_or_epoch = bool(
+        src.endswith(("Z", "z"))
+        or re.search(r"[+-]\d{2}:?\d{2}\s*$", src)
+    )
+    try:
+        from services.transform_engine import _EPOCH_MS_RE, _EPOCH_S_RE
+
+        aware_or_epoch = aware_or_epoch or bool(
+            _EPOCH_MS_RE.match(src) or _EPOCH_S_RE.match(src)
+        )
+    except Exception:
+        pass
+    try:
+        iso = text[:-1] + "+00:00" if text.endswith("Z") else text
+        obj = _datetime.fromisoformat(iso)
+        if obj.tzinfo is not None or aware_or_epoch:
+            if obj.tzinfo is None:
+                obj = obj.replace(tzinfo=timezone.utc)
+            else:
+                obj = obj.astimezone(timezone.utc)
+            obj = obj.replace(tzinfo=None)
+        if obj.microsecond:
+            return obj.strftime("%Y-%m-%dT%H:%M:%S.%f").rstrip("0").rstrip(".")
+        return obj.strftime("%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        # Fall back: strip invented trailing Z from transform parser.
+        if text.endswith("Z") and not aware_or_epoch:
+            return text[:-1]
+        if text.endswith("Z"):
+            return text[:-1]  # still wall-clock form for checksum
+        return text
+
+
+def _checksum_datetime_utc_z(iso_text: str) -> str:
+    """Backward-compatible alias — checksums use wall-clock UTC, not Z."""
+    return _checksum_datetime_utc_wall(iso_text)
 
 
 def _canonicalize_number(value: Any) -> str | None:
@@ -1208,9 +1298,65 @@ def build_reconciliation_proof(
             "sample_compare": {"passed": True, "compared": 0, "mismatches": []},
         }
 
-    key_col = primary_key or "id"
+    key_col = primary_key
+    key_provenance = "explicit" if primary_key else "missing"
+    if not key_col:
+        # Do not invent "id" — positional / guessed identity produces false
+        # high row-fidelity scores (Airbyte-class honesty gap).
+        return {
+            "passed": False,
+            "matched_key_count": 0,
+            "missing_key_count": len(source_records),
+            "extra_key_count": 0,
+            "row_fidelity_score": 0.0,
+            "sample_compare": {
+                "passed": False,
+                "compared": 0,
+                "mismatches": [],
+                "alignment": "unproven_identity",
+            },
+            "identity": {
+                "column": None,
+                "proven": False,
+                "reason": "primary_key required for key-aligned fidelity proof",
+            },
+            "verification_mode": "unproven_identity",
+        }
+
     source_keys = {normalize_cell(row.get(key_col)) for row in source_records if row.get(key_col) is not None}
     target_keys = {normalize_cell(row.get(key_col)) for row in target_records if row.get(key_col) is not None}
+    # Null / blank keys cannot prove uniqueness — fail closed on fidelity claims.
+    source_null_keys = sum(1 for row in source_records if row.get(key_col) is None or normalize_cell(row.get(key_col)) == "")
+    target_null_keys = sum(1 for row in target_records if row.get(key_col) is None or normalize_cell(row.get(key_col)) == "")
+    if source_null_keys or target_null_keys or len(source_keys) < max(1, len(source_records) - source_null_keys):
+        # Duplicate or null identity → positional comparison only, never high confidence.
+        sample_compare = sample_compare_rows(
+            source_records,
+            target_records,
+            mappings,
+            sample_size=sample_size,
+            sort_key=None,
+        )
+        sample_compare = {
+            **sample_compare,
+            "alignment": "positional_only",
+            "identity_warning": "weak or non-unique primary key — fidelity is sample/positional only",
+        }
+        return {
+            "passed": False,
+            "matched_key_count": 0,
+            "missing_key_count": len(source_records),
+            "extra_key_count": 0,
+            "row_fidelity_score": 0.0,
+            "sample_compare": sample_compare,
+            "identity": {
+                "column": key_col,
+                "proven": False,
+                "reason": "null or duplicate identity values — refuse key-aligned proof",
+            },
+            "verification_mode": "positional_only",
+        }
+
     matched_keys = source_keys & target_keys
     missing_keys = source_keys - target_keys
     extra_keys = target_keys - source_keys
@@ -1220,6 +1366,7 @@ def build_reconciliation_proof(
         target_records,
         mappings,
         sample_size=sample_size,
+        sort_key=key_col,
     )
 
     matched_key_count = len(matched_keys)
@@ -1245,6 +1392,8 @@ def build_reconciliation_proof(
         "extra_key_count": extra_key_count,
         "row_fidelity_score": row_fidelity_score,
         "sample_compare": sample_compare,
+        "identity": {"column": key_col, "proven": True, "provenance": key_provenance},
+        "verification_mode": "key_aligned",
     }
 
 
@@ -1273,6 +1422,17 @@ def sample_compare_rows(
         return None
 
     target_dicts = [d for d in (_as_dict(t) for t in target_rows) if d is not None]
+
+    # sort_key is a *target* column (e.g. id). Source rows may still use the
+    # pre-map name (rec_id → id) — resolve via mappings so key alignment works.
+    source_sort_key = sort_key
+    if sort_key and mappings:
+        sk = sort_key.lower()
+        for m in mappings:
+            if str(m.get("target") or "").lower() == sk and m.get("source"):
+                source_sort_key = str(m["source"])
+                break
+
     target_by_key: dict[str, dict[str, Any]] = {}
     if sort_key:
         for d in target_dicts:
@@ -1290,13 +1450,18 @@ def sample_compare_rows(
             converted = raw
         return normalize_cell(converted)
 
-    def _row_key(rec: Any) -> Any:
+    def _row_key(rec: Any, *, source_side: bool = False) -> Any:
         if isinstance(rec, dict):
-            val = rec.get(sort_key) if sort_key else None
+            key = source_sort_key if source_side else sort_key
+            val = rec.get(key) if key else None
+            if val is None and source_side and sort_key and sort_key != source_sort_key:
+                val = rec.get(sort_key)
             return val or (rec.get(target_columns[0]) if target_columns else None)
         return rec
 
-    source_sorted = sorted(source_records, key=lambda r: _row_key(r) or 0)[:sample_size]
+    source_sorted = sorted(
+        source_records, key=lambda r: _row_key(r, source_side=True) or 0
+    )[:sample_size]
 
     mismatches: list[dict[str, str]] = []
     compared = 0
@@ -1304,7 +1469,9 @@ def sample_compare_rows(
 
     for idx, src in enumerate(source_sorted):
         if sort_key and target_by_key:
-            key = normalize_cell(src.get(sort_key))
+            key = normalize_cell(src.get(source_sort_key) if source_sort_key else None)
+            if not key and sort_key:
+                key = normalize_cell(src.get(sort_key))
             tgt = target_by_key.get(key) if key else None
         else:
             tgt = target_fallback[idx] if idx < len(target_fallback) else None
@@ -1351,8 +1518,14 @@ def read_target_sample(
     columns: list[str] | None = None,
     limit: int = 50,
     sort_key: str | None = None,
+    key_values: list[Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Read a small ordered sample from destination for value reconciliation."""
+    """Read a small ordered sample from destination for value reconciliation.
+
+    When ``key_values`` is provided with ``sort_key``, prefer a keyed ``IN (...)``
+    read so append/upsert Gate-8 can prove fidelity against pre-existing rows
+    (ORDER BY … LIMIT alone often misses the batch keys in a large table).
+    """
     from connectors.sql_identifiers import (
         quote_column_list,
         quote_sql_identifier,
@@ -1361,6 +1534,13 @@ def read_target_sample(
     )
 
     cols = columns or ["*"]
+    keys = [k for k in (key_values or []) if k is not None and k != ""][: max(1, int(limit or 50))]
+
+    def _ssl_flag(default: bool = False) -> bool:
+        # Match list/probe defaults — ssl=True here previously emptied samples on
+        # local / non-TLS hosts while verify_target still counted rows.
+        return bool(dest.get("ssl", default))
+
     try:
         if db_type == "postgresql":
             from connectors.postgresql_conn import get_connection
@@ -1374,24 +1554,46 @@ def read_target_sample(
                 if sort_key
                 else "1"
             )
-            conn = get_connection(
-                host=dest.get("host", ""),
-                port=dest.get("port", 5432),
-                database=dest.get("database", ""),
-                username=dest.get("username", ""),
-                password=dest.get("password", ""),
-                connection_string=dest.get("connection_string", ""),
-                ssl=dest.get("ssl", True),
-            )
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"SELECT {col_sql} FROM {table_ref} ORDER BY {order_sql} LIMIT %s",
-                    (limit,),
-                )
-                names = [d[0] for d in cur.description]
-                rows = cur.fetchall()
-            conn.close()
-            return [dict(zip(names, row)) for row in rows]
+            ssl_flag = _ssl_flag(False)
+            last_exc: Exception | None = None
+            for attempt_ssl in (ssl_flag, not ssl_flag):
+                try:
+                    conn = get_connection(
+                        host=dest.get("host", ""),
+                        port=dest.get("port", 5432),
+                        database=dest.get("database", ""),
+                        username=dest.get("username", ""),
+                        password=dest.get("password", ""),
+                        connection_string=dest.get("connection_string", ""),
+                        ssl=attempt_ssl,
+                    )
+                    with conn.cursor() as cur:
+                        if keys and sort_key:
+                            key_col = quote_sql_identifier(
+                                require_safe_identifier(sort_key, preserve_case=True)
+                            )
+                            placeholders = ",".join(["%s"] * len(keys))
+                            cur.execute(
+                                f"SELECT {col_sql} FROM {table_ref} "
+                                f"WHERE {key_col} IN ({placeholders}) "
+                                f"ORDER BY {order_sql} LIMIT %s",
+                                (*keys, int(limit)),
+                            )
+                        else:
+                            cur.execute(
+                                f"SELECT {col_sql} FROM {table_ref} ORDER BY {order_sql} LIMIT %s",
+                                (limit,),
+                            )
+                        names = [d[0] for d in cur.description]
+                        rows = cur.fetchall()
+                    conn.close()
+                    return [dict(zip(names, row)) for row in rows]
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+            if last_exc:
+                return []
+            return []
 
         if db_type == "mysql":
             from connectors.mysql_conn import get_connection
@@ -1416,10 +1618,22 @@ def read_target_sample(
                 ssl=dest.get("ssl", False),
             )
             with conn.cursor() as cur:
-                cur.execute(
-                    f"SELECT {mysql_col_sql} FROM {table_ref} ORDER BY {mysql_order} LIMIT %s",
-                    (limit,),
-                )
+                if keys and sort_key:
+                    key_col = quote_sql_identifier(
+                        require_safe_identifier(sort_key, preserve_case=True), "`"
+                    )
+                    placeholders = ",".join(["%s"] * len(keys))
+                    cur.execute(
+                        f"SELECT {mysql_col_sql} FROM {table_ref} "
+                        f"WHERE {key_col} IN ({placeholders}) "
+                        f"ORDER BY {mysql_order} LIMIT %s",
+                        (*keys, int(limit)),
+                    )
+                else:
+                    cur.execute(
+                        f"SELECT {mysql_col_sql} FROM {table_ref} ORDER BY {mysql_order} LIMIT %s",
+                        (limit,),
+                    )
                 names = [d[0] for d in cur.description]
                 rows = cur.fetchall()
             conn.close()
@@ -1441,10 +1655,20 @@ def read_target_sample(
                 else "1"
             )
             conn = duckdb.connect(str(path))
-            rows = conn.execute(
-                f"SELECT {duckdb_col_sql} FROM {table_ref} ORDER BY {duckdb_order} LIMIT ?",
-                (int(limit),),
-            ).fetchall()
+            if keys and sort_key:
+                key_col = quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
+                placeholders = ",".join(["?"] * len(keys))
+                rows = conn.execute(
+                    f"SELECT {duckdb_col_sql} FROM {table_ref} "
+                    f"WHERE {key_col} IN ({placeholders}) "
+                    f"ORDER BY {duckdb_order} LIMIT ?",
+                    [*keys, int(limit)],
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"SELECT {duckdb_col_sql} FROM {table_ref} ORDER BY {duckdb_order} LIMIT ?",
+                    (int(limit),),
+                ).fetchall()
             names = [d[0] for d in conn.description]
             conn.close()
             return [dict(zip(names, row)) for row in rows]

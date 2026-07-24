@@ -150,7 +150,10 @@ def test_postgres_lsn_guard_sql_safe_for_gtid_stamps() -> None:
 
     sql = postgres_lsn_update_guard_sql("orders")
     assert "::pg_lsn" in sql
-    assert "IS DISTINCT FROM" in sql
+    # Opaque / GTID stamps use strict text '>' — never IS DISTINCT FROM
+    # (which would let an older redelivery win).
+    assert "IS DISTINCT FROM" not in sql
+    assert ">" in sql
     assert "~" in sql
 
 

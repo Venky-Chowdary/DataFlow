@@ -52,7 +52,7 @@ export function buildStreamContracts(input: BuildStreamContractsInput & {
       selected: true,
       sync_mode: input.syncMode,
       cursor_field: input.requiresCursor ? fields.cursorField : "",
-      primary_key: input.requiresPrimaryKey ? fields.primaryKeyField : "",
+      primary_key: fields.primaryKeyField || "",
       schema_policy: input.schemaPolicy,
       field_count: input.fieldCount,
       validation_mode: input.validationMode,

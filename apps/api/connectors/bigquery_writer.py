@@ -92,6 +92,7 @@ def write_mapped_rows(
     service_account: str = "",
     write_mode: str = "insert",
     conflict_columns: list[str] | None = None,
+    create_table: bool = True,
     **_kwargs: Any,
 ) -> WriteResult:
     del username, password, ssl, warehouse, _kwargs
@@ -145,7 +146,8 @@ def write_mapped_rows(
         mappings,
         column_types,
         sample_values_by_source=batch_samples,
-        table_exists=False,
+        # Deny-create must match existing DDL; create-new keeps empty dest types.
+        table_exists=False if create_table else True,
     )
     if not target_cols:
         return WriteResult(
@@ -173,11 +175,28 @@ def write_mapped_rows(
             bigquery.SchemaField(col, bq_type(t)) for col, t in zip(target_cols, logical_types)
         ]
         dataset_ref = f"{project_id}.{dataset_id}"
-        existing_datasets = {ds.dataset_id for ds in client.list_datasets()}
-        if dataset_id not in existing_datasets:
-            client.create_dataset(bigquery.Dataset(dataset_ref))
-        table = bigquery.Table(table_id, schema=schema_fields)
-        client.create_table(table, exists_ok=True)
+        if not create_table:
+            try:
+                client.get_table(table_id)
+            except Exception as exc:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=dataset_id,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"BigQuery table {table_id!r} is missing or inaccessible "
+                        f"and create_table is disabled: {exc}"
+                    ),
+                )
+        else:
+            existing_datasets = {ds.dataset_id for ds in client.list_datasets()}
+            if dataset_id not in existing_datasets:
+                client.create_dataset(bigquery.Dataset(dataset_ref))
+            table = bigquery.Table(table_id, schema=schema_fields)
+            client.create_table(table, exists_ok=True)
 
         if backfill_new_fields:
             table = client.get_table(table_id)

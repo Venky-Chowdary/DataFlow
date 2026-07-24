@@ -252,7 +252,7 @@ def test_encoding_blocks_strict_mode():
 
 
 def test_encoding_blocks_balanced_mode_too():
-    """Control chars break warehouses — Validate must block in every mode."""
+    """Balanced surfaces encoding as warnings + strip_controls — not a hard block."""
     zwsp = "hello\u200bworld"
     report = run_integrity_audit(
         source_columns=["title"],
@@ -262,11 +262,11 @@ def test_encoding_blocks_balanced_mode_too():
     )
     enc = next((c for c in report["checks"] if c["check"] == "encoding_anomalies"), None)
     assert enc is not None
-    assert enc["blocks_transfer"] is True
-    assert enc["passed"] is False
-    assert any("format-control" in str(i).lower() for i in enc["issues"])
-    assert report["blocks_transfer"] is True
-
+    assert enc["blocks_transfer"] is False
+    assert enc["passed"] is True
+    assert any("strip_controls" in w for w in (enc.get("warnings") or []))
+    assert any("strip_controls" in w for w in (report.get("warnings") or []))
+    assert enc.get("encoding_findings")
 
 def test_strip_controls_clears_encoding_block():
     zwsp = "hello\u200bworld"

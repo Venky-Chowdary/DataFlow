@@ -47,11 +47,13 @@ def _n1ql(url: str, username: str, password: str, statement: str, timeout: float
 
 
 def _extract_rows(body: Any) -> tuple[list[str], list[list[str]]]:
+    """Union keys across the page — absent ≠ empty string (Airbyte-class trap)."""
+    from services.value_serializer import DF_MISSING_SENTINEL, SQL_NULL_SENTINEL
+
     results = (body or {}).get("results") or []
     if not results:
         return [], []
-    rows: list[list[str]] = []
-    headers: list[str] = []
+    records: list[dict[str, Any]] = []
     for raw in results:
         if isinstance(raw, dict) and len(raw) == 1:
             inner = list(raw.values())[0]
@@ -61,9 +63,30 @@ def _extract_rows(body: Any) -> tuple[list[str], list[list[str]]]:
                 record = {"value": inner}
         else:
             record = raw if isinstance(raw, dict) else {"value": raw}
-        if not headers and record:
-            headers = sorted(record.keys())
-        rows.append([cell_to_string(record.get(h, "")) for h in headers])
+        if isinstance(record, dict):
+            records.append(record)
+
+    headers: list[str] = []
+    seen: set[str] = set()
+    for record in records:
+        for key in record.keys():
+            name = str(key)
+            if name not in seen:
+                seen.add(name)
+                headers.append(name)
+    headers = sorted(headers)
+
+    rows: list[list[str]] = []
+    for record in records:
+        row: list[str] = []
+        for h in headers:
+            if h not in record:
+                row.append(DF_MISSING_SENTINEL)
+            elif record[h] is None:
+                row.append(SQL_NULL_SENTINEL)
+            else:
+                row.append(cell_to_string(record[h]))
+        rows.append(row)
     return headers, rows
 
 
@@ -112,9 +135,16 @@ def read_object(
     username = merged.get("username") or ""
     password = merged.get("password") or ""
     quoted = bucket.replace("`", "\\`")
-    statement = f"SELECT * FROM `{quoted}` LIMIT {limit} OFFSET {offset}"
+    # ORDER BY META().id makes OFFSET pagination deterministic — without it,
+    # pages can silently overlap or skip documents even with a static bucket.
+    statement = (
+        f"SELECT * FROM `{quoted}` "
+        f"ORDER BY META().id "
+        f"LIMIT {int(limit)} OFFSET {int(offset)}"
+    )
     body = _n1ql(url, username, password, statement)
     headers, rows = _extract_rows(body)
-    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=len(rows))
+    # A N1QL page length is not collection cardinality — never stop after page one.
+    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=None)
 
 

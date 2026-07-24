@@ -131,11 +131,22 @@ def read_table_batch(
                 if columns
                 else "*"
             )
+            # Stable LIMIT/OFFSET requires ORDER BY (PK-or-first-column pattern).
+            order_cols = list(columns or [])
+            if not order_cols:
+                cur.execute(f"SELECT * FROM {table_ref} LIMIT 0")
+                order_cols = [desc[0] for desc in (cur.description or [])]
+            if not order_cols:
+                raise RuntimeError("Snowflake table has no columns for stable pagination")
+            order_sql = quote_column_list(
+                [require_safe_identifier(str(order_cols[0]), preserve_case=True)]
+            )
             cur.execute(
-                f"SELECT {col_sql} FROM {table_ref} LIMIT {int(limit)} OFFSET {int(offset)}"
+                f"SELECT {col_sql} FROM {table_ref} "
+                f"ORDER BY {order_sql} LIMIT {int(limit)} OFFSET {int(offset)}"
             )
             headers = [desc[0] for desc in cur.description]
-            rows = [[cell_to_string(v) for v in row] for row in cur.fetchall()]
+            rows = [[cell_to_string(v, preserve_sql_null=True) for v in row] for row in cur.fetchall()]
         return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     finally:
         conn.close()
@@ -157,8 +168,13 @@ def read_table_cursor_batch(
     columns: list[str] | None = None,
     limit: int = 500,
     role: str = "",
+    cursor_primary_key: str | None = None,
 ) -> ReadBatch:
-    """Read rows where cursor_column > watermark — incremental sync."""
+    """Read rows where cursor_column > watermark — incremental sync.
+
+    Optional ``cursor_primary_key`` enables lexicographic ``(cursor, pk)`` so
+    rows sharing a timestamp watermark are not skipped forever.
+    """
     del port
     account = normalize_account(host)
     schema = _snowflake_schema(schema)
@@ -182,20 +198,47 @@ def read_table_cursor_batch(
                 else "*"
             )
             cursor_q = quote_sql_identifier(require_safe_identifier(cursor_column, preserve_case=True))
+            pk = (cursor_primary_key or "").strip()
+            pk_q = (
+                quote_sql_identifier(require_safe_identifier(pk, preserve_case=True))
+                if pk and pk != cursor_column
+                else ""
+            )
             if cursor_after:
-                cur.execute(
-                    f"SELECT {col_sql} FROM {table_ref} "
-                    f"WHERE {cursor_q} > %s ORDER BY {cursor_q} LIMIT %s",
-                    (cursor_after, limit),
-                )
+                if pk_q:
+                    if "|" in str(cursor_after):
+                        cur_val, pk_val = str(cursor_after).split("|", 1)
+                    else:
+                        cur_val, pk_val = cursor_after, ""
+                    cur.execute(
+                        f"SELECT {col_sql} FROM {table_ref} "
+                        f"WHERE ({cursor_q}, {pk_q}) > (%s, %s) "
+                        f"ORDER BY {cursor_q}, {pk_q} LIMIT %s",
+                        (cur_val, pk_val, limit),
+                    )
+                else:
+                    cur.execute(
+                        f"SELECT {col_sql} FROM {table_ref} "
+                        f"WHERE {cursor_q} > %s ORDER BY {cursor_q} LIMIT %s",
+                        (cursor_after, limit),
+                    )
             else:
-                cur.execute(
-                    f"SELECT {col_sql} FROM {table_ref} "
-                    f"ORDER BY {cursor_q} LIMIT %s",
-                    (limit,),
-                )
+                if pk_q:
+                    cur.execute(
+                        f"SELECT {col_sql} FROM {table_ref} "
+                        f"ORDER BY {cursor_q}, {pk_q} LIMIT %s",
+                        (limit,),
+                    )
+                else:
+                    cur.execute(
+                        f"SELECT {col_sql} FROM {table_ref} "
+                        f"ORDER BY {cursor_q} LIMIT %s",
+                        (limit,),
+                    )
             headers = [desc[0] for desc in cur.description]
-            rows = [[cell_to_string(v) for v in row] for row in cur.fetchall()]
-        return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=len(rows))
+            rows = [[cell_to_string(v, preserve_sql_null=True) for v in row] for row in cur.fetchall()]
+        # Keyset pages are not a cardinality bound — page length must never
+        # trip stream early-stop (fetch_offset >= total_rows).
+        return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=None)
     finally:
         conn.close()

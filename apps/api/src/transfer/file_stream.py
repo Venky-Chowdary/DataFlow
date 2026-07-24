@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .models import EndpointConfig
-from .type_mapper import ddl_type, normalize_inferred
+from .type_mapper import ddl_carrier_type, ddl_type, normalize_inferred
 
 try:
     from services.checkpoint_service import Checkpoint, CheckpointService
@@ -65,10 +65,16 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
 from .adapters import records_to_matrix, resolve_connector_config, resolve_dest_table
 from .stream import _write_batch
 
-STREAMABLE_TYPES = {"csv", "tsv", "jsonl", "ndjson", "json", "excel", "parquet"}
+STREAMABLE_TYPES = {"csv", "tsv", "jsonl", "ndjson", "json", "excel", "parquet", "avro", "orc"}
 STREAM_THRESHOLD = int(os.getenv("DATAFLOW_STREAM_FILE_ROWS", "1"))
 FILE_SPILL_THRESHOLD = int(os.getenv("DATAFLOW_FILE_SPILL_THRESHOLD", str(50 * 1024 * 1024)))
 SPILL_DIR = os.getenv("DATAFLOW_SPILL_DIR") or None
+
+
+_JSONL_SCALAR_ERROR = (
+    "JSONL record must be a JSON object; scalar records require an explicit "
+    "normalization step to avoid silent data loss."
+)
 
 
 def _is_path(value: Any) -> bool:
@@ -155,7 +161,7 @@ def _text_reader(content: bytes | str | os.PathLike, encoding: str | None = None
     try:
         if encoding is None:
             encoding = detect_encoding(_first_bytes(content))
-        text = io.TextIOWrapper(binary, encoding=encoding, errors="replace", newline=newline)
+        text = io.TextIOWrapper(binary, encoding=encoding, errors="strict", newline=newline)
         yield text
     finally:
         if text is not None:
@@ -226,6 +232,14 @@ def _excel_batches(content: bytes | str | os.PathLike, chunk_size: int):
         headers = [str(c).strip() if c is not None else f"col_{i}" for i, c in enumerate(first)]
         batch: list[dict] = []
         for row in row_iter:
+            # Wider data rows than the header silently lost trailing cells —
+            # refuse rather than slice away columns (JSONL-style honesty).
+            if len(row) > len(headers):
+                raise ValueError(
+                    f"Excel row has {len(row)} cells but header has {len(headers)} "
+                    "columns; refuse silent column drop — widen the header row "
+                    "or fix the sheet"
+                )
             record = {
                 headers[i]: ("" if c is None else str(c).strip())
                 for i, c in enumerate(row[: len(headers)])
@@ -334,7 +348,8 @@ def peek_file_source(
 
     if file_type in ("jsonl", "ndjson"):
         sample_objs: list[dict] = []
-        columns: set[str] = set()
+        # Ordered union across the *entire* file — keys after sample window must not vanish.
+        columns: dict[str, None] = {}
         total = 0
         with _text_reader(content) as reader_file:
             for line in reader_file:
@@ -342,14 +357,21 @@ def peek_file_source(
                 if not line:
                     continue
                 total += 1
-                if len(sample_objs) < 100:
+                try:
                     obj = json.loads(line)
-                    if isinstance(obj, dict):
-                        sample_objs.append(obj)
-                        columns.update(obj.keys())
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"Invalid JSONL on line {total}: {exc}") from exc
+                if not isinstance(obj, dict):
+                    raise ValueError(_JSONL_SCALAR_ERROR)
+                for k in obj.keys():
+                    name = str(k).strip()
+                    if name and name not in columns:
+                        columns[name] = None
+                if len(sample_objs) < 100:
+                    sample_objs.append(obj)
         if total == 0:
             raise ValueError("JSONL file is empty")
-        headers = sorted(columns)
+        headers = list(columns.keys())
         schema = FileParser.infer_schema(sample_objs)
         return headers, schema, total, sample_objs[:100]
 
@@ -364,23 +386,65 @@ def peek_file_source(
     if file_type == "parquet":
         import pyarrow.parquet as pq
 
+        from services.arrow_schema import schema_from_arrow
+
         pf = pq.ParquetFile(content) if _is_path(content) else pq.ParquetFile(io.BytesIO(content))
         try:
             total = pf.metadata.num_rows
             headers = [str(c) for c in pf.schema_arrow.names]
+            # Prefer writer schema over pandas sample inference (decimals, TZ, nested).
+            schema = schema_from_arrow(pf.schema_arrow)
+            # to_pylist keeps nested list/struct fidelity — never pandas (ndarray compare lies).
             sample: list[dict] = []
             for batch in pf.iter_batches(batch_size=100):
-                batch_df = batch.to_pandas()
-                for _, row in batch_df.iterrows():
-                    rec = {str(k): (row[k].item() if hasattr(row[k], "item") else (None if row[k] != row[k] else row[k])) for k in batch_df.columns}
-                    sample.append(rec)
-                    if len(sample) >= 100:
-                        break
+                sample.extend(batch.to_pylist())
                 if len(sample) >= 100:
                     break
+            sample = sample[:100]
         finally:
             pf.close()
-        schema = FileParser.infer_schema(sample)
+        return headers, schema, total, sample
+
+    if file_type == "orc":
+        import pyarrow.orc as orc
+
+        from services.arrow_schema import schema_from_arrow
+
+        if _is_path(content):
+            table = orc.ORCFile(content).read()
+        else:
+            table = orc.read_table(io.BytesIO(content))
+        headers = [str(name) for name in table.column_names]
+        schema = schema_from_arrow(table.schema)
+        total = int(table.num_rows)
+        sample = table.slice(0, min(100, total)).to_pylist()
+        return headers, schema, total, sample
+
+    if file_type == "avro":
+        import fastavro
+
+        from services.avro_schema import schema_map_from_avro
+
+        opener = open(content, "rb") if _is_path(content) else io.BytesIO(content)  # type: ignore[arg-type]
+        try:
+            reader = fastavro.reader(opener)
+            writer_schema = getattr(reader, "writer_schema", None) or getattr(reader, "schema", None)
+            schema = schema_map_from_avro(writer_schema) if writer_schema else {}
+            sample: list[dict] = []
+            total = 0
+            for record in reader:
+                total += 1
+                if not isinstance(record, dict):
+                    record = {"value": record}
+                if len(sample) < 100:
+                    sample.append(record)
+                    for k in record.keys():
+                        schema.setdefault(str(k), "TEXT")
+            headers = list(schema.keys()) if schema else (
+                sorted(sample[0].keys()) if sample else []
+            )
+        finally:
+            opener.close()
         return headers, schema, total, sample
 
     if file_type == "json":
@@ -402,9 +466,9 @@ def peek_file_source(
                     if not isinstance(obj, dict):
                         continue
                     total += 1
+                    columns.update(obj.keys())
                     if len(sample_objs) < 100:
                         sample_objs.append(obj)
-                        columns.update(obj.keys())
         else:
             raw = content if isinstance(content, (bytes, bytearray)) else None
             if raw is None:
@@ -413,8 +477,9 @@ def peek_file_source(
             records = load_json_records(bytes(raw))
             total = len(records)
             sample_objs = records[:100]
-            for obj in sample_objs:
-                columns.update(obj.keys())
+            for obj in records:
+                if isinstance(obj, dict):
+                    columns.update(obj.keys())
         if total == 0:
             raise ValueError(
                 "JSON file has no object rows. Use an array of objects "
@@ -453,13 +518,18 @@ def _iter_jsonl_batches(
 ):
     with _text_reader(content) as reader_file:
         batch: list[dict] = []
+        line_no = 0
         for line in reader_file:
             line = line.strip()
             if not line:
                 continue
-            obj = json.loads(line)
+            line_no += 1
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSONL on line {line_no}: {exc}") from exc
             if not isinstance(obj, dict):
-                continue
+                raise ValueError(_JSONL_SCALAR_ERROR)
             batch.append(obj)
             if len(batch) >= chunk_size:
                 yield batch
@@ -504,20 +574,59 @@ def _batch_iterator_for_type(
             batch: list[dict] = []
             try:
                 for record_batch in pf.iter_batches(batch_size=batch_size):
-                    chunk_df = record_batch.to_pandas()
-                    for _, row in chunk_df.iterrows():
-                        rec = {str(k): (None if row[k] != row[k] else (row[k].item() if hasattr(row[k], "item") else row[k])) for k in chunk_df.columns}
-                        batch.append(rec)
+                    # Arrow → pylist preserves nested types; pandas path fails on arrays.
+                    for record in record_batch.to_pylist():
+                        batch.append(record)
                         if len(batch) >= batch_size:
                             yield batch
                             batch = []
-                    if batch:
-                        yield batch
-                        batch = []
+                if batch:
+                    yield batch
             finally:
                 pf.close()
 
         return _parquet_batches()
+    if file_type == "orc":
+        import pyarrow.orc as orc
+
+        if _is_path(content):
+            table = orc.ORCFile(content).read()
+        else:
+            table = orc.read_table(io.BytesIO(content))
+
+        def _orc_batches():
+            batch: list[dict] = []
+            for start in range(0, table.num_rows, batch_size):
+                chunk = table.slice(start, min(batch_size, table.num_rows - start)).to_pylist()
+                batch.extend(chunk)
+                while len(batch) >= batch_size:
+                    yield batch[:batch_size]
+                    batch = batch[batch_size:]
+            if batch:
+                yield batch
+
+        return _orc_batches()
+    if file_type == "avro":
+        import fastavro
+
+        def _avro_batches():
+            opener = open(content, "rb") if _is_path(content) else io.BytesIO(content)  # type: ignore[arg-type]
+            try:
+                reader = fastavro.reader(opener)
+                batch: list[dict] = []
+                for record in reader:
+                    if not isinstance(record, dict):
+                        record = {"value": record}
+                    batch.append(record)
+                    if len(batch) >= batch_size:
+                        yield batch
+                        batch = []
+                if batch:
+                    yield batch
+            finally:
+                opener.close()
+
+        return _avro_batches()
     raise ValueError(f"File type '{file_type}' does not support streaming ingest")
 
 
@@ -605,9 +714,9 @@ def stream_file_to_database(
         )
     # Object-store writers (S3/GCS/ADLS) emit a single destination object per call.
     # Writing multiple batches would overwrite the same key and silently lose data,
-    # so force a single batch for those destinations.
-    if dest_type in ("s3", "gcs", "adls") and total_rows:
-        batch_size = max(1, total_rows)
+    # so force a single batch — never gate on truthy total_rows (None fails open).
+    if dest_type in ("s3", "gcs", "adls"):
+        batch_size = max(1, int(total_rows or 10_000_000))
     chunks = max(1, (total_rows + batch_size - 1) // batch_size)
     dest_table = resolve_dest_table(dest_type, destination, "import")
 
@@ -619,7 +728,7 @@ def stream_file_to_database(
 
     batch_iter = _batch_iterator_for_type(file_type, content, batch_size)
 
-    column_types = {c: normalize_inferred(schema.get(c, "string")).upper() for c in columns}
+    column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in columns}
     target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
 
     try:
@@ -647,6 +756,11 @@ def stream_file_to_database(
             map_source_to_target(col, mappings) for col in contract.primary_key_columns()
         ]
     write_mode = "upsert" if requires_upsert(effective_sync) and pk_target_cols else "insert"
+    if requires_upsert(effective_sync) and not pk_target_cols:
+        raise ValueError(
+            f"Sync mode `{effective_sync}` requires primary_key for upsert; "
+            "refuse silent insert fallback (set primary_key on the stream contract)"
+        )
 
     checkpoint_service = checkpoint_service or CheckpointService()
     checkpoint = checkpoint or Checkpoint(job_id=job_id or "")
@@ -737,6 +851,7 @@ def stream_file_to_database(
                 column_types=column_types,
                 mappings=mappings,
                 validation_mode=validation_mode,
+                dest_kind=dest_type,
             )
             if audit.issues:
                 local_warnings.extend(audit.issues[:10])

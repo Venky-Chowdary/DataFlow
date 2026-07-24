@@ -28,7 +28,10 @@ def _to_es_value(value: Any, source_type: str) -> Any:
     if value is None:
         return None
     upper = source_type.upper()
-    if upper in {"DECIMAL", "NUMERIC"}:
+    if upper in {"DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC"}:
+        # Keep as string — float64 would silently lose precision (no quarantine).
+        return str(value)
+    if upper in {"FLOAT", "DOUBLE", "FLOAT64", "REAL"}:
         try:
             return float(value)
         except (ValueError, TypeError):
@@ -41,6 +44,39 @@ def _to_es_value(value: Any, source_type: str) -> Any:
             return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=json_default)
         return value
     return value
+
+
+def _resolve_doc_id(
+    source: dict[str, Any],
+    *,
+    conflict_columns: list[str],
+    target_cols: list[str],
+) -> str | None:
+    """Deterministic document identity for idempotent upsert/retry.
+
+    Prefer explicit ``_id``, then configured conflict/PK columns (including
+    composite keys), then a single ``id`` field when present.
+    """
+    if "_id" in source and source.get("_id") is not None and str(source.get("_id")).strip() != "":
+        return str(source["_id"])
+    keys = [c for c in conflict_columns if c and c in source]
+    if not keys:
+        for alias in ("id", "ID", "Id", "pk", "PK"):
+            if alias in source and source.get(alias) is not None and str(source.get(alias)).strip() != "":
+                return str(source[alias])
+        for col in target_cols:
+            if col.lower() in {"id", "pk", "doc_id", "document_id"} and col in source:
+                val = source.get(col)
+                if val is not None and str(val).strip() != "":
+                    return str(val)
+        return None
+    parts: list[str] = []
+    for col in keys:
+        val = source.get(col)
+        if val is None or str(val).strip() == "":
+            return None
+        parts.append(str(val))
+    return "|".join(parts) if len(parts) > 1 else parts[0]
 
 
 def write_mapped_rows(
@@ -63,6 +99,8 @@ def write_mapped_rows(
     create_table: bool = True,
     error_policy: str | None = None,
     backfill_new_fields: bool = False,
+    conflict_columns: list[str] | None = None,
+    write_mode: str = "insert",
     **_kwargs: Any,
 ) -> WriteResult:
     del schema, backfill_new_fields
@@ -84,10 +122,42 @@ def write_mapped_rows(
         preserve_case=True,
         error_policy=policy,
     )
+    if errors and policy == "fail":
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=index,
+            target_schema=host or "localhost",
+            checksum="",
+            chunks_completed=0,
+            error=f"Transform errors: {'; '.join(errors[:3])}",
+            warnings=errors[:10],
+            rejected_rows=len({d.get("row") for d in rejected_details if d.get("row") is not None}),
+            rejected_details=rejected_details[:100],
+        )
+
+    conflict = [c for c in (conflict_columns or []) if c]
+    mode = (write_mode or "insert").lower()
+    requires_identity = mode in {"upsert", "update", "merge", "cdc", "incremental"}
 
     client = _client(cfg)
     try:
-        if create_table and not client.indices.exists(index=index):
+        index_exists = bool(client.indices.exists(index=index))
+        if not index_exists and not create_table:
+            # Clusters with action.auto_create_index would otherwise invent the index.
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=index,
+                target_schema=host or "localhost",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Elasticsearch index {index!r} is missing and "
+                    "create_table is disabled"
+                ),
+            )
+        if create_table and not index_exists:
             # Use one shard and zero replicas for predictable test/CI behavior
             # and to avoid blowing through small cluster shard limits.
             client.indices.create(
@@ -97,40 +167,122 @@ def write_mapped_rows(
 
         from elasticsearch.helpers import bulk
 
-        def gen_actions():
-            for row in mapped_rows:
-                source = {
-                    target_cols[i]: _to_es_value(value, logical_types[i])
-                    for i, value in enumerate(row)
-                }
-                doc_id = source.pop("_id", None)
-                action: dict[str, Any] = {"_index": index, "_source": source}
-                if doc_id is not None:
-                    action["_id"] = str(doc_id)
-                yield action
+        identity_missing = 0
+        actions: list[dict[str, Any]] = []
+        for row in mapped_rows:
+            source = {
+                target_cols[i]: _to_es_value(value, logical_types[i])
+                for i, value in enumerate(row)
+            }
+            doc_id = _resolve_doc_id(
+                source,
+                conflict_columns=conflict,
+                target_cols=target_cols,
+            )
+            source.pop("_id", None)
+            action: dict[str, Any] = {"_index": index, "_source": source}
+            if doc_id is not None:
+                action["_id"] = str(doc_id)
+                # Insert/append must not silently overwrite existing docs (index vs create).
+                if mode in {"insert", "append", "create"}:
+                    action["_op_type"] = "create"
+            elif requires_identity:
+                identity_missing += 1
+                continue
+            actions.append(action)
 
-        written, bulk_errors = bulk(client, gen_actions(), raise_on_error=False)
+        written, bulk_errors = bulk(client, actions, raise_on_error=False)
         try:
             client.indices.refresh(index=index)
         except Exception:
             pass
         if on_checkpoint:
             on_checkpoint(1, 1, written)
+
+        # Materialize bulk item failures into rejected_details so control-plane
+        # JSONL / dest DLQ see them — never return ok=True with silent drops.
+        bulk_details: list[dict[str, Any]] = []
+        for err in bulk_errors or []:
+            if not isinstance(err, dict):
+                bulk_details.append({
+                    "row": "",
+                    "column": "",
+                    "target": "",
+                    "value": "",
+                    "reason": str(err)[:500],
+                    "policy": policy,
+                })
+                continue
+            inner = next(iter(err.values()), {}) if err else {}
+            if not isinstance(inner, dict):
+                inner = {}
+            reason = inner.get("error") or err
+            if isinstance(reason, dict):
+                reason = reason.get("reason") or reason.get("type") or str(reason)
+            bulk_details.append({
+                "row": str(inner.get("_id") or ""),
+                "column": "",
+                "target": index,
+                "value": "",
+                "reason": f"elasticsearch bulk: {reason}"[:500],
+                "policy": policy,
+            })
+
+        if identity_missing:
+            bulk_details.append({
+                "row": "",
+                "column": ",".join(conflict) if conflict else "_id",
+                "target": index,
+                "value": "",
+                "reason": (
+                    f"elasticsearch upsert requires document identity "
+                    f"({identity_missing} row(s) skipped) — map a primary key "
+                    "to _id or configure conflict_columns"
+                )[:500],
+                "policy": policy,
+            })
+
+        all_rejected = list(rejected_details) + bulk_details
+        fail_closed = policy == "fail" and bool(bulk_details)
+        if requires_identity and identity_missing > 0 and written == 0:
+            fail_closed = True
+        err_msg = None
+        if fail_closed:
+            if identity_missing and written == 0:
+                err_msg = (
+                    f"elasticsearch upsert blocked: {identity_missing} row(s) "
+                    "lack document identity"
+                )
+            elif bulk_errors:
+                err_msg = f"elasticsearch bulk rejected {len(bulk_errors)} item(s)"
+            else:
+                err_msg = "elasticsearch write failed"
         return WriteResult(
-            ok=True,
+            ok=not fail_closed,
             rows_written=written,
             table_name=index,
             target_schema=host or "localhost",
-            checksum=row_checksum(mapped_rows, target_cols),
+            checksum=row_checksum(mapped_rows, target_cols) if not fail_closed else "",
             chunks_completed=1,
-            warnings=(errors + [str(e) for e in bulk_errors[:5]])[:10],
-            rejected_rows=len({d["row"] for d in rejected_details}) + len(bulk_errors or []),
-            rejected_details=rejected_details[:100],
+            error=err_msg,
+            warnings=(errors + [str(e) for e in (bulk_errors or [])[:5]])[:10],
+            rejected_rows=len({str(d.get("row")) for d in all_rejected if d.get("row") not in (None, "")})
+            + (1 if identity_missing else 0)
+            + len(bulk_errors or []),
+            rejected_details=all_rejected[:100],
         )
     except Exception as exc:
         return WriteResult(
-            ok=False, rows_written=0, table_name=index, target_schema=host or "",
-            checksum="", chunks_completed=0, error=str(exc),
+            ok=False,
+            rows_written=0,
+            table_name=index,
+            target_schema=host or "",
+            checksum="",
+            chunks_completed=0,
+            error=str(exc),
         )
     finally:
-        client.close()
+        try:
+            client.close()
+        except Exception:
+            pass

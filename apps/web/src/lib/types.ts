@@ -507,6 +507,15 @@ export interface PreflightResult {
   run_id?: string;
   gates: PreflightGate[];
   blockers: { id: string; message: string; details?: Record<string, unknown>; guidance?: { gate?: string; title?: string; category?: string; why?: string; fix?: string; examples?: string[] } }[];
+  /** Top-level privilege probe from destination inspect (also on g2_destination.details). */
+  privilege_probe?: {
+    status?: string;
+    method?: string;
+    engine?: string;
+    detail?: string;
+    can_write?: boolean | null;
+    can_create_table?: boolean | null;
+  };
   proof_bundle?: PreflightProofBundle;
   coercion_report?: CoercionReport;
   load_history_report?: LoadHistoryReport;
@@ -516,12 +525,14 @@ export interface PreflightResult {
 export type ValidationActionKind =
   | "change_target_type"
   | "add_transform"
+  | "map_column"
   | "review_mappings"
   | "rerun_mapping"
   | "check_connection"
   | "normalize_control_chars"
   | "quarantine_and_rerun"
-  | "open_bad_data_fix";
+  | "open_bad_data_fix"
+  | "fix_source_keys";
 
 export interface ValidationSuggestedAction {
   kind: ValidationActionKind | string;

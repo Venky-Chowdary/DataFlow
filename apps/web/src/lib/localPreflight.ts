@@ -4,11 +4,11 @@ import type { PreflightGate, PreflightResult } from "./types";
 const GATE_IDS = [
   "g1_source",
   "g2_destination",
-  "g3_schema",
-  "g4_mapping",
-  "g5_transform",
+  "g3_schema_contract",
+  "g4_mapping_confidence",
+  "g5_dry_run",
   "g9_data_integrity",
-  "g6_ddl",
+  "g6_target_ddl",
   "g7_capacity",
   "g8_reconciliation",
   "g9_sync_contract",
@@ -94,19 +94,19 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
   const mappedSources = new Set(input.mappings.map((m) => m.source));
   const unmapped = input.columns.filter((c) => !mappedSources.has(c));
   if (unmapped.length > 0) {
-    block("g3_schema", `${unmapped.length} source column(s) have no mapping.`);
+    block("g3_schema_contract", `${unmapped.length} source column(s) have no mapping.`);
   } else {
-    pass("g3_schema", "All source columns mapped to destination fields.");
+    pass("g3_schema_contract", "All source columns mapped to destination fields.");
   }
 
   const lowConfidence = input.mappings.filter((m) => m.confidence < threshold);
   if (lowConfidence.length > 0) {
     block(
-      "g4_mapping",
+      "g4_mapping_confidence",
       `${lowConfidence.length} mapping(s) below ${(threshold * 100).toFixed(0)}% confidence — review in Map step.`,
     );
   } else {
-    pass("g4_mapping", `${input.mappings.length} mappings meet confidence threshold.`);
+    pass("g4_mapping_confidence", `${input.mappings.length} mappings meet confidence threshold.`);
   }
 
   const rows = input.sampleRows ?? [];
@@ -123,17 +123,17 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     if (!transformOk) break;
   }
   if (!transformOk) {
-    block("g5_transform", "A transform failed on sample rows.");
+    block("g5_dry_run", "A transform failed on sample rows.");
   } else {
-    pass("g5_transform", `Dry-run transforms passed on ${Math.min(rows.length, 20)} sample row(s).`);
+    pass("g5_dry_run", `Dry-run transforms passed on ${Math.min(rows.length, 20)} sample row(s).`);
   }
 
   pass("g9_data_integrity", "Sampled types and nulls within expected bounds.");
 
   if (isFileExport) {
-    skip("g6_ddl", "No DDL for file export.");
+    skip("g6_target_ddl", "No DDL for file export.");
   } else {
-    block("g6_ddl", "DDL validation requires API.");
+    block("g6_target_ddl", "DDL validation requires API.");
   }
 
   pass("g7_capacity", `${input.rowCount.toLocaleString()} rows within local export capacity.`);
@@ -145,8 +145,8 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
   }
 
   skip("g9_sync_contract", "Full refresh file export — sync contract not applicable.");
-  pass("g10_schema_policy", "Schema policy satisfied for local export.");
-  pass("g11_validation_posture", "Local validation posture approved for demo export.");
+  skip("g10_schema_policy", "Browser-only — schema policy gate skipped; requires API.");
+  skip("g11_validation_posture", "Browser-only — validation posture skipped; requires API.");
 
   const passedCount = gates.filter((g) => g.status === "pass").length;
   const skippedCount = gates.filter((g) => g.status === "skip").length;

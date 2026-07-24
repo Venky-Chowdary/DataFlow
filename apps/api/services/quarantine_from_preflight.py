@@ -87,6 +87,24 @@ def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dic
         if key in seen:
             continue
         seen.add(key)
+        # Never default schema/policy findings to strip_controls — that misleads
+        # operators into encoding remediations for DDL/policy blockers.
+        suggested_transform = issue.get("suggested_transform")
+        if not suggested_transform:
+            low = reason.lower()
+            if any(
+                k in low
+                for k in (
+                    "format-control",
+                    "replacement character",
+                    "encoding",
+                    "zero-width",
+                    "null byte",
+                )
+            ):
+                suggested_transform = "strip_controls"
+            else:
+                suggested_transform = None
         detail: dict[str, Any] = {
             "row": row_i,
             "column": column or None,
@@ -95,7 +113,7 @@ def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dic
             "reason": reason[:500],
             "policy": "preflight_quarantine",
             "chars": issue.get("chars"),
-            "suggested_transform": issue.get("suggested_transform") or "strip_controls",
+            "suggested_transform": suggested_transform,
             "suggested_fix": issue.get("suggested_fix") or issue.get("suggested_fix"),
         }
         if column and value is not None:

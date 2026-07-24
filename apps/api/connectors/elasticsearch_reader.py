@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from connectors.base import ReadBatch
+from connectors.header_union import union_attribute_keys
 
 _api_root = Path(__file__).resolve().parents[1]
 if str(_api_root) not in sys.path:
@@ -69,14 +70,36 @@ def read_index_batch(
 
         resp = client.search(index=index, body=body)
         hits = resp.get("hits", {}).get("hits") or []
-        records = [h.get("_source") or {} for h in hits]
-        if columns:
-            headers = columns
-        else:
-            keys: set[str] = set()
-            for rec in records:
-                keys.update(rec.keys())
-            headers = sorted(keys)
+        # Preserve ES document identity — _source alone cannot upsert truthfully.
+        records: list[dict[str, Any]] = []
+        for hit in hits:
+            src = dict(hit.get("_source") or {})
+            # Reserved identity fields; never overwrite an application field of the same name
+            # already present in _source (operator data wins for collision).
+            if "_id" not in src:
+                src["_id"] = hit.get("_id")
+            if "_index" not in src and hit.get("_index") is not None:
+                src["_index"] = hit.get("_index")
+            if "_routing" not in src and hit.get("_routing") is not None:
+                src["_routing"] = hit.get("_routing")
+            if "_seq_no" not in src and "_seq_no" in hit:
+                src["_seq_no"] = hit.get("_seq_no")
+            if "_primary_term" not in src and "_primary_term" in hit:
+                src["_primary_term"] = hit.get("_primary_term")
+            records.append(src)
+        page_keys: list[str] = []
+        seen: set[str] = set()
+        # Prefer identity columns first for Map / conflict_columns suggestion.
+        for preferred in ("_id", "_index", "_routing", "_seq_no", "_primary_term"):
+            if any(preferred in r for r in records) and preferred not in seen:
+                seen.add(preferred)
+                page_keys.append(preferred)
+        for rec in records:
+            for k in rec.keys():
+                if k not in seen:
+                    seen.add(k)
+                    page_keys.append(k)
+        headers = union_attribute_keys(columns, page_keys) if columns else page_keys
         rows = [[_cell(r.get(h)) for h in headers] for r in records]
         next_after = hits[-1].get("sort") if hits else None
         batch = ReadBatch(headers=headers, rows=rows, offset=0, total_rows=total)

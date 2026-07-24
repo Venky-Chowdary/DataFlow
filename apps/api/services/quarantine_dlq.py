@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 
 DLQ_PATH = data_dir() / "quarantine_dlq.jsonl"
 _MONGO_COLL = "quarantine_dlq"
+# Rotate JSONL before unbounded growth fills the disk (and then silently fails).
+_DLQ_MAX_BYTES = 100 * 1024 * 1024  # 100 MiB
 
 
 def _now() -> str:
@@ -67,6 +69,14 @@ def append_dlq_event(
 
     target: Path = path or DLQ_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if target.exists() and target.stat().st_size >= _DLQ_MAX_BYTES:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            rotated = target.with_name(f"{target.stem}.{stamp}{target.suffix}")
+            target.rename(rotated)
+            logger.warning("DLQ JSONL rotated to %s (size cap %s bytes)", rotated, _DLQ_MAX_BYTES)
+    except OSError as exc:
+        logger.warning("DLQ rotation check failed: %s", exc)
     line = json.dumps(event, default=json_default) + "\n"
     last_exc: Exception | None = None
     for attempt in range(2):

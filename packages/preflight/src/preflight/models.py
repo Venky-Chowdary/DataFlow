@@ -65,6 +65,10 @@ class ColumnMapping:
     reasoning: str = ""
     requires_review: bool = False
     score_gap: float = 1.0
+    # STRUCT/JSON Map policy — optional; gates may surface but write owns materialize.
+    struct_policy: str | None = None
+    struct_derived: bool = False
+    struct_parent: str | None = None
 
 
 @dataclass
@@ -89,6 +93,8 @@ class DestinationConfig:
     target_columns: list[ColumnSchema] = field(default_factory=list)
     table_exists: bool = False
     error: str | None = None
+    # Optional G2 privilege probe metadata (method/status/detail) for UI honesty.
+    privilege_probe: dict[str, Any] | None = None
 
 
 @dataclass
@@ -105,6 +111,12 @@ class TransferPlan:
     available_staging_bytes: int = 0
     confidence_threshold: float = 0.85
     validation_mode: str = "strict"
+    # Write semantics — uniqueness gates only hard-block when identity is required.
+    sync_mode: str = ""
+    # Operator identity from stream_contracts (source column name). Empty = infer.
+    contract_primary_key: str = ""
+    # Introspected destination PK column names (when table exists).
+    destination_pk_columns: list[str] = field(default_factory=list)
 
 
 @dataclass

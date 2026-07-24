@@ -6,9 +6,11 @@ import logging
 import os
 import resource
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 # Ensure the API root (parent of the `src` package) is first on sys.path so the
 # `services` intelligence package resolves to `apps/api/services`, not an
@@ -145,6 +147,64 @@ from services.checkpoint_service import (
 logger = logging.getLogger("dataflow.transfer")
 
 
+@contextmanager
+def _reconcile_phase_heartbeat(
+    mongo: Any,
+    job_id: str,
+    *,
+    processed: int,
+    total: int,
+    interval_s: float = 8.0,
+) -> Iterator[None]:
+    """Hold progress at 99% and keep live UI messaging fresh during reconcile.
+
+    Reconciliation can take minutes on large tables (COUNT + checksum queries).
+    Without heartbeats the theater freezes on the last write event and looks stuck.
+    """
+    mongo.update_job_status(
+        job_id,
+        "running",
+        phase="reconcile",
+        progress_pct=99,
+        records_processed=processed,
+        total_rows=total,
+        message=(
+            "All rows written — reconciling destination "
+            f"({processed:,} rows: counts + checksum proof)…"
+        ),
+    )
+    stop = threading.Event()
+    started = time.monotonic()
+
+    def _pulse() -> None:
+        while not stop.wait(interval_s):
+            elapsed = int(time.monotonic() - started)
+            mongo.update_job_status(
+                job_id,
+                "running",
+                phase="reconcile",
+                progress_pct=99,
+                records_processed=processed,
+                total_rows=total,
+                message=(
+                    f"Reconciling data ({elapsed}s) — verifying row counts "
+                    f"and checksums for {processed:,} rows…"
+                ),
+            )
+
+    thread = threading.Thread(
+        target=_pulse,
+        name=f"reconcile-heartbeat-{job_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=1.0)
+
+
 def _compare_and_publish_load_history(
     mongo: Any,
     job_id: str,
@@ -235,6 +295,24 @@ def _persist_load_history_profile(
         logger.debug("load-history save_profile skipped", exc_info=True)
 
 
+def _validation_plan_for_result(pf: dict | None) -> dict:
+    """Checklist plus live gate outcomes so operators see float→decimal etc. warnings."""
+    if not pf:
+        return {}
+    plan = dict(pf.get("validation_plan") or {})
+    if pf.get("gates") is not None:
+        plan["gates"] = pf.get("gates") or []
+    if "passed" in pf:
+        plan["passed"] = pf.get("passed")
+    if pf.get("warnings") is not None:
+        plan["warnings"] = pf.get("warnings") or []
+    if pf.get("blockers") is not None:
+        plan["blockers"] = pf.get("blockers") or []
+    if pf.get("readiness_score") is not None:
+        plan["readiness_score"] = pf.get("readiness_score")
+    return plan
+
+
 def _fail_job_preflight(mongo, job_id: str, pf: dict, *, lineage) -> tuple[str, dict]:
     """Mark job failed at preflight and persist inspectable quarantine rows."""
     from services.quarantine_from_preflight import quarantine_rows_from_preflight
@@ -266,7 +344,7 @@ def _fail_job_preflight(mongo, job_id: str, pf: dict, *, lineage) -> tuple[str, 
             "compliance_risk": (pf.get("proof_bundle", {}).get("compliance") or {}).get("risk_score"),
         },
         "readiness_score": pf.get("readiness_score"),
-        "validation_plan": pf.get("validation_plan"),
+        "validation_plan": _validation_plan_for_result(pf),
         "payload_shape": pf.get("payload_shape"),
         "quarantine_issue_count": len(qrows),
         "quarantine_row_count": rejected_rows,
@@ -276,7 +354,7 @@ def _fail_job_preflight(mongo, job_id: str, pf: dict, *, lineage) -> tuple[str, 
         run_id=job_id, passed=False,
         readiness_score=pf.get("readiness_score", 0),
         blockers=pf.get("blockers", []),
-        validation_plan=pf.get("validation_plan"),
+        validation_plan=_validation_plan_for_result(pf),
     )
     lineage.emit_run_failed(
         run_id=job_id, job_id=job_id, error=error_message,
@@ -365,7 +443,7 @@ def _build_explanation(
         mappings=mappings,
         reconciliation=recon,
         destination_summary=dest_summary,
-        validation_plan=pf.get("validation_plan") if pf else None,
+        validation_plan=_validation_plan_for_result(pf) or None,
         rows_written=rows_written,
         rejected_rows=rejected,
     )
@@ -387,6 +465,38 @@ def _mapping_proof_for_request(request: TransferRequest) -> dict[str, Any]:
     )
 
 
+def _destination_schema_probe(
+    destination: EndpointConfig,
+    sync_mode: str = "",
+) -> tuple[dict[str, str], bool | None]:
+    """Return (column_types, table_exists).
+
+    ``table_exists`` is independent of whether columns loaded — a listed table
+    with empty column metadata must not be treated as missing / create-new.
+    """
+    if destination.kind != "database":
+        return {}, None
+    if is_overwrite_sync(sync_mode):
+        return {}, None
+    try:
+        from .endpoint_intelligence import introspect_endpoint
+
+        info = introspect_endpoint(destination)
+        schema = dict(info.get("schema") or {})
+        if "table_exists" in info:
+            raw = info.get("table_exists")
+            # Preserve explicit None (unknown) — bool(None) is False and would
+            # dishonestly trigger create-new on Execute after a soft-fail probe.
+            exists = None if raw is None else bool(raw)
+        elif schema:
+            exists = True
+        else:
+            exists = None
+        return schema, exists
+    except Exception:
+        return {}, None
+
+
 def _destination_schema_types(destination: EndpointConfig, sync_mode: str = "") -> dict[str, str]:
     """Introspect destination column types for schema-aware preflight and transforms.
 
@@ -394,17 +504,8 @@ def _destination_schema_types(destination: EndpointConfig, sync_mode: str = "") 
     and recreated, so any existing schema is irrelevant and should not influence
     mapping or preflight decisions.
     """
-    if destination.kind != "database":
-        return {}
-    if is_overwrite_sync(sync_mode):
-        return {}
-    try:
-        from .endpoint_intelligence import introspect_endpoint
-
-        info = introspect_endpoint(destination)
-        return dict(info.get("schema") or {})
-    except Exception:
-        return {}
+    schema, _exists = _destination_schema_probe(destination, sync_mode=sync_mode)
+    return schema
 
 
 def _infer_primary_key(columns: list[str], mappings: list[dict[str, Any]]) -> str:
@@ -782,9 +883,53 @@ def _auto_map(
         if is_overwrite_sync(sync_mode):
             mappings = default_mappings(columns)
         else:
-            target_schema = _destination_schema_types(request.destination, sync_mode=sync_mode)
+            target_schema, dest_exists = _destination_schema_probe(
+                request.destination, sync_mode=sync_mode,
+            )
             if not target_schema:
-                mappings = default_mappings(columns)
+                # Empty columns: only invent identity create-new when the object
+                # is confirmed missing. Existing/unknown → pending via mapper.
+                try:
+                    from services.mapping_pipeline import run_mapping_pipeline
+
+                    source_schemas = [
+                        {
+                            "name": c,
+                            "inferred_type": schema.get(c, "string"),
+                            "samples": [cell_to_string(r.get(c, "")) for r in (sample_rows or [])[:8]],
+                        }
+                        for c in columns
+                    ]
+                    source_samples = {
+                        c: [cell_to_string(r.get(c, "")) for r in (sample_rows or [])[:8]]
+                        for c in columns
+                    }
+                    result = run_mapping_pipeline(
+                        source_columns=columns,
+                        target_columns=[],
+                        source_schemas=source_schemas,
+                        target_schemas=None,
+                        file_format=request.source.format,
+                        confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
+                        source_samples=source_samples,
+                        validation_mode=request.validation_mode,
+                        use_llm=False,
+                        schema_policy=request.schema_policy,
+                        destination_db_type=(request.destination.format or "").lower(),
+                        destination_table_exists=dest_exists,
+                    )
+                    auto = result.get("mappings")
+                    if auto and isinstance(auto, list) and any(m.get("source") for m in auto):
+                        mappings = auto
+                    elif dest_exists is False:
+                        mappings = default_mappings(columns)
+                except Exception as exc:
+                    logger.warning(
+                        "Empty-dest schema map failed: %s; fallback identity only if missing",
+                        exc,
+                    )
+                    if dest_exists is False:
+                        mappings = default_mappings(columns)
             else:
                 # For MongoDB append/upsert, do not let the semantic mapper overwrite _id
                 # unless the source literally contains an _id column or the user supplied a mapping.
@@ -1108,7 +1253,9 @@ class UniversalTransferEngine:
             total_rows = len(records)
             mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
 
-            dest_schema_types = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
+            dest_schema_types, dest_table_exists_flag = _destination_schema_probe(
+                request.destination, sync_mode=request.sync_mode,
+            )
             mappings = _enrich_mappings_with_types(
                 _auto_map(request, columns, schema, sample_rows=records[:100], job_id=job_id),
                 column_types=schema,
@@ -1131,7 +1278,12 @@ class UniversalTransferEngine:
                 inferred_pk = _infer_primary_key(columns, mappings)
                 if inferred_pk:
                     conflict_columns = [inferred_pk]
-            if requires_upsert(effective_sync) and conflict_columns:
+            if requires_upsert(effective_sync):
+                if not conflict_columns:
+                    raise ValueError(
+                        f"Sync mode `{effective_sync}` requires primary_key for upsert; "
+                        "refuse silent insert fallback (set primary_key on the stream contract)"
+                    )
                 write_mode = "upsert"
 
             activation_notes: list[str] = []
@@ -1185,7 +1337,7 @@ class UniversalTransferEngine:
                     sample_rows=records[:100],
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
                     destination_column_types=dest_schema_types,
-                    destination_table_exists=bool(dest_schema_types),
+                    destination_table_exists=(dest_table_exists_flag if dest_table_exists_flag is not None else bool(dest_schema_types)),
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
@@ -1210,6 +1362,7 @@ class UniversalTransferEngine:
                         validation_mode=request.validation_mode,
                         stream_contracts=request.stream_contracts,
                         backfill_new_fields=request.backfill_new_fields,
+                        source_columns=columns,
                     ),
                     validation_mode=request.validation_mode,
                     destination_db_type=dst_fmt.lower(),
@@ -1237,7 +1390,7 @@ class UniversalTransferEngine:
                         success=False,
                         error=error_message,
                         error_details=error_details,
-                        validation_plan=pf.get("validation_plan") or {},
+                        validation_plan=_validation_plan_for_result(pf),
                         payload_shape=pf.get("payload_shape") or {},
                         operation=request.operation,
                         job_id=job_id,
@@ -1519,23 +1672,23 @@ class UniversalTransferEngine:
                 mongo.update_job_status(job_id, "failed", error=f"Unknown destination: {request.destination.kind}", phase="failed")
                 return TransferResult(success=False, error=f"Unknown destination kind: {request.destination.kind}", job_id=job_id)
 
-            mongo.update_job_status(
-                job_id, "running", phase="reconcile",
-                progress_pct=compute_transfer_progress_pct(phase="reconcile") or 99,
-                message="Running reconciliation…",
-            )
-
-            recon = run_reconciliation(
-                endpoint=request.destination,
-                records=records,
-                columns=columns,
-                rows_written=rows_written,
-                writer_checksum=dest_summary.get("checksum", ""),
-                dest_summary=dest_summary,
-                mappings=mappings,
-                source_schema=schema,
-                validation_mode=request.validation_mode,
-            )
+            with _reconcile_phase_heartbeat(
+                mongo,
+                job_id,
+                processed=int(rows_written or 0),
+                total=int(rows_written or 0),
+            ):
+                recon = run_reconciliation(
+                    endpoint=request.destination,
+                    records=records,
+                    columns=columns,
+                    rows_written=rows_written,
+                    writer_checksum=dest_summary.get("checksum", ""),
+                    dest_summary=dest_summary,
+                    mappings=mappings,
+                    source_schema=schema,
+                    validation_mode=request.validation_mode,
+                )
             if not recon.get("passed"):
                 mongo.update_job_status(
                     job_id, "failed",
@@ -1616,7 +1769,7 @@ class UniversalTransferEngine:
             lineage.emit_preflight_completed(
                 run_id=job_id, passed=True,
                 readiness_score=pf.get("readiness_score", 100) if pf else 100,
-                validation_plan=pf.get("validation_plan") if pf else {},
+                validation_plan=_validation_plan_for_result(pf),
             )
             lineage.emit_lineage(
                 run_id=job_id,
@@ -1653,7 +1806,7 @@ class UniversalTransferEngine:
                 ddl_executed=ddl_log,
                 columns=columns,
                 reconciliation=recon,
-                validation_plan=pf.get("validation_plan") if pf else {},
+                validation_plan=_validation_plan_for_result(pf),
                 payload_shape=pf.get("payload_shape") if pf else {},
                 contract_id=contract_id,
                 explanation=explanation,
@@ -1705,7 +1858,9 @@ class UniversalTransferEngine:
                 sample_rows = apply_row_filter(sample_rows, request.source_filter)
 
             mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
-            dest_schema_types = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
+            dest_schema_types, dest_table_exists_flag = _destination_schema_probe(
+                request.destination, sync_mode=request.sync_mode,
+            )
             mappings = _enrich_mappings_with_types(
                 _auto_map(request, columns, schema, sample_rows=sample_rows, job_id=job_id),
                 column_types=schema,
@@ -1730,7 +1885,7 @@ class UniversalTransferEngine:
                     sample_rows=sample_rows,
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
                     destination_column_types=dest_schema_types,
-                    destination_table_exists=bool(dest_schema_types),
+                    destination_table_exists=(dest_table_exists_flag if dest_table_exists_flag is not None else bool(dest_schema_types)),
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
@@ -1755,6 +1910,7 @@ class UniversalTransferEngine:
                         validation_mode=request.validation_mode,
                         stream_contracts=request.stream_contracts,
                         backfill_new_fields=request.backfill_new_fields,
+                        source_columns=columns,
                     ),
                     validation_mode=request.validation_mode,
                     destination_db_type=dst_fmt.lower(),
@@ -1782,7 +1938,7 @@ class UniversalTransferEngine:
                         success=False,
                         error=error_message,
                         error_details=error_details,
-                        validation_plan=pf.get("validation_plan") or {},
+                        validation_plan=_validation_plan_for_result(pf),
                         payload_shape=pf.get("payload_shape") or {},
                         operation=request.operation,
                         job_id=job_id,
@@ -1984,23 +2140,23 @@ class UniversalTransferEngine:
                     limit=request.limit,
                 )
 
-            mongo.update_job_status(
-                job_id, "running", phase="reconcile",
-                progress_pct=compute_transfer_progress_pct(phase="reconcile") or 99,
-                message="Running reconciliation…",
-            )
-
-            recon = run_reconciliation(
-                endpoint=request.destination,
-                records=[],
-                columns=columns,
-                rows_written=rows_written,
-                writer_checksum=dest_summary.get("checksum", ""),
-                dest_summary=dest_summary,
-                mappings=mappings,
-                source_schema=schema,
-                validation_mode=request.validation_mode,
-            )
+            with _reconcile_phase_heartbeat(
+                mongo,
+                job_id,
+                processed=int(rows_written or 0),
+                total=int(rows_written or 0),
+            ):
+                recon = run_reconciliation(
+                    endpoint=request.destination,
+                    records=[],
+                    columns=columns,
+                    rows_written=rows_written,
+                    writer_checksum=dest_summary.get("checksum", ""),
+                    dest_summary=dest_summary,
+                    mappings=mappings,
+                    source_schema=schema,
+                    validation_mode=request.validation_mode,
+                )
             if not recon.get("passed"):
                 mongo.update_job_status(
                     job_id, "failed",
@@ -2065,7 +2221,7 @@ class UniversalTransferEngine:
             lineage.emit_preflight_completed(
                 run_id=job_id, passed=True,
                 readiness_score=pf.get("readiness_score", 100) if pf else 100,
-                validation_plan=pf.get("validation_plan") if pf else {},
+                validation_plan=_validation_plan_for_result(pf),
             )
             lineage.emit_lineage(
                 run_id=job_id,
@@ -2096,7 +2252,7 @@ class UniversalTransferEngine:
                 ddl_executed=ddl_log,
                 columns=columns,
                 reconciliation=recon,
-                validation_plan=pf.get("validation_plan") if pf else {},
+                validation_plan=_validation_plan_for_result(pf),
                 payload_shape=pf.get("payload_shape") if pf else {},
                 contract_id=contract_id,
                 explanation=explanation,
@@ -2153,7 +2309,9 @@ class UniversalTransferEngine:
                 sample_rows = apply_row_filter(sample_rows, request.source_filter)
 
             mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
-            dest_schema_types = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
+            dest_schema_types, dest_table_exists_flag = _destination_schema_probe(
+                request.destination, sync_mode=request.sync_mode,
+            )
             mappings = _enrich_mappings_with_types(
                 _auto_map(request, columns, schema, sample_rows=sample_rows, job_id=job_id),
                 column_types=schema,
@@ -2178,7 +2336,7 @@ class UniversalTransferEngine:
                     sample_rows=sample_rows,
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
                     destination_column_types=dest_schema_types,
-                    destination_table_exists=bool(dest_schema_types),
+                    destination_table_exists=(dest_table_exists_flag if dest_table_exists_flag is not None else bool(dest_schema_types)),
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
@@ -2203,6 +2361,7 @@ class UniversalTransferEngine:
                         validation_mode=request.validation_mode,
                         stream_contracts=request.stream_contracts,
                         backfill_new_fields=request.backfill_new_fields,
+                        source_columns=columns,
                     ),
                     validation_mode=request.validation_mode,
                     destination_db_type=dst_fmt.lower(),
@@ -2230,7 +2389,7 @@ class UniversalTransferEngine:
                         success=False,
                         error=error_message,
                         error_details=error_details,
-                        validation_plan=pf.get("validation_plan") or {},
+                        validation_plan=_validation_plan_for_result(pf),
                         payload_shape=pf.get("payload_shape") or {},
                         operation=request.operation,
                         job_id=job_id,
@@ -2351,23 +2510,23 @@ class UniversalTransferEngine:
                 source_filter=request.source_filter,
             )
 
-            mongo.update_job_status(
-                job_id, "running", phase="reconcile",
-                progress_pct=compute_transfer_progress_pct(phase="reconcile") or 99,
-                message="Running reconciliation…",
-            )
-
-            recon = run_reconciliation(
-                endpoint=request.destination,
-                records=[],
-                columns=columns,
-                rows_written=rows_written,
-                writer_checksum=dest_summary.get("checksum", ""),
-                dest_summary=dest_summary,
-                mappings=mappings,
-                source_schema=schema,
-                validation_mode=request.validation_mode,
-            )
+            with _reconcile_phase_heartbeat(
+                mongo,
+                job_id,
+                processed=int(rows_written or 0),
+                total=int(rows_written or 0),
+            ):
+                recon = run_reconciliation(
+                    endpoint=request.destination,
+                    records=[],
+                    columns=columns,
+                    rows_written=rows_written,
+                    writer_checksum=dest_summary.get("checksum", ""),
+                    dest_summary=dest_summary,
+                    mappings=mappings,
+                    source_schema=schema,
+                    validation_mode=request.validation_mode,
+                )
             if not recon.get("passed"):
                 mongo.update_job_status(
                     job_id, "failed",
@@ -2431,7 +2590,7 @@ class UniversalTransferEngine:
             lineage.emit_preflight_completed(
                 run_id=job_id, passed=True,
                 readiness_score=pf.get("readiness_score", 100) if pf else 100,
-                validation_plan=pf.get("validation_plan") if pf else {},
+                validation_plan=_validation_plan_for_result(pf),
             )
             lineage.emit_lineage(
                 run_id=job_id,
@@ -2462,7 +2621,7 @@ class UniversalTransferEngine:
                 ddl_executed=ddl_log,
                 columns=columns,
                 reconciliation=recon,
-                validation_plan=pf.get("validation_plan") if pf else {},
+                validation_plan=_validation_plan_for_result(pf),
                 payload_shape=pf.get("payload_shape") if pf else {},
                 contract_id=contract_id,
                 explanation=explanation,

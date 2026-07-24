@@ -261,6 +261,7 @@ def run_mapping_pipeline(
     destination_db_type: str = "",
     schema_policy: str = "manual_review",
     sync_mode: str = "",
+    destination_table_exists: bool | None = None,
 ) -> dict:
     from services.semantic_analyzer import analyze_schema
 
@@ -305,12 +306,22 @@ def run_mapping_pipeline(
         source_schemas=source_schemas,
         target_schemas=target_schemas,
         destination_db_type=destination_db_type,
+        destination_table_exists=destination_table_exists,
     )
 
-    # If the destination schema is unknown, derive it from the identity mapping.
-    # This lets the type-coercion and transform resolvers produce correct target
-    # types and DDL when the user has not created a destination table yet.
-    if not target_columns and not target_schemas and base_mappings:
+    # If the destination schema is unknown AND confirmed create-new, derive
+    # targets from identity mapping. Never invent targets when the table exists
+    # (or existence is unknown) but columns failed to load.
+    pending_schema = any(
+        (m.get("assignment_strategy") == "pending_dest_schema") for m in (base_mappings or [])
+    )
+    if (
+        not target_columns
+        and not target_schemas
+        and base_mappings
+        and not pending_schema
+        and destination_table_exists is False
+    ):
         target_columns = [m["target"] for m in base_mappings]
         target_schemas = [
             {

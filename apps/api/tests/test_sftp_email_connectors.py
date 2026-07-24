@@ -89,6 +89,11 @@ class TestSFTPWriter:
         assert b"id,amount" in written["bytes"]
         assert b"1000.0" in written["bytes"]
         sftp.file.assert_called_once()
+        written_path = sftp.file.call_args[0][0]
+        assert written_path.endswith(".tmp")
+        assert written_path.startswith("/data/out.csv.dataflow-")
+        sftp.posix_rename.assert_called_once()
+        assert sftp.posix_rename.call_args[0][1] == "/data/out.csv"
 
     def test_write_jsonl_to_sftp(self):
         written: dict = {}

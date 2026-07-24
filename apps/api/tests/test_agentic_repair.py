@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from services.agentic_repair import (
     apply_actions_to_mappings,
+    apply_actions_with_report,
     decide_proposal,
+    propose_from_preflight,
     propose_from_quarantine,
 )
+from services.validation_assistant import _suggested_actions
 
 
 def test_quarantine_propose_and_approve_applies_mappings() -> None:
@@ -24,10 +27,7 @@ def test_quarantine_propose_and_approve_applies_mappings() -> None:
         p.id,
         approve=True,
         actor="tester",
-        apply_fn=lambda actions: {
-            "applied": True,
-            "mappings": apply_actions_to_mappings(mappings, actions),
-        },
+        apply_fn=lambda actions: apply_actions_with_report(mappings, actions),
     )
     assert decided.status == "applied"
     updated = decided.apply_result["mappings"]
@@ -66,10 +66,7 @@ def test_cannot_redecide_applied_proposal() -> None:
         p.id,
         approve=True,
         actor="tester",
-        apply_fn=lambda actions: {
-            "applied": True,
-            "mappings": apply_actions_to_mappings(mappings, actions),
-        },
+        apply_fn=lambda actions: apply_actions_with_report(mappings, actions),
     )
     try:
         decide_proposal(p.id, approve=False, actor="tester")
@@ -90,9 +87,69 @@ def test_approved_can_later_apply() -> None:
         p.id,
         approve=True,
         actor="tester",
-        apply_fn=lambda actions: {
-            "applied": True,
-            "mappings": apply_actions_to_mappings(mappings, actions),
-        },
+        apply_fn=lambda actions: apply_actions_with_report(mappings, actions),
     )
     assert applied.status == "applied"
+
+
+def test_duplicate_key_actions_are_guidance_not_mutative() -> None:
+    actions = _suggested_actions(
+        blockers=[
+            {
+                "id": "g9_data_integrity",
+                "message": "Data integrity failed: id: duplicate key values (a×2)",
+            },
+            {
+                "id": "g6_target_ddl",
+                "message": "Primary key candidate 'id' has 12 duplicate value(s) in source sample",
+            },
+            {
+                "id": "g8_reconciliation",
+                "message": "Dry-run reconciliation failed — 12 duplicate target key(s) on id",
+            },
+        ],
+        column_fixes=[],
+    )
+    kinds = {a.get("kind") for a in actions}
+    assert "fix_source_keys" in kinds
+    assert "normalize_control_chars" not in kinds
+    assert "quarantine_and_rerun" not in kinds
+    assert not any(a.get("kind") == "change_target_type" for a in actions)
+
+
+def test_non_mutative_approve_does_not_fake_applied() -> None:
+    pf = {
+        "passed": False,
+        "blockers": [
+            {
+                "id": "g9_data_integrity",
+                "message": "id: duplicate key values (abc×2)",
+            },
+            {
+                "id": "g6_target_ddl",
+                "message": "Primary key candidate 'id' has 2 duplicate value(s) in source sample",
+            },
+            {
+                "id": "g8_reconciliation",
+                "message": "Dry-run reconciliation failed — 2 duplicate target key(s) on id",
+            },
+        ],
+        "gates": [
+            {"id": "g9_data_integrity", "status": "block", "message": "id: duplicate key values"},
+            {"id": "g6_target_ddl", "status": "block", "message": "Primary key candidate 'id' has duplicates"},
+            {"id": "g8_reconciliation", "status": "block", "message": "duplicate target key(s) on id"},
+        ],
+    }
+    p = propose_from_preflight(pf, job_id="dup-job")
+    assert p.diagnosis.get("mapping_applyable") is False
+    assert p.diagnosis.get("root_cause") == "duplicate_identity_keys"
+    mappings = [{"source": "id", "destination": "id"}, {"source": "name", "destination": "name"}]
+    decided = decide_proposal(
+        p.id,
+        approve=True,
+        actor="tester",
+        apply_fn=lambda actions: apply_actions_with_report(mappings, actions),
+    )
+    assert decided.status == "approved"
+    assert decided.apply_result.get("applied") is False
+    assert decided.apply_result.get("reason") == "no_mutative_actions"

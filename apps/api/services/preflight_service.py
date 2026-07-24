@@ -175,6 +175,7 @@ class FilePreflightContext(PreflightContext):
             for c in self.plan.destination.target_columns
         ]
         mode = getattr(self.plan, "validation_mode", "strict") or "strict"
+        sync_mode = getattr(self.plan, "sync_mode", "") or ""
         return audit(
             source_columns=source_columns,
             mappings=mapping_dicts,
@@ -183,6 +184,9 @@ class FilePreflightContext(PreflightContext):
             sample_rows=self.sample_rows,
             validation_mode=mode,
             destination_db_type=self.plan.destination.db_type,
+            sync_mode=sync_mode,
+            contract_primary_key=getattr(self.plan, "contract_primary_key", None) or None,
+            destination_pk_columns=getattr(self.plan, "destination_pk_columns", None) or None,
         )
 
 
@@ -204,6 +208,7 @@ def run_transfer_policy_gates(
     validation_mode: str = "strict",
     stream_contracts: list[dict[str, Any]] | None = None,
     backfill_new_fields: bool = False,
+    source_columns: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Validate enterprise run policy that sits above source/destination probes."""
     contracts = [c for c in stream_contracts or [] if c.get("selected", True)]
@@ -224,12 +229,39 @@ def run_transfer_policy_gates(
         if requires_primary_key and not (c.get("primary_key") or c.get("primary_keys"))
     ]
 
+    # Live column check — typo'd cursor/PK names must fail at Validate, not mid-run.
+    source_col_set = {str(c).strip().lower() for c in (source_columns or []) if str(c).strip()}
+    unknown_cursor: list[str] = []
+    unknown_pk: list[str] = []
+    if source_col_set:
+        for c in contracts:
+            stream = c.get("name") or c.get("stream") or "stream"
+            if requires_cursor:
+                cursor = str(c.get("cursor_field") or c.get("cursor") or "").strip()
+                if cursor and cursor.lower() not in source_col_set:
+                    unknown_cursor.append(f"{stream}.{cursor}")
+            if requires_primary_key:
+                raw_pk = c.get("primary_key") or c.get("primary_keys") or []
+                pk_fields = [raw_pk] if isinstance(raw_pk, str) else list(raw_pk or [])
+                for pk in pk_fields:
+                    name = str(pk).strip()
+                    if name and name.lower() not in source_col_set:
+                        unknown_pk.append(f"{stream}.{name}")
+
     gates: list[dict[str, Any]] = []
     sync_issues: list[str] = []
     if missing_cursor:
         sync_issues.append(f"Missing cursor field for {', '.join(missing_cursor[:5])}")
     if missing_primary_key:
         sync_issues.append(f"Missing primary key for {', '.join(missing_primary_key[:5])}")
+    if unknown_cursor:
+        sync_issues.append(
+            f"Cursor field not in source schema: {', '.join(unknown_cursor[:5])}"
+        )
+    if unknown_pk:
+        sync_issues.append(
+            f"Primary key not in source schema: {', '.join(unknown_pk[:5])}"
+        )
 
     if sync_issues:
         gates.append({
@@ -263,8 +295,20 @@ def run_transfer_policy_gates(
     }
     if schema not in allowed_schema:
         schema_issues.append(f"Unknown schema policy '{schema}'")
-    if backfill_new_fields and schema not in {"propagate_columns", "propagate_all"}:
-        schema_issues.append("Backfill new fields requires automatic column propagation")
+
+    # Stuck Studio toggle: backfill=true while policy is still manual_review (operator
+    # switched policy back but the checkbox state was never cleared). That must not
+    # fail Execute after Validate already passed — coerce to additive propagation.
+    # type_locked / pause_on_change still forbid silent ADD COLUMN.
+    policy_coerced = False
+    if backfill_new_fields and schema == "manual_review":
+        schema = "propagate_columns"
+        policy_coerced = True
+    elif backfill_new_fields and schema in {"type_locked", "pause_on_change"}:
+        schema_issues.append(
+            "Backfill new fields conflicts with schema policy "
+            f"'{schema}' — switch to Propagate columns, or turn backfill off"
+        )
 
     breaking = {
         "manual_review": "pause_for_manual_review",
@@ -286,12 +330,16 @@ def run_transfer_policy_gates(
         gates.append({
             "id": "g10_schema_policy",
             "status": GateStatus.PASS.value,
-            "message": f"Schema policy set to {schema.replace('_', ' ')}",
+            "message": (
+                f"Schema policy set to {schema.replace('_', ' ')}"
+                + (" (aligned backfill with propagate columns)" if policy_coerced else "")
+            ),
             "duration_ms": 0,
             "details": {
                 "schema_policy": schema,
                 "backfill_new_fields": backfill_new_fields,
                 "breaking_changes": breaking,
+                "policy_coerced_from_manual_review": policy_coerced,
             },
         })
 
@@ -450,6 +498,8 @@ def run_file_preflight(
     destination_column_types: dict[str, str] | None = None,
     destination_table_exists: bool | None = None,
     destination_can_create: bool | None = None,
+    destination_can_write: bool | None = None,
+    privilege_probe: dict[str, Any] | None = None,
     available_staging_bytes: int | None = None,
     destination_db_type: str = "postgresql",
     source_table: str = "",
@@ -457,16 +507,22 @@ def run_file_preflight(
     source_filename: str = "",
     schema_policy: str = "manual_review",
     backfill_new_fields: bool = False,
+    stored_source_fp: str = "",
+    stored_target_fp: str = "",
+    contract_primary_key: str | None = None,
+    destination_pk_columns: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Run 9 preflight gates for a file-based transfer."""
+    """Run preflight gates for file/DB Studio transfers (G1–G8 + integrity)."""
     if row_count <= 0 and sample_rows:
         row_count = len(sample_rows)
 
     # Preflight is a sample-based safety check, not a full table scan.  Cap the
     # sample size so very large file previews or database samples cannot make the
-    # validate step hang.
-    if sample_rows and len(sample_rows) > 500:
-        sample_rows = sample_rows[:500]
+    # validate step hang. Keep in sync with coercion_probe.DEFAULT_SAMPLE_LIMIT.
+    from services.coercion_probe import PREFLIGHT_SAMPLE_LIMIT
+
+    if sample_rows and len(sample_rows) > PREFLIGHT_SAMPLE_LIMIT:
+        sample_rows = sample_rows[:PREFLIGHT_SAMPLE_LIMIT]
 
     # If the caller did not supply rich source types, infer them from the sample
     # rows. This keeps schemaless sources (MongoDB, DynamoDB, Redis, S3 JSON) from
@@ -508,6 +564,9 @@ def run_file_preflight(
             reasoning=m.get("reasoning") or m.get("reason", ""),
             requires_review=bool(m.get("requires_review", False)),
             score_gap=float(m.get("score_gap", 1.0)),
+            struct_policy=m.get("struct_policy") or m.get("structPolicy"),
+            struct_derived=bool(m.get("struct_derived") or m.get("structDerived", False)),
+            struct_parent=m.get("struct_parent") or m.get("structParent"),
         )
         for m in mappings
     ]
@@ -520,6 +579,7 @@ def run_file_preflight(
         available_staging_bytes = _available_staging_bytes(est_bytes)
 
     dest_can_create = destination_can_create if destination_can_create is not None else destination_connected
+    dest_can_write = destination_can_write if destination_can_write is not None else destination_connected
     dest_table_exists = destination_table_exists if destination_table_exists is not None else False
 
     from services.ddl_compatibility import evaluate_ddl_compatibility
@@ -542,6 +602,8 @@ def run_file_preflight(
         schema_policy=schema_policy,
         sync_mode=sync_mode,
         destination_table=destination_table,
+        destination_pk_columns=destination_pk_columns,
+        contract_primary_key=contract_primary_key,
     )
 
     drift = detect_schema_drift(
@@ -552,13 +614,11 @@ def run_file_preflight(
         mappings=mappings,
         destination_db_type=destination_db_type,
         sample_rows=sample_rows,
+        stored_source_fp=stored_source_fp or "",
+        stored_target_fp=stored_target_fp or "",
     )
-    if drift.get("drift_detected"):
-        for issue in drift.get("issues", []):
-            if issue not in ddl_issues:
-                ddl_issues.append(issue)
-        if drift.get("severity") == "breaking":
-            ddl_compatible = False
+    # Do NOT fold drift into ddl_issues / ddl_compatible. G6 must mean real DDL
+    # (missing columns, width, types). Drift is a separate contract gate below.
 
     sample_quality: dict[str, Any] = {}
     if sample_rows and columns:
@@ -587,10 +647,11 @@ def run_file_preflight(
             db_type=dest_kind,
             connected=destination_connected,
             can_create_table=dest_can_create,
-            can_write=destination_connected,
+            can_write=dest_can_write,
             target_columns=dest_cols,
             table_exists=dest_table_exists,
             error=destination_error,
+            privilege_probe=privilege_probe,
         ),
         mappings=plan_mappings,
         dry_run_passed=False,
@@ -600,13 +661,16 @@ def run_file_preflight(
         available_staging_bytes=available_staging_bytes,
         confidence_threshold=confidence_threshold,
         validation_mode=validation_mode,
+        sync_mode=sync_mode,
+        contract_primary_key=str(contract_primary_key or "").strip(),
+        destination_pk_columns=list(destination_pk_columns or []),
     )
 
     ctx = FilePreflightContext(plan, sample_rows)
-    # Fail fast only once both source and destination are known to be connected.
-    # When either side is not yet connected we want every reachable gate to run
-    # (and be reported) so source-only or destination-only problems are visible.
-    engine = PreflightEngine(fail_fast=source_connected and destination_connected)
+    # Always collect every reachable gate on Validate. fail_fast=True hid G6 DDL
+    # behind G5 integrity blocks and forced a multi-run fix loop. Transfer still
+    # refuses to move rows when any blocker remains (passed=False).
+    engine = PreflightEngine(fail_fast=False)
     result = engine.run(ctx)
 
     from services.preflight_proof_bundle import build_preflight_proof_bundle
@@ -684,11 +748,13 @@ def run_file_preflight(
         "payload_shape": payload_shape,
         "validation_plan": validation_plan.to_dict(),
         "coercion_report": ctx.coercion_report(),
+        "privilege_probe": privilege_probe or {},
         "recommended_batch_size": min(
             recommended_batch_size(_src_fmt),
             recommended_batch_size(_tgt_fmt) or recommended_batch_size(_src_fmt),
         ),
     }
+
     # Multi-load intelligence: compare sample to last N loads of this route.
     try:
         from services.data_quality_history import compare_route_to_history
@@ -721,22 +787,96 @@ def run_file_preflight(
             "prior_load_count": 0,
             "warning": f"Load-history compare unavailable: {hist_exc!s}"[:240],
         }
+
+    # Schema drift is its own rule — never masquerade as Target DDL.
+    # Schemaless destinations have no destination DDL fingerprint to enforce;
+    # fingerprint churn is informational only (operators remapped / create-new).
+    # SQL destinations: hard-block only when policy is pause_on_change.
+    if drift.get("severity") == "breaking" and drift.get("issues"):
+        policy = (schema_policy or "manual_review").strip().lower()
+        if schemaless:
+            out.setdefault("warnings", []).append({
+                "id": "schema_drift",
+                "message": (
+                    "Mapping/schema fingerprint changed on a schemaless destination — "
+                    "informational only (no DDL to invalidate)."
+                ),
+                "details": {
+                    "issues": list(drift.get("issues") or []),
+                    "severity": "warning",
+                },
+            })
+        elif policy == "pause_on_change":
+            drift_msg = str(drift["issues"][0])
+            drift_gate = {
+                "id": "schema_drift",
+                "status": "block",
+                "message": drift_msg,
+                "duration_ms": 0,
+                "details": {
+                    "issues": list(drift.get("issues") or []),
+                    "severity": drift.get("severity"),
+                    "source_changed": drift.get("source_changed"),
+                    "target_changed": drift.get("target_changed"),
+                    "rule_id": "schema_drift.breaking",
+                    "remediation_kind": "rerun_mapping",
+                },
+            }
+            out["gates"] = [*out["gates"], drift_gate]
+            drift_blocker = enrich_blockers(
+                [{"id": "schema_drift", "message": drift_msg, "details": drift_gate["details"]}],
+                dest_kind=dest_kind,
+                validation_mode=validation_mode,
+            )
+            out["blockers"] = [*out["blockers"], *drift_blocker]
+            out["passed"] = False
+            out["passed_count"] = sum(1 for g in out["gates"] if g.get("status") == "pass")
+            out["total_gates"] = len(out["gates"])
+            out["readiness_score"] = round(out["passed_count"] / max(out["total_gates"], 1) * 100, 1)
+        else:
+            # manual_review / propagate_*: surface as a non-blocking gate so G10
+            # policy remains the operator control, not a false DDL failure.
+            out["gates"] = [
+                *out["gates"],
+                {
+                    "id": "schema_drift",
+                    "status": "pass",
+                    "message": (
+                        f"Schema fingerprint changed — policy '{policy}' allows continue "
+                        f"(review mapping if needed)"
+                    ),
+                    "duration_ms": 0,
+                    "details": {
+                        "issues": list(drift.get("issues") or []),
+                        "severity": "warning",
+                        "schema_policy": policy,
+                    },
+                },
+            ]
+
     return out
 
 
 def probe_destination(endpoint) -> tuple[bool, str]:
-    """Live connectivity probe for database destinations (Gate G2)."""
-    from src.transfer.adapters import resolve_connector_config, resolve_dest_table
-    from src.transfer.connector_registry import run_probe
+    """Live connectivity probe for database destinations (Gate G2).
 
+    When a saved ``connector_id`` is set, use the exact same probe as
+    Connectors → Test so Validate never invents different credentials.
+    """
     if endpoint.kind != "database":
         return True, "Non-database destination"
 
+    if getattr(endpoint, "connector_id", None):
+        from services.connector_probe import probe_saved_connector
+
+        ok, msg, _cfg = probe_saved_connector(endpoint.connector_id)
+        return ok, msg
+
+    from src.transfer.adapters import resolve_connector_config, resolve_dest_table
+    from src.transfer.connector_registry import run_probe
+
     cfg = resolve_connector_config(endpoint)
-    # Prefer the saved connector's driver type over any inline format string.
     db_type = (cfg.get("type") or endpoint.format or "").lower()
-    # DynamoDB uses the table name as the database identifier; ensure the
-    # connectivity probe sees the intended destination table.
     if db_type == "dynamodb":
         cfg["table"] = resolve_dest_table(db_type, endpoint)
     return run_probe(db_type, cfg)
@@ -796,41 +936,40 @@ def inspect_destination_for_preflight(
         out["message"] = "File export destination"
         return out
 
-    from src.transfer.adapters import _lookup_saved_connector
     from src.transfer.models import EndpointConfig
 
     if connector_id:
-        conn = _lookup_saved_connector(connector_id)
-        if not conn:
-            out["message"] = f"Connector '{connector_id}' not found"
-            return out
-        # Saved connector type is authoritative; inline form values only fill
-        # fields the user may have overridden in the current step.
-        db_type = (conn.get("type") or dest_type or "mongodb").lower()
-        out["db_type"] = db_type
-        from services.dialect_profiles import normalize_schema
+        # CRITICAL: Validate G2 must use the same decrypted secrets as Connectors Test.
+        # Never rebuild an EndpointConfig from empty Studio form fields (password /
+        # connection_string omitted when connector_id is set) — that path defaulted
+        # host→localhost and produced "auth failed" while Test still passed.
+        from services.connector_probe import (
+            endpoint_from_saved_connector,
+            probe_saved_connector,
+        )
 
-        endpoint = EndpointConfig(
-            kind="database",
-            format=db_type,
-            connector_id=connector_id,
-            host=dest_host or "",
-            port=int(dest_port or 0),
-            database=dest_database or "",
-            schema=normalize_schema(db_type, dest_schema, username=dest_username) or "",
+        ok, msg, cfg = probe_saved_connector(connector_id)
+        db_type = (cfg.get("type") or dest_type or "").lower()
+        out["db_type"] = db_type
+        out["_saved_cfg"] = cfg
+        if not ok:
+            out["connected"] = False
+            out["message"] = msg or "Destination unreachable"
+            return out
+
+        endpoint = endpoint_from_saved_connector(
+            connector_id,
             table=dest_table or "",
             collection=dest_collection or dest_table or "",
-            username=dest_username or "",
-            password=dest_password or "",
-            connection_string=dest_connection_string or "",
-            warehouse=dest_warehouse or "",
-            ssl=False,
-            auth_source=dest_auth_source or "",
-            auth_mode=dest_auth_mode or "",
-            auth_role=dest_auth_role or "",
-            api_key=dest_api_key or "",
-            service_account=dest_service_account or "",
+            schema=dest_schema or "",
+            database=dest_database or "",
         )
+        if not endpoint:
+            out["message"] = f"Connector '{connector_id}' not found"
+            return out
+        # Prefer operator-chosen auth_source override from Studio when present.
+        if dest_auth_source:
+            endpoint.auth_source = dest_auth_source
     elif dest_host or dest_connection_string:
         db_type = (dest_type or "mongodb").lower()
         out["db_type"] = db_type
@@ -862,20 +1001,146 @@ def inspect_destination_for_preflight(
     from src.transfer.endpoint_intelligence import introspect_endpoint
 
     info = introspect_endpoint(endpoint)
-    out["connected"] = bool(info.get("connected"))
-    out["message"] = info.get("message", "")
+    # Connectivity already proven via probe_saved_connector when connector_id set;
+    # trust that over a second introspect failure (schema-only hiccups).
+    if connector_id and out.get("db_type"):
+        out["connected"] = True
+        if not info.get("connected"):
+            # Schema introspect failed but ping passed — keep connected, surface note.
+            out["message"] = info.get("message") or msg or "Connected"
+        else:
+            out["message"] = info.get("message") or msg or "Connected"
+    else:
+        out["connected"] = bool(info.get("connected"))
+        out["message"] = info.get("message", "")
     schema = info.get("schema") or {}
     cols = info.get("columns") or list(schema.keys())
     out["columns"] = cols
     out["column_types"] = schema
     stream = dest_collection or dest_table or endpoint.collection or endpoint.table
-    if stream and cols:
+    # Prefer introspect's explicit existence (True / False / None). Recomputing
+    # with exact string match broke public.jobs vs jobs and wiped create-new.
+    if "table_exists" in info:
+        out["table_exists"] = info.get("table_exists")
+    elif stream and cols:
         out["table_exists"] = True
     elif stream and info.get("objects"):
-        names = {o.get("name") for o in info.get("objects", []) if isinstance(o, dict)}
-        out["table_exists"] = stream in names
-    out["can_create_table"] = out["connected"]
+        from src.transfer.endpoint_intelligence import _object_name_match
 
+        names = [
+            str(o.get("name") or "")
+            for o in (info.get("objects") or [])
+            if isinstance(o, dict)
+        ]
+        matched = _object_name_match(names, str(stream))
+        out["table_exists"] = True if matched else False
+    out["can_create_table"] = out["connected"]
+    out["can_write"] = out["connected"]
+
+    # Enterprise G2: measure write/create via privilege metadata (never CREATE/INSERT probe).
+    if out["connected"]:
+        try:
+            from services.destination_privilege_probe import (
+                probe_destination_privileges,
+                resolve_write_flags,
+            )
+
+            cfg: dict[str, Any] = {}
+            if out.get("_saved_cfg"):
+                cfg = dict(out.pop("_saved_cfg") or {})
+            elif connector_id:
+                from services.connector_probe import probe_saved_connector
+
+                _ok, _msg, cfg = probe_saved_connector(connector_id)
+            else:
+                cfg = {
+                    "host": getattr(endpoint, "host", "") or "",
+                    "port": int(getattr(endpoint, "port", 0) or 0),
+                    "database": getattr(endpoint, "database", "") or "",
+                    "username": getattr(endpoint, "username", "") or "",
+                    "password": getattr(endpoint, "password", "") or "",
+                    "connection_string": getattr(endpoint, "connection_string", "") or "",
+                    "schema": getattr(endpoint, "schema", "") or "",
+                    "type": out.get("db_type") or "",
+                    "warehouse": getattr(endpoint, "warehouse", "") or dest_warehouse or "",
+                    "role": getattr(endpoint, "auth_role", "") or dest_auth_role or "",
+                    "service_account": getattr(endpoint, "service_account", "")
+                    or dest_service_account
+                    or "",
+                    "ssl": bool(getattr(endpoint, "ssl", False)),
+                }
+
+            probe_schema = str(
+                dest_schema
+                or cfg.get("schema")
+                or cfg.get("dataset")
+                or getattr(endpoint, "schema", "")
+                or ""
+            )
+            probe = probe_destination_privileges(
+                out.get("db_type") or cfg.get("type") or "",
+                host=str(cfg.get("host") or ""),
+                port=int(cfg.get("port") or 0),
+                database=str(cfg.get("database") or cfg.get("project_id") or ""),
+                schema=probe_schema,
+                table=str(
+                    dest_table
+                    or dest_collection
+                    or getattr(endpoint, "table", "")
+                    or getattr(endpoint, "collection", "")
+                    or ""
+                ),
+                username=str(cfg.get("username") or ""),
+                password=str(cfg.get("password") or ""),
+                connection_string=str(cfg.get("connection_string") or ""),
+                table_exists=bool(out.get("table_exists")),
+                ssl=bool(cfg.get("ssl") or False),
+                warehouse=str(
+                    cfg.get("warehouse") or dest_warehouse or getattr(endpoint, "warehouse", "") or ""
+                ),
+                role=str(
+                    cfg.get("role")
+                    or cfg.get("auth_role")
+                    or dest_auth_role
+                    or getattr(endpoint, "auth_role", "")
+                    or ""
+                ),
+                account=str(cfg.get("account") or cfg.get("host") or ""),
+                project_id=str(
+                    cfg.get("project_id") or cfg.get("database") or ""
+                ),
+                dataset=str(cfg.get("dataset") or probe_schema),
+                service_account=str(
+                    cfg.get("service_account")
+                    or dest_service_account
+                    or getattr(endpoint, "service_account", "")
+                    or ""
+                ),
+                location=str(cfg.get("location") or ""),
+                auth_source=str(
+                    cfg.get("auth_source")
+                    or dest_auth_source
+                    or getattr(endpoint, "auth_source", "")
+                    or ""
+                ),
+                api_key=str(cfg.get("api_key") or getattr(endpoint, "api_key", "") or ""),
+            )
+            can_write, can_create, priv_meta = resolve_write_flags(True, probe)
+            out["can_write"] = can_write
+            out["can_create_table"] = can_create
+            out["privilege_probe"] = priv_meta
+            if probe.status == "denied" and probe.detail:
+                # Surface explicit deny in message without wiping connectivity success.
+                out["message"] = probe.detail
+            elif probe.status == "unavailable" and probe.detail:
+                out["privilege_probe_warning"] = probe.detail
+        except Exception as exc:  # noqa: BLE001
+            out["privilege_probe"] = {
+                "status": "unavailable",
+                "detail": str(exc),
+                "can_write": None,
+                "can_create_table": None,
+            }
     # Persist auto-resolved Mongo authSource so Validate/Execute match Connectors Test.
     resolved_auth = (getattr(endpoint, "auth_source", "") or "").strip()
     if out["connected"] and resolved_auth and (out.get("db_type") or "").lower() == "mongodb":

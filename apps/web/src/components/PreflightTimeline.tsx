@@ -2,41 +2,9 @@ import { DtIcon } from "./DtIcon";
 import { Spinner } from "./LoadingState";
 import { PreflightResult } from "../lib/types";
 import { useEffect, useState } from "react";
+import { CORE_ENGINE_GATE_IDS, gateLabel } from "../lib/preflightGates";
 
-const GATE_LABELS: Record<string, string> = {
-  g1_source: "Source readable",
-  g2_destination: "Destination reachable",
-  g3_schema_contract: "Schema contract",
-  g4_mapping_confidence: "Column mappings",
-  g5_dry_run: "Dry-run / integrity",
-  g6_target_ddl: "Target DDL",
-  g7_capacity: "Staging capacity",
-  g8_reconciliation: "Reconciliation (post-transfer)",
-  g9_sync_contract: "Sync contract",
-  g10_schema_policy: "Schema change policy",
-  g11_validation_posture: "Validation posture",
-  // legacy aliases
-  g3_schema: "Schema contract",
-  g4_mapping: "Column mappings",
-  g5_transform: "Dry-run / integrity",
-  g6_ddl: "Target DDL",
-  g9_data_integrity: "Dry-run / integrity",
-};
-
-const CORE_GATE_ORDER = [
-  "g1_source",
-  "g2_destination",
-  "g3_schema_contract",
-  "g4_mapping_confidence",
-  "g5_dry_run",
-  "g6_target_ddl",
-  "g7_capacity",
-  "g8_reconciliation",
-];
-
-function gateLabel(id: string): string {
-  return GATE_LABELS[id] ?? id.replace(/^g\d+_/, "").replace(/_/g, " ");
-}
+const CORE_GATE_ORDER = [...CORE_ENGINE_GATE_IDS];
 
 function formatElapsed(ms: number): string {
   const s = ms / 1000;

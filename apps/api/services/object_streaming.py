@@ -40,7 +40,7 @@ _SPILL_LOCK = threading.Lock()
 # guaranteed fresh copy (e.g. per-transfer runs) can pass force=True.
 _SPILL_TTL_SECONDS = int(os.getenv("DATAFLOW_SPILL_TTL", "300"))
 
-_STREAMABLE = {"csv", "tsv", "jsonl", "ndjson", "json", "excel", "parquet"}
+_STREAMABLE = {"csv", "tsv", "jsonl", "ndjson", "json", "excel", "parquet", "avro", "orc"}
 
 
 def _spill_directory() -> Path:

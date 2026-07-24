@@ -92,21 +92,43 @@ def classify_schema_change(
     added = sorted(new_names - old_names)
     dropped = sorted(old_names - new_names)
 
-    # Heuristic rename: one drop + one add with compatible types → rename (breaking).
+    # Heuristic rename: match dropped↔added by compatible (non-narrowing) types.
+    # Single-pair keeps the classic path; multi-column uses greedy type matching
+    # so N renames are not misclassified as N drops + N adds (false breaking).
     renamed_pairs: list[tuple[str, str]] = []
-    if len(dropped) == 1 and len(added) == 1:
-        d, a = dropped[0], added[0]
-        if not _is_type_narrow(old_cols[d], new_cols[a]):
-            renamed_pairs.append((d, a))
-            breaking.append({
-                "kind": "rename",
-                "column": d,
-                "to": a,
-                "old_type": old_cols[d],
-                "new_type": new_cols[a],
-            })
-            dropped = []
-            added = []
+    if dropped and added:
+        remaining_dropped = list(dropped)
+        remaining_added = list(added)
+        # Prefer exact logical-type matches, then any non-narrow pair.
+        for prefer_exact in (True, False):
+            for d in list(remaining_dropped):
+                best: str | None = None
+                for a in remaining_added:
+                    if _is_type_narrow(old_cols[d], new_cols[a]):
+                        continue
+                    same = normalize_logical_type(old_cols[d]) == normalize_logical_type(
+                        new_cols[a]
+                    )
+                    if prefer_exact and not same:
+                        continue
+                    if not prefer_exact and same:
+                        continue
+                    best = a
+                    break
+                if best is None:
+                    continue
+                renamed_pairs.append((d, best))
+                breaking.append({
+                    "kind": "rename",
+                    "column": d,
+                    "to": best,
+                    "old_type": old_cols[d],
+                    "new_type": new_cols[best],
+                })
+                remaining_dropped.remove(d)
+                remaining_added.remove(best)
+        dropped = remaining_dropped
+        added = remaining_added
 
     for col in dropped:
         breaking.append({"kind": "drop", "column": col, "old_type": old_cols[col]})
@@ -211,6 +233,10 @@ def detect_schema_drift(
 
     source_changed = bool(stored_source_fp) and not schemas_match(stored_source_fp, source_columns, source_schema)
     target_changed = bool(stored_target_fp and target_columns) and stored_target_fp != live_target_fp
+    # Redis/Mongo/Dynamo have no DDL — target fingerprints are often synthetic from
+    # mapping revisions. Fingerprint churn must not block as "Target DDL incompatible".
+    if schemaless:
+        target_changed = False
 
     mapped_sources = {str(m.get("source")) for m in mappings if m.get("source")}
     mapped_targets = {str(m.get("target")).lower() for m in mappings if m.get("target")}
@@ -241,6 +267,19 @@ def detect_schema_drift(
             src_type = source_schema.get(src) or "VARCHAR"
             tgt_type = ci_get(target_schema, tgt) or "VARCHAR"
             if not (target_schema and is_lossy_coercion(src_type, tgt_type)):
+                continue
+            # Precision collapses stay breaking even when head samples coerce
+            # (same policy as ddl_compatibility — no Airbyte soft-pass loophole).
+            from services.type_system import is_precision_collapse_coercion
+
+            if is_precision_collapse_coercion(src_type, tgt_type):
+                type_mismatches.append({
+                    "source": src,
+                    "target": tgt,
+                    "source_type": src_type.upper(),
+                    "target_type": tgt_type.upper(),
+                    "reason": "precision_collapse",
+                })
                 continue
             # Declared VARCHAR→NUMBER with clean numeric samples is not breaking drift.
             if sample_rows and samples_coerce_mapping(

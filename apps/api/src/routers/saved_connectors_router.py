@@ -192,11 +192,6 @@ def remove_saved_connector(
     return {"ok": True}
 
 
-def _sentinel_secret(value: str) -> bool:
-    """Return True if the secret could not be decrypted."""
-    return "[encrypted-secret-unavailable]" in value or "[decryption-failed]" in value
-
-
 @router.post("/{connector_id}/test")
 def test_saved_connector(
     connector_id: str,
@@ -208,42 +203,9 @@ def test_saved_connector(
     if not conn or not _can_access_connector(request, conn):
         raise HTTPException(status_code=404, detail="Connector not found")
 
-    if _sentinel_secret(conn.password or "") or _sentinel_secret(conn.connection_string or ""):
-        mark_tested(connector_id, False)
-        return {
-            "success": False,
-            "message": (
-                "Saved credentials cannot be decrypted. Install `cryptography` "
-                "(`pip install cryptography`) and ensure the same DATAFLOW_SECRETS_KEY "
-                "is set, then re-enter the password or connection string."
-            ),
-        }
+    from services.connector_probe import probe_saved_connector
 
-    from ..transfer.connector_registry import run_probe
-
-    cfg = {
-        "host": conn.host or "",
-        "port": int(conn.port or 0),
-        "database": conn.database or "",
-        "username": conn.username or "",
-        "password": conn.password or "",
-        "schema": conn.schema or "",
-        "connection_string": conn.connection_string or "",
-        "warehouse": conn.warehouse or "",
-        "ssl": conn.ssl,
-        "auth_mode": conn.auth_mode or "",
-        "auth_role": conn.auth_role or "",
-        "role": conn.auth_role or "",
-        "api_key": conn.api_key or "",
-        "service_account": conn.service_account or "",
-        "private_key": conn.private_key or "",
-        "auth_source": conn.auth_source or "",
-    }
-    try:
-        ok, message = run_probe(conn.type or "", cfg)
-    except Exception as exc:
-        mark_tested(connector_id, False)
-        return {"success": False, "message": f"Test failed: {exc}", "auth_source": cfg.get("auth_source", "")}
+    ok, message, cfg = probe_saved_connector(connector_id, workspace_id=workspace_id)
 
     # Persist any auto-resolved auth fields (e.g., MongoDB authSource) so the
     # saved connector works end-to-end without re-entering the connection string.

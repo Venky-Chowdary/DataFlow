@@ -78,8 +78,11 @@ def _seed_source_table(endpoint: EndpointConfig) -> None:
 )
 def test_manual_cross_schema_mapping(dest_driver: str, tmp_path: Path) -> None:
     """Transfer from PostgreSQL source to a destination with different column names."""
+    if dest_driver == "snowflake":
+        pytest.importorskip("fakesnow")
+
     source = _reachable_postgresql(tmp_path)
-    _seed_source_table(source)  # creates source table with SOURCE_* columns
+    _seed_source_table(source)
 
     suffix = uuid.uuid4().hex[:8]
     destination = _build_db_endpoint(dest_driver, tmp_path, "dst", suffix)
@@ -97,7 +100,6 @@ def test_manual_cross_schema_mapping(dest_driver: str, tmp_path: Path) -> None:
 
     if destination.format == "snowflake":
         pytest.importorskip("fakesnow")
-
     engine = UniversalTransferEngine()
     result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
 
@@ -116,6 +118,9 @@ def test_manual_cross_schema_mapping(dest_driver: str, tmp_path: Path) -> None:
 )
 def test_intelligent_cross_schema_mapping(dest_driver: str, tmp_path: Path) -> None:
     """Auto-map source columns to an existing target schema during upsert/append."""
+    if dest_driver == "snowflake":
+        pytest.importorskip("fakesnow")
+
     source = _reachable_postgresql(tmp_path)
     _seed_source_table(source)
 
@@ -156,9 +161,6 @@ def test_intelligent_cross_schema_mapping(dest_driver: str, tmp_path: Path) -> N
             "cursor_field": "",
         }],
     )
-
-    if destination.format == "snowflake":
-        pytest.importorskip("fakesnow")
 
     engine = UniversalTransferEngine()
     result = engine.execute_tracked(request, uuid.uuid4().hex[:24])

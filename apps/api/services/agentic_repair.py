@@ -153,11 +153,16 @@ def propose_from_preflight(
         payload["coercion_report"] = coercion_report
     explained = explain_validation(payload, use_llm=False)
     actions = list(explained.get("suggested_actions") or [])
+    mutative = [a for a in actions if action_is_mapping_mutative(a)]
     safe_actions = [a for a in actions if _action_is_safe(a)]
     auto = bool(safe_actions) and len(safe_actions) == len(actions) and all(
         a.get("kind") in ("add_transform", "change_target_type") for a in safe_actions
     )
-    conf = "high" if auto else ("medium" if safe_actions else "low")
+    conf = "high" if auto else ("medium" if mutative else "low")
+    issues = list(explained.get("issues") or [])
+    has_dup = any(
+        a.get("kind") == "fix_source_keys" for a in actions
+    )
     proposal = RepairProposal(
         id=f"repair_{uuid.uuid4().hex[:12]}",
         job_id=job_id,
@@ -167,9 +172,11 @@ def propose_from_preflight(
         summary=str(explained.get("narrative") or explained.get("summary") or "Repair proposed"),
         actions=actions,
         diagnosis={
-            "issues": explained.get("issues") or [],
+            "issues": issues,
             "column_fixes": explained.get("column_fixes") or explained.get("fixes") or [],
             "narrative": explained.get("narrative") or "",
+            "mapping_applyable": bool(mutative),
+            "root_cause": "duplicate_identity_keys" if has_dup else None,
         },
     )
     with _LOCK:
@@ -347,8 +354,16 @@ def decide_proposal(
         if apply_fn is not None:
             try:
                 apply_result = dict(apply_fn(list(row.get("actions") or [])) or {})
-                apply_result.setdefault("applied", True)
-                row["status"] = "applied"
+                # Honesty: only mark applied when mutative work actually happened.
+                really_applied = bool(apply_result.get("applied"))
+                if really_applied:
+                    row["status"] = "applied"
+                else:
+                    row["status"] = "approved"
+                    apply_result.setdefault(
+                        "reason",
+                        apply_result.get("reason") or "no_mutative_actions",
+                    )
             except Exception as exc:
                 row["status"] = "failed"
                 apply_result = {"applied": False, "error": str(exc)}
@@ -362,6 +377,19 @@ def decide_proposal(
         return decided
 
 
+MUTATIVE_ACTION_KINDS = frozenset({"change_target_type", "add_transform", "map_column"})
+
+
+def action_is_mapping_mutative(action: dict[str, Any]) -> bool:
+    """True when Approve & apply can change Studio mappings for this action."""
+    kind = str(action.get("kind") or "")
+    if kind not in MUTATIVE_ACTION_KINDS:
+        return False
+    if action.get("mapping_applyable") is False:
+        return False
+    return bool(action.get("column") or action.get("source"))
+
+
 def apply_actions_to_mappings(
     mappings: list[dict[str, Any]],
     actions: list[dict[str, Any]],
@@ -370,6 +398,8 @@ def apply_actions_to_mappings(
     out = [dict(m) for m in mappings]
     by_source = {(m.get("source") or m.get("source_column") or ""): m for m in out}
     for action in actions:
+        if not action_is_mapping_mutative(action):
+            continue
         kind = action.get("kind")
         col = action.get("column") or action.get("source")
         if not col:
@@ -392,3 +422,39 @@ def apply_actions_to_mappings(
         elif kind == "map_column" and action.get("target"):
             m["destination"] = action["target"]
     return out
+
+
+def apply_actions_with_report(
+    mappings: list[dict[str, Any]],
+    actions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Apply mutative actions only; report honesty when nothing can change mappings."""
+    mutative = [a for a in actions if action_is_mapping_mutative(a)]
+    skipped = [
+        {
+            "kind": a.get("kind"),
+            "label": a.get("label"),
+            "reason": "not_mapping_mutative",
+        }
+        for a in actions
+        if not action_is_mapping_mutative(a)
+    ]
+    if not mutative:
+        return {
+            "applied": False,
+            "mappings": list(mappings),
+            "mutated_count": 0,
+            "skipped_actions": skipped,
+            "reason": "no_mutative_actions",
+            "message": (
+                "No mapping mutations in this proposal (e.g. duplicate identity keys). "
+                "Approve does not change Studio mappings — fix source keys / identity on Map."
+            ),
+        }
+    updated = apply_actions_to_mappings(mappings, mutative)
+    return {
+        "applied": True,
+        "mappings": updated,
+        "mutated_count": len(mutative),
+        "skipped_actions": skipped,
+    }

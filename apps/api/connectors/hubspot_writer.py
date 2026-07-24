@@ -118,11 +118,14 @@ def write_mapped_rows(
                 props = {k: str(v) for k, v in pairs if v is not None and str(v) != ""}
                 id_val = props.pop(id_property, None) or props.get("email") or props.get("id")
                 if not id_val:
-                    rejected_details.append({
+                    detail = {
                         "row_index": i + len(inputs),
                         "reason": f"Missing idProperty '{id_property}' for HubSpot upsert",
                         "values": props,
-                    })
+                    }
+                    rejected_details.append(detail)
+                    if policy == "fail":
+                        raise RuntimeError(detail["reason"])
                     continue
                 inputs.append({
                     "idProperty": id_property,
@@ -141,8 +144,17 @@ def write_mapped_rows(
             }
             resp = request(method="POST", url=endpoint, token=access, data=body, timeout=120)
             data = resp.json() if resp.content else {}
+            if not isinstance(data, dict):
+                raise RuntimeError("HubSpot returned an invalid batch response")
             results = data.get("results") or []
             errors = data.get("errors") or []
+            if not isinstance(results, list) or not isinstance(errors, list):
+                raise RuntimeError("HubSpot batch response lacks result arrays")
+            accounted = len(results) + len(errors)
+            if accounted < len(inputs):
+                raise RuntimeError(
+                    f"HubSpot acknowledged only {accounted} of {len(inputs)} records"
+                )
             written += len(results)
             for r in results:
                 digest.update(str(r.get("id", "")).encode())
@@ -152,6 +164,11 @@ def write_mapped_rows(
                     "reason": str(err.get("message") or err),
                     "values": err.get("context") or {},
                 })
+            if errors and policy == "fail":
+                raise RuntimeError(
+                    f"HubSpot rejected {len(errors)} record(s); "
+                    "strict error policy blocks partial activation"
+                )
             chunks += 1
             if on_checkpoint:
                 on_checkpoint(written, len(mapped_rows), chunks)
@@ -165,6 +182,23 @@ def write_mapped_rows(
             chunks_completed=chunks,
             error=humanize_http_error(exc, "hubspot"),
             rejected_details=rejected_details,
+            driver="hubspot",
+        )
+
+    if rejected_details and policy == "fail":
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=obj,
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error=(
+                f"HubSpot rejected {len(rejected_details)} record(s); "
+                "strict error policy blocks partial activation"
+            ),
+            rejected_details=rejected_details,
+            rejected_rows=len(rejected_details),
             driver="hubspot",
         )
 

@@ -25,7 +25,7 @@ def _ensure_psycopg2() -> None:
 
 
 def _cell(value: Any) -> str:
-    return cell_to_string(value)
+    return cell_to_string(value, preserve_sql_null=True)
 
 
 
@@ -212,8 +212,13 @@ def read_table_cursor_batch(
     cursor_after: str | None = None,
     columns: list[str] | None = None,
     limit: int = 500,
+    cursor_primary_key: str | None = None,
 ) -> ReadBatch:
-    """Read rows with cursor_column > watermark — for incremental sync."""
+    """Read rows with cursor_column > watermark — for incremental sync.
+
+    When ``cursor_primary_key`` is set, uses lexicographic ``(cursor, pk)`` so
+    rows sharing a timestamp watermark are not skipped forever.
+    """
     from psycopg2 import sql
 
     schema = schema or "public"
@@ -241,21 +246,51 @@ def read_table_cursor_batch(
                     sql.Identifier(table),
                 )
             if cursor_after:
-                query = sql.SQL("{} WHERE {} > %s ORDER BY {} LIMIT %s").format(
-                    base,
-                    sql.Identifier(cursor_column),
-                    sql.Identifier(cursor_column),
-                )
-                cur.execute(query, (cursor_after, limit))
+                # Composite order: cursor then primary key when provided so tied
+                # watermarks do not skip peer rows (timestamp-cursor Airbyte trap).
+                pk = (cursor_primary_key or "").strip()
+                if pk and pk != cursor_column:
+                    query = sql.SQL(
+                        "{} WHERE ({}, {}) > (%s, %s) ORDER BY {}, {} LIMIT %s"
+                    ).format(
+                        base,
+                        sql.Identifier(cursor_column),
+                        sql.Identifier(pk),
+                        sql.Identifier(cursor_column),
+                        sql.Identifier(pk),
+                    )
+                    # cursor_after may be "value|pk" composite or bare cursor.
+                    if "|" in str(cursor_after):
+                        cur_val, pk_val = str(cursor_after).split("|", 1)
+                    else:
+                        cur_val, pk_val = cursor_after, ""
+                    cur.execute(query, (cur_val, pk_val, limit))
+                else:
+                    query = sql.SQL("{} WHERE {} > %s ORDER BY {} LIMIT %s").format(
+                        base,
+                        sql.Identifier(cursor_column),
+                        sql.Identifier(cursor_column),
+                    )
+                    cur.execute(query, (cursor_after, limit))
             else:
-                query = sql.SQL("{} ORDER BY {} LIMIT %s").format(
-                    base,
-                    sql.Identifier(cursor_column),
-                )
+                pk = (cursor_primary_key or "").strip()
+                if pk and pk != cursor_column:
+                    query = sql.SQL("{} ORDER BY {}, {} LIMIT %s").format(
+                        base,
+                        sql.Identifier(cursor_column),
+                        sql.Identifier(pk),
+                    )
+                else:
+                    query = sql.SQL("{} ORDER BY {} LIMIT %s").format(
+                        base,
+                        sql.Identifier(cursor_column),
+                    )
                 cur.execute(query, (limit,))
             fetched = cur.fetchall()
             headers = [desc[0] for desc in cur.description] if cur.description else (columns or [])
             rows = [[_cell(v) for v in row] for row in fetched]
-            return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=len(rows))
+            # Keyset pages are not a cardinality bound — page length must never
+            # trip stream early-stop (fetch_offset >= total_rows).
+            return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=None)
     finally:
         conn.close()

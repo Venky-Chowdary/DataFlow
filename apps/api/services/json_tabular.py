@@ -3,6 +3,9 @@
 Single source of truth for **every** file→destination route (Redis, Snowflake,
 MySQL, Postgres, …). Preview, upload, buffered execute, and streaming ingest
 must all call these helpers so Map/Validate/Run never disagree on JSON shape.
+
+When multiple array-of-object collections exist, refuse silent partial ingest
+unless ``records_path`` selects one (Airbyte-class trap).
 """
 
 from __future__ import annotations
@@ -35,44 +38,77 @@ def _array_of_objects(value: Any) -> list[dict[str, Any]] | None:
     return rows or None
 
 
-def _unwrap_object(data: dict[str, Any], *, depth: int) -> list[dict[str, Any]] | None:
-    """Find the first array-of-objects under ``data`` within ``depth`` levels."""
-    preferred: list[dict[str, Any]] | None = None
-    fallback: list[dict[str, Any]] | None = None
-    nested_dicts: list[dict[str, Any]] = []
+def _dig_path(data: Any, path: str) -> Any:
+    cur = data
+    for part in (path or "").split("."):
+        if not part:
+            continue
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+    return cur
 
+
+def discover_array_of_object_paths(
+    data: dict[str, Any],
+    *,
+    depth: int = 3,
+    prefix: str = "",
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Return ``(dotted_path, rows)`` for every array-of-objects under ``data``."""
+    found: list[tuple[str, list[dict[str, Any]]]] = []
     for key, value in data.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
         rows = _array_of_objects(value)
         if rows is not None:
-            key_l = str(key).lower()
-            if key_l in _PREFERRED_WRAPPER_KEYS or key in _PREFERRED_WRAPPER_KEYS:
-                preferred = rows
-                break
-            if fallback is None:
-                fallback = rows
+            found.append((path, rows))
             continue
         if depth > 0 and isinstance(value, dict):
-            nested_dicts.append(value)
-
-    if preferred is not None:
-        return preferred
-    if fallback is not None:
-        return fallback
-
-    for nested in nested_dicts:
-        found = _unwrap_object(nested, depth=depth - 1)
-        if found is not None:
-            return found
-    return None
+            found.extend(discover_array_of_object_paths(value, depth=depth - 1, prefix=path))
+    return found
 
 
-def extract_json_records(data: Any) -> list[dict[str, Any]]:
+def _select_among_candidates(
+    candidates: list[tuple[str, list[dict[str, Any]]]],
+) -> list[dict[str, Any]]:
+    if not candidates:
+        raise ValueError("No array-of-object collections found in JSON")
+    if len(candidates) == 1:
+        return candidates[0][1]
+
+    preferred: list[tuple[str, list[dict[str, Any]], int]] = []
+    for path, rows in candidates:
+        leaf = path.split(".")[-1].lower()
+        if leaf in _PREFERRED_WRAPPER_KEYS:
+            rank = _PREFERRED_WRAPPER_KEYS.index(leaf)  # type: ignore[arg-type]
+            preferred.append((path, rows, rank))
+
+    if len(preferred) == 1:
+        return preferred[0][1]
+    if len(preferred) > 1:
+        preferred.sort(key=lambda t: t[2])
+        # Multiple preferred wrappers (e.g. data + items) — pick canonical order,
+        # but only when they share the same parent path depth uniqueness is unclear
+        # across siblings. Prefer lowest rank; if two at same rank, fail closed.
+        best_rank = preferred[0][2]
+        top = [p for p in preferred if p[2] == best_rank]
+        if len(top) == 1:
+            return top[0][1]
+
+    paths = ", ".join(p for p, _ in candidates)
+    raise ValueError(
+        f"JSON has multiple array-of-object collections ({paths}). "
+        "Set records_path to select one — refuse silent partial ingest."
+    )
+
+
+def extract_json_records(data: Any, *, records_path: str | None = None) -> list[dict[str, Any]]:
     """Return row objects from a parsed JSON value.
 
     Accepted shapes
     ---------------
     - ``[{...}, ...]`` — root array of objects
-    - ``{"countries": [{...}, ...], ...}`` — preferred / first root key whose
+    - ``{"countries": [{...}, ...], ...}`` — preferred / single root key whose
       value is a non-empty array of objects
     - ``{"response":{"data":[{...}]}}`` — nested envelope (depth ≤ 3)
     - GeoJSON ``{"type":"FeatureCollection","features":[...]}``
@@ -81,8 +117,23 @@ def extract_json_records(data: Any) -> list[dict[str, Any]]:
     Raises
     ------
     ValueError
-        When no object rows can be derived (scalars, array of scalars, empty).
+        When no object rows can be derived, or when multiple sibling collections
+        exist without an explicit ``records_path``.
     """
+    path = (records_path or "").strip()
+    if path:
+        if isinstance(data, list) and path in {"item", "$", "root"}:
+            rows = [r for r in data if isinstance(r, dict)]
+        else:
+            target = _dig_path(data, path)
+            if isinstance(target, list):
+                rows = [r for r in target if isinstance(r, dict)]
+            else:
+                rows = []
+        if not rows:
+            raise ValueError(f"JSON records_path={path!r} did not resolve to an array of objects")
+        return rows
+
     if isinstance(data, list):
         rows = [r for r in data if isinstance(r, dict)]
         if not rows and data:
@@ -93,9 +144,9 @@ def extract_json_records(data: Any) -> list[dict[str, Any]]:
         return rows
 
     if isinstance(data, dict):
-        found = _unwrap_object(data, depth=3)
-        if found is not None:
-            return found
+        candidates = discover_array_of_object_paths(data, depth=3)
+        if candidates:
+            return _select_among_candidates(candidates)
         # Single record object (no nested row array).
         return [data]
 
@@ -105,10 +156,15 @@ def extract_json_records(data: Any) -> list[dict[str, Any]]:
     )
 
 
-def load_json_records(raw: bytes | str) -> list[dict[str, Any]]:
+def load_json_records(raw: bytes | str, *, records_path: str | None = None) -> list[dict[str, Any]]:
     """Parse bytes/text JSON and extract tabular records."""
     if isinstance(raw, bytes):
-        text = raw.decode("utf-8", errors="replace")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                f"JSON is not valid UTF-8 ({exc}); refuse silent byte replacement"
+            ) from exc
     else:
         text = raw
     text = text.lstrip("\ufeff").strip()
@@ -118,13 +174,14 @@ def load_json_records(raw: bytes | str) -> list[dict[str, Any]]:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid JSON: {exc}") from exc
-    return extract_json_records(data)
+    return extract_json_records(data, records_path=records_path)
 
 
 def detect_ijson_records_prefix(head: bytes) -> str | None:
     """Return an ijson path for array-of-object rows, or None if not streamable that way.
 
     ``item`` → root array. ``countries.item`` → ``{"countries":[...]}``.
+    When multiple preferred wrappers appear, prefer canonical order (data before items).
     """
     stripped = head.lstrip().lstrip(b"\xef\xbb\xbf")
     if stripped.startswith(b"["):
@@ -132,14 +189,16 @@ def detect_ijson_records_prefix(head: bytes) -> str | None:
     if not stripped.startswith(b"{"):
         return None
 
-    # Lightweight scan for `"key": [` without loading values.
     import re
 
+    hits: list[tuple[int, str]] = []
     for key in _PREFERRED_WRAPPER_KEYS:
-        # "countries" <ws> : <ws> [
         pat = rb'"' + key.encode("ascii") + rb'"\s*:\s*\['
         if re.search(pat, head[:65536], flags=re.IGNORECASE):
-            return f"{key}.item"
+            hits.append((_PREFERRED_WRAPPER_KEYS.index(key), key))
+    if hits:
+        hits.sort(key=lambda t: t[0])
+        return f"{hits[0][1]}.item"
 
     # Any first `"something": [` at root-ish depth (best effort).
     m = re.search(rb'"([^"\\]+)"\s*:\s*\[', head[:65536])

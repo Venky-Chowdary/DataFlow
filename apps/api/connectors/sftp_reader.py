@@ -35,9 +35,11 @@ def read_object(
     remote_name = filename or sftp_cfg.path
 
     cache_key = f"sftp:{sftp_cfg.host}:{sftp_cfg.port}:{sftp_cfg.path}"
+    # SFTP has no ETag in the common path — force refresh to avoid stale spill TTL.
     path = download_object(
         cache_key,
         lambda p: download_for_object_store("sftp", p, cfg, bucket, key),
+        force=True,
     )
     headers, rows, total = read_rows_from_spill(
         path,

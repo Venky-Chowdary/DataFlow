@@ -26,17 +26,17 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "pinecone": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
     "milvus": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
     "gcs": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
-    "adls": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True},
+    "adls": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "sqlite": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "sqlserver": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "oracle": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "sftp": {"test": True, "read": True, "write": True, "introspect": False, "preflight": False},
     "email": {"test": True, "read": False, "write": True, "introspect": False, "preflight": False, "dest_only": True},
     "iceberg": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
-    "kafka": {"test": True, "read": False, "write": True, "introspect": False, "preflight": False, "dest_only": True},
+    "kafka": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     # Reverse-ETL destinations: full read+write (warehouse → CRM activation).
-    "salesforce": {"test": True, "read": True, "write": True, "introspect": False, "preflight": False},
-    "hubspot": {"test": True, "read": True, "write": True, "introspect": False, "preflight": False},
+    "salesforce": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
+    "hubspot": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "stripe": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "rest_api": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "influxdb": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
@@ -134,9 +134,11 @@ SUGGESTED_SOURCES = [
     "salesforce", "hubspot", "stripe",
 ]
 
-# Catalog entry ids that map to implemented drivers — blocks false "Full transfer" on aliases
-TRANSFER_READY_CATALOG_IDS = frozenset({
-    "postgresql", "mysql", "mongodb", "sqlserver", "oracle",
+# Catalog entry ids that map to implemented drivers — blocks false "Full transfer" on aliases.
+# Hosted twins (RDS/Neon/Atlas/…) share the same duplex driver and are transfer-ready
+# under the same evidence bar — counting them is honest; inventing rest_api SaaS is not.
+_TRANSFER_READY_CORE = frozenset({
+    "postgresql", "mysql", "mongodb", "sqlserver", "sql_server", "oracle",
     "snowflake", "bigquery", "redshift",
     "dynamodb", "amazon_s3", "s3", "gcs", "google_cloud_storage", "adls",
     "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage",
@@ -147,6 +149,30 @@ TRANSFER_READY_CATALOG_IDS = frozenset({
     "sftp", "email",
     "pgvector", "qdrant", "weaviate", "pinecone", "milvus",
 })
+
+_TRANSFER_READY_HOSTED_TWINS = frozenset({
+    # Enterprise SQL / cloud managed
+    "postgresql_rds", "mysql_rds", "postgresql_cloud_sql", "mysql_cloud_sql",
+    "postgresql_azure", "mysql_azure", "postgresql_supabase", "postgresql_neon",
+    "mysql_planetscale", "amazon_rds_oracle", "oracle_autonomous_warehouse",
+    "amazon_redshift", "redshift_serverless",
+    "google_bigquery", "bigquery_us", "bigquery_eu",
+    "snowflake_aws", "snowflake_azure", "snowflake_gcp",
+    "amazon_dynamodb",
+    "mongodb_atlas",
+    # Search / cache
+    "opensearch", "amazon_elasticsearch", "elastic_cloud",
+    "elasticsearch_aws", "elasticsearch_gcp",
+    "redis_enterprise", "amazon_elasticache_redis", "azure_cache_redis",
+    "google_memorystore_redis",
+    # Object / files
+    "s3_us_east_1", "s3_eu_west_1", "s3_ap_southeast_1",
+    "gcs_us_central1", "gcs_europe_west1",
+    "csv_upload", "tsv_upload", "json_documents", "excel_workbook",
+    "parquet_lake", "jsonl_stream",
+})
+
+TRANSFER_READY_CATALOG_IDS = _TRANSFER_READY_CORE | _TRANSFER_READY_HOSTED_TWINS
 
 SUGGESTED_DESTINATIONS = [
     "postgresql", "mongodb", "mysql", "sqlserver", "oracle",

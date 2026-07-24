@@ -33,6 +33,26 @@ def _load_ml_baseline():
     return None
 
 
+def _calibrated_confidence(
+    score: float,
+    *,
+    score_gap: float,
+    requires_review: bool,
+    hard_cap: float = 0.99,
+) -> float:
+    """Keep near-tie mappings below auto-approve thresholds.
+
+    G4 / Studio auto-approve uses ~0.85 in strict mode. A near-tie with
+    confidence 0.93 would pass the gate despite ``requires_review``. Cap
+    review rows at 0.84 and scale by gap so operators must confirm.
+    """
+    conf = min(float(score), hard_cap)
+    if requires_review:
+        # gap 0.00 → 0.70, gap 0.07 → ~0.805, never above 0.84
+        conf = min(conf, round(0.70 + max(score_gap, 0.0) * 1.5, 3), 0.84)
+    return round(conf, 3)
+
+
 ABBREVIATIONS: dict[str, str] = {
     # Amounts and quantities
     "amt": "amount",
@@ -1106,6 +1126,7 @@ def map_columns(
     target_schemas: list[dict] | None = None,
     threshold: float = 0.85,
     destination_db_type: str = "",
+    destination_table_exists: bool | None = None,
 ) -> list[dict]:
     from services.semantic_analyzer import analyze_column
     from services.type_system import ddl_type
@@ -1137,29 +1158,55 @@ def map_columns(
             tgt_types[t] = "VARCHAR"
 
     if not target_columns:
-        # Destination schema is unknown/empty — identity passthrough for create-new.
-        # Types are projected to destination-native DDL when dest family is known so
-        # writers CREATE with accurate types (e.g. MySQL INT → Snowflake NUMBER(38,0)).
+        # Empty targets are NOT automatically create-new. Only invent CREATE when
+        # the destination object is confirmed missing. Existing/unknown + empty
+        # columns = pending schema (shared SQL/warehouse failure mode).
         out: list[dict] = []
+        confirmed_missing = destination_table_exists is False
         for src in source_columns:
             src_type = src_types.get(src, "VARCHAR")
             dest_native = ddl_type(dest_db, src_type) if dest_db else src_type
-            out.append(
-                {
-                    "source": src,
-                    "target": _semantic_form(src),
-                    "confidence": IDENTITY_PASSTHROUGH_CONFIDENCE,
-                    "reasoning": (
-                        f"New destination table — identity mapping; "
-                        f"types will CREATE on first write as {dest_native}"
-                    ),
-                    "user_override": False,
-                    "source_type": src_type,
-                    "target_type": dest_native,
-                    "assignment_strategy": "identity_passthrough",
-                    "create_new": True,
-                }
-            )
+            if confirmed_missing:
+                out.append(
+                    {
+                        "source": src,
+                        "target": _semantic_form(src),
+                        "confidence": IDENTITY_PASSTHROUGH_CONFIDENCE,
+                        "reasoning": (
+                            f"New destination table — identity mapping; "
+                            f"types will CREATE on first write as {dest_native}"
+                        ),
+                        "user_override": False,
+                        "source_type": src_type,
+                        "target_type": dest_native,
+                        "assignment_strategy": "identity_passthrough",
+                        "create_new": True,
+                    }
+                )
+            else:
+                exists_note = (
+                    "Destination table exists but column metadata did not load"
+                    if destination_table_exists is True
+                    else "Destination schema unavailable — not treating as create-new"
+                )
+                out.append(
+                    {
+                        "source": src,
+                        "target": _semantic_form(src),
+                        "confidence": 0.55,
+                        "reasoning": (
+                            f"{exists_note}. Retry destination schema load before Map "
+                            f"invents CREATE TABLE / identity passthrough "
+                            f"(projected type {dest_native})."
+                        ),
+                        "user_override": False,
+                        "source_type": src_type,
+                        "target_type": dest_native,
+                        "assignment_strategy": "pending_dest_schema",
+                        "create_new": False,
+                        "requires_review": True,
+                    }
+                )
         return out
 
     idf = _build_idf(source_columns + target_columns)
@@ -1196,19 +1243,23 @@ def map_columns(
         alternatives = _alternatives(source, target_columns, pair_scores)
         winner = alternatives[0]["confidence"] if alternatives else score
         runner_up = alternatives[1]["confidence"] if len(alternatives) > 1 else 0.0
+        score_gap = round(max(winner - runner_up, 0.0), 3)
+        requires_review = score_gap < 0.08 and not reason.startswith("Exact")
         assigned_sources.add(source)
         used_targets.add(target)
         mappings.append(
             {
                 "source": source,
                 "target": target,
-                "confidence": round(min(score, 0.99), 3),
+                "confidence": _calibrated_confidence(
+                    score, score_gap=score_gap, requires_review=requires_review,
+                ),
                 "reasoning": reason,
                 "user_override": False,
                 "assignment_strategy": "optimal_bipartite_hungarian",
                 "alternatives": alternatives,
-                "score_gap": round(max(winner - runner_up, 0.0), 3),
-                "requires_review": (winner - runner_up) < 0.08 and not reason.startswith("Exact"),
+                "score_gap": score_gap,
+                "requires_review": requires_review,
             }
         )
 
@@ -1256,11 +1307,18 @@ def map_columns(
                 assigned_sources.add(source)
                 winner = alternatives[0]["confidence"] if alternatives else near_score
                 runner_up = alternatives[1]["confidence"] if len(alternatives) > 1 else 0.0
+                score_gap = round(max(winner - runner_up, 0.0), 3)
+                requires_review = near_ratio < 0.85
                 mappings.append(
                     {
                         "source": source,
                         "target": near_tgt,
-                        "confidence": round(min(near_score, 0.97), 3),
+                        "confidence": _calibrated_confidence(
+                            near_score,
+                            score_gap=score_gap,
+                            requires_review=requires_review,
+                            hard_cap=0.97,
+                        ),
                         "reasoning": (
                             f"Near-form match to existing destination "
                             f"(similarity={near_ratio:.2f}); prefer over inventing a column"
@@ -1268,8 +1326,8 @@ def map_columns(
                         "user_override": False,
                         "assignment_strategy": "near_form_existing",
                         "alternatives": alternatives,
-                        "score_gap": round(max(winner - runner_up, 0.0), 3),
-                        "requires_review": near_ratio < 0.85,
+                        "score_gap": score_gap,
+                        "requires_review": requires_review,
                     }
                 )
                 continue
@@ -1338,17 +1396,23 @@ def map_columns(
             used_targets.add(best_target)
         winner = alternatives[0]["confidence"] if alternatives else best_score
         runner_up = alternatives[1]["confidence"] if len(alternatives) > 1 else 0.0
+        score_gap = round(max(winner - runner_up, 0.0), 3)
+        requires_review = score_gap < 0.08 and not best_reason.startswith("Exact")
         mappings.append(
             {
                 "source": source,
                 "target": best_target,
-                "confidence": round(min(max(best_score, 0.55), 0.99), 3),
+                "confidence": _calibrated_confidence(
+                    max(best_score, 0.55),
+                    score_gap=score_gap,
+                    requires_review=requires_review,
+                ),
                 "reasoning": best_reason,
                 "user_override": False,
                 "assignment_strategy": "fallback_best_available",
                 "alternatives": alternatives,
-                "score_gap": round(max(winner - runner_up, 0.0), 3),
-                "requires_review": (winner - runner_up) < 0.08 and not best_reason.startswith("Exact"),
+                "score_gap": score_gap,
+                "requires_review": requires_review,
             }
         )
 

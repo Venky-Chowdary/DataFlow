@@ -13,10 +13,10 @@ import { WorkspaceSearch, type SearchNavigateTarget } from "./components/ui/Work
 import { StatusPopover } from "./components/StatusPopover";
 import { DataProvider } from "./lib/DataContext";
 import { StudioActionsProvider } from "./lib/StudioActionsContext";
-import { AUTH_REQUIRED_EVENT, deleteConnector, fetchConnectors, fetchJobs, fetchSchedules, noteApiSuccess, probeApiHealth, shouldMarkApiOffline } from "./lib/api";
+import { AUTH_REQUIRED_EVENT, deleteConnector, fetchConnectors, fetchJobs, fetchSchedules, fetchTransferCapabilities, noteApiSuccess, probeApiHealth, shouldMarkApiOffline } from "./lib/api";
 import { clearSession, readSession, writeSession } from "./lib/session";
 import { loadSidebarNavCompact, saveSidebarNavCompact } from "./lib/pilotChatStore";
-import { resolveCatalogIdToType } from "./lib/connectorTypes";
+import { loadTransferLiveCatalog, resolveCatalogIdToType } from "./lib/connectorTypes";
 import { Connector, PipelineSchedule, Screen, TransferJob } from "./lib/types";
 import { LoginPage } from "./pages/LoginPage";
 import { MarketingSite } from "./pages/marketing/MarketingSite";
@@ -260,6 +260,8 @@ function AppShell({
         loadConnectors(false),
         loadJobs(false),
         loadSchedules(),
+        // Catalog SSOT for transfer-ready drivers — before Transfer Studio paints.
+        loadTransferLiveCatalog(fetchTransferCapabilities),
       ]);
       if (!cancelled) setBootLoading(false);
     })();

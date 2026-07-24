@@ -65,8 +65,8 @@ export function detectNestedDocumentFields(
         column: col,
         kind: isArray ? "array" : "nested_object",
         detail: isArray
-          ? "Array field — will explode to rows or serialize per destination DDL."
-          : "Embedded JSON object — Compass stores as BSON; DataFlow maps to typed warehouse columns.",
+          ? "Array field — serialize per destination DDL (no silent row explosion)."
+          : "Embedded JSON object — Map chooses JSON blob or flatten top-level keys (nested objects stay on parent).",
         flattenTarget: `${col}_json`,
       });
     }
@@ -121,7 +121,7 @@ export function buildCompetitiveAdvantages(ctx: {
     advantages.unshift({
       id: "json-flatten",
       title: "Nested JSON → typed columns",
-      detail: `${ctx.nestedFieldCount} nested/document field(s) detected. We flatten and coerce for Snowflake, BigQuery, and Postgres — not raw BSON dump.`,
+      detail: `${ctx.nestedFieldCount} nested/document field(s) detected. On Map, choose JSON blob or flatten top-level keys — nested objects stay on the parent (no invented deep explode).`,
       icon: "trend",
     });
   }
@@ -198,17 +198,33 @@ export function detectTypeRisks(
     }
 
     if (destType && srcType && destType !== srcType) {
-      const lossy =
-        (srcType.includes("decimal") && destType.includes("int")) ||
-        (srcType.includes("string") && (destType.includes("int") || destType.includes("number")));
-      if (lossy) {
+      const src = srcType.toLowerCase();
+      const dest = destType.toLowerCase();
+      const floatToDecimal =
+        /\b(float|double|real|float64)\b/.test(src) &&
+        /\b(decimal|numeric|number|bignumeric)\b/.test(dest) &&
+        !/\b(float|double|real|float64)\b/.test(dest);
+      const decimalToInt =
+        /\b(decimal|numeric|number|float|double)\b/.test(src) && /\b(int|bigint|smallint)\b/.test(dest);
+      const datetimeToDate =
+        /\b(timestamp|datetime|timestamptz)\b/.test(src) && /\bdate\b/.test(dest) && !/time/.test(dest);
+      const stringToNumber =
+        /\b(string|text|varchar|char)\b/.test(src) &&
+        /\b(int|bigint|decimal|numeric|number|float|double)\b/.test(dest);
+      if (floatToDecimal || decimalToInt || datetimeToDate || stringToNumber) {
         risks.push({
           id: `lossy-${m.source}`,
           column: m.source,
           severity: "block",
-          title: "Possible precision loss",
-          detail: `${srcType} → ${destType} may truncate decimals or reject values.`,
-          suggestedTransform: "cast_number",
+          title: floatToDecimal
+            ? "IEEE float → fixed-point may lose precision"
+            : datetimeToDate
+              ? "Datetime → date drops time-of-day"
+              : "Possible precision loss",
+          detail: floatToDecimal
+            ? `${srcType} → ${destType}: keep FLOAT/DOUBLE on the destination, or accept rounding risk and approve on Validate.`
+            : `${srcType} → ${destType} may truncate, drop time, or reject values. Open Validate before Execute.`,
+          suggestedTransform: decimalToInt || stringToNumber ? "cast_number" : undefined,
         });
       }
     }

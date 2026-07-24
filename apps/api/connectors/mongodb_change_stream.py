@@ -23,7 +23,7 @@ from connectors.mongodb_common import _mongo_client
 from connectors.mongodb_reader import (
     _connection_string,
     _serialize,
-    read_collection_batch,
+    read_collection_cursor_batch,
 )
 from services.cdc_engine import ChangeBatch
 
@@ -37,9 +37,14 @@ def _database_name(cfg: dict[str, Any]) -> str:
 def _doc_to_record(doc: dict[str, Any], columns: list[str] | None) -> dict[str, Any]:
     if "_id" in doc:
         doc["_id"] = str(doc["_id"])
-    if columns:
-        return {c: _serialize(doc.get(c)) for c in columns}
-    return {k: _serialize(v) for k, v in doc.items()}
+    if not columns:
+        return {k: _serialize(v) for k, v in doc.items()}
+    # Known columns first, then any sparse extras — never silent-drop mid-stream fields.
+    out = {c: _serialize(doc.get(c)) for c in columns}
+    for k, v in doc.items():
+        if k not in out:
+            out[k] = _serialize(v)
+    return out
 
 
 class MongodbChangeStreamCdc:
@@ -84,6 +89,41 @@ class MongodbChangeStreamCdc:
         self._last_signal_poll_at = 0.0
         self._signal_poll_interval_sec = float(cfg.get("signal_poll_interval_sec") or 15)
         self._signal_index_ready = False
+        import os
+
+        from services.cdc_lease import CdcLeaseGuard
+
+        cursor_key = str(cfg.get("cursor_key") or f"mongodb:{self.db_name}:{collection}")
+        holder = str(
+            cfg.get("lease_holder_id") or os.getenv("DATAFLOW_CDC_LEASE_HOLDER") or ""
+        )
+        self._lease = CdcLeaseGuard(
+            cursor_key=cursor_key,
+            resource=f"mongo_cs:{self.db_name}:{collection}",
+            holder_id=holder,
+            job_id=str(cfg.get("job_id") or ""),
+            meta={
+                "engine": "mongodb",
+                "database": self.db_name,
+                "collection": collection,
+            },
+        )
+
+    @property
+    def lease_holder_id(self) -> str:
+        return self._lease.holder_id
+
+    @lease_holder_id.setter
+    def lease_holder_id(self, value: str) -> None:
+        self._lease.holder_id = value
+
+    @property
+    def _lease_acquired(self) -> bool:
+        return self._lease.acquired
+
+    def _acquire_cdc_lease(self) -> None:
+        """Fail-fast if another worker already owns this change-stream cursor."""
+        self._lease.ensure()
 
     def _fetch_incremental_chunk(self, sig: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
         """PK-ordered chunk for signal-driven incremental snapshots (_id or configured PK)."""
@@ -119,6 +159,7 @@ class MongodbChangeStreamCdc:
         subsequent poll does not miss events that arrived during the snapshot
         (at-least-once; duplicates possible).
         """
+        self._acquire_cdc_lease()
         start_token: Any = None
         try:
             with self.coll.watch(full_document=self.full_document, max_await_time_ms=100) as stream:
@@ -127,29 +168,52 @@ class MongodbChangeStreamCdc:
         except Exception:
             start_token = None
 
-        offset = 0
+        last_id: str | None = None
+        legacy_offset: int | None = None
         if isinstance(self.resume_token, dict) and self.resume_token.get("phase") == "snapshot":
-            offset = int(self.resume_token.get("offset") or 0)
+            raw_last = self.resume_token.get("last_id")
+            if raw_last not in (None, ""):
+                last_id = str(raw_last)
+            else:
+                # Pre-Wave Y offset tokens — honor once, then switch to _id keyset.
+                legacy_offset = int(self.resume_token.get("offset") or 0)
             start_token = self.resume_token.get("token") or start_token
         while True:
-            batch = read_collection_batch(
-                cfg=self.cfg,
-                database=self.db_name,
-                collection=self.collection,
-                columns=self.columns,
-                offset=offset,
-                limit=self.batch_size,
-            )
+            if legacy_offset is not None:
+                from connectors.mongodb_reader import read_collection_batch
+
+                batch = read_collection_batch(
+                    cfg=self.cfg,
+                    database=self.db_name,
+                    collection=self.collection,
+                    columns=self.columns,
+                    offset=legacy_offset,
+                    limit=self.batch_size,
+                )
+                legacy_offset = None
+            else:
+                # _id keyset is delete-safe; SKIP/LIMIT is not under concurrent deletes.
+                batch = read_collection_cursor_batch(
+                    cfg=self.cfg,
+                    database=self.db_name,
+                    collection=self.collection,
+                    cursor_column="_id",
+                    cursor_after=last_id,
+                    cursor_type="STRING",
+                    columns=self.columns,
+                    limit=self.batch_size,
+                )
             if not batch.rows:
                 break
             records = [_doc_to_record(dict(zip(batch.headers, row)), self.columns) for row in batch.rows]
-            offset += len(batch.rows)
+            if "_id" in batch.headers:
+                last_id = str(batch.rows[-1][batch.headers.index("_id")])
             # Persist snapshot progress + change-stream handoff on every batch.
             yield ChangeBatch(
                 inserts=records,
                 resume_token={
                     "phase": "snapshot",
-                    "offset": offset,
+                    "last_id": last_id,
                     "token": start_token,
                     "collection": self.collection,
                 },
@@ -169,7 +233,7 @@ class MongodbChangeStreamCdc:
         value = doc.get(self.primary_key)
         if value is None and "documentKey" in doc:
             value = doc["documentKey"].get(self.primary_key)
-        return cell_to_string(value) if value is not None else ""
+        return cell_to_string(value, preserve_sql_null=True) if value is not None else ""
 
     def _full_doc(self, change: dict[str, Any]) -> dict[str, Any] | None:
         return change.get("fullDocument") or change.get("documentKey")
@@ -198,7 +262,11 @@ class MongodbChangeStreamCdc:
             pass
 
     def close(self) -> None:
-        """Release the MongoClient — required under multi-stream / multi-job load."""
+        """Release the CDC lease and MongoClient — required under multi-job load."""
+        try:
+            self._lease.release()
+        except Exception:
+            pass
         try:
             self.client.close()
         except Exception:
@@ -240,6 +308,7 @@ class MongodbChangeStreamCdc:
 
     def poll(self) -> Iterator[ChangeBatch]:
         """Tail the change stream for a bounded window and yield one ChangeBatch."""
+        self._acquire_cdc_lease()
         if isinstance(self.resume_token, dict) and self.resume_token.get("phase") == "snapshot":
             yield from self.snapshot()
             return

@@ -1,22 +1,111 @@
 import { CONNECTOR_CATALOG } from "./types";
 import { GENERIC_SQL_INFO } from "./genericSqlMap";
 
-/** Implemented driver types — must match apps/api/src/transfer/connector_capabilities.py */
+/**
+ * Offline form-routing mirror for catalog IDs → driver types.
+ *
+ * NOT the transfer-readiness oracle. Readiness is
+ * ``GET /transfer/capabilities`` via ``loadTransferLiveCatalog`` /
+ * ``isTransferLiveType``. This set is used only for:
+ *   - ``resolveCatalogIdToType`` alias routing before/without API
+ *   - degraded readiness when capabilities fetch fails (honest offline mode)
+ */
 export const TRANSFER_LIVE_TYPES = new Set([
   "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
   "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
   "pdf", "docx", "html",
   "dynamodb", "s3", "gcs", "google_cloud_storage", "redis", "elasticsearch",
-  "sqlite", "generic_sql", "sftp", "email",
+  "adls", "sqlite", "generic_sql", "sftp", "email", "sqlserver", "oracle",
   "salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase",
   "pgvector", "qdrant", "weaviate", "pinecone", "milvus",
   "iceberg",
 ]);
 
+export type TransferCapsState = "idle" | "loading" | "ready" | "error";
+
+/** Live drivers from GET /transfer/capabilities — readiness SSOT when ready. */
+let _liveDriversFromCatalog: Set<string> | null = null;
+let _capsState: TransferCapsState = "idle";
+let _capsLoadPromise: Promise<string[]> | null = null;
+
+/** Populate transfer-ready drivers from the API catalog (Studio boot). */
+export function setTransferLiveDrivers(drivers: string[] | null | undefined): void {
+  if (!drivers || drivers.length === 0) {
+    _liveDriversFromCatalog = null;
+    return;
+  }
+  _liveDriversFromCatalog = new Set(
+    drivers.map((d) => String(d || "").toLowerCase().trim()).filter(Boolean),
+  );
+  _capsState = "ready";
+}
+
+/** True when Studio has loaded capabilities from the API (not bootstrap fallback). */
+export function hasCatalogTransferLiveDrivers(): boolean {
+  return _capsState === "ready" && _liveDriversFromCatalog != null && _liveDriversFromCatalog.size > 0;
+}
+
+export function getTransferCapsState(): TransferCapsState {
+  return _capsState;
+}
+
+/**
+ * Eager-load transfer-ready drivers from the API. Safe to call multiple times —
+ * shares one in-flight promise. On failure, installs the offline mirror so
+ * Studio remains usable and ``isTransferLiveType`` stays honest about degraded mode.
+ */
+export async function loadTransferLiveCatalog(
+  fetchCaps: () => Promise<Record<string, unknown>>,
+): Promise<string[]> {
+  if (_capsState === "ready" && _liveDriversFromCatalog && _liveDriversFromCatalog.size > 0) {
+    return [..._liveDriversFromCatalog];
+  }
+  if (_capsLoadPromise) return _capsLoadPromise;
+
+  _capsState = "loading";
+  _capsLoadPromise = (async () => {
+    try {
+      const caps = await fetchCaps();
+      const drivers = (caps.transfer_live_drivers as string[] | undefined) ?? [];
+      const sources = (caps.source_databases as string[] | undefined) ?? [];
+      const dbs = (caps.destination_databases as string[] | undefined) ?? [];
+      const unique = [
+        ...new Set(
+          [...drivers, ...sources, ...dbs]
+            .map((d) => String(d || "").toLowerCase().trim())
+            .filter(Boolean),
+        ),
+      ];
+      if (unique.length === 0) {
+        throw new Error("capabilities returned no transfer-live drivers");
+      }
+      setTransferLiveDrivers(unique);
+      return unique;
+    } catch {
+      // Degraded: offline mirror only when API caps are unreachable.
+      _liveDriversFromCatalog = new Set(
+        [...TRANSFER_LIVE_TYPES].map((d) => d.toLowerCase()),
+      );
+      _capsState = "error";
+      return [...TRANSFER_LIVE_TYPES];
+    } finally {
+      _capsLoadPromise = null;
+    }
+  })();
+
+  return _capsLoadPromise;
+}
 export const CONNECT_ONLY_TYPES = new Set<string>([]);
 
 /** SQL engines that are first-class drivers; the rest of generic SQL IDs route through generic_sql. */
-const FIRST_CLASS_SQL = new Set(["mysql", "postgresql", "redshift", "sqlite"]);
+const FIRST_CLASS_SQL = new Set([
+  "mysql",
+  "postgresql",
+  "redshift",
+  "sqlite",
+  "sqlserver",
+  "oracle",
+]);
 
 const CATALOG_ALIASES: Record<string, string> = {
   csv___tsv: "csv",
@@ -168,7 +257,18 @@ export function isGenericSql(id: string): boolean {
 }
 
 export function isTransferLiveType(type: string): boolean {
-  return TRANSFER_LIVE_TYPES.has(type);
+  const id = (type || "").toLowerCase().trim();
+  if (!id) return false;
+  // Catalog SSOT when loaded (ready) or degraded offline mirror (error).
+  if (_liveDriversFromCatalog && _liveDriversFromCatalog.size > 0) {
+    return _liveDriversFromCatalog.has(id);
+  }
+  // Pending/idle: do not invent readiness from the hardcoded mirror.
+  // Callers that need an answer before boot should await loadTransferLiveCatalog.
+  if (_capsState === "idle" || _capsState === "loading") {
+    return false;
+  }
+  return TRANSFER_LIVE_TYPES.has(id);
 }
 
 export function isConnectOnlyType(type: string): boolean {

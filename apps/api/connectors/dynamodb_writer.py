@@ -28,9 +28,13 @@ def _to_dynamo_value(value: Any, source_type: str) -> Any:
     if value is None:
         return None
     upper = source_type.upper()
-    if upper in {"DECIMAL", "NUMERIC"}:
+    # Advertise numeric DDL as DynamoDB N — never silently store typed numbers as S.
+    if upper in {
+        "DECIMAL", "NUMERIC", "NUMBER", "INTEGER", "BIGINT", "SMALLINT",
+        "TINYINT", "FLOAT", "DOUBLE", "REAL", "INT", "INT64", "FLOAT64",
+    }:
         try:
-            return Decimal(value)
+            return Decimal(str(value))
         except Exception:
             return value
     if upper in {"JSON", "OBJECT", "ARRAY", "VARIANT"}:
@@ -81,6 +85,7 @@ def write_mapped_rows(
     error_policy: str | None = None,
     backfill_new_fields: bool = False,
     endpoint_url: str = "",
+    conflict_columns: list[str] | None = None,
     **_kwargs: Any,
 ) -> WriteResult:
     del schema, ssl, backfill_new_fields
@@ -106,20 +111,82 @@ def write_mapped_rows(
         preserve_case=True,
         error_policy=policy,
     )
+    if errors and policy == "fail":
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=host or "",
+            checksum="",
+            chunks_completed=0,
+            error=f"Transform errors: {'; '.join(errors[:3])}",
+            warnings=errors[:10],
+            rejected_rows=len({d["row"] for d in rejected_details}),
+            rejected_details=rejected_details[:100],
+        )
 
     client = boto3_client("dynamodb", cfg)
     if create_table:
-        _ensure_table(client, table, target_cols, mappings, logical_types)
+        _ensure_table(
+            client,
+            table,
+            target_cols,
+            mappings,
+            logical_types,
+            conflict_columns=conflict_columns or _kwargs.get("conflict_columns"),
+        )
 
     key_types = _table_key_types(client, table)
 
     written = 0
     batch_size = 25
-    chunks = max(1, (len(mapped_rows) + batch_size - 1) // batch_size)
+    # Filter out rows with incomplete Dynamo key components before BatchWrite.
+    valid_rows: list[list[Any]] = []
+    for row_idx, row in enumerate(mapped_rows):
+        key_ok = True
+        for key_col, attr_type in key_types.items():
+            if key_col not in target_cols:
+                continue
+            i = target_cols.index(key_col)
+            value = row[i] if i < len(row) else None
+            if value is None or (attr_type == "S" and str(value).strip() == ""):
+                key_ok = False
+                detail = {
+                    "row": row_idx + 1,
+                    "column": key_col,
+                    "target": key_col,
+                    "value": "" if value is None else str(value)[:120],
+                    "reason": (
+                        f"DynamoDB key attribute `{key_col}` missing/empty — "
+                        "refuse silent empty-string identity collapse"
+                    ),
+                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                    "chars": [],
+                }
+                rejected_details.append(detail)
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table,
+                        target_schema=host or "",
+                        checksum="",
+                        chunks_completed=0,
+                        error=detail["reason"],
+                        rejected_rows=len({d["row"] for d in rejected_details}),
+                        rejected_details=rejected_details[:100],
+                    )
+                break
+        if key_ok:
+            valid_rows.append(row)
+
+    chunks = max(1, (len(valid_rows) + batch_size - 1) // batch_size) if valid_rows else 1
 
     try:
-        for chunk_idx in range(chunks):
-            slice_rows = mapped_rows[chunk_idx * batch_size : (chunk_idx + 1) * batch_size]
+        for chunk_idx in range(0 if not valid_rows else chunks):
+            if not valid_rows:
+                break
+            slice_rows = valid_rows[chunk_idx * batch_size : (chunk_idx + 1) * batch_size]
             request_items = []
             for row in slice_rows:
                 item = {}
@@ -152,8 +219,8 @@ def write_mapped_rows(
             rows_written=written,
             table_name=table,
             target_schema=endpoint or region,
-            checksum=row_checksum(mapped_rows, target_cols),
-            chunks_completed=chunks,
+            checksum=row_checksum(valid_rows, target_cols),
+            chunks_completed=chunks if valid_rows else 0,
             warnings=errors[:10],
             rejected_rows=len({d["row"] for d in rejected_details}),
             rejected_details=rejected_details[:100],
@@ -181,24 +248,67 @@ def _table_key_types(client, table: str) -> dict[str, str]:
         return {}
 
 
-def _pick_hash_key(target_cols: list[str], mappings: list[dict]) -> str:
-    preferred = {"id", "_id", "pk", "sk", "uuid", "key"}
-    lower_map = {c.lower(): c for c in target_cols}
-    for name in preferred:
-        if name in lower_map:
-            return lower_map[name]
-    for c in target_cols:
-        lc = c.lower()
-        if lc.endswith("_id"):
-            return c
-    for mapping in mappings:
-        target = (mapping.get("target") or "").strip()
-        if target and target.lower() in preferred:
-            return target
-    return target_cols[0] if target_cols else "id"
+def _attr_type_for_logical(logical: str) -> str:
+    upper = (logical or "").upper()
+    if upper.startswith("DECIMAL") or upper in {
+        "INTEGER", "NUMERIC", "FLOAT", "DOUBLE", "LONG", "BIGINT", "NUMBER",
+    }:
+        return "N"
+    if upper in {"BINARY", "BLOB", "BYTEA", "VARBINARY"}:
+        return "B"
+    return "S"
 
 
-def _ensure_table(client, table: str, target_cols: list[str], mappings: list[dict], source_types: list[str] | None = None) -> None:
+def _resolve_key_schema(
+    target_cols: list[str],
+    mappings: list[dict],
+    *,
+    conflict_columns: list[str] | None,
+    source_types: list[str] | None,
+) -> list[tuple[str, str, str]]:
+    """Return [(name, KeyType, AttrType), ...] for create-table.
+
+    Prefer explicit conflict_columns (HASH, optional RANGE). Refuse inventing a
+    key from an arbitrary first column when no identity metadata is available.
+    """
+    conflict = [c for c in (conflict_columns or []) if c and c in target_cols]
+    if not conflict:
+        # Legacy soft path only when a clear identity name exists.
+        preferred = {"id", "_id", "pk", "sk", "uuid", "key"}
+        lower_map = {c.lower(): c for c in target_cols}
+        for name in preferred:
+            if name in lower_map:
+                conflict = [lower_map[name]]
+                break
+        if not conflict:
+            for c in target_cols:
+                if c.lower().endswith("_id"):
+                    conflict = [c]
+                    break
+    if not conflict:
+        raise ValueError(
+            "DynamoDB create-table requires conflict_columns (HASH[, RANGE]) "
+            "or a clear identity column (id/_id/*_id); refusing to invent a key "
+            "from the first mapped column"
+        )
+    keys: list[tuple[str, str, str]] = []
+    for i, col in enumerate(conflict[:2]):
+        logical = ""
+        if source_types and col in target_cols:
+            logical = source_types[target_cols.index(col)] or ""
+        keys.append((col, "HASH" if i == 0 else "RANGE", _attr_type_for_logical(logical)))
+    return keys
+
+
+def _ensure_table(
+    client,
+    table: str,
+    target_cols: list[str],
+    mappings: list[dict],
+    source_types: list[str] | None = None,
+    *,
+    conflict_columns: list[str] | None = None,
+) -> None:
     from botocore.exceptions import ClientError
 
     try:
@@ -209,18 +319,24 @@ def _ensure_table(client, table: str, target_cols: list[str], mappings: list[dic
             raise
     if not target_cols:
         raise ValueError(f"DynamoDB table `{table}` does not exist and no columns were provided to create it.")
-    hash_key = _pick_hash_key(target_cols, mappings)
-    attr_type = "S"
-    if source_types and hash_key in target_cols:
-        logical = (source_types[target_cols.index(hash_key)] or "").upper()
-        if logical in {"INTEGER", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "LONG", "BIGINT"}:
-            attr_type = "N"
-        elif logical in {"BINARY", "BLOB", "BYTEA", "VARBINARY"}:
-            attr_type = "B"
+    key_schema = _resolve_key_schema(
+        target_cols,
+        mappings,
+        conflict_columns=conflict_columns,
+        source_types=source_types,
+    )
+    # Deduplicate attribute definitions (HASH/RANGE may share names only once).
+    attr_defs = []
+    seen: set[str] = set()
+    for name, _kt, at in key_schema:
+        if name in seen:
+            continue
+        seen.add(name)
+        attr_defs.append({"AttributeName": name, "AttributeType": at})
     client.create_table(
         TableName=table,
-        AttributeDefinitions=[{"AttributeName": hash_key, "AttributeType": attr_type}],
-        KeySchema=[{"AttributeName": hash_key, "KeyType": "HASH"}],
+        AttributeDefinitions=attr_defs,
+        KeySchema=[{"AttributeName": name, "KeyType": kt} for name, kt, _at in key_schema],
         BillingMode="PAY_PER_REQUEST",
     )
     waiter = client.get_waiter("table_exists")

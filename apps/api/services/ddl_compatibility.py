@@ -6,7 +6,16 @@ import re
 from typing import Any
 
 from services.db_type_utils import SCHEMALESS_DESTS, ci_get, normalize_dest_kind
-from services.type_system import ddl_type, is_lossy_coercion, normalize_logical_type
+from services.primary_key import sync_requires_unique_identity
+from services.type_system import (
+    ddl_type,
+    decimal_scale_would_truncate,
+    is_lossy_coercion,
+    is_precision_collapse_coercion,
+    normalize_logical_type,
+    vector_dim_mismatch,
+    vector_dim_unknown_for_native,
+)
 
 _VARCHAR_WIDTH = re.compile(r"(?:varchar|char|character\s+varying)\s*\(\s*(\d+)\s*\)", re.I)
 _DECIMAL_PRECISION = re.compile(r"(?:decimal|numeric|number)\s*\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)", re.I)
@@ -91,44 +100,22 @@ _OVERWRITE_SYNC = {
 def _primary_key_target(
     mappings: list[dict],
     dest_kind: str,
+    *,
+    destination_pk_columns: list[str] | None = None,
+    contract_primary_key: str | None = None,
 ) -> str | None:
-    """Return the target column for the most likely primary key.
+    """Return the target column for the identity uniqueness contract.
 
-    For schemaless destinations the target `_id` is the only hard uniqueness
-    contract. For SQL destinations prefer exact `id`/`_id` target, then exact
-    `id`/`_id` source, then the first `*_id` source.
+    Delegates to the canonical helper so G6/G8/G9 never disagree on ``*_id``.
     """
-    tgt_by_src = {str(m.get("source") or ""): str(m.get("target") or "") for m in mappings if m.get("source")}
-    srcs = [str(m.get("source") or "") for m in mappings if m.get("source")]
-    tgts = [str(m.get("target") or "") for m in mappings if m.get("target")]
+    from services.primary_key import resolve_primary_key_target
 
-    if dest_kind in SCHEMALESS_DESTS:
-        for t in tgts:
-            if t.lower() == "_id":
-                return t
-        pk_src = next((s for s in srcs if s.lower() == "_id"), None)
-        if pk_src:
-            return tgt_by_src.get(pk_src, pk_src)
-        return None
-
-    for t in tgts:
-        if t.lower() in {"id", "_id"}:
-            return t
-
-    pk_src = None
-    for s in srcs:
-        if s.lower() in {"id", "_id"}:
-            pk_src = s
-            break
-    if not pk_src:
-        for s in srcs:
-            if s.lower().endswith("_id"):
-                pk_src = s
-                break
-
-    if pk_src:
-        return tgt_by_src.get(pk_src, pk_src)
-    return None
+    return resolve_primary_key_target(
+        mappings,
+        dest_kind,
+        destination_pk_columns=destination_pk_columns,
+        contract_primary_key=contract_primary_key,
+    )
 
 
 def _duplicate_pk_in_source(
@@ -136,13 +123,20 @@ def _duplicate_pk_in_source(
     mappings: list[dict],
     *,
     dest_kind: str,
+    destination_pk_columns: list[str] | None = None,
+    contract_primary_key: str | None = None,
 ) -> list[str]:
     if not sample_rows:
         return []
     issues: list[str] = []
     src_by_tgt = {str(m.get("target") or ""): str(m.get("source") or "") for m in mappings if m.get("target")}
 
-    pk_tgt = _primary_key_target(mappings, dest_kind)
+    pk_tgt = _primary_key_target(
+        mappings,
+        dest_kind,
+        destination_pk_columns=destination_pk_columns,
+        contract_primary_key=contract_primary_key,
+    )
     if not pk_tgt:
         return issues
     src = src_by_tgt.get(pk_tgt, pk_tgt)
@@ -175,6 +169,8 @@ def evaluate_ddl_compatibility(
     schema_policy: str | None = None,
     sync_mode: str | None = None,
     destination_table: str | None = None,
+    destination_pk_columns: list[str] | None = None,
+    contract_primary_key: str | None = None,
 ) -> tuple[bool, list[str]]:
     """
     Evaluate whether mapped columns can land in the destination DDL.
@@ -249,12 +245,38 @@ def evaluate_ddl_compatibility(
             )
             continue
 
+        if not schemaless and tgt_type and vector_dim_mismatch(src_type, tgt_type):
+            issues.append(
+                f"Vector dimension mismatch: {src} ({src_type}) → {tgt} ({tgt_type})"
+            )
+        if (
+            not schemaless
+            and vector_dim_unknown_for_native(src_type, dest_kind)
+            and normalize_logical_type(tgt_type or src_type) == "vector"
+        ):
+            issues.append(
+                f"Vector dimension unknown: {src} ({src_type}) → {tgt} "
+                f"— native VECTOR requires VECTOR(n); refuse invented default width"
+            )
+        if (
+            not schemaless
+            and decimal_scale_would_truncate(src_type, dest_kind)
+            and normalize_logical_type(tgt_type or "") not in {"string", "text", "json"}
+        ):
+            issues.append(
+                f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type or 'proposed'}) "
+                f"— scale truncates on {dest_kind}"
+            )
         if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type):
-            # Sample-aware: JSON/CSV numeric strings onto warehouse NUMBER are
-            # declared-lossy but write-safe when values coerce. Only hard-block
-            # when samples are missing or fail the write-path transform.
+            # Sample-aware soft-pass only for textual→typed coercions that the
+            # write path can prove. Declared IEEE/precision collapses
+            # (float→decimal, float→integer, decimal→integer) stay hard issues
+            # even when a head sample coerces — body rows can still lose fidelity.
+            src_logical = normalize_logical_type(src_type)
+            tgt_logical = normalize_logical_type(tgt_type)
+            precision_collapse = is_precision_collapse_coercion(src_type, tgt_type)
             sample_ok = False
-            if sample_rows:
+            if sample_rows and not precision_collapse:
                 from services.coercion_probe import samples_coerce_mapping
 
                 sample_ok = samples_coerce_mapping(
@@ -264,8 +286,17 @@ def evaluate_ddl_compatibility(
                     rows=sample_rows,
                 )
             if not sample_ok:
+                note = ""
+                if src_logical == "float" and tgt_logical == "decimal":
+                    note = " — float→decimal (IEEE precision risk; not soft-passed by samples)"
+                elif src_logical == "float" and tgt_logical == "integer":
+                    note = " — float→integer (fractional truncation risk)"
+                elif src_logical == "decimal" and tgt_logical == "integer":
+                    note = " — decimal→integer (scale truncation risk)"
+                elif src_logical == "datetime" and tgt_logical == "date":
+                    note = " — datetime→date (time-of-day truncation; not soft-passed by samples)"
                 issues.append(
-                    f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type})"
+                    f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type}){note}"
                 )
 
         if not schemaless and sample_rows and tgt_type:
@@ -304,7 +335,18 @@ def evaluate_ddl_compatibility(
                         f"Proposed DDL {inferred_ddl} for {tgt} may truncate values (max {max_len} chars)"
                     )
 
-    issues.extend(_duplicate_pk_in_source(sample_rows, mappings, dest_kind=dest_kind))
+    issues.extend(
+        _duplicate_pk_in_source(
+            sample_rows,
+            mappings,
+            dest_kind=dest_kind,
+            destination_pk_columns=destination_pk_columns,
+            contract_primary_key=contract_primary_key,
+        )
+        if sync_requires_unique_identity(sync)
+        or (table_exists and destination_pk_columns)
+        else []
+    )
 
     if not schemaless and table_exists and target_schema:
         mapped_targets = {str(m.get("target")).lower() for m in mappings if m.get("target")}

@@ -54,3 +54,66 @@ def test_policy_gates_merge_into_preflight_result():
     assert merged["readiness_score"] == 100
     assert confidence_threshold_for_mode("maximum") == 0.95
 
+
+def test_stuck_backfill_under_manual_review_does_not_block():
+    """Studio toggle stuck true after switching back to manual_review must not fail Execute."""
+    gates = run_transfer_policy_gates(
+        sync_mode="append",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[],
+        backfill_new_fields=True,
+    )
+    g10 = next(g for g in gates if g["id"] == "g10_schema_policy")
+    assert g10["status"] == "pass"
+    assert g10["details"].get("policy_coerced_from_manual_review") is True
+    assert g10["details"].get("schema_policy") == "propagate_columns"
+
+
+def test_backfill_still_blocks_under_type_locked():
+    gates = run_transfer_policy_gates(
+        sync_mode="append",
+        schema_policy="type_locked",
+        validation_mode="strict",
+        stream_contracts=[],
+        backfill_new_fields=True,
+    )
+    g10 = next(g for g in gates if g["id"] == "g10_schema_policy")
+    assert g10["status"] == "block"
+    assert "conflicts with schema policy" in str(g10["details"])
+
+
+def test_cdc_cursor_typo_blocks_against_live_source_columns():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "update_att",
+            "primary_key": "order_id",
+        }],
+        source_columns=["order_id", "updated_at", "amount"],
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    assert g9["status"] == "block"
+    assert "Cursor field not in source schema" in str(g9["details"])
+
+
+def test_cdc_cursor_and_pk_pass_when_present_in_source_columns():
+    gates = run_transfer_policy_gates(
+        sync_mode="incremental_deduped",
+        schema_policy="propagate_columns",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "primary_key": "order_id",
+        }],
+        source_columns=["order_id", "updated_at", "amount"],
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    assert g9["status"] == "pass"
+

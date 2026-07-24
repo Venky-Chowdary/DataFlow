@@ -134,14 +134,23 @@ def write_mapped_rows(
             chunks_completed=0,
         )
 
-    # Determine dimension from the first row that has an embedding.
-    dimension = 384
-    for row in vector_rows:
-        if row.get("embedding"):
-            dimension = len(row["embedding"])
-            break
+    # Determine dimension from valid embeddings only — never invent 384.
+    from services.vector_embedding import coerce_embedding, resolve_embedding_dimension
+
+    dimension, dim_err = resolve_embedding_dimension(vector_rows, default=None)
+    if dimension is None:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "public",
+            checksum="",
+            chunks_completed=0,
+            error=dim_err or "embedding dimension unknown — refuse fabricated defaults",
+        )
 
     inserted = 0
+    rejected_details: list[dict[str, Any]] = []
     conn = get_connection(
         host=host,
         port=port,
@@ -155,16 +164,68 @@ def write_mapped_rows(
         with conn.cursor() as cur:
             from psycopg2 import sql
 
-            _exec_schema_table(cur, schema or "public", table_name, dimension)
+            if create_table:
+                _exec_schema_table(cur, schema or "public", table_name, dimension)
+            else:
+                # Respect create_table=False — never contradict preflight deny-create.
+                cur.execute(
+                    "SELECT to_regclass(%s)",
+                    (f"{schema or 'public'}.{table_name}",),
+                )
+                if cur.fetchone()[0] is None:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=schema or "public",
+                        checksum="",
+                        chunks_completed=0,
+                        error=(
+                            f"pgvector destination {schema or 'public'}.{table_name} "
+                            "is missing and create_table is disabled"
+                        ),
+                    )
 
             schema_id = sql.Identifier(schema or "public")
             table_id = sql.Identifier(table_name)
 
             batch_size = 1000
             inserted = 0
-            total = len(vector_rows)
+            # Filter to rows with valid embeddings matching dimension.
+            valid_rows: list[dict[str, Any]] = []
+            for row in vector_rows:
+                emb, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
+                if err or emb is None:
+                    rejected_details.append({
+                        "row": str(row.get("id") or ""),
+                        "column": "embedding",
+                        "target": "embedding",
+                        "value": "",
+                        "reason": err or "invalid embedding",
+                        "policy": "quarantine",
+                    })
+                    continue
+                row = dict(row)
+                row["embedding"] = emb
+                valid_rows.append(row)
+            from connectors.writer_common import reject_on_strict_policy
+
+            strict_error = reject_on_strict_policy(error_policy, rejected_details, "pgvector")
+            if strict_error:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema or "public",
+                    checksum="",
+                    chunks_completed=0,
+                    error=strict_error,
+                    rejected_details=rejected_details,
+                    rejected_rows=len(rejected_details),
+                )
+            total = len(valid_rows)
             for i in range(0, total, batch_size):
-                batch = vector_rows[i : i + batch_size]
+                batch = valid_rows[i : i + batch_size]
                 values = []
                 for row in batch:
                     vector = _vector_literal(row.get("embedding"))
@@ -228,4 +289,7 @@ def write_mapped_rows(
         target_schema=schema or "public",
         checksum="",
         chunks_completed=(inserted + 999) // 1000,
+        rejected_details=rejected_details,
+        rejected_rows=len(rejected_details),
+        warnings=[r.get("reason") or "" for r in rejected_details[:10] if r.get("reason")],
     )

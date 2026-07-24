@@ -145,6 +145,51 @@ def test_safe_ddl_keeps_timestamptz_as_timestamp_logical():
     )
 
 
+def test_safe_ddl_honors_explicit_text_over_numeric_samples():
+    """Operator target_type=TEXT must not be tightened to DECIMAL by sample inference."""
+    samples = ["12345678901234567890.12345", "0.00000000015"]
+    assert (
+        safe_ddl_logical_type(
+            "TEXT",
+            samples,
+            field_name="compensation",
+            source_type="DECIMAL",
+            honor_explicit=True,
+        )
+        == "TEXT"
+    )
+    # Without honor_explicit, loose TEXT may still upgrade (typed CREATE TABLE).
+    assert (
+        safe_ddl_logical_type(
+            "TEXT",
+            samples,
+            field_name="compensation",
+            source_type="DECIMAL",
+            honor_explicit=False,
+        )
+        == "DECIMAL"
+    )
+
+
+def test_resolve_target_columns_honors_explicit_text():
+    from connectors.writer_common import resolve_target_columns
+
+    mappings = [
+        {"source": "compensation", "target": "pay_amount", "target_type": "TEXT"},
+    ]
+    cols, types = resolve_target_columns(
+        mappings,
+        {"compensation": "DECIMAL"},
+        preserve_case=True,
+        sample_values_by_source={
+            "compensation": ["12345678901234567890.12345", "0.00000000015"],
+        },
+        table_exists=False,
+    )
+    assert cols == ["pay_amount"]
+    assert types == ["TEXT"]
+
+
 def test_resolve_target_columns_new_table_widens_status_boolean():
     headers = ["status", "id"]
     rows = [["active"], ["invalidated"], ["pending"]]

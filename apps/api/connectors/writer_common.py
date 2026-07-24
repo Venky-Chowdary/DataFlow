@@ -213,19 +213,33 @@ DF_LSN_COL = "_df_lsn"
 
 
 def lsn_sort_key(lsn: Any) -> tuple:
-    """Return a sortable key for PG-style ``hi/lo`` LSNs or opaque resume tokens."""
+    """Return a sortable key for PG ``hi/lo``, MySQL ``file:pos``, versions, or opaque tokens.
+
+    Kind order is only used within the same stamp family; cross-family compares
+    fall back to the opaque string tail so mixed CDC→one-sink stays deterministic.
+    """
     if lsn is None:
-        return (-1, -1, "")
+        return (0, -1, -1, "")
     text = str(lsn).strip()
     if not text:
-        return (-1, -1, "")
-    if "/" in text:
+        return (0, -1, -1, "")
+    # Postgres WAL LSN: hex/hex (reject paths that look like URLs).
+    if "/" in text and not text.lower().startswith("gtid:"):
         hi, _, lo = text.partition("/")
-        try:
-            return (int(hi, 16), int(lo, 16), "")
-        except ValueError:
-            pass
-    return (0, 0, text)
+        if hi and lo and all(c in "0123456789abcdefABCDEF" for c in hi + lo):
+            try:
+                return (3, int(hi, 16), int(lo, 16), "")
+            except ValueError:
+                pass
+    # MySQL binlog file:pos (pos may already be zero-padded from extract_cdc_lsn).
+    if ":" in text and not text.lower().startswith("gtid:"):
+        file_name, _, pos = text.rpartition(":")
+        if file_name and pos.isdigit():
+            return (2, file_name, int(pos), "")
+    # Zero-padded / numeric versions (SQL Server CT, etc.).
+    if text.isdigit():
+        return (1, int(text), 0, "")
+    return (0, 0, 0, text)
 
 
 def compare_lsn(left: Any, right: Any) -> int:
@@ -236,6 +250,15 @@ def compare_lsn(left: Any, right: Any) -> int:
     if a > b:
         return 1
     return 0
+
+
+def lsn_is_newer(incoming: Any, existing: Any) -> bool:
+    """True when ``incoming`` should replace ``existing`` under at-least-once CDC."""
+    if existing is None or str(existing).strip() == "":
+        return True
+    if incoming is None or str(incoming).strip() == "":
+        return False
+    return compare_lsn(incoming, existing) > 0
 
 
 def dedupe_rows_by_pk_and_lsn(
@@ -282,7 +305,11 @@ def extract_cdc_lsn(resume_token: Any) -> str | None:
         file_name = resume_token.get("file") or resume_token.get("filename")
         pos = resume_token.get("pos")
         if file_name is not None and pos is not None:
-            return f"{file_name}:{pos}"
+            # Zero-pad pos so lexicographic SQL guards stay monotonic.
+            try:
+                return f"{file_name}:{int(pos):020d}"
+            except (TypeError, ValueError):
+                return f"{file_name}:{pos}"
         gtid = resume_token.get("gtid") or resume_token.get("gtid_set")
         if gtid is not None and str(gtid).strip():
             return f"gtid:{str(gtid).strip()}"
@@ -303,6 +330,11 @@ def extract_cdc_lsn(resume_token: Any) -> str | None:
     text = str(resume_token).strip()
     if not text or text in {"None", "null"}:
         return None
+    # Bare MySQL file:pos strings — pad pos for lexicographic guards.
+    if ":" in text and not text.lower().startswith("gtid:") and "/" not in text and not text.startswith("{"):
+        file_name, _, pos = text.rpartition(":")
+        if file_name and pos.isdigit():
+            return f"{file_name}:{int(pos):020d}"
     # JSON CDC tokens (SQL Server native / CT, Oracle LogMiner, etc.)
     if text.startswith("{"):
         try:
@@ -334,13 +366,13 @@ def extract_cdc_lsn(resume_token: Any) -> str | None:
 
 
 def postgres_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL) -> str:
-    """WHERE fragment for ON CONFLICT when ``_df_lsn`` is a real PG ``hi/lo`` LSN.
+    """WHERE fragment for ON CONFLICT when ``_df_lsn`` is present.
 
-    Mixed CDC stamps (``gtid:…``, ``file:pos``, Mongo tokens) must NOT use
-    ``::pg_lsn`` alone — that casts fail under MySQL/Mongo→Postgres load and
-    aborts the upsert. Non-PG stamps fall back to text inequality (at-least-once).
+    Real PG ``hi/lo`` LSNs use ``::pg_lsn``. Mixed CDC stamps (``file:pos``,
+    zero-padded versions, opaque tokens) use strict text ``>`` so an *older*
+    redelivery does not win — never ``IS DISTINCT FROM`` (any different stamp).
+    GTID sets remain best-effort lexicographic (still at-least-once, not causal).
     """
-    # Identifiers are sanitized by callers; values are column/table names we control.
     pg_pat = r"^[0-9A-Fa-f]+/[0-9A-Fa-f]+$"
     excl = f'EXCLUDED."{lsn_column}"'
     dest = f'"{table_name}"."{lsn_column}"'
@@ -349,9 +381,49 @@ def postgres_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL)
         f"({excl} ~ '{pg_pat}' AND COALESCE({dest}, '') ~ '{pg_pat}' "
         f"AND {excl}::pg_lsn > COALESCE(NULLIF({dest}, '')::pg_lsn, '0/0'::pg_lsn)) "
         f"OR "
-        f"({excl} !~ '{pg_pat}' AND {excl} IS DISTINCT FROM {dest}) "
+        f"({excl} !~ '{pg_pat}' AND ("
+        f"{dest} IS NULL OR {dest} = '' OR {excl} > {dest}"
+        f")) "
         f")"
     )
+
+
+def mysql_lsn_values_newer_sql(lsn_column: str = DF_LSN_COL, *, quote: str = "`") -> str:
+    """Boolean SQL: ``VALUES(lsn)`` is strictly newer than the destination cell.
+
+    Handles empty dest, ``file:pos`` (file then integer pos), and lexicographic
+    fallback for padded versions / opaque tokens. Used inside
+    ``ON DUPLICATE KEY UPDATE col=IF(<pred>, VALUES(col), col)``.
+    """
+    col = f"{quote}{lsn_column}{quote}"
+    inc = f"VALUES({col})"
+    dest = col
+    both_filepos = (
+        f"({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%' "
+        f"AND {dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%')"
+    )
+    filepos_newer = (
+        f"(SUBSTRING_INDEX({inc}, ':', 1) > SUBSTRING_INDEX({dest}, ':', 1) "
+        f"OR (SUBSTRING_INDEX({inc}, ':', 1) = SUBSTRING_INDEX({dest}, ':', 1) "
+        f"AND CAST(SUBSTRING_INDEX({inc}, ':', -1) AS UNSIGNED) "
+        f"> CAST(SUBSTRING_INDEX({dest}, ':', -1) AS UNSIGNED)))"
+    )
+    return (
+        f"({dest} IS NULL OR {dest} = '' "
+        f"OR ({both_filepos} AND {filepos_newer}) "
+        f"OR (NOT ({both_filepos}) AND {inc} > {dest}))"
+    )
+
+
+def sqlite_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL) -> str:
+    """WHERE fragment for SQLite ``ON CONFLICT DO UPDATE`` (lexicographic LSN).
+
+    Callers should stamp ``file:pos`` via :func:`extract_cdc_lsn` so positions
+    are zero-padded and text order matches :func:`compare_lsn`.
+    """
+    excl = f'excluded."{lsn_column}"'
+    dest = f'"{table_name}"."{lsn_column}"'
+    return f"({dest} IS NULL OR {dest} = '' OR {excl} > {dest})"
 
 
 def snowflake_lsn_match_predicate(
@@ -368,6 +440,20 @@ def snowflake_lsn_match_predicate(
 def transform_error_policy(policy: str | None = None) -> str:
     selected = (policy or TRANSFORM_ERROR_POLICY or "quarantine").strip().lower()
     return selected if selected in VALID_ERROR_POLICIES else "quarantine"
+
+
+def reject_on_strict_policy(
+    policy: str | None,
+    rejected_details: list[dict[str, Any]] | None,
+    label: str,
+) -> str | None:
+    """Return an error message when strict mode must refuse a partial write."""
+    if transform_error_policy(policy) == "fail" and rejected_details:
+        return (
+            f"{label} rejected {len(rejected_details)} row(s); "
+            "strict error policy blocks partial write"
+        )
+    return None
 
 
 _VALIDATION_MODE_POLICIES = {
@@ -453,8 +539,12 @@ def build_mapped_rows_with_details(
     preserve_case: bool = False,
 ) -> tuple[list[tuple], list[str], list[dict[str, Any]]]:
     """Returns mapped rows, error messages, and structured rejected-row details."""
+    from services.json_intelligence import materialize_struct_policies
+
     column_types = column_types or {}
     policy = transform_error_policy(error_policy)
+    # Honor Map STRUCT policy (JSON blob vs flatten top-level keys) before bind.
+    headers, data_rows = materialize_struct_policies(headers, data_rows, mappings)
     source_indices = {h: i for i, h in enumerate(headers)}
     sanitized_target_cols = [sanitize_identifier(c, preserve_case=preserve_case) for c in target_cols]
     target_index = {c: i for i, c in enumerate(sanitized_target_cols)}
@@ -570,6 +660,7 @@ def resolve_target_columns(
         tgt = sanitize_identifier(m["target"], preserve_case=preserve_case)
         if tgt not in target_cols:
             target_cols.append(tgt)
+            explicit_target = bool(m.get("target_type"))
             proposed = (
                 m.get("target_type")
                 or (dest_types or {}).get(tgt)
@@ -583,6 +674,7 @@ def resolve_target_columns(
                     samples.get(src),
                     field_name=src,
                     source_type=str(src_type) if src_type else None,
+                    honor_explicit=explicit_target,
                 )
             target_types.append(str(proposed))
     return target_cols, target_types

@@ -51,7 +51,7 @@ def write_mapped_rows(
     service_account: str = "",
     **_kwargs: Any,
 ) -> WriteResult:
-    del warehouse, backfill_new_fields, create_table
+    del warehouse, backfill_new_fields
     container = database
     if not container:
         return WriteResult(
@@ -87,6 +87,19 @@ def write_mapped_rows(
         error_policy=policy,
         preserve_case=True,
     )
+    if errors and policy == "fail":
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=key,
+            target_schema=container,
+            checksum="",
+            chunks_completed=0,
+            error=f"Transform errors: {'; '.join(errors[:3])}",
+            warnings=errors[:10],
+            rejected_rows=len({d.get("row") for d in rejected_details if d.get("row") is not None}),
+            rejected_details=rejected_details[:100],
+        )
 
     records = [{c: to_json_value(v, c, dest_types) for c, v in zip(target_cols, row)} for row in mapped_rows]
 
@@ -109,6 +122,16 @@ def write_mapped_rows(
         client = blob_service_client(cfg)
         container_client = client.get_container_client(container)
         if not container_client.exists():
+            if not create_table:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=key,
+                    target_schema=container,
+                    checksum="",
+                    chunks_completed=0,
+                    error=f"ADLS container {container!r} is missing and create_table is disabled",
+                )
             container_client.create_container()
         blob = client.get_blob_client(container, key)
         blob.upload_blob(body, overwrite=True, content_type=content_type)

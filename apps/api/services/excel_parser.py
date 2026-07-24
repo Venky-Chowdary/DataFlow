@@ -68,6 +68,12 @@ def iter_excel_batches(content: bytes, chunk_size: int) -> Iterator[list[dict]]:
     batch: list[dict] = []
     try:
         for row in row_iter:
+            if len(row) > len(headers):
+                raise ValueError(
+                    f"Excel row has {len(row)} cells but header has {len(headers)} "
+                    "columns; refuse silent column drop — widen the header row "
+                    "or fix the sheet"
+                )
             record = {
                 headers[i]: cell_to_string(c)
                 for i, c in enumerate(row[: len(headers)])

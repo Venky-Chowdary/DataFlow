@@ -3,13 +3,27 @@ import { FilterTabs } from "./ui/FilterTabs";
 import { StructurePreview } from "./ui/StructurePreview";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ARRAY_POLICIES,
   MAPPING_TRANSFORMS,
+  STRUCT_POLICIES,
+  applyDestTypeChange,
+  applyStructPolicyChange,
+  applyTransformChange,
+  approveMappingHonestly,
+  approveMappingsHonestly,
+  canWidenMapping,
+  countApproveEligible,
   flagExistingEnumBooleanConflict,
+  isArrayLogicalType,
   isEnumToBooleanConflict,
   isExistingEnumBooleanConflict,
+  isSpecialtyLogicalType,
+  isStructLogicalType,
+  pipelineTransformChip,
   widenMappingToVarchar,
   type EditableMapping,
   type MappingTransform,
+  type StructPolicy,
 } from "../lib/mapping";
 import {
   COLUMN_PAGE_SIZES,
@@ -38,6 +52,8 @@ interface ColumnReviewPanelProps {
   destType?: string;
   /** True while destination schema introspection is in flight. */
   destSchemaLoading?: boolean;
+  /** null = unknown; true = table confirmed; false = will create. */
+  destTableExists?: boolean | null;
   showTransforms?: boolean;
   hideTitle?: boolean;
   /** Expand-dialog layout: table-first, no nested preview, fixed scroll height. */
@@ -78,6 +94,7 @@ export function ColumnReviewPanel({
   destinationLabel,
   destType,
   destSchemaLoading = false,
+  destTableExists = null,
   showTransforms = true,
   hideTitle = false,
   presentation = "default",
@@ -173,32 +190,16 @@ export function ColumnReviewPanel({
   };
 
   const approveAll = () => {
-    onChange(
-      mappings.map((m) => {
-        if (isExistingEnumBooleanConflict(m)) {
-          // Physical BOOLEAN stays — do not approve; operator must remap/ALTER.
-          return flagExistingEnumBooleanConflict(m);
-        }
-        if (isEnumToBooleanConflict(m)) {
-          return { ...widenMappingToVarchar(m), approved: true, requiresReview: false };
-        }
-        return { ...m, approved: true };
-      }),
-    );
+    onChange(approveMappingsHonestly(mappings));
   };
 
   const approveOne = (index: number) => {
     const m = mappings[index];
-    if (m && isExistingEnumBooleanConflict(m)) {
-      updateMapping(index, flagExistingEnumBooleanConflict(m));
-      return;
-    }
-    if (m && isEnumToBooleanConflict(m)) {
-      updateMapping(index, { ...widenMappingToVarchar(m), approved: true, requiresReview: false });
-      return;
-    }
-    updateMapping(index, { approved: true });
+    if (!m) return;
+    updateMapping(index, approveMappingHonestly(m));
   };
+
+  const eligibleApproveCount = countApproveEligible(mappings);
 
   const focusIssues = () => {
     setFilter("review");
@@ -295,9 +296,14 @@ export function ColumnReviewPanel({
               {rowCount != null && ` · ${rowCount.toLocaleString()} rows`}
             </p>
           </div>
-          {needsReview.length > 0 && (
-            <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" onClick={approveAll}>
-              <DtIcon name="check" size={14} /> Approve all {needsReview.length} flagged
+          {eligibleApproveCount > 0 && compact && (
+            <button
+              type="button"
+              className="df2-btn df2-btn-primary df2-btn-sm"
+              onClick={approveAll}
+              title="Approves eligible rows only — specialty identity, STRUCT flatten, and existing DDL conflicts stay for review"
+            >
+              <DtIcon name="check" size={14} /> Approve eligible ({eligibleApproveCount})
             </button>
           )}
         </div>
@@ -427,9 +433,14 @@ export function ColumnReviewPanel({
                 <DtIcon name="alert" size={14} /> Issues ({filterCounts.review})
               </button>
             )}
-            {needsReview.length > 0 && (
-              <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" onClick={approveAll}>
-                <DtIcon name="check" size={14} /> Approve all {needsReview.length}
+            {eligibleApproveCount > 0 && (
+              <button
+                type="button"
+                className="df2-btn df2-btn-primary df2-btn-sm"
+                onClick={approveAll}
+                title="Approves eligible rows only — specialty / flatten / existing DDL conflicts stay for review"
+              >
+                <DtIcon name="check" size={14} /> Approve eligible ({eligibleApproveCount})
               </button>
             )}
           </div>
@@ -444,13 +455,42 @@ export function ColumnReviewPanel({
           </div>
         )}
 
-        {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && (
+        {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && destTableExists === false && (
           <div className="df2-column-review-alert df2-column-review-alert-info" role="status">
             <DtIcon name="sparkle" size={16} />
             <span>
               <strong>New destination table</strong>
-              {" — identity mapping; types will CREATE on first write"}
+              {" — create-new fields; types will CREATE on first write"}
               {destType ? ` with ${destType}-native DDL` : ""}.
+            </span>
+          </div>
+        )}
+        {!isDialog && !destSchemaLoading && destColumnSet.size > 0 && destTableExists === true && (
+          <div className="df2-column-review-alert df2-column-review-alert-info" role="status">
+            <DtIcon name="check" size={16} />
+            <span>
+              <strong>Existing destination table</strong>
+              {" — matching "}
+              {destColumnSet.size}
+              {" columns. Full append adds rows; it does not replace the table."}
+            </span>
+          </div>
+        )}
+        {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && destTableExists === true && (
+          <div className="df2-column-review-alert df2-column-review-alert-warn" role="status">
+            <DtIcon name="alert" size={16} />
+            <span>
+              <strong>Existing destination table</strong>
+              {" — confirmed on the server, but column metadata did not load. Retry Destination/Map before treating this as create-new."}
+            </span>
+          </div>
+        )}
+        {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && destTableExists == null && (
+          <div className="df2-column-review-alert df2-column-review-alert-warn" role="status">
+            <DtIcon name="alert" size={16} />
+            <span>
+              <strong>Destination schema unknown</strong>
+              {" — existence not confirmed. Retry Destination/Map; DataFlow will not invent create-new fields yet."}
             </span>
           </div>
         )}
@@ -520,10 +560,14 @@ export function ColumnReviewPanel({
                         className="df2-input df2-select df2-column-dest-type-select"
                         value={normalizeDestTypeValue(m.destType || m.inferredType || "VARCHAR", destType)}
                         onChange={(e) =>
-                          updateMapping(index, { destType: e.target.value, approved: false })
+                          updateMapping(index, applyDestTypeChange(m, e.target.value))
                         }
                         aria-label={`Destination type for ${m.source}`}
-                        title="Destination logical type"
+                        title={
+                          m.existsInDestination
+                            ? "Existing physical column — changing type here flags ALTER/remap (does not rewrite DDL)"
+                            : "Destination logical type"
+                        }
                       >
                         {destTypeSelectOptions(m.destType || m.inferredType, destType).map((opt) => (
                           <option key={opt.value} value={opt.value}>
@@ -531,12 +575,67 @@ export function ColumnReviewPanel({
                           </option>
                         ))}
                       </select>
-                      {m.existsInDestination && (
-                        <span className="df2-col-badge-exists df2-col-badge-new">exists</span>
+                      {(isStructLogicalType(m.inferredType) || isStructLogicalType(m.destType) || (m.structPolicy && !isArrayLogicalType(m.inferredType) && !isArrayLogicalType(m.destType))) && !m.structDerived && (
+                        <select
+                          className="df2-input df2-select df2-column-struct-policy"
+                          value={m.structPolicy ?? "store_as_json"}
+                          onChange={(e) =>
+                            onChange(applyStructPolicyChange(mappings, index, e.target.value as StructPolicy))
+                          }
+                          aria-label={`STRUCT policy for ${m.source}`}
+                          title={STRUCT_POLICIES.find((p) => p.id === (m.structPolicy ?? "store_as_json"))?.detail}
+                        >
+                          {STRUCT_POLICIES.map((p) => (
+                            <option key={p.id} value={p.id}>{p.label}</option>
+                          ))}
+                        </select>
                       )}
-                      {!m.existsInDestination && destColumnSet.size > 0 && (
-                        <span className="df2-col-badge-new">new</span>
+                      {(isArrayLogicalType(m.inferredType) || isArrayLogicalType(m.destType) || m.structPolicy === "explode_rows") && !m.structDerived && (
+                        <select
+                          className="df2-input df2-select df2-column-struct-policy"
+                          value={m.structPolicy === "explode_rows" ? "explode_rows" : "store_as_json"}
+                          onChange={(e) =>
+                            onChange(applyStructPolicyChange(mappings, index, e.target.value as StructPolicy))
+                          }
+                          aria-label={`ARRAY policy for ${m.source}`}
+                          title={ARRAY_POLICIES.find((p) => p.id === (m.structPolicy === "explode_rows" ? "explode_rows" : "store_as_json"))?.detail}
+                        >
+                          {ARRAY_POLICIES.map((p) => (
+                            <option key={p.id} value={p.id}>{p.label}</option>
+                          ))}
+                        </select>
                       )}
+                      <div className="df2-column-dest-badges">
+                        {m.existsInDestination && (
+                          <span className="df2-col-badge-exists">exists</span>
+                        )}
+                        {!m.existsInDestination && destColumnSet.size > 0 && (
+                          <span className="df2-col-badge-new">new</span>
+                        )}
+                        {(isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType)) && (
+                          <span
+                            className="df2-col-badge-specialty"
+                            title="VECTOR / INTERVAL / GEOGRAPHY travel as identity — dimensions/SRID are not rewritten"
+                          >
+                            identity
+                          </span>
+                        )}
+                        {(m.structPolicy === "flatten_top_level_keys" || m.structPolicy === "flatten_deep") && !m.structDerived && (
+                          <span className="df2-col-badge-struct" title={m.structPolicy === "flatten_deep" ? "Deep flatten (depth≤2)" : "Top-level keys promoted; nested objects stay on parent blob"}>
+                            {m.structPolicy === "flatten_deep" ? "deep flatten" : "flatten"}
+                          </span>
+                        )}
+                        {m.structPolicy === "explode_rows" && !m.structDerived && (
+                          <span className="df2-col-badge-struct" title="Array row explode (capped)">
+                            explode
+                          </span>
+                        )}
+                        {m.structDerived && m.structParent && (
+                          <span className="df2-col-badge-struct" title={`Promoted from ${m.structParent} flatten`}>
+                            from {m.structParent}
+                          </span>
+                        )}
+                      </div>
                       {isExistingEnumBooleanConflict(m) && (
                         <button
                           type="button"
@@ -547,7 +646,7 @@ export function ColumnReviewPanel({
                           Remap / ALTER required
                         </button>
                       )}
-                      {isEnumToBooleanConflict(m) && !m.existsInDestination && (
+                      {isEnumToBooleanConflict(m) && canWidenMapping(m) && (
                         <button
                           type="button"
                           className="df2-btn df2-btn-sm df2-btn-ghost"
@@ -571,10 +670,7 @@ export function ColumnReviewPanel({
                           className="df2-input df2-select df2-column-transform"
                           value={m.transform ?? "none"}
                           onChange={(e) =>
-                            updateMapping(index, {
-                              transform: e.target.value as MappingTransform,
-                              approved: false,
-                            })
+                            updateMapping(index, applyTransformChange(m, e.target.value as MappingTransform))
                           }
                           aria-label={`Transform for ${m.source}`}
                           title={MAPPING_TRANSFORMS.find((t) => t.id === (m.transform ?? "none"))?.detail}
@@ -583,6 +679,14 @@ export function ColumnReviewPanel({
                             <option key={t.id} value={t.id}>{t.label}</option>
                           ))}
                         </select>
+                        {pipelineTransformChip(m.engineTransform) && (
+                          <span
+                            className="df2-col-badge-pipeline"
+                            title={`Pipeline semantic transform '${pipelineTransformChip(m.engineTransform)}' — preserved on Validate/Execute unless you change the transform select`}
+                          >
+                            pipeline: {pipelineTransformChip(m.engineTransform)}
+                          </span>
+                        )}
                       </div>
                     </td>
                   )}

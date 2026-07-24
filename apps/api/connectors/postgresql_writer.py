@@ -48,13 +48,210 @@ from connectors.writer_common import (
 from services.type_system import ddl_type
 
 
+def uses_pg_on_conflict_upsert(engine: str) -> bool:
+    """Redshift rejects ``ON CONFLICT`` — never emit it for redshift engines."""
+    return (engine or "postgresql").lower() not in {"redshift", "amazon_redshift", "redshift_serverless"}
+
+
+def _redshift_delete_by_keys(
+    cursor: Any,
+    sql_mod: Any,
+    *,
+    schema: str,
+    table_name: str,
+    target_cols: list[str],
+    conflict_cols: list[str],
+    batch: list[tuple] | list[list],
+) -> list[tuple] | list[list]:
+    """Delete matching keys before insert (Redshift upsert), honoring ``_df_lsn``.
+
+    Prefer a single set-based DELETE via a TEMP stage table (atomic within the
+    open transaction) so a mid-batch crash cannot leave half-deleted keys.
+    Falls back to per-row deletes when temp staging is unavailable.
+    """
+    from connectors.writer_common import DF_LSN_COL, compare_lsn
+
+    if not batch or not conflict_cols:
+        return list(batch)
+
+    # Set-based path: stage → DELETE USING → return rows that should insert.
+    try:
+        return _redshift_stage_delete(
+            cursor,
+            sql_mod,
+            schema=schema,
+            table_name=table_name,
+            target_cols=target_cols,
+            conflict_cols=conflict_cols,
+            batch=batch,
+        )
+    except Exception:
+        pass
+
+    conflict_idxs = [target_cols.index(c) for c in conflict_cols]
+    lsn_idx = target_cols.index(DF_LSN_COL) if DF_LSN_COL in target_cols else None
+    to_write: list[Any] = []
+
+    for row in batch:
+        predicates = []
+        values: list[Any] = []
+        for col, idx in zip(conflict_cols, conflict_idxs):
+            val = row[idx] if idx < len(row) else None
+            if val is None:
+                predicates.append(sql_mod.SQL("{} IS NULL").format(sql_mod.Identifier(col)))
+            else:
+                predicates.append(
+                    sql_mod.SQL("{} = {}").format(sql_mod.Identifier(col), sql_mod.Placeholder())
+                )
+                values.append(val)
+        where = sql_mod.SQL(" AND ").join(predicates)
+
+        if lsn_idx is not None:
+            cursor.execute(
+                sql_mod.SQL("SELECT {} FROM {}.{} WHERE {} LIMIT 1").format(
+                    sql_mod.Identifier(DF_LSN_COL),
+                    sql_mod.Identifier(schema),
+                    sql_mod.Identifier(table_name),
+                    where,
+                ),
+                values,
+            )
+            existing = cursor.fetchone()
+            incoming_lsn = row[lsn_idx] if lsn_idx < len(row) else None
+            if existing is not None and compare_lsn(incoming_lsn, existing[0]) <= 0:
+                continue
+
+        cursor.execute(
+            sql_mod.SQL("DELETE FROM {}.{} WHERE {}").format(
+                sql_mod.Identifier(schema),
+                sql_mod.Identifier(table_name),
+                where,
+            ),
+            values,
+        )
+        to_write.append(row)
+    return to_write
+
+
+def _redshift_stage_delete(
+    cursor: Any,
+    sql_mod: Any,
+    *,
+    schema: str,
+    table_name: str,
+    target_cols: list[str],
+    conflict_cols: list[str],
+    batch: list[tuple] | list[list],
+) -> list[tuple] | list[list]:
+    """Stage batch keys and delete matches in one statement (txn-atomic)."""
+    from connectors.writer_common import DF_LSN_COL, compare_lsn
+
+    stage = f"_df_upsert_stage_{abs(hash((schema, table_name, tuple(conflict_cols)))) % 10_000_000}"
+    conflict_idxs = [target_cols.index(c) for c in conflict_cols]
+    lsn_idx = target_cols.index(DF_LSN_COL) if DF_LSN_COL in target_cols else None
+
+    # Filter stale LSN rows client-side first (same honesty as per-row path).
+    to_write: list[Any] = []
+    for row in batch:
+        if lsn_idx is not None:
+            predicates = []
+            values: list[Any] = []
+            for col, idx in zip(conflict_cols, conflict_idxs):
+                val = row[idx] if idx < len(row) else None
+                if val is None:
+                    predicates.append(sql_mod.SQL("{} IS NULL").format(sql_mod.Identifier(col)))
+                else:
+                    predicates.append(
+                        sql_mod.SQL("{} = {}").format(sql_mod.Identifier(col), sql_mod.Placeholder())
+                    )
+                    values.append(val)
+            where = sql_mod.SQL(" AND ").join(predicates)
+            cursor.execute(
+                sql_mod.SQL("SELECT {} FROM {}.{} WHERE {} LIMIT 1").format(
+                    sql_mod.Identifier(DF_LSN_COL),
+                    sql_mod.Identifier(schema),
+                    sql_mod.Identifier(table_name),
+                    where,
+                ),
+                values,
+            )
+            existing = cursor.fetchone()
+            incoming_lsn = row[lsn_idx] if lsn_idx < len(row) else None
+            if existing is not None and compare_lsn(incoming_lsn, existing[0]) <= 0:
+                continue
+        to_write.append(row)
+    if not to_write:
+        return []
+
+    # Build TEMP table of conflict key columns only.
+    col_defs = sql_mod.SQL(", ").join(
+        sql_mod.SQL("{} VARCHAR(65535)").format(sql_mod.Identifier(c)) for c in conflict_cols
+    )
+    cursor.execute(
+        sql_mod.SQL("CREATE TEMP TABLE {} ({})").format(sql_mod.Identifier(stage), col_defs)
+    )
+    insert_cols = sql_mod.SQL(", ").join(sql_mod.Identifier(c) for c in conflict_cols)
+    placeholders = sql_mod.SQL(", ").join(sql_mod.Placeholder() for _ in conflict_cols)
+    insert_sql = sql_mod.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+        sql_mod.Identifier(stage), insert_cols, placeholders
+    )
+    key_rows = []
+    for row in to_write:
+        key_rows.append(tuple(row[idx] if idx < len(row) else None for idx in conflict_idxs))
+    cursor.executemany(insert_sql, key_rows)
+
+    join_pred = sql_mod.SQL(" AND ").join(
+        sql_mod.SQL("t.{} IS NOT DISTINCT FROM s.{}").format(
+            sql_mod.Identifier(c), sql_mod.Identifier(c)
+        )
+        for c in conflict_cols
+    )
+    # Redshift may lack IS NOT DISTINCT FROM — use equality + null-safe OR.
+    try:
+        cursor.execute(
+            sql_mod.SQL(
+                "DELETE FROM {}.{} USING {} AS s WHERE {}"
+            ).format(
+                sql_mod.Identifier(schema),
+                sql_mod.Identifier(table_name),
+                sql_mod.Identifier(stage),
+                join_pred,
+            )
+        )
+    except Exception:
+        # Null-safe equality fallback
+        eq_pred = sql_mod.SQL(" AND ").join(
+            sql_mod.SQL(
+                "((t.{c} = s.{c}) OR (t.{c} IS NULL AND s.{c} IS NULL))"
+            ).format(c=sql_mod.Identifier(c))
+            for c in conflict_cols
+        )
+        cursor.execute(
+            sql_mod.SQL(
+                "DELETE FROM {}.{} USING {} AS s WHERE {}"
+            ).format(
+                sql_mod.Identifier(schema),
+                sql_mod.Identifier(table_name),
+                sql_mod.Identifier(stage),
+                eq_pred,
+            )
+        )
+    try:
+        cursor.execute(sql_mod.SQL("DROP TABLE IF EXISTS {}").format(sql_mod.Identifier(stage)))
+    except Exception:
+        pass
+    return to_write
+
+
 @dataclass
 class WriteResult(_WriteResult):
     driver: str = "psycopg2"
 
 
-def pg_type(inferred: str) -> str:
-    return ddl_type("postgresql", inferred)
+def pg_type(inferred: str, engine: str = "postgresql") -> str:
+    """Map logical type to Postgres or Redshift DDL (never invent Redshift JSONB)."""
+    db = "redshift" if (engine or "").lower() == "redshift" else "postgresql"
+    return ddl_type(db, inferred)
 
 
 def _copy_text_value(value: Any) -> str:
@@ -189,7 +386,8 @@ def write_mapped_rows(
 
     schema = schema or "public"
     table_name = sanitize_identifier(table_name, preserve_case=True)
-    target_types = [pg_type(t) for t in logical_types]
+    engine = str(_kwargs.get("engine") or _kwargs.get("db_type") or "postgresql").lower()
+    target_types = [pg_type(t, engine=engine) for t in logical_types]
     dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
     policy = transform_error_policy(error_policy)
 
@@ -293,7 +491,12 @@ def write_mapped_rows(
 
     def _build_insert():
         placeholders = sql.SQL(", ").join(sql.Placeholder() * len(target_cols))
-        if write_mode == "upsert" and conflict_columns:
+        # Redshift: no ON CONFLICT — plain INSERT after delete-by-key (see chunk loop).
+        if (
+            write_mode == "upsert"
+            and conflict_columns
+            and uses_pg_on_conflict_upsert(engine)
+        ):
             conflict = [c for c in conflict_columns if c in target_cols]
             if conflict:
                 update_cols = [c for c in target_cols if c not in conflict]
@@ -392,7 +595,7 @@ def write_mapped_rows(
                         )
                     )
 
-        if write_mode == "upsert" and conflict_columns:
+        if write_mode == "upsert" and conflict_columns and uses_pg_on_conflict_upsert(engine):
             conflict_cols = [c for c in conflict_columns if c in target_cols]
             if conflict_cols:
                 index_name = sanitize_identifier(
@@ -442,6 +645,15 @@ def write_mapped_rows(
                     _reconnect()
 
             insert = None if use_copy else _build_insert()
+            redshift_upsert_cols = (
+                [c for c in (conflict_columns or []) if c in target_cols]
+                if (
+                    write_mode == "upsert"
+                    and conflict_columns
+                    and not uses_pg_on_conflict_upsert(engine)
+                )
+                else []
+            )
 
             for chunk_idx in range(chunks):
                 start = chunk_idx * chunk_size
@@ -466,7 +678,19 @@ def write_mapped_rows(
                         if use_copy:
                             _copy_rows(cur, schema, table_name, target_cols, batch)
                         else:
-                            cur.executemany(insert, batch)
+                            write_batch = batch
+                            if redshift_upsert_cols:
+                                write_batch = _redshift_delete_by_keys(
+                                    cur,
+                                    sql,
+                                    schema=schema,
+                                    table_name=table_name,
+                                    target_cols=target_cols,
+                                    conflict_cols=redshift_upsert_cols,
+                                    batch=batch,
+                                )
+                            if write_batch:
+                                cur.executemany(insert, write_batch)
                         if use_ledger:
                             mark_postgres_chunk_committed(
                                 cur,
@@ -489,7 +713,19 @@ def write_mapped_rows(
                                 insert = _build_insert()
                             for row_i, row in enumerate(batch):
                                 try:
-                                    cur.execute(insert, row)
+                                    write_rows = [row]
+                                    if redshift_upsert_cols:
+                                        write_rows = _redshift_delete_by_keys(
+                                            cur,
+                                            sql,
+                                            schema=schema,
+                                            table_name=table_name,
+                                            target_cols=target_cols,
+                                            conflict_cols=redshift_upsert_cols,
+                                            batch=[row],
+                                        )
+                                    if write_rows:
+                                        cur.execute(insert, write_rows[0])
                                     conn.commit()
                                     chunk_written += 1
                                 except Exception as row_exc:

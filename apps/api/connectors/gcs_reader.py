@@ -24,4 +24,8 @@ def read_object(
 
 def list_objects(cfg: dict[str, Any], bucket: str, prefix: str = "") -> list[str]:
     client = gcs_client(cfg)
-    return [b.name for b in client.list_blobs(bucket, prefix=prefix or "", max_results=100)]
+    # Cap listing — introspect samples across this set and surfaces truncation.
+    return [
+        b.name
+        for b in client.list_blobs(bucket, prefix=prefix or "", max_results=2000)
+    ]

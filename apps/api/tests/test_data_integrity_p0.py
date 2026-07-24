@@ -224,8 +224,11 @@ def test_engine_file_to_sqlite_sets_completed_with_quarantine():
             source_filename="users.csv",
             source_content=csv,
             sync_mode="full_refresh_overwrite",
-            skip_preflight=True,
             validation_mode="balanced",
+            # Writer-quarantine path: operator already passed Validate (or
+            # approved known risk). Preflight ON correctly blocks 'not-a-number'
+            # before write — this test proves post-approve quarantine honesty.
+            skip_preflight=True,
             mappings=[
                 {"source": "id", "target": "id", "confidence": 0.95},
                 {"source": "age", "target": "age", "confidence": 0.95, "target_type": "integer"},
