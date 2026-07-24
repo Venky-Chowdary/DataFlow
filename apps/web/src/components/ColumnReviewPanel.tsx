@@ -54,6 +54,8 @@ interface ColumnReviewPanelProps {
   destSchemaLoading?: boolean;
   /** null = unknown; true = table confirmed; false = will create. */
   destTableExists?: boolean | null;
+  destConnected?: boolean | null;
+  destConnectionError?: string;
   showTransforms?: boolean;
   hideTitle?: boolean;
   /** Expand-dialog layout: table-first, no nested preview, fixed scroll height. */
@@ -95,6 +97,8 @@ export function ColumnReviewPanel({
   destType,
   destSchemaLoading = false,
   destTableExists = null,
+  destConnected = null,
+  destConnectionError = "",
   showTransforms = true,
   hideTitle = false,
   presentation = "default",
@@ -489,8 +493,17 @@ export function ColumnReviewPanel({
           <div className="df2-column-review-alert df2-column-review-alert-warn" role="status">
             <DtIcon name="alert" size={16} />
             <span>
-              <strong>Destination schema unknown</strong>
-              {" — existence not confirmed. Retry Destination/Map; DataFlow will not invent create-new fields yet."}
+              {destConnected === false ? (
+                <>
+                  <strong>Destination connection failed</strong>
+                  {` — ${destConnectionError || "Could not reach the destination."} Open Destination and test the connector.`}
+                </>
+              ) : (
+                <>
+                  <strong>Destination schema unknown</strong>
+                  {" — existence not confirmed. Retry Destination/Map; DataFlow will not invent create-new fields yet."}
+                </>
+              )}
             </span>
           </div>
         )}

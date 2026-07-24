@@ -355,6 +355,8 @@ export function TransferPage({
   /** Table/collection names from the last destination introspect (picker + exists check). */
   const [destObjectNames, setDestObjectNames] = useState<string[]>([]);
   const [destTableExists, setDestTableExists] = useState<boolean | null>(null);
+  const [destConnected, setDestConnected] = useState<boolean | null>(null);
+  const [destConnectionError, setDestConnectionError] = useState<string>("");
   const [liveSourceTypes, setLiveSourceTypes] = useState<string[]>([]);
   const [liveDestTypes, setLiveDestTypes] = useState<{ id: string; label: string }[]>(
     () => FALLBACK_DEST_TYPES.map((id) => ({ id, label: getConnectorDefaults(id).label })),
@@ -1269,6 +1271,7 @@ export function TransferPage({
     schema: Record<string, string>;
     tableExists: boolean | null;
     connected: boolean | null;
+    message: string;
   }> => {
     if (destKindMode !== "database" || !connectorId) {
       return {
@@ -1276,6 +1279,7 @@ export function TransferPage({
         schema: destSchemaMap,
         tableExists: destTableExists,
         connected: null,
+        message: "",
       };
     }
     const gen = ++destSchemaGenRef.current;
@@ -1294,6 +1298,7 @@ export function TransferPage({
           schema: destSchemaMap,
           tableExists: destTableExists,
           connected: null,
+          message: "",
         };
       }
       const objectNames = (destination.objects ?? [])
@@ -1301,6 +1306,8 @@ export function TransferPage({
         .filter(Boolean);
       setDestObjectNames(objectNames);
       const connected = destination.connected !== false;
+      setDestConnected(connected ? true : false);
+      setDestConnectionError((destination.message as string) || "");
 
       // No table typed yet — only refresh the picker list.
       if (!targetCollection.trim()) {
@@ -1308,7 +1315,7 @@ export function TransferPage({
         setDestSchemaMap({});
         setDestTableExists(null);
         destSchemaTableKeyRef.current = tableKey;
-        return { columns: [], schema: {}, tableExists: null, connected };
+        return { columns: [], schema: {}, tableExists: null, connected, message: (destination.message as string) || "" };
       }
 
       const columns = destination.columns ?? [];
@@ -1390,6 +1397,7 @@ export function TransferPage({
         schema: nextSchema,
         tableExists: resolvedExists,
         connected,
+        message: (destination.message as string) || "",
       };
     } catch (e) {
       if (gen !== destSchemaGenRef.current) {
@@ -1398,17 +1406,21 @@ export function TransferPage({
           schema: destSchemaMap,
           tableExists: destTableExists,
           connected: null,
+          message: "",
         };
       }
       // Keep last-known schema on transient errors so the demo does not blank out.
       // Do not force "table missing" — unknown is safer than a false create promise.
       setDestTableExists(null);
+      const errMsg = e instanceof Error ? e.message : "Retry or continue — existence will be rechecked on Validate.";
+      setDestConnected(false);
+      setDestConnectionError(errMsg);
       toast({
         title: "Could not read destination schema",
-        message: e instanceof Error ? e.message : "Retry or continue — existence will be rechecked on Validate.",
+        message: errMsg,
         tone: "warning",
       });
-      return { columns: destColumns, schema: destSchemaMap, tableExists: null, connected: false };
+      return { columns: destColumns, schema: destSchemaMap, tableExists: null, connected: false, message: errMsg };
     } finally {
       if (gen === destSchemaGenRef.current) setDestSchemaLoading(false);
     }
@@ -4099,6 +4111,8 @@ export function TransferPage({
           destColumns={destColumns}
           destSchemaLoading={destSchemaLoading}
           destTableExists={destTableExists}
+          destConnected={destConnected}
+          destConnectionError={destConnectionError}
           targetCollection={targetCollection}
           targetDatabase={targetDb}
           destKindMode={destKindMode}

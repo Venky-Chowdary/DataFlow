@@ -22,6 +22,8 @@ interface TransferMapStepProps {
   destSchemaLoading: boolean;
   /** null = unknown, true = confirmed on destination, false = will CREATE. */
   destTableExists?: boolean | null;
+  destConnected?: boolean | null;
+  destConnectionError?: string;
   targetCollection: string;
   targetDatabase: string;
   destKindMode: string;
@@ -81,6 +83,8 @@ export function TransferMapStep({
   destColumns,
   destSchemaLoading,
   destTableExists = null,
+  destConnected = null,
+  destConnectionError = "",
   targetCollection,
   targetDatabase,
   destKindMode,
@@ -426,6 +430,8 @@ export function TransferMapStep({
             destType={destDisplayType}
             destSchemaLoading={destSchemaLoading}
             destTableExists={destTableExists}
+            destConnected={destConnected}
+            destConnectionError={destConnectionError}
             compact
             hideTitle
             search={search}
@@ -526,8 +532,20 @@ export function TransferMapStep({
           <div className="df2-map-dialog-banner" role="status">
             <DtIcon name="alert" size={16} />
             <span>
-              <strong>Destination schema unknown</strong>
-              {" — could not confirm whether the table exists. Retry Destination/Map; do not treat this as create-new."}
+              {destConnected === false ? (
+                <>
+                  <strong>Destination connection failed</strong>
+                  {` — ${destConnectionError || "Could not reach the destination."} `}
+                  <button type="button" className="df2-btn df2-btn-sm" onClick={onBack}>
+                    Fix destination connection
+                  </button>
+                </>
+              ) : (
+                <>
+                  <strong>Destination schema unknown</strong>
+                  {" — could not confirm whether the table exists. Retry Destination/Map; do not treat this as create-new."}
+                </>
+              )}
             </span>
           </div>
         )}
@@ -541,6 +559,8 @@ export function TransferMapStep({
           destType={destDisplayType}
           destSchemaLoading={destSchemaLoading}
           destTableExists={destTableExists}
+          destConnected={destConnected}
+          destConnectionError={destConnectionError}
           presentation="dialog"
           search={search}
           onSearchChange={setSearch}

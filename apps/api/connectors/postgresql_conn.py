@@ -2,16 +2,31 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from connectors.sql_dsn import private_cloud_host_hint, resolve_sql_endpoint
 from connectors.write_resilience import is_public_proxy_host
+
+logger = logging.getLogger(__name__)
+_ssl_fallback_hosts: set[str] = set()
 
 
 def _parse_postgres_url(url: str) -> dict[str, Any]:
     from connectors.sql_dsn import parse_sql_url
 
     return parse_sql_url(url, family="postgresql")
+
+
+def _ssl_not_supported(msg: str) -> bool:
+    """Detect the common psycopg2 error when the server does not support TLS."""
+    lower = msg.lower()
+    return (
+        "server does not support ssl, but ssl was required" in lower
+        or "server does not support ssl" in lower
+        or "ssl not supported" in lower
+        or "ssl is not enabled" in lower
+    )
 
 
 def get_connection(
@@ -66,10 +81,27 @@ def get_connection(
     try:
         conn = psycopg2.connect(**kwargs)
     except Exception as first_exc:
+        fallback_sslmode: str | None = None
         if not ssl and public_proxy and sslmode != "require":
+            fallback_sslmode = "require"
+        elif ssl and sslmode == "require" and _ssl_not_supported(str(first_exc)):
+            # ssl=True with a server that does not advertise TLS is often a stale
+            # connector setting. Fall back to negotiate/try TLS first, then plain.
+            fallback_sslmode = "prefer"
+
+        if fallback_sslmode:
             try:
-                conn = psycopg2.connect(**{**kwargs, "sslmode": "require"})
-            except Exception:
+                conn = psycopg2.connect(**{**kwargs, "sslmode": fallback_sslmode})
+                if ep["host"] not in _ssl_fallback_hosts:
+                    _ssl_fallback_hosts.add(ep["host"])
+                    logger.warning(
+                        "PostgreSQL sslmode='%s' failed for %s; connected with sslmode='%s'. "
+                        "Review the connector SSL setting if encryption is required.",
+                        sslmode,
+                        ep["host"],
+                        fallback_sslmode,
+                    )
+            except psycopg2.Error:
                 hint = private_cloud_host_hint(ep["host"], connection_string)
                 if hint:
                     raise RuntimeError(f"{first_exc}{hint}") from first_exc
