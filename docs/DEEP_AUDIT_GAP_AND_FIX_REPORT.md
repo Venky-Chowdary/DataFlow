@@ -669,22 +669,25 @@ pytest apps/api/tests/test_cdc_lsn_stamp.py \
        apps/api/tests/test_mysql_cdc_lsn_upsert.py \
        apps/api/tests/test_duckdb_cdc_lsn_upsert.py \
        apps/api/tests/test_mongodb_cdc_lsn_upsert.py \
-       apps/api/tests/test_writer_common_cdc_lsn.py
-12 passed in 0.76s
+       apps/api/tests/test_writer_common_cdc_lsn.py \
+       apps/api/tests/test_cdc_postgres_logical_integration.py \
+       apps/api/tests/test_cdc_mongodb_change_stream_integration.py
+15 passed in 9.88s
 ```
 
 ### What is still NOT proven
 
 - **Full CDC end-to-end exactly-once job resume.** PK-sink LSN guards are now
-  proven for PostgreSQL, MySQL, DuckDB, and MongoDB; the remaining work is
-  full job-level resume across slot/LSN persistence and multi-stream handoff
+  proven for PostgreSQL, MySQL, DuckDB, and MongoDB, and logical-decoding /
+  change-stream integration tests pass. The remaining work is a full job-level
+  resume stress test across slot/LSN persistence and multi-stream handoff
   with real services.
 - **Cloud warehouse and real-service routes.** ~952 matrix tests still skip
   because no live Snowflake/BigQuery/Redshift/GCS/ADLS/Salesforce/etc.
   credentials or emulators are configured.
 - **BLE001 blind-except narrowing.** `except Exception as exc:` still triggers
-  `BLE001`; the next pass should narrow `Exception` to concrete,
-  source-specific exception families in the hot data path.
+  `BLE001`; the MongoDB LSN prefetch catch was narrowed to
+  `pymongo.errors.PyMongoError`, but the broader ruff runway remains.
 - **Lakehouse MERGE.** Iceberg/Delta MERGE semantics for idempotent writes are
   still a roadmap item.
 
