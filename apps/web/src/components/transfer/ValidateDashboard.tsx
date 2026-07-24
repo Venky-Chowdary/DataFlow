@@ -157,6 +157,8 @@ interface ValidateDashboardProps {
   confidenceThreshold?: number;
   destType?: string;
   validationMode?: string;
+  /** Current sync mode — duplicate-key copy must not tell append operators to "switch to append". */
+  syncMode?: string;
   /** Apply a one-click AI suggestion to the Studio (change type, add transform, navigate). */
   onApplyAction?: (action: ValidationSuggestedAction) => void;
   /** Apply strip_controls across mappings and re-run preflight. Returns what changed. */
@@ -547,6 +549,7 @@ export function ValidateDashboard({
   confidenceThreshold = 0.85,
   destType,
   validationMode,
+  syncMode,
   onApplyAction,
   onStripControlChars,
   stripControlsApplied = false,
@@ -890,11 +893,17 @@ export function ValidateDashboard({
   const sampleScanned = Number(dryGate?.details?.sample_rows_scanned ?? dryGate?.details?.sample_size ?? 0) || null;
   const engineMsTotal = (preflight?.gates ?? []).reduce((sum, g) => sum + (Number(g.duration_ms) || 0), 0);
 
-  const executiveSummary = useMemo(() => buildExecutiveSummary(preflight), [preflight]);
-  const duplicateRoot = useMemo(() => findDuplicateKeyRoot(preflight), [preflight]);
+  const executiveSummary = useMemo(
+    () => buildExecutiveSummary(preflight, syncMode),
+    [preflight, syncMode],
+  );
+  const duplicateRoot = useMemo(
+    () => findDuplicateKeyRoot(preflight, syncMode),
+    [preflight, syncMode],
+  );
   const displayBlockers = useMemo(
-    () => (preflight ? buildDisplayBlockers(preflight) : []),
-    [preflight],
+    () => (preflight ? buildDisplayBlockers(preflight, syncMode) : []),
+    [preflight, syncMode],
   );
   const explainParts = useMemo(
     () => (explain?.issues?.length ? partitionExplainIssues(explain.issues) : null),
@@ -1269,9 +1278,17 @@ export function ValidateDashboard({
                     leadingIcon={<DtIcon name="settings" size={14} />}
                     onClick={onOpenIdentitySettings}
                   >
-                    {duplicateRoot.primaryKey
-                      ? `Change primary key (${duplicateRoot.primaryKey}) or sync mode`
-                      : "Change primary key or sync mode"}
+                    {(() => {
+                      const appendLike = /append|overwrite/.test((syncMode || "").toLowerCase());
+                      if (appendLike) {
+                        return duplicateRoot.primaryKey
+                          ? `Re-run Validate (append · ${duplicateRoot.primaryKey} dupes are warnings)`
+                          : "Re-run Validate (append does not require unique keys)";
+                      }
+                      return duplicateRoot.primaryKey
+                        ? `Change primary key (${duplicateRoot.primaryKey}) or sync mode`
+                        : "Change primary key or sync mode";
+                    })()}
                   </Button>
                 )}
                 {uniqueKeySuggestions && uniqueKeySuggestions.length > 0 && onApplyPrimaryKey && (
@@ -2198,9 +2215,11 @@ export function ValidateDashboard({
                           leadingIcon={<DtIcon name="settings" size={14} />}
                           onClick={onOpenIdentitySettings}
                         >
-                          {duplicateRoot?.primaryKey
-                            ? `Change primary key (${duplicateRoot.primaryKey})`
-                            : "Change primary key or sync mode"}
+                          {/append|overwrite/.test((syncMode || "").toLowerCase())
+                            ? "Open Advanced · then Re-run Validate"
+                            : duplicateRoot?.primaryKey
+                              ? `Change primary key (${duplicateRoot.primaryKey})`
+                              : "Change primary key or sync mode"}
                         </Button>
                       )}
                     </div>

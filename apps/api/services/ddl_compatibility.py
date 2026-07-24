@@ -102,6 +102,7 @@ def _primary_key_target(
     dest_kind: str,
     *,
     destination_pk_columns: list[str] | None = None,
+    contract_primary_key: str | None = None,
 ) -> str | None:
     """Return the target column for the identity uniqueness contract.
 
@@ -113,6 +114,7 @@ def _primary_key_target(
         mappings,
         dest_kind,
         destination_pk_columns=destination_pk_columns,
+        contract_primary_key=contract_primary_key,
     )
 
 
@@ -122,6 +124,7 @@ def _duplicate_pk_in_source(
     *,
     dest_kind: str,
     destination_pk_columns: list[str] | None = None,
+    contract_primary_key: str | None = None,
 ) -> list[str]:
     if not sample_rows:
         return []
@@ -129,7 +132,10 @@ def _duplicate_pk_in_source(
     src_by_tgt = {str(m.get("target") or ""): str(m.get("source") or "") for m in mappings if m.get("target")}
 
     pk_tgt = _primary_key_target(
-        mappings, dest_kind, destination_pk_columns=destination_pk_columns
+        mappings,
+        dest_kind,
+        destination_pk_columns=destination_pk_columns,
+        contract_primary_key=contract_primary_key,
     )
     if not pk_tgt:
         return issues
@@ -164,6 +170,7 @@ def evaluate_ddl_compatibility(
     sync_mode: str | None = None,
     destination_table: str | None = None,
     destination_pk_columns: list[str] | None = None,
+    contract_primary_key: str | None = None,
 ) -> tuple[bool, list[str]]:
     """
     Evaluate whether mapped columns can land in the destination DDL.
@@ -334,6 +341,7 @@ def evaluate_ddl_compatibility(
             mappings,
             dest_kind=dest_kind,
             destination_pk_columns=destination_pk_columns,
+            contract_primary_key=contract_primary_key,
         )
         if sync_requires_unique_identity(sync)
         or (table_exists and destination_pk_columns)

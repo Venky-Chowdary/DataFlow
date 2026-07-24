@@ -550,6 +550,8 @@ def run_integrity_audit(
     validation_mode: str = "strict",
     schema_policy: str = "manual_review",
     sync_mode: str = "",
+    contract_primary_key: str | None = None,
+    destination_pk_columns: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Run all critical data integrity checks in one pass.
@@ -582,6 +584,8 @@ def run_integrity_audit(
         dest_kind,
         validation_mode=mode,
         purpose="required_nulls",
+        destination_pk_columns=destination_pk_columns,
+        contract_primary_key=contract_primary_key,
     )
 
     checks: list[dict[str, Any]] = []
@@ -656,6 +660,7 @@ def run_integrity_audit(
             primary_key=pk,
             dest_kind=dest_kind,
             validation_mode=validation_mode,
+            sync_mode=sync_mode,
         )
         checks.append({
             "check": "expectations_suite",

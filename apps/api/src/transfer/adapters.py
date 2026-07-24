@@ -438,13 +438,11 @@ def _introspect_table_schema(
         password=cfg.get("password", ""),
         schema=schema_from_cfg(db_type, cfg),
         connection_string=cfg.get("connection_string", ""),
-        # Prefer connector ssl; default True for Postgres-family so managed
-        # hosts (Railway, Neon, etc.) do not fail column probes while the
-        # table-list probe still succeeds — that false-empty schema flipped Map
-        # into dishonest create-new / identity 93% mode.
-        ssl=bool(cfg.get("ssl")) if "ssl" in cfg else (
-            db_type in ("postgresql", "redshift", "mysql", "sqlserver")
-        ),
+        # Prefer connector ssl exactly as list/probe use it. Do not default True
+        # when the key is missing — that caused managed vs local mismatch where
+        # SHOW TABLES succeeded (ssl=False) but INFORMATION_SCHEMA failed (ssl=True),
+        # leaving Map with "destination schema unavailable" for an existing table.
+        ssl=bool(cfg.get("ssl", False)),
         warehouse=cfg.get("warehouse", ""),
         table=table,
         catalog_type=cfg.get("type", ""),
@@ -453,6 +451,35 @@ def _introspect_table_schema(
     )
     if info.get("ok") and info.get("columns"):
         return {c["name"]: c["inferred_type"] for c in info["columns"]}
+
+    # Retry once with flipped SSL when the first probe failed (common when the
+    # connector ssl flag does not match the host's TLS requirement).
+    if not info.get("ok") and db_type in ("postgresql", "redshift", "mysql", "sqlserver"):
+        flipped = not bool(cfg.get("ssl", False))
+        info_retry = introspect_schema(
+            db_type,
+            host=cfg.get("host", ""),
+            port=int(cfg.get("port") or (
+                3306 if db_type == "mysql" else
+                1433 if db_type == "sqlserver" else
+                1521 if db_type == "oracle" else
+                5439 if db_type == "redshift" else
+                5432
+            )),
+            database=cfg.get("database", ""),
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=schema_from_cfg(db_type, cfg),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=flipped,
+            warehouse=cfg.get("warehouse", ""),
+            table=table,
+            catalog_type=cfg.get("type", ""),
+            auth_source=cfg.get("auth_source", ""),
+            api_key=cfg.get("api_key", ""),
+        )
+        if info_retry.get("ok") and info_retry.get("columns"):
+            return {c["name"]: c["inferred_type"] for c in info_retry["columns"]}
 
     # Fallback: infer logical types from the sample records we already have in hand.
     # This is essential for schemaless sources (MongoDB, DynamoDB, Redis) whose

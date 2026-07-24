@@ -614,8 +614,20 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             out["schema"] = out.get("schema") or {}
             out["message"] = (
                 f"Table `{resolve_table}` exists on the destination, but column "
-                f"metadata could not be loaded — mapping will use source types until retry."
+                f"metadata could not be loaded — retrying via sample SELECT."
             )
+            # Recover columns from a bounded SELECT — same path writers use.
+            _attach_sql_sample_rows(out, endpoint, cfg, fmt, resolve_table, sample_limit)
+            if out.get("columns"):
+                out["message"] = (
+                    f"Found existing table `{resolve_table}` "
+                    f"({len(out['columns'])} columns via sample read)"
+                )
+            else:
+                out["message"] = (
+                    f"Table `{resolve_table}` exists on the destination, but column "
+                    f"metadata could not be loaded — mapping will use source types until retry."
+                )
         else:
             # Missing object: wording depends on whether this endpoint is a source
             # (Transfer Studio introspect) or a destination (create-on-write is OK).

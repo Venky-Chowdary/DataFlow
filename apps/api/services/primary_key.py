@@ -51,6 +51,41 @@ def _mapping_pairs(mappings: Iterable[Any]) -> list[tuple[str, str]]:
     return pairs
 
 
+def extract_contract_primary_key(
+    stream_contracts: Iterable[Any] | None,
+    *,
+    stream_name: str = "",
+) -> str | None:
+    """Operator primary key from Studio ``stream_contracts`` (Execute uses the same)."""
+    contracts = [
+        c
+        for c in (stream_contracts or [])
+        if isinstance(c, dict) and c.get("selected", True)
+    ]
+    if not contracts:
+        return None
+    chosen: dict[str, Any] | None = None
+    want = (stream_name or "").strip()
+    if want:
+        for c in contracts:
+            name = str(c.get("name") or c.get("stream") or "").strip()
+            if name == want:
+                chosen = c
+                break
+    c = chosen or contracts[0]
+    raw = c.get("primary_key") if c else None
+    if raw is None and c:
+        raw = c.get("primary_keys")
+    if isinstance(raw, (list, tuple)):
+        for item in raw:
+            name = str(item or "").strip()
+            if name:
+                return name
+        return None
+    name = str(raw or "").strip()
+    return name or None
+
+
 def resolve_identity_key(
     *,
     mappings: Iterable[Any],
@@ -59,11 +94,14 @@ def resolve_identity_key(
     validation_mode: str = "strict",
     purpose: Purpose = "uniqueness",
     destination_pk_columns: list[str] | None = None,
+    contract_primary_key: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Return ``(source_column, target_column)`` for the identity key, or ``(None, None)``.
 
     Rules (connector-agnostic):
     * Schemaless (Mongo/Dynamo/Redis): only ``_id`` — other ``*_id`` fields are FKs.
+    * Operator ``contract_primary_key`` (stream contract) wins when present — same key
+      Execute uses for upsert/CDC/mirror/SCD2.
     * Prefer introspected destination primary-key columns when mapped.
     * SQL uniqueness (G6/G8): exact ``id`` / ``_id`` on target, else source. Never
       auto-pick ``user_id`` / ``account_id`` when several FK-like columns compete.
@@ -83,6 +121,7 @@ def resolve_identity_key(
     tgt_by_src = {s: t for s, t in pairs}
     src_by_tgt = {t: s for s, t in pairs}
     tgt_lower = {t.lower(): t for t in tgts}
+    src_lower = {s.lower(): s for s in srcs}
 
     if kind in SCHEMALESS_DESTS:
         for t in tgts:
@@ -93,6 +132,18 @@ def resolve_identity_key(
             if s.lower() == "_id":
                 return s, tgt_by_src.get(s, s)
         return None, None
+
+    # Operator identity (Advanced / stream contract) — never silently swap for ``id``.
+    contract = str(contract_primary_key or "").strip()
+    if contract:
+        matched_src = src_lower.get(contract.lower())
+        if matched_src:
+            return matched_src, tgt_by_src.get(matched_src, matched_src)
+        matched_tgt = tgt_lower.get(contract.lower())
+        if matched_tgt:
+            return src_by_tgt.get(matched_tgt, matched_tgt), matched_tgt
+        # Unmapped but named — still honor so Validate matches Execute failure mode.
+        return contract, contract
 
     # Destination contract wins: first mapped introspected PK column.
     for pk in destination_pk_columns or []:
@@ -138,6 +189,7 @@ def resolve_primary_key_target(
     *,
     validation_mode: str = "strict",
     destination_pk_columns: list[str] | None = None,
+    contract_primary_key: str | None = None,
 ) -> str | None:
     """Target-side identity column for uniqueness probes (DDL / G8)."""
     _src, tgt = resolve_identity_key(
@@ -146,6 +198,7 @@ def resolve_primary_key_target(
         validation_mode=validation_mode,
         purpose="uniqueness",
         destination_pk_columns=destination_pk_columns,
+        contract_primary_key=contract_primary_key,
     )
     return tgt
 
@@ -157,6 +210,8 @@ def resolve_primary_key_source(
     *,
     validation_mode: str = "strict",
     purpose: Purpose = "required_nulls",
+    destination_pk_columns: list[str] | None = None,
+    contract_primary_key: str | None = None,
 ) -> str | None:
     """Source-side identity column for integrity / null / duplicate audits."""
     src, _tgt = resolve_identity_key(
@@ -165,5 +220,7 @@ def resolve_primary_key_source(
         dest_kind=dest_kind,
         validation_mode=validation_mode,
         purpose=purpose,
+        destination_pk_columns=destination_pk_columns,
+        contract_primary_key=contract_primary_key,
     )
     return src

@@ -710,12 +710,11 @@ export function buildPreflightMappings(
         semantic_role: safe.semanticRole,
         create_new: Boolean(
           safe.createNew
-          || safe.assignmentStrategy === "create_compatible_new"
-          || (safe.existsInDestination === false && Boolean(safe.target)),
+          || safe.assignmentStrategy === "create_compatible_new",
         ),
         assignment_strategy:
           safe.assignmentStrategy
-          || (safe.createNew || safe.existsInDestination === false
+          || (safe.createNew || safe.assignmentStrategy === "create_compatible_new"
             ? "create_compatible_new"
             : undefined),
         struct_policy: safe.structPolicy,

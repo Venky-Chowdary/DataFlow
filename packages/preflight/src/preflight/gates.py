@@ -411,6 +411,27 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     ddl_issues = [i for i in raw_issues if not _is_drift_noise_issue(i)]
     scrubbed = len(raw_issues) - len(ddl_issues)
 
+    require_unique = True
+    try:
+        from services.primary_key import sync_requires_unique_identity
+
+        require_unique = sync_requires_unique_identity(getattr(ctx.plan, "sync_mode", "") or "")
+    except Exception:
+        require_unique = True
+
+    # Append/overwrite: strip inferred-PK uniqueness noise from host DDL issues so
+    # operators who already chose Full refresh · Append are not told to "switch sync mode".
+    if not require_unique:
+        before = len(ddl_issues)
+        ddl_issues = [
+            i
+            for i in ddl_issues
+            if "duplicate" not in i.lower()
+            and "primary key candidate" not in i.lower()
+            and "unique constraint" not in i.lower()
+        ]
+        scrubbed += before - len(ddl_issues)
+
     if schemaless:
         # Document stores have no CREATE/ALTER contract. Only identity-key
         # uniqueness in the sample can fail this gate.
@@ -425,6 +446,8 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                 dest_kind=dest_kind,
                 validation_mode=ctx.plan.validation_mode,
                 purpose="uniqueness",
+                destination_pk_columns=getattr(ctx.plan, "destination_pk_columns", None) or None,
+                contract_primary_key=getattr(ctx.plan, "contract_primary_key", None) or None,
             )
         except Exception:
             for m in ctx.plan.mappings:
@@ -495,6 +518,16 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
         )
 
     # Canonical identity key uniqueness probe for SQL destinations.
+    # Append/overwrite: skip unless the destination introspected a real PK
+    # (INSERT would then fail — fail closed with a clear gate).
+    if not require_unique and not (getattr(ctx.plan, "destination_pk_columns", None) or []):
+        return _pass(
+            GateId.G6_TARGET_DDL,
+            "Target DDL compatible (uniqueness not required for this sync mode)",
+            start,
+            {"sync_mode": getattr(ctx.plan, "sync_mode", ""), "scrubbed_drift_issues": scrubbed},
+        )
+
     source_cols = [c.name for c in ctx.plan.source.columns]
     try:
         from services.primary_key import resolve_identity_key
@@ -505,6 +538,8 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             dest_kind=dest_kind,
             validation_mode=ctx.plan.validation_mode,
             purpose="uniqueness",
+            destination_pk_columns=getattr(ctx.plan, "destination_pk_columns", None) or None,
+            contract_primary_key=getattr(ctx.plan, "contract_primary_key", None) or None,
         )
     except Exception:
         pk_src, pk_tgt = None, None
@@ -713,6 +748,8 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 ctx.plan.mappings,
                 ctx.plan.destination.db_type or "",
                 validation_mode=ctx.plan.validation_mode,
+                destination_pk_columns=getattr(ctx.plan, "destination_pk_columns", None) or None,
+                contract_primary_key=getattr(ctx.plan, "contract_primary_key", None) or None,
             )
         except Exception:
             for m in ctx.plan.mappings:

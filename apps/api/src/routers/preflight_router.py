@@ -175,6 +175,16 @@ async def run_preflight(body: PreflightRequest):
 
     dest_column_types = body.destination_column_types or dest_meta.get("column_types") or {}
 
+    from services.primary_key import extract_contract_primary_key
+
+    contract_pk = extract_contract_primary_key(
+        body.stream_contracts,
+        stream_name=body.dest_table or body.dest_collection or "",
+    )
+    # Prefer primary stream contract when dest name does not match a stream name.
+    if not contract_pk:
+        contract_pk = extract_contract_primary_key(body.stream_contracts)
+
     result = run_file_preflight(
         columns=body.columns,
         column_types=body.column_types,
@@ -201,6 +211,8 @@ async def run_preflight(body: PreflightRequest):
         source_filename="",
         schema_policy=body.schema_policy,
         backfill_new_fields=body.backfill_new_fields,
+        contract_primary_key=contract_pk,
+        destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
     )
     gated = apply_policy_gates(
         result,

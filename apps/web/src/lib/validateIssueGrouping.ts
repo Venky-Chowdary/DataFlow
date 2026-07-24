@@ -142,7 +142,10 @@ function extractSampleRows(gate: PreflightGate | undefined, details?: Record<str
 }
 
 /** Collapse G9/G6/G8 duplicate-key failures into one operator-facing root cause. */
-export function findDuplicateKeyRoot(preflight: PreflightResult | null | undefined): DuplicateKeyRoot | null {
+export function findDuplicateKeyRoot(
+  preflight: PreflightResult | null | undefined,
+  syncMode?: string,
+): DuplicateKeyRoot | null {
   if (!preflight) return null;
 
   const gateHits = (preflight.gates ?? []).filter(
@@ -200,11 +203,28 @@ export function findDuplicateKeyRoot(preflight: PreflightResult | null | undefin
   }
 
   const labels = gateIds.map((id) => gateLabel(id));
+  const sync = (syncMode || "").toLowerCase();
+  const appendLike =
+    sync.includes("append")
+    || sync === "full_refresh_overwrite"
+    || sync === "overwrite"
+    || sync === "full_refresh";
+  const fixHint = appendLike
+    ? (
+      "You already chose append/overwrite — uniqueness is not required for this sync mode. "
+      + "Re-run Validate after the API picks up the latest gates. If it still blocks, the destination "
+      + "table may enforce a real PRIMARY KEY on this column: clean duplicate source rows, or pick a "
+      + "different identity column in Destination → Advanced."
+    )
+    : (
+      "Open Destination → Advanced and set Primary key to a unique column "
+      + "(or switch to Full refresh · Append / Overwrite if uniqueness is not required). "
+      + "Map Approve cannot dedupe rows — then Re-run Validate."
+    );
   return {
     title: "Duplicate identity keys",
     impact: impactParts.join(" · "),
-    fixHint:
-      "Open Destination → Advanced and set Primary key to a unique column (or switch to append/overwrite if uniqueness is not required). Map Approve cannot dedupe rows — then Re-run Validate.",
+    fixHint,
     primaryKey,
     duplicateCount,
     sampleRows,
@@ -299,8 +319,11 @@ export function partitionCoercionColumns(columns: CoercionColumn[]): {
   return { isoNormalize, otherActionable, clean };
 }
 
-export function buildDisplayBlockers(preflight: PreflightResult): DisplayBlocker[] {
-  const root = findDuplicateKeyRoot(preflight);
+export function buildDisplayBlockers(
+  preflight: PreflightResult,
+  syncMode?: string,
+): DisplayBlocker[] {
+  const root = findDuplicateKeyRoot(preflight, syncMode);
   const absorbed = new Set(root?.absorbedBlockerIds ?? []);
   const items: DisplayBlocker[] = [];
 
@@ -337,10 +360,13 @@ export function buildDisplayBlockers(preflight: PreflightResult): DisplayBlocker
   return items;
 }
 
-export function buildExecutiveSummary(preflight: PreflightResult | null | undefined): ExecutiveSummary | null {
+export function buildExecutiveSummary(
+  preflight: PreflightResult | null | undefined,
+  syncMode?: string,
+): ExecutiveSummary | null {
   if (!preflight) return null;
-  const root = findDuplicateKeyRoot(preflight);
-  const displayBlockers = buildDisplayBlockers(preflight);
+  const root = findDuplicateKeyRoot(preflight, syncMode);
+  const displayBlockers = buildDisplayBlockers(preflight, syncMode);
   const rootCauseCount = displayBlockers.length;
   const blockedGates = (preflight.gates ?? []).filter((g) => g.status === "block").length;
   const passed = preflight.passed_count ?? 0;

@@ -113,6 +113,10 @@ class TransferPlan:
     validation_mode: str = "strict"
     # Write semantics — uniqueness gates only hard-block when identity is required.
     sync_mode: str = ""
+    # Operator identity from stream_contracts (source column name). Empty = infer.
+    contract_primary_key: str = ""
+    # Introspected destination PK column names (when table exists).
+    destination_pk_columns: list[str] = field(default_factory=list)
 
 
 @dataclass

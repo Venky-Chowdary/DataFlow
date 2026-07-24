@@ -391,10 +391,18 @@ def infer_expectations_for_schema(
     primary_key: str | None = None,
     dest_kind: str = "",
     validation_mode: str = "strict",
+    sync_mode: str = "",
 ) -> list[dict[str, Any]]:
     """Auto-generate standard expectations from schema metadata (dbt-style)."""
     specs: list[dict[str, Any]] = []
     schemaless = (dest_kind or "").lower() in SCHEMALESS_DESTS
+    require_unique = True
+    try:
+        from services.primary_key import sync_requires_unique_identity
+
+        require_unique = sync_requires_unique_identity(sync_mode)
+    except Exception:
+        require_unique = True
     for col in columns:
         t = (schema.get(col) or "VARCHAR").upper()
         is_id = col.lower().endswith("_id") or col.lower() == "id"
@@ -404,9 +412,26 @@ def infer_expectations_for_schema(
             # primary `_id`; other `*_id` fields are normal FKs and may repeat.
             if schemaless and not is_primary and col.lower() != "_id":
                 continue
-            severity = "block" if is_primary else "warn"
-            specs.append({"fn": "expect_column_unique", "column": col, "severity": severity})
-            specs.append({"fn": "expect_column_not_null", "column": col, "max_null_rate": 0.0, "severity": severity})
+            # Append/overwrite do not invent a uniqueness contract — surface as
+            # warn only. Upsert/CDC/mirror still hard-block on the identity key.
+            if is_primary and not require_unique:
+                unique_severity = "warn"
+            elif is_primary:
+                unique_severity = "block"
+            else:
+                unique_severity = "warn"
+            null_severity = "block" if is_primary else "warn"
+            specs.append({
+                "fn": "expect_column_unique",
+                "column": col,
+                "severity": unique_severity,
+            })
+            specs.append({
+                "fn": "expect_column_not_null",
+                "column": col,
+                "max_null_rate": 0.0,
+                "severity": null_severity,
+            })
         if t in {"INTEGER", "DECIMAL", "NUMERIC", "FLOAT", "NUMBER"}:
             if re.search(r"amount|price|total|balance|amt|revenue", col, re.I):
                 specs.append({
@@ -494,6 +519,7 @@ def run_auto_expectations(
     baseline_rows: list[dict[str, Any]] | None = None,
     dest_kind: str = "",
     validation_mode: str = "strict",
+    sync_mode: str = "",
 ) -> dict[str, Any]:
     """Infer + run standard expectations for a dataset."""
     specs = infer_expectations_for_schema(
@@ -502,6 +528,7 @@ def run_auto_expectations(
         primary_key=primary_key,
         dest_kind=dest_kind,
         validation_mode=validation_mode,
+        sync_mode=sync_mode,
     )
     if baseline_rows:
         for col in columns:

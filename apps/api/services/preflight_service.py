@@ -185,6 +185,8 @@ class FilePreflightContext(PreflightContext):
             validation_mode=mode,
             destination_db_type=self.plan.destination.db_type,
             sync_mode=sync_mode,
+            contract_primary_key=getattr(self.plan, "contract_primary_key", None) or None,
+            destination_pk_columns=getattr(self.plan, "destination_pk_columns", None) or None,
         )
 
 
@@ -507,6 +509,8 @@ def run_file_preflight(
     backfill_new_fields: bool = False,
     stored_source_fp: str = "",
     stored_target_fp: str = "",
+    contract_primary_key: str | None = None,
+    destination_pk_columns: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G8 + integrity)."""
     if row_count <= 0 and sample_rows:
@@ -598,6 +602,8 @@ def run_file_preflight(
         schema_policy=schema_policy,
         sync_mode=sync_mode,
         destination_table=destination_table,
+        destination_pk_columns=destination_pk_columns,
+        contract_primary_key=contract_primary_key,
     )
 
     drift = detect_schema_drift(
@@ -656,6 +662,8 @@ def run_file_preflight(
         confidence_threshold=confidence_threshold,
         validation_mode=validation_mode,
         sync_mode=sync_mode,
+        contract_primary_key=str(contract_primary_key or "").strip(),
+        destination_pk_columns=list(destination_pk_columns or []),
     )
 
     ctx = FilePreflightContext(plan, sample_rows)

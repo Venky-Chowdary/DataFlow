@@ -266,6 +266,8 @@ export function TransferPage({
   const [sourceRowEstimate, setSourceRowEstimate] = useState<number | null>(null);
   const [analysis, setAnalysis] = useState<EnhancedAnalysis | null>(null);
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
+  /** Fingerprint of Map/sync/PK that produced the current preflight result. */
+  const [validatedContractKey, setValidatedContractKey] = useState<string | null>(null);
   const [cellPreview, setCellPreview] = useState<CellPreviewResult | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [mappingProgress, setMappingProgress] = useState(0);
@@ -282,6 +284,8 @@ export function TransferPage({
   });
   const sourceIntrospectGenRef = useRef(0);
   const destSchemaGenRef = useRef(0);
+  /** Last table key that successfully owned ``destColumns`` — blocks cross-table stickiness. */
+  const destSchemaTableKeyRef = useRef("");
   const lastNewTableToastRef = useRef("");
   const [preflighting, setPreflighting] = useState(false);
   const [savingContract, setSavingContract] = useState(false);
@@ -372,7 +376,10 @@ export function TransferPage({
   const mappingReviewCount = columnMappings.filter(
     (m) => !m.approved && (m.requiresReview || m.confidence < confidenceThreshold),
   ).length;
-  const duplicateKeyRoot = useMemo(() => findDuplicateKeyRoot(preflight), [preflight]);
+  const duplicateKeyRoot = useMemo(
+    () => findDuplicateKeyRoot(preflight, syncMode),
+    [preflight, syncMode],
+  );
 
   const buildSourceSamples = useCallback((): Record<string, string[]> => {
     const rows = (parsed?.data ?? parsed?.sample_data ?? []) as Record<string, unknown>[];
@@ -397,6 +404,7 @@ export function TransferPage({
     setAnalysis(null);
     setTransferPlan(null);
     setPreflight(null);
+    setValidatedContractKey(null);
     setPersistedPlanId(null);
     setParsed(null);
     setStreamPreviews([]);
@@ -1303,16 +1311,19 @@ export function TransferPage({
       } else if (destColumns.length > 0 && resolvedExists == null) {
         resolvedExists = true;
       }
-      // Never wipe a known schema with an empty probe when the table still exists —
+      // Never wipe a known schema with an empty probe for the *same* table —
       // that falsely flips Map into "create-new" / identity 93% mode.
+      // Never keepPrior across a different table/collection (wrong DDL attribution).
       const keepPrior =
         columns.length === 0
+        && destSchemaTableKeyRef.current === tableKey
         && (resolvedExists !== false || destTableExists === true || destColumns.length > 0);
       const nextColumns = keepPrior ? destColumns : columns;
       const nextSchema = keepPrior ? destSchemaMap : schema;
       setDestColumns(nextColumns);
       setDestSchemaMap(nextSchema);
       setDestTableExists(resolvedExists);
+      destSchemaTableKeyRef.current = tableKey;
       if (keepPrior && resolvedExists === true && destColumns.length === 0) {
         const metaKey = `meta:${tableKey}`;
         if (lastNewTableToastRef.current !== metaKey) {
@@ -1412,6 +1423,7 @@ export function TransferPage({
     setTransferPlan(null);
     setPersistedPlanId(null);
     setPreflight(null);
+    setValidatedContractKey(null);
     setCellPreview(null);
     setDestColumns([]);
     setDestSchemaMap({});
@@ -2370,7 +2382,17 @@ export function TransferPage({
       let loadedTableExists: boolean | null = destTableExists;
       if (destKindMode === "database") {
         bump(22, "Loading destination schema…");
-        const loaded = await loadDestinationSchema();
+        let loaded = await loadDestinationSchema();
+        // One retry — SSL / metadata races often succeed on the second probe.
+        if (
+          loaded.columns.length === 0
+          && loaded.tableExists !== false
+          && targetCollection.trim()
+        ) {
+          bump(28, "Retrying destination schema…");
+          await new Promise((r) => window.setTimeout(r, 400));
+          loaded = await loadDestinationSchema();
+        }
         freshDestCols = loaded.columns;
         freshDestSchema = loaded.schema;
         loadedTableExists = loaded.tableExists;
@@ -2868,6 +2890,7 @@ export function TransferPage({
     setPreflighting(true);
     setStep(STEP_VALIDATE);
     setPreflight(null);
+    setValidatedContractKey(null);
     try {
       let columns: string[] = [];
       let columnTypes: Record<string, string> = {};
@@ -2990,6 +3013,7 @@ export function TransferPage({
             await approveTransferPlan(planId);
           }
           setPreflight(pf);
+          setValidatedContractKey(buildValidateContractKey(activeMappings));
           if (!pf.passed) {
             toast({
               title: "Validation incomplete",
@@ -3085,6 +3109,7 @@ export function TransferPage({
         }
       }
       setPreflight(pf);
+      setValidatedContractKey(buildValidateContractKey(activeMappings));
       if (!pf.passed) {
         toast({
           title: "Validation incomplete",
@@ -3110,6 +3135,7 @@ export function TransferPage({
           destKind: destKindMode,
         });
         setPreflight(pf);
+        setValidatedContractKey(buildValidateContractKey(activeMappings));
         if (pf.passed) {
           toast({
             title: "Validated locally",
@@ -3525,8 +3551,61 @@ export function TransferPage({
       (Boolean(destType && targetDb && targetCollection) && !destSchemaLoading));
 
   const needsDbPreflight = destKindMode === "database";
+  /** Map/sync/PK/dest edits must invalidate a prior green Validate before Execute. */
+  const buildValidateContractKey = useCallback(
+    (maps: EditableMapping[]) =>
+      JSON.stringify({
+        syncMode,
+        primaryKeyField,
+        cursorField,
+        validationMode,
+        schemaPolicy,
+        targetCollection: targetCollection.trim(),
+        destType,
+        targetDb,
+        destKindMode,
+        destSchema: destSchema.trim(),
+        mappings: maps.map((m) => [
+          m.source,
+          m.target,
+          m.transform,
+          m.engineTransform ?? "",
+          m.approved,
+          Boolean(m.createNew),
+          m.assignmentStrategy ?? "",
+          m.destType ?? "",
+        ]),
+      }),
+    [
+      syncMode,
+      primaryKeyField,
+      cursorField,
+      validationMode,
+      schemaPolicy,
+      targetCollection,
+      destType,
+      targetDb,
+      destKindMode,
+      destSchema,
+    ],
+  );
+  const validateContractKey = useMemo(
+    () => buildValidateContractKey(columnMappings),
+    [buildValidateContractKey, columnMappings],
+  );
+
+  useEffect(() => {
+    if (!preflight) return;
+    if (validatedContractKey != null && validatedContractKey !== validateContractKey) {
+      setPreflight(null);
+      setValidatedContractKey(null);
+    }
+  }, [validateContractKey, validatedContractKey, preflight]);
+
   const canExecute =
-    destKindMode === "file_export" ? canConfigureDest : Boolean(preflight?.passed);
+    destKindMode === "file_export"
+      ? canConfigureDest
+      : Boolean(preflight?.passed && validatedContractKey === validateContractKey);
 
   const destinationLabel = destKindMode === "file_export"
     ? exportFormat.toUpperCase()
@@ -3781,6 +3860,7 @@ export function TransferPage({
     setSourceRowEstimate(null);
     setAnalysis(null);
     setPreflight(null);
+    setValidatedContractKey(null);
     setCellPreview(null);
     setAnalyzing(false);
     setMappingProgress(0);
@@ -4981,6 +5061,7 @@ export function TransferPage({
             confidenceThreshold={confidenceThreshold}
             destType={destKindMode === "file_export" ? exportFormat : destType}
             validationMode={validationMode}
+            syncMode={syncMode}
             onApplyAction={applySuggestedAction}
             onStripControlChars={stripControlCharsAndRerun}
             stripControlsApplied={columnMappings.some(

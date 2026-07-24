@@ -198,6 +198,8 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         except Exception:
             sample_rows = None
 
+    from services.primary_key import extract_contract_primary_key
+
     pf = run_file_preflight(
         columns=plan.source_columns,
         column_types=plan.source_schema,
@@ -222,6 +224,8 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         backfill_new_fields=bool(policies.get("backfill_new_fields")),
         stored_source_fp=rev.source_schema_hash or "",
         stored_target_fp=rev.target_schema_hash or "",
+        contract_primary_key=extract_contract_primary_key(policies.get("stream_contracts")),
+        destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
     )
     pf = apply_policy_gates(
         pf,
