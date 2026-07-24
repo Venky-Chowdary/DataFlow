@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from decimal import InvalidOperation
+from typing import Any
 
 from services.value_serializer import json_default
 
@@ -276,7 +279,7 @@ def write_mapped_rows(
                 if iv > 2**63 - 1 or iv < -(2**63):
                     try:
                         return Decimal128(str(iv))
-                    except Exception:
+                    except (InvalidOperation, ValueError, TypeError):
                         return str(iv)
                 return iv
             if transform == "boolean" or upper in {"BOOLEAN", "BOOL"}:
@@ -315,7 +318,7 @@ def write_mapped_rows(
                 if isinstance(value, str):
                     try:
                         return Binary(base64.b64decode(value, validate=True))
-                    except Exception:
+                    except (binascii.Error, ValueError):
                         return Binary(value.encode("utf-8"))
                 return value
             if upper in {"JSON", "OBJECT", "ARRAY", "VARIANT"}:
@@ -324,7 +327,7 @@ def write_mapped_rows(
                 if isinstance(value, str):
                     try:
                         return json.loads(value, parse_constant=lambda v: None)
-                    except Exception:
+                    except (json.JSONDecodeError, TypeError):
                         return value
                 return value
             if upper == "UUID":
@@ -478,7 +481,7 @@ def write_mapped_rows(
             coerced_null_rows=coerced_null_rows,
             warnings=transform_errors,
         )
-    except Exception as exc:
+    except (pymongo.errors.PyMongoError, ValueError, TypeError, KeyError, OSError) as exc:
         return WriteResult(
             ok=False,
             rows_written=0,
