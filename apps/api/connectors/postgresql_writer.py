@@ -15,6 +15,7 @@ from services.type_system import ddl_type
 from services.value_serializer import json_default
 
 from connectors.postgresql_conn import get_connection
+from connectors.schema_drift import is_wider_type, widen_existing_columns_native
 from connectors.sql_temporal import (
     coerce_sql_temporal,
     extract_column_from_sql_error,
@@ -565,6 +566,7 @@ def write_mapped_rows(
         cur = conn.cursor()
 
     def _run_setup(cursor) -> None:
+        nonlocal target_types
         if use_ledger:
             ensure_postgres_write_ledger(cursor, schema)
         if create_table:
@@ -598,6 +600,36 @@ def write_mapped_rows(
                             sql.SQL(typ),
                         )
                     )
+
+            # Pick the wider of the mapping-proposed target DDL and the freshly
+            # introspected source DDL, then widen any destination columns that are
+            # now too narrow for the source drift.
+            desired_types: list[str] = []
+            for mapping, target_type in zip(mappings, target_types):
+                source = mapping.get("source") or ""
+                source_type = (
+                    column_types.get(source)
+                    or mapping.get("source_type")
+                    or "VARCHAR"
+                )
+                source_ddl = pg_type(source_type, engine=engine)
+                desired = (
+                    source_ddl
+                    if is_wider_type(target_type, source_ddl)
+                    else target_type
+                )
+                desired_types.append(desired)
+
+            widen_existing_columns_native(
+                cursor,
+                "postgresql",
+                schema,
+                table_name,
+                target_cols,
+                desired_types,
+                backfill=backfill_new_fields,
+            )
+            target_types = desired_types
 
         if write_mode == "upsert" and conflict_columns and uses_pg_on_conflict_upsert(engine):
             conflict_cols = [c for c in conflict_columns if c in target_cols]

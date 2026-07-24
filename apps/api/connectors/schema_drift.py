@@ -1,15 +1,461 @@
-"""Schema-drift handling — add missing columns to existing destination tables.
+"""Schema-drift handling — add missing columns and widen existing columns.
 
 Used by SQLAlchemy-based writers and by native SQL writers to safely evolve
-a destination schema when the source introduces new columns (backfill mode).
+a destination schema when the source introduces new columns or wider types
+(backfill mode).
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
+from services.type_system import is_lossy_coercion, normalize_logical_type
+
+from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
+
 logger = logging.getLogger(__name__)
+
+
+def _type_length(type_name: str) -> int | None:
+    match = re.search(r"\(\s*(\d+)", type_name or "")
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _numeric_precision_scale(type_name: str) -> tuple[int | None, int | None]:
+    m = re.search(r"\(\s*(\d+)\s*(?:,\s*(\d+))?\s*\)", type_name or "")
+    if not m:
+        return (None, None)
+    precision = int(m.group(1))
+    scale = int(m.group(2)) if m.group(2) is not None else 0
+    return (precision, scale)
+
+
+def _integer_bit_width(type_name: str) -> int | None:
+    upper = (type_name or "").upper()
+    if "BIGSERIAL" in upper or "BIGINT" in upper or "INT8" in upper:
+        return 64
+    if "MEDIUMINT" in upper:
+        return 24
+    if "SMALLSERIAL" in upper or "SMALLINT" in upper or "INT2" in upper:
+        return 16
+    if "TINYSERIAL" in upper or "TINYINT" in upper or "INT1" in upper:
+        return 8
+    if "SERIAL" in upper or "INTEGER" in upper or "INT4" in upper or "INT" in upper:
+        return 32
+    return None
+
+
+def _integer_max_digits(type_name: str) -> int | None:
+    width = _integer_bit_width(type_name)
+    if width is None:
+        return None
+    if width == 8:
+        return 4  # -128..127
+    if width == 16:
+        return 6  # -32768..32767
+    if width == 24:
+        return 8  # -8388608..8388607
+    if width == 32:
+        return 11  # -2147483648..2147483647
+    if width == 64:
+        return 20  # -9223372036854775808..9223372036854775807
+    return None
+
+
+def _float_mantissa_bits(type_name: str) -> int | None:
+    upper = (type_name or "").upper()
+    if "DOUBLE" in upper:
+        return 53
+    if "REAL" in upper or "FLOAT" in upper:
+        return 24
+    return None
+
+
+def _is_string_like(logical: str) -> bool:
+    return logical in {"string", "text"}
+
+
+def _minimum_string_length_for(old_type: str) -> int | None:
+    """Minimum VARCHAR length that can losslessly hold a non-string value."""
+    old_logical = normalize_logical_type(old_type)
+    if old_logical == "integer":
+        return _integer_max_digits(old_type)
+    if old_logical == "decimal":
+        p, s = _numeric_precision_scale(old_type)
+        if p is None:
+            return None
+        return p + 2  # sign + decimal point
+    if old_logical == "float":
+        return 24
+    if old_logical in {"date", "time"}:
+        return 30
+    if old_logical == "boolean":
+        return 5
+    if old_logical == "uuid":
+        return 36
+    return None
+
+
+def is_wider_type(old_type: str, new_type: str) -> bool:
+    """True when new_type can hold all values of old_type without loss."""
+    old_type = old_type or "VARCHAR"
+    new_type = new_type or "VARCHAR"
+    old_logical = normalize_logical_type(old_type)
+    new_logical = normalize_logical_type(new_type)
+
+    # String / text family: compare length, treating TEXT/unlimited as max.
+    if _is_string_like(old_logical) and _is_string_like(new_logical):
+        old_len = _type_length(old_type)
+        new_len = _type_length(new_type)
+        old_is_unlimited = old_logical == "text" or old_len is None
+        new_is_unlimited = new_logical == "text" or new_len is None
+        if old_is_unlimited:
+            return False
+        if new_is_unlimited:
+            return True
+        return new_len > old_len
+
+    if old_logical == new_logical:
+        if old_logical == "decimal":
+            old_p, old_s = _numeric_precision_scale(old_type)
+            new_p, new_s = _numeric_precision_scale(new_type)
+            if new_p is None and new_s is None:
+                return True  # unbounded DECIMAL
+            if old_p is None or old_s is None:
+                return False
+            if new_p is None or new_s is None:
+                return False
+            return (
+                new_p >= old_p and new_s >= old_s and (new_p > old_p or new_s > old_s)
+            )
+        if old_logical == "integer":
+            old_w = _integer_bit_width(old_type)
+            new_w = _integer_bit_width(new_type)
+            if old_w is None or new_w is None:
+                return False
+            return new_w > old_w
+        if old_logical == "float":
+            old_w = _float_mantissa_bits(old_type)
+            new_w = _float_mantissa_bits(new_type)
+            if old_w is None or new_w is None:
+                return False
+            return new_w > old_w
+        return False
+
+    # Integer -> DECIMAL: new must have enough integer digits.
+    if old_logical == "integer" and new_logical == "decimal":
+        digits = _integer_max_digits(old_type)
+        new_p, new_s = _numeric_precision_scale(new_type)
+        if digits is None or new_p is None or new_s is None:
+            return False
+        return new_p - new_s >= digits
+
+    # Integer -> FLOAT: only safe when float mantissa can exactly represent max int.
+    if old_logical == "integer" and new_logical == "float":
+        old_w = _integer_bit_width(old_type)
+        new_w = _float_mantissa_bits(new_type)
+        if old_w is None or new_w is None:
+            return False
+        return new_w >= old_w
+
+    # Cross-logical promotions to string-like: length must be sufficient.
+    if _is_string_like(new_logical):
+        min_len = _minimum_string_length_for(old_type)
+        new_len = _type_length(new_type)
+        if new_len is None:
+            return True
+        if min_len is None:
+            return False
+        return new_len >= min_len
+
+    # Other cross-logical promotions rely on the type-system safe-promotion list.
+    return not is_lossy_coercion(old_type, new_type)
+
+
+def _information_schema_type_to_str(
+    data_type: str,
+    char_len: int | None,
+    numeric_precision: int | None,
+    numeric_scale: int | None,
+) -> str:
+    """Reconstruct a type string from information_schema metadata."""
+    upper = (data_type or "").upper()
+    if upper in {
+        "CHARACTER VARYING",
+        "VARCHAR",
+        "CHARACTER",
+        "CHAR",
+        "NCHAR",
+        "NVARCHAR",
+    }:
+        length = char_len
+        if length is not None and length > 0:
+            return f"{upper}({length})"
+        return upper
+    if upper in {"TEXT", "CLOB", "LONGTEXT", "MEDIUMTEXT", "NTEXT"}:
+        return "TEXT"
+    if upper in {"NUMERIC", "DECIMAL", "NUMBER"}:
+        if numeric_precision is not None:
+            if numeric_scale is not None and numeric_scale > 0:
+                return f"{upper}({numeric_precision},{numeric_scale})"
+            return (
+                f"{upper}({numeric_precision},0)"
+                if numeric_precision is not None
+                else upper
+            )
+        return upper
+    if upper in {"DOUBLE PRECISION", "DOUBLE"}:
+        return "DOUBLE PRECISION"
+    if upper == "REAL":
+        return "REAL"
+    if upper == "FLOAT":
+        return "FLOAT"
+    if upper in {"INTEGER", "INT", "INT4"}:
+        return "INTEGER"
+    if upper in {"BIGINT", "INT8"}:
+        return "BIGINT"
+    if upper in {"SMALLINT", "INT2"}:
+        return "SMALLINT"
+    if upper == "TINYINT":
+        return "TINYINT"
+    if upper == "MEDIUMINT":
+        return "MEDIUMINT"
+    return upper
+
+
+def _quote_col(dialect: str, name: str) -> str:
+    dialect = (dialect or "").lower()
+    if dialect in ("mysql", "mariadb"):
+        return quote_sql_identifier(name, "`")
+    if dialect in ("sqlserver", "mssql"):
+        safe = name.replace("]", "]]")
+        return f"[{safe}]"
+    return quote_sql_identifier(name, '"')
+
+
+def _build_widen_ddl(
+    dialect: str,
+    schema: str | None,
+    table_name: str,
+    col: str,
+    new_type: str,
+    existing_type: str | None = None,
+) -> str:
+    """Generate a single ALTER COLUMN / MODIFY COLUMN statement."""
+    dialect = (dialect or "").lower()
+    table_ref = quote_table_ref(table_name, schema, dialect=dialect, sanitize=False)
+    col_q = _quote_col(dialect, col)
+
+    if dialect in (
+        "postgresql",
+        "postgres",
+        "redshift",
+        "cockroachdb",
+        "yugabyte",
+        "timescale",
+        "supabase",
+        "neon",
+    ):
+        # Same-family width increases do not need USING and avoid truncation risk.
+        old_logical = normalize_logical_type(existing_type or "VARCHAR")
+        new_logical = normalize_logical_type(new_type)
+        using = ""
+        if old_logical != new_logical:
+            # Cross-logical casts need an explicit cast; include the length in the cast.
+            using = f" USING {col_q}::{new_type}"
+        return f"ALTER TABLE {table_ref} ALTER COLUMN {col_q} TYPE {new_type}{using}"
+
+    if dialect in ("mysql", "mariadb"):
+        return f"ALTER TABLE {table_ref} MODIFY COLUMN {col_q} {new_type}"
+
+    if dialect in ("sqlserver", "mssql"):
+        return f"ALTER TABLE {table_ref} ALTER COLUMN {col_q} {new_type}"
+
+    if dialect in ("duckdb", "motherduck"):
+        return f"ALTER TABLE {table_ref} ALTER COLUMN {col_q} TYPE {new_type}"
+
+    if dialect in ("oracle", "oracle_db"):
+        return f"ALTER TABLE {table_ref} MODIFY ({col_q} {new_type})"
+
+    if dialect in ("sqlite",):
+        # SQLite does not support ALTER COLUMN TYPE; caller should recreate the table.
+        raise NotImplementedError("SQLite cannot ALTER COLUMN TYPE")
+
+    raise NotImplementedError(f"Unsupported dialect for column widen: {dialect}")
+
+
+def _fetch_existing_columns(
+    cursor: Any,
+    dialect: str,
+    schema: str | None,
+    table_name: str,
+) -> dict[str, str]:
+    """Return {column_name: type_string} from the destination catalog."""
+    dialect = (dialect or "").lower()
+
+    if dialect in (
+        "postgresql",
+        "postgres",
+        "redshift",
+        "cockroachdb",
+        "yugabyte",
+        "timescale",
+        "supabase",
+        "neon",
+        "duckdb",
+        "motherduck",
+    ):
+        cursor.execute(
+            """SELECT column_name, data_type, character_maximum_length,
+                      numeric_precision, numeric_scale
+               FROM information_schema.columns
+               WHERE table_schema = %s AND table_name = %s""",
+            (schema or "public", table_name),
+        )
+        out: dict[str, str] = {}
+        for row in cursor.fetchall():
+            # information_schema row may have 3 or 5 columns depending on the view.
+            if len(row) >= 5:
+                col, data_type, char_len, num_prec, num_scale = row[:5]
+            else:
+                col, data_type = row[0], row[1]
+                char_len = num_prec = num_scale = None
+            out[col] = _information_schema_type_to_str(
+                data_type, char_len, num_prec, num_scale
+            )
+        return out
+
+    if dialect in ("mysql", "mariadb"):
+        cursor.execute(
+            """SELECT column_name, data_type, character_maximum_length,
+                      numeric_precision, numeric_scale
+               FROM information_schema.columns
+               WHERE table_schema = DATABASE() AND table_name = %s""",
+            (table_name,),
+        )
+        out = {}
+        for row in cursor.fetchall():
+            if len(row) >= 5:
+                col, data_type, char_len, num_prec, num_scale = row[:5]
+            else:
+                col, data_type = row[0], row[1]
+                char_len = num_prec = num_scale = None
+            out[col] = _information_schema_type_to_str(
+                data_type, char_len, num_prec, num_scale
+            )
+        return out
+
+    if dialect in ("sqlserver", "mssql"):
+        # SQL Server table_catalog is the database; filter by schema + table.
+        cursor.execute(
+            """SELECT column_name, data_type, character_maximum_length,
+                      numeric_precision, numeric_scale
+               FROM information_schema.columns
+               WHERE table_schema = %s AND table_name = %s""",
+            (schema or "dbo", table_name),
+        )
+        out = {}
+        for row in cursor.fetchall():
+            if len(row) >= 5:
+                col, data_type, char_len, num_prec, num_scale = row[:5]
+            else:
+                col, data_type = row[0], row[1]
+                char_len = num_prec = num_scale = None
+            out[col] = _information_schema_type_to_str(
+                data_type, char_len, num_prec, num_scale
+            )
+        return out
+
+    if dialect in ("oracle", "oracle_db"):
+        cursor.execute(
+            """SELECT column_name, data_type, data_length, data_precision, data_scale
+               FROM all_tab_columns
+               WHERE owner = UPPER(:1) AND table_name = UPPER(:2)""",
+            (schema or "", table_name),
+        )
+        out = {}
+        for row in cursor.fetchall():
+            if len(row) >= 5:
+                col, data_type, data_len, num_prec, num_scale = row[:5]
+            else:
+                col, data_type = row[0], row[1]
+                data_len = num_prec = num_scale = None
+            out[col] = _information_schema_type_to_str(
+                data_type, data_len, num_prec, num_scale
+            )
+        return out
+
+    return {}
+
+
+def widen_existing_columns_native(
+    cursor: Any,
+    dialect: str,
+    schema: str | None,
+    table_name: str,
+    target_cols: list[str],
+    target_types: list[str],
+    *,
+    backfill: bool = False,
+) -> list[str]:
+    """Issue ALTER COLUMN / MODIFY COLUMN to widen columns that are now too narrow.
+
+    Returns the list of DDL statements executed.  ``backfill`` must be True for any
+    DDL to be issued.  The function is idempotent: repeated calls will only emit
+    ALTER statements when the target type is wider than the existing catalog type.
+    """
+    if not backfill or not target_cols or not target_types:
+        return []
+
+    dialect = (dialect or "").lower()
+    if dialect in ("sqlite",):
+        # SQLite cannot widen a column in place.  The caller must recreate the table.
+        logger.debug("SQLite does not support ALTER COLUMN TYPE; skipping widen.")
+        return []
+
+    existing = _fetch_existing_columns(cursor, dialect, schema, table_name)
+    if not existing:
+        return []
+
+    log: list[str] = []
+    for col, new_type in zip(target_cols, target_types):
+        if col not in existing:
+            continue
+        existing_type = existing[col]
+        if not is_wider_type(existing_type, new_type):
+            continue
+        try:
+            ddl = _build_widen_ddl(
+                dialect, schema, table_name, col, new_type, existing_type
+            )
+            cursor.execute(ddl)
+            log.append(ddl)
+            logger.debug(
+                "Widened %s.%s from %s to %s", table_name, col, existing_type, new_type
+            )
+        except Exception as exc:
+            err = str(exc).lower()
+            # Ignore "already correct width" / concurrent-alter races and
+            # harmless syntax issues.
+            if any(
+                phrase in err for phrase in ("already", "cannot alter", "not supported")
+            ):
+                logger.debug(
+                    "Widen skipped for %s.%s: %s", table_name, col, exc, exc_info=exc
+                )
+                continue
+            logger.warning(
+                "Widen failed for %s.%s: %s", table_name, col, exc, exc_info=exc
+            )
+            raise
+    return log
 
 
 def add_missing_columns(
