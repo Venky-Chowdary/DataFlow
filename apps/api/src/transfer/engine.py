@@ -276,16 +276,19 @@ def _persist_load_history_profile(
     job_id: str,
     dest_summary: dict[str, Any],
     row_count: int,
+    mappings: list[dict] | None = None,
 ) -> None:
     """Append this load to the route ring buffer (streaming-safe)."""
     try:
+        from services import pii_guard
         from services.data_quality_history import profile_batch, save_profile
 
         route = transfer_request_to_dict(request)
+        redacted_rows = pii_guard.redact_records(rows, mappings or []) if mappings else rows
         save_profile(
             route["source"],
             route["destination"],
-            profile_batch(rows, schema),
+            profile_batch(redacted_rows, schema),
             job_id=job_id,
             rejected_details=dest_summary.get("rejected_details") or [],
             rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
@@ -1546,6 +1549,7 @@ class UniversalTransferEngine:
                         write_mode=write_mode,
                         conflict_columns=conflict_columns,
                         job_id=job_id,
+                        skip_preflight=request.skip_preflight,
                     )
 
                 if effective_sync_lower == "scd2" and conflict_columns:
@@ -1647,9 +1651,10 @@ class UniversalTransferEngine:
                 unique_name = f"export_{job_id}.{ext}"
 
                 output_path = request.destination.output_path.strip() if request.destination.output_path else ""
+                workspace_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
                 if output_path:
-                    export_path = os.path.abspath(output_path)
-                    if not export_path.startswith(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))):
+                    export_path = os.path.abspath(output_path) if os.path.isabs(output_path) else os.path.abspath(os.path.join(workspace_root, output_path))
+                    if not export_path.startswith(workspace_root):
                         mongo.update_job_status(job_id, "failed", error="File export path must be inside the application workspace", phase="failed")
                         return TransferResult(success=False, error="File export path must be inside the application workspace", job_id=job_id)
                     os.makedirs(os.path.dirname(export_path) or ".", exist_ok=True)
@@ -1683,7 +1688,7 @@ class UniversalTransferEngine:
                     records=records,
                     columns=columns,
                     rows_written=rows_written,
-                    writer_checksum=dest_summary.get("checksum", ""),
+                    writer_checksum=dest_summary.get("checksum") or dest_summary.get("active_checksum", ""),
                     dest_summary=dest_summary,
                     mappings=mappings,
                     source_schema=schema,
@@ -1710,6 +1715,10 @@ class UniversalTransferEngine:
                     destination_summary=dest_summary,
                     reconciliation=recon,
                 )
+
+            from services import pii_guard
+            dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
+            recon = pii_guard.redact_reconciliation(recon, mappings)
 
             explanation = _build_explanation(
                 request, columns, schema, mappings, recon, dest_summary, pf, rows_written
@@ -1758,7 +1767,9 @@ class UniversalTransferEngine:
                 pass
             if os.environ.get("DATAFLOW_POST_TRANSFER_TRAINING", "").lower() in {"1", "true", "on"}:
                 try:
-                    samples = {c: [cell_to_string(r.get(c, "")) for r in records[:5] if r.get(c) is not None] for c in columns}
+                    from services import pii_guard
+                    redacted_training = pii_guard.redact_records(records[:5], mappings)
+                    samples = {c: [cell_to_string(r.get(c, "")) for r in redacted_training if r.get(c) is not None] for c in columns}
                     schedule_training_on_transfer(
                         request.source_filename or dest_summary.get("table", "transfer"),
                         columns, len(records), samples,
@@ -1789,6 +1800,7 @@ class UniversalTransferEngine:
             _persist_load_history_profile(
                 request, records, schema,
                 job_id=job_id, dest_summary=dest_summary, row_count=len(records),
+                mappings=mappings,
             )
             finalize_contract(contract_id, success=True)
             return TransferResult(
@@ -2121,6 +2133,7 @@ class UniversalTransferEngine:
                     validation_mode=request.validation_mode,
                     source_filter=request.source_filter,
                     limit=request.limit,
+                    skip_preflight=request.skip_preflight,
                 )
             else:
                 rows_written, ddl_log, dest_summary, _ = stream_database_transfer(
@@ -2138,6 +2151,7 @@ class UniversalTransferEngine:
                     validation_mode=request.validation_mode,
                     source_filter=request.source_filter,
                     limit=request.limit,
+                    skip_preflight=request.skip_preflight,
                 )
 
             with _reconcile_phase_heartbeat(
@@ -2151,7 +2165,7 @@ class UniversalTransferEngine:
                     records=[],
                     columns=columns,
                     rows_written=rows_written,
-                    writer_checksum=dest_summary.get("checksum", ""),
+                    writer_checksum=dest_summary.get("checksum") or dest_summary.get("active_checksum", ""),
                     dest_summary=dest_summary,
                     mappings=mappings,
                     source_schema=schema,
@@ -2179,6 +2193,10 @@ class UniversalTransferEngine:
                     reconciliation=recon,
                 )
 
+            from services import pii_guard
+            dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
+            recon = pii_guard.redact_reconciliation(recon, mappings)
+
             explanation = _build_explanation(
                 request, columns, schema, mappings, recon, dest_summary, pf, rows_written
             )
@@ -2192,6 +2210,7 @@ class UniversalTransferEngine:
             _persist_load_history_profile(
                 request, sample_rows or [], schema,
                 job_id=job_id, dest_summary=dest_summary, row_count=rows_written or total_rows,
+                mappings=mappings,
             )
             _persist_job_quarantine(job_id, dest_summary, request)
             mongo.update_job_status(
@@ -2508,6 +2527,7 @@ class UniversalTransferEngine:
                 backfill_new_fields=backfill_fields,
                 validation_mode=request.validation_mode,
                 source_filter=request.source_filter,
+                skip_preflight=request.skip_preflight,
             )
 
             with _reconcile_phase_heartbeat(
@@ -2521,7 +2541,7 @@ class UniversalTransferEngine:
                     records=[],
                     columns=columns,
                     rows_written=rows_written,
-                    writer_checksum=dest_summary.get("checksum", ""),
+                    writer_checksum=dest_summary.get("checksum") or dest_summary.get("active_checksum", ""),
                     dest_summary=dest_summary,
                     mappings=mappings,
                     source_schema=schema,
@@ -2549,6 +2569,10 @@ class UniversalTransferEngine:
                     reconciliation=recon,
                 )
 
+            from services import pii_guard
+            dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
+            recon = pii_guard.redact_reconciliation(recon, mappings)
+
             explanation = _build_explanation(
                 request, columns, schema, mappings, recon, dest_summary, pf, rows_written
             )
@@ -2562,6 +2586,7 @@ class UniversalTransferEngine:
             _persist_load_history_profile(
                 request, sample_rows or [], schema,
                 job_id=job_id, dest_summary=dest_summary, row_count=rows_written or total_rows,
+                mappings=mappings,
             )
             _persist_job_quarantine(job_id, dest_summary, request)
             mongo.update_job_status(

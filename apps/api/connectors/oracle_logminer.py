@@ -210,14 +210,16 @@ def _parse_sql_redo(sql_redo: str, *, op: str) -> dict[str, str]:
                     out[c.upper()] = v
             return out
     # UPDATE … SET "COL"=… / DELETE … WHERE "COL"=…
-    # Prefer CSV-aware SET split when present.
+    # Parse WHERE first (row identity / old values) then SET (new values) so a
+    # column updated by SET overwrites the WHERE value, while still surfacing
+    # primary-key columns from the WHERE clause for updates.
     set_m = re.search(r"\bSET\s+(.+?)(?:\s+WHERE\b|$)", text, re.I | re.S)
     where_m = re.search(r"\bWHERE\s+(.+)$", text, re.I | re.S)
     chunks: list[str] = []
+    if where_m and op in {"update", "delete"}:
+        chunks.extend(_split_sql_csv_aware(where_m.group(1)))
     if set_m:
         chunks.extend(_split_sql_csv_aware(set_m.group(1)))
-    if where_m and op == "delete":
-        chunks.extend(_split_sql_csv_aware(where_m.group(1)))
     if chunks:
         for chunk in chunks:
             m = re.match(r'"?(\w+)"?\s*=\s*(.+)$', chunk.strip(), re.I | re.S)

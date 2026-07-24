@@ -16,7 +16,7 @@ def sqlite_file_path(database: str, connection_string: str, host: str) -> str:
     When ``DATAFLOW_SQLITE_ROOT`` is set, resolved paths must stay under that
     directory (blocks ``..`` / absolute escapes outside the allowlist).
     """
-    path = (database or connection_string or host or "").strip()
+    path = (database or connection_string or "").strip()
     if not path:
         return ""
     if path == ":memory:" or path.lower().startswith("sqlite://:memory:"):

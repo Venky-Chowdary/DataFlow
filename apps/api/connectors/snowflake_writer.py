@@ -16,7 +16,12 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 from connectors.driver_guard import stub_writes_allowed
-from connectors.snowflake_conn import _is_local_account, get_connection, normalize_account
+from connectors.snowflake_conn import (
+    _is_local_account,
+    get_connection,
+    normalize_account,
+    resolve_snowflake_table_name,
+)
 from connectors.stub_writer import simulate_stub_write
 from connectors.writer_common import (
     CHUNK_SIZE,
@@ -535,6 +540,17 @@ def write_mapped_rows(
                 error=require_driver("snowflake.connector", "snowflake-connector-python"),
                 driver="none",
             )
+        if not create_table:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or "PUBLIC",
+                checksum="",
+                chunks_completed=0,
+                error="Snowflake table may not exist and create_table is disabled",
+                driver="none",
+            )
         rows, checksum, chunks = simulate_stub_write(
             data_rows=data_rows, table_name=table_name, target_schema=schema or "PUBLIC",
             on_checkpoint=on_checkpoint,
@@ -548,6 +564,7 @@ def write_mapped_rows(
     target_cols, logical_types = resolve_target_columns(
         mappings,
         column_types,
+        preserve_case=True,
         sample_values_by_source=batch_samples,
         table_exists=False if create_table else None,
     )
@@ -629,6 +646,20 @@ def write_mapped_rows(
     # Never stub local/fakesnow accounts when snowflake.connector is installed —
     # stub writes skip real load and break strict reconciliation (no read-back).
     if stub_writes_allowed() and not _is_local_account(str(account or "")):
+        if not create_table:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema,
+                checksum="",
+                chunks_completed=0,
+                error="Snowflake table may not exist and create_table is disabled",
+                rejected_rows=rejected_rows,
+                warnings=transform_errors,
+                rejected_details=rejected_details,
+                coerced_null_rows=coerced_null_rows,
+            )
         rows, checksum, chunks = simulate_stub_write(
             data_rows=mapped_rows,
             table_name=table_name,
@@ -696,7 +727,6 @@ def write_mapped_rows(
                 cur.execute(f"USE SCHEMA {sch_q}")
 
             # Bind to the real stored table name (case) before DDL/DML.
-            from connectors.snowflake_conn import resolve_snowflake_table_name
             from connectors.sql_identifiers import snowflake_fold_identifier
 
             found = resolve_snowflake_table_name(cur, schema, table_name)
@@ -740,7 +770,12 @@ def write_mapped_rows(
                         cur.execute(f"ALTER TABLE {tbl_q} ADD COLUMN {col_q} {typ}")
 
             total = len(mapped_rows)
-            conflict = [c for c in (conflict_columns or []) if c in target_cols]
+            target_cols_lower = {t.lower(): t for t in target_cols}
+            conflict = [
+                target_cols_lower[c.lower()]
+                for c in (conflict_columns or [])
+                if c.lower() in target_cols_lower
+            ]
             if write_mode == "upsert" and conflict:
                 load_method = "merge_batch"
                 # Stage once (COPY when large enough) and MERGE the whole batch.

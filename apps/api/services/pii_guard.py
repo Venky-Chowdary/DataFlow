@@ -8,6 +8,7 @@ observability or prompts.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import re
 from typing import Any
@@ -88,3 +89,84 @@ def redact_sample(sample: dict[str, Any]) -> dict[str, Any]:
 def classify_columns(columns: list[str]) -> dict[str, str]:
     """Classify columns by sensitivity risk."""
     return {c: "sensitive" if is_sensitive_name(c) else "low" for c in columns}
+
+
+def _redact_text(text: str) -> str:
+    """Substitute PII/PHI patterns in a string with a safe mask."""
+    if not isinstance(text, str):
+        return text
+    for _label, pattern in PII_PATTERNS.items():
+        text = pattern.sub(lambda m: mask(m.group()), text)
+    return text
+
+
+def _sensitive_source_columns(mappings: list[dict]) -> set[str]:
+    """Source columns that the operator has explicitly chosen to mask/hash or
+    whose names are inherently sensitive."""
+    return {
+        m["source"]
+        for m in mappings
+        if m.get("source")
+        and (
+            m.get("transform") in {"mask_pii", "hash_pii"}
+            or is_sensitive_name(m.get("source") or "")
+        )
+    }
+
+
+def redact_records(rows: list[dict], mappings: list[dict]) -> list[dict]:
+    """Return a copy of row dicts with sensitive source columns masked."""
+    sensitive = _sensitive_source_columns(mappings)
+    return [mask_record(row, sensitive) for row in rows]
+
+
+def redact_destination_summary(
+    summary: dict[str, Any], mappings: list[dict]
+) -> dict[str, Any]:
+    """Mask PII in the operator-facing destination summary before persistence."""
+    out = copy.deepcopy(summary)
+    sensitive = _sensitive_source_columns(mappings)
+
+    sample = out.get("reconcile_sample")
+    if isinstance(sample, list):
+        out["reconcile_sample"] = [mask_record(row, sensitive) for row in sample]
+
+    details = out.get("rejected_details")
+    if isinstance(details, list):
+        redacted_details: list[dict[str, Any]] = []
+        for d in details:
+            nd: dict[str, Any] = dict(d)
+            col = str(nd.get("column") or nd.get("source") or "")
+            if col in sensitive or is_sensitive_name(col):
+                if "value" in nd:
+                    nd["value"] = mask(nd["value"])
+            values = nd.get("values")
+            if isinstance(values, dict):
+                nd["values"] = mask_record(values, sensitive)
+            redacted_details.append(nd)
+        out["rejected_details"] = redacted_details
+
+    if out.get("warnings"):
+        out["warnings"] = [_redact_text(w) for w in out["warnings"]]
+    if isinstance(out.get("error"), str):
+        out["error"] = _redact_text(out["error"])
+
+    return out
+
+
+def redact_reconciliation(
+    recon: dict[str, Any] | None, mappings: list[dict]
+) -> dict[str, Any] | None:
+    """Mask PII in the reconciliation report before it is returned or persisted."""
+    if not recon:
+        return recon
+    out = copy.deepcopy(recon)
+    sample_compare = out.get("sample_compare")
+    if isinstance(sample_compare, dict):
+        for key in ("source_only", "target_only", "mismatch"):
+            rows = sample_compare.get(key)
+            if isinstance(rows, list):
+                sample_compare[key] = [redact_sample(row) for row in rows]
+    if isinstance(out.get("message"), str):
+        out["message"] = _redact_text(out["message"])
+    return out

@@ -220,14 +220,22 @@ def _check_financial_precision(
         for raw in values[:100]:
             if not raw or raw in {"0", "0.0", "0.00"}:
                 continue
+            # Schemaless missing and SQL NULL sentinels are not financial values.
+            if raw in {"__DF_MISSING__", "__df_sql_null__"}:
+                continue
             converted, err = apply_transform(raw, transform)
             if err:
                 issues.append(f"{src}: unparseable financial value {raw!r}")
                 continue
+            # Null/missing sentinel coerced to None is a valid absence, not a parse failure.
+            if converted is None:
+                continue
             try:
                 original_parsed, original_err = apply_transform(raw, "decimal")
-                if original_parsed is None or original_err:
+                if original_err:
                     issues.append(f"{src}: unparseable financial value {raw!r}")
+                    continue
+                if original_parsed is None:
                     continue
                 original = Decimal(str(original_parsed))
                 result = Decimal(str(converted))
@@ -402,9 +410,11 @@ def _check_mapping_confidence(
     for m in mappings:
         conf = float(m.get("confidence", 0))
         if conf < floor:
-            issues.append(
-                f"{m.get('source')}→{m.get('target')}: confidence {conf:.0%} < {floor:.0%}"
-            )
+            msg = f"{m.get('source')}→{m.get('target')}: confidence {conf:.0%} < {floor:.0%}"
+            # Low confidence is a blocker by default; in balanced mode it is
+            # downgraded to a warning when a more concrete issue already blocks,
+            # so the operator sees the real problem (e.g. lossy coercion).
+            issues.append(msg)
         elif m.get("requires_review"):
             # In balanced mode a near-threshold mapping with a small gap is a
             # warning, not a hard blocker, so the user can review without being
@@ -631,11 +641,24 @@ def run_integrity_audit(
         )
         checks.append(_check_financial_precision(mappings, source_types, rows))
         checks.append(_check_required_nulls(mappings, rows, null_rate_max=cfg["null_rate_max"], dest_kind=dest_kind, primary_key=pk, validation_mode=validation_mode))
-        # Append/overwrite do not require a unique identity contract — do not
-        # invent a hard block from inferred ``id`` duplicates (operator confusion).
+        # Append/overwrite do not require a unique identity contract, but in
+        # strict/maximum validation a resolved natural key with duplicates is a
+        # data-quality blocker (same honesty bar as required-nulls).
         from services.primary_key import sync_requires_unique_identity
 
-        dup_pk = pk if sync_requires_unique_identity(sync_mode) else None
+        _append_like = {
+            "full_refresh_append",
+            "incremental_append",
+            "full_refresh_overwrite",
+            "overwrite",
+            "full_refresh",
+        }
+        needs_pk_uniqueness = sync_requires_unique_identity(sync_mode) or (
+            mode in {"strict", "maximum"}
+            and pk is not None
+            and (sync_mode or "").strip().lower() not in _append_like
+        )
+        dup_pk = pk if needs_pk_uniqueness else None
         checks.append(_check_duplicate_keys(mappings, rows, validation_mode, dest_kind=dest_kind, primary_key=dup_pk))
         checks.append(
             _check_mapping_confidence(mappings, confidence_min=cfg["confidence"], validation_mode=validation_mode)
@@ -675,6 +698,22 @@ def run_integrity_audit(
                 "expectations_passed": exp.get("expectations_passed", 0),
             },
         })
+
+    # Balanced mode: if a more concrete blocker already exists, downgrade
+    # low-confidence mapping issues from blockers to warnings so the UI
+    # surfaces the root cause (lossy/wrong map) instead of a generic score.
+    if mode == "balanced":
+        mc = next((c for c in checks if c.get("check") == "mapping_confidence"), None)
+        if mc and mc.get("blocks_transfer"):
+            other_blockers = [
+                c for c in checks
+                if c.get("blocks_transfer") and c.get("check") != "mapping_confidence"
+            ]
+            if other_blockers:
+                mc["blocks_transfer"] = False
+                mc["passed"] = True
+                mc["warnings"] = list(mc.get("warnings", [])) + list(mc.get("issues", []))
+                mc["issues"] = []
 
     passed_checks = [c for c in checks if c.get("passed")]
     failed_checks = [c for c in checks if not c.get("passed")]

@@ -192,24 +192,31 @@ def run_reconciliation(
 
     # Mirror (inferred-delete) and SCD2 transfers already compute an active-row
     # checksum while applying history/soft deletes; use it directly so closed or
-    # deleted rows do not fail strict reconciliation.
-    for sub_key in ("mirror", "scd2"):
-        sub_summary = (dest_summary or {}).get(sub_key)
-        if sub_summary and sub_summary.get("active_checksum"):
-            active_rows = int(sub_summary.get("active_rows", 0))
-            active_checksum = sub_summary["active_checksum"]
-            report = reconcile(
-                source_rows=source_rows,
-                target_rows=active_rows,
-                source_checksum=source_checksum,
-                target_checksum=active_checksum,
-                rejected_rows=rejected_rows,
-                strict_checksum=True,
-                allow_extra_rows=False,
-                sample_compare=None,
-                coerced_null_rows=coerced_null_rows,
-            )
-            return report.to_dict()
+    # deleted rows do not fail strict reconciliation. The streaming staging path
+    # surfaces these at the top level; the buffered database path nests them
+    # under the "scd2"/"mirror" keys.
+    active_checksum = (dest_summary or {}).get("active_checksum")
+    active_rows = (dest_summary or {}).get("active_rows") if active_checksum else None
+    if not active_checksum:
+        for sub_key in ("mirror", "scd2"):
+            sub_summary = (dest_summary or {}).get(sub_key)
+            if sub_summary and sub_summary.get("active_checksum"):
+                active_rows = sub_summary.get("active_rows")
+                active_checksum = sub_summary["active_checksum"]
+                break
+    if active_checksum:
+        report = reconcile(
+            source_rows=source_rows,
+            target_rows=int(active_rows or 0),
+            source_checksum=source_checksum,
+            target_checksum=active_checksum,
+            rejected_rows=rejected_rows,
+            strict_checksum=True,
+            allow_extra_rows=False,
+            sample_compare=None,
+            coerced_null_rows=coerced_null_rows,
+        )
+        return report.to_dict()
 
     # Request a real read-back; if the verifier is unavailable we will detect
     # the negative row count and surface a softer "writer only" result.
@@ -232,7 +239,11 @@ def run_reconciliation(
     # stashed so append/upsert Gate-8 can still prove key-aligned fidelity.
     sample_records = list(records or [])
     if not sample_records:
-        stashed = dest_summary.get("reconcile_sample") or dest_summary.get("sample_records") or []
+        stashed = (
+            dest_summary.get("reconcile_sample")
+            or dest_summary.get("sample_records")
+            or []
+        )
         if isinstance(stashed, list):
             sample_records = [r for r in stashed if isinstance(r, dict)]
 

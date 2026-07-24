@@ -137,11 +137,15 @@ def parse_file_route_sample(
     return result.columns, schema, result.row_count
 
 
-def _matrix_cell(value: Any) -> str:
+def _matrix_cell(value: Any) -> Any:
+    # Preserve SQL NULL / missing distinctly from the literal empty string so
+    # downstream writers can tell the difference.
+    if value is None:
+        return None
     return cell_to_string(value)
 
 
-def records_to_matrix(records: list[dict], columns: list[str]) -> tuple[list[str], list[list[str]]]:
+def records_to_matrix(records: list[dict], columns: list[str]) -> tuple[list[str], list[list[Any]]]:
     headers = columns or (list(records[0].keys()) if records else [])
     rows = [[_matrix_cell(rec.get(h)) for h in headers] for rec in records]
     return headers, rows
@@ -213,6 +217,42 @@ def probe_mongodb(cfg: dict[str, Any]) -> tuple[bool, str]:
     return False, last_error
 
 
+def _find_implicit_connector_id(
+    endpoint: EndpointConfig,
+    cfg: dict[str, Any],
+    driver: str,
+    workspace_id: str | None = None,
+) -> str | None:
+    """When the endpoint has no explicit connector_id or credentials, resolve
+    the single saved connector of the same type in the workspace.  This prevents
+    silent fallbacks to ``localhost`` (e.g. SQLite writing a file named
+    ``localhost``) and makes sandbox/test transfers that create one connector
+    work without manually wiring ``connector_id``.
+    """
+    if endpoint.connector_id:
+        return None
+    has_creds = bool(
+        cfg.get("host")
+        or (cfg.get("database") or "").strip()
+        or (cfg.get("connection_string") or "").strip()
+    )
+    if has_creds:
+        return None
+    try:
+        from services.connector_store import list_connectors
+
+        candidates = [
+            c
+            for c in list_connectors(workspace_id=workspace_id)
+            if c.type == driver
+        ]
+        if len(candidates) == 1:
+            return candidates[0].id
+    except Exception:
+        pass
+    return None
+
+
 def resolve_connector_config(
     endpoint: EndpointConfig, workspace_id: str | None = None
 ) -> dict[str, Any]:
@@ -265,10 +305,11 @@ def resolve_connector_config(
     # Keep "role" as the canonical key used by Snowflake connector functions.
     cfg["role"] = endpoint.auth_role or ""
     cfg.update(endpoint.extra)
-    if endpoint.connector_id:
-        conn_dict = _lookup_saved_connector(endpoint.connector_id, workspace_id=workspace_id)
+    connector_id = endpoint.connector_id or _find_implicit_connector_id(endpoint, cfg, fmt, workspace_id=workspace_id)
+    if connector_id:
+        conn_dict = _lookup_saved_connector(connector_id, workspace_id=workspace_id)
         if not conn_dict:
-            raise ValueError(f"Connector {endpoint.connector_id} not found")
+            raise ValueError(f"Connector {connector_id} not found")
         # Inline values take precedence over a saved connector so users can override
         # per transfer.  The UI uses "test_db" as an empty placeholder default, so
         # treat it like an empty database name.
@@ -318,8 +359,8 @@ def resolve_connector_config(
                 merged_cfg[key] = value
         cfg = merged_cfg
     # Stamp connector_id so CDC fingerprints / incremental snapshots match adapters.
-    if endpoint.connector_id:
-        cfg["connector_id"] = endpoint.connector_id
+    if connector_id:
+        cfg["connector_id"] = connector_id
     # Apply driver defaults for fields that are still missing.
     # Never invent localhost when a connection string already carries host/auth —
     # that caused Validate to AUTH against the wrong endpoint while Connectors Test
@@ -854,6 +895,7 @@ def write_destination_database(
     write_mode: str = "insert",
     conflict_columns: list[str] | None = None,
     job_id: str | None = None,
+    skip_preflight: bool = False,
 ) -> tuple[int, list[str], dict]:
     from .connector_capabilities import resolve_driver_type
     from connectors.write_resilience import build_write_batch_key
@@ -914,6 +956,7 @@ def write_destination_database(
         "job_id": job_id,
         "write_batch_key": build_write_batch_key(table_name=table_name, file_batch_idx=0),
         "file_batch_idx": 0,
+        "skip_preflight": skip_preflight,
     }
 
     if db_type == "snowflake":

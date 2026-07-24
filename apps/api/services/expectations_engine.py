@@ -160,6 +160,9 @@ def expect_column_values_between(
         raw = row.get(column)
         if raw is None or str(raw).strip() == "":
             continue
+        # Missing / SQL NULL sentinels from schemaless unions are not numeric values.
+        if str(raw).strip() in {"__DF_MISSING__", "__df_sql_null__", "__df_ddb_null__"}:
+            continue
         try:
             num = float(Decimal(str(raw).replace(",", "").replace("$", "")))
         except (InvalidOperation, ValueError):

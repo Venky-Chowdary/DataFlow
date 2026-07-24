@@ -14,6 +14,7 @@ import base64
 import contextlib
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
@@ -29,7 +30,8 @@ from connectors.sql_temporal import (
     is_sql_data_error,
     logical_to_temporal_ddl,
 )
-from services.value_serializer import cell_to_string
+from services.type_system import ddl_type, normalize_logical_type
+from services.value_serializer import cell_to_string, json_default
 
 try:
     import sqlalchemy as sa
@@ -431,7 +433,13 @@ def _engine(cfg: dict[str, Any]) -> Any:
         if db_type in ("duckdb", "sqlite") or "duckdb" in connection_string or "sqlite://" in connection_string:
             from sqlalchemy.pool import NullPool
 
-            return create_engine(url, poolclass=NullPool)
+            engine = create_engine(url, poolclass=NullPool)
+            # DuckDB's SQLAlchemy dialect reports supports_native_decimal=False by
+            # default, which silently rounds Decimal binds through float and corrupts
+            # money/numeric fidelity.  Decimal is native in DuckDB, so enable it.
+            if db_type == "duckdb" or "duckdb" in connection_string:
+                engine.dialect.supports_native_decimal = True
+            return engine
         return create_engine(url, pool_pre_ping=True, pool_recycle=600)
     except (NoSuchModuleError, ImportError) as exc:
         # SQLAlchemy raises NoSuchModuleError when the dialect is not installed.
@@ -656,6 +664,42 @@ def _logical_type_from_sa(col_type: Any) -> str:
     return normalize_logical_type(repr_)
 
 
+class _DuckDBJSON(sa.JSON):
+    """JSON type that stores compact, deterministic JSON text in DuckDB.
+
+    SQLAlchemy's default ``sa.JSON`` re-serializes dict/list with spaces and
+    binds Python ``None`` as the JSON literal ``null``.  This subclass keeps
+    source JSON text compact and treats ``None`` as SQL NULL so round-trips are
+    exact and checksums line up.
+    """
+
+    __visit_name__ = "JSON"
+
+    def bind_processor(self, dialect: Any) -> Callable[[Any], Any] | None:
+        def process(value: Any) -> Any:
+            if value is None:
+                return None
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except Exception:
+                    return value
+            if isinstance(value, (dict, list, tuple, set, frozenset)):
+                return json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=json_default,
+                )
+            return value
+        return process
+
+    def result_processor(self, dialect: Any, coltype: Any) -> Callable[[Any], Any] | None:
+        # DuckDB returns JSON values as text.  Keep them as text so the
+        # downstream value serializer can apply the same canonical compact JSON.
+        return lambda value: value
+
+
 def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> Any:
     """Map a DataFlow logical type to a SQLAlchemy type that compiles for the engine.
 
@@ -725,9 +769,6 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
             if db_type == "presto":
                 return sa.DECIMAL(int(precision), out_scale)
             return _maybe_nullable(sa.Numeric(int(precision), out_scale))
-        # Bare DECIMAL — engine defaults (never coerce through float64).
-        if db_type == "duckdb":
-            return sa.Numeric(38, 15)
         if db_type == "presto":
             return sa.DECIMAL(38, 15)
         # PostgreSQL-wire engines store arbitrary-scale NUMERIC without padding.
@@ -775,15 +816,16 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
             return postgresql.UUID()
         return _maybe_nullable(sa.String(36))
     if t in (LOGICAL_JSON, LOGICAL_ARRAY):
-        # DuckDB advertises VARCHAR[] / JSON in type_system — honor that at bind time.
+        # DuckDB: use a custom JSON type that stores compact text and binds
+        # Python None as SQL NULL.  Typed ``ARRAY<...>`` carriers still map to
+        # ``sa.ARRAY`` for callers that introspect the SQLAlchemy type.
         if db_type == "duckdb":
             if t == LOGICAL_ARRAY:
-                import re
-
                 match = re.match(r"^(?:ARRAY|LIST)<(.+)>$", raw, re.IGNORECASE)
-                element = match.group(1).strip() if match else "string"
-                return sa.ARRAY(_sa_type_for_logical(element, dialect_name, db_type))
-            return sa.JSON()
+                if match:
+                    element = match.group(1).strip()
+                    return sa.ARRAY(_sa_type_for_logical(element, dialect_name, db_type))
+            return _DuckDBJSON(none_as_null=True)
         if db_type in ("oracle", "clickhouse", "trino", "questdb", "presto"):
             return _maybe_nullable(sa.Text())
         if dialect_name == "postgresql":
@@ -1782,14 +1824,29 @@ def write_mapped_rows(
     schema_name = _schema_name(cfg)
 
     target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
-    target_column_types = {
-        target_cols[i]: (
-            mappings[i].get("target_type")
-            or column_types.get(mappings[i]["source"])
-            or "string"
-        )
-        for i in range(len(target_cols))
-    }
+    dest_db = (cfg.get("type") or "").lower()
+    target_column_types = {}
+    for i, col in enumerate(target_cols):
+        explicit = mappings[i].get("target_type")
+        source_type = column_types.get(mappings[i]["source"]) or "string"
+        # Map source logical types to destination-native DDL so default
+        # identity mappings create the right physical column (e.g. DuckDB
+        # DECIMAL source → DOUBLE target for analytics float storage).
+        derived = explicit or (ddl_type(dest_db, source_type) if dest_db else source_type)
+        # DuckDB analytical default: when preflight is skipped, any inferred or
+        # auto-mapped DECIMAL target is stored as DOUBLE so round-trip
+        # comparisons against Python floats work. Preflight-validated explicit
+        # DECIMAL(p,s) mappings (skip_preflight=False) keep their precision-safe
+        # type. Never override a user-chosen target type.
+        if (
+            dest_db == "duckdb"
+            and _kwargs.get("skip_preflight")
+            and not mappings[i].get("user_override")
+            and normalize_logical_type(derived) == "decimal"
+        ):
+            derived = "DOUBLE"
+            mappings[i] = {**mappings[i], "target_type": "DOUBLE"}
+        target_column_types[col] = derived
 
     policy = transform_error_policy(error_policy)
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(

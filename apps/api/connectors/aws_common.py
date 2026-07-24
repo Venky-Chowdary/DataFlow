@@ -23,6 +23,11 @@ def resolve_endpoint_url(cfg: dict[str, Any]) -> str:
         return host.rstrip("/")
     if host.endswith(".amazonaws.com"):
         return f"https://{host}"
+    # A host with no dots (e.g. ``us-east-1``) is an AWS region, not a network
+    # endpoint.  Leave endpoint_url empty so boto3 uses its default resolver
+    # (required for moto mocks and real AWS SDK endpoints).
+    if host and "." not in host and host not in ("localhost", "127.0.0.1", "host.docker.internal"):
+        return ""
     # If host already includes a port, extract it so we don't duplicate the port param.
     if ":" in host:
         host, _, port_from_host = host.rpartition(":")

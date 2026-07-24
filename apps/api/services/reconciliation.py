@@ -485,6 +485,73 @@ def verify_postgres_table(
         return -1, ""
 
 
+def verify_pgvector_table(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    connection_string: str,
+    ssl: bool,
+    table_name: str,
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+) -> tuple[int, str]:
+    """Verify pgvector destination by reading source_id/metadata, not the opaque embedding."""
+    try:
+        from connectors.postgresql_conn import get_connection
+        from connectors.sql_identifiers import quote_table_ref
+
+        conn = get_connection(
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            connection_string=connection_string,
+            ssl=ssl,
+        )
+        table_ref = quote_table_ref(table_name, schema or "public", dialect="postgresql")
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM {table_ref}")
+            count = int(cur.fetchone()[0])
+            cur.execute(f"SELECT source_id, metadata FROM {table_ref}")
+            names = [d[0] for d in cur.description] if cur.description else ["source_id", "metadata"]
+            rows: list[dict[str, Any]] = []
+            for raw in _iter_fetchmany(cur):
+                rec = dict(zip(names, raw))
+                source_id = rec.get("source_id", "")
+                metadata = rec.get("metadata") or {}
+                if isinstance(metadata, str):
+                    try:
+                        metadata = json.loads(metadata)
+                    except Exception:
+                        metadata = {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                # Reconstruct a source-shaped row from metadata; fall back to source_id for 'id'.
+                row: dict[str, Any] = dict(metadata)
+                if target_columns:
+                    for col in target_columns:
+                        if col not in row and col.lower() == "id" and source_id:
+                            row[col] = source_id
+                    row = {k: v for k, v in row.items() if k in target_columns}
+                elif source_id and "id" not in {c.lower() for c in row}:
+                    row["id"] = source_id
+                rows.append(row)
+        conn.close()
+        checksum = canonical_checksum_from_iter(
+            iter(rows),
+            columns=target_columns or None,
+            limit=limit,
+        )
+        return count, checksum
+    except Exception:
+        return -1, ""
+
+
 def verify_snowflake_table(
     *,
     host: str,
@@ -1020,10 +1087,24 @@ def verify_target(
             )
         else:
             count, chk = -1, ""
-    elif db_type in ("postgresql", "redshift", "pgvector"):
+    elif db_type == "pgvector":
+        # pgvector tables store an opaque embedding; reconstruct source rows from
+        # the JSON metadata and source_id for an honest checksum reconciliation.
+        count, chk = verify_pgvector_table(
+            host=dest.get("host", ""),
+            port=dest.get("port", 5432),
+            database=dest.get("database", ""),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            schema=schema,
+            connection_string=dest.get("connection_string", ""),
+            ssl=dest.get("ssl", False),
+            table_name=table_name,
+            target_columns=target_columns,
+            limit=limit,
+        )
+    elif db_type in ("postgresql", "redshift"):
         # Redshift wire protocol is Postgres; local CI uses the PG emulator.
-        # pgvector tables live in the same Postgres — COUNT(*) read-back works
-        # for row proof (embedding columns are opaque to checksum fidelity).
         count, chk = verify_postgres_table(
             host=dest.get("host", ""),
             port=dest.get("port", 5432),
@@ -1459,13 +1540,37 @@ def sample_compare_rows(
             return val or (rec.get(target_columns[0]) if target_columns else None)
         return rec
 
+    def _sortable(value: Any) -> tuple:
+        """Return a stable, type-safe sort key that handles bson.Decimal128."""
+        if value is None:
+            return (0, Decimal(0))
+        if value.__class__.__name__ == "Decimal128":
+            try:
+                return (0, value.to_decimal())
+            except Exception:
+                return (1, str(value))
+        if isinstance(value, Decimal):
+            return (0, value)
+        if isinstance(value, bool):
+            return (0, Decimal(int(value)))
+        if isinstance(value, (int, float)):
+            try:
+                return (0, Decimal(value))
+            except Exception:
+                return (1, str(value))
+        text = str(value).strip()
+        try:
+            return (0, Decimal(text))
+        except Exception:
+            return (1, text.lower())
+
     source_sorted = sorted(
-        source_records, key=lambda r: _row_key(r, source_side=True) or 0
+        source_records, key=lambda r: _sortable(_row_key(r, source_side=True))
     )[:sample_size]
 
     mismatches: list[dict[str, str]] = []
     compared = 0
-    target_fallback = sorted(target_dicts, key=lambda d: _row_key(d) or 0)
+    target_fallback = sorted(target_dicts, key=lambda d: _sortable(_row_key(d)))
 
     for idx, src in enumerate(source_sorted):
         if sort_key and target_by_key:
@@ -1536,6 +1641,15 @@ def read_target_sample(
     cols = columns or ["*"]
     keys = [k for k in (key_values or []) if k is not None and k != ""][: max(1, int(limit or 50))]
 
+    def _row_names(description: Any) -> list[str]:
+        # When explicit columns were requested, trust the caller's keys so
+        # downstream mapping/reconciliation matches by the mapping target names.
+        # Cursor.description names may differ in case (e.g. fakesnow lower-cases
+        # quoted identifiers), which would make dict lookups fail for CURRENCY.
+        if cols and cols != ["*"]:
+            return list(cols)
+        return [d[0] for d in (description or [])]
+
     def _ssl_flag(default: bool = False) -> bool:
         # Match list/probe defaults — ssl=True here previously emptied samples on
         # local / non-TLS hosts while verify_target still counted rows.
@@ -1584,7 +1698,7 @@ def read_target_sample(
                                 f"SELECT {col_sql} FROM {table_ref} ORDER BY {order_sql} LIMIT %s",
                                 (limit,),
                             )
-                        names = [d[0] for d in cur.description]
+                        names = _row_names(cur.description)
                         rows = cur.fetchall()
                     conn.close()
                     return [dict(zip(names, row)) for row in rows]
@@ -1634,13 +1748,20 @@ def read_target_sample(
                         f"SELECT {mysql_col_sql} FROM {table_ref} ORDER BY {mysql_order} LIMIT %s",
                         (limit,),
                     )
-                names = [d[0] for d in cur.description]
+                names = _row_names(cur.description)
                 rows = cur.fetchall()
             conn.close()
             return [dict(zip(names, row)) for row in rows]
 
-        if db_type == "duckdb":
-            import duckdb
+        if db_type == "duckdb" or (
+            db_type == "generic_sql"
+            and (
+                "duckdb" in ((dest.get("connection_string") or dest.get("database") or "")).lower()
+                or (dest.get("connection_string") or dest.get("database") or "").lower().endswith((".duckdb", ".duck"))
+            )
+        ):
+            import sqlalchemy as sa
+            from connectors.generic_sql import get_sqlalchemy_engine
 
             path = dest.get("connection_string") or dest.get("database", "")
             if not path:
@@ -1654,24 +1775,254 @@ def read_target_sample(
                 if sort_key
                 else "1"
             )
-            conn = duckdb.connect(str(path))
-            if keys and sort_key:
-                key_col = quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
-                placeholders = ",".join(["?"] * len(keys))
-                rows = conn.execute(
-                    f"SELECT {duckdb_col_sql} FROM {table_ref} "
-                    f"WHERE {key_col} IN ({placeholders}) "
-                    f"ORDER BY {duckdb_order} LIMIT ?",
-                    [*keys, int(limit)],
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    f"SELECT {duckdb_col_sql} FROM {table_ref} ORDER BY {duckdb_order} LIMIT ?",
-                    (int(limit),),
-                ).fetchall()
-            names = [d[0] for d in conn.description]
-            conn.close()
-            return [dict(zip(names, row)) for row in rows]
+            try:
+                engine = get_sqlalchemy_engine({"type": "duckdb", "connection_string": path})
+            except Exception:
+                return []
+            with engine.connect() as conn:
+                if keys and sort_key:
+                    key_col = quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
+                    params: dict[str, Any] = {f"k{i}": k for i, k in enumerate(keys)}
+                    params["lim"] = int(limit)
+                    placeholders = ",".join(f":k{i}" for i in range(len(keys)))
+                    sql = (
+                        f"SELECT {duckdb_col_sql} FROM {table_ref} "
+                        f"WHERE {key_col} IN ({placeholders}) "
+                        f"ORDER BY {duckdb_order} LIMIT :lim"
+                    )
+                else:
+                    params = {"lim": int(limit)}
+                    sql = f"SELECT {duckdb_col_sql} FROM {table_ref} ORDER BY {duckdb_order} LIMIT :lim"
+                try:
+                    result = conn.execute(sa.text(sql), params)
+                    return [dict(row) for row in result.mappings().all()]
+                except Exception:
+                    return []
+
+        if db_type == "mongodb":
+            from connectors.mongodb_common import _mongo_client, normalize_mongodb_connection_string
+
+            try:
+                conn_str = normalize_mongodb_connection_string(
+                    dest.get("connection_string", ""),
+                    database=dest.get("database", ""),
+                    host=dest.get("host", ""),
+                    port=int(dest.get("port") or 27017),
+                    username=dest.get("username", ""),
+                    password=dest.get("password", ""),
+                    ssl=bool(dest.get("ssl", False)),
+                    auth_source=dest.get("auth_source", ""),
+                )
+                client = _mongo_client(conn_str)
+                db = client[dest.get("database") or "test"]
+                coll = db[table_name]
+                query_filter: dict[str, Any] = {}
+                if keys and sort_key:
+                    # Mongo $in is type-sensitive; widened key set matches strings,
+                    # integers, and decimals that the writer may have produced.
+                    widened: set[Any] = set()
+                    for k in keys:
+                        widened.add(k)
+                        try:
+                            if str(k).isdigit():
+                                widened.add(int(k))
+                        except Exception:
+                            pass
+                        try:
+                            widened.add(float(k))
+                        except Exception:
+                            pass
+                        # ObjectId keys from schemaless sources are serialized as hex strings.
+                        try:
+                            from bson import ObjectId
+
+                            if isinstance(k, str) and len(k) == 24 and all(c in "0123456789abcdefABCDEF" for c in k):
+                                widened.add(ObjectId(k))
+                        except Exception:
+                            pass
+                    query_filter = {sort_key: {"$in": list(widened)}}
+                cursor = coll.find(query_filter)
+                if sort_key:
+                    cursor = cursor.sort(sort_key, 1)
+                return list(cursor.limit(int(limit)))
+            except Exception:
+                return []
+
+        if db_type == "sqlite" or (
+            db_type == "generic_sql"
+            and (
+                "sqlite" in ((dest.get("connection_string") or dest.get("database") or "")).lower()
+                or (dest.get("connection_string") or dest.get("database") or "").lower().endswith((".db", ".sqlite"))
+            )
+        ):
+            import sqlite3
+
+            from connectors.sqlite_common import sqlite_file_path
+
+            path = sqlite_file_path(
+                dest.get("database") or "",
+                dest.get("connection_string") or "",
+                dest.get("host") or "",
+            )
+            if not path:
+                return []
+            sqlite_col_sql = "*" if cols == ["*"] else quote_column_list(
+                [require_safe_identifier(c, preserve_case=True) for c in cols]
+            )
+            table_ref = quote_table_ref(table_name, dialect="sqlite")
+            sqlite_order = (
+                quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
+                if sort_key
+                else "1"
+            )
+            conn = sqlite3.connect(str(path))
+            try:
+                if keys and sort_key:
+                    key_col = quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
+                    placeholders = ",".join(["?"] * len(keys))
+                    sql = f"SELECT {sqlite_col_sql} FROM {table_ref} WHERE {key_col} IN ({placeholders}) ORDER BY {sqlite_order} LIMIT ?"
+                    cur = conn.execute(sql, [*keys, int(limit)])
+                else:
+                    sql = f"SELECT {sqlite_col_sql} FROM {table_ref} ORDER BY {sqlite_order} LIMIT ?"
+                    cur = conn.execute(sql, (int(limit),))
+                rows = cur.fetchall()
+                names = _row_names(cur.description)
+                return [dict(zip(names, row)) for row in rows]
+            except Exception:
+                return []
+            finally:
+                conn.close()
+
+        if db_type == "redis":
+            from connectors.redis_reader import _decode, _redis_client
+            from connectors.sql_identifiers import sanitize_identifier
+
+            prefix = table_name or "dataflow"
+            cfg = {
+                "host": dest.get("host", ""),
+                "port": int(dest.get("port") or 6379),
+                "database": dest.get("database", "0"),
+                "username": dest.get("username", ""),
+                "password": dest.get("password", ""),
+                "connection_string": dest.get("connection_string", ""),
+                "ssl": bool(dest.get("ssl", False)),
+            }
+            try:
+                client = _redis_client(cfg)
+                key_set = set(str(k) for k in keys) if keys else set()
+                rows_out: list[dict[str, Any]] = []
+                if keys and sort_key:
+                    # Writer stores keys as ``prefix:<sanitized_id>``.
+                    key_names = [
+                        f"{prefix}:{sanitize_identifier(str(k), preserve_case=True)}"
+                        for k in keys
+                    ]
+                    for raw in client.mget(key_names):
+                        text = _decode(raw)
+                        if not text:
+                            continue
+                        try:
+                            payload = json.loads(text)
+                        except (json.JSONDecodeError, TypeError):
+                            payload = {"value": text}
+                        if isinstance(payload, dict):
+                            rows_out.append(payload)
+                        else:
+                            rows_out.append({"value": payload})
+                        if len(rows_out) >= limit:
+                            break
+                else:
+                    pattern = f"{prefix}:*" if prefix else "*"
+                    cursor = 0
+                    while True:
+                        cursor, batch = client.scan(cursor=cursor, match=pattern, count=500)
+                        for raw_key in batch:
+                            key = raw_key.decode() if isinstance(raw_key, bytes) else str(raw_key)
+                            raw = client.get(key)
+                            text = _decode(raw)
+                            try:
+                                payload = json.loads(text) if text.startswith("{") else {"value": text}
+                            except (json.JSONDecodeError, TypeError):
+                                payload = {"value": text}
+                            if isinstance(payload, dict):
+                                rows_out.append(payload)
+                            else:
+                                rows_out.append({"value": payload})
+                            if len(rows_out) >= limit:
+                                break
+                        if cursor == 0 or len(rows_out) >= limit:
+                            break
+                if columns:
+                    rows_out = [{k: v for k, v in row.items() if k in columns} for row in rows_out]
+                return rows_out[:limit]
+            except Exception:
+                return []
+
+        if db_type == "snowflake":
+            from connectors.snowflake_conn import (
+                get_connection,
+                normalize_account,
+                resolve_or_fold_snowflake_table,
+                snowflake_qualified_table,
+            )
+
+            try:
+                conn = get_connection(
+                    account=normalize_account(dest.get("host", "")),
+                    username=dest.get("username", ""),
+                    password=dest.get("password", ""),
+                    database=dest.get("database", ""),
+                    schema=schema or "PUBLIC",
+                    warehouse=dest.get("warehouse", ""),
+                    connection_string=dest.get("connection_string", ""),
+                )
+                from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
+
+                with conn.cursor() as cur:
+                    resolved = resolve_or_fold_snowflake_table(cur, schema or "PUBLIC", table_name)
+                    qualified_name = snowflake_qualified_table(schema or "PUBLIC", resolved)
+                    sf_col_sql = "*" if cols == ["*"] else quote_column_list(
+                        [require_safe_identifier(c, preserve_case=True) for c in cols]
+                    )
+                    sf_order = (
+                        quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
+                        if sort_key
+                        else "1"
+                    )
+                    if keys and sort_key:
+                        key_col = quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
+                        # Snowflake IN is type-sensitive; widen strings to ints/floats.
+                        widened: set[Any] = set()
+                        for k in keys:
+                            widened.add(k)
+                            try:
+                                if str(k).isdigit():
+                                    widened.add(int(k))
+                            except Exception:
+                                pass
+                            try:
+                                widened.add(float(k))
+                            except Exception:
+                                pass
+                        placeholders = ",".join(["%s"] * len(widened))
+                        cur.execute(
+                            f"SELECT {sf_col_sql} FROM {qualified_name} "
+                            f"WHERE {key_col} IN ({placeholders}) "
+                            f"ORDER BY {sf_order} LIMIT %s",
+                            (*widened, int(limit)),
+                        )
+                    else:
+                        cur.execute(
+                            f"SELECT {sf_col_sql} FROM {qualified_name} ORDER BY {sf_order} LIMIT %s",
+                            (int(limit),),
+                        )
+                    names = _row_names(cur.description)
+                    rows = cur.fetchall()
+                conn.close()
+                return [dict(zip(names, row)) for row in rows]
+            except Exception:
+                return []
+
     except Exception:
         return []
     return []

@@ -23,6 +23,28 @@ class WriteResult(_WriteResult):
     driver: str = "boto3"
 
 
+def _pick_hash_key(columns: list[str], mappings: list[dict]) -> str:
+    """Choose a DynamoDB hash key from column names or mapping targets.
+
+    Prefers explicit identity names, then ``*_id`` columns, then identity-like
+    mapping targets.  This is a deterministic helper used by tests and the writer
+    when no explicit conflict_columns are supplied.
+    """
+    preferred = {"id", "_id", "uuid", "key", "pk", "sk"}
+    lower_map = {c.lower(): c for c in columns}
+    for name in preferred:
+        if name in lower_map:
+            return lower_map[name]
+    for c in columns:
+        if c.lower().endswith("_id"):
+            return c
+    for m in mappings:
+        target = m.get("target") or m.get("source", "")
+        if target and (target.lower() in preferred or target.lower().endswith("_id")):
+            return target
+    return columns[0] if columns else "id"
+
+
 def _to_dynamo_value(value: Any, source_type: str) -> Any:
     """Convert transform-engine values to DynamoDB-serializable native types."""
     if value is None:

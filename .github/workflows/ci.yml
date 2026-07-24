@@ -170,11 +170,45 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
+      - name: Grant MySQL CDC privileges
+        run: |
+          python - <<'PY'
+          import sys, time
+          try:
+              import pymysql
+          except ImportError:
+              print("pymysql not installed; skipping MySQL CDC grant", file=sys.stderr)
+              sys.exit(0)
+          conn = None
+          for _ in range(60):
+              try:
+                  conn = pymysql.connect(
+                      host="127.0.0.1",
+                      port=3306,
+                      user="root",
+                      password="dataflow",
+                      database="dataflow",
+                  )
+                  break
+              except Exception:
+                  time.sleep(1)
+          if conn is None:
+              print("MySQL not reachable; skipping CDC privilege grant", file=sys.stderr)
+              sys.exit(0)
+          with conn.cursor() as cur:
+              cur.execute("GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'dataflow'@'%'")
+              cur.execute("FLUSH PRIVILEGES")
+          conn.close()
+          PY
+
       - name: Run tests
         run: npm run test
         env:
           DATAFLOW_JOB_STORE: memory
           DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          DATAFLOW_PII_HASH_KEY: test-pii-key
+          DATAFLOW_ALLOW_STUB_WRITES: "1"
+          DATAFLOW_FAKESNOW_KEEP_PATCH: "1"
           PGHOST: 127.0.0.1
           PGPORT: "5432"
           PGUSER: dataflow

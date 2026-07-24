@@ -96,6 +96,11 @@ _OVERWRITE_SYNC = {
     "replace",
 }
 
+_APPEND_SYNC = {
+    "full_refresh_append",
+    "incremental_append",
+}
+
 
 def _primary_key_target(
     mappings: list[dict],
@@ -335,18 +340,26 @@ def evaluate_ddl_compatibility(
                         f"Proposed DDL {inferred_ddl} for {tgt} may truncate values (max {max_len} chars)"
                     )
 
-    issues.extend(
-        _duplicate_pk_in_source(
-            sample_rows,
-            mappings,
-            dest_kind=dest_kind,
-            destination_pk_columns=destination_pk_columns,
-            contract_primary_key=contract_primary_key,
+    # Duplicate source-PK detection is only relevant when the destination will
+    # enforce uniqueness (cdc/mirror/upsert/SCD2) or when no append/overwrite
+    # sync mode was supplied and the target already exists / has a declared PK.
+    if sample_rows and (
+        sync_requires_unique_identity(sync)
+        or (
+            sync not in _APPEND_SYNC
+            and sync not in _OVERWRITE_SYNC
         )
-        if sync_requires_unique_identity(sync)
         or (table_exists and destination_pk_columns)
-        else []
-    )
+    ):
+        issues.extend(
+            _duplicate_pk_in_source(
+                sample_rows,
+                mappings,
+                dest_kind=dest_kind,
+                destination_pk_columns=destination_pk_columns,
+                contract_primary_key=contract_primary_key,
+            )
+        )
 
     if not schemaless and table_exists and target_schema:
         mapped_targets = {str(m.get("target")).lower() for m in mappings if m.get("target")}

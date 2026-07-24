@@ -889,9 +889,12 @@ class FileParser:
     @staticmethod
     def parse_orc(content: bytes, max_rows: int = 100_000) -> ParseResult:
         try:
+            import importlib
             import io
 
-            import pyarrow.orc as orc
+            # Use importlib so tests/sandbox can replace sys.modules["pyarrow.orc"]
+            # without the pyarrow package attribute cache shadowing the override.
+            orc = importlib.import_module("pyarrow.orc")
 
             from services.arrow_schema import columns_from_arrow_schema, schema_from_arrow
 

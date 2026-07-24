@@ -9,9 +9,12 @@ are cached by content hash to avoid re-embedding unchanged rows.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from functools import lru_cache
 from typing import Any, Callable, Protocol
+
+from services.value_serializer import sanitize_json_value
 
 
 class Embedder(Protocol):
@@ -52,7 +55,12 @@ class _SentenceTransformerEmbedder:
         model = self._load()
         if not texts:
             return []
-        return [list(v) for v in model.encode(texts, show_progress_bar=False, convert_to_numpy=True)]
+        # .tolist() guarantees native Python floats, avoiding np.float32 JSON
+        # serialization failures in the durable embedding cache and writers.
+        embeddings = model.encode(texts, show_progress_bar=False, convert_to_numpy=True)
+        if embeddings.ndim == 1:
+            return [embeddings.tolist()]
+        return embeddings.tolist()
 
 
 class _OpenAIEmbedder:
@@ -359,6 +367,18 @@ def vectorize_records(
                 content = max((str(rec[c]) for c in candidates), key=len)
             elif "content" in rec and "content" not in exclude:
                 content = str(rec["content"])
+            else:
+                # Universal fallback: embed a concise JSON representation of the
+                # record so vector destinations never fail on short/numeric rows.
+                safe_rec = {k: v for k, v in rec.items() if k not in exclude and k != PRECHUNKED_FLAG}
+                content = json.dumps(
+                    {k: sanitize_json_value(v) for k, v in safe_rec.items()},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                    default=sanitize_json_value,
+                    allow_nan=False,
+                )[:4000]
 
         embedding = None
         if embedding_column and embedding_column in rec:
@@ -367,8 +387,6 @@ def vectorize_records(
                 embedding = [float(x) for x in raw]
             elif isinstance(raw, str):
                 try:
-                    import json
-
                     embedding = [float(x) for x in json.loads(raw)]
                 except Exception:
                     pass

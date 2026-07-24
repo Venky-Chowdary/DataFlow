@@ -608,7 +608,10 @@ def infer_column(
         inferred = "DECIMAL" if "DECIMAL" in types else "INTEGER"
         role = "numeric"
     elif types <= {"DATE", "TIMESTAMP", "TIMESTAMPTZ", "TIME"}:
-        if counts.get("TIMESTAMPTZ", 0) > 0:
+        tz_count = counts.get("TIMESTAMPTZ", 0)
+        # Promote to TIMESTAMPTZ only when the column is unanimously TZ-aware,
+        # or when a temporal field name has at least one TZ sample.
+        if tz_count > 0 and (tz_count == len(non_empty) or (field_name and _is_timestamp_field_name(field_name))):
             inferred = "TIMESTAMPTZ"
         elif counts.get("TIMESTAMP", 0) >= counts.get("DATE", 0) and counts.get("TIMESTAMP", 0) >= counts.get("TIME", 0):
             inferred = "TIMESTAMP"
