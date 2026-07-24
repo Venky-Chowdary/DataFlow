@@ -5,12 +5,14 @@ from __future__ import annotations
 import base64
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from services.type_system import ddl_type
 
 from connectors.mysql_conn import get_connection
+from connectors.schema_drift import is_wider_type, widen_existing_columns_native
 from connectors.sql_temporal import (
     coerce_sql_temporal,
     extract_column_from_sql_error,
@@ -339,6 +341,37 @@ def write_mapped_rows(
                     cursor.execute(
                         f"ALTER TABLE {table_q} ADD COLUMN {quote_sql_identifier(col, '`')} {typ}"
                     )
+
+            # Pick the wider of the mapping-proposed target DDL and the freshly
+            # introspected source DDL, then widen any destination columns that are
+            # now too narrow for the source drift.
+            desired_types: list[str] = []
+            for mapping, target_type in zip(mappings, target_types):
+                source = mapping.get("source") or ""
+                source_type = (
+                    column_types.get(source)
+                    or mapping.get("source_type")
+                    or "VARCHAR"
+                )
+                source_ddl = mysql_type(source_type)
+                desired = (
+                    source_ddl
+                    if is_wider_type(target_type, source_ddl)
+                    else target_type
+                )
+                desired_types.append(desired)
+
+            widen_existing_columns_native(
+                cursor,
+                "mysql",
+                database,
+                table_name,
+                target_cols,
+                desired_types,
+                backfill=backfill_new_fields,
+                skip_cols=conflict_columns or [],
+            )
+            target_types = desired_types
 
         # Bind using physical types so ISO Z never hits a DATETIME column as TEXT.
         physical = _fetch_mysql_column_types(cursor, table_name)

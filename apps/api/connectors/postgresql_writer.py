@@ -7,9 +7,10 @@ import io
 import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any
 
 from services.type_system import ddl_type
 from services.value_serializer import json_default
@@ -628,6 +629,7 @@ def write_mapped_rows(
                 target_cols,
                 desired_types,
                 backfill=backfill_new_fields,
+                skip_cols=conflict_columns or [],
             )
             target_types = desired_types
 

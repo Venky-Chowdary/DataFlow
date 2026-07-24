@@ -15,16 +15,21 @@ import contextlib
 import json
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any
 
 from services.type_system import ddl_type, normalize_logical_type
 from services.value_serializer import cell_to_string, json_default
 
 from connectors.base import ReadBatch
-from connectors.schema_drift import add_missing_columns
+from connectors.schema_drift import (
+    _build_widen_ddl,
+    add_missing_columns,
+    is_wider_type,
+)
 from connectors.sql_temporal import (
     coerce_sql_temporal,
     extract_column_from_sql_error,
@@ -1198,6 +1203,113 @@ def _build_table_for_write(
     )
 
 
+def _source_ddl_for_widen(
+    mapping_source: str | None,
+    catalog_source: str | None,
+) -> str | None:
+    """Choose the best source DDL for schema-drift widening.
+
+    ``mapping_source`` is the inferred source type attached to the mapping
+    (e.g. DECIMAL); ``catalog_source`` is the raw source catalog type (e.g. TEXT
+    for file formats or NUMERIC(12,2) for SQL introspection).  Prefer the
+    mapping when it is concrete and the catalog is a generic string, but upgrade
+    to the catalog type when it is wider in the same logical family.
+    """
+    if not mapping_source and not catalog_source:
+        return None
+    if not mapping_source:
+        return catalog_source
+    if not catalog_source:
+        return mapping_source
+
+    from services.type_system import normalize_logical_type
+
+    mapping_logical = normalize_logical_type(mapping_source)
+    catalog_logical = normalize_logical_type(catalog_source)
+
+    if catalog_logical in {"string", "text"} and mapping_logical not in {"string", "text"}:
+        return mapping_source
+    if mapping_logical in {"string", "text"} and catalog_logical not in {"string", "text"}:
+        return catalog_source
+    if mapping_logical == catalog_logical:
+        return catalog_source if is_wider_type(mapping_source, catalog_source) else mapping_source
+    return mapping_source
+
+
+def _widen_existing_columns_sa(
+    conn: Any,
+    engine: Any,
+    dialect_name: str,
+    schema: str | None,
+    table_name: str,
+    target_cols: list[str],
+    target_column_types: dict[str, str],
+    conflict_columns: list[str] | None = None,
+) -> list[str]:
+    """Issue ALTER COLUMN / MODIFY COLUMN to widen any columns that drifted wider.
+
+    Uses SQLAlchemy reflection and text execution so the same helper works for
+    every SQLAlchemy-backed dialect (DuckDB, SQL Server, Oracle, SQLite skipped).
+    Primary-key / conflict columns are skipped because most engines cannot
+    ALTER the type of a key column in place.
+    """
+    if not target_cols or not target_column_types:
+        return []
+
+    dialect_name = (dialect_name or "").lower()
+    if dialect_name == "sqlite":
+        return []
+
+    skip_cols = set(conflict_columns or [])
+
+    try:
+        inspector = sa.inspect(conn)
+        existing_cols = inspector.get_columns(table_name, schema=schema)
+    except Exception as exc:
+        logger.debug("Could not reflect columns for widen: %s", exc, exc_info=exc)
+        return []
+
+    log: list[str] = []
+    for col in target_cols:
+        if col in skip_cols:
+            continue
+        existing = next((c for c in existing_cols if c["name"] == col), None)
+        if not existing:
+            continue
+        existing_type = str(existing["type"].compile(dialect=engine.dialect))
+        desired_type = target_column_types.get(col, existing_type)
+        if not is_wider_type(existing_type, desired_type):
+            continue
+        try:
+            ddl = _build_widen_ddl(
+                dialect_name, schema, table_name, col, desired_type, existing_type
+            )
+            conn.execute(sa.text(ddl))
+            conn.commit()
+            log.append(ddl)
+            logger.debug(
+                "Widened %s.%s from %s to %s",
+                table_name,
+                col,
+                existing_type,
+                desired_type,
+            )
+        except Exception as exc:
+            err = str(exc).lower()
+            if any(
+                phrase in err for phrase in ("already", "cannot alter", "not supported")
+            ):
+                logger.debug(
+                    "Widen skipped for %s.%s: %s", table_name, col, exc, exc_info=exc
+                )
+                continue
+            logger.warning(
+                "Widen failed for %s.%s: %s", table_name, col, exc, exc_info=exc
+            )
+            raise
+    return log
+
+
 def _infer_logical_from_samples(values: list[Any], field_name: str = "") -> str | None:
     """Use DataFlow value inference to narrow generic SQL String columns.
 
@@ -1458,8 +1570,8 @@ def delete_by_primary_keys(
             pk_quoted = f"[{str(primary_key_column).replace(']', ']]')}]"
         else:
             pk_quoted = quote_sql_identifier(primary_key_column, q)
-        placeholders = ",".join([":k{}".format(i) for i in range(len(keys))])
-        params = {"k{}".format(i): k for i, k in enumerate(keys)}
+        placeholders = ",".join([f":k{i}" for i in range(len(keys))])
+        params = {f"k{i}": k for i, k in enumerate(keys)}
         stmt = f"DELETE FROM {qualified} WHERE {pk_quoted} IN ({placeholders})"
         with engine.connect() as conn:
             result = conn.execute(sa.text(stmt), params)
@@ -2017,6 +2129,18 @@ def write_mapped_rows(
             mappings[i] = {**mappings[i], "target_type": "DOUBLE"}
         target_column_types[col] = derived
 
+    # Widen target types to at least the source DDL so schema drift to a wider
+    # source column does not truncate or overflow in the destination.
+    for i, col in enumerate(target_cols):
+        target_ddl = target_column_types[col]
+        mapping_source = mappings[i].get("source_type")
+        catalog_source = column_types.get(mappings[i].get("source"))
+        source_type = _source_ddl_for_widen(mapping_source, catalog_source) or "string"
+        source_ddl = ddl_type(dest_db, source_type) if dest_db else source_type
+        if is_wider_type(target_ddl, source_ddl):
+            target_column_types[col] = source_ddl
+            mappings[i] = {**mappings[i], "target_type": source_ddl}
+
     policy = transform_error_policy(error_policy)
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
@@ -2145,6 +2269,16 @@ def write_mapped_rows(
                     sa_col_types,
                     backfill=True,
                     connection=conn,
+                )
+                _widen_existing_columns_sa(
+                    conn,
+                    engine,
+                    dialect_name,
+                    schema_name,
+                    table_name,
+                    target_cols,
+                    target_column_types,
+                    conflict_columns=conflict_columns,
                 )
 
             total = len(converted_rows)

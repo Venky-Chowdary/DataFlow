@@ -88,7 +88,7 @@ def _minimum_string_length_for(old_type: str) -> int | None:
     if old_logical == "integer":
         return _integer_max_digits(old_type)
     if old_logical == "decimal":
-        p, s = _numeric_precision_scale(old_type)
+        p, _s = _numeric_precision_scale(old_type)
         if p is None:
             return None
         return p + 2  # sign + decimal point
@@ -164,6 +164,16 @@ def is_wider_type(old_type: str, new_type: str) -> bool:
         if old_w is None or new_w is None:
             return False
         return new_w >= old_w
+
+    # DECIMAL -> FLOAT: safe from an overflow/range perspective when the float
+    # mantissa can represent the decimal's total digit count (DOUBLE ~ 15 digits).
+    if old_logical == "decimal" and new_logical == "float":
+        old_p, _old_s = _numeric_precision_scale(old_type)
+        new_w = _float_mantissa_bits(new_type)
+        if old_p is None or new_w is None:
+            return False
+        max_exact_digits = 15 if new_w >= 53 else (6 if new_w >= 24 else 0)
+        return old_p <= max_exact_digits
 
     # Cross-logical promotions to string-like: length must be sufficient.
     if _is_string_like(new_logical):
@@ -404,6 +414,7 @@ def widen_existing_columns_native(
     target_types: list[str],
     *,
     backfill: bool = False,
+    skip_cols: list[str] | None = None,
 ) -> list[str]:
     """Issue ALTER COLUMN / MODIFY COLUMN to widen columns that are now too narrow.
 
@@ -420,12 +431,15 @@ def widen_existing_columns_native(
         logger.debug("SQLite does not support ALTER COLUMN TYPE; skipping widen.")
         return []
 
+    skip = set(skip_cols or [])
     existing = _fetch_existing_columns(cursor, dialect, schema, table_name)
     if not existing:
         return []
 
     log: list[str] = []
     for col, new_type in zip(target_cols, target_types):
+        if col in skip:
+            continue
         if col not in existing:
             continue
         existing_type = existing[col]
