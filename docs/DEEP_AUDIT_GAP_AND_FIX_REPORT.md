@@ -398,10 +398,11 @@ pytest apps/api/tests  (with DATAFLOW_PII_HASH_KEY, DATAFLOW_FAKESNOW_KEEP_PATCH
 | Blind `except Exception: pass` in preflight | `dry_run_sample` and MongoDB `auth_source` persistence suppressed validation/storage errors | `apps/api/services/preflight_service.py` |
 | Blind `except Exception: pass` in schema-drift DDL | `add_missing_columns` swallowed "already exists" rollback errors and re-raised without context; `_widen_existing_number_columns` silently aborted column widening | `apps/api/connectors/schema_drift.py`, `apps/api/connectors/snowflake_writer.py` |
 | Blind `except Exception: pass` in SQLite writer | `ALTER TABLE ADD COLUMN` suppressed `sqlite3.OperationalError` without context | `apps/api/connectors/sqlite_writer.py` |
+| Blind `except Exception: pass` in generic SQL chunk/row writes | Rollback failures during chunk/row quarantine were silently swallowed, hiding transaction state | `apps/api/connectors/generic_sql.py` |
 
 ### Implementation notes
 
-- Added `import logging` and `logger = logging.getLogger(__name__)` where missing (`engine.py`, `adapters.py`, `reconciliation.py`, `schema_drift.py`, `sqlite_writer.py`).
+- Added `import logging` and `logger = logging.getLogger(__name__)` where missing (`engine.py`, `adapters.py`, `reconciliation.py`, `schema_drift.py`, `sqlite_writer.py`, `generic_sql.py`).
 - Converted `except Exception:` and `except Exception: pass` in the critical data path to `except Exception as exc:` with structured `logger.warning` / `logger.debug` messages and `exc_info=exc`.
 - Preserved all existing fallback behavior (resume defaults, notification non-failure, cancellation tolerance) so the change is instrumentation-only.
 - `ruff format` was run on the touched files; the functional delta is the exception-variable capture and logging calls.
