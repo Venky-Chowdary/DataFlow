@@ -484,7 +484,10 @@ def _destination_schema_probe(
         info = introspect_endpoint(destination)
         schema = dict(info.get("schema") or {})
         if "table_exists" in info:
-            exists: bool | None = bool(info.get("table_exists"))
+            raw = info.get("table_exists")
+            # Preserve explicit None (unknown) — bool(None) is False and would
+            # dishonestly trigger create-new on Execute after a soft-fail probe.
+            exists = None if raw is None else bool(raw)
         elif schema:
             exists = True
         else:

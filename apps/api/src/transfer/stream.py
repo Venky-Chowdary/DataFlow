@@ -1424,6 +1424,9 @@ def stream_database_transfer(
     sf_conn_state: dict[str, Any] = {"conn": None, "session_ready": False}
     batches_completed = 0
     load_methods_seen: list[str] = []
+    # Bounded source sample for Gate-8 after streaming (records=[] at reconcile).
+    reconcile_sample: list[dict[str, Any]] = []
+    _RECONCILE_SAMPLE_CAP = 50
 
     def _ensure_snowflake_conn() -> Any:
         if sf_conn_state["conn"] is not None:
@@ -1453,10 +1456,14 @@ def stream_database_transfer(
                 "warnings": [],
                 "batch_max": None,
                 "batch_rows": 0,
+                "reconcile_sample_rows": [],
             }
         # Absorb sparse schemaless attributes discovered on this page.
         _absorb_schemaless_discovered_attrs(batch)
         local_warnings: list[str] = []
+        sample_rows: list[dict[str, Any]] = [
+            dict(zip(batch.headers, row)) for row in batch.rows[:_RECONCILE_SAMPLE_CAP]
+        ]
         # Per-batch data-quality / anomaly gate for database streams.
         if batch_quality_enabled:
             audit = run_integrity_audit(
@@ -1531,15 +1538,23 @@ def stream_database_transfer(
             "warnings": (dest_summary.get("warnings") or [])[:10] + local_warnings,
             "batch_max": batch_max,
             "batch_rows": len(batch.rows),
+            "reconcile_sample_rows": sample_rows,
         }
 
     def _apply_result(idx: int, result: dict[str, Any]) -> None:
-        nonlocal written, rejected_total, coerced_null_total, last_checksum, running_cursor, committed_offset, dest_summary, batches_completed, kafka_cursor
+        nonlocal written, rejected_total, coerced_null_total, last_checksum, running_cursor, committed_offset, dest_summary, batches_completed, kafka_cursor, reconcile_sample
         written += result["batch_written"]
         rejected_total += result["rejected"]
         coerced_null_total += result.get("coerced_null", 0)
         last_checksum = result["last_checksum"] or last_checksum
         warning_samples.extend(result["warnings"])
+        if len(reconcile_sample) < _RECONCILE_SAMPLE_CAP:
+            for row in result.get("reconcile_sample_rows") or []:
+                if not isinstance(row, dict):
+                    continue
+                reconcile_sample.append(row)
+                if len(reconcile_sample) >= _RECONCILE_SAMPLE_CAP:
+                    break
         if result["batch_max"] is not None:
             if running_cursor is None or compare_cursor_values(result["batch_max"], running_cursor) > 0:
                 running_cursor = result["batch_max"]
@@ -1761,6 +1776,9 @@ def stream_database_transfer(
     dest_summary["watermark"] = running_cursor
     dest_summary["chunk_size"] = chunk_size
     dest_summary["batches"] = batches_completed
+    dest_summary["source_row_count"] = int(dest_summary.get("source_row_count") or written or 0)
+    if reconcile_sample:
+        dest_summary["reconcile_sample"] = reconcile_sample[:_RECONCILE_SAMPLE_CAP]
     if load_methods_seen:
         if "copy_into" in load_methods_seen:
             dest_summary["load_method"] = "copy_into"

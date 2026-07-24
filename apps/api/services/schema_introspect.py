@@ -379,7 +379,7 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
             username=kwargs.get("username", ""),
             password=kwargs.get("password", ""),
             connection_string=kwargs.get("connection_string", ""),
-            ssl=kwargs.get("ssl", True),
+            ssl=kwargs.get("ssl", False),
         )
         with conn.cursor() as cur:
             cur.execute(

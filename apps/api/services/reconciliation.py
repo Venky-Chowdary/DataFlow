@@ -1032,7 +1032,7 @@ def verify_target(
             password=dest.get("password", ""),
             schema=schema,
             connection_string=dest.get("connection_string", ""),
-            ssl=dest.get("ssl", True) if db_type == "postgresql" else dest.get("ssl", False),
+            ssl=dest.get("ssl", False) if db_type == "postgresql" else dest.get("ssl", False),
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,
@@ -1518,8 +1518,14 @@ def read_target_sample(
     columns: list[str] | None = None,
     limit: int = 50,
     sort_key: str | None = None,
+    key_values: list[Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Read a small ordered sample from destination for value reconciliation."""
+    """Read a small ordered sample from destination for value reconciliation.
+
+    When ``key_values`` is provided with ``sort_key``, prefer a keyed ``IN (...)``
+    read so append/upsert Gate-8 can prove fidelity against pre-existing rows
+    (ORDER BY … LIMIT alone often misses the batch keys in a large table).
+    """
     from connectors.sql_identifiers import (
         quote_column_list,
         quote_sql_identifier,
@@ -1528,6 +1534,13 @@ def read_target_sample(
     )
 
     cols = columns or ["*"]
+    keys = [k for k in (key_values or []) if k is not None and k != ""][: max(1, int(limit or 50))]
+
+    def _ssl_flag(default: bool = False) -> bool:
+        # Match list/probe defaults — ssl=True here previously emptied samples on
+        # local / non-TLS hosts while verify_target still counted rows.
+        return bool(dest.get("ssl", default))
+
     try:
         if db_type == "postgresql":
             from connectors.postgresql_conn import get_connection
@@ -1541,24 +1554,46 @@ def read_target_sample(
                 if sort_key
                 else "1"
             )
-            conn = get_connection(
-                host=dest.get("host", ""),
-                port=dest.get("port", 5432),
-                database=dest.get("database", ""),
-                username=dest.get("username", ""),
-                password=dest.get("password", ""),
-                connection_string=dest.get("connection_string", ""),
-                ssl=dest.get("ssl", True),
-            )
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"SELECT {col_sql} FROM {table_ref} ORDER BY {order_sql} LIMIT %s",
-                    (limit,),
-                )
-                names = [d[0] for d in cur.description]
-                rows = cur.fetchall()
-            conn.close()
-            return [dict(zip(names, row)) for row in rows]
+            ssl_flag = _ssl_flag(False)
+            last_exc: Exception | None = None
+            for attempt_ssl in (ssl_flag, not ssl_flag):
+                try:
+                    conn = get_connection(
+                        host=dest.get("host", ""),
+                        port=dest.get("port", 5432),
+                        database=dest.get("database", ""),
+                        username=dest.get("username", ""),
+                        password=dest.get("password", ""),
+                        connection_string=dest.get("connection_string", ""),
+                        ssl=attempt_ssl,
+                    )
+                    with conn.cursor() as cur:
+                        if keys and sort_key:
+                            key_col = quote_sql_identifier(
+                                require_safe_identifier(sort_key, preserve_case=True)
+                            )
+                            placeholders = ",".join(["%s"] * len(keys))
+                            cur.execute(
+                                f"SELECT {col_sql} FROM {table_ref} "
+                                f"WHERE {key_col} IN ({placeholders}) "
+                                f"ORDER BY {order_sql} LIMIT %s",
+                                (*keys, int(limit)),
+                            )
+                        else:
+                            cur.execute(
+                                f"SELECT {col_sql} FROM {table_ref} ORDER BY {order_sql} LIMIT %s",
+                                (limit,),
+                            )
+                        names = [d[0] for d in cur.description]
+                        rows = cur.fetchall()
+                    conn.close()
+                    return [dict(zip(names, row)) for row in rows]
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+            if last_exc:
+                return []
+            return []
 
         if db_type == "mysql":
             from connectors.mysql_conn import get_connection
@@ -1583,10 +1618,22 @@ def read_target_sample(
                 ssl=dest.get("ssl", False),
             )
             with conn.cursor() as cur:
-                cur.execute(
-                    f"SELECT {mysql_col_sql} FROM {table_ref} ORDER BY {mysql_order} LIMIT %s",
-                    (limit,),
-                )
+                if keys and sort_key:
+                    key_col = quote_sql_identifier(
+                        require_safe_identifier(sort_key, preserve_case=True), "`"
+                    )
+                    placeholders = ",".join(["%s"] * len(keys))
+                    cur.execute(
+                        f"SELECT {mysql_col_sql} FROM {table_ref} "
+                        f"WHERE {key_col} IN ({placeholders}) "
+                        f"ORDER BY {mysql_order} LIMIT %s",
+                        (*keys, int(limit)),
+                    )
+                else:
+                    cur.execute(
+                        f"SELECT {mysql_col_sql} FROM {table_ref} ORDER BY {mysql_order} LIMIT %s",
+                        (limit,),
+                    )
                 names = [d[0] for d in cur.description]
                 rows = cur.fetchall()
             conn.close()
@@ -1608,10 +1655,20 @@ def read_target_sample(
                 else "1"
             )
             conn = duckdb.connect(str(path))
-            rows = conn.execute(
-                f"SELECT {duckdb_col_sql} FROM {table_ref} ORDER BY {duckdb_order} LIMIT ?",
-                (int(limit),),
-            ).fetchall()
+            if keys and sort_key:
+                key_col = quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
+                placeholders = ",".join(["?"] * len(keys))
+                rows = conn.execute(
+                    f"SELECT {duckdb_col_sql} FROM {table_ref} "
+                    f"WHERE {key_col} IN ({placeholders}) "
+                    f"ORDER BY {duckdb_order} LIMIT ?",
+                    [*keys, int(limit)],
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"SELECT {duckdb_col_sql} FROM {table_ref} ORDER BY {duckdb_order} LIMIT ?",
+                    (int(limit),),
+                ).fetchall()
             names = [d[0] for d in conn.description]
             conn.close()
             return [dict(zip(names, row)) for row in rows]

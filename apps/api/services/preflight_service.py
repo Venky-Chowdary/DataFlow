@@ -1018,11 +1018,22 @@ def inspect_destination_for_preflight(
     out["columns"] = cols
     out["column_types"] = schema
     stream = dest_collection or dest_table or endpoint.collection or endpoint.table
-    if stream and cols:
+    # Prefer introspect's explicit existence (True / False / None). Recomputing
+    # with exact string match broke public.jobs vs jobs and wiped create-new.
+    if "table_exists" in info:
+        out["table_exists"] = info.get("table_exists")
+    elif stream and cols:
         out["table_exists"] = True
     elif stream and info.get("objects"):
-        names = {o.get("name") for o in info.get("objects", []) if isinstance(o, dict)}
-        out["table_exists"] = stream in names
+        from src.transfer.endpoint_intelligence import _object_name_match
+
+        names = [
+            str(o.get("name") or "")
+            for o in (info.get("objects") or [])
+            if isinstance(o, dict)
+        ]
+        matched = _object_name_match(names, str(stream))
+        out["table_exists"] = True if matched else False
     out["can_create_table"] = out["connected"]
     out["can_write"] = out["connected"]
 

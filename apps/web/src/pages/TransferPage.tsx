@@ -1053,7 +1053,12 @@ export function TransferPage({
   const mappingGenRef = useRef(0);
 
   const applyPipelineMappings = useCallback(
-    async (targetCols?: string[], targetSchema?: Record<string, string>, analysisOverride?: import("../lib/types").EnhancedAnalysis | null) => {
+    async (
+      targetCols?: string[],
+      targetSchema?: Record<string, string>,
+      analysisOverride?: import("../lib/types").EnhancedAnalysis | null,
+      destinationTableExistsOverride?: boolean | null,
+    ) => {
       const sourceCols =
         (parsed?.columns?.length ? parsed.columns : null)
         ?? analysisOverride?.columns.map((c) => c.column_name)
@@ -1066,6 +1071,10 @@ export function TransferPage({
       const gen = ++mappingGenRef.current;
       const rows = parsed?.data ?? parsed?.sample_data;
       const analysisCols = analysisOverride?.columns ?? analysis?.columns;
+      const existsForMap =
+        destinationTableExistsOverride !== undefined
+          ? destinationTableExistsOverride
+          : destTableExists;
       const commitMappings = (
         next: EditableMapping[],
         llmUsed: boolean,
@@ -1119,7 +1128,7 @@ export function TransferPage({
               destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
               sync_mode: syncMode,
               destination_table_exists:
-                destKindMode === "database" ? destTableExists : false,
+                destKindMode === "database" ? existsForMap : false,
             });
           }
         } else {
@@ -1137,7 +1146,7 @@ export function TransferPage({
             destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
             sync_mode: syncMode,
             destination_table_exists:
-              destKindMode === "database" ? destTableExists : false,
+              destKindMode === "database" ? existsForMap : false,
           });
           // Do NOT create an empty draft plan here. Fire-and-forget create races
           // Validate (which may sync a good plan) and leaves Execute pointing at a
@@ -1259,9 +1268,15 @@ export function TransferPage({
     columns: string[];
     schema: Record<string, string>;
     tableExists: boolean | null;
+    connected: boolean | null;
   }> => {
     if (destKindMode !== "database" || !connectorId) {
-      return { columns: destColumns, schema: destSchemaMap, tableExists: destTableExists };
+      return {
+        columns: destColumns,
+        schema: destSchemaMap,
+        tableExists: destTableExists,
+        connected: null,
+      };
     }
     const gen = ++destSchemaGenRef.current;
     const tableKey = `${connectorId}|${destType}|${targetDb}|${destSchema}|${targetCollection.trim()}`;
@@ -1274,12 +1289,18 @@ export function TransferPage({
         destination: buildDestinationEndpoint(),
       });
       if (gen !== destSchemaGenRef.current) {
-        return { columns: destColumns, schema: destSchemaMap, tableExists: destTableExists };
+        return {
+          columns: destColumns,
+          schema: destSchemaMap,
+          tableExists: destTableExists,
+          connected: null,
+        };
       }
       const objectNames = (destination.objects ?? [])
         .map((o) => (o.name || "").trim())
         .filter(Boolean);
       setDestObjectNames(objectNames);
+      const connected = destination.connected !== false;
 
       // No table typed yet — only refresh the picker list.
       if (!targetCollection.trim()) {
@@ -1287,7 +1308,7 @@ export function TransferPage({
         setDestSchemaMap({});
         setDestTableExists(null);
         destSchemaTableKeyRef.current = tableKey;
-        return { columns: [], schema: {}, tableExists: null };
+        return { columns: [], schema: {}, tableExists: null, connected };
       }
 
       const columns = destination.columns ?? [];
@@ -1309,7 +1330,10 @@ export function TransferPage({
       });
       // Probe list / columns win over a soft-fail "missing" flag (MySQL jobs bug).
       let resolvedExists: boolean | null;
-      if (listed || destination.table_exists === true || columns.length > 0) {
+      if (destination.connected === false) {
+        // Never invent create-new when the destination is unreachable.
+        resolvedExists = null;
+      } else if (listed || destination.table_exists === true || columns.length > 0) {
         resolvedExists = true;
       } else if (destination.table_exists === false) {
         resolvedExists = false;
@@ -1365,10 +1389,16 @@ export function TransferPage({
         columns: nextColumns,
         schema: nextSchema,
         tableExists: resolvedExists,
+        connected,
       };
     } catch (e) {
       if (gen !== destSchemaGenRef.current) {
-        return { columns: destColumns, schema: destSchemaMap, tableExists: destTableExists };
+        return {
+          columns: destColumns,
+          schema: destSchemaMap,
+          tableExists: destTableExists,
+          connected: null,
+        };
       }
       // Keep last-known schema on transient errors so the demo does not blank out.
       // Do not force "table missing" — unknown is safer than a false create promise.
@@ -1378,7 +1408,7 @@ export function TransferPage({
         message: e instanceof Error ? e.message : "Retry or continue — existence will be rechecked on Validate.",
         tone: "warning",
       });
-      return { columns: destColumns, schema: destSchemaMap, tableExists: null };
+      return { columns: destColumns, schema: destSchemaMap, tableExists: null, connected: false };
     } finally {
       if (gen === destSchemaGenRef.current) setDestSchemaLoading(false);
     }
@@ -2399,6 +2429,7 @@ export function TransferPage({
       let freshDestCols = destColumns;
       let freshDestSchema = destSchemaMap;
       let loadedTableExists: boolean | null = destTableExists;
+      let loadedConnected: boolean | null = null;
       if (destKindMode === "database") {
         bump(22, "Loading destination schema…");
         let loaded = await loadDestinationSchema();
@@ -2407,6 +2438,7 @@ export function TransferPage({
           loaded.columns.length === 0
           && loaded.tableExists !== false
           && targetCollection.trim()
+          && loaded.connected !== false
         ) {
           bump(28, "Retrying destination schema…");
           await new Promise((r) => window.setTimeout(r, 400));
@@ -2415,18 +2447,23 @@ export function TransferPage({
         freshDestCols = loaded.columns;
         freshDestSchema = loaded.schema;
         loadedTableExists = loaded.tableExists;
+        loadedConnected = loaded.connected;
       }
       bump(42, "Building transfer plan…");
       await loadTransferPlan();
       let mapped: EditableMapping[] = [];
       // Create-new when the table is confirmed missing OR still unknown after probe
       // (operator typed a name; Destination already promises CREATE IF NOT EXISTS).
-      // Only refuse inventing create-new when the table is confirmed present but
-      // columns failed to load — that needs a retry, not identity mapping.
+      // Never invent create-new when the destination was unreachable.
       const canCreateNew =
         destKindMode !== "database"
         || loadedTableExists === false
-        || (loadedTableExists == null && freshDestCols.length === 0 && Boolean(targetCollection.trim()));
+        || (
+          loadedTableExists == null
+          && freshDestCols.length === 0
+          && Boolean(targetCollection.trim())
+          && loadedConnected !== false
+        );
       const mapTargets =
         freshDestCols.length > 0
           ? freshDestCols
@@ -2435,9 +2472,14 @@ export function TransferPage({
             : null;
       if (mapTargets === null) {
         toast({
-          title: "Existing table — columns not loaded",
+          title:
+            loadedConnected === false
+              ? "Destination unreachable"
+              : "Existing table — columns not loaded",
           message:
-            "Destination table is present, but schema metadata failed. Retry Destination/Map before matching columns (do not treat this as create-new).",
+            loadedConnected === false
+              ? "Could not connect to the destination. Fix the connector (Test on Connectors) before Map invents create-new fields."
+              : "Destination table is present, but schema metadata failed. Retry Destination/Map before matching columns (do not treat this as create-new).",
           tone: "warning",
         });
         mapped = columnMappings;
@@ -2462,10 +2504,10 @@ export function TransferPage({
             await runSourceColumnAnalysis(parsed, { manageAnalyzing: false });
           }
           bump(72, "Matching source to create-new fields…");
-          mapped = await applyPipelineMappings(undefined, {}) ?? [];
+          mapped = await applyPipelineMappings(undefined, {}, undefined, loadedTableExists === false ? false : loadedTableExists) ?? [];
         } else if (analysis?.columns.length || currentSourceColumns.length) {
           bump(65, "Matching source to create-new fields…");
-          mapped = await applyPipelineMappings(undefined, {}) ?? [];
+          mapped = await applyPipelineMappings(undefined, {}, undefined, loadedTableExists === false ? false : loadedTableExists) ?? [];
         } else {
           toast({
             title: "Source schema required",
@@ -2481,10 +2523,10 @@ export function TransferPage({
           await runSourceColumnAnalysis(parsed, { manageAnalyzing: false });
         }
         bump(72, "Matching source to destination fields…");
-        mapped = await applyPipelineMappings(mapTargets, freshDestSchema) ?? [];
+        mapped = await applyPipelineMappings(mapTargets, freshDestSchema, undefined, loadedTableExists) ?? [];
       } else if (analysis?.columns.length || currentSourceColumns.length) {
         bump(65, "Matching source to destination fields…");
-        mapped = await applyPipelineMappings(mapTargets, freshDestSchema) ?? [];
+        mapped = await applyPipelineMappings(mapTargets, freshDestSchema, undefined, loadedTableExists) ?? [];
       } else {
         toast({
           title: "Source schema required",
@@ -4815,7 +4857,7 @@ export function TransferPage({
             )}
           </div>
             {/* Status lives below the row so dynamic copy never shifts aligned inputs */}
-            {destDriverType !== "mongodb" && destDriverType !== "dynamodb" && (
+            {destDriverType !== "dynamodb" && (
               <div
                 className={`df2-dest-target-status${
                   destSchemaLoading
@@ -4853,13 +4895,20 @@ export function TransferPage({
                   <>
                     <DtIcon name="sparkle" size={14} />
                     <p>
-                      <strong>Table not found.</strong> DataFlow will create it automatically on first write.
+                      <strong>
+                        {destDriverType === "mongodb" ? "Collection not found." : "Table not found."}
+                      </strong>{" "}
+                      DataFlow will create it automatically on first write.
                     </p>
                   </>
                 ) : (
                   <>
                     <DtIcon name="activity" size={14} />
-                    <p>Enter a table name. If it does not exist yet, DataFlow creates it on first write.</p>
+                    <p>
+                      {destDriverType === "mongodb"
+                        ? "Enter a collection name. If it does not exist yet, DataFlow creates it on first write."
+                        : "Enter a table name. If it does not exist yet, DataFlow creates it on first write."}
+                    </p>
                   </>
                 )}
               </div>

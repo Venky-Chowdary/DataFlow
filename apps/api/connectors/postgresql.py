@@ -28,6 +28,7 @@ def test_postgresql(
             connection_string=connection_string,
             ssl=ssl,
         )
+        schema_name = schema or "public"
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -35,9 +36,9 @@ def test_postgresql(
                 FROM information_schema.tables
                 WHERE table_schema = %s AND table_type = 'BASE TABLE'
                 ORDER BY table_name
-                LIMIT 50
+                LIMIT 200
                 """,
-                (schema or "public",),
+                (schema_name,),
             )
             tables = [row[0] for row in cur.fetchall()]
 
@@ -45,7 +46,7 @@ def test_postgresql(
         return ConnectResult(
             ok=True,
             tables=tables or ["(no tables in schema)"],
-            message=f"PostgreSQL connected — {len(tables)} tables in schema '{schema or 'public'}'",
+            message=f"PostgreSQL connected — {len(tables)} tables in schema '{schema_name}'",
             driver="psycopg2",
         )
     except Exception as exc:

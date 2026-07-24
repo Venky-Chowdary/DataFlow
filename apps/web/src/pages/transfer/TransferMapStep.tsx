@@ -227,9 +227,11 @@ export function TransferMapStep({
                 ? " · existing table (columns pending)"
                 : destColumns.length === 0 && !destSchemaLoading && destTableExists == null
                   ? " · destination schema unknown"
-                  : destColumns.length > 0
-                    ? ` · ${destColumns.length} dest columns`
-                    : ""}
+                  : destColumns.length > 0 && destTableExists === true
+                    ? ` · match existing · ${destColumns.length} dest columns`
+                    : destColumns.length > 0
+                      ? ` · ${destColumns.length} dest columns`
+                      : ""}
             {streamNames.length > 1 ? ` · ${streamNames.length} streams` : ""}
           </p>
         </div>

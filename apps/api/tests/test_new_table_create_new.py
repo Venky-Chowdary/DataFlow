@@ -44,16 +44,18 @@ def test_mysql_missing_table_stamps_table_exists_false():
     assert "not found" in (out.get("message") or "").lower() or "created" in (out.get("message") or "").lower()
 
 
-def test_attach_db_sample_exception_does_not_wipe_false():
+def test_attach_db_sample_miss_still_probes_before_create_new():
+    """Unlisted tables must still run column introspect (cross-schema heal) before create-new."""
     from src.transfer import endpoint_intelligence as ei
 
-    out = {"table_exists": False, "columns": [], "schema": {}, "message": "missing"}
-    # Simulate the except path preserving False
-    if out.get("table_exists") not in (True, False):
-        out["table_exists"] = None
-    assert out["table_exists"] is False
-
-    # And the helper short-circuits when already False + not listed
+    out = {
+        "table_exists": False,
+        "columns": [],
+        "schema": {},
+        "message": "missing",
+        "objects": [],
+        "auto_create": [],
+    }
     endpoint = MagicMock()
     endpoint.table = "airports"
     endpoint.collection = ""
@@ -62,8 +64,17 @@ def test_attach_db_sample_exception_does_not_wipe_false():
     with patch.object(ei, "resolve_connector_config", return_value=cfg):
         with patch.object(ei, "_mark_table_listed_if_present", return_value=None):
             with patch.object(ei, "_object_name_match", return_value=None):
-                with patch.object(ei, "_introspect_table_schema") as introspect:
+                with patch.object(ei, "_introspect_table_schema", return_value={}) as introspect:
                     ei._attach_db_sample(out, endpoint)
-                    introspect.assert_not_called()
+                    assert introspect.called
     assert out["table_exists"] is False
     assert "created automatically" in (out.get("message") or "").lower()
+
+
+def test_attach_db_sample_exception_preserves_false():
+    from src.transfer import endpoint_intelligence as ei
+
+    out = {"table_exists": False, "columns": [], "schema": {}, "message": "missing"}
+    if out.get("table_exists") not in (True, False):
+        out["table_exists"] = None
+    assert out["table_exists"] is False
