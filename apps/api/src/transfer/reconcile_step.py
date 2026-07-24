@@ -232,7 +232,11 @@ def run_reconciliation(
     # stashed so append/upsert Gate-8 can still prove key-aligned fidelity.
     sample_records = list(records or [])
     if not sample_records:
-        stashed = dest_summary.get("reconcile_sample") or dest_summary.get("sample_records") or []
+        stashed = (
+            dest_summary.get("reconcile_sample")
+            or dest_summary.get("sample_records")
+            or []
+        )
         if isinstance(stashed, list):
             sample_records = [r for r in stashed if isinstance(r, dict)]
 

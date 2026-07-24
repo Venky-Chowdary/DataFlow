@@ -1672,6 +1672,80 @@ def read_target_sample(
             names = [d[0] for d in conn.description]
             conn.close()
             return [dict(zip(names, row)) for row in rows]
+
+        if db_type == "mongodb":
+            from connectors.mongodb_common import _mongo_client, normalize_mongodb_connection_string
+
+            try:
+                conn_str = normalize_mongodb_connection_string(
+                    dest.get("connection_string", ""),
+                    database=dest.get("database", ""),
+                    host=dest.get("host", ""),
+                    port=int(dest.get("port") or 27017),
+                    username=dest.get("username", ""),
+                    password=dest.get("password", ""),
+                    ssl=bool(dest.get("ssl", False)),
+                    auth_source=dest.get("auth_source", ""),
+                )
+                client = _mongo_client(conn_str)
+                db = client[dest.get("database") or "test"]
+                coll = db[table_name]
+                query_filter: dict[str, Any] = {}
+                if keys and sort_key:
+                    # Mongo $in is type-sensitive; widened key set matches strings,
+                    # integers, and decimals that the writer may have produced.
+                    widened: set[Any] = set()
+                    for k in keys:
+                        widened.add(k)
+                        try:
+                            if str(k).isdigit():
+                                widened.add(int(k))
+                        except Exception:
+                            pass
+                        try:
+                            widened.add(float(k))
+                        except Exception:
+                            pass
+                    query_filter = {sort_key: {"$in": list(widened)}}
+                cursor = coll.find(query_filter)
+                if sort_key:
+                    cursor = cursor.sort(sort_key, 1)
+                return list(cursor.limit(int(limit)))
+            except Exception:
+                return []
+
+        if db_type == "sqlite":
+            import sqlite3
+
+            path = dest.get("connection_string") or dest.get("database", "")
+            if not path:
+                return []
+            sqlite_col_sql = "*" if cols == ["*"] else quote_column_list(
+                [require_safe_identifier(c, preserve_case=True) for c in cols]
+            )
+            table_ref = quote_table_ref(table_name, dialect="sqlite")
+            sqlite_order = (
+                quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
+                if sort_key
+                else "1"
+            )
+            conn = sqlite3.connect(str(path))
+            try:
+                if keys and sort_key:
+                    key_col = quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
+                    placeholders = ",".join(["?"] * len(keys))
+                    sql = f"SELECT {sqlite_col_sql} FROM {table_ref} WHERE {key_col} IN ({placeholders}) ORDER BY {sqlite_order} LIMIT ?"
+                    cur = conn.execute(sql, [*keys, int(limit)])
+                else:
+                    sql = f"SELECT {sqlite_col_sql} FROM {table_ref} ORDER BY {sqlite_order} LIMIT ?"
+                    cur = conn.execute(sql, (int(limit),))
+                rows = cur.fetchall()
+                names = [d[0] for d in cur.description] if cur.description else []
+                return [dict(zip(names, row)) for row in rows]
+            except Exception:
+                return []
+            finally:
+                conn.close()
     except Exception:
         return []
     return []

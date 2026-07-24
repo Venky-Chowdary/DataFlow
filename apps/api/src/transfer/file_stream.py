@@ -996,6 +996,16 @@ def stream_file_to_database(
     dest_summary["rejected_details"] = rejected_details[:2000]
     dest_summary["warnings"] = warning_samples[:10]
     dest_summary["error_policy"] = "quarantine" if (rejected_total or coerced_null_total) else "none"
+    # Stash a bounded source sample so append/upsert Gate-8 reconciliation can
+    # perform key-aligned read-back verification instead of failing closed.
+    dest_summary["source_row_count"] = total_rows
+    if sample_rows:
+        filtered_sample = sample_rows
+        if source_filter:
+            from services.row_filter import apply_row_filter
+
+            filtered_sample = apply_row_filter(sample_rows, source_filter)
+        dest_summary["reconcile_sample"] = (filtered_sample or [])[:50]
 
     if dest_type in ("postgresql", "mysql", "redshift") and job_id:
         try:

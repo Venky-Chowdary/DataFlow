@@ -34,7 +34,10 @@ class RedisScanState:
     @classmethod
     def from_any(cls, value: Any) -> "RedisScanState":
         if value is None:
-            return cls()
+            state = cls()
+            state.pending_keys = []
+            state.emitted_keys = set()
+            return state
         if isinstance(value, cls):
             if value.pending_keys is None:
                 value.pending_keys = []
