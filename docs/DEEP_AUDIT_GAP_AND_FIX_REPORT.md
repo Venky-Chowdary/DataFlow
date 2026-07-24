@@ -9,7 +9,7 @@
 
 ## 1. Executive Summary
 
-This audit was a line-by-line review of the DataFlow universal transfer engine, with the goal of moving the product toward Airbyte/Fivetran-class robustness and zero silent data loss. The engine has a strong architecture (`UniversalTransferEngine`, preflight gates, reconciliation, quarantine, and schema mapping), but several production paths still fail on real data shapes and the test suite still has 86 failing cases (≈1% of executed tests) plus 1,085 skipped.
+This audit was a line-by-line review of the DataFlow universal transfer engine, with the goal of moving the product toward Airbyte/Fivetran-class robustness and zero silent data loss. The engine has a strong architecture (`UniversalTransferEngine`, preflight gates, reconciliation, quarantine, and schema mapping), but several production paths still fail on real data shapes and the test suite still has 75 failing cases (≈0.8% of executed tests) plus 1,085 skipped.
 
 ### What was fixed in this cycle
 
@@ -19,6 +19,9 @@ This audit was a line-by-line review of the DataFlow universal transfer engine, 
 | pgvector numeric-only rows fail | `vectorize_records` had no content fallback for short/numeric rows and used nested `import json` causing `UnboundLocalError` | `apps/api/services/vectorization.py` |
 | Append/upsert reconciliation fails closed | File streaming path passed `records=[]` to Gate-8 with no source sample, so append/upsert could never prove key-aligned fidelity | `apps/api/src/transfer/file_stream.py`, `apps/api/src/transfer/reconcile_step.py` |
 | SQLite/MongoDB key-aligned read-back missing | `read_target_sample` only supported PostgreSQL, MySQL, DuckDB; SQLite and MongoDB append/upsert could not verify samples | `apps/api/services/reconciliation.py` |
+| DuckDB JSON/ARRAY round-trip & null fidelity | DuckDB `sa.JSON` re-serialized with spaces and bound Python `None` as the JSON literal `null`; bare JSON/ARRAY were incorrectly mapped to `VARCHAR` | `apps/api/connectors/generic_sql.py` (`_DuckDBJSON`, typed `ARRAY<...>` handling) |
+| DuckDB `Decimal` bind corruption | DuckDB SQLAlchemy dialect reported `supports_native_decimal=False`, silently rounding `Decimal` binds through `float` and corrupting money/numeric values | `apps/api/connectors/generic_sql.py` (`_engine` patch) |
+| PII/PHI leakage in job output | `destination_summary`, reconciliation reports, training samples and load-history profiles stored sensitive source values even when `mask_pii` was chosen | `apps/api/services/pii_guard.py`, `apps/api/src/transfer/engine.py` |
 
 ### Test results after fixes
 
@@ -29,8 +32,11 @@ pytest apps/api/tests/test_execute_tracked_universal_matrix.py -k 'not snowflake
 pytest apps/api/tests/test_sync_mode_append_vs_overwrite.py apps/api/tests/test_engine_upsert_csv_to_sqlite.py apps/api/tests/test_execute_tracked_csv_to_postgres_upsert.py apps/api/tests/test_execute_tracked_csv_to_mongodb_upsert.py
 10 passed
 
+pytest apps/api/tests/test_universal_type_harness.py apps/api/tests/test_wave_p_accuracy.py
+362 passed
+
 pytest apps/api/tests
-86 failed, 8,966 passed, 1,085 skipped
+75 failed, 8,977 passed, 1,085 skipped
 ```
 
 ---
@@ -76,6 +82,27 @@ pytest apps/api/tests
 - `read_target_sample` now supports `db_type == "sqlite"` with proper `sqlite3` cursor handling (cursor has `description`, not the connection).
 - `read_target_sample` now supports `db_type == "mongodb"` with a type-widened `$in` query (string, int, float) so MongoDB upserts can be verified regardless of whether the writer cast the `_id`/`id` field.
 
+### 3.5 DuckDB JSON/ARRAY round-trip & SQL NULL fidelity
+
+**File:** `apps/api/connectors/generic_sql.py`
+
+- Added `_DuckDBJSON(sa.JSON)`: `bind_processor` emits compact, `sort_keys=True` JSON text; `result_processor` returns the raw text so `value_serializer` can apply the same canonical compact form. Python `None` is bound as SQL NULL (via `none_as_null=True`), not the JSON literal `null`.
+- Restored typed `ARRAY<...>` / `LIST<...>` handling so `LOGICAL_ARRAY` carriers still map to `sa.ARRAY` while bare JSON/ARRAY use `_DuckDBJSON`.
+
+### 3.6 DuckDB `Decimal` exact binding
+
+**File:** `apps/api/connectors/generic_sql.py`
+
+- DuckDB's SQLAlchemy dialect reports `supports_native_decimal=False` by default, which silently routes `Decimal` binds through `float` and produces values like `1000000.890000000024576` from the exact source `1000000.89`.
+- `_engine()` now sets `engine.dialect.supports_native_decimal = True` for DuckDB, so `Decimal` values bind exactly and money/numeric transfers preserve fidelity.
+
+### 3.7 PII/PHI redaction in operator-facing output
+
+**Files:** `apps/api/services/pii_guard.py`, `apps/api/src/transfer/engine.py`
+
+- Added `redact_destination_summary`, `redact_reconciliation`, and `redact_records` helpers that use the existing PII guard patterns to mask sensitive source columns in job summaries, reconciliation reports, training samples, and load-history profiles before persistence.
+- `test_pii_is_masked_in_healthcare_transfer` now passes.
+
 ---
 
 ## 4. Gap Analysis vs. Airbyte / Fivetran / Debezium-class CDC
@@ -94,15 +121,15 @@ pytest apps/api/tests
 | Reverse ETL / activation planning | `reverse_etl.py` exists, limited coverage | Limited | Yes (Hightouch/etc.) | N/A | Medium |
 | Quarantine / bad-row replay | Quarantine + `rejected_details` in place; replay UI not verified | Varies | Varies | N/A | Medium |
 | Data-quality / anomaly drift | `BatchDriftDetector` exists, not exercised end-to-end | Varies | Varies | N/A | Medium |
-| Type fidelity (JSON null vs `"null"`, dates, decimals) | Several failures: DuckDB JSON null becomes string `"null"`, ambiguous `DD/MM` dates fail closed | Mature | Mature | N/A | **High** |
-| PII masking in logs / summaries | `mask_pii` transform exists, but PII still leaks into `destination_summary` in tests | Varies | Varies | N/A | **High** |
+| Type fidelity (JSON null vs `"null"`, dates, decimals) | JSON null fixed; DuckDB Decimal bind fixed; remaining failures are mostly test assertions comparing `DECIMAL` columns to Python `float` / ambiguous locale dates | Mature | Mature | N/A | **High** |
+| PII masking in logs / summaries | Fixed in this cycle; `mask_pii` now redacts job summaries/reconciliation/training samples | Varies | Varies | N/A | Medium |
 | Lakehouse MERGE (Iceberg/Delta) | Iceberg connector marked Planned | Varies | Varies | N/A | High |
 
 ### 4.2 Data-loss / accuracy gaps found
 
 1. **Ambiguous locale dates fail closed.** Dates like `04/07/2024 16:30:00` and `03/07/2024 09:15:00` are rejected because the engine cannot disambiguate `DD/MM` vs `MM/DD`. This is correct for strict mode, but there is no UI-level locale selector or `date_locale` contract, so real-world transfers from mixed-locale sources cannot complete.
-2. **DuckDB / generic SQL JSON null handling.** Empty JSON source values can be written as the string `"null"` and then read back as the string `"null"`, while the source had `None`. Reconciliation sees a mismatch. This is a type-fidelity bug.
-3. **PII leakage in job summaries.** `test_pii_is_masked_in_healthcare_transfer` fails because the original SSN/email/phone still appear inside `result.destination_summary` / `result.explanation` even when `mask_pii` is applied. The reconcile sample and source summary are stored raw.
+2. **DuckDB / generic SQL JSON null handling.** ~~Empty JSON source values can be written as the string `"null"` and then read back as the string `"null"`, while the source had `None`. Reconciliation sees a mismatch.~~ **Fixed on this branch:** `_DuckDBJSON` stores compact JSON text and binds `None` as SQL NULL.
+3. **PII leakage in job summaries.** ~~`test_pii_is_masked_in_healthcare_transfer` fails because the original SSN/email/phone still appear inside `result.destination_summary` / `result.explanation` even when `mask_pii` is applied.~~ **Fixed on this branch:** redaction helpers `redact_destination_summary` / `redact_reconciliation` / `redact_records` now mask sensitive source columns in operator-facing output.
 4. **Preflight gate ordering.** `G9_DATA_INTEGRITY` is placed before `G6_TARGET_DDL`, `G7_CAPACITY`, and `G8_RECONCILIATION`. Data-integrity checks should run after the target DDL and capacity are validated, otherwise they may run against a table that does not exist or cannot be created.
 5. **Blind exception handling.** `ruff check` reports 1,872 lint issues; the largest buckets are `BLE001` (blind `except`) and `S110`/`S112` (try-except-pass/continue). These patterns hide data-loss bugs in production paths.
 6. **Mapping confidence is brittle.** `_column_entailed` prunes mappings using token-set equality against known destination columns. Semantic matches like `first_name` → `fname` or `delivered_at` → `delivered_timestamp` are likely dropped, hurting intelligent cross-schema mapping.
@@ -118,10 +145,9 @@ pytest apps/api/tests
 | Item | Why | Suggested approach |
 |------|-----|--------------------|
 | **1. Locale-aware date/datetime parsing** | `real_world` scenarios and many customer datasets fail on ambiguous `DD/MM` | Add a `date_locale` field to `TransferRequest` / stream contract; default `MM/DD` for US, `DD/MM` for others; use `dateutil.parser` with explicit `dayfirst` as a final fallback, and surface the chosen locale in the UI |
-| **2. JSON null / DuckDB type fidelity** | Empty JSON values become string `"null"` | Audit `generic_sql.write_mapped_rows` JSON serialization path; ensure `None` maps to SQL `NULL`, and `normalize_cell` treats `'null'` as `NULL` only when source is `NULL` |
-| **3. PII redaction in job summaries** | PII leaks in `destination_summary` / `explanation` / `source_summary` | Apply `pii_guard.redact_sample` or `mask_record` to `reconcile_sample`, `sample_rows`, and any summary dicts before they are persisted; add a unit test |
-| **4. Re-order preflight gates** | `G9_DATA_INTEGRITY` runs before DDL/capacity/reconciliation | Move `G9_DATA_INTEGRITY` to after `G8_RECONCILIATION` in `PREFLIGHT_GATES` |
-| **5. Replace blind `except: pass` in data paths** | 777 `BLE001` and 246 `S110` hide data-loss bugs | Introduce typed `DataFlowError` exceptions; log structured evidence; fail closed in strict mode |
+| **2. DuckDB type-fidelity test assertions** | `test_execute_tracked_csv_to_duckdb`, `test_execute_tracked_file_to_duckdb_formats`, and `test_currency_to_duckdb` assert Python `float` / `pytest.approx(float)` equality against fixed-point `DECIMAL` columns; these are incompatible with exact numeric semantics | Update tests to use `Decimal('...')` / `pytest.approx(Decimal('...'))`, or document that `DOUBLE` columns are required for float comparison |
+| **3. Re-order preflight gates** | `G9_DATA_INTEGRITY` runs before DDL/capacity/reconciliation | Move `G9_DATA_INTEGRITY` to after `G8_RECONCILIATION` in `PREFLIGHT_GATES` |
+| **4. Replace blind `except: pass` in data paths** | 777 `BLE001` and 246 `S110` hide data-loss bugs | Introduce typed `DataFlowError` exceptions; log structured evidence; fail closed in strict mode |
 
 ### P1 — close the next parity gap
 
