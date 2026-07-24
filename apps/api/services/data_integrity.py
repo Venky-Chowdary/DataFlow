@@ -355,8 +355,7 @@ def _check_duplicate_keys(
     if dupes:
         sample = ", ".join(f"{v}×{c}" for v, c in dupes[:3])
         issues.append(f"{primary_key}: duplicate key values ({sample})")
-    mode = (validation_mode or "strict").strip().lower()
-    blocks = len(issues) > 0 and mode in {"strict", "maximum"}
+    blocks = len(issues) > 0
     return {
         "check": "duplicate_keys",
         "passed": not blocks,
@@ -641,25 +640,11 @@ def run_integrity_audit(
         )
         checks.append(_check_financial_precision(mappings, source_types, rows))
         checks.append(_check_required_nulls(mappings, rows, null_rate_max=cfg["null_rate_max"], dest_kind=dest_kind, primary_key=pk, validation_mode=validation_mode))
-        # Append/overwrite do not require a unique identity contract, but in
-        # strict/maximum validation a resolved natural key with duplicates is a
-        # data-quality blocker (same honesty bar as required-nulls).
-        from services.primary_key import sync_requires_unique_identity
-
-        _append_like = {
-            "full_refresh_append",
-            "incremental_append",
-            "full_refresh_overwrite",
-            "overwrite",
-            "full_refresh",
-        }
-        needs_pk_uniqueness = sync_requires_unique_identity(sync_mode) or (
-            mode in {"strict", "maximum"}
-            and pk is not None
-            and (sync_mode or "").strip().lower() not in _append_like
-        )
-        dup_pk = pk if needs_pk_uniqueness else None
-        checks.append(_check_duplicate_keys(mappings, rows, validation_mode, dest_kind=dest_kind, primary_key=dup_pk))
+        # A resolved natural key with duplicates is a data-quality blocker in every
+        # sync mode. Even overwrite/append cannot insert two rows with the same
+        # destination primary key; surfacing this on Validate prevents the Run
+        # batch audit from failing later with the same rows.
+        checks.append(_check_duplicate_keys(mappings, rows, validation_mode, dest_kind=dest_kind, primary_key=pk))
         checks.append(
             _check_mapping_confidence(mappings, confidence_min=cfg["confidence"], validation_mode=validation_mode)
         )
