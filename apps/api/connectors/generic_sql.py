@@ -14,6 +14,7 @@ import base64
 import contextlib
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
@@ -29,7 +30,7 @@ from connectors.sql_temporal import (
     is_sql_data_error,
     logical_to_temporal_ddl,
 )
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, json_default
 
 try:
     import sqlalchemy as sa
@@ -431,7 +432,13 @@ def _engine(cfg: dict[str, Any]) -> Any:
         if db_type in ("duckdb", "sqlite") or "duckdb" in connection_string or "sqlite://" in connection_string:
             from sqlalchemy.pool import NullPool
 
-            return create_engine(url, poolclass=NullPool)
+            engine = create_engine(url, poolclass=NullPool)
+            # DuckDB's SQLAlchemy dialect reports supports_native_decimal=False by
+            # default, which silently rounds Decimal binds through float and corrupts
+            # money/numeric fidelity.  Decimal is native in DuckDB, so enable it.
+            if db_type == "duckdb" or "duckdb" in connection_string:
+                engine.dialect.supports_native_decimal = True
+            return engine
         return create_engine(url, pool_pre_ping=True, pool_recycle=600)
     except (NoSuchModuleError, ImportError) as exc:
         # SQLAlchemy raises NoSuchModuleError when the dialect is not installed.
@@ -656,6 +663,43 @@ def _logical_type_from_sa(col_type: Any) -> str:
     return normalize_logical_type(repr_)
 
 
+class _DuckDBJSON(sa.JSON):
+    """JSON type that stores compact, deterministic JSON text in DuckDB.
+
+    SQLAlchemy's default ``sa.JSON`` re-serializes dict/list with spaces and
+    binds Python ``None`` as the JSON literal ``null``.  This subclass keeps
+    source JSON text compact and treats ``None`` as SQL NULL so round-trips are
+    exact and checksums line up.
+    """
+
+    __visit_name__ = "JSON"
+
+    def bind_processor(self, dialect: Any) -> Callable[[Any], Any] | None:
+        def process(value: Any) -> Any:
+            if value is None:
+                return None
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except Exception:
+                    return value
+            if isinstance(value, (dict, list, tuple, set, frozenset)):
+                return json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                    default=json_default,
+                )
+            return value
+        return process
+
+    def result_processor(self, dialect: Any, coltype: Any) -> Callable[[Any], Any] | None:
+        # DuckDB returns JSON values as text.  Keep them as text so the
+        # downstream value serializer can apply the same canonical compact JSON.
+        return lambda value: value
+
+
 def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> Any:
     """Map a DataFlow logical type to a SQLAlchemy type that compiles for the engine.
 
@@ -775,13 +819,16 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
             return postgresql.UUID()
         return _maybe_nullable(sa.String(36))
     if t in (LOGICAL_JSON, LOGICAL_ARRAY):
-        # DuckDB advertises VARCHAR[] / JSON in type_system — honor that at bind time.
+        # DuckDB: use a custom JSON type that stores compact text and binds
+        # Python None as SQL NULL.  Typed ``ARRAY<...>`` carriers still map to
+        # ``sa.ARRAY`` for callers that introspect the SQLAlchemy type.
         if db_type == "duckdb":
-            # DuckDB native JSON/VARCHAR[] re-serializes with spaces and binds
-            # Python None as the JSON null literal. Store semi-structured values
-            # as VARCHAR so the exact source text round-trips and None becomes
-            # SQL NULL.
-            return _maybe_nullable(sa.Text())
+            if t == LOGICAL_ARRAY:
+                match = re.match(r"^(?:ARRAY|LIST)<(.+)>$", raw, re.IGNORECASE)
+                if match:
+                    element = match.group(1).strip()
+                    return sa.ARRAY(_sa_type_for_logical(element, dialect_name, db_type))
+            return _DuckDBJSON(none_as_null=True)
         if db_type in ("oracle", "clickhouse", "trino", "questdb", "presto"):
             return _maybe_nullable(sa.Text())
         if dialect_name == "postgresql":
