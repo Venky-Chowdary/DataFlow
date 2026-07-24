@@ -94,8 +94,16 @@ pytest apps/api/tests  (full suite after this session)
 | Generic SQL pre-widen degraded concrete types | File sources report `column_types` as `TEXT` while `mapping.source_type` is `DECIMAL`; `is_wider_type('DOUBLE','VARCHAR')` treated the raw string as wider and downgraded `DOUBLE` to `VARCHAR` | `_source_ddl_for_widen` prefers mapping `source_type` when the raw catalog type is a generic string, but upgrades to the catalog type when the catalog is wider in the same logical family |
 
 ```text
-pytest apps/api/tests/test_schema_drift.py apps/api/tests/test_execute_tracked_postgresql_to_postgresql_backfill_widen_fields.py apps/api/tests/test_execute_tracked_postgresql_to_postgresql_backfill_new_fields.py apps/api/tests/test_execute_tracked_mysql_to_mysql_backfill_new_fields.py apps/api/tests/test_execute_tracked_csv_to_duckdb.py apps/api/tests/test_execute_tracked_file_to_duckdb_formats.py apps/api/tests/test_currency_to_duckdb.py
-27 passed in 24.30s
+pytest apps/api/tests/test_schema_drift.py \
+       apps/api/tests/test_execute_tracked_postgresql_to_postgresql_backfill_widen_fields.py \
+       apps/api/tests/test_execute_tracked_postgresql_to_postgresql_backfill_new_fields.py \
+       apps/api/tests/test_execute_tracked_mysql_to_mysql_backfill_new_fields.py \
+       apps/api/tests/test_execute_tracked_mysql_to_mysql_backfill_widen_fields.py \
+       apps/api/tests/test_execute_tracked_duckdb_to_duckdb_backfill_widen_fields.py \
+       apps/api/tests/test_execute_tracked_csv_to_duckdb.py \
+       apps/api/tests/test_execute_tracked_file_to_duckdb_formats.py \
+       apps/api/tests/test_currency_to_duckdb.py
+29 passed in 30.00s
 ```
 
 ---
