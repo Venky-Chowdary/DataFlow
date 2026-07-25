@@ -196,7 +196,8 @@ jobs:
               print("MySQL not reachable; skipping CDC privilege grant", file=sys.stderr)
               sys.exit(0)
           with conn.cursor() as cur:
-              cur.execute("GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'dataflow'@'%'")
+              cur.execute("GRANT REPLICATION SLAVE, REPLICATION CLIENT, RELOAD ON *.* TO 'dataflow'@'%'")
+              cur.execute("GRANT ALL PRIVILEGES ON dataflow.* TO 'dataflow'@'%'")
               cur.execute("FLUSH PRIVILEGES")
           conn.close()
           PY

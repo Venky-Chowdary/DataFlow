@@ -14,6 +14,7 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
+from connectors.snowflake_conn import get_connection, resolve_or_fold_snowflake_table
 from src.transfer.engine import UniversalTransferEngine
 from src.transfer.models import EndpointConfig, TransferRequest
 
@@ -31,7 +32,7 @@ def _new_job_id() -> str:
 
 
 def test_csv_to_snowflake_upsert_updates_and_appends():
-    fakesnow = pytest.importorskip("fakesnow")
+    pytest.importorskip("fakesnow")
 
     table_name = "payments_snowflake_upsert_e2e_" + uuid.uuid4().hex[:8]
     destination = EndpointConfig(
@@ -80,20 +81,23 @@ def test_csv_to_snowflake_upsert_updates_and_appends():
     assert result2.reconciliation.get("passed") is True
     assert result2.reconciliation.get("target_rows") == 3
 
-    import snowflake.connector
-
-    conn = snowflake.connector.connect(
-        account="test",
-        user="test",
+    conn = get_connection(
+        account="localhost",
+        username="test",
         password="test",
         database="dataflow",
         schema="public",
         warehouse="",
+        connection_string="",
     )
-    with conn.cursor() as cur:
-        cur.execute(f'SELECT id, amount FROM "{table_name.upper()}" ORDER BY id')
+    try:
+        cur = conn.cursor()
+        # Resolve the actual stored table name (Snowflake folds unquoted names).
+        resolved = resolve_or_fold_snowflake_table(cur, "public", table_name)
+        cur.execute(f"SELECT id, amount FROM {resolved} ORDER BY id")
         rows = cur.fetchall()
-    conn.close()
+    finally:
+        conn.close()
     assert len(rows) == 3
     by_id = {r[0]: r[1] for r in rows}
     assert by_id[1] == pytest.approx(1111.00)

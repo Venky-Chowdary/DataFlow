@@ -77,19 +77,22 @@ def read_table_batch(
     offset: int = 0,
     limit: int = 500,
     known_total_rows: int | None = None,
+    conn: Any | None = None,
 ) -> ReadBatch:
     del schema
     table_ref = quote_table_ref(table, dialect="mysql")
     safe_table = require_safe_identifier(table, preserve_case=True)
-    conn = get_connection(
-        host=host,
-        port=port,
-        database=database,
-        username=username,
-        password=password,
-        connection_string=connection_string,
-        ssl=ssl,
-    )
+    close_conn = conn is None
+    if conn is None:
+        conn = get_connection(
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            connection_string=connection_string,
+            ssl=ssl,
+        )
     try:
         with conn.cursor() as cur:
             if known_total_rows is not None:
@@ -112,7 +115,8 @@ def read_table_batch(
             rows = [[_cell(v) for v in row] for row in fetched]
             return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     finally:
-        conn.close()
+        if close_conn:
+            conn.close()
 
 
 def read_table_cursor_batch(

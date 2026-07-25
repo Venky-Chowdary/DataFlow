@@ -27,6 +27,7 @@ from services.cdc_schema_history import (
 
 from connectors.mysql_conn import get_connection
 from connectors.mysql_reader import _cell, read_table_batch
+from connectors.sql_identifiers import quote_table_ref
 
 _DDL_RE = re.compile(
     r"\b(ALTER|CREATE|DROP|RENAME)\s+TABLE\b",
@@ -221,88 +222,173 @@ class MySqlChangeStreamCdc:
                 "password": self.cfg.get("password") or "",
             },
             "server_id": server_id,
+            "resume_stream": True,
             "blocking": blocking,
-            "only_schemas": self.database if self.database else None,
-            # pymysqlreplication accepts a list for multi-table single-reader.
-            "only_tables": list(self.tables) if len(self.tables) > 1 else (self.table or None),
+            # Do not filter at the pymysqlreplication packet level. We filter
+            # by schema/table below; packet-level filtering can drop TableMap
+            # events needed to decode WriteRows events after a RotateEvent.
+            "only_schemas": None,
+            "only_tables": None,
         }
         # An empty ``only_events`` list is an allowlist matching NOTHING (the
         # reader would silently yield zero events). Only set it when non-empty;
         # otherwise leave it unset so BinLogStreamReader streams all events.
         if only_events:
             kwargs["only_events"] = only_events
-        # Prefer GTID auto-position (Debezium-class); fall back to file/pos.
-        # pymysqlreplication: ``auto_position`` accepts the GTID set string directly
-        # (older builds have no separate ``gtid_set`` kwarg).
-        gtid = None
-        if isinstance(self.resume_token, dict):
-            gtid = self.resume_token.get("gtid") or self.resume_token.get("gtid_set")
-        if gtid:
-            kwargs["auto_position"] = gtid
-        elif (
-            isinstance(self.resume_token, dict)
-            and self.resume_token.get("file")
-            and self.resume_token.get("pos") is not None
-        ):
-            kwargs["log_file"] = self.resume_token["file"]
-            kwargs["log_pos"] = self.resume_token["pos"]
+        # Prefer file/pos resume when present; mixing GTID claims with file/pos
+        # causes the next BinLogStreamReader to skip events that were committed
+        # while the (non-blocking) window was open. GTID auto-position is used
+        # only when the token is explicitly GTID-based with no file/pos.
+        token = self.resume_token if isinstance(self.resume_token, dict) else {}
+        has_file_pos = bool(token.get("file") and token.get("pos") is not None)
+        if has_file_pos:
+            kwargs["log_file"] = token["file"]
+            kwargs["log_pos"] = token["pos"]
+        elif token.get("gtid") or token.get("gtid_set"):
+            kwargs["auto_position"] = token.get("gtid") or token.get("gtid_set")
         return kwargs
 
     def snapshot(self) -> Iterator[ChangeBatch]:
-        # Capture binlog file/pos BEFORE the snapshot so poll() starts from a
-        # consistent handoff point (at-least-once; duplicates possible, no gaps).
+        # Use a locked MySQL session for a consistent, gap-free snapshot handoff.
+        # LOCK TABLES blocks writers, SHOW MASTER STATUS captures the exact binlog
+        # position for the read view, then we read all tables on the same session.
+        # Poll() resumes after that position, so concurrent writes are delivered
+        # at-least-once; duplicates are acceptable, gaps are not.
         self._acquire_cdc_lease()
-        start_pos = self._current_binlog_position() or {
-            "table": self.table,
-            "file": None,
-            "pos": None,
-        }
-        self._ensure_decode_schema(resume_offset=start_pos)
+        self._ensure_decode_schema(resume_offset=self.resume_token)
         self.heartbeat()
-        # Resume mid-snapshot when watermark carries phase/offset.
-        offset = 0
-        if isinstance(self.resume_token, dict) and self.resume_token.get("phase") == "snapshot":
-            offset = int(self.resume_token.get("offset") or 0)
-        while True:
-            batch = read_table_batch(
+
+        lock_conn = None
+        try:
+            lock_conn = get_connection(
                 host=self.cfg.get("host") or "localhost",
                 port=self.cfg.get("port") or 3306,
                 database=self.database,
                 username=self.cfg.get("username") or "",
                 password=self.cfg.get("password") or "",
-                schema="",
                 connection_string=self.cfg.get("connection_string") or "",
                 ssl=bool(self.cfg.get("ssl")),
-                table=self.table,
-                columns=self.columns,
-                offset=offset,
-                limit=self.batch_size,
             )
-            if not batch.rows:
-                break
-            records = [dict(zip(batch.headers, row)) for row in batch.rows]
-            offset += len(batch.rows)
-            # Every snapshot batch carries a resume token so a crash cannot
-            # overwrite the binlog handoff with a primary-key cursor.
+            # Use a global read lock when we can (Debezium-style snapshot); it
+            # freezes the binlog so the read view has no backlog to catch up after
+            # the lock is released.  Falls back to per-table READ locks.
+            lock_conn.autocommit(True)
+
+            locked = False
+            try:
+                with lock_conn.cursor() as cur:
+                    cur.execute("FLUSH TABLES WITH READ LOCK")
+                locked = True
+            except Exception as exc:
+                _logger.warning(
+                    "FLUSH TABLES WITH READ LOCK unavailable (%s); falling back to per-table LOCK TABLES", exc
+                )
+            if not locked:
+                table_refs = [quote_table_ref(t, dialect="mysql") for t in self.tables]
+                lock_clause = ", ".join(f"{ref} READ" for ref in table_refs)
+                try:
+                    with lock_conn.cursor() as cur:
+                        cur.execute(f"LOCK TABLES {lock_clause}")
+                    locked = True
+                except Exception as exc:
+                    _logger.warning(
+                        "Could not LOCK TABLES for consistent CDC snapshot: %s", exc
+                    )
+
+            start_pos: dict[str, Any] = {
+                "table": self.table,
+                "tables": list(self.tables),
+            }
+            if locked:
+                with lock_conn.cursor() as cur:
+                    for sql in ("SHOW MASTER STATUS", "SHOW BINARY LOG STATUS"):
+                        try:
+                            cur.execute(sql)
+                            row = cur.fetchone()
+                            if row:
+                                start_pos = {
+                                    "file": row[0],
+                                    "pos": int(row[1]),
+                                    "table": self.table,
+                                    "tables": list(self.tables),
+                                }
+                                break
+                        except Exception:
+                            pass
+
+            if not start_pos.get("file"):
+                # Fallback when binlog position cannot be captured while locked.
+                start_pos = self._current_binlog_position() or start_pos
+
+            # Resume mid-snapshot from the recorded table/offset.
+            offset = 0
+            resume_table = self.table
+            if (
+                isinstance(self.resume_token, dict)
+                and self.resume_token.get("phase") == "snapshot"
+            ):
+                offset = int(self.resume_token.get("offset") or 0)
+                resume_table = self.resume_token.get("table") or self.table
+
+            if resume_table in self.tables:
+                tables_to_snapshot = self.tables[self.tables.index(resume_table) :]
+            else:
+                tables_to_snapshot = list(self.tables)
+
+            for table in tables_to_snapshot:
+                table_offset = offset if table == resume_table else 0
+                while True:
+                    batch = read_table_batch(
+                        host=self.cfg.get("host") or "localhost",
+                        port=self.cfg.get("port") or 3306,
+                        database=self.database,
+                        username=self.cfg.get("username") or "",
+                        password=self.cfg.get("password") or "",
+                        schema="",
+                        connection_string=self.cfg.get("connection_string") or "",
+                        ssl=bool(self.cfg.get("ssl")),
+                        table=table,
+                        columns=self.columns,
+                        offset=table_offset,
+                        limit=self.batch_size,
+                        conn=lock_conn if locked else None,
+                    )
+                    if not batch.rows:
+                        break
+                    records = [dict(zip(batch.headers, row)) for row in batch.rows]
+                    table_offset += len(batch.rows)
+                    yield ChangeBatch(
+                        inserts=records,
+                        resume_token={
+                            **start_pos,
+                            "phase": "snapshot",
+                            "offset": table_offset,
+                            "table": table,
+                        },
+                    )
+                    if len(batch.rows) < self.batch_size:
+                        break
+
+            if locked:
+                try:
+                    with lock_conn.cursor() as cur:
+                        cur.execute("UNLOCK TABLES")
+                except Exception as exc:
+                    _logger.warning("UNLOCK TABLES failed: %s", exc)
             yield ChangeBatch(
-                inserts=records,
                 resume_token={
                     **start_pos,
-                    "phase": "snapshot",
-                    "offset": offset,
+                    "phase": "streaming",
+                    "offset": 0,
                     "table": self.table,
-                },
+                }
             )
-            if len(batch.rows) < self.batch_size:
-                break
-        yield ChangeBatch(
-            resume_token={
-                **start_pos,
-                "phase": "streaming",
-                "offset": 0,
-                "table": self.table,
-            }
-        )
+        finally:
+            if lock_conn:
+                try:
+                    lock_conn.close()
+                except Exception:
+                    pass
 
     def _current_gtid_executed(self, cur) -> str | None:
         try:
@@ -698,6 +784,7 @@ class MySqlChangeStreamCdc:
         from pymysqlreplication.event import QueryEvent, RotateEvent, XidEvent
         from pymysqlreplication.row_event import (
             DeleteRowsEvent,
+            TableMapEvent,
             UpdateRowsEvent,
             WriteRowsEvent,
         )
@@ -721,14 +808,26 @@ class MySqlChangeStreamCdc:
             return {k: v for k, v in pos.items() if v is not None}
 
         def _token_at(pos: dict[str, Any] | None) -> dict[str, Any]:
-            token = dict(pos or {"tables": list(self.tables)})
+            # Only advance the resume token to a position we actually read.
+            # If a poll window reads no events, falling back to the previous
+            # resume token prevents BinLogStreamReader from jumping past events
+            # that were committed while the (non-blocking) stream was open.
+            fallback = self.resume_token if isinstance(self.resume_token, dict) else None
+            token = dict(
+                pos
+                or fallback
+                or {"tables": list(self.tables)}
+            )
+            # Do NOT inject the server's current GTID set here; the token
+            # would claim transactions we have not yet read, causing the next
+            # BinLogStreamReader to skip them. File/pos is the authoritative
+            # resume point for this code path.
             try:
-                current = self._current_binlog_position() or {}
-                if current.get("gtid"):
-                    token["gtid"] = current["gtid"]
-                if not token.get("file") and current.get("file"):
-                    token["file"] = current["file"]
-                    token["pos"] = current.get("pos")
+                if not token.get("file"):
+                    current = self._current_binlog_position() or {}
+                    if current.get("file"):
+                        token["file"] = current["file"]
+                        token["pos"] = current.get("pos")
             except Exception as exc:
                 _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
             return token
@@ -749,6 +848,7 @@ class MySqlChangeStreamCdc:
             only_events=[
                 RotateEvent,
                 QueryEvent,
+                TableMapEvent,
                 XidEvent,
                 WriteRowsEvent,
                 UpdateRowsEvent,
@@ -761,11 +861,15 @@ class MySqlChangeStreamCdc:
                 if datetime.now(timezone.utc).timestamp() > deadline:
                     break
                 if isinstance(binlog_event, RotateEvent):
-                    last_position = {
-                        "file": binlog_event.next_binlog,
-                        "pos": binlog_event.position,
-                        "tables": list(self.tables),
-                    }
+                    # pymysqlreplication updates stream.log_file/log_pos internally.
+                    # Do NOT use the RotateEvent payload (position is the *start*
+                    # of the next file, often position 4 for the current file in
+                    # heartbeat/artificial rotates) as a resume point; rely on
+                    # the row/Xid events we actually consume to advance the token.
+                    continue
+                if isinstance(binlog_event, TableMapEvent):
+                    # Table map is processed internally by pymysqlreplication; we
+                    # only need it decoded so WriteRows events get schema/table info.
                     continue
                 if isinstance(binlog_event, QueryEvent):
                     query = (getattr(binlog_event, "query", "") or "").strip()
@@ -812,7 +916,8 @@ class MySqlChangeStreamCdc:
                             if isinstance(row, dict) and "values" in row
                             else row
                         )
-                        buf.insert(tbl, self._row_to_record(values), lsn=str(stream.log_pos or ""))
+                        rec = self._row_to_record(values)
+                        buf.insert(tbl, rec, lsn=str(stream.log_pos or ""))
                         event_count += 1
                 elif isinstance(binlog_event, UpdateRowsEvent):
                     for row in getattr(binlog_event, "rows", []):
