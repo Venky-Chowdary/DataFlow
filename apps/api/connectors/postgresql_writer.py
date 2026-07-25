@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import binascii
 import importlib.util
 import io
 import json
@@ -430,7 +431,7 @@ def write_mapped_rows(
                 if isinstance(val, str):
                     try:
                         row_list[idx] = b64decode(val, validate=True)
-                    except Exception:
+                    except (binascii.Error, ValueError):
                         row_list[idx] = val.encode("utf-8")
                 elif isinstance(val, bytes):
                     row_list[idx] = val
@@ -786,7 +787,7 @@ def write_mapped_rows(
                                     if col_name != "*" and col_name in target_cols:
                                         try:
                                             sample_val = str(row[target_cols.index(col_name)])[:120]
-                                        except Exception:
+                                        except (ValueError, IndexError, TypeError):
                                             sample_val = ""
                                     rejected_details.append({
                                         "row": start + row_i,
