@@ -9,7 +9,7 @@
 
 ## 1. Executive Summary
 
-This audit was a line-by-line review of the DataFlow universal transfer engine, with the goal of moving the product toward Airbyte/Fivetran-class robustness and zero silent data loss. The engine has a strong architecture (`UniversalTransferEngine`, preflight gates, reconciliation, quarantine, and schema mapping). After this fix cycle the local full test suite is green: 9,064 passed, 1,085 skipped, 0 failed. The remaining 1,085 skipped are mostly cloud-warehouse/Oracle/Redis routes that require live credentials or services not running in the local CI container.
+This audit was a line-by-line review of the DataFlow universal transfer engine, with the goal of moving the product toward Airbyte/Fivetran-class robustness and zero silent data loss. The engine has a strong architecture (`UniversalTransferEngine`, preflight gates, reconciliation, quarantine, and schema mapping). After this fix cycle the local full test suite is green: 9,065 passed, 1,085 skipped, 0 failed. The remaining 1,085 skipped are mostly cloud-warehouse/Oracle/Redis routes that require live credentials or services not running in the local CI container.
 
 ### What was fixed in this cycle
 
@@ -1132,8 +1132,9 @@ pytest apps/api/tests/test_data_integrity.py tests/test_data_quality.py \
   - JSON parse: `(json.JSONDecodeError, ValueError)`
   - Base64 encode/decode: `(binascii.Error, ValueError)`
   - Integer coercion: `(ValueError, TypeError)`
-- `test_generic_sql` now catches `(sa.exc.SQLAlchemyError, RuntimeError)` instead of
-  `Exception`, so unrelated Python faults are not swallowed as connection failures.
+- `test_generic_sql` now catches `(sa.exc.SQLAlchemyError, OSError, RuntimeError)`
+  instead of `Exception`, so connection probes (including `socket.gaierror` from the
+  Oracle thin driver) return `(False, message)` rather than crashing the worker.
 - `ruff --fix --unsafe-fixes` cleaned pre-existing mechanical issues
   (import ordering, `startswith` tuples, SIM102/SIM103 simplifications).
 - Left the deeper engine-wide `except Exception` sites (introspection fallbacks,
@@ -1152,4 +1153,7 @@ pytest apps/api/tests/test_execute_tracked_cross_sql_matrix.py \
 
 pytest apps/api/tests/test_data_rule_scenario_matrix.py
 3742 passed in 4.43s
+
+pytest apps/api/tests
+9065 passed, 1085 skipped, 0 failed
 ```
