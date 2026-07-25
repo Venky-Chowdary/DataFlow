@@ -110,6 +110,7 @@ from .models import (
     EndpointConfig,
     TransferRequest,
     TransferResult,
+    endpoint_to_dict,
     transfer_request_to_dict,
 )
 from .reconcile_step import run_reconciliation
@@ -1556,6 +1557,7 @@ class UniversalTransferEngine:
                         or ""
                     ),
                     source_connector_id=request.source.connector_id or "",
+                    source_config=endpoint_to_dict(request.source),
                     destination_table=(
                         request.destination.table
                         or request.destination.collection
@@ -2288,6 +2290,7 @@ class UniversalTransferEngine:
                         or ""
                     ),
                     source_connector_id=request.source.connector_id or "",
+                    source_config=endpoint_to_dict(request.source),
                     destination_table=(
                         request.destination.table
                         or request.destination.collection
@@ -2852,6 +2855,7 @@ class UniversalTransferEngine:
                         or ""
                     ),
                     source_connector_id=request.source.connector_id or "",
+                    source_config=endpoint_to_dict(request.source),
                     destination_table=(
                         request.destination.table
                         or request.destination.collection

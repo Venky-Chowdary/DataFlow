@@ -80,6 +80,7 @@ def _mongo_duplicates(cfg: dict[str, Any], collection: str, pk: str, limit: int 
 def probe_source_duplicate_keys(
     *,
     source_connector_id: str = "",
+    source_config: dict[str, Any] | None = None,
     source_table: str = "",
     source_collection: str = "",
     primary_key: str = "",
@@ -88,24 +89,42 @@ def probe_source_duplicate_keys(
 ) -> list[dict[str, Any]]:
     """Return up to ``limit`` duplicate values for ``primary_key`` in the source.
 
+    Accepts either a saved connector id or an inline source config. Inline configs
+    are used when the UI sends the endpoint details directly (no saved connector).
     Returns an empty list when the source is not a database, the connector cannot
     be loaded, or the probe fails (probe failures are logged, not raised, so a
     transient source hiccup does not block validation).
     """
-    if not source_connector_id or not primary_key or (not source_table and not source_collection):
+    if not primary_key or (not source_table and not source_collection):
+        return []
+    if not source_connector_id and not source_config:
         return []
 
+    cfg: dict[str, Any] | None = None
+    db_type = ""
     try:
-        from services.connector_store import get_connector
+        if source_connector_id:
+            from services.connector_store import get_connector
 
-        conn = get_connector(source_connector_id, workspace_id=workspace_id)
-        if not conn:
+            conn = get_connector(source_connector_id, workspace_id=workspace_id)
+            if conn:
+                from services.connector_probe import probe_cfg_from_saved
+
+                cfg = probe_cfg_from_saved(conn)
+                db_type = (conn.type or "").lower()
+
+        if cfg is None and source_config:
+            cfg = dict(source_config)
+            db_type = (cfg.get("type") or cfg.get("db_type") or cfg.get("format") or "").lower()
+
+        if not cfg:
             return []
 
-        from services.connector_probe import probe_cfg_from_saved
-
-        cfg = probe_cfg_from_saved(conn)
-        db_type = (conn.type or "").lower()
+        # Inline endpoint configs use "format" for the database type; normalize to
+        # "type" so the generic_sql engine builder can build a URL.
+        if db_type:
+            cfg = dict(cfg)
+            cfg.setdefault("type", db_type)
 
         if db_type == "mongodb":
             coll = source_collection or source_table

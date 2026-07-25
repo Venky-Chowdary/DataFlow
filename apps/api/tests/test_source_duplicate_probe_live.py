@@ -131,3 +131,60 @@ def test_live_duplicate_key_probe(
     values = {r["value"]: r["count"] for r in result}
     assert values.get("a") == 2
     assert values.get("b") == 2
+
+
+def test_preflight_blocks_inline_mysql_duplicate_keys(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    unique_table: str,
+) -> None:
+    """An inline MySQL source config (no saved connector_id) still triggers G9."""
+    from tests.typed_fidelity_helpers import require_ports
+
+    require_ports(3306)
+    _seed_mysql(unique_table)
+
+    monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE_BACKEND", "file")
+    store_path = tmp_path / "connectors.json"
+    monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE", str(store_path))
+
+    from services.preflight_service import run_file_preflight
+
+    source_config = {
+        "kind": "database",
+        "format": "mysql",
+        "host": "localhost",
+        "port": 3306,
+        "database": "dataflow",
+        "username": "root",
+        "password": "dataflow",
+        "ssl": False,
+        "table": unique_table,
+    }
+    result = run_file_preflight(
+        columns=["id", "name"],
+        column_types={"id": "VARCHAR", "name": "VARCHAR"},
+        row_count=5,
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 0.99, "transform": None},
+            {"source": "name", "target": "name", "confidence": 0.99, "transform": None},
+        ],
+        destination_connected=True,
+        destination_can_create=True,
+        source_connected=True,
+        source_kind="database",
+        source_format="mysql",
+        sync_mode="upsert",
+        sample_rows=[{"id": "c", "name": "C"}],
+        destination_db_type="postgresql",
+        source_config=source_config,
+        source_table=unique_table,
+        destination_table="jobs",
+        destination_table_exists=True,
+        destination_pk_columns=["id"],
+        validation_mode="strict",
+    )
+    gate_status = {g["id"]: g for g in result["gates"]}
+    assert gate_status["g9_data_integrity"]["status"] == "block"
+    g9_issues = gate_status["g9_data_integrity"].get("details", {}).get("issues", [])
+    assert any("duplicate key values from source probe" in str(i) for i in g9_issues)

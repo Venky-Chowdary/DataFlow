@@ -587,6 +587,7 @@ def run_file_preflight(
     available_staging_bytes: int | None = None,
     destination_db_type: str = "postgresql",
     source_connector_id: str = "",
+    source_config: dict[str, Any] | None = None,
     source_table: str = "",
     destination_table: str = "",
     source_filename: str = "",
@@ -788,7 +789,7 @@ def run_file_preflight(
     # Source-side duplicate-key probe: a small sample can miss duplicates in large
     # tables, so query the source directly when we have a resolved identity key.
     source_duplicate_findings: list[dict[str, Any]] = []
-    if source_connector_id and source_table and source_kind in ("database", "cloud"):
+    if (source_connector_id or source_config) and source_table and source_kind in ("database", "cloud"):
         try:
             source_pk = resolve_primary_key_source(
                 mappings=mappings,
@@ -802,6 +803,7 @@ def run_file_preflight(
             if source_pk:
                 source_duplicate_findings = probe_source_duplicate_keys(
                     source_connector_id=source_connector_id,
+                    source_config=source_config,
                     source_table=source_table,
                     primary_key=source_pk,
                 )
