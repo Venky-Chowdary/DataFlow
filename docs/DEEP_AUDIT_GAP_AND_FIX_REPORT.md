@@ -1120,3 +1120,36 @@ pytest apps/api/tests/test_data_integrity.py tests/test_data_quality.py \
 - The live Railway `sakura.proxy.rlwy.net:54480` password failure is a real
   credential mismatch; DataFlow now surfaces the actual PostgreSQL error and never
   overwrites a saved password with a masked `****`/`redacted` placeholder.
+
+---
+
+## 21. Latest Session Addendum — narrow hot data-path exception families in generic_sql.py (2026-07-19)
+
+### What changed
+
+- `connectors/generic_sql.py` `_to_sa_value` now catches only the exception families
+  each conversion can actually raise:
+  - JSON parse: `(json.JSONDecodeError, ValueError)`
+  - Base64 encode/decode: `(binascii.Error, ValueError)`
+  - Integer coercion: `(ValueError, TypeError)`
+- `test_generic_sql` now catches `(sa.exc.SQLAlchemyError, RuntimeError)` instead of
+  `Exception`, so unrelated Python faults are not swallowed as connection failures.
+- `ruff --fix --unsafe-fixes` cleaned pre-existing mechanical issues
+  (import ordering, `startswith` tuples, SIM102/SIM103 simplifications).
+- Left the deeper engine-wide `except Exception` sites (introspection fallbacks,
+  drop-table fallback, row quarantine) for a dedicated pass; those are intentionally
+  defensive and already log/raise, while the data-conversion path is now fail-fast
+  on unexpected errors.
+
+### Verification
+
+```text
+pytest apps/api/tests/test_execute_tracked_cross_sql_matrix.py \
+       tests/test_execute_tracked_duckdb_to_duckdb.py \
+       tests/test_execute_tracked_csv_to_duckdb.py \
+       tests/test_universal_type_harness.py
+361 passed in 15.33s
+
+pytest apps/api/tests/test_data_rule_scenario_matrix.py
+3742 passed in 4.43s
+```
