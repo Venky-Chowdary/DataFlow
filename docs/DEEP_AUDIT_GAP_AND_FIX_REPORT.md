@@ -1087,3 +1087,36 @@ pytest apps/api/tests  (with DATAFLOW_PII_HASH_KEY, DATAFLOW_FAKESNOW_KEEP_PATCH
 
 - Full `apps/api/tests` run with live cloud-warehouse / object-store / Redis credentials remains skipped.
 - MySQL → PostgreSQL `jobs` duplicate-key path is proven in the engine/preflight matrix; the live Railway destination still fails password authentication, which is a saved-connector credential issue, not a code path bug.
+
+---
+
+## 20. Latest Session Addendum — explicit password overrides stale DSN (2026-07-19)
+
+### What changed
+
+- `connectors/sql_dsn.py` `resolve_sql_endpoint` keeps the DSN authoritative for
+  host/port/database but now prefers an explicit, non-masked `username` / `password`
+  over credentials embedded in a stale `connection_string`. This closes a class of
+  "connector Test passes, destination fails password auth" bugs where the `password`
+  field was updated but the stored DSN still carried an old password.
+- Added regression test `test_explicit_password_overrides_stale_connection_string`.
+- Resolved ruff `FURB167` / `SIM102` / `BLE001` findings in `sql_dsn.py`.
+
+### Verification
+
+```text
+pytest apps/api/tests/test_sql_dsn_scenarios.py
+14 passed in 0.14s
+
+pytest apps/api/tests/test_data_integrity.py tests/test_data_quality.py \
+       tests/test_ddl_compatibility.py tests/test_wave_ad_identity_ux.py \
+       tests/test_wave_ae_studio_honesty.py tests/test_source_duplicate_preflight.py \
+       tests/test_source_duplicate_probe_live.py tests/test_execute_tracked_cross_sql_matrix.py
+81 passed in 9.86s
+```
+
+### What is still NOT proven
+
+- The live Railway `sakura.proxy.rlwy.net:54480` password failure is a real
+  credential mismatch; DataFlow now surfaces the actual PostgreSQL error and never
+  overwrites a saved password with a masked `****`/`redacted` placeholder.
