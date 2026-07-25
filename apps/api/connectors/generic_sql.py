@@ -11,6 +11,7 @@ engine.
 from __future__ import annotations
 
 import base64
+import binascii
 import contextlib
 import json
 import logging
@@ -20,9 +21,6 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from typing import Any
-
-from services.type_system import ddl_type, normalize_logical_type, parse_numeric_precision_scale
-from services.value_serializer import cell_to_string, json_default
 
 from connectors.base import ReadBatch
 from connectors.schema_drift import (
@@ -36,6 +34,12 @@ from connectors.sql_temporal import (
     is_sql_data_error,
     logical_to_temporal_ddl,
 )
+from services.type_system import (
+    ddl_type,
+    normalize_logical_type,
+    parse_numeric_precision_scale,
+)
+from services.value_serializer import cell_to_string, json_default
 
 logger = logging.getLogger(__name__)
 
@@ -51,16 +55,16 @@ try:
         from clickhouse_sqlalchemy import engines as ch_engines
         from clickhouse_sqlalchemy.types import DateTime64 as ChDateTime64
         from clickhouse_sqlalchemy.types import Nullable as ChNullable
-    except Exception:  # pragma: no cover
+    except (ImportError, AttributeError):  # pragma: no cover
         ch_engines = None
         ChDateTime64 = None
         ChNullable = None
 
     try:
         from trino.sqlalchemy.datatype import TIMESTAMP as TrinoTimestamp
-    except Exception:  # pragma: no cover
+    except (ImportError, AttributeError):  # pragma: no cover
         TrinoTimestamp = None
-except Exception:  # pragma: no cover
+except (ImportError, AttributeError):  # pragma: no cover
     SQLALCHEMY_AVAILABLE = False
     ch_engines = None
     ChDateTime64 = None
@@ -353,9 +357,7 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
     db_type = (cfg.get("type") or "").lower().strip()
 
     if connection_string:
-        if connection_string.startswith("duckdb:") or connection_string.startswith(
-            "sqlite:"
-        ):
+        if connection_string.startswith(("duckdb:", "sqlite:")):
             if connection_string.startswith("sqlite:"):
                 return _normalize_sqlite_url(connection_string)
             return connection_string
@@ -514,9 +516,7 @@ def _schema_name(cfg: dict[str, Any]) -> str | None:
     if not db_type or db_type == "generic_sql":
         if connection_string.startswith("mysql") or "mariadb" in connection_string:
             db_type = "mysql"
-        elif connection_string.startswith("postgresql") or connection_string.startswith(
-            "postgres"
-        ):
+        elif connection_string.startswith(("postgresql", "postgres")):
             db_type = "postgresql"
         elif "sqlserver" in connection_string or "mssql" in connection_string:
             db_type = "sqlserver"
@@ -541,9 +541,7 @@ def _dialect_key(cfg: dict[str, Any]) -> str:
     connection_string = (cfg.get("connection_string") or "").lower()
     if connection_string.startswith("mysql") or "mariadb" in connection_string:
         return "mysql"
-    if connection_string.startswith("postgresql") or connection_string.startswith(
-        "postgres"
-    ):
+    if connection_string.startswith(("postgresql", "postgres")):
         return "postgresql"
     if "sqlserver" in connection_string or "mssql" in connection_string:
         return "sqlserver"
@@ -566,7 +564,7 @@ def _qualified_table_ref(cfg: dict[str, Any], table: str, schema: str | None) ->
 def _type_repr(type_obj: Any) -> str:
     try:
         return str(type_obj).lower()
-    except Exception:
+    except (TypeError, ValueError):
         return ""
 
 
@@ -612,9 +610,8 @@ def _logical_type_from_sa(col_type: Any) -> str:
     if any(
         tok in repr_
         for tok in ("float", "double", "real", "binary_float", "binary_double")
-    ):
-        if "decimal" not in repr_ and "numeric" not in repr_ and "number" not in repr_:
-            return "float"
+    ) and "decimal" not in repr_ and "numeric" not in repr_ and "number" not in repr_:
+        return "float"
 
     if isinstance(col_type, (sa.Numeric,)):
         from services.type_system import (
@@ -679,9 +676,8 @@ def _logical_type_from_sa(col_type: Any) -> str:
     # FLOAT before DECIMAL — "float" must not fall into the numeric/decimal bucket.
     if any(
         x in repr_ for x in ("binary_float", "binary_double", "float", "double", "real")
-    ):
-        if not any(x in repr_ for x in ("numeric", "decimal", "number(", "money")):
-            return "float"
+    ) and not any(x in repr_ for x in ("numeric", "decimal", "number(", "money")):
+        return "float"
     if any(x in repr_ for x in ("numeric", "decimal", "number", "money", "smallmoney")):
         return "decimal"
     if any(x in repr_ for x in ("int", "serial", "smallint", "tinyint", "bigint")):
@@ -720,7 +716,7 @@ class _DuckDBJSON(sa.JSON):
             if isinstance(value, str):
                 try:
                     value = json.loads(value)
-                except Exception:
+                except (json.JSONDecodeError, ValueError):
                     return value
             if isinstance(value, (dict, list, tuple, set, frozenset)):
                 return json.dumps(
@@ -894,9 +890,7 @@ def _is_string_type(sa_type: Any) -> bool:
         return True
     # Handle ClickHouse Nullable(String) / Nullable(TEXT)
     nested = getattr(sa_type, "nested_type", None)
-    if nested is not None and isinstance(nested, (sa.String, sa.Text, sa.CHAR)):
-        return True
-    return False
+    return bool(nested is not None and isinstance(nested, (sa.String, sa.Text, sa.CHAR)))
 
 
 def _to_sa_value(
@@ -925,7 +919,7 @@ def _to_sa_value(
         if isinstance(value, str):
             try:
                 parsed = json.loads(value)
-            except Exception:
+            except (json.JSONDecodeError, ValueError):
                 parsed = value
         else:
             parsed = value
@@ -950,7 +944,7 @@ def _to_sa_value(
             if _is_string_type(sa_type):
                 try:
                     return base64.b64encode(value).decode("ascii")
-                except Exception:
+                except (binascii.Error, ValueError):
                     return value.decode("utf-8", errors="replace")
             return value
         if isinstance(value, str):
@@ -958,7 +952,7 @@ def _to_sa_value(
                 return value
             try:
                 return base64.b64decode(value, validate=True)
-            except Exception:
+            except (binascii.Error, ValueError):
                 return value.encode("utf-8")
         return value
 
@@ -1051,7 +1045,7 @@ def _to_sa_value(
         if isinstance(value, str):
             try:
                 return int(value)
-            except Exception:
+            except (ValueError, TypeError):
                 return value
         return value
 
@@ -1095,7 +1089,7 @@ def test_generic_sql(**kwargs: Any) -> tuple[bool, str]:
         with engine.connect() as conn:
             conn.execute(sa.select(sa.literal(1)))
         return True, "SQLAlchemy connection successful"
-    except Exception as exc:
+    except (sa.exc.SQLAlchemyError, RuntimeError) as exc:
         return False, str(exc)
 
 
@@ -1607,9 +1601,8 @@ def _read_table_raw(
     dialect: str = "ansi",
 ) -> tuple[list[str], list[list[Any]]]:
     """Fallback read for engines whose SQLAlchemy reflection is incomplete."""
-    from services.dialect_profiles import quote_char_for
-
     from connectors.sql_identifiers import quote_table_ref
+    from services.dialect_profiles import quote_char_for
 
     qualified = quote_table_ref(table, schema, dialect=dialect)
     base = f"SELECT * FROM {qualified}"
