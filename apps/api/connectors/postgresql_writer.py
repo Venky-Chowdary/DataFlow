@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+from services.schema_inference import infer_type
 from services.type_system import ddl_type
 from services.value_serializer import json_default
 
@@ -603,16 +604,23 @@ def write_mapped_rows(
                     )
 
             # Pick the wider of the mapping-proposed target DDL and the freshly
-            # introspected source DDL, then widen any destination columns that are
-            # now too narrow for the source drift.
+            # inferred source DDL from the actual batch samples, then widen any
+            # destination columns that are now too narrow for source drift.
+            # Using the batch samples (with the active date_locale) instead of the
+            # stale peek-file schema prevents MDY/DMY dates from being downgraded
+            # to TEXT after the table is created.
             desired_types: list[str] = []
             for mapping, target_type in zip(mappings, target_types):
                 source = mapping.get("source") or ""
-                source_type = (
-                    column_types.get(source)
-                    or mapping.get("source_type")
-                    or "VARCHAR"
-                )
+                source_samples = batch_samples.get(source, []) if batch_samples else []
+                if source_samples:
+                    source_type = infer_type(source_samples, field_name=source)
+                else:
+                    source_type = (
+                        column_types.get(source)
+                        or mapping.get("source_type")
+                        or "VARCHAR"
+                    )
                 source_ddl = pg_type(source_type, engine=engine)
                 desired = (
                     source_ddl

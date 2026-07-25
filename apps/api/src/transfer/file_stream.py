@@ -29,12 +29,14 @@ try:
     from services.parallel_chunks import OrderedChunkRunner
     from services.resilience import adaptive_chunk_size
     from services.row_filter import apply_row_filter
+    from services.transform_engine import infer_date_locale, set_active_date_locale
 except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.checkpoint_service import Checkpoint, CheckpointService
     from src.services.error_handling import RetryBudget, with_retry
     from src.services.parallel_chunks import OrderedChunkRunner
     from src.services.resilience import adaptive_chunk_size
     from src.services.row_filter import apply_row_filter
+    from src.services.transform_engine import infer_date_locale, set_active_date_locale
 
 _api_root = Path(__file__).resolve().parents[2]
 if str(_api_root) not in sys.path:
@@ -686,6 +688,7 @@ def stream_file_to_database(
     validation_mode: str = "strict",
     source_filter: dict[str, Any] | None = None,
     skip_preflight: bool = False,
+    date_locale: str = "",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     try:
         from services.file_parser import FileParser
@@ -696,6 +699,12 @@ def stream_file_to_database(
     columns, probe_schema, total_rows, sample_rows = peek_file_source(content, filename)
     if not schema:
         schema = probe_schema
+
+    # Resolve ambiguous day/month date order from the sample before any transform.
+    if not date_locale and sample_rows and columns:
+        date_locale = infer_date_locale(sample_rows, columns) or ""
+    if date_locale:
+        set_active_date_locale(date_locale)
 
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
@@ -853,6 +862,10 @@ def stream_file_to_database(
             max_workers = 1
 
     def _process_file_chunk(idx: int, batch: list[dict]) -> dict[str, Any]:
+        # Worker threads do not inherit the caller's contextvars, so each chunk
+        # must re-apply the resolved date locale before any date coercion runs.
+        if date_locale:
+            set_active_date_locale(date_locale)
         if not batch:
             return {
                 "batch_written": 0,

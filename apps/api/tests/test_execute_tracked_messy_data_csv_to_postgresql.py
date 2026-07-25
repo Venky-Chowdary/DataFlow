@@ -85,3 +85,68 @@ def test_messy_csv_to_postgresql_preserves_types():
     assert rows[0] == (1, Decimal("1000.00"), None, date(2024, 1, 15), True, {"k": "v"}, ["a", "b"])
     assert rows[1] == (2, Decimal("2000.50"), "hello", date(2024, 2, 28), False, None, None)
     assert rows[2] == (3, Decimal("3.14"), "null", date(2024, 3, 1), True, {}, [])
+
+
+def test_csv_to_postgresql_auto_date_locale_mdy():
+    try:
+        with socket.create_connection(("localhost", 5432), timeout=1):
+            pass
+    except OSError:
+        pytest.skip("PostgreSQL emulator not reachable on localhost:5432")
+
+    table_name = "date_locale_mdy_test_" + uuid.uuid4().hex[:8]
+    rows = [
+        {"id": "1", "birth_date": "12/31/2024"},  # unambiguous MDY
+        {"id": "2", "birth_date": "5/8/1967"},    # ambiguous, must inherit MDY
+        {"id": "3", "birth_date": "7/9/1982"},    # ambiguous, must inherit MDY
+    ]
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=["id", "birth_date"])
+    writer.writeheader()
+    writer.writerows(rows)
+
+    request = TransferRequest(
+        source=EndpointConfig(kind="file", format="csv"),
+        source_filename="dates_mdy.csv",
+        source_content=buf.getvalue().encode("utf-8"),
+        destination=EndpointConfig(
+            kind="database",
+            format="postgresql",
+            host="localhost",
+            port=5432,
+            database="dataflow",
+            username="dataflow",
+            password="dataflow",
+            schema="public",
+            table=table_name,
+        ),
+        sync_mode="upsert",
+        stream_contracts=[{
+            "name": "people",
+            "sync_mode": "upsert",
+            "primary_key": "id",
+            "selected": True,
+        }],
+        skip_preflight=True,
+    )
+
+    engine = UniversalTransferEngine()
+    result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
+    assert result.success is True, result.error
+    assert result.records_transferred == 3
+
+    import psycopg2
+    conn = psycopg2.connect(
+        host="localhost", port=5432, database="dataflow",
+        user="dataflow", password="dataflow",
+    )
+    with conn.cursor() as cur:
+        cur.execute(f'SELECT id, birth_date FROM public."{table_name}" ORDER BY id')
+        rows = cur.fetchall()
+    conn.close()
+
+    assert rows == [
+        (1, date(2024, 12, 31)),
+        (2, date(1967, 5, 8)),
+        (3, date(1982, 7, 9)),
+    ]

@@ -1008,6 +1008,14 @@ def _auto_map(
                         and isinstance(auto, list)
                         and any(m.get("source") for m in auto)
                     ):
+                        # New tables should keep source column names; the semantic
+                        # mapper may canonicalize (e.g. birth_date -> date_of_birth)
+                        # which is only safe when the target schema is known.
+                        # Preserve the mapper's inferred target_type.
+                        if dest_exists is False:
+                            for m in auto:
+                                m["target"] = m.get("source") or m.get("target", "")
+                                m["create_new"] = True
                         mappings = auto
                     elif dest_exists is False:
                         mappings = default_mappings(columns)
@@ -2784,6 +2792,13 @@ class UniversalTransferEngine:
             if request.source_filter:
                 sample_rows = apply_row_filter(sample_rows, request.source_filter)
 
+            # Resolve ambiguous day/month date order from the sample before mapping.
+            if not request.date_locale and sample_rows and columns:
+                inferred_locale = infer_date_locale(sample_rows, columns)
+                if inferred_locale:
+                    request.date_locale = inferred_locale
+                    set_active_date_locale(inferred_locale)
+
             mongo.update_job_status(
                 job_id, "running", total_rows=total_rows, records_processed=0
             )
@@ -3036,6 +3051,7 @@ class UniversalTransferEngine:
                 validation_mode=request.validation_mode,
                 source_filter=request.source_filter,
                 skip_preflight=request.skip_preflight,
+                date_locale=request.date_locale,
             )
 
             with _reconcile_phase_heartbeat(

@@ -6,8 +6,26 @@ import re
 
 from services.semantic_mapper import map_columns
 from services.transform_engine import infer_transform_for_mapping
+from services.type_system import normalize_logical_type
 
 CONFIDENCE_FLOOR = 0.72
+
+
+# When the destination schema is generic or unknown, create-new columns should
+# inherit the typed transform's logical type instead of staying as VARCHAR/text.
+_TYPED_TRANSFORM_TARGET_TYPE: dict[str, str] = {
+    "integer": "INTEGER",
+    "decimal": "DECIMAL",
+    "boolean": "BOOLEAN",
+    "date": "DATE",
+    "datetime": "DATETIME",
+    "time": "TIME",
+    "json": "JSON",
+    "binary": "BINARY",
+    "uuid": "UUID",
+    "currency": "DECIMAL",
+    "percentage": "DECIMAL",
+}
 
 
 def classify_format(source_columns: list[str], file_format: str | None = None) -> dict:
@@ -377,24 +395,28 @@ def run_mapping_pipeline(
         tgt_type = target_by_name.get(m["target"], {}).get("inferred_type")
         # Create-new / missing dest type: auto-widen unsigned 64-bit to DECIMAL.
         if not tgt_type:
-            from services.type_system import normalize_logical_type
-
             if normalize_logical_type(src_type) == "decimal" and "unsigned" in str(src_type).lower():
                 tgt_type = "DECIMAL"
             else:
                 tgt_type = src_type
+
+        col_samples = [
+            str(x) for x in (schema_by_name.get(m["source"], {}).get("samples") or [])[:8]
+        ] or None
+        transform = infer_transform_for_mapping(
+            m["source"], m["target"], src_type, tgt_type, source_samples=col_samples
+        )
+        # New/generic destinations: the DDL type should match the chosen typed
+        # transform so a date column is created for "date" transforms, etc.
+        if normalize_logical_type(tgt_type) in {"string", "text", "varchar", "unknown"}:
+            typed_target = _TYPED_TRANSFORM_TARGET_TYPE.get(transform)
+            if typed_target:
+                tgt_type = typed_target
+
         enriched_mappings.append(
             {
                 **m,
-                "transform": infer_transform_for_mapping(
-                    m["source"],
-                    m["target"],
-                    src_type,
-                    tgt_type,
-                    source_samples=[
-                        str(x) for x in (schema_by_name.get(m["source"], {}).get("samples") or [])[:8]
-                    ] or None,
-                ),
+                "transform": transform,
                 "source_type": src_type,
                 "target_type": tgt_type,
                 "reasoning": reasoning,

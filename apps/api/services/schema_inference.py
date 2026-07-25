@@ -31,6 +31,7 @@ from services.transform_engine import (
     NULL_SENTINELS,
     _STRICT_BOOL_FALSE,
     _STRICT_BOOL_TRUE,
+    _active_date_locale,
     _parse_boolean,
     _parse_date,
     _parse_datetime,
@@ -351,10 +352,14 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
         if _valid_yyyymmdd(s) and field_name is None:
             return "DATE"
 
-    if _parse_date(s) is not None and not re.fullmatch(r"\d{8}", s):
+    # Honor the active transfer date_locale (DMY/MDY/Auto) so inference matches
+    # the parser that will be used at write time. Without this, ambiguous dates
+    # like 5/8/1967 are classified as VARCHAR even when the locale is resolved.
+    active_locale = _active_date_locale()
+    if _parse_date(s, date_locale=active_locale) is not None and not re.fullmatch(r"\d{8}", s):
         return "DATE"
 
-    if _parse_datetime(s) is not None:
+    if _parse_datetime(s, date_locale=active_locale) is not None:
         # Preserve TZ awareness when the sample carries Z / offset — never invent SRID/cast.
         if re.search(r"(Z|[+-]\d{2}:?\d{2})$", s, re.I):
             return "TIMESTAMPTZ"
