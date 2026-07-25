@@ -48,9 +48,10 @@ def read_table_batch(
         dataset=dataset_id,
     )
 
-    try:
-        from connectors.bigquery_conn import get_client
+    from google.cloud import bigquery
+    from connectors.bigquery_conn import _is_local_endpoint, get_client
 
+    try:
         client = get_client(
             project_id=project_id,
             credentials_path=connection_string,
@@ -59,11 +60,58 @@ def read_table_batch(
             port=port,
             connection_string=connection_string,
         )
+        is_local = _is_local_endpoint(host, connection_string or "")[0]
+
+        # API reference uses the raw project/dataset/table names.  ``table_ref``
+        # is the backtick-quoted SQL form used only for ``query()`` strings.
+        api_ref = bigquery.TableReference(
+            bigquery.DatasetReference(project_id, dataset_id), table
+        )
+
         if known_total_rows is not None:
             total = known_total_rows
+        elif is_local:
+            # Emulator path: `query().result()` can hang on some fake-BigQuery
+            # implementations (e.g. goccy/bigquery-emulator), while `get_table`
+            # and `list_rows` are reliable.
+            bq_table = client.get_table(api_ref)
+            total = bq_table.num_rows or 0
         else:
             count_q = f"SELECT COUNT(*) AS cnt FROM {table_ref}"  # nosec B608
-            total = int(list(client.query(count_q).result())[0]["cnt"])
+            total = int(list(client.query(count_q).result(timeout=60))[0]["cnt"])
+
+        # Determine columns/ordering.
+        if columns:
+            order_cols = list(columns)
+        else:
+            bq_table = client.get_table(api_ref)
+            order_cols = [field.name for field in (bq_table.schema or [])]
+        if not order_cols:
+            raise RuntimeError("BigQuery table has no columns for stable pagination")
+
+        if is_local:
+            rows_iter = client.list_rows(
+                api_ref,
+                max_results=limit,
+                start_index=offset,
+            )
+            rows_list = list(rows_iter)
+            # Local emulators may ignore max_results/start_index; sort and slice
+            # defensively so pagination/resume stays deterministic.
+            if len(rows_list) > limit or offset:
+
+                def _row_key(row):
+                    values = row if isinstance(row, dict) else dict(row.items())
+                    return tuple(values.get(c) for c in order_cols)
+
+                rows_list = sorted(rows_list, key=_row_key)[offset : offset + limit]
+            headers = columns or order_cols
+            rows = [
+                [cell_to_string(row.get(c) if isinstance(row, dict) else row[c], preserve_sql_null=True) for c in headers]
+                for row in rows_list
+            ]
+            return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
+
         col_sql = (
             quote_column_list(
                 [require_safe_identifier(c, preserve_case=True) for c in columns],
@@ -72,17 +120,6 @@ def read_table_batch(
             if columns
             else "*"
         )
-        # Stable LIMIT/OFFSET requires ORDER BY — unordered pages silently
-        # duplicate or skip rows under concurrent mutations / non-deterministic plans.
-        order_cols = list(columns or [])
-        if not order_cols:
-            safe_project = require_safe_identifier(project_id, preserve_case=True, max_len=1024)
-            safe_dataset = require_safe_identifier(dataset_id, preserve_case=True, max_len=1024)
-            safe_table = require_safe_identifier(table, preserve_case=True, max_len=1024)
-            bq_table = client.get_table(f"{safe_project}.{safe_dataset}.{safe_table}")
-            order_cols = [field.name for field in (bq_table.schema or [])]
-        if not order_cols:
-            raise RuntimeError("BigQuery table has no columns for stable pagination")
         order_sql = quote_column_list(
             [require_safe_identifier(order_cols[0], preserve_case=True)],
             quote_char="`",
@@ -92,7 +129,7 @@ def read_table_batch(
             f"ORDER BY {order_sql} LIMIT {int(limit)} OFFSET {int(offset)}"
         )
         job = client.query(query)
-        rows_iter = job.result()
+        rows_iter = job.result(timeout=60)
         if job.schema:
             headers = [field.name for field in job.schema]
         else:

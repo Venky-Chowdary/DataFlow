@@ -367,12 +367,19 @@ async def health_check_v1():
 
 @app.get("/health/ready")
 async def health_ready():
-    """Readiness — dependencies (Mongo, storage, drivers) are usable."""
+    """Readiness — dependencies (Mongo, storage, drivers) are usable.
+
+    Returns 503 Service Unavailable until warm-up completes and all
+    dependency checks report healthy so Railway does not route traffic
+    to a pod that cannot accept transfer jobs.
+    """
     payload = aggregate_health()
-    payload["ready"] = bool(getattr(app.state, "ready", False))
+    warm = bool(getattr(app.state, "ready", False))
+    payload["ready"] = warm and payload.get("status") == "healthy"
     if not payload["ready"] and payload.get("status") == "healthy":
         payload["status"] = "starting"
-    return payload
+    status_code = 200 if payload["ready"] else 503
+    return JSONResponse(content=payload, status_code=status_code)
 
 
 @app.get("/metrics")

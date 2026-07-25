@@ -149,7 +149,7 @@ _TRANSFER_READY_CORE = frozenset({
     "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage",
     "redis", "elasticsearch", "sqlite", "generic_sql",
     "iceberg", "apache_iceberg", "kafka", "apache_kafka",
-    "salesforce", "hubspot", "stripe", "shopify", "zendesk", "notion", "airtable",
+    "salesforce", "hubspot",
     "csv___tsv", "json", "jsonl", "ndjson", "excel", "parquet",
     "sftp", "email",
     "pgvector", "qdrant", "weaviate", "pinecone", "milvus",
@@ -159,7 +159,7 @@ _TRANSFER_READY_HOSTED_TWINS = frozenset({
     # Enterprise SQL / cloud managed
     "postgresql_rds", "mysql_rds", "postgresql_cloud_sql", "mysql_cloud_sql",
     "postgresql_azure", "mysql_azure", "postgresql_supabase", "postgresql_neon",
-    "mysql_planetscale", "amazon_rds_oracle", "oracle_autonomous_warehouse",
+    "amazon_rds_oracle", "oracle_autonomous_warehouse",
     "amazon_redshift", "redshift_serverless",
     "google_bigquery", "bigquery_us", "bigquery_eu",
     "snowflake_aws", "snowflake_azure", "snowflake_gcp",
@@ -616,7 +616,7 @@ _UNCERTIFIED_GENERIC_SQL_BRANDS = frozenset({
 # variants (RDS, Cloud SQL, Azure DB, Aurora) remain certified.
 _WIRE_COMPATIBLE_UNCERTIFIED_BRANDS = frozenset({
     "singlestore", "cockroachdb", "yugabytedb", "vitess", "tidb",
-    "oceanbase", "polardb", "planetscale",
+    "oceanbase", "polardb", "planetscale", "mysql_planetscale",
 })
 
 # Legacy helper kept for tests that still probe generic_sql brand certification.

@@ -35,7 +35,10 @@ class FileContractStore:
             return {"contracts": {}, "breakers": {}}
 
     def _write(self, payload: dict[str, Any]) -> None:
-        tmp = self.path.with_suffix(".tmp")
+        # Use a process/thread-unique temp file so concurrent writers never
+        # steal each other's source before os.replace.
+        tmp = self.path.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         tmp.replace(self.path)
 

@@ -1,6 +1,6 @@
 **Report:** `dataflow_research_report.md` (July 2026)  
 **Branch:** `devin/backend-hardening-p5`  
-**Last updated:** 2026-07-20  
+**Last updated:** 2026-07-25  
 
 This document tracks every item from the market/algorithm research report against the current codebase so progress is transparent and the remaining work is explicit.
 
@@ -8,14 +8,12 @@ This document tracks every item from the market/algorithm research report agains
 
 ## Executive summary
 
-Backend batch reliability is now solid:
+Backend batch reliability is **beta / early production** for batch transfers on supported drivers; continuous verification runs on PR #28.
 
-- `pytest tests`: **2003 passed / 182 skipped / 0 failed** (clean after Elasticsearch shard cleanup)
-- 5×5 production SKU matrix verified
-- Universal route matrix: **529 passed / 121 skipped**
-- Full backend test suite green on PR #16
-
-The product is **beta / early production** for batch transfers on supported drivers. CDC is a **strong partial** (PG/MySQL/Mongo live-proven; shared multi-table reader + Redis/file leases with fencing; SQL Server/Oracle thinner). It is **not** “100% CDC” and **not** platform-wide better than Airbyte/Debezium — integrity (mapping/preflight/quarantine/reconcile) can win *trust*; Airbyte/Debezium still win *CDC fleet coverage, edge-case years, and Connect-scale ops*.
+- Test counts on this branch are reported by CI/pytest artifacts on each push — do not rely on stale marketing numbers.
+- `pytest` full-suite status and pass/fail/skip counts are captured in the current PR verification section, not in this static doc.
+- CDC is **at-least-once upsert** by default. PG/MySQL/Mongo shared-reader paths have live integration coverage; SQL Server/Oracle need cred-gated live matrices before they can be called certified.
+- The product is **not** “100% CDC” and **not** platform-wide better than Airbyte/Debezium — integrity (mapping/preflight/quarantine/reconcile) can win *trust*; Airbyte/Debezium still win *CDC fleet coverage, edge-case years, and Connect-scale ops*.
 
 ---
 

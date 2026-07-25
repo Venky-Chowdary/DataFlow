@@ -709,6 +709,8 @@ def verify_bigquery_table(
     project_id: str,
     dataset_id: str,
     connection_string: str,
+    host: str = "",
+    port: int = 0,
     table_name: str,
     target_columns: list[str] | None = None,
     limit: int = 0,
@@ -716,7 +718,12 @@ def verify_bigquery_table(
     try:
         from connectors.bigquery_conn import get_client
 
-        client = get_client(project_id=project_id, credentials_path=connection_string)
+        client = get_client(
+            project_id=project_id,
+            credentials_path=connection_string,
+            host=host,
+            port=port,
+        )
         table_id = f"{project_id}.{dataset_id}.{table_name}"
         table = client.get_table(table_id)
         count = table.num_rows or 0
@@ -1248,6 +1255,8 @@ def verify_target(
             project_id=dest.get("database", ""),
             dataset_id=schema,
             connection_string=dest.get("connection_string", ""),
+            host=dest.get("host", ""),
+            port=int(dest.get("port", 0) or 0),
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,

@@ -615,13 +615,13 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "recommended_batch_size": 100,
     },
     "zendesk": {
-        "transfer_ready": True,
+        "transfer_ready": False,
         "tier": TIER_HIGH,
         "pattern": "batch",
         "supports_cdc": False,
         "supports_streaming": False,
-        "supports_upsert": True,
-        "supports_append": True,
+        "supports_upsert": False,
+        "supports_append": False,
         "supports_overwrite": False,
         "supports_merge": False,
         "requires_schema": False,
@@ -630,13 +630,13 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "recommended_batch_size": 100,
     },
     "shopify": {
-        "transfer_ready": True,
+        "transfer_ready": False,
         "tier": TIER_HIGH,
         "pattern": "batch",
         "supports_cdc": False,
         "supports_streaming": False,
-        "supports_upsert": True,
-        "supports_append": True,
+        "supports_upsert": False,
+        "supports_append": False,
         "supports_overwrite": False,
         "supports_merge": False,
         "requires_schema": False,
@@ -931,6 +931,14 @@ def get_connector_capability(key: str) -> dict[str, Any]:
         else:
             # Catch-all rest_api / unknown → not transfer_ready under this brand name
             cap["transfer_ready"] = False
+        # Sidecar entries may advertise upsert/append/overwrite/merge for source-only
+        # or planned brands.  Force write-related flags to match the real driver caps.
+        can_write = bool(caps.get("write"))
+        if not can_write:
+            cap["supports_upsert"] = False
+            cap["supports_append"] = False
+            cap["supports_overwrite"] = False
+            cap["supports_merge"] = False
         cap["driver_type"] = driver
         cap["driver_capabilities"] = caps
     except Exception:

@@ -11,6 +11,7 @@ import base64
 import json
 import logging
 import re
+import time
 from typing import Any
 
 import requests
@@ -80,6 +81,56 @@ def _flatten(obj: Any, prefix: str = "") -> dict[str, Any]:
     return out
 
 
+def _request_with_retry(
+    method: str,
+    url: str,
+    *,
+    max_retries: int = 3,
+    **kwargs: Any,
+) -> requests.Response:
+    """Execute an idempotent GET with 429 / 5xx / transient retry and backoff.
+
+    SaaS APIs (Notion, Airtable, Shopify, Zendesk, Stripe) rate-limit with
+    429 and transient 5xx.  We honor ``Retry-After`` when present and fall back
+    to exponential backoff.  Non-transient 4xx errors fail fast.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            resp = requests.request(method, url, **kwargs)
+            if resp.status_code == 429:
+                retry_after = resp.headers.get("Retry-After") or ""
+                try:
+                    delay = max(1, int(retry_after))
+                except ValueError:
+                    delay = 2 ** attempt
+                logger.warning("REST API rate-limited (429) on %s; retrying after %ss", url, delay)
+                if attempt < max_retries - 1:
+                    time.sleep(delay)
+                    continue
+            if 500 <= resp.status_code < 600 and attempt < max_retries - 1:
+                logger.warning(
+                    "REST API server error (%s) on %s; retrying (%s/%s)",
+                    resp.status_code,
+                    url,
+                    attempt + 1,
+                    max_retries,
+                )
+                time.sleep(2 ** attempt)
+                continue
+            return resp
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            last_exc = exc
+            logger.warning("REST API transient error on %s: %s; retrying", url, exc)
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+    if last_exc is not None:
+        raise last_exc
+    # max_retries==0 or all retries consumed without a response
+    return requests.request(method, url, **kwargs)
+
+
 def _build_headers(cfg: dict[str, Any]) -> dict[str, str]:
     headers: dict[str, str] = {"Accept": "application/json", "User-Agent": "DataFlow/1.0"}
     mode = (cfg.get("auth_mode") or cfg.get("authPrefix") or "").lower()
@@ -91,7 +142,7 @@ def _build_headers(cfg: dict[str, Any]) -> dict[str, str]:
 
     if auth_header:
         if api_key:
-            headers[auth_header] = f"{auth_prefix}{api_key}" if auth_prefix else api_key
+            headers[auth_header] = (f"{auth_prefix} {api_key}" if auth_prefix else api_key).strip()
     elif mode in ("bearer", "token", "") and api_key:
         headers["Authorization"] = f"{auth_prefix} {api_key}"
     elif mode in ("api_key", "apikey") and api_key:
@@ -326,7 +377,7 @@ def _read_page(cfg: dict[str, Any], pagination: dict[str, Any], next_url: str | 
     url = _get_url(cfg, pagination, next_url)
     headers = _build_headers(cfg)
     params = _build_params(cfg, pagination)
-    resp = requests.request("GET", url, headers=headers, params=params, timeout=60)
+    resp = _request_with_retry("GET", url, headers=headers, params=params, timeout=60)
     resp.raise_for_status()
     body = resp.json()
     records = _extract_records(body, cfg.get("data_path", ""))
@@ -364,7 +415,7 @@ def test_connection(
         url = _get_url(cfg, {})
         # Make a lightweight request with limit=1 if the API supports it.
         params = _build_params(cfg, {cfg.get("limit_param", "limit"): 1})
-        resp = requests.request("GET", url, headers=_build_headers(cfg), params=params, timeout=30)
+        resp = _request_with_retry("GET", url, headers=_build_headers(cfg), params=params, timeout=30)
         if resp.status_code == 401 or resp.status_code == 403:
             return False, "REST API authentication failed. Check the API token/key and required permissions."
         if resp.status_code == 404:

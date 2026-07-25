@@ -11,10 +11,11 @@ from typing import Any
 
 def _is_local_endpoint(host: str, connection_string: str) -> tuple[bool, str]:
     """Return (is_local, endpoint_url) for BigQuery-compatible emulators."""
-    raw = (connection_string or host or "").strip()
+    raw = (connection_string or "").strip()
     if raw.startswith("http://") or raw.startswith("https://"):
         return True, raw.rstrip("/")
-    if raw in ("localhost", "127.0.0.1", "host.docker.internal"):
+    raw_host = (host or "").strip()
+    if raw_host in ("localhost", "127.0.0.1", "host.docker.internal"):
         return True, ""
     return False, ""
 
@@ -34,6 +35,10 @@ def get_client(
 
     creds_ref = (service_account or connection_string or credentials_path or "").strip()
     is_local, endpoint_url = _is_local_endpoint(host, creds_ref)
+    # If no explicit emulator URL/credentials but the host itself is local, treat
+    # it as an emulator so tests and local stacks don't require ADC.
+    if not is_local and host in ("localhost", "127.0.0.1", "host.docker.internal"):
+        is_local = True
 
     if is_local:
         from google.auth.credentials import AnonymousCredentials

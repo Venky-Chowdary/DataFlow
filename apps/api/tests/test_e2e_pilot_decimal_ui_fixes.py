@@ -85,12 +85,13 @@ def test_e2e_pilot_domain_query_may_use_knowledge_or_tools():
 
 def test_e2e_snowflake_stub_write_survives_huge_decimal():
     """Writer must not hard-fail on values that would Overflow NUMBER(38,10)."""
+    pytest.importorskip("fakesnow")
     from connectors.snowflake_writer import write_mapped_rows
 
     # 31-digit integer — classic overflow against NUMBER(38,10) (28 int digits)
     huge = "9" * 31
     result = write_mapped_rows(
-        host="xy12345.us-east-1",
+        host="localhost",
         port=443,
         database="ANALYTICS",
         username="user",
@@ -111,8 +112,6 @@ def test_e2e_snowflake_stub_write_survives_huge_decimal():
     )
     assert result.ok, result.error
     assert result.rows_written == 3
-    # Unfit cells (e.g. 1e500) should land in rejected_details, not crash the job
-    reasons = " ".join(d.get("reason", "") for d in (result.rejected_details or []))
     # Either quarantined or fitted via wider NUMBER — never bare Overflow class dump
     assert "[<class" not in (result.error or "")
 
