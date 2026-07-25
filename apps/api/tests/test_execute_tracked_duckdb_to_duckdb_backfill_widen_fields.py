@@ -118,6 +118,9 @@ def test_duckdb_to_duckdb_backfill_widens_varchar_and_numeric():
         (1, "a-much-longer-value-that-exceeds-five", Decimal("1234567890.12")),
         (2, "world", Decimal("7890.12")),
     ]
+
+    # Verify the destination catalog was widened, not just that the values fit.
+    assert col_types.get("note", "").upper() == "VARCHAR"
     amount_type = (col_types.get("amount") or "").upper()
     assert "DECIMAL" in amount_type or "NUMERIC" in amount_type, amount_type
-    assert "12" in amount_type and "2" in amount_type, amount_type
+    assert "12" in amount_type and ",2" in amount_type, amount_type
