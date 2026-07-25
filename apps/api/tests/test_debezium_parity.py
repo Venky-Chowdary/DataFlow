@@ -409,7 +409,7 @@ def test_mysql_poll_preserves_gtid_on_resume_token(monkeypatch) -> None:
         table="orders",
         primary_key="id",
         resume_token={"file": "bin.000001", "pos": 100, "table": "orders"},
-        cursor_key=f"test:gtid:preserve",
+        cursor_key="test:gtid:preserve",
     )
 
     class FakeStream:
@@ -430,6 +430,7 @@ def test_mysql_poll_preserves_gtid_on_resume_token(monkeypatch) -> None:
     event_mod.XidEvent = type("XidEvent", (), {})
     row_mod = types.ModuleType("pymysqlreplication.row_event")
     row_mod.DeleteRowsEvent = type("DeleteRowsEvent", (), {})
+    row_mod.TableMapEvent = type("TableMapEvent", (), {})
     row_mod.UpdateRowsEvent = type("UpdateRowsEvent", (), {})
     row_mod.WriteRowsEvent = type("WriteRowsEvent", (), {})
     monkeypatch.setitem(sys.modules, "pymysqlreplication", pkg)

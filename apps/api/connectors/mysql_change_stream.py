@@ -259,6 +259,11 @@ class MySqlChangeStreamCdc:
         self.heartbeat()
 
         lock_conn = None
+        locked = False
+        start_pos: dict[str, Any] = {
+            "table": self.table,
+            "tables": list(self.tables),
+        }
         try:
             lock_conn = get_connection(
                 host=self.cfg.get("host") or "localhost",
@@ -274,7 +279,6 @@ class MySqlChangeStreamCdc:
             # the lock is released.  Falls back to per-table READ locks.
             lock_conn.autocommit(True)
 
-            locked = False
             try:
                 with lock_conn.cursor() as cur:
                     cur.execute("FLUSH TABLES WITH READ LOCK")
@@ -295,10 +299,6 @@ class MySqlChangeStreamCdc:
                         "Could not LOCK TABLES for consistent CDC snapshot: %s", exc
                     )
 
-            start_pos: dict[str, Any] = {
-                "table": self.table,
-                "tables": list(self.tables),
-            }
             if locked:
                 with lock_conn.cursor() as cur:
                     for sql in ("SHOW MASTER STATUS", "SHOW BINARY LOG STATUS"):
@@ -315,26 +315,33 @@ class MySqlChangeStreamCdc:
                                 break
                         except Exception:
                             pass
+        except Exception as exc:
+            _logger.warning(
+                "Could not acquire MySQL lock connection for CDC snapshot: %s", exc
+            )
+            locked = False
+            lock_conn = None
 
-            if not start_pos.get("file"):
-                # Fallback when binlog position cannot be captured while locked.
-                start_pos = self._current_binlog_position() or start_pos
+        if not start_pos.get("file"):
+            # Fallback when binlog position cannot be captured while locked.
+            start_pos = self._current_binlog_position() or start_pos
 
-            # Resume mid-snapshot from the recorded table/offset.
-            offset = 0
-            resume_table = self.table
-            if (
-                isinstance(self.resume_token, dict)
-                and self.resume_token.get("phase") == "snapshot"
-            ):
-                offset = int(self.resume_token.get("offset") or 0)
-                resume_table = self.resume_token.get("table") or self.table
+        # Resume mid-snapshot from the recorded table/offset.
+        offset = 0
+        resume_table = self.table
+        if (
+            isinstance(self.resume_token, dict)
+            and self.resume_token.get("phase") == "snapshot"
+        ):
+            offset = int(self.resume_token.get("offset") or 0)
+            resume_table = self.resume_token.get("table") or self.table
 
-            if resume_table in self.tables:
-                tables_to_snapshot = self.tables[self.tables.index(resume_table) :]
-            else:
-                tables_to_snapshot = list(self.tables)
+        if resume_table in self.tables:
+            tables_to_snapshot = self.tables[self.tables.index(resume_table) :]
+        else:
+            tables_to_snapshot = list(self.tables)
 
+        try:
             for table in tables_to_snapshot:
                 table_offset = offset if table == resume_table else 0
                 while True:
@@ -368,13 +375,6 @@ class MySqlChangeStreamCdc:
                     )
                     if len(batch.rows) < self.batch_size:
                         break
-
-            if locked:
-                try:
-                    with lock_conn.cursor() as cur:
-                        cur.execute("UNLOCK TABLES")
-                except Exception as exc:
-                    _logger.warning("UNLOCK TABLES failed: %s", exc)
             yield ChangeBatch(
                 resume_token={
                     **start_pos,
@@ -385,6 +385,12 @@ class MySqlChangeStreamCdc:
             )
         finally:
             if lock_conn:
+                if locked:
+                    try:
+                        with lock_conn.cursor() as cur:
+                            cur.execute("UNLOCK TABLES")
+                    except Exception as exc:
+                        _logger.warning("UNLOCK TABLES failed: %s", exc)
                 try:
                     lock_conn.close()
                 except Exception:
@@ -812,22 +818,22 @@ class MySqlChangeStreamCdc:
             # If a poll window reads no events, falling back to the previous
             # resume token prevents BinLogStreamReader from jumping past events
             # that were committed while the (non-blocking) stream was open.
-            fallback = self.resume_token if isinstance(self.resume_token, dict) else None
-            token = dict(
-                pos
-                or fallback
-                or {"tables": list(self.tables)}
-            )
-            # Do NOT inject the server's current GTID set here; the token
-            # would claim transactions we have not yet read, causing the next
-            # BinLogStreamReader to skip them. File/pos is the authoritative
-            # resume point for this code path.
+            fallback = self.resume_token if isinstance(self.resume_token, dict) else {}
+            token = dict(fallback)
+            if pos:
+                token.update(pos)
+            if not token:
+                token = {"tables": list(self.tables)}
             try:
-                if not token.get("file"):
-                    current = self._current_binlog_position() or {}
-                    if current.get("file"):
-                        token["file"] = current["file"]
-                        token["pos"] = current.get("pos")
+                current = self._current_binlog_position() or {}
+                # Keep GTID as metadata, but _binlog_kwargs uses file/pos when
+                # present so the next BinLogStreamReader never jumps past unread
+                # rows based on a GTID that raced ahead during the poll window.
+                if current.get("gtid"):
+                    token["gtid"] = current["gtid"]
+                if not token.get("file") and current.get("file"):
+                    token["file"] = current["file"]
+                    token["pos"] = current.get("pos")
             except Exception as exc:
                 _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
             return token
