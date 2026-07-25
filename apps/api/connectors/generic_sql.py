@@ -1089,7 +1089,7 @@ def test_generic_sql(**kwargs: Any) -> tuple[bool, str]:
         with engine.connect() as conn:
             conn.execute(sa.select(sa.literal(1)))
         return True, "SQLAlchemy connection successful"
-    except (sa.exc.SQLAlchemyError, RuntimeError) as exc:
+    except (sa.exc.SQLAlchemyError, OSError, RuntimeError) as exc:
         return False, str(exc)
 
 
