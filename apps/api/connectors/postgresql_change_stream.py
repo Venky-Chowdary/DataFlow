@@ -16,6 +16,7 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any
 
+from connectors.postgresql_conn import get_connection
 from services.cdc_engine import ChangeBatch
 from services.cdc_schema_history import (
     connection_fingerprint,
@@ -23,8 +24,6 @@ from services.cdc_schema_history import (
     rebuild_schema,
     record_ddl,
 )
-
-from connectors.postgresql_conn import get_connection
 
 # test_decoding value rendering uses type suffixes like [text]:'value' or [int4]:1.
 # The first colon separates column info from value; the value may itself contain colons.
@@ -43,8 +42,8 @@ def _publication_name(database: str, table: str | list[str], cursor_key: str) ->
         tbl = f"mt_{tables_digest(list(table))}"
     else:
         tbl = str(table)
-    digest = hashlib.sha1(  # noqa: S324 — non-crypto publication name digest
-        f"{database}|{tbl}|{cursor_key}".encode("utf-8"),
+    digest = hashlib.sha1(
+        f"{database}|{tbl}|{cursor_key}".encode(),
         usedforsecurity=False,
     ).hexdigest()[:10]
     raw = f"df_pub_{database}_{tbl}_{digest}".lower()
@@ -367,6 +366,10 @@ class PostgreSqlChangeStreamCdc:
                         return True
                     test_slot = f"{self.slot_name}_avail_test"[:63]
                     plugin = self.output_plugin or "pgoutput"
+                    # Guard against logical-replication probes hanging when the
+                    # server is not really ready (e.g. lock_timeout / statement
+                    # timeout disabled by session guards).
+                    cur.execute("SET LOCAL statement_timeout = '5000ms'")
                     try:
                         cur.execute(
                             "SELECT pg_create_logical_replication_slot(%s, %s)",
@@ -548,22 +551,21 @@ class PostgreSqlChangeStreamCdc:
         nullable: dict[str, bool] = {}
         primary_key: list[str] = []
         try:
-            with self._conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
+            with self._conn() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
                         SELECT column_name, data_type, is_nullable
                         FROM information_schema.columns
                         WHERE table_schema = %s AND table_name = %s
                         ORDER BY ordinal_position
                         """,
-                        (self.schema, self.table),
-                    )
-                    for name, data_type, is_nullable in cur.fetchall():
-                        columns[str(name)] = str(data_type or "text")
-                        nullable[str(name)] = str(is_nullable or "").upper() == "YES"
-                    cur.execute(
-                        """
+                    (self.schema, self.table),
+                )
+                for name, data_type, is_nullable in cur.fetchall():
+                    columns[str(name)] = str(data_type or "text")
+                    nullable[str(name)] = str(is_nullable or "").upper() == "YES"
+                cur.execute(
+                    """
                         SELECT kcu.column_name
                         FROM information_schema.table_constraints tc
                         JOIN information_schema.key_column_usage kcu
@@ -573,9 +575,9 @@ class PostgreSqlChangeStreamCdc:
                           AND tc.table_schema = %s AND tc.table_name = %s
                         ORDER BY kcu.ordinal_position
                         """,
-                        (self.schema, self.table),
-                    )
-                    primary_key = [str(r[0]) for r in cur.fetchall()]
+                    (self.schema, self.table),
+                )
+                primary_key = [str(r[0]) for r in cur.fetchall()]
         except Exception:
             _logger.debug("PostgreSQL live schema fetch failed", exc_info=True)
         return {"columns": columns, "nullable": nullable, "primary_key": primary_key}

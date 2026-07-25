@@ -37683,6 +37683,332 @@
         "backfill_new_fields": false,
         "readiness_score": 0
       }
+    },
+    "dfc-39b2412773e9447e": {
+      "id": "dfc-39b2412773e9447e",
+      "name": "mongodb-to-postgresql-9b7a52e3",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "mongodb",
+        "table": "orders",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "postgresql",
+        "table": "orders_mongo_pg_65ec15d7",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "_id",
+          "target_name": "id",
+          "source_type": "TEXT",
+          "target_type": "TEXT",
+          "transform": "trim_id",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "order_id",
+          "target_name": "order_id",
+          "source_type": "INTEGER",
+          "target_type": "BIGINT",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL",
+          "target_type": "NUMERIC",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "_id",
+          "target": "id",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as TEXT \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%, n=5) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "source_type": "VARCHAR",
+          "target_type": "TEXT",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "trim_id",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "order_id",
+          "target": "order_id",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as BIGINT \u00b7 enriched: Order number or purchase order identifier \u00b7 sample-validated (100%, n=5) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "source_type": "INTEGER",
+          "target_type": "BIGINT",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "integer",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as NUMERIC \u00b7 enriched: Monetary amount / payment value \u00b7 sample-validated (100%, n=5) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "source_type": "DECIMAL",
+          "target_type": "NUMERIC",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "decimal",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:31:31.937881+00:00",
+      "updated_at": "2026-07-25T02:31:31.937881+00:00",
+      "metadata": {
+        "sync_mode": "incremental_deduped",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-cb76cd569aad4a35": {
+      "id": "dfc-cb76cd569aad4a35",
+      "name": "mongodb-to-postgresql-a3833679",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "mongodb",
+        "table": "orders",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "postgresql",
+        "table": "orders_mongo_pg_65ec15d7",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "_id",
+          "target_name": "id",
+          "source_type": "TEXT",
+          "target_type": "TEXT",
+          "transform": "trim_id",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "order_id",
+          "target_name": "order_id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "_id",
+          "target": "id",
+          "confidence": 0.99,
+          "reasoning": "Exact semantic token match \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%, n=7) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "id",
+              "confidence": 0.99,
+              "reasoning": "Exact semantic token match"
+            },
+            {
+              "target": "order_id",
+              "confidence": 0.0,
+              "reasoning": "Semantic role match: identifier \u2192 order_number (lex=0.55)"
+            },
+            {
+              "target": "amount",
+              "confidence": 0.0,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.99,
+          "requires_review": false,
+          "transform": "trim_id",
+          "source_type": "VARCHAR",
+          "target_type": "TEXT",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "order_id",
+          "target": "order_id",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Order number or purchase order identifier \u00b7 sample-validated (100%, n=7) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "order_id",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "id",
+              "confidence": 0.791,
+              "reasoning": "Schematic index match (1M+ variants)"
+            },
+            {
+              "target": "amount",
+              "confidence": 0.215,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.199,
+          "requires_review": false,
+          "transform": "integer",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Monetary amount / payment value \u00b7 sample-validated (100%, n=7) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "amount",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "id",
+              "confidence": 0.087,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "order_id",
+              "confidence": 0.0,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.903,
+          "requires_review": false,
+          "transform": "decimal",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:31:33.806743+00:00",
+      "updated_at": "2026-07-25T02:31:33.806743+00:00",
+      "metadata": {
+        "sync_mode": "incremental_deduped",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
     }
   },
   "breakers": {
@@ -42720,6 +43046,28 @@
       "success_count": 0,
       "last_failure_time": null,
       "last_state_change": 1784576567.487242,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-39b2412773e9447e": {
+      "contract_id": "dfc-39b2412773e9447e",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784946692.0272589,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-cb76cd569aad4a35": {
+      "contract_id": "dfc-cb76cd569aad4a35",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784946693.8790607,
       "failure_threshold": 3,
       "recovery_timeout_seconds": 60.0,
       "half_open_max": 1

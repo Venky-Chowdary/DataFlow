@@ -948,6 +948,70 @@ pytest apps/api/tests/test_adapters_integration.py
 42 passed
 ```
 
+### Post-run regression found and fixed
+
+While running the full `apps/api/tests` suite an `UnboundLocalError` surfaced in `src/transfer/endpoint_intelligence.py::_attach_db_sample`: the error-logging path referenced `fmt` before it was assigned when `resolve_connector_config` itself raised. The fix moves `fmt = (endpoint.format or "").lower()` outside the `try` block so the log always has a driver name, and the schema probe error is surfaced instead of crashing.
+
+```text
+pytest apps/api/tests/test_dest_table_exists_create.py
+10 passed
+```
+
+---
+
+## 19. Schema-drift decimal self-widen + PostgreSQL CDC probe hang (this session)
+
+### Gap
+
+The full `apps/api/tests` suite revealed two more hang/loop hazards:
+
+1. **`is_wider_type` treated an unbounded `NUMERIC` as wider than itself.**
+   When the destination already had `NUMERIC` (no precision/scale) and the source
+   also mapped to `NUMERIC`, `is_wider_type` returned `True`, causing
+   `widen_existing_columns_native` to issue `ALTER TABLE ... ALTER COLUMN ... TYPE`
+   to the same type. Under `pytest` this was hidden because the test opened a
+   PostgreSQL connection and held a transaction, so the `ALTER` waited for an
+   `ACCESS EXCLUSIVE` lock forever. In standalone scripts the no-op DDL finished
+   quickly, which is why the bug looked environmental.
+
+2. **PostgreSQL logical-replication availability probe could hang.**
+   `PostgreSqlChangeStreamCdc.is_available()` calls `pg_create_logical_replication_slot`
+   to verify the server is ready. The connection setup disables `statement_timeout`
+   for long bulk loads, so a slow/stuck slot creation could block the whole CDC
+   transfer startup and the full test suite.
+
+3. **`_attach_db_sample` `UnboundLocalError` on connector-resolution failure.**
+   The error log referenced `fmt` before it was assigned when `resolve_connector_config`
+   raised; this crashed the schema probe instead of surfacing the connection error.
+
+### Fixes this session
+
+| Fix | Root cause | Evidence |
+|-----|------------|----------|
+| `is_wider_type` unbounded decimal self-comparison | `if new_p is None and new_s is None: return True` ignored the case where old was also unbounded | `apps/api/connectors/schema_drift.py` now returns `False` when both sides are unbounded and only returns `True` when moving from bounded to unbounded |
+| `widen_existing_columns_native` lock timeout | `ALTER COLUMN` can block on concurrent transactions; `lock_timeout` was disabled globally by session guards | `apps/api/connectors/schema_drift.py` now `SET LOCAL lock_timeout = '2000ms'` before each `ALTER`, catches "lock timeout" as a skippable race, and resets after |
+| PostgreSQL CDC `is_available` statement timeout | Slot-creation probe could hang indefinitely | `apps/api/connectors/postgresql_change_stream.py` now `SET LOCAL statement_timeout = '5000ms'` before `pg_create_logical_replication_slot` |
+| `_attach_db_sample` `fmt` unbound | `fmt` assigned inside the `try` block | `apps/api/src/transfer/endpoint_intelligence.py` now assigns `fmt` before the `try` block |
+
+### Verification this session
+
+```text
+pytest apps/api/tests/test_mongodb_to_postgresql_incremental.py \
+       tests/test_schema_drift.py \
+       tests/test_dest_table_exists_create.py \
+       tests/test_cdc_postgres_resume_effectively_once.py \
+       tests/test_cdc_postgres_logical_integration.py \
+       tests/test_cdc_mongodb_change_stream_integration.py \
+       tests/test_execute_tracked_duckdb_to_duckdb.py \
+       tests/test_execute_tracked_csv_to_duckdb.py \
+       tests/test_currency_to_duckdb.py \
+       tests/test_execute_tracked_duckdb_to_duckdb_backfill_widen_fields.py \
+       tests/test_mongodb_cdc_lsn_upsert.py \
+       tests/test_cdc_effectively_once.py \
+       tests/test_adapters_integration.py
+87 passed, 5 warnings in 81.62s
+```
+
 ### What is still NOT proven
 
 - **Cloud warehouse and real-service routes.** ~952 matrix tests still skip because no live Snowflake/BigQuery/Redshift/GCS/ADLS/Salesforce/etc. credentials or emulators are configured.

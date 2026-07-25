@@ -398,6 +398,9 @@ def _mark_table_listed_if_present(out: dict, table: str | None) -> str | None:
 
 def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 100) -> None:
     """Bounded schema discovery — safe for million-row tables."""
+    # Keep the raw format outside the try block so the error log can name the
+    # driver even if connector resolution itself fails.
+    fmt = (endpoint.format or "").lower()
     try:
         cfg = resolve_connector_config(endpoint)
         # Use the resolved saved-connector driver type if available, otherwise
@@ -407,7 +410,6 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         if fmt == "mongodb":
             import json
 
-            from pymongo import MongoClient
             from services.schema_inference import infer_schema_map
 
             coll_name = endpoint.collection

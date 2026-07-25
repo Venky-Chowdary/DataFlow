@@ -11,9 +11,8 @@ import logging
 import re
 from typing import Any
 
-from services.type_system import is_lossy_coercion, normalize_logical_type
-
 from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
+from services.type_system import is_lossy_coercion, normalize_logical_type
 
 logger = logging.getLogger(__name__)
 
@@ -126,11 +125,15 @@ def is_wider_type(old_type: str, new_type: str) -> bool:
         if old_logical == "decimal":
             old_p, old_s = _numeric_precision_scale(old_type)
             new_p, new_s = _numeric_precision_scale(new_type)
-            if new_p is None and new_s is None:
-                return True  # unbounded DECIMAL
-            if old_p is None or old_s is None:
-                return False
-            if new_p is None or new_s is None:
+            new_unbounded = new_p is None and new_s is None
+            old_unbounded = old_p is None and old_s is None
+            if new_unbounded and old_unbounded:
+                return False  # both unbounded: no effective change
+            if new_unbounded:
+                return True  # unbounded is wider than any bounded DECIMAL
+            if old_unbounded:
+                return False  # bounded can never be wider than unbounded
+            if new_p is None or new_s is None or old_p is None or old_s is None:
                 return False
             return (
                 new_p >= old_p and new_s >= old_s and (new_p > old_p or new_s > old_s)
@@ -460,17 +463,23 @@ def widen_existing_columns_native(
             ddl = _build_widen_ddl(
                 dialect, schema, table_name, col, new_type, existing_type
             )
+            # A concurrent reader/writer or an open transaction on this table
+            # can block ALTER COLUMN indefinitely. Use a short lock timeout so
+            # the transfer fails fast with a retriable error instead of hanging.
+            cursor.execute("SET LOCAL lock_timeout = '2000ms'")
             cursor.execute(ddl)
+            cursor.execute("SET LOCAL lock_timeout = 0")
             log.append(ddl)
             logger.debug(
                 "Widened %s.%s from %s to %s", table_name, col, existing_type, new_type
             )
         except Exception as exc:
             err = str(exc).lower()
-            # Ignore "already correct width" / concurrent-alter races and
-            # harmless syntax issues.
+            # Ignore "already correct width" / concurrent-alter / lock-timeout
+            # races and harmless syntax issues.
             if any(
-                phrase in err for phrase in ("already", "cannot alter", "not supported")
+                phrase in err
+                for phrase in ("already", "cannot alter", "not supported", "lock timeout")
             ):
                 logger.debug(
                     "Widen skipped for %s.%s: %s", table_name, col, exc, exc_info=exc
