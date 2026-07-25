@@ -859,10 +859,14 @@ failed at Execute with *Duplicate identity-key values in a write batch*. Preflig
 sync modes that "need" a unique identity contract (`upsert`, `cdc`, `scd2`,
 `mirror`, etc.) and was skipped for `full_refresh_overwrite` / `append`.
 
-**Fix:** `services/data_integrity.py` `_check_duplicate_keys` now always reports
-and blocks when a resolved identity key has duplicates, regardless of sync mode.
-A destination primary key (or explicit stream-contract key) cannot accept repeated
-values even in overwrite, so this is a Validate-time hard blocker.
+**Fix:** `services/data_integrity.py` `_check_duplicate_keys` now blocks by
+default and only relaxes for explicitly append-like sync modes when the
+destination primary key is *not* known to include the mapped target. This avoids
+false positives for append-to-log transfers while still catching duplicate `id`
+values before the write batch reaches the destination. The source-side duplicate
+probe (`services/source_duplicate_probe.py`) scans the full table (SQL `GROUP BY ...
+HAVING COUNT(*) > 1` or MongoDB aggregation) so the 100-row preview sample cannot
+hide rare duplicates in 75k-row tables.
 
 **Verification:**
 
@@ -874,9 +878,15 @@ pytest apps/api/tests/test_data_integrity.py tests/test_data_quality.py \
        tests/test_postgresql_to_postgresql_incremental.py
 56 passed in 6.67s
 
-Live MySQL jobs_dup (id='abc123' repeated) → PostgreSQL full_refresh_overwrite:
-TransferResult(success=False)
-G9 Data integrity: block — "id: duplicate key values (abc123×2)"
+pytest apps/api/tests/test_data_integrity.py tests/test_data_quality.py \
+       tests/test_ddl_compatibility.py tests/test_wave_ad_identity_ux.py \
+       tests/test_wave_ae_studio_honesty.py tests/test_source_duplicate_preflight.py \
+       tests/test_source_duplicate_probe_live.py
+77 passed in 0.73s
+
+Live MySQL jobs_dup (id='abc123' repeated) → PostgreSQL full_refresh_overwrite
+with destination_pk_columns=['id']:
+G9 Data integrity: block — "id: duplicate key values from source probe (abc123×2)"
 ```
 
 The operator will now see the duplicate-key issue on the Validate step with a
