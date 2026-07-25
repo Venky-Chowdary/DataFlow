@@ -384,13 +384,17 @@ def _check_duplicate_keys(
 
     schemaless = dest_kind in SCHEMALESS_DESTS
     sync = (sync_mode or "").strip().lower()
+    # Default to enforcing duplicate identity checks: any destination will fail to
+    # write two rows with the same key unless the sync mode is explicitly append-like
+    # and the destination PK is not known to include the mapped target.
     enforce = (
         schemaless
         or sync_requires_unique_identity(sync)
         or _is_overwrite_like(sync)
+        or not _is_append_like(sync)
     )
-    if not enforce and _is_append_like(sync) and destination_pk_columns:
-        # Only block append when the destination PK is known to include the target.
+    if _is_append_like(sync) and destination_pk_columns:
+        # Append-like modes block when the destination PK is known to include target.
         target = _target_for_source(primary_key, mappings)
         dest_pk_lower = {str(c).lower() for c in destination_pk_columns}
         if target.lower() in dest_pk_lower:
