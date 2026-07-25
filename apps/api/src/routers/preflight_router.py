@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -46,19 +46,21 @@ class PreflightRequest(BaseModel):
     column_types: dict[str, str] = Field(default_factory=dict)
     row_count: int = 0
     mappings: list[MappingItem]
-    connector_id: Optional[str] = None
-    source_connector_id: Optional[str] = None
+    connector_id: str | None = None
+    source_connector_id: str | None = None
     source_kind: str = "file"
-    source_type: Optional[str] = None
+    source_type: str | None = None
+    source_table: str | None = None
+    source_collection: str | None = None
     dest_kind: str = "database"
-    dest_type: Optional[str] = None
-    dest_host: Optional[str] = None
-    dest_port: Optional[int] = None
-    dest_database: Optional[str] = None
-    dest_username: Optional[str] = None
-    dest_password: Optional[str] = None
-    dest_connection_string: Optional[str] = None
-    sample_rows: Optional[list[dict[str, Any]]] = None
+    dest_type: str | None = None
+    dest_host: str | None = None
+    dest_port: int | None = None
+    dest_database: str | None = None
+    dest_username: str | None = None
+    dest_password: str | None = None
+    dest_connection_string: str | None = None
+    sample_rows: list[dict[str, Any]] | None = None
     estimated_bytes: int = 0
     sync_mode: str = "full_refresh_overwrite"
     schema_policy: str = "manual_review"
@@ -68,15 +70,15 @@ class PreflightRequest(BaseModel):
     destination_column_types: dict[str, str] = Field(default_factory=dict)
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian), 'MDY' (US), or ''.
     date_locale: str = ""
-    dest_schema: Optional[str] = None
-    dest_warehouse: Optional[str] = None
-    dest_auth_source: Optional[str] = None
-    dest_auth_mode: Optional[str] = None
-    dest_auth_role: Optional[str] = None
-    dest_api_key: Optional[str] = None
-    dest_service_account: Optional[str] = None
-    dest_table: Optional[str] = None
-    dest_collection: Optional[str] = None
+    dest_schema: str | None = None
+    dest_warehouse: str | None = None
+    dest_auth_source: str | None = None
+    dest_auth_mode: str | None = None
+    dest_auth_role: str | None = None
+    dest_api_key: str | None = None
+    dest_service_account: str | None = None
+    dest_table: str | None = None
+    dest_collection: str | None = None
 
 
 def _schema_default(db_type: str) -> str:
@@ -158,9 +160,7 @@ async def run_preflight(body: PreflightRequest):
         dest_kind=body.dest_kind,
     )
 
-    if body.dest_kind == "file_export":
-        destination_connected = True
-    elif dest_meta.get("connected"):
+    if body.dest_kind == "file_export" or dest_meta.get("connected"):
         destination_connected = True
     elif body.connector_id or body.dest_host or body.dest_connection_string:
         destination_connected = False
@@ -208,7 +208,8 @@ async def run_preflight(body: PreflightRequest):
         destination_can_write=dest_meta.get("can_write"),
         privilege_probe=dest_meta.get("privilege_probe"),
         destination_db_type=(dest_meta.get("db_type") or body.dest_type or "postgresql").lower(),
-        source_table="",
+        source_connector_id=body.source_connector_id or "",
+        source_table=(body.source_table or body.source_collection or ""),
         destination_table=(body.dest_table or body.dest_collection or ""),
         source_filename="",
         schema_policy=body.schema_policy,
@@ -281,7 +282,7 @@ class ExplainRequest(BaseModel):
     """A preflight result to explain (as returned by POST /preflight/run)."""
 
     preflight: dict[str, Any] = Field(..., description="Full preflight result dict")
-    dest_type: Optional[str] = None
+    dest_type: str | None = None
     validation_mode: str = "strict"
     use_llm: bool = Field(True, description="Reuse Data Pilot LLM for a natural-language narrative when available")
 
@@ -304,7 +305,7 @@ async def explain_preflight(body: ExplainRequest):
             validation_mode=body.validation_mode,
             use_llm=body.use_llm,
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -320,7 +321,7 @@ async def classify_schema_drift(body: SchemaDriftRequest):
 
     try:
         return classify_schema_change(body.old_schema, body.new_schema)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -356,5 +357,5 @@ async def preview_quarantine_cells(body: CellPreviewRequest):
             )
         finally:
             reset_active_date_locale(locale_token)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))

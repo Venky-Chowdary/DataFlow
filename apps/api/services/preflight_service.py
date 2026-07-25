@@ -31,12 +31,14 @@ from services.connector_capability_registry import (
     recommended_batch_size,
 )
 from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
+from services.primary_key import resolve_primary_key_source
+from services.source_duplicate_probe import probe_source_duplicate_keys
 from services.transform_engine import (
     reset_active_date_locale,
     set_active_date_locale,
 )
-from services.value_serializer import cell_to_string
 from services.validation_plan import build_validation_plan
+from services.value_serializer import cell_to_string
 
 
 def _with_date_locale(fn):
@@ -56,16 +58,24 @@ def _with_date_locale(fn):
 class FilePreflightContext(PreflightContext):
     """Preflight context for file → database transfers."""
 
-    def __init__(self, plan: TransferPlan, sample_rows: list[dict] | None = None):
+    def __init__(
+        self,
+        plan: TransferPlan,
+        sample_rows: list[dict] | None = None,
+        source_duplicate_findings: list[dict[str, Any]] | None = None,
+    ):
         super().__init__(plan=plan)
         self.sample_rows = sample_rows or []
+        self.source_duplicate_findings = source_duplicate_findings or []
 
     def run_dry_run(self, sample_size: int = 1000) -> tuple[bool, list[str]]:
         if not self.sample_rows:
             return False, [
-                "No sample rows available for dry-run validation. "
-                "Re-run Source introspect so DataFlow can load a preview sample "
-                "from the source table (column metadata alone is not enough)."
+                (
+                    "No sample rows available for dry-run validation. "
+                    "Re-run Source introspect so DataFlow can load a preview sample "
+                    "from the source table (column metadata alone is not enough)."
+                )
             ]
 
         headers = list(self.sample_rows[0].keys()) if self.sample_rows else []
@@ -222,6 +232,7 @@ class FilePreflightContext(PreflightContext):
             or None,
             destination_pk_columns=getattr(self.plan, "destination_pk_columns", None)
             or None,
+            source_duplicate_findings=self.source_duplicate_findings,
         )
 
 
@@ -574,6 +585,7 @@ def run_file_preflight(
     privilege_probe: dict[str, Any] | None = None,
     available_staging_bytes: int | None = None,
     destination_db_type: str = "postgresql",
+    source_connector_id: str = "",
     source_table: str = "",
     destination_table: str = "",
     source_filename: str = "",
@@ -762,7 +774,30 @@ def run_file_preflight(
         destination_pk_columns=list(destination_pk_columns or []),
     )
 
-    ctx = FilePreflightContext(plan, sample_rows)
+    # Source-side duplicate-key probe: a small sample can miss duplicates in large
+    # tables, so query the source directly when we have a resolved identity key.
+    source_duplicate_findings: list[dict[str, Any]] = []
+    if source_connector_id and source_table and source_kind in ("database", "cloud"):
+        try:
+            source_pk = resolve_primary_key_source(
+                mappings=mappings,
+                source_columns=columns,
+                dest_kind=dest_kind,
+                validation_mode=validation_mode,
+                purpose="uniqueness",
+                destination_pk_columns=destination_pk_columns,
+                contract_primary_key=contract_primary_key,
+            )
+            if source_pk:
+                source_duplicate_findings = probe_source_duplicate_keys(
+                    source_connector_id=source_connector_id,
+                    source_table=source_table,
+                    primary_key=source_pk,
+                )
+        except Exception as exc:
+            logger.warning("Source duplicate-key probe skipped: %s", exc, exc_info=exc)
+
+    ctx = FilePreflightContext(plan, sample_rows, source_duplicate_findings=source_duplicate_findings)
     # Always collect every reachable gate on Validate. fail_fast=True hid G6 DDL
     # behind G5 integrity blocks and forced a multi-run fix loop. Transfer still
     # refuses to move rows when any blocker remains (passed=False).
@@ -1147,7 +1182,7 @@ def inspect_destination_for_preflight(
             if isinstance(o, dict)
         ]
         matched = _object_name_match(names, str(stream))
-        out["table_exists"] = True if matched else False
+        out["table_exists"] = bool(matched)
     out["can_create_table"] = out["connected"]
     out["can_write"] = out["connected"]
 

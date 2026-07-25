@@ -3153,6 +3153,12 @@ export function TransferPage({
           dest_kind: destKindMode,
           connector_id: destKindMode === "database" && connectorId ? connectorId : undefined,
           source_connector_id: isConnectorSource ? sourceConnectorId || undefined : undefined,
+          source_table: isConnectorSource && sourceKind === "database" && sourceConnector?.type !== "mongodb"
+            ? (sourceTable || undefined)
+            : undefined,
+          source_collection: isConnectorSource && sourceKind === "database" && sourceConnector?.type === "mongodb"
+            ? (sourceCollection || undefined)
+            : undefined,
           // Always send driver type even with a saved connector — Validate must not
           // default db_type to postgresql and invent SQL DDL / fingerprint blocks.
           dest_type: destKindMode === "database"

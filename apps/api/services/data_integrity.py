@@ -332,8 +332,9 @@ def _check_duplicate_keys(
     *,
     dest_kind: str = "",
     primary_key: str | None = None,
+    source_duplicate_findings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Duplicate check on the resolved identity key only (same as write-time audit)."""
+    """Duplicate check on the resolved identity key (sample + source-side probe)."""
     issues: list[str] = []
     if not primary_key:
         return {
@@ -343,8 +344,16 @@ def _check_duplicate_keys(
             "issues": [],
             "primary_key": None,
         }
-    # Check the source identity column directly — do not re-filter by schemaless
-    # target name in a way that skips the resolved key or invents another.
+    # Source-side probe is authoritative: it scans the full table, not just the
+    # preview sample, so duplicates that would fail the write batch are caught on Validate.
+    findings = source_duplicate_findings or []
+    if findings:
+        sample = ", ".join(
+            f"{f.get('value')}×{f.get('count', 1)}" for f in findings[:3]
+        )
+        issues.append(f"{primary_key}: duplicate key values from source probe ({sample})")
+
+    # Fall back to / augment with the preview sample.
     seen: dict[str, int] = {}
     for row in rows:
         val = cell_to_string(row.get(primary_key, "")).strip()
@@ -561,6 +570,7 @@ def run_integrity_audit(
     sync_mode: str = "",
     contract_primary_key: str | None = None,
     destination_pk_columns: list[str] | None = None,
+    source_duplicate_findings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     Run all critical data integrity checks in one pass.
@@ -644,7 +654,7 @@ def run_integrity_audit(
         # sync mode. Even overwrite/append cannot insert two rows with the same
         # destination primary key; surfacing this on Validate prevents the Run
         # batch audit from failing later with the same rows.
-        checks.append(_check_duplicate_keys(mappings, rows, validation_mode, dest_kind=dest_kind, primary_key=pk))
+        checks.append(_check_duplicate_keys(mappings, rows, validation_mode, dest_kind=dest_kind, primary_key=pk, source_duplicate_findings=source_duplicate_findings))
         checks.append(
             _check_mapping_confidence(mappings, confidence_min=cfg["confidence"], validation_mode=validation_mode)
         )

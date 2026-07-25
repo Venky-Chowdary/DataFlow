@@ -281,6 +281,8 @@ export async function runPreflight(payload: {
   }[];
   connector_id?: string;
   source_connector_id?: string;
+  source_table?: string;
+  source_collection?: string;
   dest_type?: string;
   dest_host?: string;
   dest_port?: number;
