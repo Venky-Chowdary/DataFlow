@@ -1018,10 +1018,13 @@ pytest apps/api/tests/test_mongodb_to_postgresql_incremental.py \
        tests/test_dest_table_exists_create.py \
        tests/test_connector_wiring.py \
        tests/test_source_duplicate_preflight.py \
+       tests/test_source_duplicate_probe_live.py \
        tests/test_preflight_schemaless.py \
        tests/test_data_quality_gates.py \
-       tests/test_preflight_transform_validation.py
-256 passed, 5 warnings in 145.31s
+       tests/test_preflight_transform_validation.py \
+       tests/test_execute_tracked_cross_sql_matrix.py \
+       tests/test_typed_fidelity_transfer_matrix_e2e.py
+274 passed, 9 skipped, 0 failed
 ```
 
 ### What is still NOT proven
