@@ -257,7 +257,7 @@ def _delete_mysql(cfg: dict[str, Any], table_name: str, pk_col: str, keys: list[
         conn.autocommit = True
         placeholders = ",".join(["%s"] * len(keys))
         with conn.cursor() as cur:
-            cur.execute(f"DELETE FROM `{table_name}` WHERE `{pk_col}` IN ({placeholders})", keys)
+            cur.execute(f"DELETE FROM `{table_name}` WHERE `{pk_col}` IN ({placeholders})", keys)  # nosec B608
             deleted = cur.rowcount
         conn.close()
         return deleted
@@ -275,7 +275,7 @@ def _delete_sqlite(cfg: dict[str, Any], table_name: str, pk_col: str, keys: list
         conn = sqlite3.connect(database)
         placeholders = ",".join(["?"] * len(keys))
         cur = conn.execute(
-            f'DELETE FROM "{table_name}" WHERE "{pk_col}" IN ({placeholders})', keys
+            f'DELETE FROM "{table_name}" WHERE "{pk_col}" IN ({placeholders})', keys  # nosec B608
         )
         deleted = cur.rowcount
         conn.commit()

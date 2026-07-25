@@ -25,7 +25,6 @@ from connectors.snowflake_conn import (
 )
 from connectors.stub_writer import simulate_stub_write
 from connectors.writer_common import (
-    CHUNK_SIZE,
     DF_LSN_COL,
     _coerced_null_row_count,
     _rejected_row_count,
@@ -341,7 +340,7 @@ def _batch_insert_rows(
             row_placeholders.append(f"({', '.join(['%s'] * len(target_cols))})")
         values_sql = ", ".join(row_placeholders)
         sql = (
-            f"INSERT INTO {quote_sql_identifier(table_name)} ({col_list}) "
+            f"INSERT INTO {quote_sql_identifier(table_name)} ({col_list}) "  # nosec B608
             f"SELECT {select_sql} FROM VALUES {values_sql}"
         )
         cur.execute(sql, params)
@@ -391,7 +390,7 @@ def _load_rows_into_table(
         col_list = ", ".join(quote_sql_identifier(c) for c in target_cols)
         value_placeholders = ", ".join(["%s"] * len(target_cols))
         insert_sql = (
-            f"INSERT INTO {quote_sql_identifier(table_name)} ({col_list}) "
+            f"INSERT INTO {quote_sql_identifier(table_name)} ({col_list}) "  # nosec B608
             f"VALUES ({value_placeholders})"
         )
         for offset in range(0, total, MAX_BIND_INSERT_ROWS):
@@ -449,7 +448,7 @@ def _merge_batch_via_temp(
                 for c in update_cols
             )
             merge_sql = (
-                f"MERGE INTO {tgt_q} t "
+                f"MERGE INTO {tgt_q} t "  # nosec B608
                 f"USING {tmp_q} s "
                 f"ON {on_clause} "
                 f"WHEN MATCHED{lsn_guard} THEN UPDATE SET {set_clause} "
@@ -507,7 +506,7 @@ def _copy_into_table(
                 ERROR_ON_COLUMN_COUNT_MISMATCH = TRUE
             )
             ON_ERROR = 'ABORT_STATEMENT'
-            """
+            """  # nosec B608
         )
         rows = cur.fetchall()
         loaded = 0

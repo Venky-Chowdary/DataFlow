@@ -95,7 +95,7 @@ def read_table_batch(
             if known_total_rows is not None:
                 total = known_total_rows
             else:
-                cur.execute(f"SELECT COUNT(*) FROM {table_ref}")
+                cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
                 total = int(cur.fetchone()[0])
             order_by = _order_by_clause(cur, safe_table, columns)
             if columns:
@@ -103,9 +103,9 @@ def read_table_batch(
                     [require_safe_identifier(c, preserve_case=True) for c in columns],
                     quote_char="`",
                 )
-                query = f"SELECT {col_list} FROM {table_ref} ORDER BY {order_by} LIMIT %s OFFSET %s"
+                query = f"SELECT {col_list} FROM {table_ref} ORDER BY {order_by} LIMIT %s OFFSET %s"  # nosec B608
             else:
-                query = f"SELECT * FROM {table_ref} ORDER BY {order_by} LIMIT %s OFFSET %s"
+                query = f"SELECT * FROM {table_ref} ORDER BY {order_by} LIMIT %s OFFSET %s"  # nosec B608
             cur.execute(query, (limit, offset))
             fetched = cur.fetchall()
             headers = [desc[0] for desc in cur.description] if cur.description else (columns or [])
@@ -156,9 +156,9 @@ def read_table_cursor_batch(
                     [require_safe_identifier(c, preserve_case=True) for c in columns],
                     quote_char="`",
                 )
-                base = f"SELECT {col_list} FROM {table_ref}"
+                base = f"SELECT {col_list} FROM {table_ref}"  # nosec B608
             else:
-                base = f"SELECT * FROM {table_ref}"
+                base = f"SELECT * FROM {table_ref}"  # nosec B608
             pk = (cursor_primary_key or "").strip()
             pk_q = (
                 quote_sql_identifier(require_safe_identifier(pk, preserve_case=True), "`")

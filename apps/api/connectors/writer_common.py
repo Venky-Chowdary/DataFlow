@@ -247,7 +247,7 @@ def filter_stale_lsn_rows(
 
     existing: dict[tuple[Any, ...], Any] = {}
     select_cols = ", ".join(q(c, quote) for c in conflict_cols) + f", {q(DF_LSN_COL, quote)}"
-    stmt = f"SELECT {select_cols} FROM {qualified} WHERE " + " OR ".join(clauses)
+    stmt = f"SELECT {select_cols} FROM {qualified} WHERE " + " OR ".join(clauses)  # nosec B608
     cursor.execute(stmt, params)
     for found in cursor.fetchall():
         key = tuple(found[i] for i in range(len(conflict_cols)))

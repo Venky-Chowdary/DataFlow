@@ -21,7 +21,7 @@ def base_url(host: str, default: str) -> str:
     return host.rstrip("/")
 
 
-def token(
+def token(  # nosec B107
     api_key: str = "",
     connection_string: str = "",
     username: str = "",

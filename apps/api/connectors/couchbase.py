@@ -138,7 +138,7 @@ def read_object(
     # ORDER BY META().id makes OFFSET pagination deterministic — without it,
     # pages can silently overlap or skip documents even with a static bucket.
     statement = (
-        f"SELECT * FROM `{quoted}` "
+        f"SELECT * FROM `{quoted}` "  # nosec B608
         f"ORDER BY META().id "
         f"LIMIT {int(limit)} OFFSET {int(offset)}"
     )

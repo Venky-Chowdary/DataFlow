@@ -11,7 +11,8 @@ from __future__ import annotations
 import importlib
 import json
 import logging
-import subprocess
+import shlex
+import subprocess  # nosec: B404 — used only to run operator-configured Singer tap executables with shell=False
 import sys
 import tempfile
 from abc import ABC, abstractmethod
@@ -121,11 +122,20 @@ class SingerTapBridge(BaseConnector):
     supports_read = True
     supports_write = False
 
+    _SHELL_METACHARS = frozenset({";", "|", "&", ">", "<", "$", "`", "\\"})
+
     def _argv(self, *extra: str) -> list[str]:
         cmd = self.config.get("tap_command")
         if not cmd:
             raise ValueError("singer_tap requires tap_command")
-        argv = cmd.split() if isinstance(cmd, str) else list(cmd)
+        if isinstance(cmd, list):
+            argv = list(cmd)
+        else:
+            argv = shlex.split(str(cmd))
+        if any(any(c in tok for c in self._SHELL_METACHARS) for tok in argv):
+            raise ValueError("tap_command contains shell metacharacters; pass an argv list or a shell-safe command")
+        if not argv:
+            raise ValueError("tap_command resolved to an empty argv list")
         return argv + list(extra)
 
     def _config_file(self) -> str | None:
@@ -151,7 +161,7 @@ class SingerTapBridge(BaseConnector):
             argv = self._argv("--check")
             if cfg_path:
                 argv.extend(["--config", cfg_path])
-            proc = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=60)  # nosec: B603 — argv is shell-safe and shell=False
             if proc.returncode == 0:
                 return True, "Singer tap --check OK"
             # Many taps lack --check; fall back to command presence
@@ -169,7 +179,7 @@ class SingerTapBridge(BaseConnector):
         if cfg_path:
             argv.extend(["--config", cfg_path])
         try:
-            proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)  # nosec: B603 — argv is shell-safe and shell=False
         except Exception:
             return []
         streams: list[StreamSchema] = []
@@ -237,8 +247,9 @@ class SingerTapBridge(BaseConnector):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-        )
-        assert proc.stdout is not None
+        )  # nosec: B603 — argv is shell-safe and shell=False
+        if proc.stdout is None:
+            raise RuntimeError("subprocess stdout is not captured")
         batch: list[dict[str, Any]] = []
         schema: StreamSchema | None = None
         skipped = 0

@@ -346,7 +346,13 @@ class SqlServerNativeCdc:
 
     def _changes_tvf_for(self, capture_instance: str) -> str:
         """Return the CDC TVF for a capture instance + row filter."""
-        cap = (capture_instance or self.capture_instance or "").strip()
+        from connectors.sql_identifiers import require_safe_identifier
+
+        cap = require_safe_identifier(
+            (capture_instance or self.capture_instance or "").strip(),
+            preserve_case=True,
+            max_len=128,
+        )
         if self.row_filter == ROW_FILTER_NET:
             return f"cdc.fn_cdc_get_net_changes_{cap}"
         return f"cdc.fn_cdc_get_all_changes_{cap}"
@@ -552,7 +558,7 @@ class SqlServerNativeCdc:
                         FROM {qualified}
                         ORDER BY [{pk}]
                         OFFSET %s ROWS FETCH NEXT %s ROWS ONLY
-                        """,
+                        """,  # nosec B608
                         (offset, self.batch_size),
                     )
                     cols = [d[0] for d in (cur.description or [])]
@@ -616,7 +622,7 @@ class SqlServerNativeCdc:
                             FROM {qualified}
                             ORDER BY [{pk}]
                             OFFSET %s ROWS FETCH NEXT %s ROWS ONLY
-                            """,
+                            """,  # nosec B608
                             (offset, self.batch_size),
                         )
                         cols = [d[0] for d in (cur.description or [])]
@@ -669,7 +675,7 @@ class SqlServerNativeCdc:
                         FROM {qualified}
                         WHERE {pk} > %s
                         ORDER BY {pk}
-                        """,
+                        """,  # nosec B608
                         (last_pk,),
                     )
                 else:
@@ -678,7 +684,7 @@ class SqlServerNativeCdc:
                         SELECT TOP ({limit}) *
                         FROM {qualified}
                         ORDER BY {pk}
-                        """
+                        """  # nosec B608
                     )
                 cols = [d[0] for d in (cur.description or [])]
                 rows = cur.fetchall() or []
@@ -703,12 +709,15 @@ class SqlServerNativeCdc:
                     max_lsn = self._max_lsn(cur)
                     if not max_lsn or max_lsn == self.start_lsn:
                         return events
-                    cur.execute(
+                    sql = (
                         f"""
                         SELECT TOP ({peek_limit}) *
                         FROM {fn}(%s, %s, %s)
                         ORDER BY __$start_lsn, __$seqval
-                        """,
+                        """  # nosec: B608 — fn validated by _changes_tvf_for and peek_limit is an int
+                    )
+                    cur.execute(
+                        sql,
                         (
                             _hex_to_lsn(self.start_lsn),
                             _hex_to_lsn(max_lsn),
@@ -846,12 +855,15 @@ class SqlServerNativeCdc:
                         )
                         return
                     # from_lsn is exclusive of the last fully applied LSN.
-                    cur.execute(
+                    sql = (
                         f"""
                         SELECT TOP ({self.batch_size + 1}) *
                         FROM {fn}(%s, %s, %s)
                         ORDER BY __$start_lsn, __$seqval
-                        """,
+                        """  # nosec: B608 — fn validated by _changes_tvf_for and batch_size is an int
+                    )
+                    cur.execute(
+                        sql,
                         (
                             _hex_to_lsn(self.start_lsn),
                             _hex_to_lsn(max_lsn),
@@ -944,14 +956,14 @@ class SqlServerNativeCdc:
                         if not cap:
                             continue
                         fn = self._changes_tvf_for(cap)
-                        cur.execute(
+                        sql = (
                             f"""
                             SELECT TOP ({per_limit}) *
                             FROM {fn}(%s, %s, %s)
                             ORDER BY __$start_lsn, __$seqval
-                            """,
-                            (from_lsn, to_lsn, filter_arg),
+                            """  # nosec: B608 — fn validated by _changes_tvf_for and per_limit is an int
                         )
+                        cur.execute(sql, (from_lsn, to_lsn, filter_arg))
                         cols = [d[0] for d in (cur.description or [])]
                         for row in cur.fetchall() or []:
                             rec = {cols[i]: row[i] for i in range(len(cols))}

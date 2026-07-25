@@ -18,6 +18,7 @@ packages/ml/data/
 .DS_Store
 
 apps/api/data/vector_store/
+apps/api/data/fakesnow_data/
 apps/api/data/training/
 apps/api/data/upload_registry.json
 apps/api/data/audit_events.jsonl

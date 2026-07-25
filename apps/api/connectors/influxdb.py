@@ -29,7 +29,7 @@ def _url(host: str, port: int, ssl: bool) -> str:
     return h.rstrip("/")
 
 
-def _query(url_base: str, database: str, q: str, username: str = "", password: str = "", timeout: float = 30.0) -> Any:
+def _query(url_base: str, database: str, q: str, username: str = "", password: str = "", timeout: float = 30.0) -> Any:  # nosec B107
     params: dict[str, str] = {"q": q}
     if database:
         params["db"] = database
@@ -137,7 +137,7 @@ def read_object(
     quoted = measurement.replace('"', '\\"')
     # ORDER BY time makes OFFSET pagination deterministic across series.
     q = (
-        f'SELECT * FROM "{quoted}" '
+        f'SELECT * FROM "{quoted}" '  # nosec: B608 — InfluxQL identifier is double-quoted and escaped above
         f"ORDER BY time ASC "
         f"LIMIT {int(limit)} OFFSET {int(offset)}"
     )

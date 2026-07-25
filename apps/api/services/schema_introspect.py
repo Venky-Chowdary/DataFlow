@@ -78,7 +78,7 @@ def _refine_columns_by_samples(
     qualified = f"{q}{schema}{q}.{q}{table}{q}" if schema else f"{q}{table}{q}"
     try:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT {cols_sql} FROM {qualified} LIMIT %s", (sample_limit,))
+            cur.execute(f"SELECT {cols_sql} FROM {qualified} LIMIT %s", (sample_limit,))  # nosec B608
             rows = cur.fetchall()
         for idx, c in enumerate(candidates):
             values = [row[idx] for row in rows if row[idx] is not None]
@@ -879,7 +879,8 @@ def _introspect_bigquery(**kwargs) -> dict[str, Any]:
                     ds_id = getattr(ds, "dataset_id", None) or str(ds)
                     try:
                         tbl = client.get_table(f"{project_id}.{ds_id}.{table}")
-                    except Exception:
+                    except Exception as exc:
+                        logger.debug("BigQuery table lookup failed for %s.%s: %s", project_id, ds_id, exc)
                         continue
                     if tbl is not None:
                         resolved_dataset = ds_id
@@ -1987,6 +1988,8 @@ def _introspect_sqlite(
         return {"ok": False, "error": "SQLite table name is required", "columns": [], "tables": []}
 
     try:
+        from connectors.sql_identifiers import quote_sql_identifier
+
         conn = sqlite3.connect(path, timeout=8)
         conn.row_factory = sqlite3.Row
         try:
@@ -1995,7 +1998,8 @@ def _introspect_sqlite(
             if not cur.fetchone():
                 return {"ok": False, "error": f"Table `{table}` not found", "columns": [], "tables": []}
 
-            cur.execute(f'PRAGMA table_info("{table}")')
+            table_q = quote_sql_identifier(table)
+            cur.execute(f"PRAGMA table_info({table_q})")
             info_rows = cur.fetchall()
             if not info_rows:
                 return {"ok": False, "error": f"No columns for table `{table}`", "columns": [], "tables": []}
@@ -2006,7 +2010,7 @@ def _introspect_sqlite(
             # Sample up to 100 rows for value-based inference
             samples: dict[str, list[str]] = {name: [] for name in col_names}
             try:
-                cur.execute(f'SELECT * FROM "{table}" LIMIT 100')
+                cur.execute(f"SELECT * FROM {table_q} LIMIT 100")  # nosec B608
                 for row in cur.fetchall():
                     for i, name in enumerate(col_names):
                         value = row[i]

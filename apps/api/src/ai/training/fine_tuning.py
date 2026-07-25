@@ -75,8 +75,8 @@ class DataTransferFineTuningPipeline:
                 import random
                 other_keys = [k for k in SYNONYM_DICTIONARY if k != canonical]
                 if other_keys:
-                    neg_key = random.choice(other_keys)
-                    neg_syn = random.choice(SYNONYM_DICTIONARY[neg_key])
+                    neg_key = random.choice(other_keys)  # nosec B311
+                    neg_syn = random.choice(SYNONYM_DICTIONARY[neg_key])  # nosec B311
                     pairs.append({"anchor": syn, "positive": neg_syn, "score": 0.0})
 
         path = os.path.join(self.output_dir, "embedding_pairs.jsonl")

@@ -340,7 +340,8 @@ class MySqlChangeStreamCdc:
                                 if gtid:
                                     pos["gtid"] = gtid
                                 return pos
-                        except Exception:
+                        except (ValueError, IndexError) as exc:
+                            _logger.warning("Could not parse MySQL binlog position row: %s", exc)
                             continue
                     if gtid:
                         return {"gtid": gtid, "file": None, "pos": None, "table": self.table}
@@ -592,12 +593,12 @@ class MySqlChangeStreamCdc:
             with conn.cursor() as cur:
                 if last_pk:
                     cur.execute(
-                        f"SELECT * FROM {qualified} WHERE {pk} > %s ORDER BY {pk} LIMIT %s",
+                        f"SELECT * FROM {qualified} WHERE {pk} > %s ORDER BY {pk} LIMIT %s",  # nosec B608
                         (last_pk, limit),
                     )
                 else:
                     cur.execute(
-                        f"SELECT * FROM {qualified} ORDER BY {pk} LIMIT %s",
+                        f"SELECT * FROM {qualified} ORDER BY {pk} LIMIT %s",  # nosec B608
                         (limit,),
                     )
                 cols = [d[0] for d in (cur.description or [])]

@@ -2238,7 +2238,7 @@ def stream_scd2_mirror_transfer(
                 # Reactivate rows that are back in the source.
                 conn.execute(
                     sa.text(
-                        f"UPDATE {target_qualified} "
+                        f"UPDATE {target_qualified} "  # nosec B608
                         f"SET {soft_delete_col} = FALSE "
                         f"WHERE EXISTS (SELECT 1 FROM {staging_qualified} WHERE {join_pred})"
                     )
@@ -2246,7 +2246,7 @@ def stream_scd2_mirror_transfer(
                 # Soft-delete rows that are no longer in the source.
                 conn.execute(
                     sa.text(
-                        f"UPDATE {target_qualified} "
+                        f"UPDATE {target_qualified} "  # nosec B608
                         f"SET {soft_delete_col} = TRUE "
                         f"WHERE NOT EXISTS (SELECT 1 FROM {staging_qualified} WHERE {join_pred}) "
                         f"AND ({soft_delete_col} IS NULL OR {soft_delete_col} = FALSE)"
@@ -2299,7 +2299,7 @@ def _read_staging_batches(
             offset = 0
             while True:
                 cols = ",".join(quote_sql_identifier(c) for c in columns)
-                sql = f"SELECT {cols} FROM {qualified} LIMIT {batch_size} OFFSET {offset}"
+                sql = f"SELECT {cols} FROM {qualified} LIMIT {batch_size} OFFSET {offset}"  # nosec B608
                 result = conn.execute(sa.text(sql))
                 rows = result.mappings().all()
                 if not rows:

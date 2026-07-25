@@ -134,13 +134,15 @@ class TransactionBuffer:
 
     def insert(self, row: dict[str, Any], *, lsn: str | None = None) -> None:
         self._ensure_open(lsn)
-        assert self._open is not None
+        if self._open is None:
+            raise RuntimeError("CDC transaction buffer is not open after insert")
         self._open.inserts.append(row)
         self._after_dml()
 
     def update(self, row: dict[str, Any], *, lsn: str | None = None) -> None:
         self._ensure_open(lsn)
-        assert self._open is not None
+        if self._open is None:
+            raise RuntimeError("CDC transaction buffer is not open after update")
         self._open.updates.append(row)
         self._after_dml()
 
@@ -148,7 +150,8 @@ class TransactionBuffer:
         if not pk:
             return
         self._ensure_open(lsn)
-        assert self._open is not None
+        if self._open is None:
+            raise RuntimeError("CDC transaction buffer is not open after delete")
         self._open.deletes.append(pk)
         self._after_dml()
 
@@ -252,7 +255,8 @@ class TransactionBuffer:
         self._spill_memory_to_disk()
 
     def _spill_memory_to_disk(self) -> None:
-        assert self._open is not None
+        if self._open is None:
+            raise RuntimeError("CDC transaction buffer is not open during spill")
         if not self._open.inserts and not self._open.updates and not self._open.deletes:
             return
         path = self._open.spill_path
@@ -277,7 +281,8 @@ class TransactionBuffer:
         self._open.deletes.clear()
 
     def _materialize_open(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-        assert self._open is not None
+        if self._open is None:
+            raise RuntimeError("CDC transaction buffer is not open during materialize")
         inserts: list[dict[str, Any]] = []
         updates: list[dict[str, Any]] = []
         deletes: list[str] = []

@@ -10,6 +10,8 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 from ..knowledge.industry_schemas import INDUSTRY_SCHEMAS
 
 
@@ -82,7 +84,8 @@ class UniversalDataFeeder:
                         row_count=result.row_count,
                         file_type=result.file_type,
                     ))
-                except Exception:
+                except Exception as exc:
+                    logger.warning("Could not load schema from %s: %s", file_path, exc)
                     continue
 
         return schemas

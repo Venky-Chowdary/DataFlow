@@ -13,7 +13,7 @@ from typing import Any
 
 _lock = threading.Lock()
 
-_counters: dict[str, float] = {
+_counters: dict[str, float] = {  # nosec B105
     "dataflow_jobs_total": 0.0,
     "dataflow_jobs_completed_total": 0.0,
     "dataflow_jobs_failed_total": 0.0,

@@ -14,6 +14,8 @@ import logging
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class RetentionProbeResult:
@@ -301,7 +303,8 @@ def probe_oracle_retention(
                     row = conn.execute(sa.text(sql)).fetchone()
                     if row and row[0] is not None:
                         candidates.append(int(row[0]))
-                except Exception:
+                except sa.exc.SQLAlchemyError as exc:
+                    logger.debug("Oracle retention probe query failed: %s", exc)
                     continue
         oldest = min(candidates) if candidates else None
         return classify_scn_retention(

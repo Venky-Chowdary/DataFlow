@@ -44,7 +44,7 @@ class _EmailConfig:
         self.host = ""
         self.port = 587
         self.username = ""
-        self.password = ""
+        self.password = ""  # nosec B105
         self.from_addr = ""
         self.to_addrs: list[str] = []
         self.subject = "DataFlow export"

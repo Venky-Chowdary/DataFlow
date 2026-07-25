@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from connectors.saas_common import (
@@ -17,6 +18,15 @@ from connectors.saas_common import (
 DEFAULT_HOST = "login.salesforce.com"
 DEFAULT_OBJECT = "Account"
 API_VERSION = "v58.0"
+
+# Salesforce API names are alphanumeric with underscores.
+_SAFE_SFORCE_IDENT = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
+
+def _validate_api_name(name: str, label: str) -> str:
+    if not _SAFE_SFORCE_IDENT.match(name or ""):
+        raise ValueError(f"Invalid Salesforce {label}: {name!r}")
+    return name
 
 
 def test_salesforce(
@@ -77,9 +87,9 @@ def list_sobjects(cfg: dict[str, Any]) -> list[str]:
 def describe_sobject(cfg: dict[str, Any], sobject: str) -> list[dict[str, Any]]:
     """Return Salesforce describe fields for one SObject."""
     access_token, url_base = _access(cfg)
-    name = (sobject or object_name(cfg, DEFAULT_OBJECT)).strip()
-    if not name:
-        raise ValueError("Salesforce object/table name required")
+    name = _validate_api_name(
+        (sobject or object_name(cfg, DEFAULT_OBJECT)).strip(), "object"
+    )
     r = request(
         method="GET",
         url=f"{url_base}/services/data/{API_VERSION}/sobjects/{name}/describe",
@@ -113,9 +123,9 @@ def read_object(
 ) -> ReadBatch:
     """Read Salesforce object rows via SOQL."""
     access_token, url_base = _access(cfg)
-    sobject = (object or object_name(cfg, DEFAULT_OBJECT)).strip()
-    if not sobject:
-        raise ValueError("Salesforce object/table name required")
+    sobject = _validate_api_name(
+        (object or object_name(cfg, DEFAULT_OBJECT)).strip(), "object"
+    )
 
     names: list[str] = []
     field_chunks: list[list[str]] = []
@@ -160,13 +170,17 @@ def read_object(
 
     def _run_query(field_list: str, identity_field: str) -> list[dict[str, Any]]:
         nonlocal total_size
+        # Validate SOQL identifiers before interpolation.
+        for field in field_list.split(","):
+            _validate_api_name(field.strip(), "field")
+        _validate_api_name(identity_field, "field")
         # Prefer queryMore / nextRecordsUrl over OFFSET — Salesforce OFFSET is capped
         # and unsuitable for multi-page replication.
         # ORDER BY identity so wide-schema field chunks merge by the same row set.
-        query = f"SELECT {field_list} FROM {sobject} ORDER BY {identity_field}"
+        query = f"SELECT {field_list} FROM {sobject} ORDER BY {identity_field}"  # nosec B608
         if offset and offset > 0:
             # Shallow preview only — deep resumes must use cursor/keyset contracts.
-            query += f" LIMIT {limit} OFFSET {offset}"
+            query += f" LIMIT {int(limit)} OFFSET {int(offset)}"  # nosec B608
             r = request(method="GET", url=query_url, token=access_token, params={"q": query}, timeout=60)
             r.raise_for_status()
             data = r.json()
@@ -175,7 +189,7 @@ def read_object(
                 total_size = published if total_size is None else max(total_size, published)
             return list(data.get("records") or [])
 
-        query += f" LIMIT {min(limit, 2000)}"
+        query += f" LIMIT {min(limit, 2000)}"  # nosec B608
         r = request(method="GET", url=query_url, token=access_token, params={"q": query}, timeout=60)
         r.raise_for_status()
         data = r.json()

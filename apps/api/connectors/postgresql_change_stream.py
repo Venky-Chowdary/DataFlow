@@ -681,7 +681,7 @@ class PostgreSqlChangeStreamCdc:
                         )
                         col_sql = quote_column_list(self.columns, quote_char='"')
                         query = (
-                            f"SELECT {col_sql} FROM {table_ref} "
+                            f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
                             f"ORDER BY {order_by} LIMIT %s OFFSET %s"
                         )
                         offset = 0
@@ -854,12 +854,12 @@ class PostgreSqlChangeStreamCdc:
             with conn.cursor() as cur:
                 if last_pk:
                     cur.execute(
-                        f"SELECT * FROM {qualified} WHERE {pk} > %s ORDER BY {pk} LIMIT %s",
+                        f"SELECT * FROM {qualified} WHERE {pk} > %s ORDER BY {pk} LIMIT %s",  # nosec B608
                         (last_pk, limit),
                     )
                 else:
                     cur.execute(
-                        f"SELECT * FROM {qualified} ORDER BY {pk} LIMIT %s",
+                        f"SELECT * FROM {qualified} ORDER BY {pk} LIMIT %s",  # nosec B608
                         (limit,),
                     )
                 cols = [d[0] for d in (cur.description or [])]
@@ -1066,7 +1066,7 @@ class PostgreSqlChangeStreamCdc:
                             from services.cdc_toast import CdcToastIncompleteError
 
                             raise CdcToastIncompleteError(
-                                f"CDC UPDATE on {change.relation} has TOAST gaps "
+                                f"CDC UPDATE on {change.relation} has TOAST gaps "  # nosec: B608 — error message, not SQL
                                 "without old-tuple merge; set REPLICA IDENTITY FULL",
                                 table=change.relation or self.table,
                                 columns=list(change.toast_unchanged_cols or []),

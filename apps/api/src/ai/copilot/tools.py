@@ -648,7 +648,7 @@ class DataPilotTools:
             output={"connectors": summary, "count": len(summary)},
         )
 
-    def _create_connector(
+    def _create_connector(  # nosec B107
         self,
         name: str = "",
         type: str = "",

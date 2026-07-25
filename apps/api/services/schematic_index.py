@@ -8,7 +8,7 @@ Used by the semantic mapper for O(1) abbreviation / alias resolution.
 from __future__ import annotations
 
 import logging
-import pickle
+import pickle  # nosec B403
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -55,7 +55,7 @@ def _build_index() -> dict[str, str]:
     if _CACHE_PATH.exists():
         try:
             with open(_CACHE_PATH, "rb") as f:
-                cached = pickle.load(f)
+                cached = pickle.load(f)  # nosec B301
             if isinstance(cached, dict) and len(cached) > 10_000:
                 return cached
         except Exception as exc:

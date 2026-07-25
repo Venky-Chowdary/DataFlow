@@ -136,7 +136,7 @@ def reconnect_backoff_seconds(attempt: int) -> float:
     import random
 
     base = min(15.0, 0.5 * (2 ** max(0, attempt - 1)))
-    return base + random.uniform(0, 0.45)
+    return base + random.uniform(0, 0.45)  # nosec B311
 
 
 def should_retry_connection_lost(
@@ -283,7 +283,7 @@ def mysql_chunk_committed(
     chunk_idx: int,
 ) -> bool:
     cur.execute(
-        f"SELECT 1 FROM `{LEDGER_TABLE}` WHERE job_id = %s AND batch_key = %s AND chunk_idx = %s",
+        f"SELECT 1 FROM `{LEDGER_TABLE}` WHERE job_id = %s AND batch_key = %s AND chunk_idx = %s",  # nosec: B608 — LEDGER_TABLE is a module constant
         (job_id, batch_key, chunk_idx),
     )
     return cur.fetchone() is not None
@@ -373,7 +373,7 @@ def cleanup_write_ledger(
             try:
                 with conn.cursor() as cur:
                     cur.execute(
-                        f"DELETE FROM `{LEDGER_TABLE}` WHERE job_id = %s",
+                        f"DELETE FROM `{LEDGER_TABLE}` WHERE job_id = %s",  # nosec: B608 — LEDGER_TABLE is a module constant
                         (job_id,),
                     )
                 conn.commit()

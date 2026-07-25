@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import urllib.parse
+import urllib.request
 from typing import Any
 
 from services.notification_store import (
@@ -24,6 +25,14 @@ from services.notification_store import (
 from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
+
+# Only HTTP(S) webhook/mail APIs are allowed — never file:/ or arbitrary schemes.
+_ALLOWED_SCHEMES = frozenset({"http", "https"})
+
+
+def _allowed_url(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    return parsed.scheme in _ALLOWED_SCHEMES
 
 
 def _env_smtp() -> dict[str, Any]:
@@ -38,9 +47,9 @@ def _env_smtp() -> dict[str, Any]:
 
 
 def _http_post(url: str, payload: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any]:
+    if not _allowed_url(url):
+        return {"ok": False, "error": f"URL scheme not allowed: {url}"}
     try:
-        import urllib.request
-
         data = json.dumps(payload, default=json_default).encode("utf-8")
         req = urllib.request.Request(
             url,
@@ -48,7 +57,7 @@ def _http_post(url: str, payload: dict[str, Any], headers: dict[str, str] | None
             headers={"Content-Type": "application/json", **(headers or {})},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:  # nosec: B310 — scheme is restricted to http(s) above
             body = resp.read().decode("utf-8", errors="ignore")
         return {"ok": True, "status": resp.status, "body": body[:500]}
     except Exception as exc:
@@ -88,12 +97,14 @@ def _send_resend(recipients: list[str], subject: str, body: str, from_addr: str,
 def _send_mailgun(recipients: list[str], subject: str, body: str, from_addr: str, api_key: str, domain: str, region: str = "us") -> dict[str, Any]:
     host = "api.mailgun.net" if region != "eu" else "api.eu.mailgun.net"
     url = f"https://{host}/v3/{domain}/messages"
+    if not _allowed_url(url):
+        return {"ok": False, "error": f"URL scheme not allowed: {url}"}
     data = urllib.parse.urlencode({"from": from_addr, "to": ",".join(recipients), "subject": subject, "text": body}).encode("utf-8")
     import base64
     credentials = base64.b64encode(f"api:{api_key}".encode()).decode()
     req = urllib.request.Request(url, data=data, headers={"Authorization": f"Basic {credentials}"}, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:  # nosec: B310 — scheme is https and validated above
             resp_body = resp.read().decode("utf-8", errors="ignore")
         return {"ok": True, "status": resp.status, "body": resp_body[:500]}
     except Exception as exc:

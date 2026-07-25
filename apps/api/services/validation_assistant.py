@@ -14,7 +14,10 @@ deterministic narrative is used.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from services.preflight_rules import explain_gate, explain_issue
 
@@ -388,7 +391,8 @@ def _llm_narrative(deterministic: str, issues: list[dict[str, Any]]) -> tuple[st
             resp = provider.generate(prompt, system=system, max_tokens=400)
             if resp.success and resp.content.strip():
                 return resp.content.strip(), provider.name
-        except Exception:
+        except Exception as exc:
+            logger.warning("Validation-assistant provider %s failed: %s", provider.name, exc)
             continue
     return deterministic, "deterministic"
 

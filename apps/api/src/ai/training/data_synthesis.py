@@ -53,7 +53,7 @@ class DataTransferDataSynthesizer:
     """Generate training data from knowledge base patterns."""
 
     def __init__(self, seed: int = 42):
-        self.rng = random.Random(seed)
+        self.rng = random.Random(seed)  # nosec B311
 
     def synthesize_column_classification(self, count: int = 500) -> TrainingDataset:
         """Generate column name → semantic type classification examples."""

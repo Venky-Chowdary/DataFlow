@@ -280,7 +280,7 @@ def write_mapped_rows(
                         for c in update_cols
                     )
                 insert_sql = (
-                    f"INSERT INTO {table_q} ({col_names}) VALUES ({placeholders}) "
+                    f"INSERT INTO {table_q} ({col_names}) VALUES ({placeholders}) "  # nosec B608
                     f"ON DUPLICATE KEY UPDATE {updates}"
                 )
             else:
@@ -288,9 +288,9 @@ def write_mapped_rows(
                     f"INSERT IGNORE INTO {table_q} ({col_names}) VALUES ({placeholders})"
                 )
         else:
-            insert_sql = f"INSERT INTO {table_q} ({col_names}) VALUES ({placeholders})"
+            insert_sql = f"INSERT INTO {table_q} ({col_names}) VALUES ({placeholders})"  # nosec B608
     else:
-        insert_sql = f"INSERT INTO {table_q} ({col_names}) VALUES ({placeholders})"
+        insert_sql = f"INSERT INTO {table_q} ({col_names}) VALUES ({placeholders})"  # nosec B608
 
     proxy_dest = is_public_proxy_host(host) or is_public_proxy_host(connection_string)
     job_id = str(_kwargs.get("job_id") or "").strip()

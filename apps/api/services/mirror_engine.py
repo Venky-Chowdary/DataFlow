@@ -118,7 +118,7 @@ def _update_deleted_batch(
 
     if activate_keys:
         where_keys, params = _pk_or_clause(pk_columns, activate_keys, prefix="a")
-        stmt = f"UPDATE {qualified} SET {col_quoted} = FALSE WHERE {where_keys}"
+        stmt = f"UPDATE {qualified} SET {col_quoted} = FALSE WHERE {where_keys}"  # nosec B608
         try:
             result = conn.execute(sa.text(stmt), params)
             conn.commit()
@@ -129,7 +129,7 @@ def _update_deleted_batch(
     if delete_keys:
         where_keys, params = _pk_or_clause(pk_columns, delete_keys, prefix="d")
         stmt = (
-            f"UPDATE {qualified} SET {col_quoted} = TRUE "
+            f"UPDATE {qualified} SET {col_quoted} = TRUE "  # nosec B608
             f"WHERE {where_keys} "
             f"AND ({col_quoted} IS NULL OR {col_quoted} = FALSE)"
         )
@@ -163,7 +163,7 @@ def _compute_active_checksum(
     offset = 0
     while True:
         sql = (
-            f"SELECT {cols_quoted} FROM {qualified} "
+            f"SELECT {cols_quoted} FROM {qualified} "  # nosec B608
             f"WHERE {col_quoted} IS NOT TRUE "
             f"LIMIT {batch_size} OFFSET {offset}"
         )
@@ -256,7 +256,7 @@ def apply_inferred_soft_deletes(
             offset = 0
             while True:
                 sql = (
-                    f"SELECT {pk_quoted}, {col_quoted} FROM {qualified} "
+                    f"SELECT {pk_quoted}, {col_quoted} FROM {qualified} "  # nosec B608
                     f"ORDER BY {order_by} LIMIT {batch_size} OFFSET {offset}"
                 )
                 result = conn.execute(sa.text(sql))

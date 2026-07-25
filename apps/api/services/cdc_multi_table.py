@@ -124,7 +124,8 @@ class MultiTableTransactionBuffer:
         )
 
     def _bucket(self, table: str) -> _TableBuf:
-        assert self._open is not None
+        if self._open is None:
+            raise RuntimeError("CDC multi-table buffer is not open")
         key = table or ""
         if key not in self._open.by_table:
             self._open.by_table[key] = _TableBuf()
@@ -139,14 +140,16 @@ class MultiTableTransactionBuffer:
 
     def insert(self, table: str, row: dict[str, Any], *, lsn: str | None = None) -> None:
         self._ensure_open(lsn)
-        assert self._open is not None
+        if self._open is None:
+            raise RuntimeError("CDC multi-table buffer is not open after insert")
         self._bucket(table).inserts.append(row)
         self._open.event_count += 1
         self._maybe_overflow()
 
     def update(self, table: str, row: dict[str, Any], *, lsn: str | None = None) -> None:
         self._ensure_open(lsn)
-        assert self._open is not None
+        if self._open is None:
+            raise RuntimeError("CDC multi-table buffer is not open after update")
         self._bucket(table).updates.append(row)
         self._open.event_count += 1
         self._maybe_overflow()
@@ -155,7 +158,8 @@ class MultiTableTransactionBuffer:
         if not pk:
             return
         self._ensure_open(lsn)
-        assert self._open is not None
+        if self._open is None:
+            raise RuntimeError("CDC multi-table buffer is not open after delete")
         self._bucket(table).deletes.append(pk)
         self._open.event_count += 1
         self._maybe_overflow()

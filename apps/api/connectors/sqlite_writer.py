@@ -150,7 +150,7 @@ def _sqlite_upsert_batch(
             for c in update_cols
         )
         insert_sql = (
-            f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({placeholders}) "
+            f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({placeholders}) "  # nosec B608
             f"ON CONFLICT ({conflict_sql}) DO UPDATE SET {set_sql} WHERE {where_sql}"
         )
         try:
@@ -168,11 +168,11 @@ def _sqlite_upsert_batch(
     del_placeholders = ", ".join(
         "(" + ", ".join("?" for _ in conflict_cols) + ")" for _ in deduped
     )
-    delete_sql = f"DELETE FROM {table_quoted} WHERE ({col_sql}) IN ({del_placeholders})"
+    delete_sql = f"DELETE FROM {table_quoted} WHERE ({col_sql}) IN ({del_placeholders})"  # nosec B608
     delete_params = [v for key in deduped.keys() for v in key]
     cur.execute(delete_sql, delete_params)
 
-    insert_sql = f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({placeholders})"
+    insert_sql = f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({placeholders})"  # nosec B608
     cur.executemany(insert_sql, rows)
     return len(rows), skipped + (original_count - len(rows))
 
@@ -296,7 +296,7 @@ def write_mapped_rows(
         chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE)
         conflict_cols = [c for c in (conflict_columns or []) if c in target_cols]
         placeholders = ", ".join("?" for _ in target_cols)
-        insert = f"INSERT INTO {table_quoted} ({', '.join(quote_sql_identifier(c) for c in target_cols)}) VALUES ({placeholders})"
+        insert = f"INSERT INTO {table_quoted} ({', '.join(quote_sql_identifier(c) for c in target_cols)}) VALUES ({placeholders})"  # nosec B608
 
         conn = sqlite3.connect(path, timeout=8)
         try:

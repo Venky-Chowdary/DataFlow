@@ -152,7 +152,7 @@ class ConversationSynthesizer:
     def synthesize_from_semantic_patterns(self, count: int = 50) -> list[ConversationExample]:
         """Generate mapping Q&A from semantic patterns."""
         import random
-        rng = random.Random(42)
+        rng = random.Random(42)  # nosec B311
         examples = []
 
         for _ in range(min(count, len(SEMANTIC_PATTERNS))):

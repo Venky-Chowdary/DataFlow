@@ -409,7 +409,7 @@ class OracleLogMinerCdc:
                           SELECT t.*, ROW_NUMBER() OVER (ORDER BY t."{pk}") AS df_rn
                           FROM {self._qualified()} t
                         ) WHERE df_rn > :off AND df_rn <= :lim
-                        """,
+                        """,  # nosec B608
                         {"off": offset, "lim": offset + self.batch_size},
                     )
                     cols = [d[0] for d in (cur.description or [])]
@@ -464,7 +464,7 @@ class OracleLogMinerCdc:
                               SELECT t.*, ROW_NUMBER() OVER (ORDER BY t."{pk}") AS df_rn
                               FROM {self._qualified(table_name)} t
                             ) WHERE df_rn > :off AND df_rn <= :lim
-                            """,
+                            """,  # nosec B608
                             {"off": offset, "lim": offset + self.batch_size},
                         )
                         cols = [d[0] for d in (cur.description or [])]
@@ -523,7 +523,7 @@ class OracleLogMinerCdc:
                           FROM {self._qualified()} t
                           WHERE t."{pk}" > :last_pk
                         ) WHERE df_rn <= :lim
-                        """,
+                        """,  # nosec B608
                         {"last_pk": last_pk, "lim": limit},
                     )
                 else:
@@ -533,7 +533,7 @@ class OracleLogMinerCdc:
                           SELECT t.*, ROW_NUMBER() OVER (ORDER BY t."{pk}") AS df_rn
                           FROM {self._qualified()} t
                         ) WHERE df_rn <= :lim
-                        """,
+                        """,  # nosec B608
                         {"lim": limit},
                     )
                 cols = [d[0] for d in (cur.description or [])]
@@ -782,21 +782,22 @@ class OracleLogMinerCdc:
                         """,
                         {"start_scn": self.scn + 1, "end_scn": end_scn},
                     )
-                    in_list = self._table_in_sql()
+                    in_list = self._table_in_sql()  # nosec: B608 — in_list built from require_safe_identifier above
                     # Look-ahead past batch_size so we can keep complete XID groups.
                     lim = max(self.batch_size + 1, 64) * max(1, len(self.tables))
+                    sql = f"""
+                    SELECT SCN, OPERATION, SQL_REDO, TABLE_NAME, SEG_OWNER,
+                           XIDUSN, XIDSLT, XIDSEQ
+                    FROM v$logmnr_contents
+                    WHERE SEG_OWNER = :owner
+                      AND TABLE_NAME IN ({in_list})
+                      AND OPERATION IN ('INSERT','UPDATE','DELETE')
+                      AND SCN > :start_scn
+                      AND ROWNUM <= :lim
+                    ORDER BY SCN, XIDUSN, XIDSLT, XIDSEQ
+                    """  # nosec: B608 — in_list built from require_safe_identifier above
                     cur.execute(
-                        f"""
-                        SELECT SCN, OPERATION, SQL_REDO, TABLE_NAME, SEG_OWNER,
-                               XIDUSN, XIDSLT, XIDSEQ
-                        FROM v$logmnr_contents
-                        WHERE SEG_OWNER = :owner
-                          AND TABLE_NAME IN ({in_list})
-                          AND OPERATION IN ('INSERT','UPDATE','DELETE')
-                          AND SCN > :start_scn
-                          AND ROWNUM <= :lim
-                        ORDER BY SCN, XIDUSN, XIDSLT, XIDSEQ
-                        """,
+                        sql,
                         {
                             "owner": self.schema,
                             "start_scn": self.scn,

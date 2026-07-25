@@ -77,7 +77,7 @@ class HubSpotCDKConnector(BaseConnector):
                 "type": "object",
                 "required": ["api_key"],
                 "properties": {
-                    "api_key": {
+                    "api_key": {  # nosec B105
                         "type": "string",
                         "title": "Private app access token",
                         "airbyte_secret": True,

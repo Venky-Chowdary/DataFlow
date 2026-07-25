@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import importlib
 import os
-import subprocess
+import subprocess  # nosec: B404 — only used for auto-installing driver packages from a controlled allowlist
 import sys
 from typing import Any
 
@@ -91,10 +91,15 @@ def ensure_platform_drivers(*, quiet: bool = False) -> dict[str, Any]:
 
     if missing_before and _auto_install_enabled():
         pkgs = sorted({pip for _, _, pip in missing_before})
+        # Only install packages from the controlled driver-to-pip allowlist.
+        allowed = set(_PIP_FOR_MODULE.values())
+        disallowed = [p for p in pkgs if p not in allowed]
+        if disallowed:
+            raise RuntimeError(f"Refusing to auto-install untrusted packages: {disallowed}")
         if not quiet:
             print(f"[*] DataFlow: provisioning {len(pkgs)} connector driver(s)…")
         cmd = [sys.executable, "-m", "pip", "install", "-q", *pkgs]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True)  # nosec: B603
         if result.returncode == 0:
             installed = pkgs
             if not quiet:

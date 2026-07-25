@@ -24,6 +24,8 @@ import logging
 import re
 from typing import Any
 
+from connectors.sql_identifiers import quote_sql_identifier
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_TABLE = "dataflow_signal"
@@ -41,23 +43,18 @@ def ensure_signal_table(conn, *, table: str = DEFAULT_TABLE, dialect: str = "pos
     """Create the signal table if missing (idempotent)."""
     tbl = signal_table_name({"signal_table": table})
     if dialect in {"postgresql", "postgres"}:
-        ddl = f"""
-        CREATE TABLE IF NOT EXISTS {tbl} (
-          id VARCHAR(64) PRIMARY KEY,
-          type VARCHAR(32) NOT NULL,
-          data TEXT
-        )
-        """
+        tbl_q = quote_sql_identifier(tbl)
     elif dialect in {"mysql", "mariadb"}:
-        ddl = f"""
-        CREATE TABLE IF NOT EXISTS `{tbl}` (
-          id VARCHAR(64) PRIMARY KEY,
-          type VARCHAR(32) NOT NULL,
-          data TEXT
-        )
-        """
+        tbl_q = quote_sql_identifier(tbl, quote_char="`")
     else:
         raise ValueError(f"Unsupported signal-table dialect: {dialect}")
+    ddl = f"""
+    CREATE TABLE IF NOT EXISTS {tbl_q} (
+      id VARCHAR(64) PRIMARY KEY,
+      type VARCHAR(32) NOT NULL,
+      data TEXT
+    )
+    """
     with conn.cursor() as cur:
         cur.execute(ddl)
     conn.commit()
@@ -158,14 +155,15 @@ def poll_signal_table(
     in connector memory / watermark metadata to avoid re-applying.
     """
     tbl = signal_table_name({"signal_table": table})
+    if dialect in {"mysql", "mariadb"}:
+        tbl_q = quote_sql_identifier(tbl, quote_char="`")
+    else:
+        tbl_q = quote_sql_identifier(tbl)
     seen = set(processed_ids or ())
     results: list[dict[str, Any]] = []
     try:
         with conn.cursor() as cur:
-            if dialect in {"mysql", "mariadb"}:
-                cur.execute(f"SELECT id, type, data FROM `{tbl}` ORDER BY id LIMIT %s", (limit,))
-            else:
-                cur.execute(f"SELECT id, type, data FROM {tbl} ORDER BY id LIMIT %s", (limit,))
+            cur.execute(f"SELECT id, type, data FROM {tbl_q} ORDER BY id LIMIT %s", (limit,))  # nosec B608
             rows = cur.fetchall() or []
     except Exception as exc:
         logger.debug("CDC signal table poll skipped: %s", exc)

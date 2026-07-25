@@ -5,8 +5,17 @@ from __future__ import annotations
 import csv
 import io
 import json
-import xml.sax.saxutils as saxutils
 from typing import Any
+
+
+def _xml_escape(text: str) -> str:
+    """Escape characters that are special in XML element text."""
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
 
 from services.value_serializer import json_default
 
@@ -105,8 +114,8 @@ def _write_xml_bytes(headers: list[str], rows: list[list[str]]) -> tuple[bytes, 
     for row in rows:
         lines.append("  <record>")
         for h, v in zip(headers, row):
-            tag = saxutils.escape(str(h).replace(" ", "_"))
-            value = saxutils.escape(str(v))
+            tag = _xml_escape(str(h).replace(" ", "_"))
+            value = _xml_escape(str(v))
             lines.append(f"    <{tag}>{value}</{tag}>")
         lines.append("  </record>")
     lines.append("</records>")

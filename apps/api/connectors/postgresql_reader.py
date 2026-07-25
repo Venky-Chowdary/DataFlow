@@ -150,17 +150,20 @@ def read_table_batch(
                     table=table,
                 )
             order_by = _order_by_clause(cur, schema, table, columns)
+            order_sql = sql.SQL(order_by)
             if columns:
                 col_sql = sql.SQL(", ").join(map(sql.Identifier, columns))
-                query = sql.SQL("SELECT {} FROM {}.{} ORDER BY " + order_by + " LIMIT %s OFFSET %s").format(
+                query = sql.SQL("SELECT {} FROM {}.{} ORDER BY {} LIMIT %s OFFSET %s").format(
                     col_sql,
                     sql.Identifier(schema),
                     sql.Identifier(table),
+                    order_sql,
                 )
             else:
-                query = sql.SQL("SELECT * FROM {}.{} ORDER BY " + order_by + " LIMIT %s OFFSET %s").format(
+                query = sql.SQL("SELECT * FROM {}.{} ORDER BY {} LIMIT %s OFFSET %s").format(
                     sql.Identifier(schema),
                     sql.Identifier(table),
+                    order_sql,
                 )
             cur.execute(query, (limit, offset))
             fetched = cur.fetchall()

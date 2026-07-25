@@ -33,7 +33,7 @@ def _default_sso() -> dict[str, dict[str, Any]]:
             "x509_cert": "",
             "email_attribute": "email",
         },
-        "oidc": {
+        "oidc": {  # nosec B105
             "enabled": False,
             "issuer": "",
             "client_id": "",
@@ -41,7 +41,7 @@ def _default_sso() -> dict[str, dict[str, Any]]:
             "redirect_uri": "",
             "scopes": "openid email profile",
         },
-        "azure_ad": {
+        "azure_ad": {  # nosec B105
             "enabled": False,
             "tenant_id": "",
             "client_id": "",

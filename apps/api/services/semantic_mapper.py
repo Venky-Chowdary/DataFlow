@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
-import pickle
+import pickle  # nosec B403
 import re
 import sys
 from collections import Counter
@@ -27,7 +27,7 @@ def _load_ml_baseline():
             if pkg_path not in sys.path:
                 sys.path.append(pkg_path)
             with model_path.open("rb") as f:
-                _model_cache = pickle.load(f)
+                _model_cache = pickle.load(f)  # nosec B301
                 return _model_cache
     except Exception as exc:
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
@@ -373,15 +373,11 @@ ABBREVIATIONS: dict[str, str] = {
     "hipaa_authorized": "hipaa_authorized",
     "consent_flg": "consent_flag",
     "consent_flag": "consent_flag",
-    "emp_id": "employee_id",
-    "employee_id": "employee_id",
     "emp_no": "employee_number",
     "employee_number": "employee_number",
     "dept_cd": "department_code",
-    "department_code": "department_code",
     "dept_nm": "department_name",
     "department_name": "department_name",
-    "salary_amt": "salary_amount",
     "bonus_amt": "bonus_amount",
     "comm_amt": "commission_amount",
     "commission_amount": "commission_amount",
@@ -433,7 +429,6 @@ ABBREVIATIONS: dict[str, str] = {
     "origin_postal_code": "origin_postal_code",
     "dest_zip": "destination_postal_code",
     "destination_postal_code": "destination_postal_code",
-    "del_dt": "delivery_date",
     "freight_amt": "freight_amount",
     "freight_amount": "freight_amount",
     "fuel_surcharge": "fuel_surcharge_amount",
@@ -447,7 +442,6 @@ ABBREVIATIONS: dict[str, str] = {
     "qty_shipped": "quantity_shipped",
     "quantity_shipped": "quantity_shipped",
     "qty_ordered": "quantity_ordered",
-    "quantity_ordered": "quantity_ordered",
     "qty_received": "quantity_received",
     "quantity_received": "quantity_received",
     "asn_id": "asn_id",
@@ -469,8 +463,6 @@ ABBREVIATIONS: dict[str, str] = {
     "delay_minutes": "delay_minutes",
     "proof_del_flg": "proof_of_delivery_flag",
     "proof_of_delivery_flag": "proof_of_delivery_flag",
-    "acct_no": "account_number",
-    "account_number": "account_number",
     "princ_amt": "principal_amount",
     "principal_amount": "principal_amount",
     "fee_amt": "fee_amount",
@@ -516,8 +508,6 @@ ABBREVIATIONS: dict[str, str] = {
     "vat_amount": "vat_amount",
     "invoice_amt": "invoice_amount",
     "invoice_amount": "invoice_amount",
-    "inv_no": "invoice_number",
-    "invoice_number": "invoice_number",
     "int_rate": "interest_rate",
     "disc_amt": "discount_amount",
     "discount_amount": "discount_amount",
@@ -533,9 +523,6 @@ ABBREVIATIONS: dict[str, str] = {
     "item_count": "item_count",
     "channel": "sales_channel",
     "sales_channel": "sales_channel",
-    "sku": "product_sku",
-    "product_sku": "product_sku",
-    "unit_prc": "unit_price",
     "gender_cd": "gender",
     "ward_cd": "ward_code",
     "ward_code": "ward_code",

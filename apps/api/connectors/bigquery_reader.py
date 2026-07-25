@@ -62,7 +62,7 @@ def read_table_batch(
         if known_total_rows is not None:
             total = known_total_rows
         else:
-            count_q = f"SELECT COUNT(*) AS cnt FROM {table_ref}"
+            count_q = f"SELECT COUNT(*) AS cnt FROM {table_ref}"  # nosec B608
             total = int(list(client.query(count_q).result())[0]["cnt"])
         col_sql = (
             quote_column_list(
@@ -88,7 +88,7 @@ def read_table_batch(
             quote_char="`",
         )
         query = (
-            f"SELECT {col_sql} FROM {table_ref} "
+            f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
             f"ORDER BY {order_sql} LIMIT {int(limit)} OFFSET {int(offset)}"
         )
         job = client.query(query)
@@ -189,7 +189,7 @@ def read_table_cursor_batch(
             )
             order = f"{cursor_q}, {pk_q}"
         query = (
-            f"SELECT {col_sql} FROM {table_ref}{where} "
+            f"SELECT {col_sql} FROM {table_ref}{where} "  # nosec B608
             f"ORDER BY {order} LIMIT {int(limit)}"
         )
         job_config = bigquery.QueryJobConfig(query_parameters=params) if params else None

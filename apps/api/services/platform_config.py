@@ -137,8 +137,8 @@ def validate_production_config() -> list[str]:
 
     errors: list[str] = []
     secret = os.getenv("DATAFLOW_AUTH_SECRET", "")
-    if not secret or secret == "dev-change-me-before-production":
-        errors.append("DATAFLOW_AUTH_SECRET must be set to a strong random value in production")
+    if not secret or len(secret) < 32:  # nosec B105
+        errors.append("DATAFLOW_AUTH_SECRET must be set to a strong random value (>=32 bytes) in production")
 
     if os.getenv("DATAFLOW_REQUIRE_AUTH", "0").lower() not in ("1", "true", "yes"):
         errors.append("DATAFLOW_REQUIRE_AUTH must be 1 in production")

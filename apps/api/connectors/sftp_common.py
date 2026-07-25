@@ -17,7 +17,7 @@ class SFTPConfig:
         self.host = ""
         self.port = 22
         self.username = ""
-        self.password = ""
+        self.password = ""  # nosec B105
         self.path = ""
         self.private_key = ""
 

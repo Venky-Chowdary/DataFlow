@@ -543,7 +543,7 @@ class RetryBudget:
         delay = self.base_delay_seconds * (self.exponential_base ** self.attempts_made)
         delay = min(delay, self.max_delay_seconds)
         if self.jitter:
-            delay = delay * (0.5 + random.random() * 0.5)
+            delay = delay * (0.5 + random.random() * 0.5)  # nosec B311
         self.attempts_made += 1
         self.budget_used += delay
         return delay

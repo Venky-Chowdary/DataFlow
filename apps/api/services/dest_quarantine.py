@@ -238,7 +238,7 @@ def mark_dlq_promoted(
                 return {"updated": 0, "error": "sqlite path unresolved", "table": table}
             if by_job:
                 sql = (
-                    f'UPDATE "{table}" SET "_df_promoted_at" = ? '
+                    f'UPDATE "{table}" SET "_df_promoted_at" = ? '  # nosec B608
                     f'WHERE "_df_job_id" = ? '
                     f'AND ("_df_promoted_at" IS NULL OR "_df_promoted_at" = \'\')'
                 )
@@ -246,7 +246,7 @@ def mark_dlq_promoted(
             else:
                 placeholders = ", ".join("?" for _ in ids)
                 sql = (
-                    f'UPDATE "{table}" SET "_df_promoted_at" = ? '
+                    f'UPDATE "{table}" SET "_df_promoted_at" = ? '  # nosec B608
                     f'WHERE "_df_qid" IN ({placeholders})'
                 )
                 params = [promoted_at, *ids]
@@ -268,7 +268,7 @@ def mark_dlq_promoted(
         params_sa: dict[str, Any] = {"promoted_at": promoted_at}
         if by_job:
             sql = (
-                f"UPDATE {qualified} SET {quote_sql_identifier('_df_promoted_at')} = :promoted_at "
+                f"UPDATE {qualified} SET {quote_sql_identifier('_df_promoted_at')} = :promoted_at "  # nosec B608
                 f"WHERE {quote_sql_identifier('_df_job_id')} = :job_id "
                 f"AND ({quote_sql_identifier('_df_promoted_at')} IS NULL "
                 f"OR {quote_sql_identifier('_df_promoted_at')} = '')"
@@ -278,7 +278,7 @@ def mark_dlq_promoted(
             placeholders = ", ".join(f":id{i}" for i in range(len(ids)))
             params_sa.update({f"id{i}": ids[i] for i in range(len(ids))})
             sql = (
-                f"UPDATE {qualified} SET {quote_sql_identifier('_df_promoted_at')} = :promoted_at "
+                f"UPDATE {qualified} SET {quote_sql_identifier('_df_promoted_at')} = :promoted_at "  # nosec B608
                 f"WHERE {quote_sql_identifier('_df_qid')} IN ({placeholders})"
             )
             if job_id:
@@ -313,7 +313,7 @@ def count_open_dlq_rows(destination: Any, *, job_id: str = "") -> dict[str, Any]
             if not path:
                 return {"supported": True, "open_rows": 0, "table": table, "error": "sqlite path unresolved"}
             sql = (
-                f'SELECT COUNT(*) FROM "{table}" '
+                f'SELECT COUNT(*) FROM "{table}" '  # nosec B608
                 f'WHERE ("_df_promoted_at" IS NULL OR "_df_promoted_at" = \'\')'
             )
             params: list[Any] = []
@@ -332,7 +332,7 @@ def count_open_dlq_rows(destination: Any, *, job_id: str = "") -> dict[str, Any]
         qualified = _qualified_dlq_table(cfg, table)
         engine = get_sqlalchemy_engine(cfg)
         sql = (
-            f"SELECT COUNT(*) FROM {qualified} "
+            f"SELECT COUNT(*) FROM {qualified} "  # nosec B608
             f"WHERE ({quote_sql_identifier('_df_promoted_at')} IS NULL "
             f"OR {quote_sql_identifier('_df_promoted_at')} = '')"
         )

@@ -86,7 +86,8 @@ def resolve_snowflake_table_name(cur: Any, schema: str, table: str) -> str | Non
             row = cur.fetchone()
             if row and row[0]:
                 return str(row[0])
-        except Exception:
+        except Exception as exc:
+            logger.debug("Candidate table resolution failed for %r: %s", cand, exc)
             continue
 
     try:
@@ -134,7 +135,9 @@ def snowflake_qualified_table(schema: str, table: str) -> str:
 
 
 def _fakesnow_db_path() -> str:
-    path = os.environ.get("FAKESNOW_DB_PATH", "/tmp/fakesnow_data")
+    from services.platform_config import data_dir
+
+    path = os.environ.get("FAKESNOW_DB_PATH") or str(data_dir() / "fakesnow_data")
     os.makedirs(path, exist_ok=True)
     return path
 

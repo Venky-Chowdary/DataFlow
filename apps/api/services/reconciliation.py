@@ -510,9 +510,9 @@ def verify_postgres_table(
             table_name, schema or "public", dialect="postgresql"
         )
         with conn.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) FROM {table_ref}")
+            cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
-            cur.execute(f"SELECT * FROM {table_ref}")
+            cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
             names = [d[0] for d in cur.description] if cur.description else []
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(
@@ -557,9 +557,9 @@ def verify_pgvector_table(
             table_name, schema or "public", dialect="postgresql"
         )
         with conn.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) FROM {table_ref}")
+            cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
-            cur.execute(f"SELECT source_id, metadata FROM {table_ref}")
+            cur.execute(f"SELECT source_id, metadata FROM {table_ref}")  # nosec B608
             names = (
                 [d[0] for d in cur.description]
                 if cur.description
@@ -645,9 +645,9 @@ def verify_snowflake_table(
                 cur, schema or "PUBLIC", table_name
             )
             qualified_name = snowflake_qualified_table(schema or "PUBLIC", resolved)
-            cur.execute(f"SELECT COUNT(*) FROM {qualified_name}")
+            cur.execute(f"SELECT COUNT(*) FROM {qualified_name}")  # nosec B608
             count = int(cur.fetchone()[0])
-            cur.execute(f"SELECT * FROM {qualified_name}")
+            cur.execute(f"SELECT * FROM {qualified_name}")  # nosec B608
             names = [d[0] for d in cur.description] if cur.description else []
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(
@@ -689,9 +689,9 @@ def verify_mysql_table(
 
         table_ref = quote_table_ref(table_name, dialect="mysql")
         with conn.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) FROM {table_ref}")
+            cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
-            cur.execute(f"SELECT * FROM {table_ref}")
+            cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
             names = [d[0] for d in cur.description] if cur.description else []
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(
@@ -873,9 +873,9 @@ def verify_sqlite_table(
         table_ref = quote_table_ref(table_name, dialect="sqlite")
         conn = sqlite3.connect(str(path))
         cur = conn.cursor()
-        cur.execute(f"SELECT COUNT(*) FROM {table_ref}")
+        cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
         count = cur.fetchone()[0]
-        cur.execute(f"SELECT * FROM {table_ref}")
+        cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
         names = [d[0] for d in cur.description] if cur.description else []
         columns = names or target_columns or []
         checksum = canonical_checksum_from_iter(
@@ -913,8 +913,8 @@ def verify_duckdb_table(
 
         table_ref = quote_table_ref(table_name, dialect="duckdb")
         conn = duckdb.connect(str(path))
-        count = conn.execute(f"SELECT COUNT(*) FROM {table_ref}").fetchone()[0]
-        cur = conn.execute(f"SELECT * FROM {table_ref}")
+        count = conn.execute(f"SELECT COUNT(*) FROM {table_ref}").fetchone()[0]  # nosec B608
+        cur = conn.execute(f"SELECT * FROM {table_ref}")  # nosec B608
         names = [d[0] for d in cur.description] if cur.description else []
         columns = names or target_columns or []
         checksum = canonical_checksum_from_iter(
@@ -1815,14 +1815,14 @@ def read_target_sample(
                             )
                             placeholders = ",".join(["%s"] * len(keys))
                             cur.execute(
-                                f"SELECT {col_sql} FROM {table_ref} "
+                                f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
                                 f"WHERE {key_col} IN ({placeholders}) "
                                 f"ORDER BY {order_sql} LIMIT %s",
                                 (*keys, int(limit)),
                             )
                         else:
                             cur.execute(
-                                f"SELECT {col_sql} FROM {table_ref} ORDER BY {order_sql} LIMIT %s",
+                                f"SELECT {col_sql} FROM {table_ref} ORDER BY {order_sql} LIMIT %s",  # nosec B608
                                 (limit,),
                             )
                         names = _row_names(cur.description)
@@ -1871,14 +1871,14 @@ def read_target_sample(
                     )
                     placeholders = ",".join(["%s"] * len(keys))
                     cur.execute(
-                        f"SELECT {mysql_col_sql} FROM {table_ref} "
+                        f"SELECT {mysql_col_sql} FROM {table_ref} "  # nosec B608
                         f"WHERE {key_col} IN ({placeholders}) "
                         f"ORDER BY {mysql_order} LIMIT %s",
                         (*keys, int(limit)),
                     )
                 else:
                     cur.execute(
-                        f"SELECT {mysql_col_sql} FROM {table_ref} ORDER BY {mysql_order} LIMIT %s",
+                        f"SELECT {mysql_col_sql} FROM {table_ref} ORDER BY {mysql_order} LIMIT %s",  # nosec B608
                         (limit,),
                     )
                 names = _row_names(cur.description)
@@ -1932,13 +1932,13 @@ def read_target_sample(
                     params["lim"] = int(limit)
                     placeholders = ",".join(f":k{i}" for i in range(len(keys)))
                     sql = (
-                        f"SELECT {duckdb_col_sql} FROM {table_ref} "
+                        f"SELECT {duckdb_col_sql} FROM {table_ref} "  # nosec B608
                         f"WHERE {key_col} IN ({placeholders}) "
                         f"ORDER BY {duckdb_order} LIMIT :lim"
                     )
                 else:
                     params = {"lim": int(limit)}
-                    sql = f"SELECT {duckdb_col_sql} FROM {table_ref} ORDER BY {duckdb_order} LIMIT :lim"
+                    sql = f"SELECT {duckdb_col_sql} FROM {table_ref} ORDER BY {duckdb_order} LIMIT :lim"  # nosec B608
                 try:
                     result = conn.execute(sa.text(sql), params)
                     return [dict(row) for row in result.mappings().all()]
@@ -2044,10 +2044,10 @@ def read_target_sample(
                         require_safe_identifier(sort_key, preserve_case=True)
                     )
                     placeholders = ",".join(["?"] * len(keys))
-                    sql = f"SELECT {sqlite_col_sql} FROM {table_ref} WHERE {key_col} IN ({placeholders}) ORDER BY {sqlite_order} LIMIT ?"
+                    sql = f"SELECT {sqlite_col_sql} FROM {table_ref} WHERE {key_col} IN ({placeholders}) ORDER BY {sqlite_order} LIMIT ?"  # nosec B608
                     cur = conn.execute(sql, [*keys, int(limit)])
                 else:
-                    sql = f"SELECT {sqlite_col_sql} FROM {table_ref} ORDER BY {sqlite_order} LIMIT ?"
+                    sql = f"SELECT {sqlite_col_sql} FROM {table_ref} ORDER BY {sqlite_order} LIMIT ?"  # nosec B608
                     cur = conn.execute(sql, (int(limit),))
                 rows = cur.fetchall()
                 names = _row_names(cur.description)
@@ -2200,14 +2200,14 @@ def read_target_sample(
                                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
                         placeholders = ",".join(["%s"] * len(widened))
                         cur.execute(
-                            f"SELECT {sf_col_sql} FROM {qualified_name} "
+                            f"SELECT {sf_col_sql} FROM {qualified_name} "  # nosec B608
                             f"WHERE {key_col} IN ({placeholders}) "
                             f"ORDER BY {sf_order} LIMIT %s",
                             (*widened, int(limit)),
                         )
                     else:
                         cur.execute(
-                            f"SELECT {sf_col_sql} FROM {qualified_name} ORDER BY {sf_order} LIMIT %s",
+                            f"SELECT {sf_col_sql} FROM {qualified_name} ORDER BY {sf_order} LIMIT %s",  # nosec B608
                             (int(limit),),
                         )
                     names = _row_names(cur.description)

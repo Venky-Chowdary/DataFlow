@@ -23,7 +23,7 @@ _ALLOW_DEV_USER = os.getenv("DATAFLOW_ALLOW_DEV_USER", "0").lower() in ("1", "tr
 # bcrypt hash of "password123" for test@gmail.com (dev/staging only, never production)
 _DEV_USER = {
     "email": "test@gmail.com",
-    "password_hash": "$2b$12$II.e7tCoYPLs2Pv8/dWEVeOMl3GOwsiUnSteHd6Twq3juXLiLsO9e",
+    "password_hash": "$2b$12$II.e7tCoYPLs2Pv8/dWEVeOMl3GOwsiUnSteHd6Twq3juXLiLsO9e",  # nosec B105
     "name": "Test User",
     "role": "Workspace tester",
 }

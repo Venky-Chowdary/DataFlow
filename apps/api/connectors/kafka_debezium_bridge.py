@@ -127,7 +127,8 @@ class KafkaDebeziumConsumer:
         """Commit offsets after destination apply + checkpoint (at-least-once)."""
         if self._consumer is None:
             self.connect()
-        assert self._consumer is not None
+        if self._consumer is None:
+            raise RuntimeError("Kafka consumer is not connected")
         try:
             from kafka import OffsetAndMetadata, TopicPartition  # type: ignore
         except ImportError:
@@ -152,7 +153,8 @@ class KafkaDebeziumConsumer:
         """Yield destination rows — Debezium envelopes preferred, else JSON passthrough."""
         if self._consumer is None:
             self.connect()
-        assert self._consumer is not None
+        if self._consumer is None:
+            raise RuntimeError("Kafka consumer is not connected")
         from connectors.confluent_schema_registry import (
             SchemaRegistryError,
             decode_kafka_value,

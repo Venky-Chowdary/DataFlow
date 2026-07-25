@@ -89,7 +89,8 @@ def append_dlq_event(
             last_exc = exc
             logger.warning("DLQ append failed (attempt %s): %s", attempt + 1, exc)
             time.sleep(0.05 * (attempt + 1))
-    assert last_exc is not None
+    if last_exc is None:
+        raise RuntimeError("DLQ append failed but no exception was captured")
     raise last_exc
 
 
@@ -144,7 +145,7 @@ def list_dlq_events(*, job_id: str | None = None, limit: int = 100) -> list[dict
             continue
         try:
             ev = json.loads(line)
-        except Exception:
+        except json.JSONDecodeError:
             continue
         if job_id and ev.get("job_id") != job_id:
             continue

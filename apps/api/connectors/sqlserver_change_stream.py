@@ -186,7 +186,7 @@ class SqlServerChangeTrackingCdc:
                             FROM {qualified}
                             ORDER BY [{pk}]
                             OFFSET %s ROWS FETCH NEXT %s ROWS ONLY
-                            """,
+                            """,  # nosec B608
                             (offset, self.batch_size),
                         )
                         cols = [d[0] for d in (cur.description or [])]
@@ -245,7 +245,7 @@ class SqlServerChangeTrackingCdc:
                             CT.[{pk}] AS pk_val
                         FROM CHANGETABLE(CHANGES {qualified}, %s) AS CT
                         ORDER BY CT.SYS_CHANGE_VERSION
-                        """,
+                        """,  # nosec B608
                         (self.version,),
                     )
                     rows = cur.fetchall() or []
@@ -275,7 +275,7 @@ class SqlServerChangeTrackingCdc:
                     if keys:
                         placeholders = ",".join(["%s"] * len(keys))
                         cur.execute(
-                            f"SELECT * FROM {qualified} WHERE [{pk}] IN ({placeholders})",
+                            f"SELECT * FROM {qualified} WHERE [{pk}] IN ({placeholders})",  # nosec B608
                             tuple(keys),
                         )
                         cols = [d[0] for d in (cur.description or [])]

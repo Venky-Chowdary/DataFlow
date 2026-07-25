@@ -9,9 +9,10 @@ dockerfilePath = "Dockerfile.api"
 watchPatterns = ["apps/api/**", "packages/preflight/**", "Dockerfile.api"]
 
 [deploy]
-# Readiness waits for MongoDB, storage, and driver warm-up so the service is not
-# routed traffic before it can actually serve requests.
-healthcheckPath = "/health/ready"
+# Liveness (not readiness) — Railway deploy healthchecks must hit a cheap path
+# that does not block on Mongo/RAG warm-up. Runtime readiness should use
+# /health/ready separately.
+healthcheckPath = "/health"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 5

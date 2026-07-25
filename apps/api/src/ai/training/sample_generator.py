@@ -31,7 +31,7 @@ class DataTransferSampleGenerator:
     """Generate realistic sample datasets for testing."""
 
     def __init__(self, seed: int = 42):
-        self.rng = random.Random(seed)
+        self.rng = random.Random(seed)  # nosec B311
 
     def generate_logistics_csv(self, rows: int = 100) -> SampleDataset:
         """Generate logistics/shipping CSV data."""

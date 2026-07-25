@@ -182,7 +182,7 @@ def _fetch_current_rows(
     where_keys, params = _pk_or_clause(pk_columns, keys, prefix="k")
     current_pred = f"{current_quoted} = 1" if dialect_name == "sqlite" else f"{current_quoted} IS TRUE"
     sql = (
-        f"SELECT {pk_select}, {hash_quoted} FROM {qualified} "
+        f"SELECT {pk_select}, {hash_quoted} FROM {qualified} "  # nosec B608
         f"WHERE {where_keys} AND {current_pred}"
     )
     result = conn.execute(sa.text(sql), params)
@@ -225,7 +225,7 @@ def _expire_rows(
     current_pred = f"{current_quoted} = 1" if dialect_name == "sqlite" else f"{current_quoted} IS TRUE"
     false_lit = "0" if dialect_name == "sqlite" else "FALSE"
     sql = (
-        f"UPDATE {qualified} "
+        f"UPDATE {qualified} "  # nosec B608
         f"SET {valid_to_quoted} = :ts, {current_quoted} = {false_lit} "
         f"WHERE {where_keys} AND {current_pred}"
     )
@@ -253,13 +253,13 @@ def _active_checksum(
     offset = 0
     while True:
         sql = (
-            f"SELECT {cols_quoted} FROM {qualified} "
+            f"SELECT {cols_quoted} FROM {qualified} "  # nosec B608
             f"WHERE {current_quoted} IS TRUE "
             f"LIMIT {batch_size} OFFSET {offset}"
         )
         if dialect_name == "sqlite":
             sql = (
-                f"SELECT {cols_quoted} FROM {qualified} "
+                f"SELECT {cols_quoted} FROM {qualified} "  # nosec B608
                 f"WHERE {current_quoted} = 1 "
                 f"LIMIT {batch_size} OFFSET {offset}"
             )

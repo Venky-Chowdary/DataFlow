@@ -59,7 +59,7 @@ def build_bigquery_merge_sql(
         matched += (
             f" AND S.`{lsn_column}` > COALESCE(T.`{lsn_column}`, '')"
         )
-    matched += f" THEN UPDATE SET {set_clause}"
+    matched += f" THEN UPDATE SET {set_clause}"  # nosec B608
     insert_cols = ", ".join(f"`{c}`" for c in target_cols)
     insert_vals = ", ".join(f"S.`{c}`" for c in target_cols)
     return (

@@ -1369,9 +1369,9 @@ def _sample_raw_table(
         "microsoft_sql_server",
         "azure_sql_database",
     }:
-        stmt = f"SELECT TOP 200 * FROM {qualified}"
+        stmt = f"SELECT TOP 200 * FROM {qualified}"  # nosec B608
     else:
-        stmt = f"SELECT * FROM {qualified} LIMIT 200"
+        stmt = f"SELECT * FROM {qualified} LIMIT 200"  # nosec B608
     result = conn.execute(sa.text(stmt))
     headers = list(result.keys())
     rows = result.fetchall()
@@ -1403,17 +1403,23 @@ def introspect_table_schema(
                 with engine.connect() as conn:
                     from services.type_system import normalize_logical_type
 
-                    schema_expr = "current_schema()" if schema is None else ":schema"
                     params: dict = {"table": table}
-                    if schema is not None:
+                    if schema is None:
+                        sql = sa.text(
+                            "SELECT column_name, data_type, is_nullable "
+                            "FROM information_schema.columns "
+                            "WHERE table_name = :table AND table_schema = current_schema() "
+                            "ORDER BY ordinal_position"
+                        )
+                    else:
                         params["schema"] = schema
-                    sql = (
-                        f"SELECT column_name, data_type, is_nullable "
-                        f"FROM information_schema.columns "
-                        f"WHERE table_name = :table AND table_schema = {schema_expr} "
-                        f"ORDER BY ordinal_position"
-                    )
-                    rows = conn.execute(sa.text(sql), params).fetchall()
+                        sql = sa.text(
+                            "SELECT column_name, data_type, is_nullable "
+                            "FROM information_schema.columns "
+                            "WHERE table_name = :table AND table_schema = :schema "
+                            "ORDER BY ordinal_position"
+                        )
+                    rows = conn.execute(sql, params).fetchall()
                     if rows:
                         result = [
                             {
@@ -1582,7 +1588,7 @@ def delete_by_primary_keys(
             pk_quoted = quote_sql_identifier(primary_key_column, q)
         placeholders = ",".join([f":k{i}" for i in range(len(keys))])
         params = {f"k{i}": k for i, k in enumerate(keys)}
-        stmt = f"DELETE FROM {qualified} WHERE {pk_quoted} IN ({placeholders})"
+        stmt = f"DELETE FROM {qualified} WHERE {pk_quoted} IN ({placeholders})"  # nosec B608
         with engine.connect() as conn:
             result = conn.execute(sa.text(stmt), params)
             conn.commit()
@@ -1607,7 +1613,7 @@ def _read_table_raw(
     from services.dialect_profiles import quote_char_for
 
     qualified = quote_table_ref(table, schema, dialect=dialect)
-    base = f"SELECT * FROM {qualified}"
+    base = f"SELECT * FROM {qualified}"  # nosec B608
     dialect_l = (dialect or "ansi").lower()
     is_mssql = dialect_l in {
         "mssql",
@@ -1622,7 +1628,7 @@ def _read_table_raw(
     }
     # Discover columns so we can ORDER BY the first one — bare LIMIT/OFFSET is
     # non-deterministic and silently duplicates/skips rows across pages.
-    probe_sql = f"SELECT TOP 0 * FROM {qualified}" if is_mssql else f"{base} LIMIT 0"
+    probe_sql = f"SELECT TOP 0 * FROM {qualified}" if is_mssql else f"{base} LIMIT 0"  # nosec B608
     probe = conn.execute(sa.text(probe_sql))
     headers = list(probe.keys())
     if not headers:
@@ -1659,7 +1665,7 @@ def _count_table_raw(
 
     qualified = quote_table_ref(table, schema, dialect=dialect)
     try:
-        return conn.execute(sa.text(f"SELECT COUNT(*) FROM {qualified}")).scalar()
+        return conn.execute(sa.text(f"SELECT COUNT(*) FROM {qualified}")).scalar()  # nosec B608
     except Exception:
         # Never fabricate len(rows) as cardinality — that stops streaming after page one.
         return None

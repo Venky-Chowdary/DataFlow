@@ -108,7 +108,7 @@ def apply_update_row_or_raise(
     )
     if result.toast_incomplete:
         raise CdcToastIncompleteError(
-            f"CDC UPDATE on {table or 'table'} has TOAST-unchanged columns "
+            f"CDC UPDATE on {table or 'table'} has TOAST-unchanged columns "  # nosec: B608 — error message, not SQL
             f"without an old tuple to merge ({result.toast_unchanged_cols}); "
             "set REPLICA IDENTITY FULL (or INCLUDE the TOAST columns) — "
             "refusing destructive sparse upsert",

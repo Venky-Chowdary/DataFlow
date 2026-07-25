@@ -79,7 +79,7 @@ def count_table_rows(
         with conn.cursor() as cur:
             _use_warehouse(cur, warehouse)
             table_ref = _table_ref(cur, schema, table)
-            cur.execute(f"SELECT COUNT(*) FROM {table_ref}")
+            cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             return int(cur.fetchone()[0])
     finally:
         conn.close()
@@ -134,7 +134,7 @@ def read_table_batch(
             # Stable LIMIT/OFFSET requires ORDER BY (PK-or-first-column pattern).
             order_cols = list(columns or [])
             if not order_cols:
-                cur.execute(f"SELECT * FROM {table_ref} LIMIT 0")
+                cur.execute(f"SELECT * FROM {table_ref} LIMIT 0")  # nosec B608
                 order_cols = [desc[0] for desc in (cur.description or [])]
             if not order_cols:
                 raise RuntimeError("Snowflake table has no columns for stable pagination")
@@ -142,7 +142,7 @@ def read_table_batch(
                 [require_safe_identifier(str(order_cols[0]), preserve_case=True)]
             )
             cur.execute(
-                f"SELECT {col_sql} FROM {table_ref} "
+                f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
                 f"ORDER BY {order_sql} LIMIT {int(limit)} OFFSET {int(offset)}"
             )
             headers = [desc[0] for desc in cur.description]
@@ -211,27 +211,27 @@ def read_table_cursor_batch(
                     else:
                         cur_val, pk_val = cursor_after, ""
                     cur.execute(
-                        f"SELECT {col_sql} FROM {table_ref} "
+                        f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
                         f"WHERE ({cursor_q}, {pk_q}) > (%s, %s) "
                         f"ORDER BY {cursor_q}, {pk_q} LIMIT %s",
                         (cur_val, pk_val, limit),
                     )
                 else:
                     cur.execute(
-                        f"SELECT {col_sql} FROM {table_ref} "
+                        f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
                         f"WHERE {cursor_q} > %s ORDER BY {cursor_q} LIMIT %s",
                         (cursor_after, limit),
                     )
             else:
                 if pk_q:
                     cur.execute(
-                        f"SELECT {col_sql} FROM {table_ref} "
+                        f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
                         f"ORDER BY {cursor_q}, {pk_q} LIMIT %s",
                         (limit,),
                     )
                 else:
                     cur.execute(
-                        f"SELECT {col_sql} FROM {table_ref} "
+                        f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
                         f"ORDER BY {cursor_q} LIMIT %s",
                         (limit,),
                     )

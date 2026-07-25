@@ -562,7 +562,7 @@ def mark_tested(connector_id: str, ok: bool) -> None:
 def mask_connector(c: SavedConnector) -> dict[str, Any]:
     d = c.to_dict()
     if d.get("password"):
-        d["password"] = "****"
+        d["password"] = "****"  # nosec B105
     if d.get("connection_string"):
         d["connection_string"] = _mask_conn_str(d["connection_string"])
     if d.get("api_key"):

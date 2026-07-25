@@ -714,7 +714,7 @@ def infer_column(
 
                     base64.b64decode(s, validate=True)
                     valid += 1
-                except Exception:
+                except (ValueError, TypeError):
                     # Invalid base64 padding/alphabet — treat as non-binary below.
                     continue
         if valid == len(non_empty):

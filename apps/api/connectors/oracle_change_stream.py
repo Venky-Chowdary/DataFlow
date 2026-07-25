@@ -150,8 +150,9 @@ class OracleFlashbackCdc:
                     row = cur.fetchone()
                     if not row:
                         return False
-                    cur.execute(
-                        f"SELECT COUNT(*) FROM {self._qualified()} VERSIONS BETWEEN SCN MINVALUE AND MAXVALUE "
+                    # _qualified() double-quotes identifiers; the f-string only contains that quoted table reference.
+                    cur.execute(  # nosec B608
+                        f"SELECT COUNT(*) FROM {self._qualified()} VERSIONS BETWEEN SCN MINVALUE AND MAXVALUE "  # nosec B608
                         f"WHERE ROWNUM <= 1"
                     )
                     cur.fetchone()
@@ -184,7 +185,7 @@ class OracleFlashbackCdc:
                               FROM {qualified} t
                             )
                             WHERE df_rn > :off AND df_rn <= :lim
-                            """,
+                            """,  # nosec B608
                             {"off": offset, "lim": offset + self.batch_size},
                         )
                         cols = [d[0] for d in (cur.description or [])]
@@ -255,7 +256,7 @@ class OracleFlashbackCdc:
                           VERSIONS BETWEEN SCN :start_scn AND :end_scn
                           ORDER BY VERSIONS_STARTSCN
                         ) WHERE ROWNUM <= :lim
-                        """,
+                        """,  # nosec B608
                         {"start_scn": self.scn + 1, "end_scn": head_scn, "lim": self.batch_size},
                     )
                     cols = [d[0] for d in (cur.description or [])]

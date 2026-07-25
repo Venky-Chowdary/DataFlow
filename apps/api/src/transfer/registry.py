@@ -34,7 +34,8 @@ def _live_db_drivers(live_fn_name: str = "transfer_live_driver_types") -> list[s
         from pathlib import Path
         path = Path(__file__).resolve().parent / "connector_capabilities.py"
         spec = importlib.util.spec_from_file_location("connector_capabilities_for_registry", path)
-        assert spec is not None and spec.loader is not None
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Could not load connector capabilities spec from {path}")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         transfer_live_driver_types = mod.transfer_live_driver_types
