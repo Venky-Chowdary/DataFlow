@@ -255,10 +255,13 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
     # Railway private DNS — guidance depends on whether THIS API is on Railway.
     if ".railway.internal" in text:
         try:
-            from connectors.sql_dsn import is_running_on_railway, private_cloud_host_hint
+            from connectors.sql_dsn import (
+                is_running_on_railway,
+                private_cloud_host_hint,
+            )
 
             on_railway = is_running_on_railway()
-        except Exception:
+        except Exception:  # noqa: BLE001
             on_railway = False
         if on_railway:
             # Keep the real cause when present; append railway-internal guidance.
@@ -393,8 +396,18 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
     if re.search(r"database is locked|deadlock|too many connections|max connections|quota exceeded", text):
         return "Database is locked or overloaded. Try again later or reduce concurrency."
 
-    # Resource / table not found
-    if re.search(r"table|resource|not found|does not exist|unknown database", text):
+    # Resource / table not found — be precise so unrelated driver text
+    # (e.g. fakesnow lock errors that mention an object name) is not mislabeled.
+    missing_object = (
+        r"(?:table|relation|object|view|sequence|bucket|container|index|resource|database|schema)\s+"
+        r"(?:'[^']+'\s+)?(?:does not exist|do not exist|not found|not exist)|"
+        r"unknown database|"
+        r"no such (?:table|relation|object|view|database|schema|sequence)|"
+        r"file or path not found|"
+        r"bucket .* not found|container .* not found|"
+        r"object '[^']+' does not exist"
+    )
+    if re.search(missing_object, text, re.IGNORECASE):
         return "Destination or resource not found. Check the database, schema, table, bucket, or index name."
 
     # Redshift, RDS, cloud Postgres/MySQL share the same auth/host families as their base drivers.
