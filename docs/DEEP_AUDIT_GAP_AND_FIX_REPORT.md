@@ -884,9 +884,15 @@ pytest apps/api/tests/test_data_integrity.py tests/test_data_quality.py \
        tests/test_source_duplicate_probe_live.py
 77 passed in 0.73s
 
+pytest apps/api/tests/test_data_rule_scenario_matrix.py
+3742 passed in 4.34s
+
 Live MySQL jobs_dup (id='abc123' repeated) → PostgreSQL full_refresh_overwrite
 with destination_pk_columns=['id']:
 G9 Data integrity: block — "id: duplicate key values from source probe (abc123×2)"
+
+Balanced mode with a sole duplicate user_id is surfaced as a warning, not a
+hard block, while strict/maximum still fail closed before the write batch.
 ```
 
 The operator will now see the duplicate-key issue on the Validate step with a
