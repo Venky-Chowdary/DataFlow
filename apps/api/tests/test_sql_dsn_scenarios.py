@@ -185,6 +185,23 @@ def test_normalize_scheme_less_postgres_dsn():
     assert ep["host"] != "localhost"
 
 
+def test_explicit_password_overrides_stale_connection_string():
+    """A password update in the secret field must beat a stored DSN password."""
+    ep = resolve_sql_endpoint(
+        family="postgresql",
+        host="",
+        port=0,
+        database="",
+        username="postgres",
+        password="new_secret",
+        connection_string="postgresql://postgres:old_secret@tokaido.proxy.rlwy.net:27396/railway",
+        default_port=5432,
+    )
+    assert ep["host"] == "tokaido.proxy.rlwy.net"
+    assert ep["password"] == "new_secret"
+    assert ep["username"] == "postgres"
+
+
 def test_mysql_url_still_parses():
     parsed = parse_sql_url(
         "mysql://root:x@tokaido.proxy.rlwy.net:32253/railway",

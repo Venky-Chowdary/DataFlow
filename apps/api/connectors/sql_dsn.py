@@ -12,7 +12,7 @@ _PG_SCHEMES = frozenset({"postgresql", "postgres", "postgresql+psycopg2", "pgsql
 # user:pass@host:port/db  (scheme omitted — common Railway paste mistake)
 _USERINFO_AT_HOST = re.compile(
     r"^(?P<user>[^:/@\s]+):(?P<password>[^@\s]+)@(?P<host>[^:/?\s]+)(?::(?P<port>\d+))?(?:/(?P<db>[^?\s]*))?",
-    re.I,
+    re.IGNORECASE,
 )
 
 
@@ -85,11 +85,18 @@ def resolve_sql_endpoint(
 ) -> dict[str, Any]:
     """Merge form fields + connection string (+ URL pasted into host).
 
-    When a connection string / DSN parses successfully, it is authoritative for
-    host/port/user/password/database. Form defaults like localhost:5432 must not
-    override a Railway public proxy URL (that was breaking Test connection).
-    Discrete fields only fill blanks the URL did not provide.
+    The DSN is authoritative for host/port/database so a Railway public proxy URL
+    is not clobbered by localhost:5432 form defaults. However, an explicit
+    non-empty username or password from the form (or a saved connector) takes
+    precedence over the DSN credentials — that keeps password updates in the
+    dedicated secret field from being ignored when a stale DSN is still stored.
     """
+
+    def _is_masked_value(value: Any) -> bool:
+        if not isinstance(value, str):
+            return False
+        v = value.strip()
+        return not v or v == "****" or "****" in v or "<redacted>" in v.lower()
     normalized_cs = normalize_sql_dsn(connection_string, family=family)
     parsed = parse_sql_url(normalized_cs, family=family)
     # Allow pasting a full DSN into the Host field by mistake.
@@ -100,33 +107,36 @@ def resolve_sql_endpoint(
 
     form_host = host_raw
     # Treat common placeholder defaults as empty so they never beat a real DSN.
-    if form_host.lower() in ("localhost", "127.0.0.1", "host.docker.internal"):
+    if form_host.lower() in ("localhost", "127.0.0.1", "host.docker.internal") and parsed.get("host"):
         # Keep only if the URL did not supply a host
-        if parsed.get("host"):
-            form_host = ""
+        form_host = ""
 
     form_port = int(port or 0)
     if form_port in (0, default_port) and parsed.get("port"):
         # Default catalog port (5432/3306) must not override proxy ports (27396…)
         form_port = 0
 
+    url_user = str(parsed.get("username") or "") if parsed.get("host") else ""
+    url_password = str(parsed.get("password") or "") if parsed.get("host") else ""
+    explicit_user = (username or "").strip()
+    explicit_password = password or ""
+
     if parsed.get("host"):
         final_host = str(parsed.get("host") or "") or form_host or "localhost"
         final_port = int(parsed.get("port") or 0) or form_port or default_port
-        final_user = str(parsed.get("username") or "") or (username or "").strip()
-        if parsed.get("password") not in (None, ""):
-            final_password = str(parsed.get("password") or "")
-        elif password not in (None, ""):
-            final_password = password
-        else:
-            final_password = ""
         final_database = str(parsed.get("database") or "") or (database or "").strip()
     else:
         final_host = form_host or "localhost"
         final_port = form_port or default_port
-        final_user = (username or "").strip()
-        final_password = password if password not in (None, "") else ""
         final_database = (database or "").strip()
+
+    # Explicit non-masked form/connector credentials override a stale DSN password.
+    final_user = explicit_user if explicit_user and not _is_masked_value(explicit_user) else url_user
+    final_password = (
+        explicit_password
+        if explicit_password and not _is_masked_value(explicit_password)
+        else url_password
+    )
 
     return {
         "host": final_host,
@@ -144,7 +154,7 @@ def is_running_on_railway() -> bool:
         from services.platform_config import is_railway
 
         return bool(is_railway())
-    except Exception:
+    except (ImportError, AttributeError):
         import os
 
         return bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_SERVICE_ID"))
