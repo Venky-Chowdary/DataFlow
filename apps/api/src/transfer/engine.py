@@ -1537,6 +1537,7 @@ class UniversalTransferEngine:
                         or request.source_filename
                         or ""
                     ),
+                    source_connector_id=request.source.connector_id or "",
                     destination_table=(
                         request.destination.table
                         or request.destination.collection
@@ -2268,6 +2269,7 @@ class UniversalTransferEngine:
                         or request.source_filename
                         or ""
                     ),
+                    source_connector_id=request.source.connector_id or "",
                     destination_table=(
                         request.destination.table
                         or request.destination.collection
@@ -2824,6 +2826,7 @@ class UniversalTransferEngine:
                         or request.source_filename
                         or ""
                     ),
+                    source_connector_id=request.source.connector_id or "",
                     destination_table=(
                         request.destination.table
                         or request.destination.collection
