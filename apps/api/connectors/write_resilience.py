@@ -100,7 +100,7 @@ def is_connection_lost(exc: BaseException | str) -> bool:
     try:
         from connectors.sql_temporal import is_sql_data_error
     except ImportError:
-        is_sql_data_error = lambda _e: False  # noqa: E731
+        is_sql_data_error = lambda _e: False
     # Never treat bad cell values as a dropped socket — that burns reconnect budget
     # and fails the whole job instead of quarantining the row.
     if is_sql_data_error(exc):
@@ -117,6 +117,8 @@ def is_connection_lost(exc: BaseException | str) -> bool:
                 "incorrect datetime",
                 "data truncation",
                 "out of range",
+                "lock wait",
+                "lock timeout",
             )
         ):
             return "server closed" in text or "connection reset" in text or "broken pipe" in text
