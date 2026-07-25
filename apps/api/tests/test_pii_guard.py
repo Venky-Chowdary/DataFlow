@@ -17,6 +17,7 @@ from services.pii_guard import (  # noqa: E402
     is_sensitive_name,
     mask,
     mask_record,
+    redact_reconciliation,
 )
 from services.transform_engine import apply_transform  # noqa: E402
 
@@ -86,3 +87,30 @@ def test_apply_transform_hash_pii():
     assert err is None
     assert len(val) == 32
     assert val == apply_transform("alice@example.com", "hash_pii")[0]
+
+
+def test_redact_reconciliation_masks_mismatch_values():
+    recon = {
+        "passed": False,
+        "mismatches": [
+            {
+                "row": "1",
+                "source": "email",
+                "target": "email",
+                "source_value": "alice@example.com",
+                "target_value": "alice@example.com",
+            },
+            {
+                "row": "2",
+                "source": "amount",
+                "target": "amount",
+                "source_value": "100.50",
+                "target_value": "100.5",
+            },
+        ],
+    }
+    redacted = redact_reconciliation(recon, [])
+    assert redacted["mismatches"][0]["source_value"].startswith("al")
+    assert "***" in redacted["mismatches"][0]["source_value"]
+    assert redacted["mismatches"][0]["target_value"].startswith("al")
+    assert redacted["mismatches"][1]["source_value"] == "100.50"

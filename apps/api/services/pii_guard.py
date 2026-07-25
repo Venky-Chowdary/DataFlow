@@ -167,6 +167,16 @@ def redact_reconciliation(
             rows = sample_compare.get(key)
             if isinstance(rows, list):
                 sample_compare[key] = [redact_sample(row) for row in rows]
+    mismatches = out.get("mismatches")
+    if isinstance(mismatches, list):
+        for mm in mismatches:
+            for key, col_key in (("source_value", "source"), ("target_value", "target")):
+                val = mm.get(key)
+                if val is None:
+                    continue
+                col = mm.get(col_key) or ""
+                if is_sensitive_name(col) or detect_pii(val)["has_pii"]:
+                    mm[key] = mask(val)
     if isinstance(out.get("message"), str):
         out["message"] = _redact_text(out["message"])
     return out
