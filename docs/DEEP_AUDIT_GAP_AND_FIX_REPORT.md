@@ -1023,8 +1023,12 @@ pytest apps/api/tests/test_mongodb_to_postgresql_incremental.py \
        tests/test_data_quality_gates.py \
        tests/test_preflight_transform_validation.py \
        tests/test_execute_tracked_cross_sql_matrix.py \
-       tests/test_typed_fidelity_transfer_matrix_e2e.py
-274 passed, 9 skipped, 0 failed
+       tests/test_typed_fidelity_transfer_matrix_e2e.py \
+       tests/test_cdc_postgres_logical_integration.py \
+       tests/test_cdc_mysql_binlog_integration.py \
+       tests/test_cdc_mongodb_change_stream_integration.py \
+       tests/test_mongodb_cdc_lsn_upsert.py
+279 passed, 9 skipped, 1 warning
 ```
 
 ### What is still NOT proven
