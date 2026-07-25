@@ -51,7 +51,8 @@ def _mongo_collection():
 
         mongo = get_mongodb_service()
         if mongo and getattr(mongo, "client", None) and type(mongo).__name__ != "MemoryMongoDBService":
-            return mongo.get_database().get("audit_events")
+            # ``Database.get`` is not a valid PyMongo API; ``get_collection`` is.
+            return mongo.get_database().get_collection("audit_events")
     except Exception as exc:
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     return None

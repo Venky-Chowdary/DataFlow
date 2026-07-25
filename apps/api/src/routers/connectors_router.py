@@ -20,7 +20,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from pymongo.errors import PyMongoError
 from services.team_store import can_read_workspace, can_write_workspace
 from services.value_serializer import json_default
@@ -57,12 +57,14 @@ def _require_write_workspace(request: Request, x_workspace_id: str = Header(defa
 
 class ConnectorConfig(BaseModel):
     """Connector configuration"""
+    model_config = ConfigDict(populate_by_name=True)
+
     name: str = Field(..., description="Display name for this connector")
     type: str = Field(..., description="Connector type (mongodb, postgresql, mysql, etc.)")
     host: str = Field(..., description="Host address")
     port: int = Field(..., description="Port number")
     database: str = Field(default="", description="Database name")
-    schema: Optional[str] = Field(default=None, description="Schema or dataset name")
+    db_schema: Optional[str] = Field(default=None, alias="schema", description="Schema or dataset name")
     username: Optional[str] = Field(default=None, description="Username")
     password: Optional[str] = Field(default=None, description="Password")
     connection_string: Optional[str] = Field(default=None, description="Full connection string")
@@ -95,11 +97,13 @@ class ConnectorResponse(BaseModel):
 
 class TestConnectionRequest(BaseModel):
     """Request to test a connection"""
+    model_config = ConfigDict(populate_by_name=True)
+
     type: str
     host: Optional[str] = ""
     port: Optional[int] = None
     database: str = ""
-    schema: Optional[str] = None
+    db_schema: Optional[str] = Field(default=None, alias="schema")
     username: Optional[str] = None
     password: Optional[str] = None
     connection_string: Optional[str] = None
@@ -212,7 +216,7 @@ async def test_connection(request: TestConnectionRequest):
             "database": request.database or "",
             "username": request.username or "",
             "password": request.password or "",
-            "schema": request.schema or "",
+            "schema": request.db_schema or "",
             "connection_string": request.connection_string or "",
             "ssl": bool(request.ssl) if request.ssl is not None else False,
             "warehouse": request.warehouse or "",
@@ -273,7 +277,7 @@ async def create_connector(
         "host": config.host,
         "port": config.port,
         "database": config.database,
-        "schema": config.schema,
+        "schema": config.db_schema,
         "username": config.username,
         "password": config.password,
         "connection_string": config.connection_string,

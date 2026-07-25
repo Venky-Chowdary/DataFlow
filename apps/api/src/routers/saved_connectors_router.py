@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 _api_root = Path(__file__).resolve().parents[2]
 if str(_api_root) not in sys.path:
@@ -35,6 +35,8 @@ router = APIRouter(prefix="/connectors/saved", tags=["Saved Connectors"])
 
 
 class ConnectorSaveDTO(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     name: str
     type: str
     role: str = "both"
@@ -43,7 +45,7 @@ class ConnectorSaveDTO(BaseModel):
     database: str = ""
     username: str = ""
     password: str = ""
-    schema: str = "public"
+    db_schema: str = Field(default="public", alias="schema")
     connection_string: str = ""
     ssl: bool = False
     warehouse: str = ""
@@ -175,7 +177,7 @@ def save_connector(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     workspace_id = _require_write_workspace(request, workspace_id)
-    data = body.model_dump()
+    data = body.model_dump(by_alias=True)
     form_test = data.pop("last_test_ok", None)
     data["workspace_id"] = workspace_id
     # If the form re-submits a masked copy of an existing connector, preserve secrets
@@ -201,7 +203,7 @@ def update_saved_connector(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     workspace_id = _require_write_workspace(request, workspace_id)
-    data = body.model_dump()
+    data = body.model_dump(by_alias=True)
     form_test = data.pop("last_test_ok", None)
     existing = get_connector(connector_id, workspace_id=workspace_id)
     if not existing or not _can_access_connector(request, existing):
