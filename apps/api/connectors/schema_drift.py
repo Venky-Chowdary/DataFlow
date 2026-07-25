@@ -135,8 +135,12 @@ def is_wider_type(old_type: str, new_type: str) -> bool:
                 return False  # bounded can never be wider than unbounded
             if new_p is None or new_s is None or old_p is None or old_s is None:
                 return False
+            # A fixed-point widen must preserve both integer-digit capacity and
+            # scale: DECIMAL(10,4) cannot hold DECIMAL(10,2) values (8 int vs 6).
             return (
-                new_p >= old_p and new_s >= old_s and (new_p > old_p or new_s > old_s)
+                new_s >= old_s
+                and (new_p - new_s) >= (old_p - old_s)
+                and (new_s > old_s or (new_p - new_s) > (old_p - old_s))
             )
         if old_logical == "integer":
             old_w = _integer_bit_width(old_type)
@@ -168,15 +172,9 @@ def is_wider_type(old_type: str, new_type: str) -> bool:
             return False
         return new_w >= old_w
 
-    # DECIMAL -> FLOAT: safe from an overflow/range perspective when the float
-    # mantissa can represent the decimal's total digit count (DOUBLE ~ 15 digits).
-    if old_logical == "decimal" and new_logical == "float":
-        old_p, _old_s = _numeric_precision_scale(old_type)
-        new_w = _float_mantissa_bits(new_type)
-        if old_p is None or new_w is None:
-            return False
-        max_exact_digits = 15 if new_w >= 53 else (6 if new_w >= 24 else 0)
-        return old_p <= max_exact_digits
+    # DECIMAL -> FLOAT is never considered a widen: binary floating-point cannot
+    # represent many decimal values exactly (e.g. 0.1), so ALTERing a DECIMAL
+    # column to FLOAT/DOUBLE would silently lose fixed-point fidelity.
 
     # Cross-logical promotions to string-like: length must be sufficient.
     if _is_string_like(new_logical):

@@ -171,6 +171,26 @@ def test_classify_no_change():
     assert report["breaking"] == []
 
 
+def test_is_wider_type_decimal_preserves_integer_and_scale():
+    from connectors.schema_drift import is_wider_type
+
+    # Growing scale at the cost of integer digits is not a widen.
+    assert is_wider_type("DECIMAL(10,2)", "DECIMAL(10,4)") is False
+    # More total precision with the same scale is a widen.
+    assert is_wider_type("DECIMAL(10,2)", "DECIMAL(12,2)") is True
+    # Growing both integer and scale capacity is a widen.
+    assert is_wider_type("DECIMAL(10,2)", "DECIMAL(12,4)") is True
+    # Equal types are not widens (no ALTER needed).
+    assert is_wider_type("DECIMAL(10,2)", "DECIMAL(10,2)") is False
+
+
+def test_is_wider_type_decimal_to_float_is_lossy():
+    from connectors.schema_drift import is_wider_type
+
+    assert is_wider_type("DECIMAL(10,2)", "DOUBLE") is False
+    assert is_wider_type("DECIMAL(5,2)", "REAL") is False
+
+
 def test_classify_additive_nullable_column_and_widen():
     old = {
         "columns": {"id": "INTEGER", "amount": "INTEGER"},

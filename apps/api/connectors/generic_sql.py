@@ -1928,15 +1928,25 @@ def _upsert_batch(
         result = conn.execute(table_obj.insert(), batch)
         return max(0, getattr(result, "rowcount", None) or 0) or len(batch)
 
-    # Last occurrence of each conflict key wins within the batch.
-    deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
-    for row in batch:
-        key = tuple(row[c] for c in conflict_cols)
-        deduped[key] = row
-    rows = list(deduped.values())
-
     update_cols = [c for c in target_cols if c not in conflict_cols]
     lsn_guarded = DF_LSN_COL in target_cols
+
+    # Keep the highest-LSN row per conflict key so CDC redelivery inside one
+    # batch is deterministic; fall back to last-wins when no LSN column.
+    if lsn_guarded:
+        best: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for row in batch:
+            key = tuple(row[c] for c in conflict_cols)
+            prev = best.get(key)
+            if prev is None or compare_lsn(row.get(DF_LSN_COL), prev.get(DF_LSN_COL)) >= 0:
+                best[key] = row
+        rows = list(best.values())
+    else:
+        deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for row in batch:
+            key = tuple(row[c] for c in conflict_cols)
+            deduped[key] = row
+        rows = list(deduped.values())
 
     def _native_upsert() -> int | None:
         try:

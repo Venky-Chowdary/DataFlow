@@ -21,6 +21,7 @@ from connectors.writer_common import (
     _coerced_null_row_count,
     _rejected_row_count,
     build_mapped_rows_with_details,
+    compare_lsn,
     lsn_is_newer,
     resolve_target_columns,
     row_checksum,
@@ -400,6 +401,24 @@ def write_mapped_rows(
                         rejected_details=rejected_details[:100],
                         warnings=transform_errors,
                     )
+
+                # Deduplicate within the batch on the conflict key, keeping the
+                # highest _df_lsn so ``bulk_write(ordered=False)`` does not apply
+                # same-PK updates in an undefined order.
+                if DF_LSN_COL in target_cols:
+                    best_docs: dict[tuple, dict[str, Any]] = {}
+                    for doc in docs:
+                        key = tuple(doc.get(c) for c in pk_cols)
+                        prev = best_docs.get(key)
+                        if prev is None or compare_lsn(doc.get(DF_LSN_COL), prev.get(DF_LSN_COL)) >= 0:
+                            best_docs[key] = doc
+                    docs = list(best_docs.values())
+                else:
+                    seen_docs: dict[tuple, dict[str, Any]] = {}
+                    for doc in docs:
+                        key = tuple(doc.get(c) for c in pk_cols)
+                        seen_docs[key] = doc
+                    docs = list(seen_docs.values())
 
                 # Pre-fetch existing _df_lsn values for the batch keys so stale
                 # redelivery cannot regress destination state under CDC.
