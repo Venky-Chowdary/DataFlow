@@ -97,6 +97,11 @@ def introspect_endpoint(
 
     if fmt == "mongodb":
         try:
+            from pymongo.errors import PyMongoError
+        except ImportError:
+            out["message"] = "pymongo is not installed"
+            return out
+        try:
             from .connector_registry import humanize_connection_error, run_probe
 
             ok, msg = run_probe(fmt, cfg)
@@ -121,7 +126,7 @@ def introspect_endpoint(
                 # name list so Transfer Studio can create-new for typed names.
                 try:
                     colls = db.list_collection_names()
-                except Exception as list_err:
+                except PyMongoError as list_err:
                     out["message"] = f"Could not list collections in `{db_name}`: {list_err}"
                     return out
                 out["objects"] = [{"name": c, "type": "collection"} for c in colls[:200]]
@@ -158,7 +163,7 @@ def introspect_endpoint(
                 out["connected"] = True
                 out["objects"] = [{"name": c, "type": "collection"} for c in colls[:50]]
                 out["message"] = f"MongoDB connected — {len(colls)} collections in `{db_name}`"
-        except Exception as e:
+        except PyMongoError as e:
             out["message"] = humanize_connection_error("mongodb", e)
         return out
 
@@ -416,6 +421,8 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             if not coll_name:
                 return
             try:
+                from pymongo.errors import PyMongoError
+
                 # Reuse the cached MongoClient to avoid repeated connection handshakes
                 # when the UI polls/retries introspection for the same connector.
                 client = _mongo_client(mongodb_connection_string(cfg))
@@ -423,7 +430,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 coll = db[coll_name]
                 cursor = coll.find().max_time_ms(5000).limit(sample_limit)
                 records = list(cursor)
-            except Exception as exc:
+            except PyMongoError as exc:
                 out["message"] = f"Collection sample failed: {exc}"
                 return
             # Serialize MongoDB-native types to JSON-safe scalars so the
@@ -463,6 +470,8 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             out["data"] = safe_records[:preview_n]
             out["sample_row_count"] = len(records)
             try:
+                from pymongo.errors import PyMongoError
+
                 estimate = int(coll.estimated_document_count(maxTimeMS=5000)) if columns else 0
                 out["row_estimate"] = estimate
                 # Never treat the introspection sample size as the collection size.
@@ -472,7 +481,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                         f"{out.get('message', '')} · row estimate unavailable "
                         f"(showing {len(records)}-row sample)"
                     ).strip(" ·")
-            except Exception:
+            except PyMongoError:
                 # Prefer unknown over lying that a 100-row sample is the full table.
                 out["row_estimate"] = 0
                 out["row_estimate_uncertain"] = True

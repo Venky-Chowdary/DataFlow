@@ -159,13 +159,21 @@ def close_quietly(conn: Any) -> None:
 
 
 def apply_postgres_session_guards(conn: Any) -> None:
-    """Disable aggressive statement/idle kills that abort long Railway transfers."""
+    """Disable aggressive statement/idle kills that abort long Railway transfers.
+
+    ``statement_timeout`` and ``idle_in_transaction_session_timeout`` stay at 0
+    so multi-million-row COPY / reconcile operations are not killed.  A finite
+    ``lock_timeout`` (2 minutes) prevents the connection from waiting forever on
+    a contended table lock, e.g. a concurrent DDL or an open transaction held by
+    the operator.  DDL paths that need a shorter fail-fast window can ``SET LOCAL``
+    a lower value and ``RESET`` afterwards.
+    """
     try:
         conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute("SET statement_timeout = 0")
             cur.execute("SET idle_in_transaction_session_timeout = 0")
-            cur.execute("SET lock_timeout = 0")
+            cur.execute("SET lock_timeout = 120000")
             cur.execute("SET application_name = 'dataflow'")
         conn.autocommit = False
     except Exception:
@@ -176,13 +184,21 @@ def apply_postgres_session_guards(conn: Any) -> None:
 
 
 def apply_mysql_session_guards(conn: Any) -> None:
-    """Raise MySQL session I/O / wait timeouts for long bulk loads."""
+    """Raise MySQL session I/O / wait timeouts for long bulk loads.
+
+    ``wait_timeout`` / ``interactive_timeout`` are raised so long-running transfers
+    are not killed.  ``lock_wait_timeout`` / ``innodb_lock_wait_timeout`` are set
+    to 2 minutes so a contended metadata lock or row lock fails fast instead of
+    hanging the transfer indefinitely.
+    """
     try:
         with conn.cursor() as cur:
             cur.execute("SET SESSION wait_timeout = 28800")
             cur.execute("SET SESSION interactive_timeout = 28800")
             cur.execute("SET SESSION net_read_timeout = 600")
             cur.execute("SET SESSION net_write_timeout = 600")
+            cur.execute("SET SESSION lock_wait_timeout = 120")
+            cur.execute("SET SESSION innodb_lock_wait_timeout = 120")
     except Exception as exc:
         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 

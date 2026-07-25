@@ -463,12 +463,10 @@ def widen_existing_columns_native(
             ddl = _build_widen_ddl(
                 dialect, schema, table_name, col, new_type, existing_type
             )
-            # A concurrent reader/writer or an open transaction on this table
-            # can block ALTER COLUMN indefinitely. Use a short lock timeout so
-            # the transfer fails fast with a retriable error instead of hanging.
-            cursor.execute("SET LOCAL lock_timeout = '2000ms'")
+            # Session-level lock timeouts are now configured by each driver's
+            # connection guard (e.g. apply_postgres_session_guards / apply_mysql_session_guards)
+            # so ALTER COLUMN cannot hang forever on a contended table lock.
             cursor.execute(ddl)
-            cursor.execute("SET LOCAL lock_timeout = 0")
             log.append(ddl)
             logger.debug(
                 "Widened %s.%s from %s to %s", table_name, col, existing_type, new_type
