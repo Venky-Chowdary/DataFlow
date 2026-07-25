@@ -9,7 +9,7 @@
 
 ## 1. Executive Summary
 
-This audit was a line-by-line review of the DataFlow universal transfer engine, with the goal of moving the product toward Airbyte/Fivetran-class robustness and zero silent data loss. The engine has a strong architecture (`UniversalTransferEngine`, preflight gates, reconciliation, quarantine, and schema mapping). After this fix cycle the local full test suite is green: 9,052 passed, 1,085 skipped, 0 failed. The remaining 1,085 skipped are mostly cloud-warehouse/Oracle/Redis routes that require live credentials or services not running in the local CI container.
+This audit was a line-by-line review of the DataFlow universal transfer engine, with the goal of moving the product toward Airbyte/Fivetran-class robustness and zero silent data loss. The engine has a strong architecture (`UniversalTransferEngine`, preflight gates, reconciliation, quarantine, and schema mapping). After this fix cycle the local full test suite is green: 9,064 passed, 1,085 skipped, 0 failed. The remaining 1,085 skipped are mostly cloud-warehouse/Oracle/Redis routes that require live credentials or services not running in the local CI container.
 
 ### What was fixed in this cycle
 
@@ -1053,3 +1053,37 @@ pytest apps/api/tests/test_mongodb_to_postgresql_incremental.py \
 - **Full CDC end-to-end job resume across MySQL/MongoDB/SQL Server.** PostgreSQL logical-decoding job resume is proven; multi-stream and other engines still need stress tests.
 - **BLE001 blind-except narrowing.** The broader `except Exception as exc:` runway remains.
 - **Lakehouse MERGE.** Iceberg/Delta MERGE semantics for idempotent writes are still a roadmap item.
+
+---
+
+## 19. Latest Session Addendum — duplicate identity key enforcement refined (2026-07-19)
+
+### What changed
+
+- `services/data_integrity.py` `_check_duplicate_keys` now:
+  - Defaults to **enforcing** duplicate identity checks (any non-append-like sync mode, or append-like when the destination PK is known to include the mapped target).
+  - Skips false blocks for **append-like** modes (`full_refresh_append`, `incremental_append`, `append`, `append_only`) when the destination primary key is not known to include the mapped target.
+  - Downgrades duplicate identity issues to **warnings** in `balanced` validation mode, while `strict` / `maximum` still hard-block before Run.
+- `run_integrity_audit` resolves two primary keys: `pk_nulls` for required-null checks and `pk_uniqueness` for duplicate checks, so an FK-like `*_id` that repeats does not falsely trigger a duplicate-key block.
+- `test_source_duplicate_preflight.py` and `test_wave_ad_identity_ux.py` updated to match the new ownership (G9 data_integrity owns duplicate identity keys, G6 target DDL does not).
+
+### Verification this session
+
+```text
+pytest apps/api/tests/test_data_integrity.py tests/test_data_quality.py \
+       tests/test_ddl_compatibility.py tests/test_wave_ad_identity_ux.py \
+       tests/test_wave_ae_studio_honesty.py tests/test_source_duplicate_preflight.py \
+       tests/test_source_duplicate_probe_live.py
+77 passed in 0.73s
+
+pytest apps/api/tests/test_data_rule_scenario_matrix.py
+3742 passed in 4.34s
+
+pytest apps/api/tests  (with DATAFLOW_PII_HASH_KEY, DATAFLOW_FAKESNOW_KEEP_PATCH, DATAFLOW_ALLOW_STUB_WRITES)
+9064 passed, 1085 skipped, 0 failed
+```
+
+### What is still NOT proven
+
+- Full `apps/api/tests` run with live cloud-warehouse / object-store / Redis credentials remains skipped.
+- MySQL → PostgreSQL `jobs` duplicate-key path is proven in the engine/preflight matrix; the live Railway destination still fails password authentication, which is a saved-connector credential issue, not a code path bug.
