@@ -52,7 +52,9 @@ def test_ddl_skips_duplicate_pk_for_append():
     assert not any("Primary key candidate" in i for i in issues)
 
 
-def test_ddl_blocks_duplicate_pk_for_cdc():
+def test_ddl_no_longer_emits_pk_candidate_for_cdc():
+    """G6 focuses on DDL shape; duplicate identity keys are owned by G9 data_integrity."""
+    from services.data_integrity import run_integrity_audit
     from services.ddl_compatibility import evaluate_ddl_compatibility
 
     mappings = [
@@ -74,7 +76,21 @@ def test_ddl_blocks_duplicate_pk_for_cdc():
         allow_create=True,
         sync_mode="cdc",
     )
-    assert any("Primary key candidate" in i for i in issues)
+    assert not any("Primary key candidate" in i for i in issues)
+    assert not any("duplicate" in i.lower() for i in issues)
+
+    report = run_integrity_audit(
+        source_columns=["id", "name"],
+        mappings=mappings,
+        sample_rows=rows,
+        destination_db_type="postgresql",
+        validation_mode="strict",
+        sync_mode="cdc",
+    )
+    dup = next((c for c in report.get("checks", []) if c.get("check") == "duplicate_keys"), None)
+    assert dup is not None
+    assert dup.get("blocks_transfer") is True
+    assert any("duplicate" in str(i).lower() for i in dup.get("issues", []))
 
 
 def test_integrity_skips_dupes_for_append():

@@ -325,6 +325,31 @@ def _check_required_nulls(
     }
 
 
+def _is_append_like(sync_mode: str) -> bool:
+    return (sync_mode or "").strip().lower() in {
+        "full_refresh_append",
+        "incremental_append",
+        "append",
+        "append_only",
+    }
+
+
+def _is_overwrite_like(sync_mode: str) -> bool:
+    return (sync_mode or "").strip().lower() in {
+        "full_refresh_overwrite",
+        "overwrite",
+        "full_refresh",
+        "replace",
+    }
+
+
+def _target_for_source(source: str, mappings: list[dict]) -> str:
+    for m in (mappings or []):
+        if (m.get("source") or "").lower() == (source or "").lower():
+            return str(m.get("target") or source)
+    return source
+
+
 def _check_duplicate_keys(
     mappings: list[dict],
     rows: list[dict[str, Any]],
@@ -333,8 +358,18 @@ def _check_duplicate_keys(
     dest_kind: str = "",
     primary_key: str | None = None,
     source_duplicate_findings: list[dict[str, Any]] | None = None,
+    sync_mode: str = "",
+    destination_pk_columns: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Duplicate check on the resolved identity key (sample + source-side probe)."""
+    """Duplicate check on the resolved identity key (sample + source-side probe).
+
+    - Schemaless destinations (Mongo/Redis/Dynamo) and sync modes that require a
+      unique identity (upsert/CDC/mirror/SCD2) always enforce duplicates.
+    - Overwrite modes enforce duplicates because the destination table is recreated
+      and the mapped identity key is likely to become the primary key.
+    - Append-like modes only enforce duplicates when the destination primary key is
+      known to include the mapped target column; otherwise duplicates may be legal.
+    """
     issues: list[str] = []
     if not primary_key:
         return {
@@ -344,6 +379,33 @@ def _check_duplicate_keys(
             "issues": [],
             "primary_key": None,
         }
+
+    from services.primary_key import sync_requires_unique_identity
+
+    schemaless = dest_kind in SCHEMALESS_DESTS
+    sync = (sync_mode or "").strip().lower()
+    enforce = (
+        schemaless
+        or sync_requires_unique_identity(sync)
+        or _is_overwrite_like(sync)
+    )
+    if not enforce and _is_append_like(sync) and destination_pk_columns:
+        # Only block append when the destination PK is known to include the target.
+        target = _target_for_source(primary_key, mappings)
+        dest_pk_lower = {str(c).lower() for c in destination_pk_columns}
+        if target.lower() in dest_pk_lower:
+            enforce = True
+
+    if not enforce:
+        return {
+            "check": "duplicate_keys",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+            "primary_key": primary_key,
+            "dest_kind": dest_kind,
+        }
+
     # Source-side probe is authoritative: it scans the full table, not just the
     # preview sample, so duplicates that would fail the write batch are caught on Validate.
     findings = source_duplicate_findings or []
@@ -597,12 +659,24 @@ def run_integrity_audit(
     from services.primary_key import resolve_primary_key_source
 
     mode = (validation_mode or "strict").strip().lower()
-    pk = resolve_primary_key_source(
+    pk_nulls = resolve_primary_key_source(
         mappings,
         source_columns,
         dest_kind,
         validation_mode=mode,
         purpose="required_nulls",
+        destination_pk_columns=destination_pk_columns,
+        contract_primary_key=contract_primary_key,
+    )
+    # Duplicate checks must use a key that is actually expected to be unique.
+    # Required-nulls may fall back to the first `*_id` FK in strict mode, which
+    # legitimately repeats; uniqueness resolution stays conservative.
+    pk_uniqueness = resolve_primary_key_source(
+        mappings,
+        source_columns,
+        dest_kind,
+        validation_mode=mode,
+        purpose="uniqueness",
         destination_pk_columns=destination_pk_columns,
         contract_primary_key=contract_primary_key,
     )
@@ -649,12 +723,11 @@ def run_integrity_audit(
             )
         )
         checks.append(_check_financial_precision(mappings, source_types, rows))
-        checks.append(_check_required_nulls(mappings, rows, null_rate_max=cfg["null_rate_max"], dest_kind=dest_kind, primary_key=pk, validation_mode=validation_mode))
-        # A resolved natural key with duplicates is a data-quality blocker in every
-        # sync mode. Even overwrite/append cannot insert two rows with the same
-        # destination primary key; surfacing this on Validate prevents the Run
-        # batch audit from failing later with the same rows.
-        checks.append(_check_duplicate_keys(mappings, rows, validation_mode, dest_kind=dest_kind, primary_key=pk, source_duplicate_findings=source_duplicate_findings))
+        checks.append(_check_required_nulls(mappings, rows, null_rate_max=cfg["null_rate_max"], dest_kind=dest_kind, primary_key=pk_nulls, validation_mode=validation_mode))
+        # Duplicate identity keys block when the write path will enforce uniqueness:
+        # schemaless destinations, upsert/CDC/mirror/SCD2, overwrite (table recreated),
+        # or append when the destination PK is known to include the mapped target.
+        checks.append(_check_duplicate_keys(mappings, rows, validation_mode, dest_kind=dest_kind, primary_key=pk_uniqueness, source_duplicate_findings=source_duplicate_findings, sync_mode=sync_mode, destination_pk_columns=destination_pk_columns))
         checks.append(
             _check_mapping_confidence(mappings, confidence_min=cfg["confidence"], validation_mode=validation_mode)
         )
@@ -675,7 +748,7 @@ def run_integrity_audit(
             rows,
             source_columns,
             source_types,
-            primary_key=pk,
+            primary_key=pk_uniqueness,
             dest_kind=dest_kind,
             validation_mode=validation_mode,
             sync_mode=sync_mode,

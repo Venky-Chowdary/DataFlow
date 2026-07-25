@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -85,6 +84,8 @@ def test_preflight_blocks_on_source_duplicate_keys(
         source_connector_id=connector_id,
         source_table=table,
         destination_table="jobs",
+        destination_table_exists=True,
+        destination_pk_columns=["id"],
         validation_mode="strict",
     )
     gate_status = {g["id"]: g for g in result["gates"]}
