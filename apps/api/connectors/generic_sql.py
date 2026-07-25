@@ -1906,6 +1906,46 @@ def _delete_by_keys(
         conn.execute(sa.delete(table_obj).where(sa.or_(*clauses)))
 
 
+def _prefetch_existing_lsn(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+) -> dict[tuple[Any, ...], Any]:
+    """Return mapping from conflict key tuple to the existing ``_df_lsn`` value.
+
+    Fail closed: if the lookup cannot run, raise rather than assuming no
+    prior LSN (which would let stale CDC redelivery overwrite the sink).
+    """
+    existing: dict[tuple[Any, ...], Any] = {}
+    if not rows or not conflict_cols:
+        return existing
+    clauses = []
+    for row in rows:
+        if any(row.get(c) in (None, "") for c in conflict_cols):
+            continue
+        clauses.append(
+            sa.and_(
+                *[
+                    table_obj.c[c].is_(None) if row[c] is None else table_obj.c[c] == row[c]
+                    for c in conflict_cols
+                ]
+            )
+        )
+    if not clauses:
+        return existing
+    stmt = sa.select(
+        *[table_obj.c[c] for c in conflict_cols],
+        table_obj.c[DF_LSN_COL],
+    ).where(sa.or_(*clauses))
+    for found in conn.execute(stmt):
+        # Use positional indices because some dialects (DuckDB, SQLite raw) return
+        # plain tuples rather than key-addressable Row objects.
+        key = tuple(found[i] for i in range(len(conflict_cols)))
+        existing[key] = found[len(conflict_cols)]
+    return existing
+
+
 def _upsert_batch(
     conn: Any,
     table_obj: sa.Table,
@@ -1941,6 +1981,18 @@ def _upsert_batch(
             if prev is None or compare_lsn(row.get(DF_LSN_COL), prev.get(DF_LSN_COL)) >= 0:
                 best[key] = row
         rows = list(best.values())
+        # Prefetch existing LSNs and drop stale rows before any write so
+        # ``rows_skipped`` accounting is exact and redelivery cannot regress.
+        existing_lsn = _prefetch_existing_lsn(conn, table_obj, rows, conflict_cols)
+        filtered: list[dict[str, Any]] = []
+        for row in rows:
+            key = tuple(row.get(c) for c in conflict_cols)
+            prior = existing_lsn.get(key)
+            incoming = row.get(DF_LSN_COL)
+            if incoming is not None and compare_lsn(incoming, prior) <= 0:
+                continue
+            filtered.append(row)
+        rows = filtered
     else:
         deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
         for row in batch:
@@ -1972,9 +2024,12 @@ def _upsert_batch(
                     stmt = stmt.on_conflict_do_update(**kwargs_pg)
                 else:
                     stmt = stmt.on_conflict_do_nothing(index_elements=conflict_cols)
-                result = conn.execute(stmt)
+                conn.execute(stmt)
                 if lsn_guarded:
-                    return max(0, getattr(result, "rowcount", None) or 0)
+                    # Rows were pre-filtered to those with a strictly newer LSN,
+                    # so every row in ``rows`` is applied. Rowcount counts
+                    # conflicts as inserted for PG, which would swallow skips.
+                    return len(rows)
                 return len(rows)
 
             if dialect_name == "sqlite":
@@ -1998,9 +2053,9 @@ def _upsert_batch(
                     stmt = stmt.on_conflict_do_update(**kwargs_sqlite)
                 else:
                     stmt = stmt.on_conflict_do_nothing(index_elements=conflict_cols)
-                result = conn.execute(stmt)
+                conn.execute(stmt)
                 if lsn_guarded:
-                    return max(0, getattr(result, "rowcount", None) or 0)
+                    return len(rows)
                 return len(rows)
 
             if dialect_name in ("mysql", "mariadb"):
@@ -2060,15 +2115,12 @@ def _upsert_batch(
         filtered: list[dict[str, Any]] = []
         for row in rows:
             incoming_lsn = row.get(DF_LSN_COL)
-            try:
-                key_clause = sa.and_(
-                    *[table_obj.c[c] == row[c] for c in conflict_cols]
-                )
-                existing = conn.execute(
-                    sa.select(table_obj.c[DF_LSN_COL]).where(key_clause).limit(1)
-                ).fetchone()
-            except (sa.exc.SQLAlchemyError, OSError):
-                existing = None
+            key_clause = sa.and_(
+                *[table_obj.c[c] == row[c] for c in conflict_cols]
+            )
+            existing = conn.execute(
+                sa.select(table_obj.c[DF_LSN_COL]).where(key_clause).limit(1)
+            ).fetchone()
             if existing is not None and compare_lsn(incoming_lsn, existing[0]) <= 0:
                 continue
             filtered.append(row)

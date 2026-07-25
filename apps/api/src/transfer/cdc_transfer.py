@@ -519,6 +519,14 @@ def _apply_change_batch(
                     f"CDC deletes are not supported for destination type '{dest_type}'"
                 )
 
+    # Stash a bounded source sample so Gate-8 reconciliation can compare the
+    # rows we just wrote against a read-back of the destination.
+    sample_rows = list(change.inserts or []) + list(change.updates or [])
+    if sample_rows:
+        if dest_summary is None:
+            dest_summary = {}
+        dest_summary["reconcile_sample"] = sample_rows[:50]
+
     return rows_written, last_checksum, dest_summary, deleted
 
 
@@ -1667,7 +1675,6 @@ def _run_cdc_single_stream(
                     "cdc_retention_resume": lag_fields.get("cdc_retention_resume"),
                     "cdc_retention_retained": lag_fields.get("cdc_retention_retained"),
                     "cdc_retention_message": lag_fields.get("cdc_retention_message"),
-                    "watermark": state.running_cursor,
                     "cdc": {
                         "inserts": state.inserts,
                         "updates": state.updates,

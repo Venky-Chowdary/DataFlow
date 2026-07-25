@@ -20,6 +20,7 @@ from connectors.writer_common import (
     _coerced_null_row_count,
     _rejected_row_count,
     build_mapped_rows_with_details,
+    filter_stale_lsn_rows,
     quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
@@ -103,23 +104,38 @@ def _sqlite_upsert_batch(
     target_cols: list[str],
     batch: list[tuple],
     conflict_cols: list[str],
-) -> None:
+    schema: str | None = None,
+) -> tuple[int, int]:
     """Upsert with optional ``_df_lsn`` monotonic guard (at-least-once CDC).
 
-    Prefers ``INSERT … ON CONFLICT DO UPDATE WHERE`` when ``_df_lsn`` is present
-    so stale redelivery does not regress row state. Falls back to delete+insert
-    with an LSN filter when the conflict target is unavailable.
+    Prefetch existing LSNs for the batch, drop stale rows, then either use
+    ``INSERT … ON CONFLICT DO UPDATE WHERE`` or delete+insert fallback. Returns
+    (rows_written, rows_skipped) for accurate reconciliation accounting.
     """
-    from connectors.writer_common import (
-        DF_LSN_COL,
-        compare_lsn,
-        dedupe_rows_by_pk_and_lsn,
-        sqlite_lsn_update_guard_sql,
-    )
+    from connectors.writer_common import DF_LSN_COL, dedupe_rows_by_pk_and_lsn, sqlite_lsn_update_guard_sql
 
     rows = dedupe_rows_by_pk_and_lsn(batch, conflict_cols, target_cols)
     if not rows:
-        return
+        return 0, 0
+
+    original_count = len(rows)
+    lsn_guarded = DF_LSN_COL in target_cols and conflict_cols
+    if lsn_guarded:
+        rows, skipped = filter_stale_lsn_rows(
+            cur,
+            table_name,
+            schema,
+            conflict_cols,
+            rows,
+            target_cols,
+            quote='"',
+            placeholder="?",
+        )
+    else:
+        skipped = 0
+
+    if not rows:
+        return 0, skipped + (original_count - len(rows))
 
     table_quoted = quote_sql_identifier(table_name)
     cols_sql = ", ".join(quote_sql_identifier(c) for c in target_cols)
@@ -127,7 +143,7 @@ def _sqlite_upsert_batch(
     conflict_sql = ", ".join(quote_sql_identifier(c) for c in conflict_cols)
     update_cols = [c for c in target_cols if c not in conflict_cols]
 
-    if update_cols and DF_LSN_COL in target_cols:
+    if lsn_guarded and update_cols:
         where_sql = sqlite_lsn_update_guard_sql(table_name)
         set_sql = ", ".join(
             f"{quote_sql_identifier(c)}=excluded.{quote_sql_identifier(c)}"
@@ -139,31 +155,12 @@ def _sqlite_upsert_batch(
         )
         try:
             cur.executemany(insert_sql, rows)
-            return
+            return len(rows), skipped + (original_count - len(rows))
         except Exception as exc:
             # Missing UNIQUE on conflict cols — fall through to delete+insert.
             logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
-    # delete+insert fallback: skip keys where existing LSN is newer/equal.
-    if DF_LSN_COL in target_cols and conflict_cols:
-        lsn_idx = target_cols.index(DF_LSN_COL)
-        key_indices = [target_cols.index(c) for c in conflict_cols]
-        keep: list[tuple] = []
-        for row in rows:
-            key = tuple(row[i] for i in key_indices)
-            where = " AND ".join(f"{quote_sql_identifier(c)}=?" for c in conflict_cols)
-            cur.execute(
-                f"SELECT {quote_sql_identifier(DF_LSN_COL)} FROM {table_quoted} WHERE {where}",
-                list(key),
-            )
-            existing = cur.fetchone()
-            if existing is not None and compare_lsn(row[lsn_idx], existing[0]) <= 0:
-                continue
-            keep.append(row)
-        rows = keep
-        if not rows:
-            return
-
+    # delete+insert fallback (already deduped + LSN filtered).
     indices = [target_cols.index(c) for c in conflict_cols]
     deduped = {tuple(row[i] for i in indices): row for row in rows}
     rows = list(deduped.values())
@@ -177,6 +174,7 @@ def _sqlite_upsert_batch(
 
     insert_sql = f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({placeholders})"
     cur.executemany(insert_sql, rows)
+    return len(rows), skipped + (original_count - len(rows))
 
 
 def write_mapped_rows(
@@ -254,6 +252,7 @@ def write_mapped_rows(
     converted_rows: list[tuple] = []
     chunks = 0
     written = 0
+    rows_skipped = 0
     transform_errors: list[str] = []
 
     try:
@@ -343,13 +342,15 @@ def write_mapped_rows(
                 with conn:
                     cur = conn.cursor()
                     if write_mode == "upsert" and conflict_cols:
-                        _sqlite_upsert_batch(
-                            cur, table_name, target_cols, batch, conflict_cols
+                        chunk_written, chunk_skipped = _sqlite_upsert_batch(
+                            cur, table_name, target_cols, batch, conflict_cols, schema=schema or None
                         )
+                        written += chunk_written
+                        rows_skipped += chunk_skipped
                     else:
                         cur.executemany(insert, batch)
+                        written += len(batch)
 
-                written += len(batch)
                 if on_checkpoint:
                     on_checkpoint(chunk_idx + 1, chunks, written)
 
@@ -365,6 +366,7 @@ def write_mapped_rows(
                 rejected_rows=max(rejected_rows, len(data_rows) - written),
                 rejected_details=rejected_details,
                 coerced_null_rows=coerced_null_rows,
+                rows_skipped=rows_skipped,
                 warnings=transform_errors,
             )
         finally:
@@ -379,4 +381,5 @@ def write_mapped_rows(
             chunks_completed=chunks,
             error=str(exc),
             rejected_details=rejected_details if "rejected_details" in locals() else [],
+            rows_skipped=rows_skipped if "rows_skipped" in locals() else 0,
         )

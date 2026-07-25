@@ -37,6 +37,7 @@ from connectors.writer_common import (
     build_mapped_rows_with_details,
     dedupe_rows,
     dedupe_rows_by_pk_and_lsn,
+    filter_stale_lsn_rows,
     quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
@@ -416,6 +417,8 @@ def write_mapped_rows(
                     for row in mapped_rows
                 ]
 
+            rows_skipped = 0
+
             for chunk_idx in range(chunks):
                 start = chunk_idx * chunk_size
                 batch = converted_rows[start : start + chunk_size]
@@ -435,17 +438,36 @@ def write_mapped_rows(
                         ):
                             chunk_written = len(batch)
                             break
-                        cur.executemany(insert_sql, batch)
+                        write_batch = batch
+                        if (
+                            write_mode == "upsert"
+                            and conflict_columns
+                            and DF_LSN_COL in target_cols
+                        ):
+                            conflict_cols = [c for c in conflict_columns if c in target_cols]
+                            write_batch, skipped = filter_stale_lsn_rows(
+                                cur,
+                                table_name,
+                                None,
+                                conflict_cols,
+                                batch,
+                                target_cols,
+                                quote="`",
+                                placeholder="%s",
+                            )
+                            rows_skipped += skipped
+                        if write_batch:
+                            cur.executemany(insert_sql, write_batch)
                         if use_ledger:
                             mark_mysql_chunk_committed(
                                 cur,
                                 job_id=job_id,
                                 batch_key=write_batch_key,
                                 chunk_idx=chunk_idx,
-                                rows_written=len(batch),
+                                rows_written=len(write_batch),
                             )
                         conn.commit()
-                        chunk_written = len(batch)
+                        chunk_written = len(write_batch)
                         break
                     except Exception as chunk_exc:
                         try:
@@ -522,6 +544,7 @@ def write_mapped_rows(
             rejected_rows=max(rejected_rows, len(data_rows) - written),
             rejected_details=rejected_details,
             coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
             warnings=transform_errors,
         )
     except Exception as exc:
@@ -537,5 +560,6 @@ def write_mapped_rows(
             rejected_rows=rejected_rows,
             rejected_details=rejected_details,
             coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped if 'rows_skipped' in locals() else 0,
             warnings=transform_errors,
         )

@@ -4,8 +4,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
-
 _API_ROOT = Path(__file__).resolve().parents[2]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
@@ -114,3 +112,24 @@ def test_redact_reconciliation_masks_mismatch_values():
     assert "***" in redacted["mismatches"][0]["source_value"]
     assert redacted["mismatches"][0]["target_value"].startswith("al")
     assert redacted["mismatches"][1]["source_value"] == "100.50"
+
+
+def test_redact_reconciliation_masks_sample_compare_mismatches():
+    recon = {
+        "passed": False,
+        "sample_compare": {
+            "passed": False,
+            "compared": 1,
+            "mismatches": [
+                {
+                    "source": "email",
+                    "target": "email",
+                    "source_value": "bob@example.com",
+                    "target_value": "bob@example.com",
+                }
+            ],
+        },
+    }
+    redacted = redact_reconciliation(recon, [])
+    assert "***" in redacted["sample_compare"]["mismatches"][0]["source_value"]
+    assert "***" in redacted["sample_compare"]["mismatches"][0]["target_value"]

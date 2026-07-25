@@ -154,6 +154,18 @@ def redact_destination_summary(
     return out
 
 
+def _redact_mismatch_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Mask source/target values in a mismatch detail dict."""
+    for key, col_key in (("source_value", "source"), ("target_value", "target")):
+        val = entry.get(key)
+        if val is None:
+            continue
+        col = entry.get(col_key) or ""
+        if is_sensitive_name(col) or detect_pii(val)["has_pii"]:
+            entry[key] = mask(val)
+    return entry
+
+
 def redact_reconciliation(
     recon: dict[str, Any] | None, mappings: list[dict]
 ) -> dict[str, Any] | None:
@@ -163,20 +175,19 @@ def redact_reconciliation(
     out = copy.deepcopy(recon)
     sample_compare = out.get("sample_compare")
     if isinstance(sample_compare, dict):
-        for key in ("source_only", "target_only", "mismatch"):
+        for key in ("source_only", "target_only"):
             rows = sample_compare.get(key)
             if isinstance(rows, list):
                 sample_compare[key] = [redact_sample(row) for row in rows]
+        # The real sample_compare shape stores mismatch details under
+        # ``mismatches`` (each item has source_value / target_value).
+        mm = sample_compare.get("mismatches")
+        if isinstance(mm, list):
+            sample_compare["mismatches"] = [_redact_mismatch_entry(dict(row)) for row in mm]
     mismatches = out.get("mismatches")
     if isinstance(mismatches, list):
         for mm in mismatches:
-            for key, col_key in (("source_value", "source"), ("target_value", "target")):
-                val = mm.get(key)
-                if val is None:
-                    continue
-                col = mm.get(col_key) or ""
-                if is_sensitive_name(col) or detect_pii(val)["has_pii"]:
-                    mm[key] = mask(val)
+            _redact_mismatch_entry(mm)
     if isinstance(out.get("message"), str):
         out["message"] = _redact_text(out["message"])
     return out

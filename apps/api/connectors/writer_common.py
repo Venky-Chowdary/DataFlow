@@ -188,11 +188,82 @@ class WriteResult:
     # when values were silently changed. Genuine empty->NULL sentinels are NOT
     # counted here (they produce no transform error).
     coerced_null_rows: int = 0
+    # Rows intentionally not written because they are stale/duplicate under CDC
+    # LSN guards. They are not data loss and must be excluded from rows_written.
     rows_skipped: int = 0
 
 
 def row_checksum(rows: list[Any], columns: list[str] | None = None) -> str:
     return checksum_rows(rows, columns)
+
+
+def filter_stale_lsn_rows(
+    cursor: Any,
+    table_name: str,
+    schema: str | None,
+    conflict_cols: list[str],
+    rows: list[tuple],
+    target_cols: list[str],
+    *,
+    quote: str = '"',
+    placeholder: str = "%s",
+) -> tuple[list[tuple], int]:
+    """Return (rows_to_write, rows_skipped) for an LSN-guarded batch.
+
+    Queries the destination for the existing ``_df_lsn`` value for each conflict
+    key in the batch, then drops rows whose incoming LSN is not strictly newer.
+    Fail closed: if the lookup cannot run, raise rather than assume no prior LSN.
+    """
+    if not rows or not conflict_cols or DF_LSN_COL not in target_cols:
+        return rows, 0
+
+    conflict_idxs = [target_cols.index(c) for c in conflict_cols]
+    lsn_idx = target_cols.index(DF_LSN_COL)
+
+    # Build OR clauses for non-null conflict keys.
+    params: list[Any] = []
+    clauses: list[str] = []
+    q = quote_sql_identifier
+    if schema:
+        qualified = f"{q(schema, quote)}.{q(table_name, quote)}"
+    else:
+        qualified = f"{q(table_name, quote)}"
+    for row in rows:
+        if any(row[idx] in (None, "") for idx in conflict_idxs):
+            continue
+        parts = []
+        for idx in conflict_idxs:
+            val = row[idx]
+            col = conflict_cols[conflict_idxs.index(idx)]
+            if val is None:
+                parts.append(f"{q(col, quote)} IS NULL")
+            else:
+                parts.append(f"{q(col, quote)} = {placeholder}")
+                params.append(val)
+        if parts:
+            clauses.append("(" + " AND ".join(parts) + ")")
+    if not clauses:
+        return rows, 0
+
+    existing: dict[tuple[Any, ...], Any] = {}
+    select_cols = ", ".join(q(c, quote) for c in conflict_cols) + f", {q(DF_LSN_COL, quote)}"
+    stmt = f"SELECT {select_cols} FROM {qualified} WHERE " + " OR ".join(clauses)
+    cursor.execute(stmt, params)
+    for found in cursor.fetchall():
+        key = tuple(found[i] for i in range(len(conflict_cols)))
+        existing[key] = found[-1]
+
+    to_write: list[tuple] = []
+    skipped = 0
+    for row in rows:
+        key = tuple(row[idx] for idx in conflict_idxs)
+        incoming = row[lsn_idx]
+        prior = existing.get(key)
+        if incoming is not None and compare_lsn(incoming, prior) <= 0:
+            skipped += 1
+            continue
+        to_write.append(row)
+    return to_write, skipped
 
 
 def row_fingerprints(rows: list[Any], columns: list[str] | None = None, *, sort_key: str | None = None) -> list[tuple[str, str]]:

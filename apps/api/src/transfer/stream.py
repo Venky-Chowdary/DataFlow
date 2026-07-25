@@ -59,9 +59,11 @@ except ImportError:  # pragma: no cover - tests with api root on path
 def _writer_diagnostics(result: Any) -> dict[str, Any]:
     rejected = int(getattr(result, "rejected_rows", 0) or 0)
     coerced = int(getattr(result, "coerced_null_rows", 0) or 0)
+    skipped = int(getattr(result, "rows_skipped", 0) or 0)
     return {
         "rejected_rows": rejected,
         "coerced_null_rows": coerced,
+        "rows_skipped": skipped,
         "rejected_details": list(getattr(result, "rejected_details", []) or [])[:500],
         "warnings": list(getattr(result, "warnings", []) or [])[:10],
         "error_policy": "quarantine" if (rejected or coerced) else "none",

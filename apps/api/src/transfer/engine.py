@@ -90,6 +90,11 @@ except (
         resolve_sync_contract,
         should_drop_destination_for_sync,
     )
+try:
+    from services import pii_guard
+except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+    from src.services import pii_guard
+
 from .adapters import (
     parse_file_content,
     read_source_database,
@@ -1995,6 +2000,8 @@ class UniversalTransferEngine:
                     source_schema=schema,
                     validation_mode=request.validation_mode,
                 )
+            dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
+            recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
                 mongo.update_job_status(
                     job_id,
@@ -2019,11 +2026,6 @@ class UniversalTransferEngine:
                     destination_summary=dest_summary,
                     reconciliation=recon,
                 )
-
-            from services import pii_guard
-
-            dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
-            recon = pii_guard.redact_reconciliation(recon, mappings)
 
             explanation = _build_explanation(
                 request,
@@ -2090,8 +2092,6 @@ class UniversalTransferEngine:
                 "on",
             }:
                 try:
-                    from services import pii_guard
-
                     redacted_training = pii_guard.redact_records(records[:5], mappings)
                     samples = {
                         c: [
@@ -2588,6 +2588,8 @@ class UniversalTransferEngine:
                     source_schema=schema,
                     validation_mode=request.validation_mode,
                 )
+            dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
+            recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
                 mongo.update_job_status(
                     job_id,
@@ -2612,11 +2614,6 @@ class UniversalTransferEngine:
                     destination_summary=dest_summary,
                     reconciliation=recon,
                 )
-
-            from services import pii_guard
-
-            dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
-            recon = pii_guard.redact_reconciliation(recon, mappings)
 
             explanation = _build_explanation(
                 request,
@@ -3073,6 +3070,8 @@ class UniversalTransferEngine:
                     source_schema=schema,
                     validation_mode=request.validation_mode,
                 )
+            dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
+            recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
                 mongo.update_job_status(
                     job_id,
@@ -3097,11 +3096,6 @@ class UniversalTransferEngine:
                     destination_summary=dest_summary,
                     reconciliation=recon,
                 )
-
-            from services import pii_guard
-
-            dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
-            recon = pii_guard.redact_reconciliation(recon, mappings)
 
             explanation = _build_explanation(
                 request,
