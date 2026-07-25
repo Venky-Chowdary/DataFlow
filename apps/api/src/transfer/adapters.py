@@ -300,6 +300,86 @@ def _find_implicit_connector_id(
     return None
 
 
+def _is_masked_secret(value: Any) -> bool:
+    """True when a credential value is empty, placeholder, or redacted."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        v = value.strip()
+        if not v or v == "****":
+            return True
+        if "****" in v or "<redacted>" in v.lower():
+            return True
+    return False
+
+
+def _sync_credentials_into_connection_string(cfg: dict[str, Any]) -> None:
+    """Rewrite a SQL URL so its embedded user/password match explicit fields.
+
+    Generic SQLAlchemy paths (introspection, duplicate-key probes, schema drift)
+    build the engine from the ``connection_string`` and do not merge an explicit
+    ``password`` field. If a saved connector has a stale URL password but a fresh
+    ``password`` field, the connector Test can pass while Validate/Run fail.
+    Synchronizing the URL keeps every code path consistent.
+    """
+    cstr = (cfg.get("connection_string") or "").strip()
+    password = cfg.get("password") or ""
+    username = cfg.get("username") or ""
+    if not cstr or _is_masked_secret(cstr) or _is_masked_secret(password):
+        return
+
+    family = (cfg.get("type") or cfg.get("format") or "").lower()
+    sql_families = {
+        "mysql",
+        "mariadb",
+        "postgresql",
+        "postgres",
+        "redshift",
+        "cockroachdb",
+        "timescaledb",
+        "aurora",
+        "amazon_aurora",
+        "azure_database_for_mysql",
+        "google_cloud_sql_mysql",
+        "amazon_rds_mysql",
+        "generic_sql",
+    }
+    if family not in sql_families:
+        return
+
+    from connectors.sql_dsn import normalize_sql_dsn
+    from urllib.parse import quote, unquote, urlparse, urlunparse
+
+    normalized = normalize_sql_dsn(cstr, family=family)
+    if "://" not in normalized:
+        return
+    parsed = urlparse(normalized)
+    if not parsed.hostname:
+        return
+    old_user = unquote(parsed.username or "")
+    old_pass = unquote(parsed.password or "")
+    # Only update if the explicit password is different or the explicit username
+    # differs and is non-empty. Keep the connection string's host/port/path/query.
+    new_user = username or old_user
+    new_pass = password or old_pass
+    if str(new_user) == old_user and str(new_pass) == old_pass:
+        return
+    if not new_pass:
+        return
+
+    def _q(value: str) -> str:
+        return quote(value, safe="") if value else ""
+
+    host_part = parsed.hostname
+    if parsed.port:
+        host_part = f"{host_part}:{parsed.port}"
+    if new_user:
+        netloc = f"{_q(new_user)}:{_q(new_pass)}@{host_part}"
+    else:
+        netloc = f":{_q(new_pass)}@{host_part}"
+    cfg["connection_string"] = urlunparse(parsed._replace(netloc=netloc))
+
+
 def resolve_connector_config(
     endpoint: EndpointConfig, workspace_id: str | None = None
 ) -> dict[str, Any]:
@@ -478,6 +558,7 @@ def resolve_connector_config(
         for key, value in {**cfg, **conn_dict}.items():
             if key not in merged_cfg:
                 merged_cfg[key] = value
+        _sync_credentials_into_connection_string(merged_cfg)
         cfg = merged_cfg
     # Stamp connector_id so CDC fingerprints / incremental snapshots match adapters.
     if connector_id:
@@ -504,6 +585,9 @@ def resolve_connector_config(
         cfg["database"] = (
             mongodb_database_from_uri(cfg.get("connection_string", "")) or ""
         )
+    # Ensure generic SQLAlchemy paths (introspection, schema drift, duplicate-key
+    # probes) use the same credentials as the explicit user/pass fields.
+    _sync_credentials_into_connection_string(cfg)
     return cfg
 
 

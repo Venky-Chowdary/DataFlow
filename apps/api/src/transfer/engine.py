@@ -21,7 +21,6 @@ if str(_api_root) not in sys.path:
 
 try:
     from services import lineage_telemetry as lineage
-    from services.data_quality_history import validate_batch_against_history
     from services.error_handling import (
         RetryBudget,
         TransferCancelled,
@@ -59,7 +58,6 @@ except (
     ImportError
 ):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services import lineage_telemetry as lineage
-    from src.services.data_quality_history import validate_batch_against_history
     from src.services.error_handling import (
         RetryBudget,
         TransferCancelled,
@@ -141,7 +139,6 @@ except (
 ):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.ai.training.training_scheduler import schedule_training_on_transfer
 
-from connectors.writer_common import CHUNK_SIZE
 from services.batch_progress import (
     ThrottledCheckpoint,
     compute_transfer_progress_pct,

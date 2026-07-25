@@ -237,6 +237,25 @@ def test_parse_file_content_csv_bytes():
     assert schema["amount"] == "decimal"
 
 
+def test_resolve_connector_config_syncs_password_into_connection_string():
+    """Generic SQLAlchemy paths build the engine from connection_string, so the
+    URL password must match the explicit password field to avoid a connector that
+    passes Test but fails Validate/Run introspection."""
+    ep = EndpointConfig(
+        format="postgresql",
+        host="",
+        port=0,
+        database="",
+        username="postgres",
+        password="new_secret",
+        connection_string="postgresql://postgres:old_secret@tokaido.proxy.rlwy.net:27396/railway",
+    )
+    cfg = resolve_connector_config(ep)
+    assert "new_secret" in cfg["connection_string"]
+    assert "old_secret" not in cfg["connection_string"]
+    assert cfg["password"] == "new_secret"
+
+
 def test_adapter_imports_all_writer_modules():
     for driver, spec in CONNECTOR_MODULES.items():
         mod = importlib.import_module(spec.writer)

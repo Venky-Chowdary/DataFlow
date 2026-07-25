@@ -789,7 +789,11 @@ def run_file_preflight(
     # Source-side duplicate-key probe: a small sample can miss duplicates in large
     # tables, so query the source directly when we have a resolved identity key.
     source_duplicate_findings: list[dict[str, Any]] = []
-    if (source_connector_id or source_config) and source_table and source_kind in ("database", "cloud"):
+    if (
+        (source_connector_id or source_config)
+        and source_table
+        and source_kind in ("database", "cloud")
+    ):
         try:
             source_pk = resolve_primary_key_source(
                 mappings=mappings,

@@ -115,7 +115,12 @@ def probe_source_duplicate_keys(
 
         if cfg is None and source_config:
             cfg = dict(source_config)
-            db_type = (cfg.get("type") or cfg.get("db_type") or cfg.get("format") or "").lower()
+            db_type = (
+                cfg.get("type")
+                or cfg.get("db_type")
+                or cfg.get("format")
+                or ""
+            ).lower()
 
         if not cfg:
             return []
