@@ -993,6 +993,7 @@ The full `apps/api/tests` suite revealed two more hang/loop hazards:
 | PostgreSQL CDC `is_available` statement timeout | Slot-creation probe could hang indefinitely | `apps/api/connectors/postgresql_change_stream.py` now `SET LOCAL statement_timeout = '5000ms'` before `pg_create_logical_replication_slot` |
 | `_attach_db_sample` `fmt` unbound | `fmt` assigned inside the `try` block | `apps/api/src/transfer/endpoint_intelligence.py` now assigns `fmt` before the `try` block |
 | Saved-connector masked secrets corrupting destination auth | `update_connector` and `saved_connectors_router.py` only preserved `password`/`private_key`; a masked `connection_string` (e.g. `postgresql://postgres:****@...`) overwrote the real saved DSN, so destination introspection failed with password auth errors even though the connector test was green | `services/connector_store.update_connector` and `src/routers/saved_connectors_router` now preserve any secret / connection-string / API key / service account that carries `****` or `<redacted>` placeholders; live reproduction showed a masked update no longer corrupts the saved password or connection string |
+| Runtime/local data artifacts in the branch | `apps/api/data` and `apps/api/localhost` contained test-run artifacts, quarantine logs, CDC history, training outputs, SQLite caches, and encrypted `connectors.json` that were bloating the PR diff and leaking local state | Untracked 66 runtime files (≈100 MB) from the index and expanded `.gitignore`; static catalog/config (`connector_catalog.json`, `integrations.json`) remain tracked; runtime stores are created on demand |
 
 ### Verification this session
 
@@ -1012,8 +1013,9 @@ pytest apps/api/tests/test_mongodb_to_postgresql_incremental.py \
        tests/test_mongodb_cdc_lsn_upsert.py \
        tests/test_cdc_effectively_once.py \
        tests/test_adapters_integration.py \
-       tests/test_dest_table_exists_create.py
-141 passed, 5 warnings in 144.13s
+       tests/test_dest_table_exists_create.py \
+       tests/test_connector_wiring.py
+238 passed, 5 warnings in 144.65s
 ```
 
 ### What is still NOT proven
