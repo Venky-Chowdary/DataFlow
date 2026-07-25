@@ -431,6 +431,19 @@ def _check_duplicate_keys(
         sample = ", ".join(f"{v}×{c}" for v, c in dupes[:3])
         issues.append(f"{primary_key}: duplicate key values ({sample})")
     blocks = len(issues) > 0
+    if blocks and (validation_mode or "").strip().lower() == "balanced":
+        # Balanced mode surfaces duplicate identity keys as warnings so the
+        # operator can remediate (dedupe, choose a composite key, or switch sync
+        # mode) without a hard block. Strict/maximum still fail closed.
+        return {
+            "check": "duplicate_keys",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+            "warnings": issues[:15],
+            "primary_key": primary_key,
+            "dest_kind": dest_kind,
+        }
     return {
         "check": "duplicate_keys",
         "passed": not blocks,
