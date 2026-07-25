@@ -165,7 +165,7 @@ def test_reconcile_clean_still_reports_full_fidelity():
     )
     assert report.passed is True
     assert report.coerced_null_rows == 0
-    assert "100% row fidelity" in report.message
+    assert "checksums match" in report.message
 
 
 def test_reconcile_dropped_rows_do_not_confuse_row_count():
