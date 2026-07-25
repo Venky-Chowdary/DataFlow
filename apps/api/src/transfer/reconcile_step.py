@@ -143,9 +143,10 @@ def run_reconciliation(
     """Verify row counts and checksums against the destination."""
     rejected_rows = int(dest_summary.get("rejected_rows", 0) or 0)
     coerced_null_rows = int(dest_summary.get("coerced_null_rows", 0) or 0)
+    rows_skipped = int(dest_summary.get("rows_skipped", 0) or 0)
     # Coerced rows are KEPT (a cell became NULL); only genuinely dropped rows are
-    # absent from the destination. Reconstructing the source count from the write
-    # side must therefore add back only the dropped rows, not the coerced ones.
+    # absent from the destination. Skipped rows (e.g. stale CDC LSN) are not
+    # dropped, but they are also not written to the destination.
     dropped_rows = max(rejected_rows - coerced_null_rows, 0)
     # Prefer independent source accounting when the caller provides it
     # (streaming paths should pass source_row_count from the read side).
@@ -153,8 +154,8 @@ def run_reconciliation(
     if isinstance(source_row_count, int) and source_row_count >= 0:
         source_rows = source_row_count
     else:
-        source_rows = len(records) if records else rows_written + dropped_rows
-    expected_written = max(source_rows - dropped_rows, 0)
+        source_rows = len(records) if records else rows_written + dropped_rows + rows_skipped
+    expected_written = max(source_rows - dropped_rows - rows_skipped, 0)
 
     if endpoint.kind != "database":
         return {
@@ -164,6 +165,7 @@ def run_reconciliation(
             "target_rows": rows_written,
             "rejected_rows": rejected_rows,
             "coerced_null_rows": coerced_null_rows,
+            "rows_skipped": rows_skipped,
         }
 
     db_type = endpoint.format.lower()
@@ -216,6 +218,7 @@ def run_reconciliation(
             allow_extra_rows=False,
             sample_compare=None,
             coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
         )
         return report.to_dict()
 
@@ -302,6 +305,7 @@ def run_reconciliation(
                 "target_checksum": "",
                 "rejected_rows": rejected_rows,
                 "coerced_null_rows": coerced_null_rows,
+                "rows_skipped": rows_skipped,
             }
         if rows_written == expected_written:
             return {
@@ -309,6 +313,7 @@ def run_reconciliation(
                 "message": (
                     f"Transfer verified by writer: {rows_written:,} rows written"
                     + (f", {rejected_rows:,} rejected" if rejected_rows else "")
+                    + (f", {rows_skipped:,} skipped" if rows_skipped else "")
                     + " (read-back verifier not available for this destination)"
                 ),
                 "source_rows": source_rows,
@@ -317,6 +322,7 @@ def run_reconciliation(
                 "target_checksum": "",
                 "rejected_rows": rejected_rows,
                 "coerced_null_rows": coerced_null_rows,
+                "rows_skipped": rows_skipped,
             }
         report = reconcile(
             source_rows=source_rows,
@@ -326,6 +332,7 @@ def run_reconciliation(
             rejected_rows=rejected_rows,
             strict_checksum=False,
             coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
         )
         return report.to_dict()
 
@@ -340,6 +347,7 @@ def run_reconciliation(
             strict_checksum=strict_checksum,
             sample_compare=sample_compare,
             coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
         )
         return report.to_dict()
 
@@ -355,5 +363,6 @@ def run_reconciliation(
         allow_extra_rows=True,
         sample_compare=sample_compare,
         coerced_null_rows=coerced_null_rows,
+        rows_skipped=rows_skipped,
     )
     return report.to_dict()

@@ -52,6 +52,10 @@ class ReconciliationReport:
     # cast. Data was ALTERED, so this is surfaced even when row counts/checksums
     # match — reconciliation must not claim "100% fidelity" in that case.
     coerced_null_rows: int = 0
+    # Rows intentionally not written because they were stale/duplicate without
+    # being rejected (e.g. CDC LSN redelivery). They must not be counted as
+    # dropped, but they also do not appear in the destination.
+    rows_skipped: int = 0
     # Bounded read-back sample (mismatches) for operator drill-down / export.
     sample_compare: dict[str, Any] | None = None
 
@@ -309,14 +313,18 @@ def reconcile(
     allow_extra_rows: bool = False,
     sample_compare: dict[str, Any] | None = None,
     coerced_null_rows: int = 0,
+    rows_skipped: int = 0,
 ) -> ReconciliationReport:
     coerced_null_rows = max(int(coerced_null_rows or 0), 0)
+    rows_skipped = max(int(rows_skipped or 0), 0)
     # Coerced rows are KEPT in the destination (a cell became NULL), so they do
     # not lower the expected row count — only genuinely DROPPED rows do. Under a
     # quarantine policy rejected_rows == coerced_null_rows (kept), so dropped==0;
     # under a fail policy coerced_null_rows==0, so dropped==rejected_rows.
+    # Skipped rows are neither dropped nor written (e.g. stale CDC LSN
+    # redelivery) and must be excluded from the expected destination count.
     dropped_rows = max(max(rejected_rows, 0) - coerced_null_rows, 0)
-    expected_rows = max(source_rows - dropped_rows, 0)
+    expected_rows = max(source_rows - dropped_rows - rows_skipped, 0)
     row_count_ok = target_rows == expected_rows or (
         allow_extra_rows and target_rows >= expected_rows
     )
@@ -334,10 +342,11 @@ def reconcile(
             target_checksum=target_checksum,
             message=(
                 f"Row count mismatch: source {source_rows}, rejected {rejected_rows}, "
-                f"expected target {expected_rows} vs target {target_rows}{extra_note}"
+                f"skipped {rows_skipped}, expected target {expected_rows} vs target {target_rows}{extra_note}"
             ),
             rejected_rows=rejected_rows,
             coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
         )
 
     if sample_compare and not sample_compare.get("passed", True):
@@ -352,6 +361,7 @@ def reconcile(
             message=f"Read-back sample verification failed: {detail}",
             rejected_rows=rejected_rows,
             coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
             sample_compare=sample_compare,
         )
 
@@ -380,6 +390,7 @@ def reconcile(
                         + f"; {target_rows - expected_rows} pre-existing rows skipped in checksum)"
                     ),
                     rejected_rows=rejected_rows,
+                    rows_skipped=rows_skipped,
                     sample_compare=sample_compare,
                 )
             return ReconciliationReport(
@@ -395,6 +406,7 @@ def reconcile(
                 ),
                 rejected_rows=rejected_rows,
                 coerced_null_rows=coerced_null_rows,
+                rows_skipped=rows_skipped,
                 sample_compare=sample_compare,
             )
         if strict_checksum:
@@ -409,6 +421,7 @@ def reconcile(
                     f"vs target {target_checksum}"
                 ),
                 rejected_rows=rejected_rows,
+                rows_skipped=rows_skipped,
             )
         return ReconciliationReport(
             passed=True,
@@ -424,6 +437,7 @@ def reconcile(
             ),
             rejected_rows=rejected_rows,
             coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
         )
     if coerced_null_rows:
         # Row counts and checksums can still match here because the SAME failed
@@ -449,6 +463,7 @@ def reconcile(
         message=message,
         rejected_rows=rejected_rows,
         coerced_null_rows=coerced_null_rows,
+        rows_skipped=rows_skipped,
         sample_compare=sample_compare,
     )
 

@@ -73,9 +73,11 @@ except (ImportError, AttributeError):  # pragma: no cover
 
 from connectors.writer_common import (
     CHUNK_SIZE,
+    DF_LSN_COL,
     _coerced_null_row_count,
     _rejected_row_count,
     build_mapped_rows_with_details,
+    compare_lsn,
     quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
@@ -1911,18 +1913,20 @@ def _upsert_batch(
     conflict_columns: list[str],
     target_cols: list[str],
     dialect_name: str,
-) -> None:
+) -> int:
     """Write a batch idempotently using the best native upsert available.
 
     Deduplicates the batch on the conflict key, then:
       * PostgreSQL, SQLite, MySQL/MariaDB: native ``ON CONFLICT`` /
         ``ON DUPLICATE KEY`` upsert.
       * Everyone else: chunked DELETE by equality keys followed by INSERT.
+
+    Returns the number of destination rows actually written in this batch.
     """
     conflict_cols = [c for c in conflict_columns if c in target_cols]
     if not conflict_cols:
-        conn.execute(table_obj.insert(), batch)
-        return
+        result = conn.execute(table_obj.insert(), batch)
+        return max(0, getattr(result, "rowcount", None) or 0) or len(batch)
 
     # Last occurrence of each conflict key wins within the batch.
     deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
@@ -1932,8 +1936,9 @@ def _upsert_batch(
     rows = list(deduped.values())
 
     update_cols = [c for c in target_cols if c not in conflict_cols]
+    lsn_guarded = DF_LSN_COL in target_cols
 
-    def _native_upsert() -> bool:
+    def _native_upsert() -> int | None:
         try:
             if dialect_name == "postgresql":
                 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -1945,20 +1950,22 @@ def _upsert_batch(
 
                 stmt = pg_insert(table_obj).values(rows)
                 if update_cols:
-                    kwargs: dict[str, Any] = {
+                    kwargs_pg: dict[str, Any] = {
                         "index_elements": conflict_cols,
                         "set_": {c: stmt.excluded[c] for c in update_cols},
                     }
                     # At-least-once guard: only apply when incoming _df_lsn is newer.
                     if DF_LSN_COL in target_cols and DF_LSN_COL in update_cols:
-                        kwargs["where"] = sa.text(
+                        kwargs_pg["where"] = sa.text(
                             postgres_lsn_update_guard_sql(table_obj.name)
                         )
-                    stmt = stmt.on_conflict_do_update(**kwargs)
+                    stmt = stmt.on_conflict_do_update(**kwargs_pg)
                 else:
                     stmt = stmt.on_conflict_do_nothing(index_elements=conflict_cols)
-                conn.execute(stmt)
-                return True
+                result = conn.execute(stmt)
+                if lsn_guarded:
+                    return max(0, getattr(result, "rowcount", None) or 0)
+                return len(rows)
 
             if dialect_name == "sqlite":
                 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -1970,19 +1977,21 @@ def _upsert_batch(
 
                 stmt = sqlite_insert(table_obj).values(rows)
                 if update_cols:
-                    kwargs: dict[str, Any] = {
+                    kwargs_sqlite: dict[str, Any] = {
                         "index_elements": conflict_cols,
                         "set_": {c: stmt.excluded[c] for c in update_cols},
                     }
                     if DF_LSN_COL in target_cols and DF_LSN_COL in update_cols:
-                        kwargs["where"] = sa.text(
+                        kwargs_sqlite["where"] = sa.text(
                             sqlite_lsn_update_guard_sql(table_obj.name)
                         )
-                    stmt = stmt.on_conflict_do_update(**kwargs)
+                    stmt = stmt.on_conflict_do_update(**kwargs_sqlite)
                 else:
                     stmt = stmt.on_conflict_do_nothing(index_elements=conflict_cols)
-                conn.execute(stmt)
-                return True
+                result = conn.execute(stmt)
+                if lsn_guarded:
+                    return max(0, getattr(result, "rowcount", None) or 0)
+                return len(rows)
 
             if dialect_name in ("mysql", "mariadb"):
                 from sqlalchemy.dialects.mysql import insert as mysql_insert
@@ -1992,10 +2001,16 @@ def _upsert_batch(
                     mysql_lsn_values_newer_sql,
                 )
 
+                # MySQL ON DUPLICATE KEY UPDATE reports affected_rows as 2 for
+                # updates and 1 for inserts, so rowcount cannot be trusted for
+                # per-source-row accounting. Use the delete+insert fallback when
+                # an LSN guard is required so the skip count is exact.
+                if lsn_guarded:
+                    return None
+
                 stmt = mysql_insert(table_obj).values(rows)
                 if update_cols:
                     if DF_LSN_COL in target_cols and DF_LSN_COL in update_cols:
-                        # Emulate IF(newer, VALUES(c), c) via CASE for each column.
                         newer = mysql_lsn_values_newer_sql(DF_LSN_COL, quote="`")
                         set_map = {
                             c: sa.text(f"IF({newer}, VALUES(`{c}`), `{c}`)")
@@ -2009,8 +2024,8 @@ def _upsert_batch(
                 else:
                     stmt = stmt.prefix_with("IGNORE")
                 conn.execute(stmt)
-                return True
-        except Exception:
+                return len(rows)
+        except (sa.exc.SQLAlchemyError, OSError, ValueError):
             # Native upsert can fail if the table lacks the required unique
             # index/constraint.  Roll back the aborted transaction so the
             # delete+insert fallback can run cleanly.
@@ -2019,37 +2034,40 @@ def _upsert_batch(
             )
             try:
                 conn.rollback()
-            except Exception as exc:
-                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
-            return False
-        return False
+            except (sa.exc.SQLAlchemyError, OSError) as exc:
+                logger.warning("chunk rollback failed: %s", exc, exc_info=exc)
+            return None
+        return None
 
-    if not _native_upsert():
-        # delete+insert: drop stale CDC rows before deleting so redelivery
-        # cannot regress state when ``_df_lsn`` is present.
-        from connectors.writer_common import DF_LSN_COL, compare_lsn
+    native_count = _native_upsert()
+    if native_count is not None:
+        return native_count
 
-        apply_rows = rows
-        if DF_LSN_COL in target_cols:
-            filtered: list[dict[str, Any]] = []
-            for row in rows:
-                incoming_lsn = row.get(DF_LSN_COL)
-                try:
-                    key_clause = sa.and_(
-                        *[table_obj.c[c] == row[c] for c in conflict_cols]
-                    )
-                    existing = conn.execute(
-                        sa.select(table_obj.c[DF_LSN_COL]).where(key_clause).limit(1)
-                    ).fetchone()
-                except Exception:
-                    existing = None
-                if existing is not None and compare_lsn(incoming_lsn, existing[0]) <= 0:
-                    continue
-                filtered.append(row)
-            apply_rows = filtered
-        if apply_rows:
-            _delete_by_keys(conn, table_obj, apply_rows, conflict_cols)
-            conn.execute(table_obj.insert(), apply_rows)
+    # delete+insert: drop stale CDC rows before deleting so redelivery
+    # cannot regress state when ``_df_lsn`` is present.
+    apply_rows = rows
+    if lsn_guarded:
+        filtered: list[dict[str, Any]] = []
+        for row in rows:
+            incoming_lsn = row.get(DF_LSN_COL)
+            try:
+                key_clause = sa.and_(
+                    *[table_obj.c[c] == row[c] for c in conflict_cols]
+                )
+                existing = conn.execute(
+                    sa.select(table_obj.c[DF_LSN_COL]).where(key_clause).limit(1)
+                ).fetchone()
+            except (sa.exc.SQLAlchemyError, OSError):
+                existing = None
+            if existing is not None and compare_lsn(incoming_lsn, existing[0]) <= 0:
+                continue
+            filtered.append(row)
+        apply_rows = filtered
+    if apply_rows:
+        _delete_by_keys(conn, table_obj, apply_rows, conflict_cols)
+        result = conn.execute(table_obj.insert(), apply_rows)
+        return max(0, getattr(result, "rowcount", None) or 0) or len(apply_rows)
+    return 0
 
 
 def write_mapped_rows(
@@ -2213,6 +2231,7 @@ def write_mapped_rows(
 
     written = 0
     chunks_completed = 0
+    rows_skipped = 0
     try:
         with engine.connect() as conn:
             db_type = (cfg.get("type") or "").lower()
@@ -2299,8 +2318,9 @@ def write_mapped_rows(
                     break
 
                 try:
+                    chunk_written = 0
                     if write_mode == "upsert" and conflict_columns:
-                        _upsert_batch(
+                        chunk_written = _upsert_batch(
                             conn,
                             table_obj,
                             batch,
@@ -2308,10 +2328,17 @@ def write_mapped_rows(
                             target_cols,
                             dialect_name,
                         )
+                        if DF_LSN_COL in target_cols:
+                            rows_skipped += len(batch) - chunk_written
+                        else:
+                            chunk_written = len(batch)
                     else:
-                        conn.execute(table_obj.insert(), batch)
+                        result = conn.execute(table_obj.insert(), batch)
+                        chunk_written = max(
+                            0, getattr(result, "rowcount", None) or 0
+                        ) or len(batch)
                     conn.commit()
-                    written += len(batch)
+                    written += chunk_written
                 except Exception as chunk_exc:
                     try:
                         conn.rollback()
@@ -2331,7 +2358,7 @@ def write_mapped_rows(
                         for row_i, row in enumerate(batch):
                             try:
                                 if write_mode == "upsert" and conflict_columns:
-                                    _upsert_batch(
+                                    row_written = _upsert_batch(
                                         conn,
                                         table_obj,
                                         [row],
@@ -2339,10 +2366,16 @@ def write_mapped_rows(
                                         target_cols,
                                         dialect_name,
                                     )
+                                    if DF_LSN_COL in target_cols:
+                                        if not row_written:
+                                            rows_skipped += 1
+                                    else:
+                                        row_written = 1
                                 else:
-                                    conn.execute(table_obj.insert(), [row])
+                                    result = conn.execute(table_obj.insert(), [row])
+                                    row_written = 1 if getattr(result, "rowcount", None) is None else (max(0, result.rowcount or 0) or 1)
                                 conn.commit()
-                                chunk_written += 1
+                                chunk_written += row_written
                             except Exception as row_exc:
                                 try:
                                     conn.rollback()
@@ -2387,10 +2420,11 @@ def write_mapped_rows(
             chunks_completed=chunks_completed or chunks,
             rejected_rows=max(
                 _rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
-                len(data_rows) - written if data_rows else 0,
+                len(data_rows) - written - rows_skipped if data_rows else 0,
             ),
             rejected_details=rejected_details,
             coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
+            rows_skipped=rows_skipped,
             warnings=transform_errors,
         )
     except Exception as exc:
@@ -2406,6 +2440,7 @@ def write_mapped_rows(
                 data_rows, mapped_rows, rejected_details, policy
             ),
             rejected_details=rejected_details,
+            rows_skipped=rows_skipped,
             warnings=transform_errors,
         )
     finally:

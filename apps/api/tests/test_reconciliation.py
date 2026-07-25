@@ -27,6 +27,20 @@ def test_reconcile_allows_quarantined_rows():
     assert r.rejected_rows == 2
 
 
+def test_reconcile_accounts_skipped_rows():
+    # 10 source rows, 2 stale CDC redeliveries skipped, 1 rejected -> 7 expected.
+    r = reconcile(
+        source_rows=10,
+        target_rows=7,
+        source_checksum="abc",
+        target_checksum="abc",
+        rejected_rows=1,
+        rows_skipped=2,
+    )
+    assert r.passed
+    assert r.rows_skipped == 2
+
+
 def test_reconcile_fails_sample_mismatch():
     r = reconcile(
         source_rows=2,
