@@ -20,6 +20,7 @@ export type SchemaPolicyId =
   | "type_locked";
 
 export type ValidationModeId = "balanced" | "strict" | "maximum";
+export type DateLocaleId = "" | "DMY" | "MDY";
 
 export const SYNC_MODES: { id: SyncModeId; label: string; detail: string }[] = [
   { id: "full_refresh_overwrite", label: "Full overwrite", detail: "Drop/replace destination, then load the full snapshot." },
@@ -71,3 +72,9 @@ export const DEFAULT_SYNC_MODE_IDS: SyncModeId[] = SYNC_MODES.map((m) => m.id);
 export const SYNC_MODE_META: Record<string, { label: string; detail: string }> = Object.fromEntries(
   SYNC_MODES.map((m) => [m.id, { label: m.label, detail: m.detail }]),
 );
+
+export const DATE_LOCALES: { id: DateLocaleId; label: string; detail: string }[] = [
+  { id: "", label: "Auto", detail: "Infer day/month order from source sample; fail closed if ambiguous." },
+  { id: "DMY", label: "DMY (day/month/year)", detail: "European / Indian / Australian date order." },
+  { id: "MDY", label: "MDY (month/day/year)", detail: "United States date order." },
+];

@@ -937,6 +937,8 @@ async def run_universal_transfer(
                 request_obj.backfill_new_fields = True
             if policies.get("write_via_staging") and not form_write_via_staging:
                 request_obj.write_via_staging = True
+            if not date_locale:
+                request_obj.date_locale = policies.get("date_locale", request_obj.date_locale)
             if not stream_contracts_json.strip():
                 plan_contracts = payload.get("stream_contracts") or policies.get("stream_contracts")
                 if isinstance(plan_contracts, list) and plan_contracts:

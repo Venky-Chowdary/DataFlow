@@ -34,6 +34,7 @@ from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
 from services.primary_key import resolve_primary_key_source
 from services.source_duplicate_probe import probe_source_duplicate_keys
 from services.transform_engine import (
+    infer_date_locale,
     reset_active_date_locale,
     set_active_date_locale,
 )
@@ -610,6 +611,16 @@ def run_file_preflight(
     if sample_rows and len(sample_rows) > PREFLIGHT_SAMPLE_LIMIT:
         sample_rows = sample_rows[:PREFLIGHT_SAMPLE_LIMIT]
 
+    # If the operator did not specify a locale for ambiguous day/month dates,
+    # scan the sample for an unambiguous majority before any date coercion.
+    if sample_rows and columns:
+        inferred_locale = infer_date_locale(
+            sample_rows, columns, existing_locale=date_locale
+        )
+        if inferred_locale and not date_locale:
+            date_locale = inferred_locale
+            set_active_date_locale(date_locale)
+
     # If the caller did not supply rich source types, infer them from the sample
     # rows. This keeps schemaless sources (MongoDB, DynamoDB, Redis, S3 JSON) from
     # being treated as all-VARCHAR against a typed warehouse target.
@@ -885,6 +896,7 @@ def run_file_preflight(
         "payload_shape": payload_shape,
         "validation_plan": validation_plan.to_dict(),
         "coercion_report": ctx.coercion_report(),
+        "date_locale": date_locale,
         "privilege_probe": privilege_probe or {},
         "recommended_batch_size": min(
             recommended_batch_size(_src_fmt),

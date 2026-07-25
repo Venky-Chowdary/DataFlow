@@ -23,6 +23,7 @@ export type DestSchemaPolicy =
   | "type_locked";
 
 export type DestValidationMode = "balanced" | "strict" | "maximum";
+export type DestDateLocale = "" | "DMY" | "MDY";
 
 export interface SyncModeOption {
   id: DestSyncMode;
@@ -41,15 +42,23 @@ export interface ValidationModeOption {
   label: string;
 }
 
+export interface DateLocaleOption {
+  id: DestDateLocale;
+  label: string;
+  detail: string;
+}
+
 interface DestinationAdvancedDrawerProps {
   open: boolean;
   onClose: () => void;
   syncModes: SyncModeOption[];
   schemaPolicies: SchemaPolicyOption[];
   validationModes: ValidationModeOption[];
+  dateLocales: DateLocaleOption[];
   syncMode: DestSyncMode;
   schemaPolicy: DestSchemaPolicy;
   validationMode: DestValidationMode;
+  dateLocale: DestDateLocale;
   backfillNewFields: boolean;
   /** Stream names (one row each when multi-stream). */
   streamNames: string[];
@@ -68,6 +77,7 @@ interface DestinationAdvancedDrawerProps {
   onSyncModeChange: (mode: DestSyncMode) => void;
   onSchemaPolicyChange: (policy: DestSchemaPolicy) => void;
   onValidationModeChange: (mode: DestValidationMode) => void;
+  onDateLocaleChange: (locale: DestDateLocale) => void;
   onBackfillChange: (value: boolean) => void;
   onStreamCursorChange: (stream: string, value: string) => void;
   onStreamPrimaryKeyChange: (stream: string, value: string) => void;
@@ -153,9 +163,11 @@ export function DestinationAdvancedDrawer({
   syncModes,
   schemaPolicies,
   validationModes,
+  dateLocales,
   syncMode,
   schemaPolicy,
   validationMode,
+  dateLocale,
   backfillNewFields,
   streamNames,
   streamFields,
@@ -171,6 +183,7 @@ export function DestinationAdvancedDrawer({
   onSyncModeChange,
   onSchemaPolicyChange,
   onValidationModeChange,
+  onDateLocaleChange,
   onBackfillChange,
   onStreamCursorChange,
   onStreamPrimaryKeyChange,
@@ -421,6 +434,22 @@ export function DestinationAdvancedDrawer({
         )}
 
         <div className="df2-policy-toolbar">
+          <div className="df2-field">
+            <label className="df2-label">Date locale</label>
+            <select
+              className="df2-select"
+              value={dateLocale}
+              onChange={(e) => onDateLocaleChange(e.target.value as DestDateLocale)}
+              title="How to interpret ambiguous day/month dates like 5/8/1967"
+            >
+              {dateLocales.map((loc) => (
+                <option key={loc.id} value={loc.id} title={loc.detail}>
+                  {loc.label}
+                </option>
+              ))}
+            </select>
+            <small className="df2-label-hint">Auto infers from unambiguous rows. Set DMY or MDY for all-ambiguous samples.</small>
+          </div>
           <div className="df2-field">
             <label className="df2-label">Validation</label>
             <FilterBar ariaLabel="Validation mode">

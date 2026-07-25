@@ -258,6 +258,59 @@ def _is_ambiguous_mdy_dmy(text: str, date_locale: str = "") -> bool:
         re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:[ T].*)?$", text.strip())
     )
 
+
+def infer_date_locale(
+    records: Iterable[Any],
+    columns: list[str] | None = None,
+    *,
+    existing_locale: str = "",
+    max_rows: int = 1000,
+) -> str:
+    """Infer DMY or MDY from unambiguous slash/dash/dot dates in a sample.
+
+    A value like 31/12/2024 is unambiguously DMY; 12/31/2024 is MDY.
+    Ambiguous values (both fields <= 12 and unequal) are ignored.
+    If an explicit locale is already set, it is returned unchanged.
+    """
+    order = _active_date_locale(existing_locale)
+    if order:
+        return order
+    dmy = 0
+    mdy = 0
+    pattern = re.compile(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:[ T].*)?$")
+    checked = 0
+    for rec in records:
+        if checked >= max_rows:
+            break
+        checked += 1
+        if isinstance(rec, dict):
+            vals = rec.values() if columns is None else (rec.get(c) for c in columns)
+        elif isinstance(rec, (list, tuple)) and columns is not None:
+            vals = (rec[columns.index(c)] for c in columns if c in columns)
+        else:
+            vals = [rec]
+        for v in vals:
+            if not isinstance(v, str):
+                continue
+            v = v.strip()
+            if not _DATE_LIKE_RE.search(v):
+                continue
+            m = pattern.match(v)
+            if not m:
+                continue
+            first, second = int(m.group(1)), int(m.group(2))
+            if first > 12 and second <= 12:
+                dmy += 1
+            elif second > 12 and first <= 12:
+                mdy += 1
+            # if both > 12 it's invalid; if equal it's locale-independent
+    if dmy and dmy >= mdy:
+        return "DMY"
+    if mdy and mdy > dmy:
+        return "MDY"
+    return ""
+
+
 def _reorder_date_patterns(text: str, patterns: tuple[str, ...], date_locale: str = "") -> list[str]:
     """Move the most likely day/month ordering patterns to the front.
 

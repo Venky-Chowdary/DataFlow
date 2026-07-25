@@ -306,6 +306,7 @@ export async function runPreflight(payload: {
   validation_mode?: string;
   backfill_new_fields?: boolean;
   stream_contracts?: Record<string, unknown>[];
+  date_locale?: string;
 }): Promise<import("./types").PreflightResult> {
   const res = await apiFetch(`${API_BASE}/preflight/run`, {
     method: "POST",
@@ -1819,6 +1820,7 @@ export async function runUniversalTransfer(options: {
   priorityColumn?: string;
   priorityDirection?: "asc" | "desc";
   limit?: number;
+  dateLocale?: string;
 }) {
   const formData = new FormData();
   if (options.file) formData.append("file", options.file);
@@ -1874,6 +1876,7 @@ export async function runUniversalTransfer(options: {
     formData.append("stream_contracts_json", JSON.stringify(options.streamContracts));
   }
   if (options.planId) formData.append("plan_id", options.planId);
+  formData.append("date_locale", options.dateLocale || "");
   const res = await apiFetch(`${API_BASE}/transfer/run`, { method: "POST", body: formData, timeoutMs: LONG_REQUEST_TIMEOUT_MS });
   const data = await res.json();
   if (!res.ok) {

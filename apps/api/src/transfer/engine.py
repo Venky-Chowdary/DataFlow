@@ -32,6 +32,7 @@ try:
     from services.mongodb_service import get_mongodb_service
     from services.pipeline_explanation import build_pipeline_explanation
     from services.transform_engine import (
+        infer_date_locale,
         reset_active_date_locale,
         set_active_date_locale,
     )
@@ -1423,6 +1424,15 @@ class UniversalTransferEngine:
             mongo.update_job_status(
                 job_id, "running", total_rows=total_rows, records_processed=0
             )
+
+            # If the operator did not specify a locale for ambiguous day/month
+            # dates, scan the source sample for an unambiguous majority before
+            # any date coercion runs.
+            if not request.date_locale:
+                inferred_locale = infer_date_locale(records, columns)
+                if inferred_locale:
+                    request.date_locale = inferred_locale
+                    set_active_date_locale(inferred_locale)
 
             dest_schema_types, dest_table_exists_flag = _destination_schema_probe(
                 request.destination,

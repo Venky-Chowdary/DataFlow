@@ -214,6 +214,7 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         sample_rows=sample_rows,
         confidence_threshold=threshold,
         validation_mode=validation_mode,
+        date_locale=policies.get("date_locale", ""),
         destination_column_types=live_target_schema,
         destination_table_exists=dest_meta.get("table_exists"),
         destination_can_create=dest_meta.get("can_create_table"),

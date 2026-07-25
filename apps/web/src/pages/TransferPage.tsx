@@ -65,9 +65,11 @@ import {
 } from "../lib/dialectDefaults";
 import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, isTransferLiveType, resolveDriverType, setTransferLiveDrivers } from "../lib/connectorTypes";
 import {
+  DATE_LOCALES,
   SCHEMA_POLICIES,
   SYNC_MODES,
   VALIDATION_MODES,
+  type DateLocaleId,
   type SchemaPolicyId,
   type SyncModeId,
   type ValidationModeId,
@@ -318,6 +320,7 @@ export function TransferPage({
   const [syncMode, setSyncMode] = useState<SyncMode>("full_refresh_append");
   const [schemaPolicy, setSchemaPolicy] = useState<SchemaPolicy>("manual_review");
   const [validationMode, setValidationMode] = useState<ValidationMode>("strict");
+  const [dateLocale, setDateLocale] = useState<DateLocaleId>("");
   const [backfillNewFields, setBackfillNewFields] = useState(false);
   const [writeViaStaging, setWriteViaStaging] = useState(false);
   const [vectorContentColumn, setVectorContentColumn] = useState("");
@@ -935,6 +938,7 @@ export function TransferPage({
       sync_mode: syncMode,
       schema_policy: schemaPolicy,
       validation_mode: validationMode,
+      date_locale: dateLocale,
       backfill_new_fields: backfillNewFields,
       write_via_staging: writeViaStaging,
       stream_contracts: streamContracts,
@@ -961,6 +965,7 @@ export function TransferPage({
     syncMode,
     schemaPolicy,
     validationMode,
+    dateLocale,
     backfillNewFields,
     writeViaStaging,
     streamContracts,
@@ -3199,6 +3204,7 @@ export function TransferPage({
           sync_mode: syncMode,
           schema_policy: schemaPolicy,
           validation_mode: validationOverride ?? validationMode,
+          date_locale: dateLocale,
           backfill_new_fields: backfillNewFields,
           stream_contracts: streamContracts,
         });
@@ -3422,6 +3428,7 @@ export function TransferPage({
         syncMode,
         schemaPolicy,
         validationMode,
+        dateLocale,
         backfillNewFields,
         writeViaStaging,
         enableOcr,
@@ -5043,9 +5050,11 @@ export function TransferPage({
             syncModes={SYNC_MODES}
             schemaPolicies={SCHEMA_POLICIES}
             validationModes={VALIDATION_MODES}
+            dateLocales={DATE_LOCALES}
             syncMode={syncMode}
             schemaPolicy={schemaPolicy}
             validationMode={validationMode}
+            dateLocale={dateLocale}
             backfillNewFields={backfillNewFields}
             streamNames={advancedStreamNames}
             streamFields={streamFields}
@@ -5131,6 +5140,7 @@ export function TransferPage({
               }
             }}
             onValidationModeChange={setValidationMode}
+            onDateLocaleChange={setDateLocale}
             onBackfillChange={setBackfillNewFields}
             onStreamCursorChange={(stream, value) => {
               setStreamFields((prev) => ({
