@@ -188,6 +188,7 @@ class WriteResult:
     # when values were silently changed. Genuine empty->NULL sentinels are NOT
     # counted here (they produce no transform error).
     coerced_null_rows: int = 0
+    rows_skipped: int = 0
 
 
 def row_checksum(rows: list[Any], columns: list[str] | None = None) -> str:

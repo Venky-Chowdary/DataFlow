@@ -1,4 +1,4 @@
-"""_df_lsn effectively-once proofs for PK sinks (not platform exactly-once)."""
+"""_df_lsn PK-sink LSN-guarded idempotent upsert proofs (not platform exactly-once)."""
 
 from __future__ import annotations
 

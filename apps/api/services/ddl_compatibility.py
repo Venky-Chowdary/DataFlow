@@ -6,7 +6,6 @@ import re
 from typing import Any
 
 from services.db_type_utils import SCHEMALESS_DESTS, ci_get, normalize_dest_kind
-from services.primary_key import sync_requires_unique_identity
 from services.type_system import (
     ddl_type,
     decimal_scale_would_truncate,
@@ -95,70 +94,6 @@ _OVERWRITE_SYNC = {
     "full_refresh",
     "replace",
 }
-
-_APPEND_SYNC = {
-    "full_refresh_append",
-    "incremental_append",
-}
-
-
-def _primary_key_target(
-    mappings: list[dict],
-    dest_kind: str,
-    *,
-    destination_pk_columns: list[str] | None = None,
-    contract_primary_key: str | None = None,
-) -> str | None:
-    """Return the target column for the identity uniqueness contract.
-
-    Delegates to the canonical helper so G6/G8/G9 never disagree on ``*_id``.
-    """
-    from services.primary_key import resolve_primary_key_target
-
-    return resolve_primary_key_target(
-        mappings,
-        dest_kind,
-        destination_pk_columns=destination_pk_columns,
-        contract_primary_key=contract_primary_key,
-    )
-
-
-def _duplicate_pk_in_source(
-    sample_rows: list[dict] | None,
-    mappings: list[dict],
-    *,
-    dest_kind: str,
-    destination_pk_columns: list[str] | None = None,
-    contract_primary_key: str | None = None,
-) -> list[str]:
-    if not sample_rows:
-        return []
-    issues: list[str] = []
-    src_by_tgt = {str(m.get("target") or ""): str(m.get("source") or "") for m in mappings if m.get("target")}
-
-    pk_tgt = _primary_key_target(
-        mappings,
-        dest_kind,
-        destination_pk_columns=destination_pk_columns,
-        contract_primary_key=contract_primary_key,
-    )
-    if not pk_tgt:
-        return issues
-    src = src_by_tgt.get(pk_tgt, pk_tgt)
-
-    seen: dict[str, int] = {}
-    for row in sample_rows:
-        val = str(row.get(src, "")).strip()
-        if not val:
-            continue
-        seen[val] = seen.get(val, 0) + 1
-    dupes = [v for v, n in seen.items() if n > 1]
-    if dupes:
-        issues.append(
-            f"Primary key candidate '{pk_tgt}' has {len(dupes)} duplicate value(s) in source sample"
-        )
-    return issues
-
 
 def evaluate_ddl_compatibility(
     *,
@@ -340,26 +275,9 @@ def evaluate_ddl_compatibility(
                         f"Proposed DDL {inferred_ddl} for {tgt} may truncate values (max {max_len} chars)"
                     )
 
-    # Duplicate source-PK detection is only relevant when the destination will
-    # enforce uniqueness (cdc/mirror/upsert/SCD2) or when no append/overwrite
-    # sync mode was supplied and the target already exists / has a declared PK.
-    if sample_rows and (
-        sync_requires_unique_identity(sync)
-        or (
-            sync not in _APPEND_SYNC
-            and sync not in _OVERWRITE_SYNC
-        )
-        or (table_exists and destination_pk_columns)
-    ):
-        issues.extend(
-            _duplicate_pk_in_source(
-                sample_rows,
-                mappings,
-                dest_kind=dest_kind,
-                destination_pk_columns=destination_pk_columns,
-                contract_primary_key=contract_primary_key,
-            )
-        )
+    # Duplicate source-PK detection is owned by G9 data_integrity so the
+    # check is not duplicated here. G6 focuses on DDL shape and target
+    # compatibility; G9 audits source values (duplicates, nulls, precision).
 
     if not schemaless and table_exists and target_schema:
         mapped_targets = {str(m.get("target")).lower() for m in mappings if m.get("target")}

@@ -66,6 +66,8 @@ def test_mongodb_upsert_rejects_older_lsn():
         conflict_columns=["id"],
     )
     assert r2.ok, r2.error
+    assert r2.rows_written == 0
+    assert r2.rows_skipped == 1
 
     doc = coll.find_one({"id": 1})
     coll.drop()

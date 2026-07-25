@@ -407,7 +407,21 @@ def resolve_connector_config(
                 )
             chosen_database = saved_database or inline_database
 
-        def _pick(inline: Any, saved: Any) -> Any:
+        def _is_masked(value: Any) -> bool:
+            if value is None:
+                return True
+            if isinstance(value, str):
+                v = value.strip()
+                if not v or v == "****":
+                    return True
+                # Masked connection strings keep the host but hide the password.
+                if "****" in v or "<redacted>" in v.lower():
+                    return True
+            return False
+
+        def _pick(inline: Any, saved: Any, sensitive: bool = False) -> Any:
+            if sensitive and _is_masked(inline):
+                return saved if saved is not None else ""
             return (
                 inline
                 if inline not in (None, "", 0)
@@ -420,9 +434,13 @@ def resolve_connector_config(
             "database": chosen_database,
             "schema": _pick(cfg.get("schema"), conn_dict.get("schema")),
             "username": _pick(cfg.get("username"), conn_dict.get("username")),
-            "password": _pick(cfg.get("password"), conn_dict.get("password")),
+            "password": _pick(
+                cfg.get("password"), conn_dict.get("password"), sensitive=True
+            ),
             "connection_string": _pick(
-                cfg.get("connection_string"), conn_dict.get("connection_string")
+                cfg.get("connection_string"),
+                conn_dict.get("connection_string"),
+                sensitive=True,
             ),
             "warehouse": _pick(cfg.get("warehouse"), conn_dict.get("warehouse")),
             "ssl": conn_dict.get("ssl")
@@ -432,11 +450,17 @@ def resolve_connector_config(
             "auth_mode": _pick(cfg.get("auth_mode"), conn_dict.get("auth_mode")),
             "auth_role": _pick(cfg.get("auth_role"), conn_dict.get("auth_role")),
             "auth_source": _pick(cfg.get("auth_source"), conn_dict.get("auth_source")),
-            "api_key": _pick(cfg.get("api_key"), conn_dict.get("api_key")),
-            "service_account": _pick(
-                cfg.get("service_account"), conn_dict.get("service_account")
+            "api_key": _pick(
+                cfg.get("api_key"), conn_dict.get("api_key"), sensitive=True
             ),
-            "private_key": _pick(cfg.get("private_key"), conn_dict.get("private_key")),
+            "service_account": _pick(
+                cfg.get("service_account"),
+                conn_dict.get("service_account"),
+                sensitive=True,
+            ),
+            "private_key": _pick(
+                cfg.get("private_key"), conn_dict.get("private_key"), sensitive=True
+            ),
             "endpoint_url": _pick(
                 cfg.get("endpoint_url"), conn_dict.get("endpoint_url")
             ),

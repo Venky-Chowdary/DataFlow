@@ -133,6 +133,37 @@ def test_resolve_connector_config_placeholder_database_uses_saved(monkeypatch):
     assert cfg["database"] == "DATAFLOW"
 
 
+def test_resolve_connector_config_ignores_masked_credential_placeholders(monkeypatch):
+    """The UI returns '****' for secrets; the transfer path must use saved values."""
+    from transfer import adapters
+
+    saved = {
+        "host": "saved.pg.example.com",
+        "port": 5432,
+        "database": "railway",
+        "schema": "public",
+        "username": "postgres",
+        "password": "SAVED_PASSWORD",
+        "connection_string": "postgresql://postgres:SAVED_PASSWORD@saved.pg.example.com:5432/railway",
+        "type": "postgresql",
+    }
+    monkeypatch.setattr(
+        adapters, "_lookup_saved_connector", lambda connector_id, workspace_id=None: saved
+    )
+
+    ep = EndpointConfig(
+        format="postgresql",
+        connector_id="conn-1",
+        password="****",
+        connection_string="postgresql://postgres:****@saved.pg.example.com:5432/railway",
+        table="jobs",
+    )
+    cfg = resolve_connector_config(ep)
+    assert cfg["password"] == "SAVED_PASSWORD"
+    assert "SAVED_PASSWORD" in cfg["connection_string"]
+    assert "****" not in cfg["connection_string"]
+
+
 def test_records_to_matrix_csv_like_rows():
     records = [
         {"order_id": "1", "amount": "10.50", "active": "true"},

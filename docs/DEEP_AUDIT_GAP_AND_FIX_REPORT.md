@@ -881,3 +881,76 @@ G9 Data integrity: block — "id: duplicate key values (abc123×2)"
 
 The operator will now see the duplicate-key issue on the Validate step with a
 *Review mappings / fix data integrity* CTA, instead of a failed Run.
+
+---
+
+## 18. Connector Masked-Credential + DuckDB DECIMAL + Mongo CDC LSN + Prod Auth Defaults (this session)
+
+### Gap
+
+Three Carter-flagged high-severity issues plus the live `MySQL jobs → PostgreSQL jobs`
+password-auth failure were still open:
+
+1. **Connector test green / destination password-auth failure.** When a saved
+   connector was selected in Transfer Studio, the UI returned masked secrets as
+   `"****"` (and masked connection strings with `:****@`). `resolve_connector_config`
+   treated those placeholders as real inline overrides and used them during
+   destination introspection, while the connector test path used the saved
+   connector directly. Result: connector test passed, destination schema probe
+   failed with password authentication failure.
+
+2. **DuckDB DECIMAL false-green / precision loss.** `generic_sql.py` silently
+   collapsed any inferred `DECIMAL` target to `DOUBLE` when `skip_preflight=True`
+   and no user override was set. This made CSV-to-DuckDB tests pass by returning
+   Python `float`s, but it lost scale/fidelity for explicit database `DECIMAL(p,s)`
+   sources and made the DuckDB backfill widen test a false green (the column was
+   `DOUBLE`, not `DECIMAL(12,2)`).
+
+3. **MongoDB CDC LSN accounting / fail-open prefetch.** `mongodb_writer.py` counted
+   stale LSK-skipped documents in `rows_written`, inflating completeness / Gate-8.
+   If the `_df_lsn` prefetch raised, the code logged a warning and continued with
+   an empty `existing_lsn` map, so `lsn_is_newer(incoming, None)` was always True
+   and stale redelivery could overwrite newer rows.
+
+4. **Production auth brittle after Dockerfile change.** `Dockerfile.api` no longer
+   sets `DATAFLOW_REQUIRE_AUTH=1` because Railway's builder treats `AUTH` as a
+   secret substring. `apply_railway_defaults()` only set it on Railway, so a
+   non-Railway `DATAFLOW_ENV=production` container would fail `validate_production_config()`.
+
+### Fixes this session
+
+| Fix | Root cause | Evidence |
+|-----|------------|----------|
+| Masked credential placeholders ignored in transfer path | `resolve_connector_config` `_pick` used inline value whenever it was non-empty, so `"****"` replaced the saved password | `apps/api/src/transfer/adapters.py` `_is_masked` / `_pick` now treat `"****"` and `<redacted>` / connection strings containing `****` as empty for sensitive fields |
+| DuckDB `DECIMAL(p,s)` preserved for DB sources; `DOUBLE` fallback only for bare inferred DECIMAL | `generic_sql.py` unconditionally rewrote all `DECIMAL` targets to `DOUBLE` under `skip_preflight` | `apps/api/connectors/generic_sql.py` now collapses to `DOUBLE` only when the source type has no precision/scale (file/CSV inference); explicit `NUMERIC/DECIMAL(p,s)` stays exact; `_source_ddl_for_widen` prefers concrete catalog types over bare logicals |
+| MongoDB LSN skip accounting and prefetch fail-closed | `written += len(ops) + skipped_stale` and `except PyMongoError: logger.warning(...)` disabled the guard | `apps/api/connectors/mongodb_writer.py` now tracks `skipped_total` separately, writes `rows_skipped` in `WriteResult`, and returns a failed `WriteResult` if LSN prefetch fails while `_df_lsn` is mapped |
+| Production auth default in `apply_railway_defaults` | Function only ran on Railway | `apps/api/services/platform_config.py` now applies `DATAFLOW_REQUIRE_AUTH=1` whenever `is_production()` is true, unless the operator explicitly opts out |
+
+### Verification this session
+
+```text
+pytest apps/api/tests/test_adapters_integration.py::test_resolve_connector_config_ignores_masked_credential_placeholders
+1 passed
+
+pytest apps/api/tests/test_execute_tracked_duckdb_to_duckdb.py \
+       apps/api/tests/test_execute_tracked_csv_to_duckdb.py \
+       apps/api/tests/test_currency_to_duckdb.py \
+       apps/api/tests/test_execute_tracked_duckdb_to_duckdb_backfill_widen_fields.py
+4 passed
+
+pytest apps/api/tests/test_mongodb_cdc_lsn_upsert.py
+1 passed
+
+pytest apps/api/tests/test_execute_tracked_universal_matrix.py -k 'not snowflake'
+342 passed, 918 skipped, 72 deselected
+
+pytest apps/api/tests/test_adapters_integration.py
+42 passed
+```
+
+### What is still NOT proven
+
+- **Cloud warehouse and real-service routes.** ~952 matrix tests still skip because no live Snowflake/BigQuery/Redshift/GCS/ADLS/Salesforce/etc. credentials or emulators are configured.
+- **Full CDC end-to-end job resume across MySQL/MongoDB/SQL Server.** PostgreSQL logical-decoding job resume is proven; multi-stream and other engines still need stress tests.
+- **BLE001 blind-except narrowing.** The broader `except Exception as exc:` runway remains.
+- **Lakehouse MERGE.** Iceberg/Delta MERGE semantics for idempotent writes are still a roadmap item.

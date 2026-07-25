@@ -132,7 +132,8 @@ def test_fails_varchar_width_overflow():
     assert any("width overflow" in i.lower() for i in issues)
 
 
-def test_fails_duplicate_pk_in_source_sample():
+def test_duplicate_pk_in_source_is_owned_by_data_integrity_not_g6():
+    """G6 no longer duplicates the duplicate-key check; G9 data_integrity owns it."""
     ok, issues = evaluate_ddl_compatibility(
         mappings=[{"source": "order_id", "target": "order_id", "confidence": 1.0}],
         source_schema={"order_id": "INTEGER"},
@@ -141,8 +142,23 @@ def test_fails_duplicate_pk_in_source_sample():
         dest_connected=True,
         sample_rows=[{"order_id": "1"}, {"order_id": "1"}],
     )
-    assert not ok
-    assert any("duplicate" in i.lower() for i in issues)
+    assert ok
+    assert not any("duplicate" in i.lower() for i in issues)
+
+    from services.data_integrity import run_integrity_audit
+
+    report = run_integrity_audit(
+        source_columns=["order_id"],
+        mappings=[{"source": "order_id", "target": "order_id", "confidence": 1.0}],
+        sample_rows=[{"order_id": "1"}, {"order_id": "1"}],
+        destination_db_type="postgresql",
+        validation_mode="strict",
+        sync_mode="full_refresh_overwrite",
+    )
+    assert not report["passed"]
+    dup = next((c for c in report["checks"] if c["check"] == "duplicate_keys"), {})
+    assert dup.get("blocks_transfer") is True
+    assert any("duplicate" in str(i).lower() for i in dup.get("issues", []))
 
 
 def test_passes_when_target_column_case_differs():
@@ -215,7 +231,8 @@ def test_mongodb_non_id_suffix_fields_do_not_trigger_pk_duplicate_block():
     assert issues == []
 
 
-def test_mongodb_explicit_id_mapping_still_blocks_duplicate_id_values():
+def test_mongodb_explicit_id_mapping_duplicate_detected_by_data_integrity():
+    """G6 stays DDL-focused; duplicate `_id` values are caught in G9."""
     ok, issues = evaluate_ddl_compatibility(
         mappings=[{"source": "id", "target": "_id", "confidence": 0.99}],
         source_schema={"id": "VARCHAR"},
@@ -225,8 +242,22 @@ def test_mongodb_explicit_id_mapping_still_blocks_duplicate_id_values():
         dest_db_type="mongodb",
         sample_rows=[{"id": "dup"}, {"id": "dup"}],
     )
-    assert not ok
-    assert any("duplicate" in i.lower() for i in issues)
+    assert ok
+    assert not any("duplicate" in i.lower() for i in issues)
+
+    from services.data_integrity import run_integrity_audit
+
+    report = run_integrity_audit(
+        source_columns=["id"],
+        mappings=[{"source": "id", "target": "_id", "confidence": 0.99}],
+        sample_rows=[{"id": "dup"}, {"id": "dup"}],
+        destination_db_type="mongodb",
+        validation_mode="strict",
+        sync_mode="upsert",
+    )
+    assert not report["passed"]
+    dup = next((c for c in report["checks"] if c["check"] == "duplicate_keys"), {})
+    assert dup.get("blocks_transfer") is True
 
 
 def test_float_to_decimal_not_soft_passed_by_samples():

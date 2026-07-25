@@ -97,13 +97,27 @@ def test_duckdb_to_duckdb_backfill_widens_varchar_and_numeric():
     assert result2.records_transferred == 2
 
     conn = duckdb.connect(dst_path)
-    rows = conn.execute(
-        f'SELECT id, note, amount FROM "{dst_table}" ORDER BY id'
-    ).fetchall()
-    conn.execute(f'DROP TABLE "{dst_table}"')
-    conn.close()
+    try:
+        rows = conn.execute(
+            f'SELECT id, note, amount FROM "{dst_table}" ORDER BY id'
+        ).fetchall()
+        col_types = {
+            r[0]: r[1]
+            for r in conn.execute(
+                f'SELECT column_name, data_type FROM information_schema.columns '
+                f'WHERE table_name = \'{dst_table}\''
+            ).fetchall()
+        }
+    finally:
+        conn.execute(f'DROP TABLE "{dst_table}"')
+        conn.close()
 
+    # DuckDB does not enforce VARCHAR length, so the long note proves the row
+    # landed; the DECIMAL column must actually be widened to (12,2).
     assert rows == [
-        (1, "a-much-longer-value-that-exceeds-five", 1234567890.12),
-        (2, "world", 7890.12),
+        (1, "a-much-longer-value-that-exceeds-five", Decimal("1234567890.12")),
+        (2, "world", Decimal("7890.12")),
     ]
+    amount_type = (col_types.get("amount") or "").upper()
+    assert "DECIMAL" in amount_type or "NUMERIC" in amount_type, amount_type
+    assert "12" in amount_type and "2" in amount_type, amount_type

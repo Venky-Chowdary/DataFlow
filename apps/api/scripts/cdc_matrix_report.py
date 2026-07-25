@@ -116,7 +116,7 @@ def main() -> int:
                 "Leases: Redis multi-node (fail-closed) or file single-host; fencing generation on steal.",
                 "PG TOAST merge + typed txn buffer overflow (no silent drop/wipe).",
                 "Shared multi-table live IT + ack-barrier chaos are in matrix.",
-                "_df_lsn effectively-once PK-sink proofs are not platform exactly-once.",
+                "_df_lsn PK-sink LSN-guarded idempotent upsert proofs are not platform exactly-once.",
             ],
         },
     }

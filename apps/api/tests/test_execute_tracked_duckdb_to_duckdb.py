@@ -73,7 +73,7 @@ def test_duckdb_to_duckdb_preserves_types():
 
         assert rows[0] == (1, Decimal("1000.00"), None, date(2024, 1, 15), True, '{"k":"v"}', '["a","b"]')
         assert rows[1] == (2, Decimal("2000.50"), "hello", date(2024, 2, 28), False, None, None)
-        assert rows[2] == (3, 3.14, "null", date(2024, 3, 1), True, '{}', '[]')
+        assert rows[2] == (3, Decimal("3.14"), "null", date(2024, 3, 1), True, '{}', '[]')
     finally:
         for p in (source_path, target_path):
             try:

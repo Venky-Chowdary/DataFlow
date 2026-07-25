@@ -350,6 +350,7 @@ def write_mapped_rows(
         mongo_batch_size = max(1, min(MONGO_WRITE_BATCH_SIZE, CHUNK_SIZE))
         chunks = max(1, (total + mongo_batch_size - 1) // mongo_batch_size)
         written = 0
+        skipped_total = 0
 
         for chunk_idx in range(chunks):
             start = chunk_idx * mongo_batch_size
@@ -418,7 +419,24 @@ def write_mapped_rows(
                                 key = tuple(existing.get(c) for c in pk_cols)
                                 existing_lsn[key] = existing.get(DF_LSN_COL)
                     except pymongo.errors.PyMongoError as exc:
-                        logger.warning("MongoDB LSN prefetch failed: %s", exc, exc_info=exc)
+                        # Fail closed: without the prior LSN map we cannot prove
+                        # idempotency, so we must not write this batch.
+                        return WriteResult(
+                            ok=False,
+                            rows_written=written,
+                            rows_skipped=skipped_total,
+                            table_name=collection_name,
+                            target_schema=db_name,
+                            checksum="",
+                            chunks_completed=chunk_idx,
+                            error=(
+                                "MongoDB CDC LSN prefetch failed; cannot guarantee "
+                                f"idempotent delivery: {exc}"
+                            ),
+                            rejected_rows=len(rejected_details),
+                            rejected_details=rejected_details[:100],
+                            warnings=transform_errors,
+                        )
 
                 ops = []
                 skipped_stale = 0
@@ -463,20 +481,22 @@ def write_mapped_rows(
                     ops.append(ReplaceOne(filt, doc, upsert=True))
                 if ops:
                     coll.bulk_write(ops, ordered=False)
-                written += len(ops) + skipped_stale
+                written += len(ops)
+                skipped_total += skipped_stale
             else:
                 written += _idempotent_insert_many(coll, docs)
             if on_checkpoint:
-                on_checkpoint(chunk_idx + 1, chunks, written)
+                on_checkpoint(chunk_idx + 1, chunks, written + skipped_total)
 
         return WriteResult(
             ok=True,
             rows_written=written,
+            rows_skipped=skipped_total,
             table_name=collection_name,
             target_schema=db_name,
             checksum=row_checksum(mapped_rows, target_cols),
             chunks_completed=chunks,
-            rejected_rows=max(rejected_rows, len(data_rows) - written),
+            rejected_rows=max(rejected_rows, len(data_rows) - written - skipped_total),
             rejected_details=rejected_details,
             coerced_null_rows=coerced_null_rows,
             warnings=transform_errors,

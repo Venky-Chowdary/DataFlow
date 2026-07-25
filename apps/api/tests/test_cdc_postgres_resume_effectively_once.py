@@ -1,4 +1,4 @@
-"""Real PostgreSQL CDC end-to-end effectively-once resume test.
+"""Real PostgreSQL CDC end-to-end PK-sink LSN-guarded idempotent resume test.
 
 Simulates a job that is stopped after the initial snapshot, then restarted.
 The second run must resume from the persisted LSN watermark and stream only

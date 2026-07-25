@@ -322,13 +322,24 @@ def _fetch_existing_columns(
         "duckdb",
         "motherduck",
     ):
-        cursor.execute(
-            """SELECT column_name, data_type, character_maximum_length,
-                      numeric_precision, numeric_scale
-               FROM information_schema.columns
-               WHERE table_schema = %s AND table_name = %s""",
-            (schema or "public", table_name),
-        )
+        # DuckDB's native driver uses ``?`` placeholders, not ``%s``.
+        params = (schema or "public", table_name)
+        if dialect in ("duckdb", "motherduck"):
+            cursor.execute(
+                """SELECT column_name, data_type, character_maximum_length,
+                          numeric_precision, numeric_scale
+                   FROM information_schema.columns
+                   WHERE table_schema = ? AND table_name = ?""",
+                params,
+            )
+        else:
+            cursor.execute(
+                """SELECT column_name, data_type, character_maximum_length,
+                          numeric_precision, numeric_scale
+                   FROM information_schema.columns
+                   WHERE table_schema = %s AND table_name = %s""",
+                params,
+            )
         out: dict[str, str] = {}
         for row in cursor.fetchall():
             # information_schema row may have 3 or 5 columns depending on the view.

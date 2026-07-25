@@ -646,7 +646,7 @@ def build_mapping_proof(
                     "severity": "error",
                     "message": (
                         f"Destination '{destination_db_type}' does not support upsert — "
-                        "CDC redelivery will duplicate rows (not effectively-once). "
+                        "CDC redelivery will duplicate rows (not LSN-guarded idempotent upsert). "
                         "Use a PK upsert sink or set allow_append_only=true."
                     ),
                 })

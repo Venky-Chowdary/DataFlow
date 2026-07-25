@@ -21,7 +21,7 @@ from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from typing import Any
 
-from services.type_system import ddl_type, normalize_logical_type
+from services.type_system import ddl_type, normalize_logical_type, parse_numeric_precision_scale
 from services.value_serializer import cell_to_string, json_default
 
 from connectors.base import ReadBatch
@@ -1203,6 +1203,11 @@ def _build_table_for_write(
     )
 
 
+def _type_has_params(type_name: str | None) -> bool:
+    """True when a DDL string carries a length, precision, or dimension."""
+    return bool(re.search(r"\(\s*\d", type_name or ""))
+
+
 def _source_ddl_for_widen(
     mapping_source: str | None,
     catalog_source: str | None,
@@ -1232,6 +1237,15 @@ def _source_ddl_for_widen(
     if mapping_logical in {"string", "text"} and catalog_logical not in {"string", "text"}:
         return catalog_source
     if mapping_logical == catalog_logical:
+        mapping_params = _type_has_params(mapping_source)
+        catalog_params = _type_has_params(catalog_source)
+        # If one side is bare (e.g. DECIMAL) and the other carries precision
+        # (e.g. NUMERIC(12,2)), prefer the concrete side. Bare logicals are
+        # not wider than a typed carrier; they are just less specific.
+        if mapping_params and not catalog_params:
+            return mapping_source
+        if catalog_params and not mapping_params:
+            return catalog_source
         return catalog_source if is_wider_type(mapping_source, catalog_source) else mapping_source
     return mapping_source
 
@@ -2109,24 +2123,26 @@ def write_mapped_rows(
         explicit = mappings[i].get("target_type")
         source_type = column_types.get(mappings[i]["source"]) or "string"
         # Map source logical types to destination-native DDL so default
-        # identity mappings create the right physical column (e.g. DuckDB
-        # DECIMAL source → DOUBLE target for analytics float storage).
+        # identity mappings create the right physical column. DuckDB DECIMAL
+        # sources keep their (p,s) DDL when present — never silently collapse
+        # to DOUBLE, which loses scale and breaks financial fidelity.
         derived = explicit or (
             ddl_type(dest_db, source_type) if dest_db else source_type
         )
-        # DuckDB analytical default: when preflight is skipped, any inferred or
-        # auto-mapped DECIMAL target is stored as DOUBLE so round-trip
-        # comparisons against Python floats work. Preflight-validated explicit
-        # DECIMAL(p,s) mappings (skip_preflight=False) keep their precision-safe
-        # type. Never override a user-chosen target type.
+        # DuckDB only: if preflight is skipped and the source DECIMAL has no
+        # declared precision/scale (typical for CSV / file inference), fall
+        # back to DOUBLE. This avoids inventing a scale that pads values like
+        # 3.14 with trailing zeros, while preserving explicit database decimals.
         if (
             dest_db == "duckdb"
             and _kwargs.get("skip_preflight")
             and not mappings[i].get("user_override")
             and normalize_logical_type(derived) == "decimal"
         ):
-            derived = "DOUBLE"
-            mappings[i] = {**mappings[i], "target_type": "DOUBLE"}
+            p, s = parse_numeric_precision_scale(source_type)
+            if p is None and s is None:
+                derived = "DOUBLE"
+                mappings[i] = {**mappings[i], "target_type": "DOUBLE"}
         target_column_types[col] = derived
 
     # Widen target types to at least the source DDL so schema drift to a wider

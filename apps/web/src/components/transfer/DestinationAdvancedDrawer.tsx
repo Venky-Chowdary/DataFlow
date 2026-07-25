@@ -356,7 +356,7 @@ export function DestinationAdvancedDrawer({
               <option value="when_needed">when_needed — snapshot if resume missing/broken</option>
             </select>
             <small className="df2-label-hint">
-              Delivery remains <strong>at-least-once upsert</strong> unless the destination stamps `_df_lsn` for PK effectively-once.
+              Delivery remains <strong>at-least-once upsert</strong> unless the destination stamps `_df_lsn` for PK LSN-guarded idempotent upsert.
             </small>
             {onAllowAppendOnlyChange && (
               <label className="df2-policy-toggle" style={{ marginTop: "0.75rem" }}>
@@ -369,7 +369,7 @@ export function DestinationAdvancedDrawer({
                   <strong>Allow append-only CDC</strong>
                   <small className="df2-label-hint">
                     Opt in when the destination cannot upsert. Redelivery will duplicate rows —
-                    not effectively-once. Prefer a PK upsert sink.
+                    not idempotent. Prefer a PK upsert sink.
                   </small>
                 </span>
               </label>

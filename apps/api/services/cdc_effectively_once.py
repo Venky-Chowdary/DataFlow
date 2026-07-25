@@ -1,12 +1,12 @@
-"""Effectively-once row state for PK sinks under at-least-once CDC delivery.
+"""PK-sink LSN-guarded idempotent upsert under at-least-once CDC delivery.
 
 Honesty
 -------
 Log delivery remains **at-least-once**. When destinations upsert on a primary
 key and stamp ``_df_lsn`` from the resume token, redelivery of an *older*
-token must not regress row state. That is **effectively once for PK sink
-state** — not exactly-once end-to-end delivery, and not claimed for append-
-only sinks or destinations without the LSN guard.
+token must not regress row state. That is **LSN-guarded idempotency for PK
+sink state** — not exactly-once end-to-end delivery, and not claimed for
+append-only sinks or destinations without the LSN guard.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ SINK_APPEND_ONLY = "append_only_at_least_once"
 
 
 class CdcAppendOnlySinkError(ValueError):
-    """CDC destination cannot provide PK+_df_lsn effectively-once semantics."""
+    """CDC destination cannot provide PK+_df_lsn idempotent upsert semantics."""
 
 
 @dataclass
@@ -152,7 +152,7 @@ def classify_sink_delivery(
         "supports_upsert": upsert_capable,
         "notes": [
             "Append-only / non-upsert sinks duplicate rows under at-least-once CDC.",
-            "Refuse exactly-once / effectively-once claims for this route.",
+            "Refuse exactly-once / LSN-guarded idempotency claims for this route.",
         ],
     }
 
@@ -168,7 +168,7 @@ def gate_cdc_destination(
     """Fail-fast when CDC would write append-only without an explicit allow.
 
     Default: block CDC → non-upsert sinks so operators do not silently get
-    duplicate rows on redelivery while thinking they have effectively-once.
+    duplicate rows on redelivery while thinking they have LSN-guarded idempotency.
     Pass ``allow_append_only=True`` to opt into honest at-least-once append.
     """
     posture = classify_sink_delivery(
@@ -182,7 +182,7 @@ def gate_cdc_destination(
         raise CdcAppendOnlySinkError(
             "CDC destination "
             f"'{dest_type or 'unknown'}' is append-only (or missing PK/upsert). "
-            "At-least-once redelivery will duplicate rows — not effectively-once. "
+            "At-least-once redelivery will duplicate rows — not LSN-guarded idempotent upsert. "
             "Use a PK upsert sink, or set allow_append_only=true to acknowledge "
             "duplicate risk."
         )

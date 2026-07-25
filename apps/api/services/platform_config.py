@@ -245,14 +245,16 @@ def web_url() -> str:
 
 
 def apply_railway_defaults() -> None:
-    """Set sensible defaults when running on Railway."""
-    if not is_railway():
+    """Set sensible defaults when running on Railway or any production image."""
+    if is_railway():
+        os.environ.setdefault("DATAFLOW_ENV", "production")
+    if not is_railway() and not is_production():
         return
-    os.environ.setdefault("DATAFLOW_ENV", "production")
+    # Auth is required in production unless the operator explicitly opts out.
     os.environ.setdefault("DATAFLOW_REQUIRE_AUTH", "1")
     os.environ.setdefault("DATAFLOW_TRAINING", "off")
     os.environ.setdefault("DATAFLOW_AUTO_INSTALL_DRIVERS", "0")
     os.environ.setdefault("DATAFLOW_ENABLE_DOCS", "0")
     os.environ.setdefault("DATAFLOW_SEED_DEMO", "0")
-    if os.getenv("MONGO_URL") and not os.getenv("MONGODB_URI"):
+    if is_railway() and os.getenv("MONGO_URL") and not os.getenv("MONGODB_URI"):
         os.environ["MONGODB_URI"] = os.environ["MONGO_URL"]
