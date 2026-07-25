@@ -241,8 +241,7 @@ def _resolve_config(cfg: dict[str, Any]) -> dict[str, Any]:
             "path_suffix": ".json",
         },
         "zendesk": {
-            "pagination_type": "cursor",
-            "cursor_param": "cursor",
+            "pagination_type": "link",
             "next_path": "next_page",
             "limit_param": "per_page",
         },
