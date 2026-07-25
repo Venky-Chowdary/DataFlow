@@ -992,6 +992,7 @@ The full `apps/api/tests` suite revealed two more hang/loop hazards:
 | Connection lock-timeouts for PostgreSQL / MySQL | `lock_timeout = 0` in `apply_postgres_session_guards` and no MySQL `lock_wait_timeout` let contended DDL wait forever; `widen_existing_columns_native` was emitting PostgreSQL-only `SET LOCAL lock_timeout` to MySQL/DuckDB/SQL Server cursors | `apply_postgres_session_guards` sets `lock_timeout = 120000`; `apply_mysql_session_guards` sets `lock_wait_timeout` and `innodb_lock_wait_timeout = 120`; the widen path relies on these session guards and no longer issues dialect-invalid `SET LOCAL` |
 | PostgreSQL CDC `is_available` statement timeout | Slot-creation probe could hang indefinitely | `apps/api/connectors/postgresql_change_stream.py` now `SET LOCAL statement_timeout = '5000ms'` before `pg_create_logical_replication_slot` |
 | `_attach_db_sample` `fmt` unbound | `fmt` assigned inside the `try` block | `apps/api/src/transfer/endpoint_intelligence.py` now assigns `fmt` before the `try` block |
+| Saved-connector masked secrets corrupting destination auth | `update_connector` and `saved_connectors_router.py` only preserved `password`/`private_key`; a masked `connection_string` (e.g. `postgresql://postgres:****@...`) overwrote the real saved DSN, so destination introspection failed with password auth errors even though the connector test was green | `services/connector_store.update_connector` and `src/routers/saved_connectors_router` now preserve any secret / connection-string / API key / service account that carries `****` or `<redacted>` placeholders; live reproduction showed a masked update no longer corrupts the saved password or connection string |
 
 ### Verification this session
 
@@ -1010,8 +1011,9 @@ pytest apps/api/tests/test_mongodb_to_postgresql_incremental.py \
        tests/test_execute_tracked_postgresql_to_postgresql_backfill_widen_fields.py \
        tests/test_mongodb_cdc_lsn_upsert.py \
        tests/test_cdc_effectively_once.py \
-       tests/test_adapters_integration.py
-89 passed, 5 warnings in 88.58s
+       tests/test_adapters_integration.py \
+       tests/test_dest_table_exists_create.py
+141 passed, 5 warnings in 144.13s
 ```
 
 ### What is still NOT proven

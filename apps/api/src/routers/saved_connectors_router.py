@@ -20,7 +20,7 @@ _api_root = Path(__file__).resolve().parents[2]
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
-from services.connector_store import (  # noqa: E402
+from services.connector_store import (
     create_connector,
     delete_connector,
     get_connector,
@@ -29,7 +29,7 @@ from services.connector_store import (  # noqa: E402
     mask_connector,
     update_connector,
 )
-from services.team_store import can_read_workspace, can_write_workspace  # noqa: E402
+from services.team_store import can_read_workspace, can_write_workspace
 
 router = APIRouter(prefix="/connectors/saved", tags=["Saved Connectors"])
 
@@ -97,6 +97,39 @@ def _to_ui(c) -> dict[str, Any]:
     return d
 
 
+_Secret_fields = ("password", "api_key", "service_account", "private_key")
+
+
+def _is_masked_value(value: Any) -> bool:
+    """Detect values that the UI sends back as placeholders for unchanged secrets."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        v = value.strip()
+        if not v or v == "****":
+            return True
+        if "****" in v or "<redacted>" in v.lower():
+            return True
+    return False
+
+
+def _preserve_masked_secrets(data: dict[str, Any], existing: Any) -> dict[str, Any]:
+    """Copy saved secrets back into an update payload that only carried placeholders.
+
+    This is the server-side backstop for the common UI pattern: the connector list
+    is masked, the form is re-submitted with the masked values, and without this
+    guard the saved connection string / password / API key would be overwritten by
+    ``****`` and destination introspection would fail with authentication errors.
+    """
+    out = dict(data)
+    for field in _Secret_fields:
+        if _is_masked_value(out.get(field)) and getattr(existing, field, None) is not None:
+            out[field] = getattr(existing, field)
+    if _is_masked_value(out.get("connection_string")) and getattr(existing, "connection_string", None):
+        out["connection_string"] = existing.connection_string
+    return out
+
+
 def _can_access_connector(request: Request, conn: Any) -> bool:
     """True if the actor may see or mutate this connector."""
     if not conn.workspace_id:
@@ -145,6 +178,15 @@ def save_connector(
     data = body.model_dump()
     form_test = data.pop("last_test_ok", None)
     data["workspace_id"] = workspace_id
+    # If the form re-submits a masked copy of an existing connector, preserve secrets
+    # before create_connector deletes the old record and re-creates it.
+    existing = None
+    for c in list_connectors(role=data.get("role"), workspace_id=workspace_id):
+        if c.name == data.get("name") and c.type == data.get("type"):
+            existing = c
+            break
+    if existing is not None:
+        data = _preserve_masked_secrets(data, existing)
     conn = create_connector(data)
     _persist_form_test_status(conn.id, form_test)
     refreshed = get_connector(conn.id, workspace_id=workspace_id) or conn
@@ -164,10 +206,7 @@ def update_saved_connector(
     existing = get_connector(connector_id, workspace_id=workspace_id)
     if not existing or not _can_access_connector(request, existing):
         raise HTTPException(status_code=404, detail="Connector not found")
-    if data.get("password") in ("", "****"):
-        data["password"] = existing.password
-    if data.get("private_key") in ("", "****"):
-        data["private_key"] = existing.private_key
+    data = _preserve_masked_secrets(data, existing)
     data["workspace_id"] = existing.workspace_id or workspace_id
     updated = update_connector(connector_id, data, workspace_id=workspace_id)
     if not updated:

@@ -81,19 +81,6 @@ _BIDIRECTIONAL_TYPES = frozenset({
 })
 
 
-def normalize_connector_role(connector_type: str, role: str | None) -> str:
-    """Return a persisted topology role. Dual-use types always store ``both``."""
-    t = (connector_type or "").strip().lower()
-    if t in _BIDIRECTIONAL_TYPES:
-        return "both"
-    r = (role or "both").strip().lower()
-    if r in ("destination", "dest"):
-        return "destination"
-    if r == "source":
-        return "source"
-    return "both"
-
-
 def _store_path() -> Path:
     """Return the effective file store path.
 
@@ -463,9 +450,35 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
     return conn
 
 
+def _is_masked_placeholder(value: Any) -> bool:
+    """Detect placeholder strings that must not overwrite saved secrets."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        v = value.strip()
+        if not v or v == "****":
+            return True
+        if "****" in v or "<redacted>" in v.lower():
+            return True
+    return False
+
+
+def _coerce_secret_update(new: Any, existing: Any) -> Any:
+    """Preserve an existing secret when the update payload only carries a placeholder."""
+    if _is_masked_placeholder(new) and existing not in (None, ""):
+        return existing
+    return new
+
+
 def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str | None = None) -> SavedConnector | None:
     def _merge(existing: SavedConnector) -> SavedConnector:
         merged = {**existing.to_dict(), **data, "id": connector_id}
+        # Never let a masked UI payload overwrite a saved secret / connection string.
+        for secret_field in ("password", "api_key", "service_account", "private_key"):
+            merged[secret_field] = _coerce_secret_update(merged.get(secret_field), existing.to_dict().get(secret_field))
+        merged["connection_string"] = _coerce_secret_update(
+            merged.get("connection_string"), existing.to_dict().get("connection_string")
+        )
         merged["role"] = normalize_connector_role(
             str(merged.get("type") or existing.type),
             merged.get("role"),

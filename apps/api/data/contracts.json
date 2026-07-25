@@ -38009,6 +38009,5411 @@
         "backfill_new_fields": false,
         "readiness_score": 0
       }
+    },
+    "dfc-0011dca30c214ddf": {
+      "id": "dfc-0011dca30c214ddf",
+      "name": "postgresql-to-snowflake-d1e8be7b",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "postgresql",
+        "table": "pg_to_sf_src_3b89499b",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "snowflake",
+        "table": "pg_to_sf_3e8da523",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "name",
+          "target_name": "name",
+          "source_type": "TEXT",
+          "target_type": "TEXT",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        },
+        {
+          "source": "name",
+          "target": "name",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:10.701911+00:00",
+      "updated_at": "2026-07-25T02:45:10.701911+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-28ddb22f645343d0": {
+      "id": "dfc-28ddb22f645343d0",
+      "name": "mysql-to-snowflake-289b0cf2",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "mysql",
+        "table": "mysql_to_sf_src_67b8a946",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "snowflake",
+        "table": "mysql_to_sf_a06694d4",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "name",
+          "target_name": "name",
+          "source_type": "TEXT",
+          "target_type": "TEXT",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        },
+        {
+          "source": "name",
+          "target": "name",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:12.920187+00:00",
+      "updated_at": "2026-07-25T02:45:12.920187+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-ee785bbd56e04c8f": {
+      "id": "dfc-ee785bbd56e04c8f",
+      "name": "mongodb-to-snowflake-f77194ec",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "mongodb",
+        "table": "mdb_to_sf_src_f3555e03",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "snowflake",
+        "table": "mdb_to_sf_467ce7c0",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "_id",
+          "target_name": "_id",
+          "source_type": "TEXT",
+          "target_type": "TEXT",
+          "transform": "trim_id",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "name",
+          "target_name": "name",
+          "source_type": "TEXT",
+          "target_type": "TEXT",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "profile",
+          "target_name": "profile",
+          "source_type": "OBJECT",
+          "target_type": "OBJECT",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "tags",
+          "target_name": "tags",
+          "source_type": "ARRAY",
+          "target_type": "ARRAY",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "score",
+          "target_name": "score",
+          "source_type": "TEXT",
+          "target_type": "TEXT",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "active",
+          "target_name": "active",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "transform": "boolean",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "created",
+          "target_name": "created",
+          "source_type": "TIMESTAMP",
+          "target_type": "TIMESTAMP",
+          "transform": "datetime",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "balance",
+          "target_name": "balance",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "profile_age",
+          "target_name": "profile_age",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "profile_city",
+          "target_name": "profile_city",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "extra",
+          "target_name": "extra",
+          "source_type": "TEXT",
+          "target_type": "TEXT",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "nested_array",
+          "target_name": "nested_array",
+          "source_type": "ARRAY",
+          "target_type": "ARRAY",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "_id",
+          "target": "_id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "trim_id"
+        },
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        },
+        {
+          "source": "name",
+          "target": "name",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        },
+        {
+          "source": "profile",
+          "target": "profile",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "json"
+        },
+        {
+          "source": "tags",
+          "target": "tags",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "json"
+        },
+        {
+          "source": "score",
+          "target": "score",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        },
+        {
+          "source": "active",
+          "target": "active",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "boolean"
+        },
+        {
+          "source": "created",
+          "target": "created",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "datetime"
+        },
+        {
+          "source": "balance",
+          "target": "balance",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "decimal"
+        },
+        {
+          "source": "profile_age",
+          "target": "profile_age",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        },
+        {
+          "source": "profile_city",
+          "target": "profile_city",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        },
+        {
+          "source": "extra",
+          "target": "extra",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        },
+        {
+          "source": "nested_array",
+          "target": "nested_array",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "json"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:15.081496+00:00",
+      "updated_at": "2026-07-25T02:45:15.081496+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-68cf132d92af4fb0": {
+      "id": "dfc-68cf132d92af4fb0",
+      "name": "s3-to-snowflake-27b3fbc3",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "s3",
+        "table": "users.csv",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "snowflake",
+        "table": "s3_to_sf_e558b592",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "name",
+          "target_name": "name",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        },
+        {
+          "source": "name",
+          "target": "name",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:17.205058+00:00",
+      "updated_at": "2026-07-25T02:45:17.205058+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-204c56a04725476d": {
+      "id": "dfc-204c56a04725476d",
+      "name": "redis-to-snowflake-d301c69e",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "redis",
+        "table": "redis_to_sf_2e355376:user:*",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "snowflake",
+        "table": "redis_to_sf_f34d7022",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "redis_key",
+          "target_name": "redis_key",
+          "source_type": "string",
+          "target_type": "string",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "redis_type",
+          "target_name": "redis_type",
+          "source_type": "string",
+          "target_type": "string",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "string",
+          "target_type": "string",
+          "transform": "trim_id",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "name",
+          "target_name": "name",
+          "source_type": "string",
+          "target_type": "string",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "redis_key",
+          "target": "redis_key",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        },
+        {
+          "source": "redis_type",
+          "target": "redis_type",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        },
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "trim_id"
+        },
+        {
+          "source": "name",
+          "target": "name",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:19.267548+00:00",
+      "updated_at": "2026-07-25T02:45:19.267548+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-79873617f2e74e71": {
+      "id": "dfc-79873617f2e74e71",
+      "name": "csv-to-postgresql-84b6147f",
+      "version": 1,
+      "status": "signed",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "postgresql",
+        "table": "decimal_precision_ac3a362f",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "decimal"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [
+        {
+          "id": "g1_source",
+          "status": "pass",
+          "message": "Source readable \u2014 2 columns",
+          "duration_ms": 0.01,
+          "details": {}
+        },
+        {
+          "id": "g2_destination",
+          "status": "pass",
+          "message": "Destination reachable with write access; CREATE table allowed",
+          "duration_ms": 0.0,
+          "details": {}
+        },
+        {
+          "id": "g3_schema_contract",
+          "status": "pass",
+          "message": "Schema contract valid",
+          "duration_ms": 0.2,
+          "details": {}
+        },
+        {
+          "id": "g4_mapping_confidence",
+          "status": "pass",
+          "message": "All 2 mappings meet confidence floor",
+          "duration_ms": 0.0,
+          "details": {}
+        },
+        {
+          "id": "g5_dry_run",
+          "status": "pass",
+          "message": "Sample transform dry-run passed (5 preview rows)",
+          "duration_ms": 0.1,
+          "details": {
+            "errors": [],
+            "sample_rows_scanned": 5,
+            "sample_rows_available": 5,
+            "sample_cap": 1000
+          }
+        },
+        {
+          "id": "g6_target_ddl",
+          "status": "pass",
+          "message": "Target DDL compatible (uniqueness not required for this sync mode)",
+          "duration_ms": 0.01,
+          "details": {
+            "sync_mode": "full_refresh_overwrite",
+            "scrubbed_drift_issues": 0
+          }
+        },
+        {
+          "id": "g7_capacity",
+          "status": "pass",
+          "message": "Capacity sufficient (118762783x headroom)",
+          "duration_ms": 0.0,
+          "details": {}
+        },
+        {
+          "id": "g8_reconciliation",
+          "status": "pass",
+          "message": "Dry-run reconciliation passed \u2014 5 row(s) (write-path sample)",
+          "duration_ms": 0.1,
+          "details": {
+            "source_rows": 5,
+            "target_rows": 5,
+            "preview_only": true,
+            "note": "Pre-write write-path sample check \u2014 live Gate-8 checksum runs after load"
+          }
+        },
+        {
+          "id": "g9_data_integrity",
+          "status": "pass",
+          "message": "9/9 integrity checks passed",
+          "duration_ms": 0.39,
+          "details": {
+            "checks_passed": 9,
+            "warnings": [],
+            "encoding_issues": []
+          }
+        },
+        {
+          "id": "g9_sync_contract",
+          "status": "pass",
+          "message": "Sync contract valid for full refresh overwrite",
+          "duration_ms": 0,
+          "details": {
+            "sync_mode": "full_refresh_overwrite",
+            "streams": 1,
+            "requires_cursor": false,
+            "requires_primary_key": false
+          }
+        },
+        {
+          "id": "g10_schema_policy",
+          "status": "pass",
+          "message": "Schema policy set to manual review",
+          "duration_ms": 0,
+          "details": {
+            "schema_policy": "manual_review",
+            "backfill_new_fields": false,
+            "breaking_changes": "pause_for_manual_review",
+            "policy_coerced_from_manual_review": false
+          }
+        },
+        {
+          "id": "g11_validation_posture",
+          "status": "pass",
+          "message": "Validation posture strict uses confidence threshold 0.85",
+          "duration_ms": 0,
+          "details": {
+            "validation_mode": "strict",
+            "confidence_threshold": 0.85
+          }
+        }
+      ],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:21.617799+00:00",
+      "updated_at": "2026-07-25T02:45:21.617799+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 100.0
+      }
+    },
+    "dfc-e28541934c61474f": {
+      "id": "dfc-e28541934c61474f",
+      "name": "duckdb-to-duckdb-2602133f",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "duckdb",
+        "table": "users",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "duckdb",
+        "table": "round_trip_66925bf0",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "integer",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL(10,2)",
+          "target_type": "DECIMAL(10,2)",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "note",
+          "target_name": "note",
+          "source_type": "string",
+          "target_type": "string",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "created",
+          "target_name": "created",
+          "source_type": "date",
+          "target_type": "date",
+          "transform": "date",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "active",
+          "target_name": "active",
+          "source_type": "boolean",
+          "target_type": "boolean",
+          "transform": "boolean",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "meta",
+          "target_name": "meta",
+          "source_type": "json",
+          "target_type": "json",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "tags",
+          "target_name": "tags",
+          "source_type": "json",
+          "target_type": "json",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "decimal"
+        },
+        {
+          "source": "note",
+          "target": "note",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        },
+        {
+          "source": "created",
+          "target": "created",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "date"
+        },
+        {
+          "source": "active",
+          "target": "active",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "boolean"
+        },
+        {
+          "source": "meta",
+          "target": "meta",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "json"
+        },
+        {
+          "source": "tags",
+          "target": "tags",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "json"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:23.784096+00:00",
+      "updated_at": "2026-07-25T02:45:23.784096+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-d46f1f9dafd44375": {
+      "id": "dfc-d46f1f9dafd44375",
+      "name": "duckdb-to-duckdb-11fb367c",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "duckdb",
+        "table": "src_widen_1bae234b",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "duckdb",
+        "table": "dst_widen_93891fb2",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "integer",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "note",
+          "target_name": "note",
+          "source_type": "string",
+          "target_type": "string",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL(8,2)",
+          "target_type": "DECIMAL(8,2)",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%, n=2) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "id",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "amount",
+              "confidence": 0.117,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "note",
+              "confidence": 0.077,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.873,
+          "requires_review": false,
+          "transform": "integer",
+          "source_type": "INTEGER",
+          "target_type": "integer",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "note",
+          "target": "note",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Field Note \u00b7 sample-validated (100%, n=2)",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "note",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "id",
+              "confidence": 0.0,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "amount",
+              "confidence": 0.0,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.99,
+          "requires_review": false,
+          "transform": "none",
+          "source_type": "VARCHAR",
+          "target_type": "string",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Monetary amount / payment value \u00b7 sample-validated (100%, n=2) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "amount",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "note",
+              "confidence": 0.378,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "id",
+              "confidence": 0.0,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.612,
+          "requires_review": false,
+          "transform": "decimal",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL(8,2)",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:26.643458+00:00",
+      "updated_at": "2026-07-25T02:45:26.643458+00:00",
+      "metadata": {
+        "sync_mode": "upsert",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": true,
+        "readiness_score": 0
+      }
+    },
+    "dfc-cfa6383d317e4256": {
+      "id": "dfc-cfa6383d317e4256",
+      "name": "duckdb-to-duckdb-45073416",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "duckdb",
+        "table": "src_widen_1bae234b",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "duckdb",
+        "table": "dst_widen_93891fb2",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "integer",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "note",
+          "target_name": "note",
+          "source_type": "string",
+          "target_type": "string",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL(12,2)",
+          "target_type": "DECIMAL(8,2)",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%, n=2) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "id",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "amount",
+              "confidence": 0.117,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "note",
+              "confidence": 0.077,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.873,
+          "requires_review": false,
+          "transform": "integer",
+          "source_type": "INTEGER",
+          "target_type": "integer",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "note",
+          "target": "note",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Field Note \u00b7 sample-validated (100%, n=2)",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "note",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "id",
+              "confidence": 0.0,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "amount",
+              "confidence": 0.0,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.99,
+          "requires_review": false,
+          "transform": "none",
+          "source_type": "VARCHAR",
+          "target_type": "string",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Monetary amount / payment value \u00b7 sample-validated (100%, n=2) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "amount",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "note",
+              "confidence": 0.378,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "id",
+              "confidence": 0.0,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.612,
+          "requires_review": false,
+          "transform": "decimal",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL(8,2)",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:29.418079+00:00",
+      "updated_at": "2026-07-25T02:45:29.418079+00:00",
+      "metadata": {
+        "sync_mode": "upsert",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": true,
+        "readiness_score": 0
+      }
+    },
+    "dfc-ef88971e1523443e": {
+      "id": "dfc-ef88971e1523443e",
+      "name": "duckdb-to-postgresql-188d3a0f",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "duckdb",
+        "table": "users",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "postgresql",
+        "table": "duckdb_to_pg_5a9614e0",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "integer",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL(10,2)",
+          "target_type": "DECIMAL(10,2)",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "note",
+          "target_name": "note",
+          "source_type": "string",
+          "target_type": "string",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "created",
+          "target_name": "created",
+          "source_type": "date",
+          "target_type": "date",
+          "transform": "date",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "active",
+          "target_name": "active",
+          "source_type": "boolean",
+          "target_type": "boolean",
+          "transform": "boolean",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "meta",
+          "target_name": "meta",
+          "source_type": "json",
+          "target_type": "json",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "tags",
+          "target_name": "tags",
+          "source_type": "json",
+          "target_type": "json",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "decimal"
+        },
+        {
+          "source": "note",
+          "target": "note",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        },
+        {
+          "source": "created",
+          "target": "created",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "date"
+        },
+        {
+          "source": "active",
+          "target": "active",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "boolean"
+        },
+        {
+          "source": "meta",
+          "target": "meta",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "json"
+        },
+        {
+          "source": "tags",
+          "target": "tags",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "json"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:31.844136+00:00",
+      "updated_at": "2026-07-25T02:45:31.844136+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-b4ffb60407214a6e": {
+      "id": "dfc-b4ffb60407214a6e",
+      "name": "csv-to-postgresql-33c846ba",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "postgresql",
+        "table": "edge_types_test_e5cce00d",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "BIGINT",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "user_id",
+          "target_name": "user_id",
+          "source_type": "UUID",
+          "target_type": "UUID",
+          "transform": "uuid",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "measured_at",
+          "target_name": "measured_at",
+          "source_type": "TIMESTAMPTZ",
+          "target_type": "TIMESTAMPTZ",
+          "transform": "datetime",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "sensor_value",
+          "target_name": "sensor_value",
+          "source_type": "DECIMAL",
+          "target_type": "NUMERIC",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "tax_rate",
+          "target_name": "tax_rate",
+          "source_type": "DECIMAL",
+          "target_type": "NUMERIC",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "payload",
+          "target_name": "payload",
+          "source_type": "BINARY",
+          "target_type": "BYTEA",
+          "transform": "binary",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "note",
+          "target_name": "note",
+          "source_type": "VARCHAR",
+          "target_type": "TEXT",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "flag",
+          "target_name": "flag",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "transform": "boolean",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as BIGINT \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%, n=2) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "source_type": "INTEGER",
+          "target_type": "BIGINT",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "integer",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "user_id",
+          "target": "user_id",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as UUID \u00b7 enriched: Customer or client identifier \u00b7 sample-validated (100%, n=2) \u00b7 quality: uuid pattern aligned, high-cardinality identifier aligned",
+          "user_override": false,
+          "source_type": "UUID",
+          "target_type": "UUID",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "uuid",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": true,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "measured_at",
+          "target": "measured_at",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as TIMESTAMPTZ \u00b7 enriched: Generic numeric value \u00b7 sample-validated (100%, n=2) \u00b7 quality: date-like source aligned to temporal target",
+          "user_override": false,
+          "source_type": "TIMESTAMPTZ",
+          "target_type": "TIMESTAMPTZ",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "datetime",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": true,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.5
+          }
+        },
+        {
+          "source": "sensor_value",
+          "target": "sensor_value",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as NUMERIC \u00b7 enriched: Generic numeric value \u00b7 sample-validated (100%, n=2)",
+          "user_override": false,
+          "source_type": "DECIMAL",
+          "target_type": "NUMERIC",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "decimal",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "tax_rate",
+          "target": "tax_rate",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as NUMERIC \u00b7 enriched: Tax amount \u00b7 sample-validated (100%, n=2)",
+          "user_override": false,
+          "source_type": "DECIMAL",
+          "target_type": "NUMERIC",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "decimal",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "payload",
+          "target": "payload",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as BYTEA \u00b7 enriched: Binary blob, bytea, or base64-encoded payload \u00b7 sample-validated (100%, n=2)",
+          "user_override": false,
+          "source_type": "BINARY",
+          "target_type": "BYTEA",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "binary",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "note",
+          "target": "note",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as TEXT \u00b7 enriched: Field Note \u00b7 sample-validated (100%, n=2)",
+          "user_override": false,
+          "source_type": "VARCHAR",
+          "target_type": "TEXT",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "none",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.5,
+            "unique_ratio": 1.0,
+            "likely_identifier": false,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "flag",
+          "target": "flag",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as BOOLEAN \u00b7 enriched: Field Flag \u00b7 sample-validated (100%, n=2) \u00b7 quality: boolean pattern aligned",
+          "user_override": false,
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "boolean",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": true,
+            "semantic_pattern_score": 1.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:33.933204+00:00",
+      "updated_at": "2026-07-25T02:45:33.933204+00:00",
+      "metadata": {
+        "sync_mode": "upsert",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-9cd1f43774274fa8": {
+      "id": "dfc-9cd1f43774274fa8",
+      "name": "csv-to-snowflake-b4fa61d3",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "snowflake",
+        "table": "edge_sf_539a2901",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "row_id",
+          "target_name": "row_id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "record_uuid",
+          "target_name": "record_uuid",
+          "source_type": "UUID",
+          "target_type": "UUID",
+          "transform": "uuid",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "is_active",
+          "target_name": "is_active",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "transform": "boolean",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "created_at",
+          "target_name": "created_at",
+          "source_type": "TIMESTAMPTZ",
+          "target_type": "TIMESTAMPTZ",
+          "transform": "datetime",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "metadata_json",
+          "target_name": "metadata_json",
+          "source_type": "JSON",
+          "target_type": "JSON",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "txn_yyyymmdd",
+          "target_name": "txn_yyyymmdd",
+          "source_type": "DATE",
+          "target_type": "DATE",
+          "transform": "date",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "birth_date",
+          "target_name": "birth_date",
+          "source_type": "DATE",
+          "target_type": "DATE",
+          "transform": "date",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "updated_epoch_ms",
+          "target_name": "updated_epoch_ms",
+          "source_type": "TIMESTAMPTZ",
+          "target_type": "TIMESTAMPTZ",
+          "transform": "datetime",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "customer_email",
+          "target_name": "customer_email",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "email",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "narrative_body",
+          "target_name": "narrative_body",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "payload_b64",
+          "target_name": "payload_b64",
+          "source_type": "BINARY",
+          "target_type": "BINARY",
+          "transform": "binary",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "row_id",
+          "target": "row_id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "decimal"
+        },
+        {
+          "source": "record_uuid",
+          "target": "record_uuid",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "uuid"
+        },
+        {
+          "source": "is_active",
+          "target": "is_active",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "boolean"
+        },
+        {
+          "source": "created_at",
+          "target": "created_at",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "datetime"
+        },
+        {
+          "source": "metadata_json",
+          "target": "metadata_json",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "json"
+        },
+        {
+          "source": "txn_yyyymmdd",
+          "target": "txn_yyyymmdd",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "date"
+        },
+        {
+          "source": "birth_date",
+          "target": "birth_date",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "date"
+        },
+        {
+          "source": "updated_epoch_ms",
+          "target": "updated_epoch_ms",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "datetime"
+        },
+        {
+          "source": "customer_email",
+          "target": "customer_email",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "email"
+        },
+        {
+          "source": "narrative_body",
+          "target": "narrative_body",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        },
+        {
+          "source": "payload_b64",
+          "target": "payload_b64",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "binary"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:35.935870+00:00",
+      "updated_at": "2026-07-25T02:45:35.935870+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-8a70f57d034e44cf": {
+      "id": "dfc-8a70f57d034e44cf",
+      "name": "json-to-snowflake-8b68d8e7",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "json",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "snowflake",
+        "table": "json_to_snowflake_6bf156bf",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "active",
+          "target_name": "active",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "transform": "boolean",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "created",
+          "target_name": "created",
+          "source_type": "TIMESTAMP",
+          "target_type": "TIMESTAMP",
+          "transform": "datetime",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "meta",
+          "target_name": "meta",
+          "source_type": "JSON",
+          "target_type": "JSON",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "note",
+          "target_name": "note",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "tags",
+          "target_name": "tags",
+          "source_type": "ARRAY",
+          "target_type": "ARRAY",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "active",
+          "target": "active",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "boolean"
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "decimal"
+        },
+        {
+          "source": "created",
+          "target": "created",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "datetime"
+        },
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        },
+        {
+          "source": "meta",
+          "target": "meta",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "json"
+        },
+        {
+          "source": "note",
+          "target": "note",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        },
+        {
+          "source": "tags",
+          "target": "tags",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "json"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:38.058507+00:00",
+      "updated_at": "2026-07-25T02:45:38.058507+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-53ac0cd95b2e453b": {
+      "id": "dfc-53ac0cd95b2e453b",
+      "name": "jsonl-to-snowflake-d4e356bd",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "jsonl",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "snowflake",
+        "table": "jsonl_to_snowflake_6d16397e",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "note",
+          "target_name": "note",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "created",
+          "target_name": "created",
+          "source_type": "TIMESTAMP",
+          "target_type": "TIMESTAMP",
+          "transform": "datetime",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "active",
+          "target_name": "active",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "transform": "boolean",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "meta",
+          "target_name": "meta",
+          "source_type": "JSON",
+          "target_type": "JSON",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "tags",
+          "target_name": "tags",
+          "source_type": "ARRAY",
+          "target_type": "ARRAY",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "decimal"
+        },
+        {
+          "source": "note",
+          "target": "note",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        },
+        {
+          "source": "created",
+          "target": "created",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "datetime"
+        },
+        {
+          "source": "active",
+          "target": "active",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "boolean"
+        },
+        {
+          "source": "meta",
+          "target": "meta",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "json"
+        },
+        {
+          "source": "tags",
+          "target": "tags",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "json"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:40.181856+00:00",
+      "updated_at": "2026-07-25T02:45:40.181856+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-2d9e481021084c37": {
+      "id": "dfc-2d9e481021084c37",
+      "name": "parquet-to-snowflake-6206e054",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "parquet",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "snowflake",
+        "table": "parquet_to_snowflake_3c9b8db8",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "TEXT",
+          "target_type": "TEXT",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "note",
+          "target_name": "note",
+          "source_type": "TEXT",
+          "target_type": "TEXT",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "created",
+          "target_name": "created",
+          "source_type": "TEXT",
+          "target_type": "TEXT",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "active",
+          "target_name": "active",
+          "source_type": "TEXT",
+          "target_type": "TEXT",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "meta",
+          "target_name": "meta",
+          "source_type": "TEXT",
+          "target_type": "TEXT",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "tags",
+          "target_name": "tags",
+          "source_type": "TEXT",
+          "target_type": "TEXT",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        },
+        {
+          "source": "note",
+          "target": "note",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        },
+        {
+          "source": "created",
+          "target": "created",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        },
+        {
+          "source": "active",
+          "target": "active",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        },
+        {
+          "source": "meta",
+          "target": "meta",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        },
+        {
+          "source": "tags",
+          "target": "tags",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:42.288369+00:00",
+      "updated_at": "2026-07-25T02:45:42.288369+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-44029615423f4b58": {
+      "id": "dfc-44029615423f4b58",
+      "name": "csv-to-duckdb-fcc6030a",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "duckdb",
+        "table": "f2d_csv_95417a8f",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "BIGINT",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL(38,15)",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "note",
+          "target_name": "note",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "created",
+          "target_name": "created",
+          "source_type": "TIMESTAMP",
+          "target_type": "TIMESTAMP",
+          "transform": "datetime",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "active",
+          "target_name": "active",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "transform": "boolean",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "meta",
+          "target_name": "meta",
+          "source_type": "JSON",
+          "target_type": "VARCHAR",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "tags",
+          "target_name": "tags",
+          "source_type": "ARRAY",
+          "target_type": "VARCHAR",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as BIGINT \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%, n=3) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "source_type": "INTEGER",
+          "target_type": "BIGINT",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "integer",
+          "agent": "MappingReasonerAgent",
+          "format_class": "csv",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as DECIMAL(38,15) \u00b7 enriched: Monetary amount / payment value \u00b7 sample-validated (100%, n=3) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL(38,15)",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "decimal",
+          "agent": "MappingReasonerAgent",
+          "format_class": "csv",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "note",
+          "target": "note",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as VARCHAR \u00b7 enriched: Field Note \u00b7 sample-validated (100%, n=3)",
+          "user_override": false,
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "none",
+          "agent": "MappingReasonerAgent",
+          "format_class": "csv",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.333,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "created",
+          "target": "created",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as TIMESTAMP \u00b7 enriched: Generic date value \u00b7 sample-validated (100%, n=3) \u00b7 quality: date-like source aligned to temporal target",
+          "user_override": false,
+          "source_type": "TIMESTAMP",
+          "target_type": "TIMESTAMP",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "datetime",
+          "agent": "MappingReasonerAgent",
+          "format_class": "csv",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": true,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "active",
+          "target": "active",
+          "confidence": 0.11,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as BOOLEAN \u00b7 enriched: Field Active \u00b7 sample-validated (100%, n=3) \u00b7 quality: boolean pattern aligned, string enum cannot map cleanly to BOOLEAN \u2014 use VARCHAR on new tables; for existing BOOLEAN columns remap or ALTER (mapping Widen is not DDL)",
+          "user_override": false,
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "boolean",
+          "agent": "MappingReasonerAgent",
+          "format_class": "csv",
+          "sample_parse_rate": 1.0,
+          "requires_review": true,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": true,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "meta",
+          "target": "meta",
+          "confidence": 0.92,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as VARCHAR \u00b7 enriched: Field Meta",
+          "user_override": false,
+          "source_type": "JSON",
+          "target_type": "VARCHAR",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "json",
+          "agent": "MappingReasonerAgent",
+          "format_class": "csv",
+          "sample_parse_rate": 0.667,
+          "column_profile": {
+            "null_rate": 0.333,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "tags",
+          "target": "tags",
+          "confidence": 0.92,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as VARCHAR \u00b7 enriched: Field Tags",
+          "user_override": false,
+          "source_type": "ARRAY",
+          "target_type": "VARCHAR",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "json",
+          "agent": "MappingReasonerAgent",
+          "format_class": "csv",
+          "sample_parse_rate": 0.667,
+          "column_profile": {
+            "null_rate": 0.333,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:44.627779+00:00",
+      "updated_at": "2026-07-25T02:45:44.627779+00:00",
+      "metadata": {
+        "sync_mode": "upsert",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-5142c1dfefa4457a": {
+      "id": "dfc-5142c1dfefa4457a",
+      "name": "tsv-to-duckdb-44d783e7",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "tsv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "duckdb",
+        "table": "f2d_tsv_1f375461",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "BIGINT",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL(38,15)",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "note",
+          "target_name": "note",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "created",
+          "target_name": "created",
+          "source_type": "TIMESTAMP",
+          "target_type": "TIMESTAMP",
+          "transform": "datetime",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "active",
+          "target_name": "active",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "transform": "boolean",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "meta",
+          "target_name": "meta",
+          "source_type": "JSON",
+          "target_type": "VARCHAR",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "tags",
+          "target_name": "tags",
+          "source_type": "ARRAY",
+          "target_type": "VARCHAR",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as BIGINT \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%, n=3) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "source_type": "INTEGER",
+          "target_type": "BIGINT",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "integer",
+          "agent": "MappingReasonerAgent",
+          "format_class": "tsv",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as DECIMAL(38,15) \u00b7 enriched: Monetary amount / payment value \u00b7 sample-validated (100%, n=3) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL(38,15)",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "decimal",
+          "agent": "MappingReasonerAgent",
+          "format_class": "tsv",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "note",
+          "target": "note",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as VARCHAR \u00b7 enriched: Field Note \u00b7 sample-validated (100%, n=3)",
+          "user_override": false,
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "none",
+          "agent": "MappingReasonerAgent",
+          "format_class": "tsv",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.333,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "created",
+          "target": "created",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as TIMESTAMP \u00b7 enriched: Generic date value \u00b7 sample-validated (100%, n=3) \u00b7 quality: date-like source aligned to temporal target",
+          "user_override": false,
+          "source_type": "TIMESTAMP",
+          "target_type": "TIMESTAMP",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "datetime",
+          "agent": "MappingReasonerAgent",
+          "format_class": "tsv",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": true,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "active",
+          "target": "active",
+          "confidence": 0.11,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as BOOLEAN \u00b7 enriched: Field Active \u00b7 sample-validated (100%, n=3) \u00b7 quality: boolean pattern aligned, string enum cannot map cleanly to BOOLEAN \u2014 use VARCHAR on new tables; for existing BOOLEAN columns remap or ALTER (mapping Widen is not DDL)",
+          "user_override": false,
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "boolean",
+          "agent": "MappingReasonerAgent",
+          "format_class": "tsv",
+          "sample_parse_rate": 1.0,
+          "requires_review": true,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": true,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "meta",
+          "target": "meta",
+          "confidence": 0.92,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as VARCHAR \u00b7 enriched: Field Meta",
+          "user_override": false,
+          "source_type": "JSON",
+          "target_type": "VARCHAR",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "json",
+          "agent": "MappingReasonerAgent",
+          "format_class": "tsv",
+          "sample_parse_rate": 0.667,
+          "column_profile": {
+            "null_rate": 0.333,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "tags",
+          "target": "tags",
+          "confidence": 0.92,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as VARCHAR \u00b7 enriched: Field Tags",
+          "user_override": false,
+          "source_type": "ARRAY",
+          "target_type": "VARCHAR",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "json",
+          "agent": "MappingReasonerAgent",
+          "format_class": "tsv",
+          "sample_parse_rate": 0.667,
+          "column_profile": {
+            "null_rate": 0.333,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:46.890333+00:00",
+      "updated_at": "2026-07-25T02:45:46.890333+00:00",
+      "metadata": {
+        "sync_mode": "upsert",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-8685c9f941794dc1": {
+      "id": "dfc-8685c9f941794dc1",
+      "name": "json-to-duckdb-605d4d1b",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "json",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "duckdb",
+        "table": "f2d_json_f662aac6",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "active",
+          "target_name": "active",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "transform": "boolean",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL(38,15)",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "created",
+          "target_name": "created",
+          "source_type": "TIMESTAMP",
+          "target_type": "TIMESTAMP",
+          "transform": "datetime",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "BIGINT",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "meta",
+          "target_name": "meta",
+          "source_type": "JSON",
+          "target_type": "VARCHAR",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "note",
+          "target_name": "note",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "tags",
+          "target_name": "tags",
+          "source_type": "ARRAY",
+          "target_type": "VARCHAR",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "active",
+          "target": "active",
+          "confidence": 0.11,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as BOOLEAN \u00b7 enriched: Field Active \u00b7 sample-validated (100%, n=3) \u00b7 quality: boolean pattern aligned, string enum cannot map cleanly to BOOLEAN \u2014 use VARCHAR on new tables; for existing BOOLEAN columns remap or ALTER (mapping Widen is not DDL)",
+          "user_override": false,
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "boolean",
+          "agent": "MappingReasonerAgent",
+          "format_class": "json",
+          "sample_parse_rate": 1.0,
+          "requires_review": true,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": true,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as DECIMAL(38,15) \u00b7 enriched: Monetary amount / payment value \u00b7 sample-validated (100%, n=3) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL(38,15)",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "decimal",
+          "agent": "MappingReasonerAgent",
+          "format_class": "json",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "created",
+          "target": "created",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as TIMESTAMP \u00b7 enriched: Generic date value \u00b7 sample-validated (100%, n=3) \u00b7 quality: date-like source aligned to temporal target",
+          "user_override": false,
+          "source_type": "TIMESTAMP",
+          "target_type": "TIMESTAMP",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "datetime",
+          "agent": "MappingReasonerAgent",
+          "format_class": "json",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": true,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as BIGINT \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%, n=3) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "source_type": "INTEGER",
+          "target_type": "BIGINT",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "integer",
+          "agent": "MappingReasonerAgent",
+          "format_class": "json",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "meta",
+          "target": "meta",
+          "confidence": 0.92,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as VARCHAR \u00b7 enriched: Field Meta",
+          "user_override": false,
+          "source_type": "JSON",
+          "target_type": "VARCHAR",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "json",
+          "agent": "MappingReasonerAgent",
+          "format_class": "json",
+          "sample_parse_rate": 0.667,
+          "column_profile": {
+            "null_rate": 0.333,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "note",
+          "target": "note",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as VARCHAR \u00b7 enriched: Field Note \u00b7 sample-validated (100%, n=3)",
+          "user_override": false,
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "none",
+          "agent": "MappingReasonerAgent",
+          "format_class": "json",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.333,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "tags",
+          "target": "tags",
+          "confidence": 0.92,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as VARCHAR \u00b7 enriched: Field Tags",
+          "user_override": false,
+          "source_type": "ARRAY",
+          "target_type": "VARCHAR",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "json",
+          "agent": "MappingReasonerAgent",
+          "format_class": "json",
+          "sample_parse_rate": 0.667,
+          "column_profile": {
+            "null_rate": 0.333,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:49.168985+00:00",
+      "updated_at": "2026-07-25T02:45:49.168985+00:00",
+      "metadata": {
+        "sync_mode": "upsert",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-d6ca5d40e9c04ac8": {
+      "id": "dfc-d6ca5d40e9c04ac8",
+      "name": "jsonl-to-duckdb-2f78f406",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "jsonl",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "duckdb",
+        "table": "f2d_jsonl_2bbbef4e",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "BIGINT",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL(38,15)",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "note",
+          "target_name": "note",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "created",
+          "target_name": "created",
+          "source_type": "TIMESTAMP",
+          "target_type": "TIMESTAMP",
+          "transform": "datetime",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "active",
+          "target_name": "active",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "transform": "boolean",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "meta",
+          "target_name": "meta",
+          "source_type": "JSON",
+          "target_type": "VARCHAR",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "tags",
+          "target_name": "tags",
+          "source_type": "ARRAY",
+          "target_type": "VARCHAR",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as BIGINT \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%, n=3) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "source_type": "INTEGER",
+          "target_type": "BIGINT",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "integer",
+          "agent": "MappingReasonerAgent",
+          "format_class": "jsonl",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as DECIMAL(38,15) \u00b7 enriched: Monetary amount / payment value \u00b7 sample-validated (100%, n=3) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL(38,15)",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "decimal",
+          "agent": "MappingReasonerAgent",
+          "format_class": "jsonl",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "note",
+          "target": "note",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as VARCHAR \u00b7 enriched: Field Note \u00b7 sample-validated (100%, n=3)",
+          "user_override": false,
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "none",
+          "agent": "MappingReasonerAgent",
+          "format_class": "jsonl",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.333,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "created",
+          "target": "created",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as TIMESTAMP \u00b7 enriched: Generic date value \u00b7 sample-validated (100%, n=3) \u00b7 quality: date-like source aligned to temporal target",
+          "user_override": false,
+          "source_type": "TIMESTAMP",
+          "target_type": "TIMESTAMP",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "datetime",
+          "agent": "MappingReasonerAgent",
+          "format_class": "jsonl",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": true,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "active",
+          "target": "active",
+          "confidence": 0.11,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as BOOLEAN \u00b7 enriched: Field Active \u00b7 sample-validated (100%, n=3) \u00b7 quality: boolean pattern aligned, string enum cannot map cleanly to BOOLEAN \u2014 use VARCHAR on new tables; for existing BOOLEAN columns remap or ALTER (mapping Widen is not DDL)",
+          "user_override": false,
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "boolean",
+          "agent": "MappingReasonerAgent",
+          "format_class": "jsonl",
+          "sample_parse_rate": 1.0,
+          "requires_review": true,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": true,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "meta",
+          "target": "meta",
+          "confidence": 0.92,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as VARCHAR \u00b7 enriched: Field Meta",
+          "user_override": false,
+          "source_type": "JSON",
+          "target_type": "VARCHAR",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "json",
+          "agent": "MappingReasonerAgent",
+          "format_class": "jsonl",
+          "sample_parse_rate": 0.667,
+          "column_profile": {
+            "null_rate": 0.333,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "tags",
+          "target": "tags",
+          "confidence": 0.92,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as VARCHAR \u00b7 enriched: Field Tags",
+          "user_override": false,
+          "source_type": "ARRAY",
+          "target_type": "VARCHAR",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "json",
+          "agent": "MappingReasonerAgent",
+          "format_class": "jsonl",
+          "sample_parse_rate": 0.667,
+          "column_profile": {
+            "null_rate": 0.333,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:51.464625+00:00",
+      "updated_at": "2026-07-25T02:45:51.464625+00:00",
+      "metadata": {
+        "sync_mode": "upsert",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-306b8f898f214147": {
+      "id": "dfc-306b8f898f214147",
+      "name": "parquet-to-duckdb-9fe769ce",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "parquet",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "duckdb",
+        "table": "f2d_parquet_35106cf5",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "BIGINT",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "TEXT",
+          "target_type": "DECIMAL(38,15)",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "note",
+          "target_name": "note",
+          "source_type": "TEXT",
+          "target_type": "VARCHAR",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "created",
+          "target_name": "created",
+          "source_type": "TEXT",
+          "target_type": "TIMESTAMP",
+          "transform": "datetime",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "active",
+          "target_name": "active",
+          "source_type": "TEXT",
+          "target_type": "BOOLEAN",
+          "transform": "boolean",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "meta",
+          "target_name": "meta",
+          "source_type": "TEXT",
+          "target_type": "VARCHAR",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "tags",
+          "target_name": "tags",
+          "source_type": "TEXT",
+          "target_type": "VARCHAR",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as BIGINT \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%, n=3) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "source_type": "INTEGER",
+          "target_type": "BIGINT",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "integer",
+          "agent": "MappingReasonerAgent",
+          "format_class": "parquet",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as DECIMAL(38,15) \u00b7 enriched: Monetary amount / payment value \u00b7 sample-validated (100%, n=3) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL(38,15)",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "decimal",
+          "agent": "MappingReasonerAgent",
+          "format_class": "parquet",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "note",
+          "target": "note",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as VARCHAR \u00b7 enriched: Long-form text, narrative, or CLOB content \u00b7 sample-validated (100%, n=3)",
+          "user_override": false,
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "none",
+          "agent": "MappingReasonerAgent",
+          "format_class": "parquet",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.333,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "created",
+          "target": "created",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as TIMESTAMP \u00b7 enriched: Long-form text, narrative, or CLOB content \u00b7 sample-validated (100%, n=3) \u00b7 quality: date-like source aligned to temporal target",
+          "user_override": false,
+          "source_type": "TIMESTAMP",
+          "target_type": "TIMESTAMP",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "datetime",
+          "agent": "MappingReasonerAgent",
+          "format_class": "parquet",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": true,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "active",
+          "target": "active",
+          "confidence": 0.11,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as BOOLEAN \u00b7 enriched: Long-form text, narrative, or CLOB content \u00b7 sample-validated (100%, n=3) \u00b7 quality: boolean pattern aligned, string enum cannot map cleanly to BOOLEAN \u2014 use VARCHAR on new tables; for existing BOOLEAN columns remap or ALTER (mapping Widen is not DDL)",
+          "user_override": false,
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "boolean",
+          "agent": "MappingReasonerAgent",
+          "format_class": "parquet",
+          "sample_parse_rate": 1.0,
+          "requires_review": true,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": true,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "meta",
+          "target": "meta",
+          "confidence": 0.92,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as VARCHAR \u00b7 enriched: Long-form text, narrative, or CLOB content",
+          "user_override": false,
+          "source_type": "JSON",
+          "target_type": "VARCHAR",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "json",
+          "agent": "MappingReasonerAgent",
+          "format_class": "parquet",
+          "sample_parse_rate": 0.667,
+          "column_profile": {
+            "null_rate": 0.333,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "tags",
+          "target": "tags",
+          "confidence": 0.92,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as VARCHAR \u00b7 enriched: Long-form text, narrative, or CLOB content",
+          "user_override": false,
+          "source_type": "ARRAY",
+          "target_type": "VARCHAR",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "json",
+          "agent": "MappingReasonerAgent",
+          "format_class": "parquet",
+          "sample_parse_rate": 0.667,
+          "column_profile": {
+            "null_rate": 0.333,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:53.365840+00:00",
+      "updated_at": "2026-07-25T02:45:53.365840+00:00",
+      "metadata": {
+        "sync_mode": "upsert",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-595385d0877e4a5f": {
+      "id": "dfc-595385d0877e4a5f",
+      "name": "json-to-mongodb-b3ab8101",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "json",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "mongodb",
+        "table": "json_to_mongo_f662f5f0",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "active",
+          "target_name": "active",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "transform": "boolean",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "name",
+          "target_name": "name",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "active",
+          "target": "active",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "boolean"
+        },
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        },
+        {
+          "source": "name",
+          "target": "name",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:55.513472+00:00",
+      "updated_at": "2026-07-25T02:45:55.513472+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-fd07c586cede4778": {
+      "id": "dfc-fd07c586cede4778",
+      "name": "json-to-postgresql-cabb9d2b",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "json",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "postgresql",
+        "table": "json_pg_json_decb4ed0",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "active",
+          "target_name": "active",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "transform": "boolean",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "created",
+          "target_name": "created",
+          "source_type": "TIMESTAMP",
+          "target_type": "TIMESTAMP",
+          "transform": "datetime",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "meta",
+          "target_name": "meta",
+          "source_type": "JSON",
+          "target_type": "JSON",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "note",
+          "target_name": "note",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "tags",
+          "target_name": "tags",
+          "source_type": "ARRAY",
+          "target_type": "ARRAY",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "active",
+          "target": "active",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "boolean"
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "decimal"
+        },
+        {
+          "source": "created",
+          "target": "created",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "datetime"
+        },
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        },
+        {
+          "source": "meta",
+          "target": "meta",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "json"
+        },
+        {
+          "source": "note",
+          "target": "note",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        },
+        {
+          "source": "tags",
+          "target": "tags",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "json"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:57.533039+00:00",
+      "updated_at": "2026-07-25T02:45:57.533039+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-1181da7a87344900": {
+      "id": "dfc-1181da7a87344900",
+      "name": "jsonl-to-postgresql-54f293f3",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "jsonl",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "postgresql",
+        "table": "json_pg_jsonl_8d575343",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "note",
+          "target_name": "note",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "created",
+          "target_name": "created",
+          "source_type": "TIMESTAMP",
+          "target_type": "TIMESTAMP",
+          "transform": "datetime",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "active",
+          "target_name": "active",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "transform": "boolean",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "meta",
+          "target_name": "meta",
+          "source_type": "JSON",
+          "target_type": "JSON",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "tags",
+          "target_name": "tags",
+          "source_type": "ARRAY",
+          "target_type": "ARRAY",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "decimal"
+        },
+        {
+          "source": "note",
+          "target": "note",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        },
+        {
+          "source": "created",
+          "target": "created",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "datetime"
+        },
+        {
+          "source": "active",
+          "target": "active",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "boolean"
+        },
+        {
+          "source": "meta",
+          "target": "meta",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "json"
+        },
+        {
+          "source": "tags",
+          "target": "tags",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "json"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:45:59.590403+00:00",
+      "updated_at": "2026-07-25T02:45:59.590403+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-28b04405697841c3": {
+      "id": "dfc-28b04405697841c3",
+      "name": "csv-to-postgresql-071394d8",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "postgresql",
+        "table": "payments_locale_test_ec8da9e4",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "BIGINT",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL",
+          "target_type": "NUMERIC",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as BIGINT \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%, n=5) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "source_type": "INTEGER",
+          "target_type": "BIGINT",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "integer",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as NUMERIC \u00b7 enriched: Monetary amount / payment value \u00b7 sample-validated (100%, n=5) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "source_type": "DECIMAL",
+          "target_type": "NUMERIC",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "decimal",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.2
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:46:01.797101+00:00",
+      "updated_at": "2026-07-25T02:46:01.797101+00:00",
+      "metadata": {
+        "sync_mode": "upsert",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-21fdc58cd51c44a8": {
+      "id": "dfc-21fdc58cd51c44a8",
+      "name": "csv-to-snowflake-90ce19e6",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "snowflake",
+        "table": "locale_sf_73c2bfec",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "currency",
+          "target_name": "currency",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "decimal"
+        },
+        {
+          "source": "currency",
+          "target": "currency",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:46:03.796160+00:00",
+      "updated_at": "2026-07-25T02:46:03.796160+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-8c1636e0c4ba4818": {
+      "id": "dfc-8c1636e0c4ba4818",
+      "name": "csv-to-postgresql-e3813bda",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "postgresql",
+        "table": "messy_data_test_52e7ec8e",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "BIGINT",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL",
+          "target_type": "NUMERIC",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "note",
+          "target_name": "note",
+          "source_type": "VARCHAR",
+          "target_type": "TEXT",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "created",
+          "target_name": "created",
+          "source_type": "DATE",
+          "target_type": "DATE",
+          "transform": "date",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "active",
+          "target_name": "active",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "transform": "boolean",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "meta",
+          "target_name": "meta",
+          "source_type": "JSON",
+          "target_type": "JSONB",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "tags",
+          "target_name": "tags",
+          "source_type": "ARRAY",
+          "target_type": "JSONB",
+          "transform": "json",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as BIGINT \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%, n=3) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "source_type": "INTEGER",
+          "target_type": "BIGINT",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "integer",
+          "agent": "MappingReasonerAgent",
+          "format_class": "csv",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as NUMERIC \u00b7 enriched: Monetary amount / payment value \u00b7 sample-validated (100%, n=3) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "source_type": "DECIMAL",
+          "target_type": "NUMERIC",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "decimal",
+          "agent": "MappingReasonerAgent",
+          "format_class": "csv",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "note",
+          "target": "note",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as TEXT \u00b7 enriched: Field Note \u00b7 sample-validated (100%, n=3)",
+          "user_override": false,
+          "source_type": "VARCHAR",
+          "target_type": "TEXT",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "none",
+          "agent": "MappingReasonerAgent",
+          "format_class": "csv",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.333,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "created",
+          "target": "created",
+          "confidence": 0.93,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as DATE \u00b7 enriched: Generic date value \u00b7 sample-validated (100%, n=3) \u00b7 quality: date-like source aligned to temporal target",
+          "user_override": false,
+          "source_type": "DATE",
+          "target_type": "DATE",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "date",
+          "agent": "MappingReasonerAgent",
+          "format_class": "csv",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": true,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "active",
+          "target": "active",
+          "confidence": 0.11,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as BOOLEAN \u00b7 enriched: Field Active \u00b7 sample-validated (100%, n=3) \u00b7 quality: boolean pattern aligned, string enum cannot map cleanly to BOOLEAN \u2014 use VARCHAR on new tables; for existing BOOLEAN columns remap or ALTER (mapping Widen is not DDL)",
+          "user_override": false,
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "boolean",
+          "agent": "MappingReasonerAgent",
+          "format_class": "csv",
+          "sample_parse_rate": 1.0,
+          "requires_review": true,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": true,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "meta",
+          "target": "meta",
+          "confidence": 0.92,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as JSONB \u00b7 enriched: Field Meta",
+          "user_override": false,
+          "source_type": "JSON",
+          "target_type": "JSONB",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "json",
+          "agent": "MappingReasonerAgent",
+          "format_class": "csv",
+          "sample_parse_rate": 0.667,
+          "column_profile": {
+            "null_rate": 0.333,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "tags",
+          "target": "tags",
+          "confidence": 0.92,
+          "reasoning": "New destination table \u2014 identity mapping; types will CREATE on first write as JSONB \u00b7 enriched: Field Tags",
+          "user_override": false,
+          "source_type": "ARRAY",
+          "target_type": "JSONB",
+          "assignment_strategy": "identity_passthrough",
+          "create_new": true,
+          "transform": "json",
+          "agent": "MappingReasonerAgent",
+          "format_class": "csv",
+          "sample_parse_rate": 0.667,
+          "column_profile": {
+            "null_rate": 0.333,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:46:06.042309+00:00",
+      "updated_at": "2026-07-25T02:46:06.042309+00:00",
+      "metadata": {
+        "sync_mode": "upsert",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-2cd06b888394460e": {
+      "id": "dfc-2cd06b888394460e",
+      "name": "mysql-to-mysql-33b58b00",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "mysql",
+        "table": "mysql_src_backfill_ddaaf12a",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "mysql",
+        "table": "mysql_dst_backfill_924bbeeb",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL(18,2)",
+          "target_type": "DECIMAL(18,2)",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%, n=2) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "id",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "amount",
+              "confidence": 0.117,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.873,
+          "requires_review": false,
+          "transform": "integer",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Monetary amount / payment value \u00b7 sample-validated (100%, n=2) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "amount",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "id",
+              "confidence": 0.0,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.99,
+          "requires_review": false,
+          "transform": "decimal",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL(18,2)",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:46:08.114689+00:00",
+      "updated_at": "2026-07-25T02:46:08.114689+00:00",
+      "metadata": {
+        "sync_mode": "upsert",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": true,
+        "readiness_score": 0
+      }
+    },
+    "dfc-f9eb57c92a6f468c": {
+      "id": "dfc-f9eb57c92a6f468c",
+      "name": "mysql-to-mysql-ad6290dc",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "mysql",
+        "table": "mysql_src_backfill_ddaaf12a",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "mysql",
+        "table": "mysql_dst_backfill_924bbeeb",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL(18,2)",
+          "target_type": "DECIMAL(18,2)",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "currency",
+          "target_name": "currency",
+          "source_type": "TEXT",
+          "target_type": "VARCHAR",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%, n=2) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "id",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "amount",
+              "confidence": 0.117,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.873,
+          "requires_review": false,
+          "transform": "integer",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "agent": "MappingReasonerAgent",
+          "format_class": "finance_feed",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Monetary amount / payment value \u00b7 sample-validated (100%, n=2) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "amount",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "id",
+              "confidence": 0.0,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.99,
+          "requires_review": false,
+          "transform": "decimal",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL(18,2)",
+          "agent": "MappingReasonerAgent",
+          "format_class": "finance_feed",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "currency",
+          "target": "currency",
+          "confidence": 0.93,
+          "reasoning": "No type-compatible destination column \u2014 map to a new text field (create/ADD as VARCHAR); do not coerce into incompatible DDL \u00b7 enriched: ISO currency code \u00b7 sample-validated (100%, n=2)",
+          "user_override": false,
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "assignment_strategy": "create_compatible_new",
+          "create_new": true,
+          "alternatives": [
+            {
+              "target": "id",
+              "confidence": 0.0,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "amount",
+              "confidence": 0.0,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.0,
+          "requires_review": true,
+          "transform": "none",
+          "agent": "MappingReasonerAgent",
+          "format_class": "finance_feed",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:46:10.229470+00:00",
+      "updated_at": "2026-07-25T02:46:10.229470+00:00",
+      "metadata": {
+        "sync_mode": "upsert",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": true,
+        "readiness_score": 0
+      }
+    },
+    "dfc-092a5edba78f419b": {
+      "id": "dfc-092a5edba78f419b",
+      "name": "mysql-to-mysql-48c0214e",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "mysql",
+        "table": "mysql_src_widen_7fd73c7d",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "mysql",
+        "table": "mysql_dst_widen_a8ac9f31",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "note",
+          "target_name": "note",
+          "source_type": "TEXT",
+          "target_type": "TEXT",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL(8,2)",
+          "target_type": "DECIMAL(8,2)",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%, n=2) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "id",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "amount",
+              "confidence": 0.117,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "note",
+              "confidence": 0.077,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.873,
+          "requires_review": false,
+          "transform": "integer",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "note",
+          "target": "note",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Long-form text, narrative, or CLOB content \u00b7 sample-validated (100%, n=2)",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "note",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "id",
+              "confidence": 0.0,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "amount",
+              "confidence": 0.0,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.99,
+          "requires_review": false,
+          "transform": "none",
+          "source_type": "VARCHAR",
+          "target_type": "TEXT",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Monetary amount / payment value \u00b7 sample-validated (100%, n=2) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "amount",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "note",
+              "confidence": 0.378,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "id",
+              "confidence": 0.0,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.612,
+          "requires_review": false,
+          "transform": "decimal",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL(8,2)",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:46:12.055152+00:00",
+      "updated_at": "2026-07-25T02:46:12.055152+00:00",
+      "metadata": {
+        "sync_mode": "upsert",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": true,
+        "readiness_score": 0
+      }
+    },
+    "dfc-0c7996ef351a4c5b": {
+      "id": "dfc-0c7996ef351a4c5b",
+      "name": "mysql-to-mysql-397852b6",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "mysql",
+        "table": "mysql_src_widen_7fd73c7d",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "mysql",
+        "table": "mysql_dst_widen_a8ac9f31",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "note",
+          "target_name": "note",
+          "source_type": "TEXT",
+          "target_type": "TEXT",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "DECIMAL(12,2)",
+          "target_type": "DECIMAL(8,2)",
+          "transform": "decimal",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%, n=2) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "id",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "amount",
+              "confidence": 0.117,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "note",
+              "confidence": 0.077,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.873,
+          "requires_review": false,
+          "transform": "integer",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "note",
+          "target": "note",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Long-form text, narrative, or CLOB content \u00b7 sample-validated (100%, n=2)",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "note",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "id",
+              "confidence": 0.0,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "amount",
+              "confidence": 0.0,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.99,
+          "requires_review": false,
+          "transform": "none",
+          "source_type": "VARCHAR",
+          "target_type": "TEXT",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Monetary amount / payment value \u00b7 sample-validated (100%, n=2) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "amount",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "note",
+              "confidence": 0.378,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "id",
+              "confidence": 0.0,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.612,
+          "requires_review": false,
+          "transform": "decimal",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL(8,2)",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:46:14.170150+00:00",
+      "updated_at": "2026-07-25T02:46:14.170150+00:00",
+      "metadata": {
+        "sync_mode": "upsert",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": true,
+        "readiness_score": 0
+      }
+    },
+    "dfc-36dbb2952d164e9a": {
+      "id": "dfc-36dbb2952d164e9a",
+      "name": "parquet-to-mysql-48c6eea6",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "parquet",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "mysql",
+        "table": "pq_to_mysql_97d0352b",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "name",
+          "target_name": "name",
+          "source_type": "TEXT",
+          "target_type": "TEXT",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "TEXT",
+          "target_type": "TEXT",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        },
+        {
+          "source": "name",
+          "target": "name",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:46:16.210940+00:00",
+      "updated_at": "2026-07-25T02:46:16.210940+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-74fd793242ad438b": {
+      "id": "dfc-74fd793242ad438b",
+      "name": "parquet-to-postgresql-da135045",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "parquet",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "postgresql",
+        "table": "pq_to_pg_55f80a41",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "name",
+          "target_name": "name",
+          "source_type": "TEXT",
+          "target_type": "TEXT",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "amount",
+          "target_name": "amount",
+          "source_type": "TEXT",
+          "target_type": "TEXT",
+          "transform": "none",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        },
+        {
+          "source": "name",
+          "target": "name",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        },
+        {
+          "source": "amount",
+          "target": "amount",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "none"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-25T02:46:18.198518+00:00",
+      "updated_at": "2026-07-25T02:46:18.198518+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
     }
   },
   "breakers": {
@@ -43068,6 +48473,358 @@
       "success_count": 0,
       "last_failure_time": null,
       "last_state_change": 1784946693.8790607,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-0011dca30c214ddf": {
+      "contract_id": "dfc-0011dca30c214ddf",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947510.9303255,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-28ddb22f645343d0": {
+      "contract_id": "dfc-28ddb22f645343d0",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947513.1226594,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-ee785bbd56e04c8f": {
+      "contract_id": "dfc-ee785bbd56e04c8f",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947515.3110843,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-68cf132d92af4fb0": {
+      "contract_id": "dfc-68cf132d92af4fb0",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947517.374246,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-204c56a04725476d": {
+      "contract_id": "dfc-204c56a04725476d",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947519.4679708,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-79873617f2e74e71": {
+      "contract_id": "dfc-79873617f2e74e71",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947521.6945577,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-e28541934c61474f": {
+      "contract_id": "dfc-e28541934c61474f",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947524.1656954,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-d46f1f9dafd44375": {
+      "contract_id": "dfc-d46f1f9dafd44375",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947527.012135,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-cfa6383d317e4256": {
+      "contract_id": "dfc-cfa6383d317e4256",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947529.7882867,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-ef88971e1523443e": {
+      "contract_id": "dfc-ef88971e1523443e",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947532.2125077,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-b4ffb60407214a6e": {
+      "contract_id": "dfc-b4ffb60407214a6e",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947534.016114,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-9cd1f43774274fa8": {
+      "contract_id": "dfc-9cd1f43774274fa8",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947536.1425433,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-8a70f57d034e44cf": {
+      "contract_id": "dfc-8a70f57d034e44cf",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947538.244724,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-53ac0cd95b2e453b": {
+      "contract_id": "dfc-53ac0cd95b2e453b",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947540.3693037,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-2d9e481021084c37": {
+      "contract_id": "dfc-2d9e481021084c37",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947542.4756465,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-44029615423f4b58": {
+      "contract_id": "dfc-44029615423f4b58",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947544.72093,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-5142c1dfefa4457a": {
+      "contract_id": "dfc-5142c1dfefa4457a",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947546.9740732,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-8685c9f941794dc1": {
+      "contract_id": "dfc-8685c9f941794dc1",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947549.2554786,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-d6ca5d40e9c04ac8": {
+      "contract_id": "dfc-d6ca5d40e9c04ac8",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947551.550482,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-306b8f898f214147": {
+      "contract_id": "dfc-306b8f898f214147",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947553.456014,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-595385d0877e4a5f": {
+      "contract_id": "dfc-595385d0877e4a5f",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947555.5699382,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-fd07c586cede4778": {
+      "contract_id": "dfc-fd07c586cede4778",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947557.6159685,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-1181da7a87344900": {
+      "contract_id": "dfc-1181da7a87344900",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947559.6744583,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-28b04405697841c3": {
+      "contract_id": "dfc-28b04405697841c3",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947561.8803976,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-21fdc58cd51c44a8": {
+      "contract_id": "dfc-21fdc58cd51c44a8",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947563.9760702,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-8c1636e0c4ba4818": {
+      "contract_id": "dfc-8c1636e0c4ba4818",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947566.1214702,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-2cd06b888394460e": {
+      "contract_id": "dfc-2cd06b888394460e",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947568.2005694,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-f9eb57c92a6f468c": {
+      "contract_id": "dfc-f9eb57c92a6f468c",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947570.3216772,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-092a5edba78f419b": {
+      "contract_id": "dfc-092a5edba78f419b",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947572.178219,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-0c7996ef351a4c5b": {
+      "contract_id": "dfc-0c7996ef351a4c5b",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947574.2766838,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-36dbb2952d164e9a": {
+      "contract_id": "dfc-36dbb2952d164e9a",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947576.300465,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-74fd793242ad438b": {
+      "contract_id": "dfc-74fd793242ad438b",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784947578.2814133,
       "failure_threshold": 3,
       "recovery_timeout_seconds": 60.0,
       "half_open_max": 1
