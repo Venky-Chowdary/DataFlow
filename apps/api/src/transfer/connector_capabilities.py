@@ -599,6 +599,14 @@ _UNCERTIFIED_GENERIC_SQL_BRANDS = frozenset({
     "clickhouse", "presto", "trino", "athena", "hive", "impala",
 })
 
+# Wire-compatible brand aliases that should NOT inherit Certified from the base
+# mysql / postgresql driver until CI proves them. Managed same-engine cloud
+# variants (RDS, Cloud SQL, Azure DB, Aurora) remain certified.
+_WIRE_COMPATIBLE_UNCERTIFIED_BRANDS = frozenset({
+    "singlestore", "cockroachdb", "yugabytedb", "vitess", "tidb",
+    "oceanbase", "polardb", "planetscale",
+})
+
 # Legacy helper kept for tests that still probe generic_sql brand certification.
 _CERTIFIABLE_GENERIC_SQL_BRANDS = frozenset({
     "oracle", "sql_server", "sqlserver", "mssql", "duckdb",
@@ -624,6 +632,10 @@ def _generic_sql_brand_certified(catalog_id: str) -> bool:
 def _catalog_transfer_ready(catalog_id: str, driver: str, caps: dict[str, bool]) -> bool:
     """True when the resolved driver is implemented and live (aliases inherit readiness)."""
     if not transfer_ready(caps):
+        return False
+    # Wire-compatible brand engines (e.g. SingleStore, CockroachDB, TiDB) are not
+    # automatically Certified just because they speak the mysql/postgresql protocol.
+    if catalog_id in _WIRE_COMPATIBLE_UNCERTIFIED_BRANDS:
         return False
     # Marketing SaaS/API brand IDs that only route to generic rest_api are never
     # certified transfer-ready — only the first-class driver id itself qualifies.
@@ -656,6 +668,8 @@ def _is_rest_api_brand_alias(catalog_id: str, driver: str) -> bool:
 
 def _is_uncertified_driver_alias(catalog_id: str, driver: str) -> bool:
     """True when catalog id should not inherit Certified from its resolved driver."""
+    if catalog_id in _WIRE_COMPATIBLE_UNCERTIFIED_BRANDS:
+        return True
     if _is_rest_api_brand_alias(catalog_id, driver):
         return True
     if driver == "generic_sql" and catalog_id != "generic_sql":

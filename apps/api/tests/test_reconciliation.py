@@ -6,7 +6,7 @@ from services.reconciliation import reconcile
 def test_reconcile_pass():
     r = reconcile(source_rows=10, target_rows=10, source_checksum="abc", target_checksum="abc")
     assert r.passed
-    assert "100%" in r.message
+    assert "checksums match" in r.message
 
 
 def test_reconcile_row_mismatch():

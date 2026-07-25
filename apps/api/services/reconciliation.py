@@ -451,7 +451,7 @@ def reconcile(
         if rejected_rows and rejected_rows != coerced_null_rows:
             message += f"; {rejected_rows} row(s) rejected"
     else:
-        message = f"100% row fidelity verified ({target_rows} rows)"
+        message = f"Row fidelity verified — source and target checksums match ({target_rows} rows)"
         if rejected_rows:
             message = f"Transfer verified ({target_rows} rows written, {rejected_rows} rejected)"
     return ReconciliationReport(
@@ -2073,7 +2073,6 @@ def read_target_sample(
             }
             try:
                 client = _redis_client(cfg)
-                key_set = set(str(k) for k in keys) if keys else set()
                 rows_out: list[dict[str, Any]] = []
                 if keys and sort_key:
                     # Writer stores keys as ``prefix:<sanitized_id>``.

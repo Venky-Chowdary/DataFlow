@@ -837,7 +837,7 @@ After the connection/schema-probe fixes, a real MySQL → PostgreSQL transfer of
 
 ```text
 TransferResult(success=True, records_transferred=2, operation='migration')
-Reconciliation: 100% row fidelity verified (2 rows)
+Reconciliation: row fidelity verified — source and target checksums match (2 rows)
   source_checksum: 5e33e745c37529dd == target_checksum: 5e33e745c37529dd
 Preflight gates: 11/11 passed, readiness_score: 100.0
 Mapping:
