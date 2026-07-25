@@ -251,6 +251,39 @@ def _quote_col(dialect: str, name: str) -> str:
     return quote_sql_identifier(name, '"')
 
 
+# Substrings that must never appear in a generated DDL type string.
+_DDL_TYPE_FORBIDDEN_TOKENS = (";", "'", '"', "\\", "--", "/*", "*/")
+_DDL_TYPE_ALLOWED = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_(), ]*$")
+
+
+def _sanitize_ddl_type(type_name: str) -> str:
+    """Validate a generated type name before interpolating it into DDL.
+
+    Allows standard type tokens such as ``VARCHAR(255)``,
+    ``DECIMAL(38,10)`` and ``TIMESTAMP WITH TIME ZONE``. Rejects any
+    characters that could terminate or alter the statement.
+    """
+    text = (type_name or "").strip()
+    if not text:
+        raise ValueError("Empty DDL type name")
+    if any(token in text for token in _DDL_TYPE_FORBIDDEN_TOKENS):
+        raise ValueError(f"DDL type contains forbidden characters: {type_name!r}")
+    if not _DDL_TYPE_ALLOWED.match(text):
+        raise ValueError(f"DDL type has invalid characters: {type_name!r}")
+    # Parentheses must be balanced.
+    depth = 0
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                raise ValueError(f"Unbalanced parentheses in DDL type: {type_name!r}")
+    if depth != 0:
+        raise ValueError(f"Unbalanced parentheses in DDL type: {type_name!r}")
+    return text
+
+
 def _build_widen_ddl(
     dialect: str,
     schema: str | None,
@@ -261,6 +294,7 @@ def _build_widen_ddl(
 ) -> str:
     """Generate a single ALTER COLUMN / MODIFY COLUMN statement."""
     dialect = (dialect or "").lower()
+    new_type = _sanitize_ddl_type(new_type)
     table_ref = quote_table_ref(table_name, schema, dialect=dialect, sanitize=False)
     col_q = _quote_col(dialect, col)
 

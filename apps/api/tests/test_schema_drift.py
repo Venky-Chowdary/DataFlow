@@ -191,6 +191,21 @@ def test_is_wider_type_decimal_to_float_is_lossy():
     assert is_wider_type("DECIMAL(5,2)", "REAL") is False
 
 
+def test_sanitize_ddl_type_rejects_injection():
+    from connectors.schema_drift import _sanitize_ddl_type
+
+    assert _sanitize_ddl_type("VARCHAR(255)") == "VARCHAR(255)"
+    assert _sanitize_ddl_type("DECIMAL(38,10)") == "DECIMAL(38,10)"
+    assert _sanitize_ddl_type("TIMESTAMP WITH TIME ZONE") == "TIMESTAMP WITH TIME ZONE"
+    for bad in ("VARCHAR; DROP TABLE t", "TEXT'--", 'TEXT"--', "TEXT/*x*/", "TEXT\\n", "TEXT--"):
+        try:
+            _sanitize_ddl_type(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"Expected ValueError for {bad!r}")
+
+
 def test_classify_additive_nullable_column_and_widen():
     old = {
         "columns": {"id": "INTEGER", "amount": "INTEGER"},
