@@ -1950,7 +1950,17 @@ def read_target_sample(
                     sql = f"SELECT {duckdb_col_sql} FROM {table_ref} ORDER BY {duckdb_order} LIMIT :lim"  # nosec B608
                 try:
                     result = conn.execute(sa.text(sql), params)
-                    return [dict(row) for row in result.mappings().all()]
+                    rows = result.mappings().all()
+                    # DuckDB returns column labels using the sanitized (underscore)
+                    # form of names like "fields.Name".  Re-label them with the
+                    # requested target column names so reconciliation keys match
+                    # the engine's mapping targets.
+                    if cols and cols != ["*"]:
+                        return [
+                            {cols[i]: list(row.values())[i] for i in range(len(cols))}
+                            for row in rows
+                        ]
+                    return [dict(row) for row in rows]
                 except Exception:
                     return []
 
@@ -2223,6 +2233,94 @@ def read_target_sample(
                     rows = cur.fetchall()
                 conn.close()
                 return [dict(zip(names, row)) for row in rows]
+            except Exception:
+                return []
+
+        if db_type == "bigquery":
+            from connectors.bigquery_conn import get_client, _is_local_endpoint
+
+            project_id = dest.get("database", "")
+            dataset_id = schema or "dataflow"
+            is_local, _ = _is_local_endpoint(
+                dest.get("host", ""), dest.get("connection_string", "")
+            )
+            try:
+                client = get_client(
+                    project_id=project_id,
+                    credentials_path=dest.get("connection_string", ""),
+                    service_account=dest.get("service_account", ""),
+                    host=dest.get("host", ""),
+                    port=int(dest.get("port") or 0),
+                    connection_string=dest.get("connection_string", ""),
+                )
+                table_id = f"{project_id}.{dataset_id}.{table_name}"
+                if is_local:
+                    # Emulator path: scan rows and filter in-process; avoids
+                    # query().result() hangs on the goccy emulator for some jobs.
+                    out: list[dict[str, Any]] = []
+                    scan_limit = (limit or 50) * 10 if (keys and sort_key) else (limit or 50)
+                    widened = set()
+                    if keys and sort_key:
+                        for k in keys:
+                            widened.add(k)
+                            try:
+                                if str(k).isdigit():
+                                    widened.add(int(k))
+                            except Exception:
+                                pass
+                            try:
+                                widened.add(float(k))
+                            except Exception:
+                                pass
+                    for row in client.list_rows(table_id, max_results=scan_limit):
+                        d = dict(row.items()) if hasattr(row, "items") else {k: v for k, v in zip(cols, row)}
+                        if cols and cols != ["*"]:
+                            d = {k: v for k, v in d.items() if k in cols}
+                        if keys and sort_key:
+                            if d.get(sort_key) in widened:
+                                out.append(d)
+                        else:
+                            out.append(d)
+                        if len(out) >= (limit or 50):
+                            break
+                    return out
+                # Production: use a real BigQuery query with a bounded timeout.
+                col_sql = (
+                    "*"
+                    if cols == ["*"]
+                    else quote_column_list(
+                        [require_safe_identifier(c, preserve_case=True) for c in cols]
+                    )
+                )
+                bq_order = (
+                    quote_sql_identifier(
+                        require_safe_identifier(sort_key, preserve_case=True)
+                    )
+                    if sort_key
+                    else "1"
+                )
+                if keys and sort_key:
+                    key_col = quote_sql_identifier(
+                        require_safe_identifier(sort_key, preserve_case=True)
+                    )
+                    placeholders = ",".join(["%s"] * len(keys))
+                    sql = (
+                        f"SELECT {col_sql} FROM `{table_id}` "  # nosec B608
+                        f"WHERE {key_col} IN ({placeholders}) "
+                        f"ORDER BY {bq_order} LIMIT %s"
+                    )
+                    params = (*keys, int(limit))
+                else:
+                    sql = f"SELECT {col_sql} FROM `{table_id}` ORDER BY {bq_order} LIMIT %s"  # nosec B608
+                    params = (int(limit),)
+                res = client.query(sql, timeout=60).result()
+                names = list(res.schema) if res.schema else cols
+                if names and names[0] and not isinstance(names[0], str):
+                    names = [f.name for f in names]
+                return [
+                    {k: v for k, v in dict(row.items()).items() if k in (cols if cols != ["*"] else dict(row.items()).keys())}
+                    for row in res
+                ]
             except Exception:
                 return []
 

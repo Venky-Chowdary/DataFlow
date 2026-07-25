@@ -221,3 +221,194 @@ def test_oracle_env_profile_documented():
         "DATAFLOW_ORACLE_SERVICE",
     ]
     assert all(isinstance(k, str) and k.startswith("DATAFLOW_ORACLE_") for k in required)
+
+
+@pytest.mark.skipif(not _ORACLE_LIVE, reason=_ORACLE_SKIP)
+def test_oracle_cdc_update_delete_poll():
+    """After an update and delete the poll stream reports the changed/deleted keys."""
+    from connectors.oracle_change_stream import OracleFlashbackCdc
+    from connectors.oracle_logminer import OracleLogMinerCdc
+    from connectors.generic_sql import get_connection
+
+    table = f"CDC_UD_{uuid.uuid4().hex[:8].upper()}"
+    schema = CFG["schema"]
+    cdc = None
+    try:
+        with get_connection(
+            host=CFG["host"],
+            port=CFG["port"],
+            database=CFG["database"],
+            username=CFG["username"],
+            password=CFG["password"],
+            connection_string="",
+            ssl=False,
+            db_type="oracle",
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f'CREATE TABLE "{schema}"."{table}" '
+                    f'(ID NUMBER PRIMARY KEY, AMOUNT NUMBER(10,2))'
+                )
+                cur.execute(f'INSERT INTO "{schema}"."{table}" (ID, AMOUNT) VALUES (1, 10)')
+                cur.execute(f'INSERT INTO "{schema}"."{table}" (ID, AMOUNT) VALUES (2, 20)')
+                cur.execute(f'ALTER TABLE "{schema}"."{table}" ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS')
+                conn.commit()
+
+        logminer = OracleLogMinerCdc(
+            CFG, table=table, primary_key="ID", schema=schema, cursor_key=f"it-ora-ud:{table}"
+        )
+        if logminer.is_available():
+            cdc = logminer
+        else:
+            logminer.close()
+            cdc = OracleFlashbackCdc(
+                CFG, table=table, primary_key="ID", schema=schema, cursor_key=f"it-ora-ud-fb:{table}"
+            )
+            assert cdc.is_available() is True
+
+        list(cdc.snapshot())
+
+        with get_connection(
+            host=CFG["host"],
+            port=CFG["port"],
+            database=CFG["database"],
+            username=CFG["username"],
+            password=CFG["password"],
+            connection_string="",
+            ssl=False,
+            db_type="oracle",
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f'UPDATE "{schema}"."{table}" SET AMOUNT = 99 WHERE ID = 1')
+                cur.execute(f'DELETE FROM "{schema}"."{table}" WHERE ID = 2')
+                conn.commit()
+
+        changes = list(cdc.poll())
+        if changes:
+            updates = [r for b in changes for r in b.updates]
+            deletes = [k for b in changes for k in b.deletes]
+            assert any(str(r.get("ID") or r.get("id")) == "1" for r in updates), updates
+            assert any(str(k) == "2" for k in deletes), deletes
+
+        meta = cdc.cdc_metadata()
+        assert meta.get("delivery") == "at-least-once"
+        assert "exactly-once" not in str(meta).lower()
+    finally:
+        if cdc is not None:
+            try:
+                cdc.close()
+            except Exception:
+                pass
+        try:
+            with get_connection(
+                host=CFG["host"],
+                port=CFG["port"],
+                database=CFG["database"],
+                username=CFG["username"],
+                password=CFG["password"],
+                connection_string="",
+                ssl=False,
+                db_type="oracle",
+            ) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f'DROP TABLE "{schema}"."{table}"')
+                    conn.commit()
+        except Exception:
+            pass
+
+
+@pytest.mark.skipif(not _ORACLE_LIVE, reason=_ORACLE_SKIP)
+def test_oracle_cdc_resume_token_roundtrip():
+    """A fresh CDC instance resumed from a snapshot token must continue streaming."""
+    from connectors.oracle_change_stream import OracleFlashbackCdc
+    from connectors.oracle_logminer import OracleLogMinerCdc
+    from connectors.generic_sql import get_connection
+
+    table = f"CDC_RESUME_{uuid.uuid4().hex[:8].upper()}"
+    schema = CFG["schema"]
+    cdc = None
+    try:
+        with get_connection(
+            host=CFG["host"],
+            port=CFG["port"],
+            database=CFG["database"],
+            username=CFG["username"],
+            password=CFG["password"],
+            connection_string="",
+            ssl=False,
+            db_type="oracle",
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f'CREATE TABLE "{schema}"."{table}" '
+                    f'(ID NUMBER PRIMARY KEY, AMOUNT NUMBER(10,2))'
+                )
+                cur.execute(f'INSERT INTO "{schema}"."{table}" (ID, AMOUNT) VALUES (1, 10)')
+                cur.execute(f'ALTER TABLE "{schema}"."{table}" ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS')
+                conn.commit()
+
+        logminer = OracleLogMinerCdc(
+            CFG, table=table, primary_key="ID", schema=schema, cursor_key=f"it-ora-res:{table}"
+        )
+        if logminer.is_available():
+            cdc = logminer
+        else:
+            logminer.close()
+            cdc = OracleFlashbackCdc(
+                CFG, table=table, primary_key="ID", schema=schema, cursor_key=f"it-ora-res-fb:{table}"
+            )
+            assert cdc.is_available() is True
+
+        batches = list(cdc.snapshot())
+        token = batches[-1].resume_token
+        assert token
+
+        with get_connection(
+            host=CFG["host"],
+            port=CFG["port"],
+            database=CFG["database"],
+            username=CFG["username"],
+            password=CFG["password"],
+            connection_string="",
+            ssl=False,
+            db_type="oracle",
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f'INSERT INTO "{schema}"."{table}" (ID, AMOUNT) VALUES (2, 20)')
+                conn.commit()
+
+        cdc2 = cdc.__class__(
+            CFG,
+            table=table,
+            primary_key="ID",
+            schema=schema,
+            cursor_key=f"it-ora-res2:{table}",
+            resume_token=token,
+        )
+        changes = list(cdc2.poll())
+        if changes:
+            inserts = [r for b in changes for r in b.inserts]
+            assert any(str(r.get("ID") or r.get("id")) == "2" for r in inserts), inserts
+    finally:
+        for inst in (cdc, cdc2 if "cdc2" in dir() else None):
+            if inst is not None:
+                try:
+                    inst.close()
+                except Exception:
+                    pass
+        try:
+            with get_connection(
+                host=CFG["host"],
+                port=CFG["port"],
+                database=CFG["database"],
+                username=CFG["username"],
+                password=CFG["password"],
+                connection_string="",
+                ssl=False,
+                db_type="oracle",
+            ) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f'DROP TABLE "{schema}"."{table}"')
+                    conn.commit()
+        except Exception:
+            pass

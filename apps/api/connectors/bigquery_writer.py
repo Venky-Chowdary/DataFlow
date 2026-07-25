@@ -34,7 +34,25 @@ class WriteResult(_WriteResult):
 
 
 def bq_type(inferred: str) -> str:
-    return ddl_type("bigquery", inferred)
+    """Map logical type to a BigQuery SchemaField type string.
+
+    BigQuery's NUMERIC / BIGNUMERIC are fixed-point types with fixed caps
+    (38,9) and (76,38); the Python client does not accept arbitrary
+    ``BIGNUMERIC(p,s)`` parameter strings and the emulator hangs when given
+    one.  Strip parameters and fall back to STRING when the source scale
+    or precision exceeds what BIGNUMERIC can store.
+    """
+    import re
+
+    raw = ddl_type("bigquery", inferred)
+    match = re.match(r"(BIGNUMERIC|NUMERIC)\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)", raw, re.IGNORECASE)
+    if match:
+        precision = int(match.group(2))
+        scale = int(match.group(3))
+        if scale > 38 or precision > 76:
+            return "STRING"
+        return "BIGNUMERIC"
+    return raw
 
 
 def build_bigquery_merge_sql(
@@ -109,16 +127,6 @@ def write_mapped_rows(
     policy = transform_error_policy(error_policy)
     conflict_columns = list(conflict_columns or [])
 
-    if stub_writes_allowed():
-        rows, checksum, chunks = simulate_stub_write(
-            data_rows=data_rows, table_name=table_name, target_schema=dataset_id,
-            on_checkpoint=on_checkpoint,
-        )
-        return WriteResult(
-            ok=True, rows_written=rows, table_name=table_name, target_schema=dataset_id,
-            checksum=checksum, chunks_completed=chunks, driver="stub",
-        )
-
     try:
         from google.cloud import bigquery  # noqa: F401
     except ImportError:
@@ -160,7 +168,9 @@ def write_mapped_rows(
     try:
         from google.cloud import bigquery
 
-        from connectors.bigquery_conn import get_client
+        from connectors.bigquery_conn import get_client, _is_local_endpoint
+
+        is_local, _ = _is_local_endpoint(host, connection_string)
 
         client = get_client(
             project_id=project_id,
@@ -253,34 +263,59 @@ def write_mapped_rows(
             staging = bigquery.Table(staging_id, schema=schema_fields)
             client.create_table(staging, exists_ok=True)
             try:
-                # Load jobs (not streaming inserts) so staging is immediately MERGE-readable.
-                load_config = bigquery.LoadJobConfig(
-                    schema=schema_fields,
-                    write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-                    source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-                )
-                for chunk_idx in range(chunks):
-                    start = chunk_idx * CHUNK_SIZE
-                    batch = mapped_rows[start : start + CHUNK_SIZE]
-                    if not batch:
-                        break
-                    records = records_for_bigquery(batch, target_cols, bq_types)
-                    load_job = client.load_table_from_json(
-                        records, staging_id, job_config=load_config
+                if is_local:
+                    # goccy/bigquery-emulator does not support load jobs; streaming
+                    # inserts into a staging table are immediately MERGE-readable.
+                    for chunk_idx in range(chunks):
+                        start = chunk_idx * CHUNK_SIZE
+                        batch = mapped_rows[start : start + CHUNK_SIZE]
+                        if not batch:
+                            break
+                        records = records_for_bigquery(batch, target_cols, bq_types)
+                        errors = client.insert_rows_json(staging_id, records)
+                        if errors:
+                            raise RuntimeError(f"BigQuery staging insert errors: {errors[:3]}")
+                        merge_sql = build_bigquery_merge_sql(
+                            table_id,
+                            staging_id,
+                            target_cols,
+                            conflict_columns,
+                            lsn_column=DF_LSN_COL if DF_LSN_COL in target_cols else None,
+                        )
+                        client.query(merge_sql).result()
+                        written += len(batch)
+                        chunks_completed = chunk_idx + 1
+                        if on_checkpoint:
+                            on_checkpoint(chunks_completed, chunks, written)
+                else:
+                    # Load jobs (not streaming inserts) so staging is immediately MERGE-readable.
+                    load_config = bigquery.LoadJobConfig(
+                        schema=schema_fields,
+                        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+                        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
                     )
-                    load_job.result()
-                    merge_sql = build_bigquery_merge_sql(
-                        table_id,
-                        staging_id,
-                        target_cols,
-                        conflict_columns,
-                        lsn_column=DF_LSN_COL if DF_LSN_COL in target_cols else None,
-                    )
-                    client.query(merge_sql).result()
-                    written += len(batch)
-                    chunks_completed = chunk_idx + 1
-                    if on_checkpoint:
-                        on_checkpoint(chunks_completed, chunks, written)
+                    for chunk_idx in range(chunks):
+                        start = chunk_idx * CHUNK_SIZE
+                        batch = mapped_rows[start : start + CHUNK_SIZE]
+                        if not batch:
+                            break
+                        records = records_for_bigquery(batch, target_cols, bq_types)
+                        load_job = client.load_table_from_json(
+                            records, staging_id, job_config=load_config
+                        )
+                        load_job.result()
+                        merge_sql = build_bigquery_merge_sql(
+                            table_id,
+                            staging_id,
+                            target_cols,
+                            conflict_columns,
+                            lsn_column=DF_LSN_COL if DF_LSN_COL in target_cols else None,
+                        )
+                        client.query(merge_sql).result()
+                        written += len(batch)
+                        chunks_completed = chunk_idx + 1
+                        if on_checkpoint:
+                            on_checkpoint(chunks_completed, chunks, written)
             finally:
                 client.delete_table(staging_id, not_found_ok=True)
         else:
