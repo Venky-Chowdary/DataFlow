@@ -874,7 +874,6 @@ def _align_registry_honesty() -> None:
         "kinesis", "pubsub", "delta", "hudi",
         "databricks", "synapse", "sap", "workday", "netsuite", "servicenow",
         "dynamics365", "msgraph", "google_workspace", "sharepoint",
-        "shopify", "zendesk",
         # duckdb is CI-proven via generic_sql; kafka/iceberg/oracle/sqlserver are first-class.
     }
     for key in fiction:
@@ -900,13 +899,11 @@ def get_connector_capability(key: str) -> dict[str, Any]:
         "kinesis", "pubsub", "delta", "hudi",
         "databricks", "synapse", "sap", "workday", "netsuite", "servicenow",
         "dynamics365", "msgraph", "google_workspace", "sharepoint",
-        "shopify", "zendesk",
     }
     try:
         from src.transfer.connector_capabilities import (
             _DRIVER_CAPS,
             _FILE_CAPS,
-            _source_only_ready,
             get_capabilities,
             resolve_driver_type,
             transfer_ready,
@@ -928,9 +925,9 @@ def get_connector_capability(key: str) -> dict[str, Any]:
         if normalized in _FICTION:
             cap["transfer_ready"] = False
         elif first_class or (driver in _DRIVER_CAPS and normalized == driver):
-            cap["transfer_ready"] = bool(transfer_ready(caps) or _source_only_ready(caps))
+            cap["transfer_ready"] = bool(transfer_ready(caps))
         elif driver in _DRIVER_CAPS and normalized not in _FICTION and driver != "rest_api":
-            cap["transfer_ready"] = bool(transfer_ready(caps) or _source_only_ready(caps))
+            cap["transfer_ready"] = bool(transfer_ready(caps))
         else:
             # Catch-all rest_api / unknown → not transfer_ready under this brand name
             cap["transfer_ready"] = False

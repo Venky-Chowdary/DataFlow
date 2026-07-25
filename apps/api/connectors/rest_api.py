@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 from typing import Any
 
 import requests
@@ -83,14 +84,14 @@ def _build_headers(cfg: dict[str, Any]) -> dict[str, str]:
     headers: dict[str, str] = {"Accept": "application/json", "User-Agent": "DataFlow/1.0"}
     mode = (cfg.get("auth_mode") or cfg.get("authPrefix") or "").lower()
     auth_header = (cfg.get("auth_header") or "").strip()
-    auth_prefix = (cfg.get("auth_prefix") or "").strip() or "Bearer"
+    auth_prefix = (cfg.get("auth_prefix") if cfg.get("auth_prefix") is not None else "Bearer").strip()
     api_key = token(cfg.get("api_key", ""), cfg.get("connection_string", ""), cfg.get("username", ""), cfg.get("password", ""))
     username = (cfg.get("username") or "").strip()
     password = (cfg.get("password") or "").strip()
 
     if auth_header:
         if api_key:
-            headers[auth_header] = api_key
+            headers[auth_header] = f"{auth_prefix}{api_key}" if auth_prefix else api_key
     elif mode in ("bearer", "token", "") and api_key:
         headers["Authorization"] = f"{auth_prefix} {api_key}"
     elif mode in ("api_key", "apikey") and api_key:
@@ -98,6 +99,9 @@ def _build_headers(cfg: dict[str, Any]) -> dict[str, str]:
     elif username and password:
         creds = base64.b64encode(f"{username}:{password}".encode()).decode()
         headers["Authorization"] = f"Basic {creds}"
+    extra_headers = cfg.get("extra_headers") or {}
+    if isinstance(extra_headers, dict):
+        headers.update(extra_headers)
     return headers
 
 
@@ -142,6 +146,53 @@ def _default_base_url(catalog_id: str) -> str:
     return host_overrides.get(catalog_id, "")
 
 
+def _template_context(cfg: dict[str, Any]) -> dict[str, str]:
+    """Build a substitution mapping for base-URL templates like {shop}.{brand}.com."""
+    extra = cfg.get("extra") or {}
+    if isinstance(extra, str):
+        try:
+            extra = json.loads(extra)
+        except Exception:
+            extra = {}
+    if not isinstance(extra, dict):
+        extra = {}
+    ctx: dict[str, Any] = {**extra, **cfg}
+    # Common placeholder aliases so users can reuse standard fields.
+    aliases = {
+        "shop": ["shop", "store", "subdomain", "username", "database"],
+        "store": ["store", "shop", "subdomain", "username", "database"],
+        "subdomain": ["subdomain", "shop", "store", "username", "database"],
+        "domain": ["domain", "subdomain", "shop", "store", "username", "database"],
+        "instance": ["instance", "subdomain", "domain", "shop", "username", "database"],
+    }
+    for placeholder, keys in aliases.items():
+        if placeholder not in ctx:
+            for k in keys:
+                v = ctx.get(k)
+                if isinstance(v, str) and v.strip():
+                    ctx[placeholder] = v.strip()
+                    break
+    return {k: str(v) for k, v in ctx.items() if isinstance(v, (str, int, float, bool))}
+
+
+def _substitute_base_url(host: str, cfg: dict[str, Any]) -> str:
+    """Replace {placeholder} tokens in a base URL using config/extra fields."""
+    if "{" not in host:
+        return host
+    ctx = _template_context(cfg)
+
+    def _repl(match: re.Match) -> str:
+        key = match.group(1)
+        if key in ctx:
+            return str(ctx[key])
+        raise ValueError(
+            f"Missing required placeholder '{key}' for host '{host}'. "
+            f"Set it in extra.{{key}} or a standard field (shop/subdomain/domain/instance)."
+        )
+
+    return re.sub(r"\{(\w+)\}", _repl, host)
+
+
 def _parse_json_config(cfg: dict[str, Any]) -> dict[str, Any]:
     """Allow advanced overrides via the connection_string JSON or extra dict."""
     overrides: dict[str, Any] = {}
@@ -164,6 +215,9 @@ def _resolve_config(cfg: dict[str, Any]) -> dict[str, Any]:
     host = (merged.get("host") or merged.get("endpoint_url") or "").strip()
     if not host:
         host = _default_base_url(catalog_id)
+    host = _substitute_base_url(host, merged)
+    if not host:
+        raise ValueError(f"Host / base URL is required for REST API source (type={catalog_id})")
     host = base_url(host, "")
     merged["host"] = host
 
@@ -171,15 +225,35 @@ def _resolve_config(cfg: dict[str, Any]) -> dict[str, Any]:
     merged["object_path"] = object_path
 
     # Brand-native pagination — do not invent offset for cursor/Link APIs.
-    saas_defaults: dict[str, dict[str, str]] = {
+    saas_defaults: dict[str, dict[str, Any]] = {
         "airtable": {
             "pagination_type": "cursor",
             "cursor_param": "offset",
             "next_path": "offset",
             "data_path": "records",
+            "limit_param": "pageSize",
         },
-        "shopify": {"pagination_type": "link"},
-        "zendesk": {"pagination_type": "link"},
+        "shopify": {
+            "pagination_type": "link",
+            "auth_header": "X-Shopify-Access-Token",
+            "auth_prefix": "",
+            "limit_param": "limit",
+            "path_suffix": ".json",
+        },
+        "zendesk": {
+            "pagination_type": "cursor",
+            "cursor_param": "cursor",
+            "next_path": "next_page",
+            "limit_param": "per_page",
+        },
+        "notion": {
+            "pagination_type": "cursor",
+            "cursor_param": "start_cursor",
+            "next_path": "next_cursor",
+            "data_path": "results",
+            "limit_param": "page_size",
+            "extra_headers": {"Notion-Version": "2022-06-28"},
+        },
     }
     for key, value in saas_defaults.get(catalog_id, {}).items():
         if not merged.get(key):
@@ -187,6 +261,10 @@ def _resolve_config(cfg: dict[str, Any]) -> dict[str, Any]:
     if catalog_id == "zendesk" and not merged.get("data_path") and object_path:
         # /api/v2/tickets → tickets list key
         merged["data_path"] = object_path.rsplit("/", 1)[-1]
+    if catalog_id == "shopify" and not merged.get("data_path") and object_path:
+        # products.json → products
+        key = object_path.rsplit("/", 1)[-1]
+        merged["data_path"] = key[: -len(".json")] if key.endswith(".json") else key
 
     pagination_type = (merged.get("pagination_type") or merged.get("pagination") or "offset").lower()
     if pagination_type not in {"offset", "page", "cursor", "link", "none"}:
@@ -203,6 +281,7 @@ def _resolve_config(cfg: dict[str, Any]) -> dict[str, Any]:
     merged.setdefault("auth_header", "")
     merged.setdefault("auth_prefix", "Bearer")
     merged.setdefault("auth_query", "api_key")
+    merged.setdefault("extra_headers", {})
 
     return merged
 
@@ -212,6 +291,9 @@ def _get_url(cfg: dict[str, Any], pagination: dict[str, Any], next_url: str | No
         return next_url
     host = cfg["host"].rstrip("/")
     obj = cfg["object_path"].strip("/")
+    suffix = (cfg.get("path_suffix") or "").strip()
+    if obj and suffix and not obj.endswith(suffix):
+        obj = f"{obj}{suffix}"
     if not host:
         raise ValueError("Host / base URL is required for REST API source")
     if obj:
@@ -397,7 +479,9 @@ def read_object(
                 )
             if next_url:
                 seen_cursors.add(next_url)
-            records, next_url, _ = _read_page(cfg, {limit_param: page_limit}, next_url)
+            # Do not append limit/page params to an absolute next URL from a Link header.
+            page_params = {} if next_url else {limit_param: page_limit}
+            records, next_url, _ = _read_page(cfg, page_params, next_url)
             all_rows.extend(records)
             if not next_url or not records:
                 break

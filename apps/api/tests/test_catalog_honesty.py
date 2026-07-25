@@ -12,9 +12,9 @@ from src.transfer.connector_capabilities import (
 from src.transfer.registry import validate_transfer
 
 
-def test_rest_api_brand_alias_is_planned_not_live() -> None:
-    """Catalog brand IDs that only route to generic rest_api are Planned."""
-    for brand in ("zendesk", "shopify", "netsuite", "servicenow"):
+def test_rest_api_brand_stubs_are_planned() -> None:
+    """Catalog brand IDs with only a generic rest_api driver are Planned."""
+    for brand in ("netsuite", "servicenow"):
         driver = resolve_driver_type(brand)
         assert driver == "rest_api", brand
         row = enrich_catalog_entry(
@@ -26,8 +26,20 @@ def test_rest_api_brand_alias_is_planned_not_live() -> None:
         assert row["capability_label"] == "Planned", brand
 
 
+def test_dedicated_saas_source_only_drivers() -> None:
+    """New brand-specific REST drivers are source-only live, not full transfer."""
+    for brand in ("stripe", "shopify", "zendesk", "notion", "airtable"):
+        row = enrich_catalog_entry(
+            {"id": brand, "name": brand.title(), "category": "saas", "status": "live", "description": ""}
+        )
+        assert row["transfer_ready"] is False, brand
+        assert row["effective_status"] == "live", brand
+        assert row["certification_tier"] == "source_only", brand
+        assert "Source" in row["capability_label"], brand
+
+
 def test_dedicated_saas_drivers_activation_and_source_only() -> None:
-    """Salesforce/HubSpot are reverse-ETL write-ready; Stripe remains source-only."""
+    """Salesforce/HubSpot are reverse-ETL write-ready; Stripe source-only."""
     for brand in ("hubspot", "salesforce"):
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live", "description": ""}
@@ -35,12 +47,6 @@ def test_dedicated_saas_drivers_activation_and_source_only() -> None:
         assert row["transfer_ready"] is True, brand
         assert row["certification_tier"] == "certified", brand
         assert row["effective_status"] == "live", brand
-    stripe = enrich_catalog_entry(
-        {"id": "stripe", "name": "Stripe", "category": "saas", "status": "live", "description": ""}
-    )
-    assert stripe["transfer_ready"] is False
-    assert stripe["certification_tier"] == "source_only"
-    assert stripe["effective_status"] == "live"
 
 
 def test_first_class_rest_api_is_source_only() -> None:

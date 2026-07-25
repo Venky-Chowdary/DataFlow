@@ -39,6 +39,10 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "salesforce": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "hubspot": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "stripe": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "shopify": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "zendesk": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "notion": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "airtable": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "rest_api": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "influxdb": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "neo4j": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
@@ -132,7 +136,7 @@ SUGGESTED_SOURCES = [
     "csv___tsv", "json", "jsonl", "excel", "parquet",
     "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
     "sftp",
-    "salesforce", "hubspot", "stripe",
+    "salesforce", "hubspot", "stripe", "shopify", "zendesk", "notion", "airtable",
 ]
 
 # Catalog entry ids that map to implemented drivers — blocks false "Full transfer" on aliases.
@@ -145,7 +149,7 @@ _TRANSFER_READY_CORE = frozenset({
     "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage",
     "redis", "elasticsearch", "sqlite", "generic_sql",
     "iceberg", "apache_iceberg", "kafka", "apache_kafka",
-    "salesforce", "hubspot",
+    "salesforce", "hubspot", "stripe", "shopify", "zendesk", "notion", "airtable",
     "csv___tsv", "json", "jsonl", "ndjson", "excel", "parquet",
     "sftp", "email",
     "pgvector", "qdrant", "weaviate", "pinecone", "milvus",
@@ -215,6 +219,10 @@ def default_port(driver_type: str) -> int:
         "salesforce": 443,
         "hubspot": 443,
         "stripe": 443,
+        "shopify": 443,
+        "zendesk": 443,
+        "notion": 443,
+        "airtable": 443,
         "rest_api": 443,
         "influxdb": 8086,
         "neo4j": 7474,
@@ -408,6 +416,10 @@ _DRIVER_MODULE: dict[str, str | None] = {
     "salesforce": "requests",
     "hubspot": "requests",
     "stripe": "requests",
+    "shopify": "requests",
+    "zendesk": "requests",
+    "notion": "requests",
+    "airtable": "requests",
     "rest_api": "requests",
     "influxdb": "requests",
     "neo4j": "requests",
@@ -630,7 +642,12 @@ def _generic_sql_brand_certified(catalog_id: str) -> bool:
 
 
 def _catalog_transfer_ready(catalog_id: str, driver: str, caps: dict[str, bool]) -> bool:
-    """True when the resolved driver is implemented and live (aliases inherit readiness)."""
+    """True when the resolved driver supports a production read+write transfer.
+
+    Source-only connectors are live as sources but are not ``transfer_ready``
+    (certified full transfer).  Use ``certification_tier`` / ``source_ready``
+    for source-only eligibility.
+    """
     if not transfer_ready(caps):
         return False
     # Wire-compatible brand engines (e.g. SingleStore, CockroachDB, TiDB) are not
@@ -726,8 +743,10 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def source_ready(caps: dict[str, bool]) -> bool:
-    """True when connector can act as a transfer source (duplex / file)."""
+    """True when connector can act as a transfer source (source-only / duplex / file)."""
     if caps.get("file_source"):
+        return True
+    if caps.get("source_only") and caps.get("read"):
         return True
     return bool(caps.get("read") and caps.get("write") and not caps.get("dest_only"))
 
