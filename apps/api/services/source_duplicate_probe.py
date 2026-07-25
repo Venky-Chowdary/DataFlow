@@ -15,56 +15,28 @@ logger = logging.getLogger(__name__)
 
 
 def _sql_duplicates(cfg: dict[str, Any], table: str, pk: str, limit: int = 5) -> list[dict[str, Any]]:
-    from connectors.generic_sql import _engine
-    from connectors.sql_identifiers import quote_sql_identifier
-    from services.dialect_profiles import quote_char_for
-
-    engine = _engine(cfg)
-    dialect = engine.dialect.name
-
-    # Prefer a dialect-specific fully qualified table name. Most dialects accept
-    # "schema"."table"; keep it simple and let SQLAlchemy parse if needed.
-    schema = (cfg.get("schema") or "").strip()
-    if schema:
-        table = f"{schema}.{table}"
-
-    q = getattr(engine.dialect, "identifier_preparer", None)
-    quote_char = quote_char_for(dialect) or '"'
-    if q is not None:
-        def _quote(name: str) -> str:
-            return q.quote(str(name))
-    else:
-        def _quote(name: str) -> str:
-            return quote_sql_identifier(str(name), quote_char)
-
-    quoted_table = _quote(table)
-    quoted_pk = _quote(pk)
-
     import sqlalchemy as sa
 
-    # Some dialects (Trino/Presto/Spark) do not allow positional parameters in
-    # the GROUP BY/HAVING clause, so build the LIMIT literally but small.
-    sql = f"""
-        SELECT {quoted_pk}, COUNT(*) AS _cnt
-        FROM {quoted_table}
-        GROUP BY {quoted_pk}
-        HAVING COUNT(*) > 1
-        LIMIT {int(limit)}
-    """
-    try:
-        with engine.connect() as conn:
-            rows = conn.execute(sa.text(sql)).fetchall()
-    except sa.exc.SQLAlchemyError:
-        # Try with a subquery for dialects that reject HAVING without an alias.
-        sql = f"""
-            SELECT * FROM (
-                SELECT {quoted_pk}, COUNT(*) AS _cnt
-                FROM {quoted_table}
-                GROUP BY {quoted_pk}
-            ) _dupes WHERE _cnt > 1 LIMIT {int(limit)}
-        """
-        with engine.connect() as conn:
-            rows = conn.execute(sa.text(sql)).fetchall()
+    from connectors.generic_sql import _engine
+
+    engine = _engine(cfg)
+    schema = (cfg.get("schema") or "").strip() or None
+
+    # Build a dialect-agnostic query so SQLAlchemy emits the right LIMIT/TOP/FETCH
+    # syntax for SQL Server, Oracle, etc.
+    tbl = sa.table(table, schema=schema)
+    pk_col = sa.column(pk)
+    cnt = sa.func.count().label("_cnt")
+    stmt = (
+        sa.select(pk_col, cnt)
+        .select_from(tbl)
+        .group_by(pk_col)
+        .having(cnt > 1)
+        .limit(limit)
+    )
+
+    with engine.connect() as conn:
+        rows = conn.execute(stmt).fetchall()
 
     return [
         {"value": row[0] if row else None, "count": int(row[1]) if len(row) > 1 else 1}
