@@ -41,6 +41,12 @@ services:
     env_file: .env
     environment:
       DATAFLOW_ENV: production
+      DATAFLOW_REQUIRE_AUTH: 1
+      DATAFLOW_ENABLE_DOCS: 0
+      DATAFLOW_TRAINING: off
+      DATAFLOW_SEED_DEMO: 0
+      DATAFLOW_WORKER_FLEET: 1
+      DATAFLOW_MULTI_REPLICA: 1
       MONGODB_URI: mongodb://${MONGO_ROOT_USER:-dataflow}:${MONGO_ROOT_PASSWORD}@mongodb:27017/?authSource=admin
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
       DATAFLOW_DATA_DIR: /data/data
@@ -55,6 +61,32 @@ services:
         condition: service_healthy
     ports:
       - "${API_PORT:-8000}:8000"
+
+  # Dedicated worker for CDC / batch transfer execution.  Runs the same image with
+  # a different start command so API pods stay responsive under load.
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    command: ["/app/scripts/start-worker.sh"]
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATAFLOW_ENV: production
+      DATAFLOW_WORKER_FLEET: 1
+      DATAFLOW_TRAINING: off
+      DATAFLOW_SEED_DEMO: 0
+      MONGODB_URI: mongodb://${MONGO_ROOT_USER:-dataflow}:${MONGO_ROOT_PASSWORD}@mongodb:27017/?authSource=admin
+      DATAFLOW_DATA_DIR: /data/data
+      DATAFLOW_UPLOAD_DIR: /data/uploads
+      DATAFLOW_VECTOR_STORE_DIR: /data/vector_store
+    volumes:
+      - dataflow_data:/data/data
+      - dataflow_uploads:/data/uploads
+      - dataflow_vectors:/data/vector_store
+    depends_on:
+      mongodb:
+        condition: service_healthy
 
   web:
     build:

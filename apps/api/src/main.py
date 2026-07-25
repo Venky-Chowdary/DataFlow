@@ -219,13 +219,30 @@ app.add_middleware(RBACMiddleware)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(TenantMiddleware)
 
+# Enterprise CORS: no wildcard methods/headers, explicit list only.
+# Credentials are only sent from the configured origins (cors_origins) or the
+# Railway subdomain regex.  Add ``X-Workspace-Id`` / ``X-Correlation-ID`` to the
+# allowlist so multi-tenant and trace headers work across origins.
+_ALLOW_HEADERS = [
+    "accept",
+    "accept-encoding",
+    "accept-language",
+    "authorization",
+    "content-type",
+    "origin",
+    "x-correlation-id",
+    "x-requested-with",
+    "x-workspace-id",
+]
+_ALLOW_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
     allow_origin_regex=_cors_origin_regex,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=_ALLOW_METHODS,
+    allow_headers=_ALLOW_HEADERS,
 )
 
 
@@ -236,14 +253,15 @@ async def add_timing_header(request: Request, call_next):
     request.state.correlation_id = correlation_id
     try:
         response = await call_next(request)
-    except (Exception, BaseException) as exc:
+    except BaseException as exc:
         # Catch unhandled endpoint and TaskGroup exceptions here so the outer
         # Starlette/anyio task group does not surface an ExceptionGroup and
         # crash the worker. Re-raise process-control exceptions.
         if isinstance(exc, (SystemExit, KeyboardInterrupt)):
             raise
-        # Unwrap a single ExceptionGroup so a clear message reaches the client.
-        if isinstance(exc, BaseExceptionGroup) and len(getattr(exc, "exceptions", [])) == 1:
+        # Unwrap a single exception group (anyio TaskGroup / asyncio) so a clear
+        # message reaches the client.  Duck-type ``exceptions`` to stay portable.
+        if len(getattr(exc, "exceptions", [])) == 1:
             exc = exc.exceptions[0]
         logger.exception("Unhandled error on %s", request.url.path)
         detail = str(exc) if not is_production() else "An unexpected error occurred"
@@ -255,6 +273,12 @@ async def add_timing_header(request: Request, call_next):
     process_time = time.time() - start_time
     response.headers["X-Process-Time"] = f"{process_time:.4f}s"
     response.headers["X-Correlation-ID"] = correlation_id
+    # Baseline security headers for the enterprise API.  HSTS is intentionally
+    # omitted here so TLS termination (Cloudflare, AWS ALB, etc.) can add it.
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
 
     path = request.url.path
     if (
