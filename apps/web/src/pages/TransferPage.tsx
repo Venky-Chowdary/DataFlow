@@ -2860,6 +2860,10 @@ export function TransferPage({
         void stripControlCharsAndRerun();
         break;
       }
+      case "quarantine_and_rerun": {
+        void stripControlCharsAndRerun("balanced");
+        break;
+      }
       case "open_bad_data_fix":
         // ValidateDashboard opens the drawer; keep as no-op fallback.
         break;
@@ -3301,8 +3305,12 @@ export function TransferPage({
       case "open_bad_data_fix":
         return { onPrimaryFix: () => setStep(STEP_MAP), primaryFixLabel: action.label };
       case "rerun_mapping":
-      case "quarantine_and_rerun":
         return { onPrimaryFix: () => executePreflight(), primaryFixLabel: action.label };
+      case "quarantine_and_rerun":
+        return {
+          onPrimaryFix: () => void stripControlCharsAndRerun("balanced"),
+          primaryFixLabel: action.label,
+        };
       case "check_connection":
         return { onPrimaryFix: () => setStep(STEP_SOURCE), primaryFixLabel: action.label };
       case "fix_source_keys":
