@@ -261,3 +261,115 @@ def test_stripe_read_customers():
     batch = stripe.read_object(cfg={"api_key": "sk_test_123"}, limit=10)
     assert "id" in batch.headers
     assert len(batch.rows) == 2
+
+
+@responses.activate
+def test_stripe_writer_creates_customers():
+    import connectors.stripe_writer as stripe_writer
+
+    responses.add(
+        responses.POST,
+        re.compile(r"https://api\.stripe\.com/v1/customers"),
+        json={"id": "cus_1"},
+        status=200,
+    )
+    responses.add(
+        responses.POST,
+        re.compile(r"https://api\.stripe\.com/v1/customers"),
+        json={"id": "cus_2"},
+        status=200,
+    )
+    r = stripe_writer.write_mapped_rows(
+        api_key="sk_test_123",
+        table_name="customers",
+        headers=["name", "email"],
+        data_rows=[["Alice", "alice@example.com"], ["Bob", "bob@example.com"]],
+        mappings=[
+            {"source": "name", "target": "name", "transform": "direct"},
+            {"source": "email", "target": "email", "transform": "direct"},
+        ],
+        write_mode="upsert",
+    )
+    assert r.ok
+    assert r.rows_written == 2
+    assert r.table_name == "customers"
+
+
+@responses.activate
+def test_stripe_writer_updates_by_id():
+    import connectors.stripe_writer as stripe_writer
+
+    responses.add(
+        responses.POST,
+        re.compile(r"https://api\.stripe\.com/v1/customers/cus_existing"),
+        json={"id": "cus_existing"},
+        status=200,
+    )
+    r = stripe_writer.write_mapped_rows(
+        api_key="sk_test_123",
+        table_name="customers",
+        headers=["id", "name"],
+        data_rows=[["cus_existing", "New Name"]],
+        mappings=[
+            {"source": "id", "target": "id", "transform": "direct"},
+            {"source": "name", "target": "name", "transform": "direct"},
+        ],
+        write_mode="upsert",
+        conflict_columns=["id"],
+    )
+    assert r.ok
+    assert r.rows_written == 1
+    assert "cus_existing" in responses.calls[0].request.url
+
+
+@responses.activate
+def test_stripe_writer_quarantines_bad_rows():
+    import connectors.stripe_writer as stripe_writer
+
+    responses.add(
+        responses.POST,
+        re.compile(r"https://api\.stripe\.com/v1/customers"),
+        json={"error": {"message": "invalid"}},
+        status=400,
+    )
+    responses.add(
+        responses.POST,
+        re.compile(r"https://api\.stripe\.com/v1/customers"),
+        json={"id": "cus_ok"},
+        status=200,
+    )
+    r = stripe_writer.write_mapped_rows(
+        api_key="sk_test_123",
+        table_name="customers",
+        headers=["name"],
+        data_rows=[["Bad"], ["Good"]],
+        mappings=[{"source": "name", "target": "name", "transform": "direct"}],
+        write_mode="upsert",
+        error_policy="quarantine",
+    )
+    assert r.ok
+    assert r.rows_written == 1
+    assert r.rejected_rows == 1
+
+
+@responses.activate
+def test_stripe_writer_auth_fails_closed():
+    import connectors.stripe_writer as stripe_writer
+
+    responses.add(
+        responses.POST,
+        re.compile(r"https://api\.stripe\.com/v1/customers"),
+        json={"error": {"message": "unauth"}},
+        status=401,
+    )
+    r = stripe_writer.write_mapped_rows(
+        api_key="sk_test_123",
+        table_name="customers",
+        headers=["name"],
+        data_rows=[["Alice"]],
+        mappings=[{"source": "name", "target": "name", "transform": "direct"}],
+        write_mode="upsert",
+        error_policy="quarantine",
+    )
+    assert r.ok is False
+    assert "authentication" in (r.error or "").lower()

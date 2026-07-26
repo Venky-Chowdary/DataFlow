@@ -38,7 +38,7 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     # Reverse-ETL destinations: full read+write (warehouse → CRM activation).
     "salesforce": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "hubspot": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
-    "stripe": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "stripe": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True},
     "shopify": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "zendesk": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "notion": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},

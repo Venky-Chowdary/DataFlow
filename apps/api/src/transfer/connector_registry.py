@@ -159,8 +159,7 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
         probe=("connectors.stripe", "test_stripe"),
         reader="connectors.stripe",
         reader_fn="read_object",
-        writer="connectors.saas_common",
-        writer_fn="write_not_supported",
+        writer="connectors.stripe_writer",
     ),
     "rest_api": ConnectorModules(
         probe=("connectors.rest_api", "test_connection"),
