@@ -1,4 +1,4 @@
-"""Unit tests for source-only SaaS connectors using mocked HTTP responses."""
+"""Unit tests for SaaS source and reverse-ETL connectors using mocked HTTP responses."""
 
 from __future__ import annotations
 
@@ -13,8 +13,10 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
+import connectors.airtable_writer as airtable_writer  # noqa: E402
 import connectors.hubspot as hubspot  # noqa: E402
 import connectors.salesforce as salesforce  # noqa: E402
+import connectors.shopify_writer as shopify_writer  # noqa: E402
 import connectors.stripe as stripe  # noqa: E402
 
 
@@ -373,3 +375,160 @@ def test_stripe_writer_auth_fails_closed():
     )
     assert r.ok is False
     assert "authentication" in (r.error or "").lower()
+
+
+@responses.activate
+def test_airtable_writer_creates_records():
+    responses.add(
+        responses.POST,
+        re.compile(r"https://api\.airtable\.com/v0/appXXX/Contacts"),
+        json={"records": [{"id": "rec1"}]},
+        status=200,
+    )
+    r = airtable_writer.write_mapped_rows(
+        api_key="patXXX",
+        database="appXXX",
+        table_name="Contacts",
+        headers=["name"],
+        data_rows=[["Alice"]],
+        mappings=[{"source": "name", "target": "name", "transform": "direct"}],
+        write_mode="upsert",
+    )
+    assert r.ok
+    assert r.rows_written == 1
+    assert r.table_name == "Contacts"
+
+
+@responses.activate
+def test_airtable_writer_upserts_by_conflict_column():
+    responses.add(
+        responses.PATCH,
+        re.compile(r"https://api\.airtable\.com/v0/appXXX/Contacts"),
+        json={"records": [{"id": "rec2"}]},
+        status=200,
+    )
+    r = airtable_writer.write_mapped_rows(
+        api_key="patXXX",
+        database="appXXX",
+        table_name="Contacts",
+        headers=["email", "name"],
+        data_rows=[["a@example.com", "Alice"]],
+        mappings=[
+            {"source": "email", "target": "email", "transform": "direct"},
+            {"source": "name", "target": "name", "transform": "direct"},
+        ],
+        write_mode="upsert",
+        conflict_columns=["email"],
+    )
+    assert r.ok
+    assert r.rows_written == 1
+
+
+@responses.activate
+def test_airtable_writer_updates_by_record_id():
+    responses.add(
+        responses.PATCH,
+        re.compile(r"https://api\.airtable\.com/v0/appXXX/Contacts"),
+        json={"records": [{"id": "rec_existing"}]},
+        status=200,
+    )
+    r = airtable_writer.write_mapped_rows(
+        api_key="patXXX",
+        database="appXXX",
+        table_name="Contacts",
+        headers=["id", "name"],
+        data_rows=[["rec_existing", "New Name"]],
+        mappings=[
+            {"source": "id", "target": "id", "transform": "direct"},
+            {"source": "name", "target": "name", "transform": "direct"},
+        ],
+        write_mode="upsert",
+    )
+    assert r.ok
+    assert r.rows_written == 1
+
+
+@responses.activate
+def test_airtable_writer_auth_fails_closed():
+    responses.add(
+        responses.POST,
+        re.compile(r"https://api\.airtable\.com/v0/appXXX/Contacts"),
+        json={"error": "Unauthorized"},
+        status=401,
+    )
+    r = airtable_writer.write_mapped_rows(
+        api_key="patXXX",
+        database="appXXX",
+        table_name="Contacts",
+        headers=["name"],
+        data_rows=[["Alice"]],
+        mappings=[{"source": "name", "target": "name", "transform": "direct"}],
+        write_mode="upsert",
+        error_policy="quarantine",
+    )
+    assert r.ok is False
+    assert "authentication" in (r.error or "").lower()
+
+
+@responses.activate
+def test_shopify_writer_creates_customer():
+    responses.add(
+        responses.POST,
+        re.compile(r"https://myshop\.myshopify\.com/admin/api/2024-04/customers\.json"),
+        json={"customer": {"id": "123"}},
+        status=200,
+    )
+    r = shopify_writer.write_mapped_rows(
+        host="myshop.myshopify.com",
+        api_key="shpat_xxx",
+        table_name="customers",
+        headers=["first_name", "email"],
+        data_rows=[["Alice", "alice@example.com"]],
+        mappings=[
+            {"source": "first_name", "target": "first_name", "transform": "direct"},
+            {"source": "email", "target": "email", "transform": "direct"},
+        ],
+        write_mode="upsert",
+    )
+    assert r.ok
+    assert r.rows_written == 1
+    assert r.table_name == "customers"
+
+
+@responses.activate
+def test_shopify_writer_updates_by_id():
+    responses.add(
+        responses.PUT,
+        re.compile(r"https://myshop\.myshopify\.com/admin/api/2024-04/customers/456\.json"),
+        json={"customer": {"id": "456"}},
+        status=200,
+    )
+    r = shopify_writer.write_mapped_rows(
+        host="myshop.myshopify.com",
+        api_key="shpat_xxx",
+        table_name="customers",
+        headers=["id", "first_name"],
+        data_rows=[["456", "New"]],
+        mappings=[
+            {"source": "id", "target": "id", "transform": "direct"},
+            {"source": "first_name", "target": "first_name", "transform": "direct"},
+        ],
+        write_mode="upsert",
+        conflict_columns=["id"],
+    )
+    assert r.ok
+    assert r.rows_written == 1
+
+
+@responses.activate
+def test_shopify_writer_missing_shop_fails():
+    r = shopify_writer.write_mapped_rows(
+        api_key="shpat_xxx",
+        table_name="customers",
+        headers=["first_name"],
+        data_rows=[["Alice"]],
+        mappings=[{"source": "first_name", "target": "first_name", "transform": "direct"}],
+        write_mode="upsert",
+    )
+    assert r.ok is False
+    assert "shop" in (r.error or "").lower()

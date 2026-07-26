@@ -47,11 +47,13 @@ def request(
     data: dict[str, Any] | None = None,
     timeout: float = 30.0,
     retry_budget: RetryBudget | None = None,
+    auth_header: str = "Authorization",
+    auth_scheme: str = "Bearer",
 ) -> requests.Response:
     """Make an HTTP request with retriable transient handling (429 / 5xx / timeouts)."""
     h = dict(headers or {})
-    if token:
-        h.setdefault("Authorization", f"Bearer {token}")
+    if token and auth_header:
+        h.setdefault(auth_header, f"{auth_scheme} {token}".strip())
     h.setdefault("Accept", "application/json")
     h.setdefault("User-Agent", "DataFlow/1.0")
 

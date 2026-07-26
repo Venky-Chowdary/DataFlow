@@ -193,8 +193,7 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
         probe=("connectors.shopify", "test_shopify"),
         reader="connectors.shopify",
         reader_fn="read_object",
-        writer="connectors.saas_common",
-        writer_fn="write_not_supported",
+        writer="connectors.shopify_writer",
     ),
     "zendesk": ConnectorModules(
         probe=("connectors.zendesk", "test_zendesk"),
@@ -214,8 +213,7 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
         probe=("connectors.airtable", "test_airtable"),
         reader="connectors.airtable",
         reader_fn="read_object",
-        writer="connectors.saas_common",
-        writer_fn="write_not_supported",
+        writer="connectors.airtable_writer",
     ),
     "pgvector": ConnectorModules(
         probe=("connectors.postgresql", "test_postgresql"),
