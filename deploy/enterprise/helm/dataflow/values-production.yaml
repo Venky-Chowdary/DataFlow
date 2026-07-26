@@ -1,0 +1,69 @@
+# Production overrides for customer-dedicated EKS deployments.
+# Fill in Terraform outputs before installing:
+#
+#   terraform -chdir=deploy/enterprise/terraform/aws output -raw rds_cluster_endpoint
+#   terraform -chdir=deploy/enterprise/terraform/aws output -raw redis_primary_endpoint
+#   terraform -chdir=deploy/enterprise/terraform/aws output -raw documentdb_endpoint
+#   terraform -chdir=deploy/enterprise/terraform/aws output -raw s3_data_bucket
+#   terraform -chdir=deploy/enterprise/terraform/aws output -raw irsa_role_arn
+#
+global:
+  environment: prod
+
+imagePullSecrets: []
+
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: "FILL_IRSA_ROLE_ARN"
+
+api:
+  image:
+    tag: stable
+  replicas: 3
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      cpu: "4"
+      memory: 4Gi
+
+web:
+  image:
+    tag: stable
+  replicas: 3
+
+worker:
+  image:
+    tag: stable
+  replicas: 3
+
+scheduler:
+  image:
+    tag: stable
+  replicas: 1
+
+data:
+  rds:
+    host: "FILL_RDS_ENDPOINT"
+  redis:
+    host: "FILL_REDIS_ENDPOINT"
+  documentdb:
+    host: "FILL_DOCDB_ENDPOINT"
+
+objectStore:
+  s3:
+    bucket: "FILL_S3_DATA_BUCKET"
+
+externalSecrets:
+  enabled: true
+  secretName: dataflow-master
+  remoteSecretName: "dataflow/master-XXXXXXXX"
+
+ingress:
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: "FILL_ACM_CERTIFICATE_ARN"
+    alb.ingress.kubernetes.io/ssl-policy: "ELBSecurityPolicy-TLS13-1-2-2021-06"

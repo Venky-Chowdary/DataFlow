@@ -1,0 +1,182 @@
+global:
+  environment: prod
+  domain: dataflow.example.com
+
+imagePullSecrets: []
+
+serviceAccount:
+  create: true
+  annotations:
+    eks.amazonaws.com/role-arn: ""
+  name: dataflow
+
+api:
+  enabled: true
+  image:
+    repository: ghcr.io/venky-chowdary/dataflow-api
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicas: 3
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  service:
+    type: ClusterIP
+    port: 8000
+  health:
+    livenessPath: /health
+    readinessPath: /health/ready
+  nodeSelector:
+    workload: api
+  tolerations: []
+  affinity: {}
+
+web:
+  enabled: true
+  image:
+    repository: ghcr.io/venky-chowdary/dataflow-web
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicas: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  service:
+    type: ClusterIP
+    port: 3000
+  nodeSelector:
+    workload: api
+  tolerations: []
+  affinity: {}
+
+worker:
+  enabled: true
+  image:
+    repository: ghcr.io/venky-chowdary/dataflow-api
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicas: 2
+  mode: cdc,batch
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+  nodeSelector:
+    workload: worker
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: worker
+      effect: NoSchedule
+  affinity: {}
+
+scheduler:
+  enabled: true
+  image:
+    repository: ghcr.io/venky-chowdary/dataflow-api
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  nodeSelector:
+    workload: worker
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: worker
+      effect: NoSchedule
+
+data:
+  rds:
+    host: ""
+    port: 5432
+    database: dataflow
+    username: dataflow
+  redis:
+    host: ""
+    port: 6379
+  documentdb:
+    host: ""
+    port: 27017
+    database: dataflow
+    username: dataflow
+
+objectStore:
+  s3:
+    bucket: ""
+    region: us-east-1
+
+auth:
+  requireAuth: "1"
+  enableDocs: "0"
+  training: "off"
+  seedDemo: "0"
+
+externalSecrets:
+  enabled: false
+  refreshInterval: 1h
+  secretStoreName: aws-secrets-manager
+  secretName: dataflow-master
+  remoteSecretName: ""
+
+ingress:
+  enabled: true
+  className: alb
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.io/listen-ports: '[{"HTTPS":443}]'
+  tls:
+    enabled: true
+    certificateArn: ""
+
+networkPolicy:
+  enabled: true
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+horizontalPodAutoscaler:
+  enabled: true
+  api:
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  worker:
+    minReplicas: 2
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+serviceMonitor:
+  enabled: false
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL

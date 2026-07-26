@@ -1,0 +1,65 @@
+{{ if .Values.horizontalPodAutoscaler.enabled -}}
+{{ if .Values.api.enabled -}}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "dataflow.fullname" . }}-api
+  labels:
+    app.kubernetes.io/component: api
+    {{- include "dataflow.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "dataflow.fullname" . }}-api
+  minReplicas: {{ .Values.horizontalPodAutoscaler.api.minReplicas }}
+  maxReplicas: {{ .Values.horizontalPodAutoscaler.api.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.horizontalPodAutoscaler.api.targetCPUUtilizationPercentage }}
+    {{- if .Values.horizontalPodAutoscaler.api.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.horizontalPodAutoscaler.api.targetMemoryUtilizationPercentage }}
+    {{- end }}
+{{- end }}
+---
+{{ if .Values.worker.enabled -}}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "dataflow.fullname" . }}-worker
+  labels:
+    app.kubernetes.io/component: worker
+    {{- include "dataflow.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "dataflow.fullname" . }}-worker
+  minReplicas: {{ .Values.horizontalPodAutoscaler.worker.minReplicas }}
+  maxReplicas: {{ .Values.horizontalPodAutoscaler.worker.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.horizontalPodAutoscaler.worker.targetCPUUtilizationPercentage }}
+    {{- if .Values.horizontalPodAutoscaler.worker.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.horizontalPodAutoscaler.worker.targetMemoryUtilizationPercentage }}
+    {{- end }}
+{{- end }}
+{{- end }}

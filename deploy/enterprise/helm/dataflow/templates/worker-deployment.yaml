@@ -1,0 +1,49 @@
+{{ if .Values.worker.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dataflow.fullname" . }}-worker
+  labels:
+    app.kubernetes.io/component: worker
+    {{- include "dataflow.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: worker
+      {{- include "dataflow.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: worker
+        {{- include "dataflow.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "dataflow.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: worker
+          image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
+          imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
+          command:
+            - python
+            - -m
+            - src.worker_main
+          env:
+            {{- include "dataflow.commonEnv" . | nindent 12 }}
+            - name: DATAFLOW_WORKER_FLEET
+              value: "1"
+            - name: DATAFLOW_WORKER_MODE
+              value: {{ .Values.worker.mode | quote }}
+          {{- include "dataflow.secretEnvFrom" . | nindent 10 }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+      nodeSelector:
+        {{- toYaml .Values.worker.nodeSelector | nindent 8 }}
+      tolerations:
+        {{- toYaml .Values.worker.tolerations | nindent 8 }}
+      affinity:
+        {{- toYaml .Values.worker.affinity | nindent 8 }}
+{{- end }}

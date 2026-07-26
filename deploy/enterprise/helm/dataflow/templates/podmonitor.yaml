@@ -1,0 +1,15 @@
+{{ if .Values.serviceMonitor.enabled -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "dataflow.fullname" . }}
+  labels:
+    {{- include "dataflow.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "dataflow.selectorLabels" . | nindent 6 }}
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+{{- end }}
