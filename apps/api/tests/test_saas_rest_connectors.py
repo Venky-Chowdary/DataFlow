@@ -113,8 +113,8 @@ def test_airtable_cursor_pagination():
 
 
 def test_source_only_saas_tiers():
-    """Zendesk/Notion remain source-only until real reverse-ETL writers land."""
-    for brand in ("zendesk", "notion"):
+    """No dedicated SaaS brand should remain source-only once a reverse-ETL writer ships."""
+    for brand in ():
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live"}
         )
@@ -124,8 +124,8 @@ def test_source_only_saas_tiers():
 
 
 def test_transfer_ready_saas_tiers():
-    """Stripe/Airtable/Shopify now have real reverse-ETL writers."""
-    for brand in ("stripe", "shopify", "airtable"):
+    """SaaS connectors with real reverse-ETL writers are certified."""
+    for brand in ("stripe", "shopify", "airtable", "zendesk", "notion"):
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live"}
         )
