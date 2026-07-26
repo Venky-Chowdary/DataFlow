@@ -375,6 +375,13 @@ export function buildExecutiveSummary(
   const passed = preflight.passed_count ?? 0;
   const total = preflight.total_gates || (preflight.gates?.length ?? 0);
   const readinessCaption = `${passed}/${total} gates · readiness is the share of gates that passed`;
+  const complianceOnly = Boolean(
+    preflight.proof_bundle?.transfer_decision?.compliance_only
+    || displayBlockers.every((b) =>
+      /pii\/compliance|compliance review/i.test(b.message)
+      || b.source?.details?.compliance_ack_required === true
+    )
+  ) && rootCauseCount > 0 && blockedGates === 0;
 
   if (preflight.passed) {
     return {
@@ -385,6 +392,18 @@ export function buildExecutiveSummary(
       readinessCaption,
       railLine: "Ready to execute",
       aiPromptHint: null,
+    };
+  }
+
+  if (complianceOnly) {
+    return {
+      title: "Approve PII to unlock Execute",
+      subtitle: `${passed}/${total} engine gates passed · compliance acknowledgment required`,
+      untilLines: ["Confirm governance policy allows moving detected PII fields"],
+      rootCauseCount: 1,
+      readinessCaption,
+      railLine: "Awaiting PII / compliance approval",
+      aiPromptHint: "Why is PII review required for this transfer?",
     };
   }
 

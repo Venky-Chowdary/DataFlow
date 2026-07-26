@@ -197,6 +197,11 @@ interface ValidateDashboardProps {
   } | null;
   /** Trigger preflight from the dashboard (same as the rail CTA). */
   onRunPreflight?: () => void;
+  /**
+   * Operator attested governance policy allows moving detected PII.
+   * Re-runs Validate with compliance_acknowledged=true.
+   */
+  onAcknowledgeCompliance?: () => void;
   /** Current Studio mappings for durable repair apply. */
   repairMappings?: RepairMapping[];
   /** After Approve & apply — merge updated mappings into Studio. */
@@ -562,6 +567,7 @@ export function ValidateDashboard({
   onOpenMappingProof,
   mappingProofSummary = null,
   onRunPreflight,
+  onAcknowledgeCompliance,
   repairMappings = [],
   onRepairMappingsApplied,
   repairJobId = "",
@@ -2284,6 +2290,32 @@ export function ValidateDashboard({
                   )}
                   {item.why && !b.id.includes("dry_run") && (
                     <span className="df2-vd-blocker-why">{item.why}</span>
+                  )}
+                  {(
+                    b.details?.compliance_ack_required === true
+                    || /pii\/compliance|compliance review/i.test(b.message)
+                  ) && onAcknowledgeCompliance && (
+                    <div className="df2-vd-blocker-actions df2-vd-fix-actions">
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        leadingIcon={<DtIcon name="shield" size={14} />}
+                        onClick={() => onAcknowledgeCompliance()}
+                        disabled={running}
+                        title="Confirm your data governance policy allows moving these PII fields for this transfer"
+                      >
+                        Approve PII for this transfer
+                      </Button>
+                      {onReviewMappings && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => onReviewMappings()}
+                        >
+                          Review mappings
+                        </Button>
+                      )}
+                    </div>
                   )}
                   {(encodingBlocks || hasEncodingIssue) && (b.id.includes("dry_run") || /format-control|replacement character/i.test(b.message)) && (
                     <div className="df2-vd-blocker-actions df2-vd-fix-actions">

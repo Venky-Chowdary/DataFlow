@@ -449,14 +449,15 @@ def apply_policy_gates(
     proof_bundle = result.get("proof_bundle") or {}
     transfer_decision = (proof_bundle.get("transfer_decision") or {}).get("decision")
     proof_blockers = (proof_bundle.get("transfer_decision") or {}).get("blockers") or []
+    compliance_only = bool(
+        (proof_bundle.get("transfer_decision") or {}).get("compliance_only")
+    ) or is_compliance_only_block(proof_blockers)
 
     is_strict = (validation_mode or "strict").lower() in {"strict", "maximum"}
-    compliance_only = is_compliance_only_block(proof_blockers)
 
     # In non-strict modes, PII/compliance review is a warning, not a hard blocker.
-    # Real transfers with email/name fields should be able to proceed after the user
-    # sees the compliance risk. Reconciliation failures and semantic confidence issues
-    # still stop the transfer.
+    # In strict mode, compliance-only stays a dedicated ack gate (Approve PII CTA)
+    # rather than masquerading as a failed schema/data check.
     if is_strict:
         active_proof_blockers = list(proof_blockers)
     else:
@@ -470,10 +471,18 @@ def apply_policy_gates(
         {"id": b["id"], "message": b["message"], "details": b.get("details", {})}
         for b in result.get("blockers", [])
     ]
-    blockers.extend(
-        {"id": f"proof_{idx}", "message": str(message), "details": {}}
-        for idx, message in enumerate(active_proof_blockers)
-    )
+    for idx, message in enumerate(active_proof_blockers):
+        is_compliance = (
+            "PII/compliance" in str(message) or "compliance review" in str(message).lower()
+        )
+        blockers.append({
+            "id": f"proof_{idx}",
+            "message": str(message),
+            "details": {
+                "compliance_ack_required": bool(is_compliance and compliance_only),
+                "remediation_kind": "acknowledge_compliance" if is_compliance else "fix_proof",
+            },
+        })
 
     if policy_gates:
         gates = [*result.get("gates", []), *policy_gates]
@@ -510,10 +519,16 @@ def apply_policy_gates(
             for msg in gate_blocker_messages:
                 if msg not in decision_blockers:
                     decision_blockers.append(msg)
+            # Compliance-only: keep decision=review so the UI shows Approve PII,
+            # not a generic "schema failed" block with contradictory 12/12 passed.
+            decision_label = "review" if compliance_only and not any(
+                g.get("status") == GateStatus.BLOCK.value for g in gates
+            ) else "block"
             proof_bundle["passed"] = False
             proof_bundle["transfer_decision"] = {
-                "decision": "block",
+                "decision": decision_label,
                 "blockers": decision_blockers,
+                "compliance_only": compliance_only,
                 "reason": "; ".join(decision_blockers)
                 if decision_blockers
                 else "Preflight gates blocked the transfer",
@@ -532,6 +547,7 @@ def apply_policy_gates(
             proof_bundle["transfer_decision"] = {
                 "decision": decision,
                 "blockers": [],
+                "compliance_only": False,
                 "reason": (
                     "No blocking issues detected"
                     if not warnings
@@ -601,6 +617,7 @@ def run_file_preflight(
     destination_pk_columns: list[str] | None = None,
     date_locale: str = "",
     cursor_fields: list[str] | None = None,
+    compliance_acknowledged: bool = False,
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G8 + integrity)."""
 
@@ -852,6 +869,7 @@ def run_file_preflight(
         target_records=[],
         validation_mode=validation_mode,
         confidence_threshold=confidence_threshold,
+        compliance_acknowledged=compliance_acknowledged,
     )
 
     from services.preflight_rules import enrich_blockers

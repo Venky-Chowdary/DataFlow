@@ -79,6 +79,8 @@ class PreflightRequest(BaseModel):
     dest_service_account: str | None = None
     dest_table: str | None = None
     dest_collection: str | None = None
+    # Operator attested governance policy allows moving detected PII columns.
+    compliance_acknowledged: bool = False
 
 
 def _schema_default(db_type: str) -> str:
@@ -217,6 +219,7 @@ async def run_preflight(body: PreflightRequest):
         contract_primary_key=contract_pk,
         destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
         date_locale=body.date_locale,
+        compliance_acknowledged=bool(body.compliance_acknowledged),
     )
     gated = apply_policy_gates(
         result,

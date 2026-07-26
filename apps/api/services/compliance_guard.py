@@ -17,14 +17,51 @@ DOB_RE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})$")
 ACCOUNT_RE = re.compile(r"^(?:\d{8,19}|[A-Z]{2}\d{12,30})$")
 
 _NAME_PATTERN_GROUPS: dict[str, tuple[tuple[str, ...], float]] = {
-    "email": ((r"email", r"e_mail", r"mail"), 0.22),
-    "phone": ((r"phone", r"mobile", r"tel", r"contact"), 0.22),
-    "name": ((r"name", r"first_name", r"last_name", r"full_name", r"contact_name"), 0.18),
-    "address": ((r"address", r"street", r"city", r"zip", r"postal", r"country"), 0.18),
-    "dob": ((r"dob", r"birth", r"date_of_birth"), 0.42),
-    "ssn": ((r"ssn", r"social_security", r"tax_id", r"tin"), 0.5),
-    "account": ((r"account", r"routing", r"iban", r"swift", r"bank", r"card", r"cvv"), 0.4),
-    "identifier": ((r"id", r"uuid", r"guid", r"record_id", r"policy_no", r"member_id", r"mrn"), 0.32),
+    "email": ((r"email", r"e_mail", r"\bmail\b"), 0.22),
+    "phone": ((r"phone", r"mobile", r"\btel\b", r"contact_?(?:phone|number|no)"), 0.22),
+    "name": ((
+        r"\bname\b",
+        r"first_?name",
+        r"last_?name",
+        r"full_?name",
+        r"contact_?name",
+        r"customer_?name",
+        r"user_?name",
+        r"display_?name",
+    ), 0.18),
+    "address": ((
+        r"address",
+        r"street",
+        r"\bcity\b",
+        r"\bzip\b",
+        r"postal",
+        r"country(?:_?code)?\b",
+    ), 0.18),
+    "dob": ((r"\bdob\b", r"birth", r"date_of_birth"), 0.42),
+    "ssn": ((r"\bssn\b", r"social_security", r"tax_id", r"\btin\b"), 0.5),
+    # PCI/financial account — NOT boolean flags like accountLocked / accountActive.
+    "account": ((
+        r"account_?(?:number|no|num|id)\b",
+        r"bank_?account",
+        r"routing_?(?:number|no|num)?\b",
+        r"\biban\b",
+        r"\bswift\b",
+        r"\bcvv\b",
+        r"card_?(?:number|no|num)\b",
+        r"credit_?card",
+        r"debit_?card",
+        r"pan\b",
+    ), 0.4),
+    # High-signal regulated IDs only — bare ``id`` / ``*Id`` matches every CRM field.
+    "identifier": ((
+        r"\buuid\b",
+        r"\bguid\b",
+        r"policy_?(?:no|number|num)\b",
+        r"member_?id\b",
+        r"\bmrn\b",
+        r"record_?id\b",
+        r"patient_?id\b",
+    ), 0.32),
 }
 
 

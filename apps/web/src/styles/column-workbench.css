@@ -824,8 +824,8 @@
   flex-shrink: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-  gap: 6px;
-  align-items: center;
+  gap: 8px;
+  align-items: stretch;
   padding: 8px 12px;
   border-bottom: 1px solid #f1f5f9;
 }
@@ -836,6 +836,7 @@
   justify-content: center;
   color: #0f766e;
   flex-shrink: 0;
+  align-self: center;
 }
 
 .df2-mapping-intelligence-endpoint {
@@ -843,6 +844,15 @@
   gap: 6px;
   align-items: flex-start;
   min-width: 0;
+  min-height: 52px;
+}
+
+.df2-mapping-intelligence-endpoint-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
 }
 
 .df2-mapping-intelligence-endpoint span {
@@ -852,6 +862,7 @@
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: #94a3b8;
+  line-height: 1.2;
 }
 
 .df2-mapping-intelligence-endpoint strong {
@@ -862,11 +873,19 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: 1.25;
+  min-height: 14px;
 }
 
 .df2-mapping-intelligence-endpoint small {
+  display: block;
   font-size: 10px;
   color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.25;
+  min-height: 13px;
 }
 
 /* Critical / attention rail */
@@ -1322,7 +1341,7 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   gap: 10px;
-  align-items: center;
+  align-items: stretch;
   padding: 12px;
   border-radius: 12px;
   border: 1px solid var(--df-line, #e2e8f0);
@@ -1334,6 +1353,15 @@
   align-items: flex-start;
   gap: 10px;
   min-width: 0;
+  min-height: 52px;
+}
+
+.df2-mapping-pairs-endpoint-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
 }
 
 .df2-mapping-pairs-endpoint strong {
@@ -1344,6 +1372,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-height: 16px;
+  line-height: 1.25;
 }
 
 .df2-mapping-pairs-endpoint small {
@@ -1353,6 +1383,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-height: 14px;
+  line-height: 1.25;
 }
 
 .df2-mapping-pairs-kind {

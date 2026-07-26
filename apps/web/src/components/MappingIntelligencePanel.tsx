@@ -75,9 +75,12 @@ export function MappingIntelligencePanel({
       <div className="df2-mapping-intelligence-route df2-mapping-intelligence-route-compact">
         <div className="df2-mapping-intelligence-endpoint">
           <ConnectorIcon id={sourceType} size={18} />
-          <div>
+          <div className="df2-mapping-intelligence-endpoint-text">
             <span>Source</span>
             <strong title={sourceLabel}>{sourceLabel}</strong>
+            <small title={sourceSubtitle || undefined}>
+              {sourceSubtitle || "\u00A0"}
+            </small>
           </div>
         </div>
         <span className="df2-mapping-route-arrow" aria-hidden>
@@ -85,14 +88,14 @@ export function MappingIntelligencePanel({
         </span>
         <div className="df2-mapping-intelligence-endpoint">
           <ConnectorIcon id={destType} size={18} />
-          <div>
+          <div className="df2-mapping-intelligence-endpoint-text">
             <span>Destination</span>
             <strong title={destLabel}>{destLabel}</strong>
-            {destSchemaLoading ? (
-              <small>Loading destination schema…</small>
-            ) : destSubtitle ? (
-              <small>{destSubtitle}</small>
-            ) : null}
+            <small title={destSchemaLoading ? "Loading destination schema…" : (destSubtitle || undefined)}>
+              {destSchemaLoading
+                ? "Loading destination schema…"
+                : destSubtitle || "\u00A0"}
+            </small>
           </div>
         </div>
       </div>

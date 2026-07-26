@@ -307,6 +307,8 @@ export async function runPreflight(payload: {
   backfill_new_fields?: boolean;
   stream_contracts?: Record<string, unknown>[];
   date_locale?: string;
+  /** Operator attested governance policy allows moving detected PII. */
+  compliance_acknowledged?: boolean;
 }): Promise<import("./types").PreflightResult> {
   const res = await apiFetch(`${API_BASE}/preflight/run`, {
     method: "POST",

@@ -409,6 +409,8 @@ export interface PreflightProofBundle {
     requires_review: boolean;
     tags: string[];
     details?: Record<string, unknown>;
+    acknowledged?: boolean;
+    review_status?: string;
   };
   reconciliation: {
     passed: boolean;
@@ -430,6 +432,8 @@ export interface PreflightProofBundle {
     blockers: string[];
     reason: string;
     warnings?: string[];
+    /** True when the only pending item is PII governance acknowledgment. */
+    compliance_only?: boolean;
   };
 }
 

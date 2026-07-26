@@ -96,6 +96,7 @@ def build_preflight_proof_bundle(
     primary_key: str | None = None,
     validation_mode: str = "strict",
     confidence_threshold: float = 0.85,
+    compliance_acknowledged: bool = False,
 ) -> dict[str, Any]:
     """Assemble the unified proof bundle for a transfer preflight decision."""
     mappings = mappings or []
@@ -108,6 +109,7 @@ def build_preflight_proof_bundle(
 
     from services.compliance_guard import score_compliance_risk
     compliance = score_compliance_risk(columns, sample_rows)
+    compliance["acknowledged"] = bool(compliance_acknowledged)
 
     from services.reconciliation import build_reconciliation_proof
     reconciliation = build_reconciliation_proof(
@@ -121,8 +123,12 @@ def build_preflight_proof_bundle(
         reconciliation = _build_preview_reconciliation(source_records, mappings)
 
     blockers: list[str] = []
-    if compliance.get("requires_review"):
+    compliance_blockers: list[str] = []
+    if compliance.get("requires_review") and not compliance_acknowledged:
+        compliance_blockers.append("PII/compliance review required")
         blockers.append("PII/compliance review required")
+    elif compliance.get("requires_review") and compliance_acknowledged:
+        compliance["review_status"] = "acknowledged"
     if not reconciliation.get("passed"):
         blockers.append("Row-level reconciliation proof failed")
 
@@ -141,7 +147,12 @@ def build_preflight_proof_bundle(
 
     decision = "approve"
     if blockers:
-        decision = "block" if compliance.get("requires_review") or not reconciliation.get("passed") else "review"
+        # Compliance-only is a review gate with an explicit Approve CTA — not a
+        # schema/data failure. Keep decision=review so the UI can unlock after ack.
+        if blockers == compliance_blockers and compliance_blockers:
+            decision = "review"
+        else:
+            decision = "block" if (not reconciliation.get("passed") or min_confidence < effective_threshold) else "review"
 
     confidence_band = "high" if min_confidence >= 0.9 else "medium" if min_confidence >= 0.75 else "low"
     quality_grade = "excellent" if quality_score >= 0.9 else "good" if quality_score >= 0.7 else "review"
@@ -167,6 +178,7 @@ def build_preflight_proof_bundle(
         "transfer_decision": {
             "decision": decision,
             "blockers": blockers,
+            "compliance_only": bool(blockers) and blockers == compliance_blockers,
             "reason": "No blocking issues detected" if not blockers else "; ".join(blockers),
         },
     }

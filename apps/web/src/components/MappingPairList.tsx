@@ -37,10 +37,10 @@ export function MappingPairList({
       <div className="df2-mapping-pairs-route">
         <div className="df2-mapping-pairs-endpoint">
           <ConnectorIcon id={sourceType} size={18} />
-          <div>
+          <div className="df2-mapping-pairs-endpoint-text">
             <span className="df2-mapping-pairs-kind">Source</span>
             <strong title={sourceLabel}>{sourceLabel}</strong>
-            {sourceSubtitle && <small>{sourceSubtitle}</small>}
+            <small title={sourceSubtitle || undefined}>{sourceSubtitle || "\u00A0"}</small>
           </div>
         </div>
         <div className="df2-mapping-pairs-bridge" aria-hidden>
@@ -48,10 +48,10 @@ export function MappingPairList({
         </div>
         <div className="df2-mapping-pairs-endpoint">
           <ConnectorIcon id={destType} size={18} />
-          <div>
+          <div className="df2-mapping-pairs-endpoint-text">
             <span className="df2-mapping-pairs-kind">Destination</span>
             <strong title={destLabel}>{destLabel}</strong>
-            {destSubtitle && <small>{destSubtitle}</small>}
+            <small title={destSubtitle || undefined}>{destSubtitle || "\u00A0"}</small>
           </div>
         </div>
       </div>

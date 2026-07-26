@@ -320,6 +320,7 @@ export function TransferPage({
   const [syncMode, setSyncMode] = useState<SyncMode>("full_refresh_append");
   const [schemaPolicy, setSchemaPolicy] = useState<SchemaPolicy>("manual_review");
   const [validationMode, setValidationMode] = useState<ValidationMode>("strict");
+  const [complianceAcknowledged, setComplianceAcknowledged] = useState(false);
   const [dateLocale, setDateLocale] = useState<DateLocaleId>("");
   const [backfillNewFields, setBackfillNewFields] = useState(false);
   const [writeViaStaging, setWriteViaStaging] = useState(false);
@@ -2969,9 +2970,14 @@ export function TransferPage({
     }
   };
 
-  const executePreflight = async (overrideMappings?: EditableMapping[], validationOverride?: ValidationMode) => {
+  const executePreflight = async (
+    overrideMappings?: EditableMapping[],
+    validationOverride?: ValidationMode,
+    opts?: { complianceAcknowledged?: boolean },
+  ) => {
     const activeMappings = overrideMappings ?? columnMappings;
     const activeValidation = validationOverride ?? validationMode;
+    const ackCompliance = opts?.complianceAcknowledged ?? complianceAcknowledged;
     const threshold = confidenceThresholdForMode(activeValidation);
     if (
       sourceKind === "file"
@@ -3211,6 +3217,7 @@ export function TransferPage({
           date_locale: dateLocale,
           backfill_new_fields: backfillNewFields,
           stream_contracts: streamContracts,
+          compliance_acknowledged: ackCompliance,
         });
       } catch (apiErr) {
         if (sourceKind === "file" && destKindMode === "file_export" && parsed) {
@@ -4022,6 +4029,7 @@ export function TransferPage({
     setSourceRowEstimate(null);
     setAnalysis(null);
     setPreflight(null);
+    setComplianceAcknowledged(false);
     setValidatedContractKey(null);
     setCellPreview(null);
     setAnalyzing(false);
@@ -5275,6 +5283,15 @@ export function TransferPage({
             onOpenMappingProof={() => setMappingProofOpen(true)}
             mappingProofSummary={mappingProofSummary}
             onRunPreflight={() => void executePreflight()}
+            onAcknowledgeCompliance={() => {
+              setComplianceAcknowledged(true);
+              toast({
+                title: "PII acknowledged",
+                message: "Re-running Validate with governance approval for detected PII fields.",
+                tone: "info",
+              });
+              void executePreflight(undefined, undefined, { complianceAcknowledged: true });
+            }}
             repairJobId={activeJobId || seedStudioIntent?.jobId || persistedPlanId || ""}
             seedRepairProposalId={seedRepairProposalId}
             onSeedRepairConsumed={() => setSeedRepairProposalId(null)}
