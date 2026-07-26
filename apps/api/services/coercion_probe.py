@@ -205,7 +205,7 @@ def analyze_coercion(
     dest_types: dict[str, str] | None = None,
     dest_db_type: str = "",
     sample_limit: int = DEFAULT_SAMPLE_LIMIT,
-    table_exists: bool | None = False,
+    table_exists: bool | None = None,
 ) -> dict[str, Any]:
     """Predict per-value write coercion for each mapping against sampled rows.
 
@@ -285,6 +285,10 @@ def analyze_coercion(
             "generic_sql",
             "redshift",
             "duckdb",
+            "sqlserver",
+            "mssql",
+            "snowflake",
+            "bigquery",
         }:
             use_json_wire = True
         use_bool_wire = tgt_logical == "boolean" and dest_l in {
@@ -296,6 +300,8 @@ def analyze_coercion(
             "sqlserver",
             "mssql",
             "duckdb",
+            "snowflake",
+            "bigquery",
         }
 
         for idx, row in enumerate(rows):
@@ -438,7 +444,7 @@ def analyze_coercion(
             "suggested_target_type": suggested_type,
             "suggested_transform": suggested_transform,
             "destination_exists": dest_col_exists,
-            "table_exists": bool(table_exists),
+            "table_exists": table_exists,
         }
         columns.append(entry)
         by_source[src] = entry

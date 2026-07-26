@@ -172,7 +172,8 @@ def write_mapped_rows(
         column_types,
         sample_values_by_source=batch_samples,
         # Deny-create must match existing DDL; create-new keeps empty dest types.
-        table_exists=False if create_table else True,
+        # Unknown existence must stay None — never invent True on append.
+        table_exists=False if create_table else None,
     )
     if not target_cols:
         return WriteResult(

@@ -9,7 +9,7 @@ import { LiveEventLog } from "../ui/LiveEventLog";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./NotificationDeliveryStrip";
 import { QuarantinePanel } from "./QuarantinePanel";
-import { Gate8ProofCard } from "./Gate8ProofCard";
+import { Gate8ProofCard, type Gate8Reconciliation } from "./Gate8ProofCard";
 import { JobTrustScoreCard } from "./JobTrustScoreCard";
 import { CdcCursorGapPanel } from "./CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./CdcRetentionPanel";
@@ -36,6 +36,8 @@ interface TransferResultDashboardProps {
   onSchedule?: () => void;
   /** Jump back to Validate so Strip / Quarantine / Fix bad data stay reachable from Run. */
   onOpenValidate?: () => void;
+  /** Resume from durable checkpoint (same API as Jobs). */
+  onResume?: () => void;
 }
 
 function fmt(value: string | number | undefined): string | null {
@@ -76,6 +78,7 @@ export function TransferResultDashboard({
   onViewJobs,
   onSchedule,
   onOpenValidate,
+  onResume,
 }: TransferResultDashboardProps) {
   const { setActiveData } = useActiveData();
   const [proofOpen, setProofOpen] = useState(false);
@@ -332,6 +335,7 @@ export function TransferResultDashboard({
           source_ha_role: result.source_ha_role,
         }}
         onOpenValidate={onOpenValidate}
+        onResume={onResume}
         onOpenQuarantine={
           showQuarantine
             ? () => document.getElementById("df2-result-quarantine")?.scrollIntoView({ behavior: "smooth" })
@@ -339,14 +343,39 @@ export function TransferResultDashboard({
         }
       />
 
-      {result.reconciliation && (
-        <Gate8ProofCard
-          report={result.reconciliation}
-          explanation={result.explanation}
-          className="df2-result-gate8"
-          onOpenValidate={onOpenValidate}
-        />
-      )}
+      {(() => {
+        const writerChecksum = String(
+          ds?.checksum || (ds as Record<string, unknown> | undefined)?.active_checksum || "",
+        );
+        const hasGate8 = Boolean(result.reconciliation || writerChecksum);
+        if (!hasGate8) return null;
+        return (
+          <Gate8ProofCard
+            report={
+              (result.reconciliation as Gate8Reconciliation | undefined) || {
+                passed: result.success,
+                message: result.success
+                  ? "Writer checksum captured — full Gate-8 sample compare may still be loading"
+                  : result.error || "Transfer failed before Gate-8 reconcile",
+                source_checksum: writerChecksum,
+                target_checksum: writerChecksum,
+                rejected_rows: rejected,
+                coerced_null_rows: coercedNull,
+                source_rows: rec,
+                target_rows: rec,
+              }
+            }
+            explanation={result.explanation}
+            className="df2-result-gate8"
+            onOpenValidate={onOpenValidate}
+            onOpenQuarantine={
+              showQuarantine
+                ? () => document.getElementById("df2-result-quarantine")?.scrollIntoView({ behavior: "smooth" })
+                : undefined
+            }
+          />
+        );
+      })()}
 
       {resolvedProof && (
         <section className="df2-result-mapping-proof" aria-label="Mapping proof">

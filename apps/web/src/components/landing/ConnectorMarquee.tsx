@@ -30,7 +30,7 @@ function MarqueeRow({ ids, reverse }: { ids: string[]; reverse?: boolean }) {
 export function ConnectorMarquee() {
   return (
     <section className="lp-marquee-band" aria-label="Supported integrations">
-      <p className="lp-marquee-eyebrow">Trusted connector catalog</p>
+      <p className="lp-marquee-eyebrow">Connector catalog · transfer-live drivers labeled in Studio</p>
       <MarqueeRow ids={ROW_A} />
       <MarqueeRow ids={ROW_B} reverse />
     </section>

@@ -25,6 +25,7 @@ import {
   partitionExplainIssues,
 } from "../../lib/validateIssueGrouping";
 import { BadDataFixDrawer, type BadDataIssue } from "./BadDataFixDrawer";
+import { Gate8ProofCard, type Gate8Reconciliation } from "./Gate8ProofCard";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
 import { RepairProposalDrawer } from "./RepairProposalDrawer";
 
@@ -2096,8 +2097,36 @@ export function ValidateDashboard({
                     {privilegeProbe.engine && (
                       <span className="df2-vd-priv-engine">{privilegeProbe.engine}</span>
                     )}
+                    {privilegeProbe.can_create_table != null && (
+                      <span className="df2-vd-priv-method">
+                        create={privilegeProbe.can_create_table ? "yes" : "no"}
+                      </span>
+                    )}
+                    {privilegeProbe.can_write != null && (
+                      <span className="df2-vd-priv-method">
+                        write={privilegeProbe.can_write ? "yes" : "no"}
+                      </span>
+                    )}
                   </div>
                 )}
+                {status !== "pending" && /g2_destination|destination/i.test(meta.key) && (() => {
+                  const gate = gateByKey.get(meta.key);
+                  const exists = gate?.details?.table_exists;
+                  const label =
+                    exists === true
+                      ? "table exists"
+                      : exists === false
+                        ? "create-new"
+                        : /unknown|existence/i.test(message || "")
+                          ? "existence unknown"
+                          : null;
+                  if (!label) return null;
+                  return (
+                    <div className="df2-vd-priv-probe status-unknown">
+                      <span className="df2-vd-priv-chip">{label}</span>
+                    </div>
+                  );
+                })()}
                 {status !== "pending" && durationMs != null && durationMs > 0 && (
                   <p className="df2-vd-rule-dur">Engine time {formatDuration(durationMs)}</p>
                 )}
@@ -2116,18 +2145,11 @@ export function ValidateDashboard({
       </div>
 
       {reconciliation && (
-        <div className="df2-vd-recon">
-          <span className={`df2-vd-recon-badge ${reconciliation.passed ? "ok" : "warn"}`}>
-            <DtIcon name={reconciliation.passed ? "check" : "alert"} size={13} />
-            {reconciliation.preview ? "Reconciliation preview" : "Reconciliation"}
-          </span>
-          <span>{reconciliation.matched_key_count?.toLocaleString() ?? "—"} matched</span>
-          <span>{reconciliation.missing_key_count?.toLocaleString() ?? 0} missing</span>
-          <span>{reconciliation.extra_key_count?.toLocaleString() ?? 0} extra</span>
-          {reconciliation.row_fidelity_score != null && (
-            <span>fidelity {(reconciliation.row_fidelity_score * 100).toFixed(0)}%</span>
-          )}
-        </div>
+        <Gate8ProofCard
+          report={reconciliation as Gate8Reconciliation}
+          className="df2-vd-gate8"
+          compact
+        />
       )}
 
       {sampleCompare && !sampleCompare.skipped && (

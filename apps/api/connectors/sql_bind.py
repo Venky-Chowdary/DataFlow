@@ -99,9 +99,10 @@ def normalize_sql_bind_value(
     eng = (engine or "").strip().lower()
     if upper in {"BINARY", "BLOB", "LONGBLOB", "VARBINARY", "BYTEA"}:
         return coerce_binary_wire(value)
-    if upper in {"JSON", "JSONB"}:
-        # MySQL/MariaDB bind JSON as text; Postgres/SA prefer native structures.
-        as_text = eng in {"mysql", "mariadb", ""}
+    if upper in {"JSON", "JSONB", "VARIANT", "OBJECT", "ARRAY"}:
+        # MySQL/MariaDB + Snowflake VARIANT bind JSON as text;
+        # Postgres/SA/BigQuery prefer native structures where possible.
+        as_text = eng in {"mysql", "mariadb", "snowflake", ""}
         return coerce_json_wire(value, as_text=as_text)
     if upper in {"BOOLEAN", "BOOL"}:
         return coerce_boolean_wire(value, as_int=eng in {"mysql", "mariadb"})

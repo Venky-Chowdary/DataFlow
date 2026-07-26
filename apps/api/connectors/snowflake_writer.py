@@ -325,17 +325,23 @@ def _batch_insert_rows(
         sub = batch[offset : offset + MAX_BIND_INSERT_ROWS]
         row_placeholders: list[str] = []
         params: list[Any] = []
+        from connectors.sql_bind import normalize_sql_bind_value
+
         for row in sub:
             converted: list[Any] = []
             for v, t in zip(row, target_types):
                 if _is_json_type(t):
-                    # JSON-typed cells must be valid JSON strings (or SQL NULL).
-                    # cell_to_string(None) would produce '', which PARSE_JSON('')
-                    # treats as NULL in real Snowflake but errors in DuckDB/fakesnow.
-                    s = cell_to_string(v)
-                    converted.append(None if s == "" else s)
+                    # JSON/VARIANT: empty → SQL NULL; scalars wrapped as JSON text.
+                    bound = normalize_sql_bind_value(v, t or "VARIANT", engine="snowflake")
+                    converted.append(bound)
                 else:
-                    converted.append(v)
+                    base = (t or "").split("(")[0].upper()
+                    if base in {"BOOLEAN", "BOOL"}:
+                        converted.append(
+                            normalize_sql_bind_value(v, "BOOLEAN", engine="snowflake")
+                        )
+                    else:
+                        converted.append(v)
             params.extend(converted)
             row_placeholders.append(f"({', '.join(['%s'] * len(target_cols))})")
         values_sql = ", ".join(row_placeholders)

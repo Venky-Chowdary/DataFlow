@@ -210,7 +210,12 @@ function OutcomesBand({
           label="Unique drivers"
           detail={driverDetail}
         />
-        <CountUpStat index={2} target={100} suffix="%" label="Row & checksum proof" detail="Reconciled end-to-end after write" />
+        <CountUpStat
+          index={2}
+          target={8}
+          label="Gate-8 reconcile"
+          detail="Row counts + checksums after every write — measured, not marketing"
+        />
         <CountUpStat index={3} target={0} label="Silently dropped rows" detail="Bad rows are quarantined, never lost" />
       </Reveal>
     </section>

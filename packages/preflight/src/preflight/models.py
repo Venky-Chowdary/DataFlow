@@ -92,7 +92,8 @@ class DestinationConfig:
     can_write: bool = False
     target_columns: list[ColumnSchema] = field(default_factory=list)
     # Tri-state: True / False / None (probe unknown — never treat as create-new).
-    table_exists: bool | None = False
+    # Default None so omitted fields do not inherit false create-new semantics.
+    table_exists: bool | None = None
     error: str | None = None
     # Optional G2 privilege probe metadata (method/status/detail) for UI honesty.
     privilege_probe: dict[str, Any] | None = None

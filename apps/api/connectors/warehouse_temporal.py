@@ -177,7 +177,9 @@ def records_for_bigquery(
     target_cols: list[str],
     logical_or_bq_types: list[str],
 ) -> list[dict[str, Any]]:
-    """Build insert_rows_json / load_table_from_json records with temporal normalize."""
+    """Build insert_rows_json / load_table_from_json records with temporal + bool/JSON normalize."""
+    from connectors.sql_bind import normalize_sql_bind_value
+
     records: list[dict[str, Any]] = []
     for row in batch:
         rec: dict[str, Any] = {}
@@ -186,6 +188,8 @@ def records_for_bigquery(
             typ = logical_or_bq_types[i] if i < len(logical_or_bq_types) else "STRING"
             if val is not None and bigquery_temporal_ddl(typ):
                 rec[col] = format_bigquery_bind(val, typ)
+            elif val is not None:
+                rec[col] = normalize_sql_bind_value(val, typ, engine="bigquery")
             else:
                 rec[col] = val
         records.append(rec)

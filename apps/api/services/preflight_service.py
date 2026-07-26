@@ -157,7 +157,7 @@ class FilePreflightContext(PreflightContext):
                 source_types=source_types,
                 dest_types=dest_types,
                 dest_db_type=self.plan.destination.db_type,
-                table_exists=getattr(self.plan.destination, "table_exists", False),
+                table_exists=getattr(self.plan.destination, "table_exists", None),
             )
         except Exception as exc:
             logger.warning(

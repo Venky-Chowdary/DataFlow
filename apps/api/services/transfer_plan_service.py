@@ -222,7 +222,15 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         validation_mode=validation_mode,
         date_locale=policies.get("date_locale", ""),
         destination_column_types=live_target_schema,
-        destination_table_exists=dest_meta.get("table_exists"),
+        destination_table_exists=(
+            dest_meta.get("table_exists")
+            if isinstance(dest_meta.get("table_exists"), bool)
+            else (
+                dest.get("table_exists")
+                if isinstance(dest.get("table_exists"), bool)
+                else None
+            )
+        ),
         destination_can_create=dest_meta.get("can_create_table"),
         destination_can_write=dest_meta.get("can_write"),
         privilege_probe=dest_meta.get("privilege_probe"),

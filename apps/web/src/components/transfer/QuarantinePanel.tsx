@@ -138,6 +138,13 @@ export function QuarantinePanel({
     job_id: string;
     rows_written: number;
     rejected: number;
+    dest_dlq_promoted?: {
+      updated?: number;
+      table?: string;
+      promoted_at?: string;
+      error?: string;
+      skipped?: boolean;
+    };
   } | null>(null);
   const [destDlq, setDestDlq] = useState<import("../../lib/api").QuarantineInfo["dest_dlq"]>(undefined);
 
@@ -264,23 +271,28 @@ export function QuarantinePanel({
         rows,
         transform_overrides: overrides,
       });
+      const promoted = result.dest_dlq_promoted;
       setReplayResult({
         job_id: result.job_id,
         rows_written: result.rows_written,
         rejected: result.rejected,
+        dest_dlq_promoted: promoted,
       });
       toast({
         title: result.rejected ? "Promote finished with rejects" : "Promote / Replay finished",
         message: [
           `Wrote ${result.rows_written.toLocaleString()} row(s)`,
           result.rejected ? `${result.rejected} still rejected` : null,
-          destDlq?.table && !result.rejected
-            ? `DLQ rows stamped on ${destDlq.table}`
-            : null,
+          promoted?.updated != null && !result.rejected
+            ? `DLQ promoted ${promoted.updated} row(s)${promoted.table ? ` on ${promoted.table}` : ""}`
+            : destDlq?.table && !result.rejected
+              ? `DLQ rows stamped on ${destDlq.table}`
+              : null,
+          promoted?.error ? `DLQ stamp: ${promoted.error}` : null,
         ]
           .filter(Boolean)
           .join(" · "),
-        tone: result.rejected ? "warning" : "success",
+        tone: result.rejected || promoted?.error ? "warning" : "success",
       });
       onReplayComplete?.(result.job_id);
       await load();
@@ -494,7 +506,14 @@ export function QuarantinePanel({
               <span>
                 Replay job <code>{replayResult.job_id.slice(0, 8)}</code> wrote{" "}
                 {replayResult.rows_written.toLocaleString()} row(s)
-                {replayResult.rejected > 0 ? `, ${replayResult.rejected.toLocaleString()} still rejected` : ""}.
+                {replayResult.rejected > 0 ? `, ${replayResult.rejected.toLocaleString()} still rejected` : ""}
+                {replayResult.dest_dlq_promoted?.updated != null
+                  ? ` · DLQ promoted ${replayResult.dest_dlq_promoted.updated}`
+                  : ""}
+                {replayResult.dest_dlq_promoted?.table
+                  ? ` on ${replayResult.dest_dlq_promoted.table}`
+                  : ""}
+                .
               </span>
             </div>
           )}

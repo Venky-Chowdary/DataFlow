@@ -49,7 +49,13 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     dest = ctx.plan.destination
     probe = dict(dest.privilege_probe or {}) if isinstance(getattr(dest, "privilege_probe", None), dict) else {}
-    details = {"privilege_probe": probe} if probe else {}
+    details: dict = {
+        "table_exists": dest.table_exists,
+        "can_create_table": dest.can_create_table,
+        "can_write": dest.can_write,
+    }
+    if probe:
+        details["privilege_probe"] = probe
 
     if dest.error:
         return _block(GateId.G2_DESTINATION, f"Destination error: {dest.error}", start, details)

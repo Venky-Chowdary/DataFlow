@@ -46,6 +46,7 @@ import {
   mapTransferPlan,
   preflightTransferPlan,
   previewQuarantineCells,
+  resumeJob,
   runPreflight,
   runUniversalTransfer,
   syncTransferPlanMappings,
@@ -467,6 +468,8 @@ export function TransferPage({
       auth_role: selectedDestConnector?.auth_role || undefined,
       api_key: selectedDestConnector?.api_key || undefined,
       service_account: selectedDestConnector?.service_account || undefined,
+      // Tri-state existence for plan Validate≡Map (never invent create-new).
+      table_exists: destTableExists,
       ...(syncMode === "cdc" && allowAppendOnly ? { allow_append_only: true } : {}),
       ...(isVector
         ? {
@@ -982,6 +985,7 @@ export function TransferPage({
     destOutputPath,
     destWarehouse,
     targetCollection,
+    destTableExists,
   ]);
 
   const ensurePersistedPlan = useCallback(async (
@@ -5513,6 +5517,31 @@ export function TransferPage({
             onNewTransfer={resetTransferStudio}
             onSchedule={() => void handleScheduleRoute()}
             onOpenValidate={() => setStep(STEP_VALIDATE)}
+            onResume={
+              result.job_id && !result.success
+                ? () => {
+                    void (async () => {
+                      try {
+                        await resumeJob(result.job_id!);
+                        toast({
+                          title: "Resume started",
+                          message: "Continuing from the last durable checkpoint.",
+                          tone: "success",
+                        });
+                        setActiveJobId(result.job_id!);
+                        setTransferring(true);
+                        setResult(null);
+                      } catch (e) {
+                        toast({
+                          title: "Resume failed",
+                          message: e instanceof Error ? e.message : "Resume failed",
+                          tone: "error",
+                        });
+                      }
+                    })();
+                  }
+                : undefined
+            }
           />
         </div>
       )}
