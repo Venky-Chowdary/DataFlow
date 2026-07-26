@@ -147,6 +147,7 @@ def test_sqlserver_ct_resume_token_roundtrip():
         batches = list(cdc.snapshot())
         token = batches[-1].resume_token
         assert decode_sqlserver_resume_token(token)["phase"] == "streaming"
+        cdc.close()
 
         with cdc._conn() as conn:
             with conn.cursor() as cur:
@@ -164,6 +165,10 @@ def test_sqlserver_ct_resume_token_roundtrip():
         changes = list(cdc2.poll())
         assert any(str(r.get("id")) == "2" for b in changes for r in b.inserts)
     finally:
+        cdc.close()
+        cdc2 = locals().get("cdc2")
+        if cdc2:
+            cdc2.close()
         with cdc._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(f"IF OBJECT_ID('dbo.{table}') IS NOT NULL DROP TABLE dbo.[{table}]")

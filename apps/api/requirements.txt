@@ -63,6 +63,7 @@ fakesnow>=0.8.0
 
 # Generic SQL engines (SQLAlchemy DBAPI drivers)
 pyodbc>=5.0.0                # SQL Server, Sybase, Informix, Exasol via unixodbc
+pymssql>=2.3.0               # SQL Server fallback when unixodbc is unavailable
 oracledb>=2.0.0              # Oracle
 ibm-db>=3.2.0                # IBM DB2
 teradatasql>=17.10.0.0       # Teradata

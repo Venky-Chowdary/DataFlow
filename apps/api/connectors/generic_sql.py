@@ -302,6 +302,21 @@ def _drivername(db_type: str) -> str:
     return _DRIVERNAME_MAP.get(db_type, db_type)
 
 
+def _mssql_drivername() -> str:
+    """Pick an installed SQL Server DBAPI: pyodbc preferred, pymssql fallback."""
+    try:
+        import pyodbc  # noqa: F401
+        return "mssql+pyodbc"
+    except Exception:
+        pass
+    try:
+        import pymssql  # noqa: F401
+        return "mssql+pymssql"
+    except Exception:
+        pass
+    return "mssql+pyodbc"
+
+
 def _default_port(db_type: str) -> int:
     return _DEFAULT_PORT_MAP.get(db_type, 0)
 
@@ -419,8 +434,10 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
         port = _default_port(db_type)
 
     query = None
-    if drivername.startswith("mssql+pyodbc"):
-        query = {"driver": "ODBC Driver 17 for SQL Server"}
+    if drivername.startswith("mssql"):
+        drivername = _mssql_drivername()
+        if drivername == "mssql+pyodbc":
+            query = {"driver": "ODBC Driver 17 for SQL Server"}
         # Always On listener: MultiSubnetFailover speeds AG failover reconnect.
         multi = cfg.get("multi_subnet_failover")
         if multi is None:
@@ -507,6 +524,36 @@ def _engine(cfg: dict[str, Any]) -> Any:
 def get_sqlalchemy_engine(cfg: dict[str, Any]) -> Any:
     """Public accessor for a configured SQLAlchemy engine."""
     return _engine(cfg)
+
+
+def get_connection(
+    *,
+    host: str = "",
+    port: int = 0,
+    database: str = "",
+    username: str = "",
+    password: str = "",
+    connection_string: str = "",
+    ssl: bool = False,
+    db_type: str = "",
+    **kwargs: Any,
+) -> Any:
+    """Return a raw DBAPI connection for the configured SQL engine.
+
+    The context manager yields a DBAPI connection with a ``.cursor()`` method so
+    callers (e.g. CDC readers) can execute raw SQL and parameterised queries.
+    """
+    cfg = {
+        "host": host,
+        "port": port,
+        "database": database,
+        "username": username,
+        "password": password,
+        "connection_string": connection_string,
+        "ssl": ssl,
+        "type": db_type or kwargs.get("type") or "",
+    }
+    return _engine(cfg).raw_connection()
 
 
 def _schema_name(cfg: dict[str, Any]) -> str | None:
