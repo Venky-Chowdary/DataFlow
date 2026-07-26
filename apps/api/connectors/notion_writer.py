@@ -1,0 +1,367 @@
+"""Notion reverse-ETL writer — create/update pages in a Notion database.
+
+The writer introspects the target database to discover exact property types
+(title, rich_text, number, select, multi_select, status, date, checkbox, url,
+email, phone_number, relation) and maps each incoming column to the correct
+Notion property payload.  Read-only or unsupported property types are skipped
+with a warning.  Updates require the Notion page id in the row.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+from typing import Any, Callable
+
+from connectors.saas_common import (
+    humanize_http_error,
+    is_auth_error,
+    request,
+    token,
+)
+from connectors.writer_common import (
+    WriteResult,
+    build_mapped_rows_with_details,
+    resolve_target_columns,
+    transform_error_policy,
+)
+
+DEFAULT_HOST = "api.notion.com"
+NOTION_VERSION = "2022-06-28"
+
+
+def _database_id(table_or_db: str) -> str:
+    """Normalize a Notion database id from URL, UUID, or bare id."""
+    s = (table_or_db or "").strip()
+    if not s:
+        return s
+    # Strip query params and fragment.
+    s = s.split("?")[0].split("#")[0].rstrip("/")
+    # Extract last path segment if URL.
+    if "/" in s:
+        s = s.rsplit("/", 1)[-1]
+    # Remove dashes from UUID form.
+    return s.replace("-", "")
+
+
+def _page_id(raw: str) -> str:
+    """Normalize Notion page id; hyphenated UUIDs are accepted."""
+    raw = (raw or "").strip()
+    if not raw:
+        return raw
+    if "/" in raw:
+        raw = raw.rsplit("/", 1)[-1]
+    # Notion page IDs are UUIDs; hyphenated form is canonical.
+    if len(raw) == 32 and re.fullmatch(r"[0-9a-fA-F]{32}", raw):
+        return f"{raw[:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:]}"
+    return raw
+
+
+def _fetch_database_properties(database_id: str, access_token: str) -> dict[str, str]:
+    """Return {property_name_lower: notion_type} for a database."""
+    url = f"https://{DEFAULT_HOST}/v1/databases/{database_id}"
+    resp = request(
+        method="GET",
+        url=url,
+        token=access_token,
+        headers={"Notion-Version": NOTION_VERSION},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    props = body.get("properties", {})
+    return {k.lower(): v.get("type", "") for k, v in props.items()}
+
+
+def _title_property(properties: dict[str, str]) -> str | None:
+    for name, typ in properties.items():
+        if typ == "title":
+            return name
+    return None
+
+
+def _as_property_value(
+    value: Any,
+    notion_type: str,
+    property_name: str,
+    warnings: list[str],
+    row_idx: int,
+) -> Any:
+    """Map a single cell value into a Notion property object value."""
+    text = ""
+    if value is not None:
+        text = str(value)
+
+    if notion_type == "title":
+        return {"title": [{"text": {"content": text}}]}
+    if notion_type == "rich_text":
+        return {"rich_text": [{"text": {"content": text}}]}
+    if notion_type == "number":
+        if text == "":
+            return {"number": None}
+        try:
+            return {"number": float(text)}
+        except ValueError:
+            warnings.append(f"row {row_idx}: cannot coerce '{property_name}' to number")
+            return {"number": None}
+    if notion_type == "url":
+        return {"url": text or None}
+    if notion_type == "email":
+        return {"email": text or None}
+    if notion_type == "phone_number":
+        return {"phone_number": text or None}
+    if notion_type == "checkbox":
+        return {"checkbox": bool(value) and text.lower() not in {"false", "0", "", "no"}}
+    if notion_type == "select":
+        return {"select": {"name": text} if text else None}
+    if notion_type == "status":
+        return {"status": {"name": text} if text else None}
+    if notion_type == "multi_select":
+        names = [{"name": v.strip()} for v in text.split(",") if v.strip()]
+        return {"multi_select": names}
+    if notion_type == "date":
+        if text:
+            return {"date": {"start": text}}
+        return {"date": None}
+    if notion_type == "relation":
+        ids = [_page_id(v) for v in text.split(",") if v.strip()]
+        return {"relation": [{"id": i} for i in ids if i]}
+
+    # Read-only or unsupported (formula, rollup, created_*, last_edited_*, files).
+    warnings.append(f"row {row_idx}: Notion property '{property_name}' type '{notion_type}' is not writable; skipped.")
+    return None
+
+
+def write_mapped_rows(
+    *,
+    host: str = "",
+    port: int = 0,
+    database: str = "",
+    username: str = "",
+    password: str = "",
+    schema: str = "",
+    connection_string: str = "",
+    ssl: bool = True,
+    table_name: str = "",
+    headers: list[str] | None = None,
+    data_rows: list[list[str]] | None = None,
+    mappings: list[dict] | None = None,
+    column_types: dict[str, str] | None = None,
+    on_checkpoint: Callable[..., None] | None = None,
+    create_table: bool = False,
+    error_policy: str | None = None,
+    write_mode: str = "upsert",
+    conflict_columns: list[str] | None = None,
+    api_key: str = "",
+    **_kwargs: Any,
+) -> WriteResult:
+    headers = headers or []
+    data_rows = data_rows or []
+    mappings = mappings or []
+    column_types = column_types or {}
+
+    database_id = _database_id(table_name or database or connection_string or "")
+    if not database_id:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error="Notion database id is required (table_name/database/connection_string).",
+            driver="notion",
+        )
+
+    access_token = token(api_key, connection_string, username, password)
+    if not access_token:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=database_id,
+            checksum="",
+            chunks_completed=0,
+            error="Notion integration token is required.",
+            driver="notion",
+        )
+
+    try:
+        properties = _fetch_database_properties(database_id, access_token)
+    except Exception as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=database_id,
+            checksum="",
+            chunks_completed=0,
+            error=f"Unable to read Notion database schema: {humanize_http_error(exc, 'notion')}",
+            driver="notion",
+        )
+
+    title_name = _title_property(properties)
+    target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
+    policy = transform_error_policy(error_policy)
+    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        error_policy=policy,
+        dest_types={c: "string" for c in target_cols},
+        preserve_case=True,
+    )
+    if transform_errors and policy == "fail":
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=database_id,
+            checksum="",
+            chunks_completed=0,
+            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            rejected_details=rejected_details,
+            driver="notion",
+        )
+
+    mode = (write_mode or "upsert").lower()
+    upsert_modes = {"upsert", "merge", "update", "overwrite", "replace"}
+
+    written = 0
+    chunks = 0
+    digest = hashlib.sha256()
+    all_rejected = list(rejected_details)
+    warnings: list[str] = []
+
+    for i, row in enumerate(mapped_rows):
+        if isinstance(row, dict):
+            row_dict = dict(row)
+        else:
+            row_dict = dict(zip(target_cols, row))
+
+        record_id = None
+        if mode in upsert_modes:
+            candidates = list(conflict_columns or ["id"])
+            for c in candidates:
+                val = row_dict.get(c)
+                if val:
+                    record_id = _page_id(str(val))
+                    break
+
+        notion_properties: dict[str, Any] = {}
+        has_title = False
+        for col, val in row_dict.items():
+            prop_type = properties.get(col.lower())
+            if not prop_type:
+                warnings.append(f"row {i}: '{col}' does not exist in Notion database; skipped.")
+                continue
+            if prop_type in {"formula", "rollup", "created_by", "created_time", "last_edited_by", "last_edited_time", "files"}:
+                warnings.append(f"row {i}: '{col}' is read-only in Notion; skipped.")
+                continue
+            prop_value = _as_property_value(val, prop_type, col, warnings, i)
+            if prop_value is not None:
+                notion_properties[col] = prop_value
+                if prop_type == "title" and val is not None and str(val):
+                    has_title = True
+
+        if title_name and not has_title:
+            # Notion requires a title on create; fall back to first non-empty value.
+            for col, val in row_dict.items():
+                if val is not None and str(val).strip():
+                    notion_properties[title_name] = _as_property_value(val, "title", title_name, warnings, i)
+                    has_title = True
+                    break
+            if not has_title:
+                warnings.append(f"row {i}: no title value available for Notion page; skipped.")
+                continue
+
+        if record_id:
+            url = f"https://{DEFAULT_HOST}/v1/pages/{record_id}"
+            method = "PATCH"
+            payload: dict[str, Any] = {"properties": notion_properties}
+        else:
+            url = f"https://{DEFAULT_HOST}/v1/pages"
+            method = "POST"
+            payload = {
+                "parent": {"database_id": database_id},
+                "properties": notion_properties,
+            }
+
+        idem_key = f"dataflow-notion-{database_id}-{i}-{hashlib.sha256(str(payload).encode()).hexdigest()[:16]}"
+        try:
+            resp = request(
+                method=method,
+                url=url,
+                token=access_token,
+                headers={"Notion-Version": NOTION_VERSION, "Idempotency-Key": idem_key},
+                data=payload,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            rec_id = body.get("id") if isinstance(body, dict) else None
+            if rec_id:
+                written += 1
+                digest.update(str(rec_id).encode())
+        except Exception as exc:
+            if is_auth_error(exc):
+                return WriteResult(
+                    ok=False,
+                    rows_written=written,
+                    table_name=table_name,
+                    target_schema=database_id,
+                    checksum=digest.hexdigest()[:32],
+                    chunks_completed=chunks,
+                    error=humanize_http_error(exc, "notion"),
+                    rejected_details=all_rejected,
+                    rejected_rows=len(all_rejected),
+                    warnings=warnings,
+                    driver="notion",
+                )
+            detail = {
+                "row": i,
+                "column": "",
+                "target": table_name,
+                "value": str(record_id or row_dict),
+                "reason": humanize_http_error(exc, "notion"),
+                "policy": policy,
+                "values": payload,
+            }
+            all_rejected.append(detail)
+            if policy == "fail":
+                return WriteResult(
+                    ok=False,
+                    rows_written=written,
+                    table_name=table_name,
+                    target_schema=database_id,
+                    checksum=digest.hexdigest()[:32],
+                    chunks_completed=chunks,
+                    error=f"Notion write failed for row {i}: {detail['reason']}",
+                    rejected_details=all_rejected,
+                    rejected_rows=len(all_rejected),
+                    warnings=warnings,
+                    driver="notion",
+                )
+            warnings.append(f"row {i}: {detail['reason']}")
+
+        if on_checkpoint and (i + 1) % 100 == 0:
+            on_checkpoint(i + 1, written, 1)
+            chunks += 1
+
+    if on_checkpoint:
+        on_checkpoint(len(mapped_rows), written, 1)
+
+    return WriteResult(
+        ok=True,
+        rows_written=written,
+        table_name=table_name,
+        target_schema=database_id,
+        checksum=digest.hexdigest()[:32],
+        chunks_completed=chunks or 1,
+        rejected_details=all_rejected,
+        rejected_rows=len(all_rejected),
+        warnings=warnings[:20],
+        driver="notion",
+    )
