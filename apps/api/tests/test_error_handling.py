@@ -102,6 +102,9 @@ def test_humanize_missing_column_and_table_guide_to_map():
     assert col["confidence"] == "high"
     assert "Map" in col["fix"]
 
+    pg_col = humanize_transfer_failure(RuntimeError('column "email" does not exist'))
+    assert pg_col["code"] == "destination_column_missing"
+
     missing = humanize_transfer_failure(RuntimeError('relation "railway.users" does not exist'))
     assert missing["code"] == "destination_table_missing"
     assert "Destination" in missing["fix"]

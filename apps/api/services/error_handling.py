@@ -353,6 +353,8 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
             "unknown column",
             "undefined column",
             "column does not exist",
+            'column "',
+            "column '",
             "no such column",
             "invalid column name",
             "unrecognized name",
@@ -377,8 +379,10 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     (
         (
             "relation does not exist",
+            'relation "',
             "table doesn't exist",
             "table does not exist",
+            "doesn't exist",
             "no such table",
             "unknown table",
             "er_no_such_table",
