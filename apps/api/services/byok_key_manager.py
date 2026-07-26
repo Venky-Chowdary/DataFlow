@@ -93,13 +93,13 @@ class BYOKKey:
 
 
 def _is_platform_encrypted(value: str) -> bool:
-    return bool(value and (value.startswith(_PREFIX_V1) or value.startswith(_PREFIX_V0)))
+    return bool(value and (value.startswith(_PREFIX_V1) or value.startswith(_PREFIX_V0) or value.startswith("sm:")))
 
 
-def _wrap_key_material(raw_bytes: bytes) -> str:
+def _wrap_key_material(raw_bytes: bytes, tenant_id: str = "") -> str:
     """Encrypt raw key bytes with the platform master key."""
     encoded = base64.urlsafe_b64encode(raw_bytes).decode("ascii")
-    return encrypt_secret(encoded)
+    return encrypt_secret(encoded, tenant_id=tenant_id or None, label="byok-key")
 
 
 def _unwrap_key_material(wrapped: str) -> bytes:
@@ -199,7 +199,7 @@ def create_key(
         reference = str(key_material).strip()
     else:
         raw = _validate_key_material(key_material, provider)
-        reference = _wrap_key_material(raw)
+        reference = _wrap_key_material(raw, tenant_id=tenant_id)
 
     key = BYOKKey(
         id=str(uuid.uuid4()),

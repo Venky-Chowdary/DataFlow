@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
+
+from services.platform_config import web_url
 from pydantic import BaseModel, Field
 
 from ..services.auth_service import (
@@ -29,10 +32,97 @@ class LoginRequest(BaseModel):
 
 
 def _web_origin() -> str:
+    explicit = web_url()
+    if explicit:
+        return explicit.rstrip("/")
     domain = os.getenv("DATAFLOW_WEB_DOMAIN", "http://localhost:5173").strip()
     if not domain.startswith("http"):
         domain = f"https://{domain}"
     return domain.rstrip("/")
+
+
+def _saml_base_url(request: Request) -> str:
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("x-forwarded-host", request.url.hostname)
+    port = request.headers.get("x-forwarded-port", str(request.url.port or (443 if scheme == "https" else 80)))
+    port_str = f":{port}" if port not in ("443", "80") and (scheme != "https" or port != "443") else ""
+    return f"{scheme}://{host}{port_str}"
+
+
+def _saml_sp_entity_id(request: Request) -> str:
+    explicit = os.getenv("DATAFLOW_SAML_SP_ENTITY_ID", "").strip()
+    if explicit:
+        return explicit
+    return f"{_saml_base_url(request)}/api/v1/auth/sso/saml/metadata"
+
+
+def _saml_acs_url(request: Request) -> str:
+    explicit = os.getenv("DATAFLOW_SAML_ACS_URL", "").strip()
+    if explicit:
+        return explicit
+    return f"{_saml_base_url(request)}/api/v1/auth/sso/saml/callback"
+
+
+def _saml_settings_dict(request: Request, cfg: dict[str, str]) -> dict[str, Any]:
+    entity_id = cfg.get("entity_id", "").strip()
+    sso_url = cfg.get("sso_url", "").strip()
+    x509_cert = cfg.get("x509_cert", "").strip()
+    return {
+        "strict": True,
+        "debug": False,
+        "sp": {
+            "entityId": _saml_sp_entity_id(request),
+            "assertionConsumerService": {
+                "url": _saml_acs_url(request),
+                "binding": "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST",
+            },
+            "NameIDFormat": "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
+            "x509cert": "",
+            "privateKey": "",
+        },
+        "idp": {
+            "entityId": entity_id,
+            "singleSignOnService": {
+                "url": sso_url,
+                "binding": "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect",
+            },
+            "x509cert": x509_cert,
+        },
+        "security": {
+            "nameIdEncrypted": False,
+            "authnRequestsSigned": False,
+            "logoutRequestSigned": False,
+            "logoutResponseSigned": False,
+            "signMetadata": False,
+            "wantAssertionsSigned": True,
+            "wantAssertionsEncrypted": False,
+            "wantNameId": True,
+            "wantNameIdEncrypted": False,
+            "requestedAuthnContext": True,
+            "requestedAuthnContextComparison": "exact",
+            "wantXMLValidation": True,
+            "relaxDestinationValidation": True,
+            "destinationStrictlyMatches": False,
+            "rejectUnsolicitedResponsesWithInResponseTo": False,
+            "wantMessagesSigned": False,
+        },
+    }
+
+
+def _saml_request_dict(request: Request, post_data: dict[str, str] | None = None) -> dict[str, Any]:
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("x-forwarded-host", request.url.hostname)
+    port = int(request.headers.get("x-forwarded-port", request.url.port or (443 if scheme == "https" else 80)))
+    return {
+        "https": "on" if scheme == "https" else "off",
+        "http_host": host,
+        "server_port": port,
+        "script_name": "/api/v1/auth/sso/saml",
+        "get_data": {},
+        "post_data": post_data or {},
+        "lowercase_urlencoding": False,
+        "request_uri": str(request.url),
+    }
 
 
 @router.get("/sso/providers")
@@ -43,7 +133,7 @@ async def sso_providers():
 
 
 @router.get("/sso/{sso_type}/start")
-async def sso_start(sso_type: str):
+async def sso_start(sso_type: str, request: Request):
     from services.integrations_store import get_sso_config_raw, validate_sso_config
 
     check = validate_sso_config(sso_type)
@@ -75,10 +165,14 @@ async def sso_start(sso_type: str):
         return RedirectResponse(authorize, status_code=302)
 
     if sso_type == "saml":
-        sso_url = cfg.get("sso_url", "")
-        if sso_url:
-            return RedirectResponse(sso_url, status_code=302)
-        raise HTTPException(status_code=400, detail="SAML SSO URL not configured")
+        try:
+            from onelogin.saml2.auth import OneLogin_Saml2_Auth
+        except Exception as exc:
+            raise HTTPException(status_code=501, detail="SAML support is not installed") from exc
+        saml_settings = _saml_settings_dict(request, cfg)
+        req = _saml_request_dict(request)
+        auth = OneLogin_Saml2_Auth(req, saml_settings)
+        return RedirectResponse(auth.login(return_to=state), status_code=302)
 
     raise HTTPException(status_code=400, detail="Unsupported SSO type")
 
@@ -170,6 +264,67 @@ async def sso_callback(sso_type: str, code: str = "", state: str = "", error: st
         raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"SSO callback failed: {exc}") from exc
+
+
+@router.post("/sso/{sso_type}/callback")
+async def sso_post_callback(sso_type: str, request: Request):
+    if sso_type != "saml":
+        raise HTTPException(status_code=405, detail="POST callback is only supported for SAML")
+
+    try:
+        from onelogin.saml2.auth import OneLogin_Saml2_Auth
+    except Exception as exc:
+        raise HTTPException(status_code=501, detail="SAML support is not installed") from exc
+
+    from services.integrations_store import get_sso_config_raw
+
+    cfg = get_sso_config_raw(sso_type)
+    form = await request.form()
+    saml_response = str(form.get("SAMLResponse", ""))
+    relay_state = str(form.get("RelayState", ""))
+    if not saml_response:
+        raise HTTPException(status_code=400, detail="SAMLResponse is required")
+    if relay_state and not get_and_pop(relay_state, sso_type):
+        raise HTTPException(status_code=400, detail="Invalid SAML RelayState")
+
+    req = _saml_request_dict(request, post_data={"SAMLResponse": saml_response})
+    saml_settings = _saml_settings_dict(request, cfg)
+    auth = OneLogin_Saml2_Auth(req, saml_settings)
+    auth.process_response()
+    errors = auth.get_errors()
+    if errors:
+        raise HTTPException(status_code=401, detail=f"SAML response invalid: {', '.join(errors)}")
+    if not auth.is_authenticated():
+        raise HTTPException(status_code=401, detail="SAML authentication failed")
+
+    name_id = auth.get_nameid()
+    email = name_id
+    if not email or "@" not in email:
+        email_attr = cfg.get("email_attribute", "email")
+        attributes = auth.get_attributes()
+        email = (
+            (attributes.get(email_attr, [""])[0] if isinstance(attributes.get(email_attr), list) else attributes.get(email_attr, ""))
+            or name_id
+        )
+    if not email or "@" not in email:
+        raise HTTPException(status_code=502, detail="SAML identity did not return an email")
+
+    token, expires_at = create_token(str(email))
+    try:
+        from services.audit_log import append_audit_event
+
+        append_audit_event(
+            action="auth.sso.login",
+            resource=f"/auth/sso/{sso_type}/callback",
+            actor=str(email),
+            level="success",
+            details={"provider": sso_type},
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
+    redirect = f"{_web_origin()}/?sso_token={token}&expires_at={expires_at}&sso_email={email}"
+    return RedirectResponse(redirect, status_code=302)
 
 
 @router.get("/bootstrap")

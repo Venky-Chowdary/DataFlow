@@ -1,10 +1,15 @@
-"""Encrypt connector credentials at rest (Fernet).
+"""Encrypt connector credentials at rest.
 
-Fernet encryption is used when the `cryptography` package is installed. In
-development, a base64 ``enc:v0:`` fallback keeps local setups working when
-cryptography is missing. In production, encryption fail-closes: cryptography
-must be installed and ``DATAFLOW_SECRETS_KEY`` (or a strong auth secret) must
-be set — base64 writes and reads are rejected.
+Three backends are supported:
+
+* ``fernet`` (default) — Fernet symmetric encryption using ``DATAFLOW_SECRETS_KEY``.
+* ``aws_secretsmanager`` — AWS Secrets Manager per-tenant secret storage.
+* ``env`` (development only) — base64 ``enc:v0:`` fallback.
+
+Per-tenant isolation in AWS is achieved by including ``DATAFLOW_TENANT_ID`` in
+the secret name and requiring a unique secret for every value. In production,
+the fail-closed policy is the same: no cryptography / no vault access means no
+secret reads/writes.
 """
 
 from __future__ import annotations
@@ -13,11 +18,15 @@ import base64
 import hashlib
 import logging
 import os
+import uuid
+from abc import ABC, abstractmethod
+from typing import Any
 
 _logger = logging.getLogger(__name__)
 
 _PREFIX_V1 = "enc:v1:"
 _PREFIX_V0 = "enc:v0:"
+_PREFIX_SM = "sm:"
 
 
 class SecretVaultError(RuntimeError):
@@ -32,6 +41,142 @@ def _is_production() -> bool:
     except Exception:
         env = os.getenv("DATAFLOW_ENV", os.getenv("ENVIRONMENT", "")).lower()
         return env in ("production", "prod")
+
+
+def _tenant_id() -> str:
+    return (os.getenv("DATAFLOW_TENANT_ID") or "global").strip() or "global"
+
+
+def _secrets_manager_prefix() -> str:
+    return (os.getenv("DATAFLOW_SECRETS_MANAGER_PREFIX") or "dataflow").strip("/")
+
+
+class SecretVault(ABC):
+    @abstractmethod
+    def secrets_encryption_ready(self) -> bool:
+        ...
+
+    @abstractmethod
+    def encrypt(self, plain: str, *, tenant_id: str | None = None, label: str = "") -> str:
+        ...
+
+    @abstractmethod
+    def decrypt(self, stored: str, *, tenant_id: str | None = None) -> str:
+        ...
+
+
+class FernetVault(SecretVault):
+    """Default symmetric encryption using Fernet."""
+
+    def secrets_encryption_ready(self) -> bool:
+        try:
+            import cryptography.fernet  # noqa: F401
+        except Exception:
+            return False
+        if _is_production() and not _has_dedicated_secrets_key():
+            auth = os.getenv("DATAFLOW_AUTH_SECRET", "")
+            return bool(auth and auth != "dev-change-me-before-production")
+        return True
+
+    def encrypt(self, plain: str, *, tenant_id: str | None = None, label: str = "") -> str:
+        return _fernet_encrypt(plain)
+
+    def decrypt(self, stored: str, *, tenant_id: str | None = None) -> str:
+        return _fernet_decrypt(stored)
+
+
+class AwsSecretsManagerVault(SecretVault):
+    """Per-tenant secret storage backed by AWS Secrets Manager.
+
+    Each call to ``encrypt`` creates a new secret version under a tenant-scoped
+    name. The returned reference has the form ``sm:<secret-arn>:<version-id>``
+    and is opaque to callers.
+    """
+
+    def __init__(self) -> None:
+        self._client: Any | None = None
+        self._region = (os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1").strip()
+
+    def _get_client(self) -> Any:
+        if self._client is not None:
+            return self._client
+        try:
+            import boto3
+        except Exception as exc:
+            raise SecretVaultError("boto3 is not installed; cannot use AWS Secrets Manager backend") from exc
+        try:
+            self._client = boto3.client("secretsmanager", region_name=self._region)
+        except Exception as exc:
+            raise SecretVaultError(f"Failed to create AWS Secrets Manager client: {exc}") from exc
+        return self._client
+
+    def secrets_encryption_ready(self) -> bool:
+        if _is_production():
+            try:
+                self._get_client()
+            except Exception:
+                return False
+        return True
+
+    def encrypt(self, plain: str, *, tenant_id: str | None = None, label: str = "") -> str:
+        if not plain or plain == "****" or plain.startswith("["):
+            return plain
+        if plain.startswith(_PREFIX_V1) or plain.startswith(_PREFIX_V0) or plain.startswith(_PREFIX_SM):
+            return plain
+
+        client = self._get_client()
+        tenant = tenant_id or _tenant_id()
+        prefix = _secrets_manager_prefix()
+        secret_name = f"{prefix}/{tenant}/{label or 'secret'}-{uuid.uuid4().hex[:16]}"
+        try:
+            create_kwargs = {
+                "Name": secret_name,
+                "Description": "DataFlow connector credential",
+                "SecretString": plain,
+            }
+            kms_key_id = os.getenv("DATAFLOW_SECRETS_KMS_KEY_ID", "").strip()
+            if kms_key_id:
+                create_kwargs["KmsKeyId"] = kms_key_id
+            resp = client.create_secret(**create_kwargs)
+            version_id = resp.get("VersionId", "")
+            secret_id = resp.get("Name", secret_name)
+            return f"{_PREFIX_SM}{secret_id}:{version_id}"
+        except Exception as exc:
+            raise SecretVaultError(f"AWS Secrets Manager create_secret failed: {exc}") from exc
+
+    def decrypt(self, stored: str, *, tenant_id: str | None = None) -> str:
+        if not stored:
+            return stored
+        if not stored.startswith(_PREFIX_SM):
+            return _fernet_decrypt(stored)
+
+        client = self._get_client()
+        ref = stored[len(_PREFIX_SM) :]
+        parts = ref.split(":", 1)
+        arn = parts[0]
+        version_id = parts[1] if len(parts) > 1 else ""
+        try:
+            kwargs = {"SecretId": arn}
+            if version_id:
+                kwargs["VersionId"] = version_id
+            resp = client.get_secret_value(**kwargs)
+            return resp.get("SecretString", "") or resp.get("SecretBinary", b"").decode("utf-8")
+        except Exception as exc:
+            raise SecretVaultError(f"AWS Secrets Manager get_secret_value failed: {exc}") from exc
+
+
+_vault_instance: SecretVault | None = None
+
+
+def _get_vault() -> SecretVault:
+    global _vault_instance
+    if _vault_instance is None:
+        backend = (os.getenv("DATAFLOW_SECRETS_BACKEND") or "fernet").lower().strip()
+        if backend == "aws_secretsmanager":
+            _vault_instance = AwsSecretsManagerVault()
+        else:
+            _vault_instance = FernetVault()
+    return _vault_instance
 
 
 def _has_dedicated_secrets_key() -> bool:
@@ -53,7 +198,7 @@ def _fernet_key() -> bytes:
     return base64.urlsafe_b64encode(hashlib.sha256(auth.encode()).digest())
 
 
-def _get_fernet():
+def _get_fernet() -> Any:
     from cryptography.fernet import Fernet
 
     return Fernet(_fernet_key())
@@ -79,23 +224,27 @@ def _warn_once() -> None:
 
 
 def secrets_encryption_ready() -> bool:
-    """True when the vault can encrypt with Fernet under current policy."""
-    if not _cryptography_available():
-        return False
-    if _is_production() and not _has_dedicated_secrets_key():
-        # Production may still derive from AUTH_SECRET if validate_production_config allows it,
-        # but dedicated key is preferred. Ready if cryptography works and auth secret is strong.
-        auth = os.getenv("DATAFLOW_AUTH_SECRET", "")
-        return bool(auth and auth != "dev-change-me-before-production")
-    return True
+    """True when the active vault can encrypt under current policy."""
+    return _get_vault().secrets_encryption_ready()
 
 
-def encrypt_secret(plain: str) -> str:
+def encrypt_secret(plain: str, *, tenant_id: str | None = None, label: str = "") -> str:
+    """Encrypt/store a secret and return an opaque reference."""
     if not plain or plain == "****" or plain.startswith("["):
         return plain
-    if plain.startswith(_PREFIX_V1) or plain.startswith(_PREFIX_V0):
+    if plain.startswith(_PREFIX_V1) or plain.startswith(_PREFIX_V0) or plain.startswith(_PREFIX_SM):
         return plain
+    return _get_vault().encrypt(plain, tenant_id=tenant_id, label=label)
 
+
+def decrypt_secret(stored: str, *, tenant_id: str | None = None) -> str:
+    """Retrieve/decrypt a stored secret reference."""
+    if not stored:
+        return stored
+    return _get_vault().decrypt(stored, tenant_id=tenant_id)
+
+
+def _fernet_encrypt(plain: str) -> str:
     if not _cryptography_available():
         if _is_production():
             raise SecretVaultError(
@@ -117,10 +266,7 @@ def encrypt_secret(plain: str) -> str:
     return f"{_PREFIX_V1}{token}"
 
 
-def decrypt_secret(stored: str) -> str:
-    if not stored:
-        return stored
-
+def _fernet_decrypt(stored: str) -> str:
     if stored.startswith(_PREFIX_V1):
         if not _cryptography_available():
             if _is_production():
@@ -150,9 +296,9 @@ def decrypt_secret(stored: str) -> str:
     return stored
 
 
-def encrypt_connection_string(conn_str: str) -> str:
-    return encrypt_secret(conn_str)
+def encrypt_connection_string(conn_str: str, *, tenant_id: str | None = None) -> str:
+    return encrypt_secret(conn_str, tenant_id=tenant_id, label="connection-string")
 
 
-def decrypt_connection_string(stored: str) -> str:
-    return decrypt_secret(stored)
+def decrypt_connection_string(stored: str, *, tenant_id: str | None = None) -> str:
+    return decrypt_secret(stored, tenant_id=tenant_id)
