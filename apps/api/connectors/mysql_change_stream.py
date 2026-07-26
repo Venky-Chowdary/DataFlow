@@ -313,8 +313,8 @@ class MySqlChangeStreamCdc:
                                     "tables": list(self.tables),
                                 }
                                 break
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            _logger.debug("CDC binlog status query failed: %s", exc)
         except Exception as exc:
             _logger.warning(
                 "Could not acquire MySQL lock connection for CDC snapshot: %s", exc
@@ -393,8 +393,8 @@ class MySqlChangeStreamCdc:
                         _logger.warning("UNLOCK TABLES failed: %s", exc)
                 try:
                     lock_conn.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _logger.debug("Error closing MySQL lock connection: %s", exc)
 
     def _current_gtid_executed(self, cur) -> str | None:
         try:

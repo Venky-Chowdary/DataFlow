@@ -2266,12 +2266,12 @@ def read_target_sample(
                             try:
                                 if str(k).isdigit():
                                     widened.add(int(k))
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                logger.debug("Could not widen key %r to int: %s", k, exc)
                             try:
                                 widened.add(float(k))
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                logger.debug("Could not widen key %r to float: %s", k, exc)
                     for row in client.list_rows(table_id, max_results=scan_limit):
                         d = dict(row.items()) if hasattr(row, "items") else {k: v for k, v in zip(cols, row)}
                         if cols and cols != ["*"]:
