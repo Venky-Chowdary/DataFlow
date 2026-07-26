@@ -22,7 +22,6 @@ from src.transfer.connector_capabilities import (  # noqa: E402
     dest_ready,
     get_capabilities,
     resolve_driver_type,
-    source_ready,
 )
 from src.transfer.connector_registry import CONNECTOR_MODULES  # noqa: E402
 from src.transfer.registry import validate_transfer  # noqa: E402
@@ -103,5 +102,5 @@ def test_live_catalog_count_matches_health_manifest():
         f"Expected a honest certified live set (40–200), got {len(live)}"
     )
     # Planned brands must never appear under status=live.
-    for brand in ("db2", "teradata", "zendesk", "shopify"):
+    for brand in ("db2", "teradata", "zendesk", "notion"):
         assert brand not in live, brand

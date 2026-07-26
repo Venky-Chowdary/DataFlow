@@ -113,10 +113,22 @@ def test_airtable_cursor_pagination():
 
 
 def test_source_only_saas_tiers():
-    for brand in ("stripe", "shopify", "zendesk", "notion", "airtable"):
+    """Zendesk/Notion remain source-only until real reverse-ETL writers land."""
+    for brand in ("zendesk", "notion"):
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live"}
         )
         assert row["transfer_ready"] is False, brand
         assert row["certification_tier"] == "source_only", brand
+        assert row["effective_status"] == "live", brand
+
+
+def test_transfer_ready_saas_tiers():
+    """Stripe/Airtable/Shopify now have real reverse-ETL writers."""
+    for brand in ("stripe", "shopify", "airtable"):
+        row = enrich_catalog_entry(
+            {"id": brand, "name": brand.title(), "category": "saas", "status": "live"}
+        )
+        assert row["transfer_ready"] is True, brand
+        assert row["certification_tier"] == "certified", brand
         assert row["effective_status"] == "live", brand

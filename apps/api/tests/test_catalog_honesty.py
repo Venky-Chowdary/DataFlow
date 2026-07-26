@@ -27,8 +27,8 @@ def test_rest_api_brand_stubs_are_planned() -> None:
 
 
 def test_dedicated_saas_source_only_drivers() -> None:
-    """New brand-specific REST drivers are source-only live, not full transfer."""
-    for brand in ("stripe", "shopify", "zendesk", "notion", "airtable"):
+    """Brand-specific REST drivers without real reverse-ETL writers stay source-only."""
+    for brand in ("zendesk", "notion"):
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live", "description": ""}
         )
@@ -38,9 +38,21 @@ def test_dedicated_saas_source_only_drivers() -> None:
         assert "Source" in row["capability_label"], brand
 
 
+def test_dedicated_saas_transfer_ready_drivers() -> None:
+    """Stripe/Airtable/Shopify now ship real reverse-ETL writers and are certified."""
+    for brand in ("stripe", "shopify", "airtable"):
+        row = enrich_catalog_entry(
+            {"id": brand, "name": brand.title(), "category": "saas", "status": "live", "description": ""}
+        )
+        assert row["transfer_ready"] is True, brand
+        assert row["effective_status"] == "live", brand
+        assert row["certification_tier"] == "certified", brand
+        assert "Full transfer" in row["capability_label"], brand
+
+
 def test_dedicated_saas_drivers_activation_and_source_only() -> None:
-    """Salesforce/HubSpot are reverse-ETL write-ready; Stripe source-only."""
-    for brand in ("hubspot", "salesforce"):
+    """Salesforce/HubSpot/Stripe/Airtable/Shopify are reverse-ETL write-ready."""
+    for brand in ("hubspot", "salesforce", "stripe", "airtable", "shopify"):
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live", "description": ""}
         )
@@ -111,7 +123,8 @@ def test_catalog_search_live_is_certified_only() -> None:
         assert all(c.get("transfer_ready") for c in data["connectors"])
         # Reverse-ETL SaaS (hubspot/salesforce) may appear as certified destinations.
         # Source-only Stripe and REST brand stubs must not.
-        for brand in ("stripe", "zendesk", "shopify"):
+        # Zendesk and Notion are source-only; Stripe/Shopify/Airtable are now certified.
+        for brand in ("zendesk", "notion"):
             assert brand not in ids
         assert data.get("transfer_live", 0) < 200  # not hundreds of greenwashed stubs
         assert data.get("certified", 0) > 0

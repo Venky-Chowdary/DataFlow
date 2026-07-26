@@ -84,6 +84,17 @@ def _infer_catalog_type(
     if cs.startswith("file://"):
         return "filesystem"
 
+    # A bare local warehouse path (no URL scheme) defaults to the legacy
+    # filesystem CoW writer unless the user explicitly asked for a SQL catalog.
+    if wh and not wh.startswith(("s3://", "gs://", "gcs://", "arn:", "http://", "https://", "file://")):
+        if "://" not in wh and ":" not in wh:
+            return "filesystem"
+
+    # If no connection string or warehouse was provided, default to filesystem
+    # rather than silently assuming a SQLite catalog in the current directory.
+    if not cs and not wh:
+        return "filesystem"
+
     # Default to a local SQL catalog backed by SQLite inside the warehouse path.
     return "sql"
 
@@ -191,7 +202,10 @@ def parse_iceberg_catalog_config(endpoint: Any) -> dict[str, Any]:
     """
     extra = _ensure_dict(_get_value(endpoint, "extra"))
     connection_string = _get_value(endpoint, "connection_string")
-    warehouse = _get_value(endpoint, "warehouse")
+    # The "database" field is commonly used as the warehouse/catalog path when no
+    # explicit warehouse/connection_string is provided (legacy filesystem CoW tests
+    # and simple local deployments rely on this).
+    warehouse = _get_value(endpoint, "warehouse") or _get_value(endpoint, "database")
     region = _get_value(endpoint, "region")
     catalog_type = _infer_catalog_type(connection_string, region, warehouse, extra)
     catalog_name = extra.get("catalog_name") or "dataflow"
