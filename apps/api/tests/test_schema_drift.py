@@ -44,12 +44,118 @@ def test_detects_source_schema_change():
         target_schema={"user_id": "INTEGER", "email": "VARCHAR"},
         stored_source_fp=old_fp,
         mappings=[{"source": "id", "target": "user_id", "confidence": 0.9}],
+        previous_source_columns=["id", "email"],
+        previous_source_schema={"id": "INTEGER", "email": "VARCHAR"},
+        schema_policy="manual_review",
     )
     assert report["source_changed"] is True
     assert report["drift_detected"] is True
-    assert report["severity"] == "breaking"
+    # Additive new column — not hard-breaking under Airbyte-class classify.
+    assert report["severity"] in {"additive", "warning"}
     assert "created_at" in report["unmapped_sources"]
+    evo = report["schema_evolution"]
+    assert evo["action"] == "review"
+    assert not evo["should_pause"]
 
+
+def test_propagate_auto_maps_additive_column():
+    from services.schema_drift import apply_propagate_mappings
+
+    cols = ["id", "email", "created_at"]
+    old_fp = fingerprint_schema(["id", "email"], {"id": "INTEGER", "email": "VARCHAR"})
+    mappings = [
+        {"source": "id", "target": "id", "confidence": 0.99},
+        {"source": "email", "target": "email", "confidence": 0.99},
+    ]
+    report = detect_schema_drift(
+        source_columns=cols,
+        source_schema={"id": "INTEGER", "email": "VARCHAR", "created_at": "TIMESTAMP"},
+        target_columns=["id", "email"],
+        target_schema={"id": "INTEGER", "email": "VARCHAR"},
+        stored_source_fp=old_fp,
+        mappings=mappings,
+        previous_source_columns=["id", "email"],
+        previous_source_schema={"id": "INTEGER", "email": "VARCHAR"},
+        schema_policy="propagate_columns",
+    )
+    evo = report["schema_evolution"]
+    assert evo["should_propagate"] is True
+    assert evo["should_pause"] is False
+    assert report["severity"] == "additive"
+    new_maps, applied = apply_propagate_mappings(
+        mappings,
+        source_columns=cols,
+        source_schema={"id": "INTEGER", "email": "VARCHAR", "created_at": "TIMESTAMP"},
+        evolution=evo,
+        schema_policy="propagate_columns",
+    )
+    assert any(m.get("source") == "created_at" and m.get("propagated") for m in new_maps)
+    assert applied and applied[0]["source"] == "created_at"
+
+
+def test_hard_breaking_pauses_even_under_propagate():
+    report = detect_schema_drift(
+        source_columns=["sku", "email"],
+        source_schema={"sku": "VARCHAR", "email": "VARCHAR"},
+        target_columns=["id", "email"],
+        target_schema={"id": "INTEGER", "email": "VARCHAR"},
+        mappings=[
+            {"source": "sku", "target": "id", "confidence": 0.9},
+            {"source": "email", "target": "email", "confidence": 0.9},
+        ],
+        previous_source_columns=["id", "email"],
+        previous_source_schema={"id": "INTEGER", "email": "VARCHAR"},
+        previous_primary_key=["id"],
+        live_primary_key=["sku"],
+        schema_policy="propagate_columns",
+    )
+    evo = report["schema_evolution"]
+    assert evo["should_pause"] is True
+    assert evo["action"] == "pause"
+    assert report["severity"] == "breaking"
+    assert any(h.get("kind") == "primary_key_change" for h in evo["hard_breaking"])
+
+
+def test_cursor_removed_always_pauses():
+    report = detect_schema_drift(
+        source_columns=["id", "email"],
+        source_schema={"id": "INTEGER", "email": "VARCHAR"},
+        target_columns=["id", "email"],
+        target_schema={"id": "INTEGER", "email": "VARCHAR"},
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "email", "target": "email", "confidence": 1.0},
+        ],
+        previous_source_columns=["id", "email", "updated_at"],
+        previous_source_schema={
+            "id": "INTEGER",
+            "email": "VARCHAR",
+            "updated_at": "TIMESTAMP",
+        },
+        cursor_fields=["updated_at"],
+        schema_policy="propagate_all",
+    )
+    evo = report["schema_evolution"]
+    assert evo["should_pause"] is True
+    assert any(h.get("kind") == "cursor_removed" for h in evo["hard_breaking"])
+
+
+def test_soft_drop_net_additive_under_propagate():
+    """Fivetran-class: column drop keeps dest history — soft under propagate."""
+    report = detect_schema_drift(
+        source_columns=["id"],
+        source_schema={"id": "INTEGER"},
+        target_columns=["id", "legacy"],
+        target_schema={"id": "INTEGER", "legacy": "VARCHAR"},
+        mappings=[{"source": "id", "target": "id", "confidence": 1.0}],
+        previous_source_columns=["id", "legacy"],
+        previous_source_schema={"id": "INTEGER", "legacy": "VARCHAR"},
+        schema_policy="propagate_columns",
+    )
+    evo = report["schema_evolution"]
+    assert evo["should_pause"] is False
+    assert any(s.get("kind") == "drop" for s in evo["soft_net_additive"])
+    assert evo["action"] in {"propagate", "continue"}
 
 def test_warns_on_unmapped_destination_columns():
     report = detect_schema_drift(
@@ -153,11 +259,12 @@ def test_snowflake_target_fingerprint_churn_is_breaking():
         stored_target_fp=old_fp,
         mappings=[{"source": "id", "target": "id", "confidence": 1.0}],
         destination_db_type="snowflake",
+        schema_policy="pause_on_change",
     )
     assert report["target_changed"] is True
+    assert report["schema_evolution"]["should_pause"] is True
     assert report["severity"] == "breaking"
     assert any("Destination schema changed" in i for i in report["issues"])
-
 
 def test_classify_no_change():
     schema = {

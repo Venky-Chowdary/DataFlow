@@ -558,6 +558,49 @@ def _destination_schema_types(
     return schema
 
 
+def _apply_schema_auto_propagate(
+    *,
+    request: Any,
+    columns: list[str],
+    schema: dict[str, str],
+    mappings: list[dict[str, Any]],
+    dest_schema_types: dict[str, str] | None,
+) -> list[dict[str, Any]]:
+    """Validate≡Execute schema auto-propagate — pause on hard-break, extend maps."""
+    from services.schema_drift import apply_propagate_mappings, detect_schema_drift
+
+    drift = detect_schema_drift(
+        source_columns=columns,
+        source_schema=schema,
+        target_columns=list((dest_schema_types or {}).keys()),
+        target_schema=dest_schema_types or {},
+        mappings=mappings,
+        destination_db_type=(getattr(request.destination, "format", "") or "").lower(),
+        schema_policy=getattr(request, "schema_policy", None) or "manual_review",
+    )
+    evolution = drift.get("schema_evolution") or {}
+    if evolution.get("should_pause"):
+        raise ValueError(
+            (drift.get("issues") or ["Breaking schema change — sync paused"])[0]
+        )
+    if not evolution.get("should_propagate"):
+        return mappings
+    mappings, applied = apply_propagate_mappings(
+        mappings,
+        source_columns=columns,
+        source_schema=schema,
+        evolution=evolution,
+        schema_policy=getattr(request, "schema_policy", None) or "manual_review",
+    )
+    if not applied:
+        return mappings
+    return _enrich_mappings_with_types(
+        mappings,
+        column_types=schema,
+        dest_types=dest_schema_types,
+    )
+
+
 def _infer_primary_key(columns: list[str], mappings: list[dict[str, Any]]) -> str:
     """Infer the primary key target column for mirror/upsert/key-addressed transfers.
 
@@ -1459,6 +1502,15 @@ class UniversalTransferEngine:
                 column_types=schema,
                 dest_types=dest_schema_types,
             )
+            # Schema auto-propagate (Validate≡Execute): extend mappings for new
+            # additive columns under propagate_* before conflict/identity resolve.
+            mappings = _apply_schema_auto_propagate(
+                request=request,
+                columns=columns,
+                schema=schema,
+                mappings=mappings,
+                dest_schema_types=dest_schema_types,
+            )
             # Resolve upsert mode for non-streaming database writes.
             contract = resolve_sync_contract(request.stream_contracts)
             effective_sync = resolve_effective_sync_mode(
@@ -2264,6 +2316,13 @@ class UniversalTransferEngine:
                 column_types=schema,
                 dest_types=dest_schema_types,
             )
+            mappings = _apply_schema_auto_propagate(
+                request=request,
+                columns=columns,
+                schema=schema,
+                mappings=mappings,
+                dest_schema_types=dest_schema_types,
+            )
             mongo.update_job_status(
                 job_id,
                 "running",
@@ -2828,6 +2887,13 @@ class UniversalTransferEngine:
                 ),
                 column_types=schema,
                 dest_types=dest_schema_types,
+            )
+            mappings = _apply_schema_auto_propagate(
+                request=request,
+                columns=columns,
+                schema=schema,
+                mappings=mappings,
+                dest_schema_types=dest_schema_types,
             )
             mongo.update_job_status(
                 job_id,

@@ -1,4 +1,20 @@
-"""Schema drift detection — compare live schemas against persisted transfer contracts."""
+"""Schema drift detection + auto-propagate — Airbyte/Fivetran-class evolution.
+
+Algorithms (primary sources: Airbyte schema-change docs, Fivetran net-additive /
+schema_change_handling):
+
+* Additive (nullable add, widen) → auto-apply under ``propagate_columns`` /
+  ``propagate_all`` (Validate≡Execute share ``apply_propagate_mappings``).
+* Net-additive drops/renames under propagate → keep dest history; map the new
+  name; never silent DROP COLUMN (Fivetran-safe).
+* Hard breaking (PK change, type narrow, NOT NULL add) → **always pause**,
+  even when propagate is on (Airbyte rule).
+* ``pause_on_change`` → pause on any detected change.
+* ``manual_review`` → continue with existing mappings only (ignore new cols
+  until approved); still pause on hard breaking.
+* ``type_locked`` → pause on any type change; additive columns still require
+  propagate or explicit backfill.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +24,23 @@ from typing import Any
 from services.db_type_utils import SCHEMALESS_DESTS, ci_get, normalize_dest_kind
 from services.schema_fingerprint import fingerprint_schema, schemas_match
 from services.type_system import is_lossy_coercion, normalize_logical_type
+
+# Policies that auto-apply additive field evolution (Airbyte propagate_*).
+PROPAGATE_POLICIES = frozenset({"propagate_columns", "propagate_all"})
+
+# Always pause — Airbyte breaking + DataFlow type-fidelity (no silent narrow).
+HARD_BREAKING_KINDS = frozenset({
+    "primary_key_change",
+    "cursor_removed",
+    "primary_key_removed",
+    "narrow_type",
+    "type_change",
+    "add_not_null",
+    "nullability_tighten",
+})
+
+# Soft under propagate (Fivetran net-additive): dest keeps old column / new name.
+SOFT_NET_ADDITIVE_KINDS = frozenset({"drop", "rename"})
 
 
 def _norm_type(value: str | None) -> str:
@@ -205,6 +238,235 @@ def classify_schema_change(
     }
 
 
+
+def _schema_dict_from_flat(
+    columns: list[str],
+    types: dict[str, str] | None,
+    *,
+    nullable: dict[str, bool] | None = None,
+    primary_key: list[str] | None = None,
+) -> dict[str, Any]:
+    cols = {str(c): str((types or {}).get(c) or "VARCHAR") for c in columns}
+    return {
+        "columns": cols,
+        "nullable": {c: (nullable or {}).get(c, True) for c in cols},
+        "primary_key": list(primary_key or []),
+    }
+
+
+def classify_from_column_maps(
+    old_columns: list[str] | None,
+    old_types: dict[str, str] | None,
+    new_columns: list[str] | None,
+    new_types: dict[str, str] | None,
+    *,
+    old_pk: list[str] | None = None,
+    new_pk: list[str] | None = None,
+    cursor_fields: list[str] | None = None,
+) -> dict[str, Any]:
+    """Classify evolution from flat column maps (plan revisions / live introspect)."""
+    old_columns = list(old_columns or [])
+    new_columns = list(new_columns or [])
+    if not old_columns and not new_columns:
+        return {"additive": [], "breaking": [], "severity": "none", "renamed": []}
+    report = classify_schema_change(
+        _schema_dict_from_flat(old_columns, old_types, primary_key=old_pk),
+        _schema_dict_from_flat(new_columns, new_types, primary_key=new_pk),
+    )
+    # Airbyte hard-break: cursor removed from source.
+    cursors = [str(c).strip() for c in (cursor_fields or []) if str(c).strip()]
+    if cursors and old_columns:
+        old_lower = {c.lower() for c in old_columns}
+        new_lower = {c.lower() for c in new_columns}
+        for cur in cursors:
+            if cur.lower() in old_lower and cur.lower() not in new_lower:
+                report["breaking"].append({
+                    "kind": "cursor_removed",
+                    "column": cur,
+                })
+                report["severity"] = "breaking"
+    return report
+
+
+def resolve_schema_evolution(
+    classification: dict[str, Any] | None,
+    *,
+    schema_policy: str = "manual_review",
+    unmapped_sources: list[str] | None = None,
+    source_changed: bool = False,
+) -> dict[str, Any]:
+    """Decide pause / propagate / review / continue — Validate and Execute SSOT.
+
+    Airbyte: propagate applies non-breaking; breaking always pauses.
+    Fivetran: net-additive drops/renames under propagate (keep dest history).
+    DataFlow: also fail-closed on type narrow (no silent airbyte_meta soft-pass).
+    """
+    policy = (schema_policy or "manual_review").strip().lower()
+    classification = classification or {
+        "additive": [],
+        "breaking": [],
+        "severity": "none",
+        "renamed": [],
+    }
+    additive = list(classification.get("additive") or [])
+    breaking = list(classification.get("breaking") or [])
+    unmapped = list(unmapped_sources or [])
+
+    hard: list[dict[str, Any]] = []
+    soft: list[dict[str, Any]] = []
+    for item in breaking:
+        kind = str(item.get("kind") or "")
+        if kind in HARD_BREAKING_KINDS:
+            hard.append(item)
+        elif kind in SOFT_NET_ADDITIVE_KINDS and policy in PROPAGATE_POLICIES:
+            soft.append(item)
+        elif kind in SOFT_NET_ADDITIVE_KINDS and policy == "manual_review":
+            soft.append(item)
+        else:
+            hard.append(item)
+
+    if source_changed and not additive and not breaking and unmapped:
+        for col in unmapped:
+            additive.append({
+                "kind": "add_column",
+                "column": col,
+                "new_type": "VARCHAR",
+                "nullable": True,
+                "inferred": True,
+            })
+
+    action = "continue"
+    reasons: list[str] = []
+
+    if policy == "pause_on_change" and (
+        additive or hard or soft or source_changed or unmapped
+    ):
+        action = "pause"
+        reasons.append("schema_policy=pause_on_change")
+    elif hard:
+        action = "pause"
+        reasons.append(
+            "hard_breaking:"
+            + ",".join(sorted({str(h.get("kind")) for h in hard}))
+        )
+    elif policy == "type_locked" and any(
+        str(a.get("kind")) == "widen_type" for a in additive
+    ):
+        action = "pause"
+        reasons.append("type_locked_blocks_widen")
+    elif policy in PROPAGATE_POLICIES and (additive or soft or unmapped):
+        action = "propagate"
+        reasons.append(f"auto_propagate under {policy}")
+    elif policy == "manual_review" and (additive or soft or unmapped or source_changed):
+        action = "review"
+        reasons.append("manual_review_keep_existing_mappings")
+    elif policy == "type_locked" and unmapped:
+        action = "review"
+        reasons.append("type_locked_new_columns_need_approval")
+
+    severity = "none"
+    if hard or action == "pause":
+        severity = "breaking"
+    elif additive or soft or (action == "propagate"):
+        severity = "additive"
+    elif action == "review":
+        severity = "warning"
+
+    return {
+        "action": action,
+        "severity": severity,
+        "policy": policy,
+        "reasons": reasons,
+        "additive": additive,
+        "hard_breaking": hard,
+        "soft_net_additive": soft,
+        "unmapped_sources": unmapped,
+        "should_pause": action == "pause",
+        "should_propagate": action == "propagate",
+        "backfill_recommended": bool(
+            action == "propagate"
+            and any(
+                str(a.get("kind")) in {"add_column", "rename"}
+                for a in additive + soft
+            )
+        ),
+    }
+
+
+def apply_propagate_mappings(
+    mappings: list[dict[str, Any]] | None,
+    *,
+    source_columns: list[str],
+    source_schema: dict[str, str] | None = None,
+    evolution: dict[str, Any] | None = None,
+    schema_policy: str = "manual_review",
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Extend mappings for auto-propagate — shared by Validate and Execute.
+
+    Returns ``(mappings, applied_changes)``. Under non-propagate policies the
+    mapping list is unchanged (Airbyte approve-myself / Fivetran block).
+    """
+    mappings = [dict(m) for m in (mappings or [])]
+    policy = (schema_policy or "manual_review").strip().lower()
+    evolution = evolution or {}
+    if policy not in PROPAGATE_POLICIES and not evolution.get("should_propagate"):
+        return mappings, []
+
+    existing_src = {
+        str(m.get("source") or "").strip()
+        for m in mappings
+        if m.get("source")
+    }
+    existing_src_lower = {s.lower() for s in existing_src}
+    source_schema = source_schema or {}
+    applied: list[dict[str, Any]] = []
+
+    def _add(col: str, *, reason: str, renamed_from: str | None = None) -> None:
+        name = str(col or "").strip()
+        if not name or name.lower() in existing_src_lower:
+            return
+        if name not in source_columns and name.lower() not in {
+            c.lower() for c in source_columns
+        }:
+            match = next((c for c in source_columns if c.lower() == name.lower()), None)
+            if not match:
+                return
+            name = match
+        entry: dict[str, Any] = {
+            "source": name,
+            "target": name,
+            "confidence": 1.0,
+            "propagated": True,
+            "assignment_strategy": "create_compatible_new",
+            "propagate_reason": reason,
+        }
+        if name in source_schema:
+            entry["source_type"] = source_schema[name]
+        if renamed_from:
+            entry["renamed_from"] = renamed_from
+        mappings.append(entry)
+        existing_src.add(name)
+        existing_src_lower.add(name.lower())
+        applied.append(entry)
+
+    for change in list(evolution.get("additive") or []):
+        if str(change.get("kind")) == "add_column":
+            _add(str(change.get("column") or ""), reason="add_column")
+
+    for change in list(evolution.get("soft_net_additive") or []):
+        if str(change.get("kind")) == "rename":
+            _add(
+                str(change.get("to") or ""),
+                reason="soft_rename",
+                renamed_from=str(change.get("column") or ""),
+            )
+
+    for col in list(evolution.get("unmapped_sources") or []):
+        _add(str(col), reason="unmapped_propagate")
+
+    return mappings, applied
+
+
 def detect_schema_drift(
     *,
     source_columns: list[str],
@@ -216,11 +478,14 @@ def detect_schema_drift(
     mappings: list[dict[str, Any]] | None = None,
     destination_db_type: str = "",
     sample_rows: list[dict[str, Any]] | None = None,
+    previous_source_columns: list[str] | None = None,
+    previous_source_schema: dict[str, str] | None = None,
+    previous_primary_key: list[str] | None = None,
+    live_primary_key: list[str] | None = None,
+    cursor_fields: list[str] | None = None,
+    schema_policy: str = "manual_review",
 ) -> dict[str, Any]:
-    """
-    Compare current schemas to stored fingerprints and mapping coverage.
-    Returns structured drift report for preflight and plan audit.
-    """
+    """Compare live schemas to stored contracts; attach schema_evolution plan."""
     source_schema = source_schema or {}
     target_columns = target_columns or []
     target_schema = target_schema or {}
@@ -231,17 +496,16 @@ def detect_schema_drift(
     live_source_fp = fingerprint_schema(source_columns, source_schema)
     live_target_fp = fingerprint_schema(target_columns, target_schema) if target_columns else ""
 
-    source_changed = bool(stored_source_fp) and not schemas_match(stored_source_fp, source_columns, source_schema)
+    source_changed = bool(stored_source_fp) and not schemas_match(
+        stored_source_fp, source_columns, source_schema
+    )
     target_changed = bool(stored_target_fp and target_columns) and stored_target_fp != live_target_fp
-    # Redis/Mongo/Dynamo have no DDL — target fingerprints are often synthetic from
-    # mapping revisions. Fingerprint churn must not block as "Target DDL incompatible".
     if schemaless:
         target_changed = False
 
     mapped_sources = {str(m.get("source")) for m in mappings if m.get("source")}
     mapped_targets = {str(m.get("target")).lower() for m in mappings if m.get("target")}
     unmapped_sources = [c for c in source_columns if c not in mapped_sources]
-    # Engine-managed SCD2 / CDC bookkeeping columns are not mapping orphans.
     try:
         from services.scd2_engine import SCD2_COLUMNS
 
@@ -268,8 +532,6 @@ def detect_schema_drift(
             tgt_type = ci_get(target_schema, tgt) or "VARCHAR"
             if not (target_schema and is_lossy_coercion(src_type, tgt_type)):
                 continue
-            # Precision collapses stay breaking even when head samples coerce
-            # (same policy as ddl_compatibility — no Airbyte soft-pass loophole).
             from services.type_system import is_precision_collapse_coercion
 
             if is_precision_collapse_coercion(src_type, tgt_type):
@@ -281,7 +543,6 @@ def detect_schema_drift(
                     "reason": "precision_collapse",
                 })
                 continue
-            # Declared VARCHAR→NUMBER with clean numeric samples is not breaking drift.
             if sample_rows and samples_coerce_mapping(
                 m,
                 source_types=source_schema,
@@ -296,6 +557,86 @@ def detect_schema_drift(
                 "target_type": tgt_type.upper(),
             })
 
+    classification: dict[str, Any] | None = None
+    prev_cols = list(previous_source_columns or [])
+    prev_types = dict(previous_source_schema or {})
+    if prev_cols or prev_types:
+        classification = classify_from_column_maps(
+            prev_cols or list(prev_types.keys()),
+            prev_types,
+            source_columns,
+            source_schema,
+            old_pk=previous_primary_key,
+            new_pk=live_primary_key,
+            cursor_fields=cursor_fields,
+        )
+    elif source_changed and mapped_sources:
+        still_present = [c for c in mapped_sources if c in source_columns]
+        dropped_mapped = [c for c in mapped_sources if c not in source_columns]
+        if still_present and unmapped_sources and not dropped_mapped:
+            classification = {
+                "additive": [
+                    {
+                        "kind": "add_column",
+                        "column": c,
+                        "new_type": source_schema.get(c, "VARCHAR"),
+                        "nullable": True,
+                        "inferred": True,
+                    }
+                    for c in unmapped_sources
+                ],
+                "breaking": [],
+                "severity": "additive",
+                "renamed": [],
+            }
+        elif dropped_mapped:
+            classification = {
+                "additive": [
+                    {
+                        "kind": "add_column",
+                        "column": c,
+                        "new_type": source_schema.get(c, "VARCHAR"),
+                        "nullable": True,
+                        "inferred": True,
+                    }
+                    for c in unmapped_sources
+                ],
+                "breaking": [
+                    {"kind": "drop", "column": c, "old_type": "VARCHAR"}
+                    for c in dropped_mapped
+                ],
+                "severity": "breaking",
+                "renamed": [],
+            }
+
+    if type_mismatches:
+        classification = classification or {
+            "additive": [],
+            "breaking": [],
+            "severity": "breaking",
+            "renamed": [],
+        }
+        for tm in type_mismatches:
+            classification["breaking"].append({
+                "kind": (
+                    "narrow_type"
+                    if tm.get("reason") == "precision_collapse"
+                    else "type_change"
+                ),
+                "column": tm.get("source"),
+                "old_type": tm.get("source_type"),
+                "new_type": tm.get("target_type"),
+                "target": tm.get("target"),
+            })
+        classification["severity"] = "breaking"
+
+    evolution = resolve_schema_evolution(
+        classification,
+        schema_policy=schema_policy,
+        unmapped_sources=unmapped_sources,
+        source_changed=source_changed or target_changed,
+    )
+
     issues: list[str] = []
     if source_changed:
         issues.append("Source schema changed since last mapping revision")
@@ -307,15 +648,19 @@ def detect_schema_drift(
         issues.append(f"{len(orphan_targets)} destination column(s) are unmapped")
     if type_mismatches:
         issues.append(f"{len(type_mismatches)} mapped column pair(s) have type mismatch")
+    if evolution.get("hard_breaking"):
+        issues.append(
+            f"{len(evolution['hard_breaking'])} hard-breaking schema change(s) require review"
+        )
 
-    severity = "none"
-    if source_changed or target_changed or type_mismatches:
-        severity = "breaking"
-    elif unmapped_sources or orphan_targets:
+    severity = evolution.get("severity") or "none"
+    if severity == "none" and (unmapped_sources or orphan_targets):
+        severity = "warning"
+    elif severity == "none" and issues:
         severity = "warning"
 
     return {
-        "drift_detected": bool(issues),
+        "drift_detected": bool(issues) or evolution.get("action") not in {"continue", None},
         "severity": severity,
         "issues": issues,
         "source_fingerprint": live_source_fp,
@@ -326,4 +671,6 @@ def detect_schema_drift(
         "orphan_targets": orphan_targets,
         "type_mismatches": type_mismatches,
         "mapping_coverage": round(len(mapped_sources) / max(len(source_columns), 1), 3),
+        "classification": classification,
+        "schema_evolution": evolution,
     }

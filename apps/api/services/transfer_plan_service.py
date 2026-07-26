@@ -172,6 +172,9 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
 
     from services.schema_drift import detect_schema_drift
 
+    # Previous = revision snapshot (or empty for legacy revisions without snapshot).
+    prev_cols = list(rev.source_columns or [])
+    prev_schema = dict(rev.source_schema or {})
     drift = detect_schema_drift(
         source_columns=plan.source_columns,
         source_schema=plan.source_schema,
@@ -181,6 +184,9 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         stored_target_fp=rev.target_schema_hash,
         mappings=rev.mappings,
         destination_db_type=(dest.get("format") or dest.get("type") or "").lower(),
+        previous_source_columns=prev_cols or None,
+        previous_source_schema=prev_schema or None,
+        schema_policy=str((plan.policies or {}).get("schema_policy") or "manual_review"),
     )
 
     policies = plan.policies
@@ -225,6 +231,8 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         backfill_new_fields=bool(policies.get("backfill_new_fields")),
         stored_source_fp=rev.source_schema_hash or "",
         stored_target_fp=rev.target_schema_hash or "",
+        previous_source_columns=prev_cols or None,
+        previous_source_schema=prev_schema or None,
         contract_primary_key=extract_contract_primary_key(policies.get("stream_contracts")),
         destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
     )
@@ -244,13 +252,20 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
 
     if drift.get("drift_detected"):
         pf["schema_drift"] = drift
-        if drift.get("severity") == "breaking" and policies.get("schema_policy") == "pause_on_change":
+        evolution = drift.get("schema_evolution") or {}
+        if evolution.get("should_pause") or (
+            drift.get("severity") == "breaking"
+            and policies.get("schema_policy") == "pause_on_change"
+        ):
             pf["passed"] = False
             pf.setdefault("blockers", []).append({
                 "gate": "schema_drift",
                 "message": drift["issues"][0] if drift.get("issues") else "Schema drift detected",
+                "details": {"schema_evolution": evolution},
             })
-
+        elif evolution.get("should_propagate") and pf.get("effective_mappings"):
+            rev_mappings = pf["effective_mappings"]
+            pf["mappings"] = rev_mappings
     add_preflight_run(plan_id, pf)
     append_audit_event(
         action="transfer_plan.preflight",

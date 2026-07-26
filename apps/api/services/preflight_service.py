@@ -595,9 +595,12 @@ def run_file_preflight(
     backfill_new_fields: bool = False,
     stored_source_fp: str = "",
     stored_target_fp: str = "",
+    previous_source_columns: list[str] | None = None,
+    previous_source_schema: dict[str, str] | None = None,
     contract_primary_key: str | None = None,
     destination_pk_columns: list[str] | None = None,
     date_locale: str = "",
+    cursor_fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G8 + integrity)."""
 
@@ -734,6 +737,12 @@ def run_file_preflight(
         sample_rows=sample_rows,
         stored_source_fp=stored_source_fp or "",
         stored_target_fp=stored_target_fp or "",
+        previous_source_columns=previous_source_columns,
+        previous_source_schema=previous_source_schema,
+        previous_primary_key=None,
+        live_primary_key=destination_pk_columns,
+        cursor_fields=cursor_fields,
+        schema_policy=schema_policy,
     )
     # Do NOT fold drift into ddl_issues / ddl_compatible. G6 must mean real DDL
     # (missing columns, width, types). Drift is a separate contract gate below.
@@ -944,12 +953,12 @@ def run_file_preflight(
         }
 
     # Schema drift is its own rule — never masquerade as Target DDL.
-    # Schemaless destinations have no destination DDL fingerprint to enforce;
-    # fingerprint churn is informational only (operators remapped / create-new).
-    # SQL destinations: hard-block only when policy is pause_on_change.
-    if drift.get("severity") == "breaking" and drift.get("issues"):
+    # Airbyte rule: hard-breaking ALWAYS pauses (even under propagate_*).
+    # Propagate auto-applies additive; manual_review keeps existing mappings.
+    evolution = drift.get("schema_evolution") or {}
+    if drift.get("drift_detected") or evolution.get("action") not in (None, "continue"):
         policy = (schema_policy or "manual_review").strip().lower()
-        if schemaless:
+        if schemaless and not evolution.get("hard_breaking"):
             out.setdefault("warnings", []).append(
                 {
                     "id": "schema_drift",
@@ -960,11 +969,24 @@ def run_file_preflight(
                     "details": {
                         "issues": list(drift.get("issues") or []),
                         "severity": "warning",
+                        "schema_evolution": evolution,
                     },
                 }
             )
-        elif policy == "pause_on_change":
-            drift_msg = str(drift["issues"][0])
+        elif evolution.get("should_pause") or (
+            drift.get("severity") == "breaking"
+            and policy == "pause_on_change"
+        ):
+            hard = evolution.get("hard_breaking") or []
+            if hard and isinstance(hard[0], dict) and hard[0].get("kind"):
+                drift_msg = (
+                    f"Breaking schema change: {hard[0].get('kind')} "
+                    "— sync paused for review (Airbyte-class fail-closed)"
+                )
+            elif drift.get("issues"):
+                drift_msg = str(drift["issues"][0])
+            else:
+                drift_msg = "Schema drift requires review"
             drift_gate = {
                 "id": "schema_drift",
                 "status": "block",
@@ -972,11 +994,12 @@ def run_file_preflight(
                 "duration_ms": 0,
                 "details": {
                     "issues": list(drift.get("issues") or []),
-                    "severity": drift.get("severity"),
+                    "severity": "breaking",
                     "source_changed": drift.get("source_changed"),
                     "target_changed": drift.get("target_changed"),
+                    "schema_evolution": evolution,
                     "rule_id": "schema_drift.breaking",
-                    "remediation_kind": "rerun_mapping",
+                    "remediation_kind": "approve_schema_drift",
                 },
             }
             out["gates"] = [*out["gates"], drift_gate]
@@ -1000,26 +1023,62 @@ def run_file_preflight(
             out["readiness_score"] = round(
                 out["passed_count"] / max(out["total_gates"], 1) * 100, 1
             )
-        else:
-            # manual_review / propagate_*: surface as a non-blocking gate so G10
-            # policy remains the operator control, not a false DDL failure.
+        elif evolution.get("should_propagate"):
+            from services.schema_drift import apply_propagate_mappings
+
+            propagated_maps, applied = apply_propagate_mappings(
+                list(mappings or []),
+                source_columns=list(columns or []),
+                source_schema=column_types or {},
+                evolution=evolution,
+                schema_policy=policy,
+            )
+            if applied:
+                out["effective_mappings"] = propagated_maps
+                out["propagated_mappings"] = applied
             out["gates"] = [
                 *out["gates"],
                 {
                     "id": "schema_drift",
                     "status": "pass",
                     "message": (
-                        f"Schema fingerprint changed — policy '{policy}' allows continue "
-                        f"(review mapping if needed)"
+                        f"Schema auto-propagate ({policy}): "
+                        f"{len(applied)} column mapping(s) added; "
+                        "destination ADD COLUMN on Execute"
                     ),
                     "duration_ms": 0,
                     "details": {
                         "issues": list(drift.get("issues") or []),
-                        "severity": "warning",
+                        "severity": "additive",
                         "schema_policy": policy,
+                        "schema_evolution": evolution,
+                        "propagated": [a.get("source") for a in applied],
+                        "backfill_recommended": evolution.get("backfill_recommended"),
                     },
                 },
             ]
+            out["schema_drift"] = drift
+        else:
+            # manual_review / type_locked review: continue with existing mappings.
+            out["gates"] = [
+                *out["gates"],
+                {
+                    "id": "schema_drift",
+                    "status": "pass",
+                    "message": (
+                        f"Schema change detected — policy '{policy}' keeps existing "
+                        "mappings (approve on Map to include new columns)"
+                    ),
+                    "duration_ms": 0,
+                    "details": {
+                        "issues": list(drift.get("issues") or []),
+                        "severity": evolution.get("severity") or "warning",
+                        "schema_policy": policy,
+                        "schema_evolution": evolution,
+                    },
+                },
+            ]
+            out["schema_drift"] = drift
 
     return out
 

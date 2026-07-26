@@ -49,6 +49,9 @@ class PlanRevision:
     llm: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=_now)
     approved: bool = False
+    # Snapshot at revision time — required for additive vs breaking classify.
+    source_columns: list[str] = field(default_factory=list)
+    source_schema: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -69,6 +72,10 @@ class PlanRevision:
             llm=dict(data.get("llm") or {}),
             created_at=data.get("created_at", _now()),
             approved=bool(data.get("approved", False)),
+            source_columns=[str(c) for c in (data.get("source_columns") or [])],
+            source_schema={
+                str(k): str(v) for k, v in (data.get("source_schema") or {}).items()
+            },
         )
 
 
@@ -230,6 +237,8 @@ def add_mapping_revision(
             plan_summary=dict(pipeline_result.get("plan_summary") or {}),
             mapping_proof=mapping_proof,
             llm=dict(pipeline_result.get("llm") or {}),
+            source_columns=list(src_cols),
+            source_schema={k: str(v) for k, v in (src_schema or {}).items()},
         )
         plan.revisions.append(rev)
         plan.active_version = version
