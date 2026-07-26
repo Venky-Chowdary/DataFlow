@@ -340,6 +340,10 @@ def load_table(
 
 def test_iceberg_catalog(endpoint: Any) -> tuple[bool, str]:
     """Probe an Iceberg catalog/warehouse for reachability and write permission."""
+    if not _get_value(endpoint, "table"):
+        # Connectivity probes do not need a real table; use a probe placeholder.
+        if isinstance(endpoint, dict):
+            endpoint["table"] = "dataflow_probe"
     try:
         config = parse_iceberg_catalog_config(endpoint)
         if config["catalog_type"] == "filesystem":

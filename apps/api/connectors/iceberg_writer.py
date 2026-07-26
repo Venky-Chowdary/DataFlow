@@ -453,8 +453,11 @@ def _write_mapped_rows_pyiceberg(
     error_policy: str | None,
     write_mode: str,
     conflict_columns: list[str] | None,
+    sync_mode: str = "",
+    file_batch_idx: int = 0,
 ) -> WriteResult:
     """Write a batch through a real pyiceberg catalog with MERGE/upsert support."""
+    from services.sync_cursor import is_overwrite_sync
     if pa is None:
         return WriteResult(
             ok=False,
@@ -574,6 +577,17 @@ def _write_mapped_rows_pyiceberg(
 
     mode = (write_mode or "append").lower()
     upsert_modes = {"upsert", "merge", "cdc", "incremental_deduped"}
+    # Multi-chunk full-refresh overwrite: only the first chunk may replace the
+    # destination; later chunks append to the same snapshot. This mirrors the
+    # Redis prefix-clear-once contract and avoids losing all but the final chunk.
+    if is_overwrite_sync(sync_mode) and mode not in upsert_modes:
+        if file_batch_idx in (0, 1):
+            if mode == "insert":
+                mode = "overwrite"
+        else:
+            mode = "append"
+    elif mode in {"overwrite", "replace"} and file_batch_idx > 1:
+        mode = "append"
 
     try:
         existing_arrow = tbl.schema().as_arrow()
@@ -940,6 +954,8 @@ def write_mapped_rows(
     data_rows = data_rows or []
     mappings = mappings or []
     column_types = column_types or {}
+    sync_mode = str(_kwargs.pop("sync_mode", ""))
+    file_batch_idx = int(_kwargs.pop("file_batch_idx", 0) or 0)
     table = (table_name or "events").strip()
 
     endpoint = {
@@ -968,6 +984,8 @@ def write_mapped_rows(
             error_policy=error_policy,
             write_mode=write_mode,
             conflict_columns=conflict_columns,
+            sync_mode=sync_mode,
+            file_batch_idx=file_batch_idx,
         )
 
     return _write_mapped_rows_filesystem(
@@ -989,5 +1007,7 @@ def write_mapped_rows(
         error_policy=error_policy,
         write_mode=write_mode,
         conflict_columns=conflict_columns,
+        sync_mode=sync_mode,
+        file_batch_idx=file_batch_idx,
         **_kwargs,
     )

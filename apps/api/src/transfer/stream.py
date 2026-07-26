@@ -873,6 +873,9 @@ def _write_batch(
                 for k, v in cfg.items()
                 if k not in common and v not in (None, "")
             }
+            # Iceberg full-refresh overwrite must truncate once per job, not per chunk.
+            common["sync_mode"] = sync_mode
+            common["file_batch_idx"] = chunk_idx
         result = write_via_registry(
             dest_type,
             common=common,
@@ -1438,8 +1441,9 @@ def stream_database_transfer(
     max_workers = int(os.getenv("DATAFLOW_PARALLEL_WORKERS", str(min(2, os.cpu_count() or 1))))
     # SQLite handles concurrency poorly with a single shared file, so keep it sequential.
     # Snowflake reuses one connection for the job — must stay serial.
+    # Iceberg catalog commits are snapshot-isolated; concurrent writers conflict.
     # Public TCP proxies drop under concurrent bulk writers — force one connection.
-    if dest_type in ("sqlite", "snowflake"):
+    if dest_type in ("sqlite", "snowflake", "iceberg"):
         max_workers = 1
     else:
         try:

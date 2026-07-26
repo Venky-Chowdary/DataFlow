@@ -934,6 +934,41 @@ def verify_duckdb_table(
         return -1, ""
 
 
+def verify_iceberg_table(
+    *,
+    connection_string: str = "",
+    warehouse: str = "",
+    table_name: str = "",
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+) -> tuple[int, str]:
+    """Reconcile an Iceberg table by scanning the catalog and fingerprinting rows."""
+    try:
+        from connectors.iceberg_catalog import load_catalog, parse_iceberg_catalog_config
+
+        endpoint = {
+            "connection_string": connection_string or "",
+            "warehouse": warehouse or "",
+            "table": table_name,
+            "table_name": table_name,
+        }
+        cfg = parse_iceberg_catalog_config(endpoint)
+        catalog = load_catalog(endpoint)
+        identifier = cfg["namespace"] + (cfg["table_name"],)
+        tbl = catalog.load_table(identifier)
+        count = tbl.scan().count()
+        arrow = tbl.scan().to_arrow()
+        if limit and len(arrow) > limit:
+            arrow = arrow.slice(0, limit)
+        rows = arrow.to_pylist()
+        columns = target_columns or list(arrow.column_names)
+        checksum = fingerprint_checksum(_iter_fingerprints(rows, columns))
+        return int(count), checksum
+    except Exception as exc:
+        logger.warning("Iceberg reconciliation read-back failed: %s", exc, exc_info=exc)
+        return -1, ""
+
+
 def verify_mongodb_collection(
     *,
     host: str = "",
@@ -1112,7 +1147,15 @@ def verify_target(
     target_columns: list[str] | None = None,
     limit: int = 0,
 ) -> tuple[int, str]:
-    if db_type == "mongodb":
+    if db_type == "iceberg":
+        count, chk = verify_iceberg_table(
+            connection_string=dest.get("connection_string", ""),
+            warehouse=dest.get("warehouse", ""),
+            table_name=table_name,
+            target_columns=target_columns,
+            limit=limit,
+        )
+    elif db_type == "mongodb":
         count, chk = verify_mongodb_collection(
             host=dest.get("host", ""),
             port=int(dest.get("port") or 27017),
@@ -1330,8 +1373,8 @@ def normalize_cell(value: Any) -> str:
             re_encoded = base64.b64encode(decoded)
             if re_encoded == value:
                 return re_encoded.decode("ascii")
-        except Exception as exc:
-            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        except Exception:
+            logger.debug("Raw bytes are not valid base64; encoding as base64 for checksum")
         return base64.b64encode(value).decode("ascii")
     if isinstance(value, (dict, list, tuple, set, frozenset)):
         return json.dumps(value, sort_keys=True, default=json_default)

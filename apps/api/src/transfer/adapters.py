@@ -450,6 +450,8 @@ def resolve_connector_config(
         "port": endpoint.port or 0,
         "database": endpoint.database or "",
         "schema": endpoint.schema or "",
+        "table": endpoint.table or "",
+        "table_name": endpoint.table or "",
         "username": endpoint.username,
         "password": endpoint.password,
         "connection_string": endpoint.connection_string or "",
