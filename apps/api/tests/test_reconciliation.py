@@ -259,3 +259,40 @@ def test_sample_compare_aligns_renamed_primary_key():
     assert result["compared"] > 0
     assert result["passed"] is True
     assert result["mismatches"] == []
+
+
+def test_sample_compare_skips_columns_absent_from_readback():
+    """Missing read-back keys must not invent NULL mismatches (old [:20] bug)."""
+    from services.reconciliation import sample_compare_rows
+
+    source = [{
+        "id": "1",
+        "flag": "false",
+        "late_col": "x",
+    }]
+    # Simulate truncated SELECT that omitted late_col.
+    target = [{"id": 1, "flag": 0}]
+    mappings = [
+        {"source": "id", "target": "id", "transform": "integer"},
+        {"source": "flag", "target": "flag", "transform": "boolean"},
+        {"source": "late_col", "target": "late_col", "transform": "none"},
+    ]
+    result = sample_compare_rows(
+        source,
+        target,
+        mappings,
+        target_columns=["id", "flag", "late_col"],
+        sort_key="id",
+    )
+    assert result["passed"] is True
+    assert all(m.get("target") != "late_col" for m in result["mismatches"])
+
+
+def test_mysql_boolean_false_binds_as_zero():
+    from connectors.mysql_writer import _to_mysql_value
+
+    assert _to_mysql_value(False, "BOOLEAN") == 0
+    assert _to_mysql_value(True, "BOOLEAN") == 1
+    assert _to_mysql_value("", "JSON") is None
+    assert _to_mysql_value({"a": 1}, "JSON") == '{"a":1}'
+    assert _to_mysql_value("not-json", "JSON") == '"not-json"'

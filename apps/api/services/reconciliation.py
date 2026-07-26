@@ -1750,14 +1750,21 @@ def sample_compare_rows(
         if tgt is None:
             continue
 
+        # Case-insensitive target lookup — MySQL/Snowflake cursors may fold names.
+        tgt_keys = {str(k).lower(): k for k in tgt.keys()}
+
         for m in mappings:
             src_col = str(m.get("source") or "")
             tgt_col = str(m.get("target") or "")
             if not src_col or not tgt_col:
                 continue
+            physical_tgt = tgt_keys.get(tgt_col.lower())
+            if physical_tgt is None:
+                # Column absent from read-back sample — do not invent NULL mismatch.
+                continue
             transform = m.get("transform")
             src_val = _normalize_source(src.get(src_col), transform)
-            tgt_val = normalize_cell(tgt.get(tgt_col))
+            tgt_val = normalize_cell(tgt.get(physical_tgt))
             compared += 1
             if src_val != tgt_val:
                 mismatches.append(

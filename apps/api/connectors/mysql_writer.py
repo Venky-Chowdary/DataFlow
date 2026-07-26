@@ -120,6 +120,29 @@ def _to_mysql_value(value: Any, source_type: str) -> Any:
             except Exception:
                 return value.encode("utf-8")
         return value
+    if upper in {"JSON"}:
+        # MySQL JSON rejects '' / bare words (error 3140). Bind compact JSON text
+        # or SQL NULL — never an empty string.
+        import json as _json
+
+        from services.value_serializer import json_default
+
+        if isinstance(value, (dict, list, tuple)):
+            return _json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=json_default)
+        if isinstance(value, (bool, int, float)):
+            return _json.dumps(value, allow_nan=False)
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            _json.loads(text)
+            return text
+        except Exception:
+            # Lossless wrap so scalars still load into JSON columns.
+            return _json.dumps(text, ensure_ascii=False)
+    if upper in {"BOOLEAN", "BOOL", "TINYINT"} and isinstance(value, bool):
+        # Explicit 0/1 — MySQL BOOLEAN is TINYINT(1); keep False distinct from NULL.
+        return 1 if value else 0
     return value
 
 def _open_mysql(

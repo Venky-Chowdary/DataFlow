@@ -260,12 +260,15 @@ def run_reconciliation(
             mappings=mapping_dicts,
             limit=min(50, len(sample_records)),
         )
+        # Compare EVERY mapped column. Truncating to 20 falsely treated columns
+        # 21+ as NULL (Mongo→MySQL users with 24 fields: Gate-8 failed on
+        # referral_invite_modal_dismissed with source 0 vs invented NULL).
         target_sample = read_target_sample(
             db_type,
             cfg,
             schema=schema,
             table_name=table_name,
-            columns=target_cols[:20] or None,
+            columns=target_cols or None,
             limit=min(50, len(sample_records)),
             sort_key=sort_key,
             key_values=key_values or None,
