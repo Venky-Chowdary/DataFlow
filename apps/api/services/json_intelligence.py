@@ -162,7 +162,11 @@ def apply_struct_policies_to_row(
             if k not in out or out.get(k) is None:
                 # Serialize nested leftovers for the string matrix.
                 if isinstance(v, (dict, list)):
-                    out[k] = json.dumps(v, ensure_ascii=False, separators=(",", ":"), default=str)
+                    from services.value_serializer import json_default
+
+                    out[k] = json.dumps(
+                        v, ensure_ascii=False, separators=(",", ":"), default=json_default
+                    )
                 else:
                     out[k] = v
     return out
@@ -244,7 +248,11 @@ def materialize_struct_policies(
             for idx, elem in enumerate(arr[:ARRAY_EXPLODE_MAX]):
                 clone = dict(as_dict)
                 if isinstance(elem, (dict, list)):
-                    clone[elem_col] = json.dumps(elem, ensure_ascii=False, separators=(",", ":"), default=str)
+                    from services.value_serializer import json_default
+
+                    clone[elem_col] = json.dumps(
+                        elem, ensure_ascii=False, separators=(",", ":"), default=json_default
+                    )
                 else:
                     clone[elem_col] = elem
                 # Preserve original array blob on parent; index for reconcile honesty.

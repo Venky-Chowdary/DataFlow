@@ -230,6 +230,16 @@ def mark_dlq_promoted(
         return {"updated": 0}
 
     try:
+        if dest_type == "mongodb":
+            return _mark_dlq_promoted_mongodb(
+                destination,
+                table=table,
+                ids=ids,
+                job_id=job_id,
+                by_job=by_job,
+                promoted_at=promoted_at,
+            )
+
         if dest_type == "sqlite":
             import sqlite3
 
@@ -293,6 +303,59 @@ def mark_dlq_promoted(
         return {"updated": 0, "error": str(exc)[:300], "table": table}
 
 
+def _mark_dlq_promoted_mongodb(
+    destination: Any,
+    *,
+    table: str,
+    ids: list[str],
+    job_id: str,
+    by_job: bool,
+    promoted_at: str,
+) -> dict[str, Any]:
+    """Stamp ``_df_promoted_at`` on Mongo DLQ documents (collection host)."""
+    from connectors.mongodb_common import _mongo_client, normalize_mongodb_connection_string
+    from src.transfer.adapters import resolve_connector_config
+
+    cfg = resolve_connector_config(destination)
+    uri = normalize_mongodb_connection_string(
+        cfg.get("connection_string", ""),
+        database=cfg.get("database", "") or getattr(destination, "database", "") or "",
+        host=cfg.get("host", "") or getattr(destination, "host", "") or "",
+        port=int(cfg.get("port") or getattr(destination, "port", 0) or 0),
+        username=cfg.get("username", "") or getattr(destination, "username", "") or "",
+        password=cfg.get("password", "") or getattr(destination, "password", "") or "",
+        ssl=bool(cfg.get("ssl") or getattr(destination, "ssl", False)),
+        auth_source=cfg.get("auth_source", ""),
+    )
+    db_name = (
+        getattr(destination, "database", None)
+        or cfg.get("database")
+        or "test"
+    )
+    client = _mongo_client(uri)
+    coll = client[db_name][table]
+    if by_job:
+        filt: dict[str, Any] = {
+            "_df_job_id": job_id,
+            "$or": [
+                {"_df_promoted_at": {"$exists": False}},
+                {"_df_promoted_at": None},
+                {"_df_promoted_at": ""},
+            ],
+        }
+    else:
+        filt = {"_df_qid": {"$in": ids}}
+        if job_id:
+            filt["_df_job_id"] = job_id
+    result = coll.update_many(filt, {"$set": {"_df_promoted_at": promoted_at}})
+    return {
+        "updated": int(result.modified_count or 0),
+        "table": table,
+        "promoted_at": promoted_at,
+        "driver": "mongodb",
+    }
+
+
 def count_open_dlq_rows(destination: Any, *, job_id: str = "") -> dict[str, Any]:
     """Count unpromoted DLQ rows (optional job filter) for Studio badges."""
     from src.transfer.adapters import resolve_connector_config
@@ -306,6 +369,35 @@ def count_open_dlq_rows(destination: Any, *, job_id: str = "") -> dict[str, Any]
     endpoint = dlq_endpoint(destination)
     table = endpoint.table or dlq_table_name("import")
     try:
+        if dest_type == "mongodb":
+            from connectors.mongodb_common import _mongo_client, normalize_mongodb_connection_string
+            from src.transfer.adapters import resolve_connector_config as _resolve_cfg
+
+            cfg = _resolve_cfg(destination)
+            uri = normalize_mongodb_connection_string(
+                cfg.get("connection_string", ""),
+                database=cfg.get("database", "") or getattr(destination, "database", "") or "",
+                host=cfg.get("host", "") or getattr(destination, "host", "") or "",
+                port=int(cfg.get("port") or getattr(destination, "port", 0) or 0),
+                username=cfg.get("username", "") or getattr(destination, "username", "") or "",
+                password=cfg.get("password", "") or getattr(destination, "password", "") or "",
+                ssl=bool(cfg.get("ssl") or getattr(destination, "ssl", False)),
+                auth_source=cfg.get("auth_source", ""),
+            )
+            db_name = getattr(destination, "database", None) or cfg.get("database") or "test"
+            coll = _mongo_client(uri)[db_name][table]
+            filt: dict[str, Any] = {
+                "$or": [
+                    {"_df_promoted_at": {"$exists": False}},
+                    {"_df_promoted_at": None},
+                    {"_df_promoted_at": ""},
+                ]
+            }
+            if job_id:
+                filt["_df_job_id"] = job_id
+            n = int(coll.count_documents(filt))
+            return {"supported": True, "open_rows": n, "table": table, "driver": "mongodb"}
+
         if dest_type == "sqlite":
             import sqlite3
 

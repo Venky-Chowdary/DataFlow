@@ -413,8 +413,6 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         fmt = (cfg.get("type") or endpoint.format or "").lower()
 
         if fmt == "mongodb":
-            import json
-
             from services.schema_inference import infer_schema_map
 
             coll_name = endpoint.collection
@@ -433,17 +431,48 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             except PyMongoError as exc:
                 out["message"] = f"Collection sample failed: {exc}"
                 return
-            # Serialize MongoDB-native types to JSON-safe scalars so the
-            # introspection response can be returned without FastAPI serialization errors.
-            from services.value_serializer import json_default
+            # Match Execute path (mongodb_reader): expand nested docs + string
+            # matrix via cell_to_string so Map/Validate columns ≡ write headers.
+            from services.json_intelligence import expand_mongo_documents
+            from services.value_serializer import DF_MISSING_SENTINEL, SQL_NULL_SENTINEL
 
-            safe_records = []
-            for r in records:
-                safe_records.append(json.loads(json.dumps(r, default=json_default)))
-            columns = list(safe_records[0].keys()) if safe_records else []
+            for doc in records:
+                if isinstance(doc, dict) and "_id" in doc:
+                    doc["_id"] = str(doc["_id"])
+            records = expand_mongo_documents(records, cfg=cfg)
+
+            # Union keys across the sample (sparse nested fields mid-batch).
+            columns: list[str] = []
+            seen_cols: set[str] = set()
+            for doc in records:
+                if not isinstance(doc, dict):
+                    continue
+                for k in doc.keys():
+                    if k not in seen_cols:
+                        seen_cols.add(k)
+                        columns.append(k)
+
+            safe_records: list[dict[str, Any]] = []
+            for doc in records:
+                if not isinstance(doc, dict):
+                    continue
+                row: dict[str, Any] = {}
+                for col in columns:
+                    if col not in doc:
+                        row[col] = DF_MISSING_SENTINEL
+                    elif doc[col] is None:
+                        row[col] = SQL_NULL_SENTINEL
+                    else:
+                        row[col] = cell_to_string(doc[col], preserve_sql_null=True)
+                safe_records.append(row)
+
             # Canonical schema intelligence choke point (type + semantic_role).
             samples_by_field = {
-                col: [cell_to_string(r.get(col)) for r in records[:100] if r.get(col) is not None]
+                col: [
+                    r[col]
+                    for r in safe_records[:100]
+                    if r.get(col) not in (None, "", DF_MISSING_SENTINEL, SQL_NULL_SENTINEL)
+                ]
                 for col in columns
             }
             schema, intel = infer_schema_map(samples_by_field)

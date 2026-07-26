@@ -159,7 +159,6 @@ except (
 from services.checkpoint_service import (
     Checkpoint,
     CheckpointService,
-    resume_or_create_checkpoint,
 )
 
 logger = logging.getLogger("dataflow.transfer")
@@ -1359,10 +1358,48 @@ class UniversalTransferEngine:
         checkpoint = None
         if resume:
             try:
-                checkpoint = resume_or_create_checkpoint(job_id, checkpoint_service)
+                checkpoint = checkpoint_service.load(job_id)
             except Exception as exc:
                 logger.warning("resume checkpoint load failed: %s", exc, exc_info=exc)
-        if not resume:
+                checkpoint = None
+            # Prefer job.records_processed when the checkpoint blob was cleared
+            # after a completed partial wave (Studio Resume / multi-batch upsert).
+            if not _checkpoint_has_progress(checkpoint):
+                try:
+                    job_doc = mongo.get_job(job_id) or {}
+                    prior_rows = int(job_doc.get("records_processed") or 0)
+                except Exception:
+                    prior_rows = 0
+                if prior_rows > 0:
+                    checkpoint = Checkpoint(
+                        job_id=job_id,
+                        rows_processed=prior_rows,
+                        offset=prior_rows,
+                    )
+            if not _checkpoint_has_progress(checkpoint):
+                # Insert/append resume-from-zero silently duplicates. Idempotent
+                # modes (upsert/overwrite/mirror) may restart safely when the
+                # control-plane lost the checkpoint (Mongo down, cleared job).
+                contract = resolve_sync_contract(request.stream_contracts)
+                sync = resolve_effective_sync_mode(
+                    request.sync_mode,
+                    contract.sync_mode if contract else None,
+                )
+                if requires_upsert(sync) or is_overwrite_sync(sync):
+                    logger.warning(
+                        "resume job=%s without durable checkpoint — restarting "
+                        "from zero under idempotent sync_mode=%s",
+                        job_id,
+                        sync,
+                    )
+                    checkpoint = Checkpoint(job_id=job_id)
+                else:
+                    raise ValueError(
+                        "No durable checkpoint to resume (need offset, chunk_index, or "
+                        "rows_processed progress). Use Retry / start a new transfer, "
+                        "or re-run from Validate after fixing the failure."
+                    )
+        else:
             checkpoint = Checkpoint(job_id=job_id)
         lineage.emit_run_started(
             run_id=job_id,
@@ -1806,14 +1843,52 @@ class UniversalTransferEngine:
             )
 
             if request.destination.kind == "database":
-                # Buffered path still reloads all rows; only skip the destructive
-                # full-refresh DROP when resuming with a durable checkpoint that
-                # already wrote progress (avoids wiping destination on resume).
+                # Buffered path reloads the in-memory source; slice past committed
+                # rows so Resume does not re-write (or duplicate) progress. Still
+                # skip destructive full-refresh DROP when a durable checkpoint exists.
                 checkpoint_has_progress = _checkpoint_has_progress(checkpoint)
                 should_drop_full_refresh = should_drop_destination_for_sync(
                     request_sync_mode=request.sync_mode,
                     contract_sync_mode=contract.sync_mode if contract else None,
                 ) and not (resume and checkpoint_has_progress)
+                if resume and checkpoint_has_progress:
+                    skip_n = max(
+                        int(getattr(checkpoint, "rows_processed", 0) or 0),
+                        int(getattr(checkpoint, "offset", 0) or 0),
+                    )
+                    if skip_n > 0:
+                        if skip_n >= len(records):
+                            mongo.update_job_status(
+                                job_id,
+                                "completed",
+                                phase="completed",
+                                progress_pct=100,
+                                message=(
+                                    f"Resume: checkpoint already at {skip_n:,} row(s); "
+                                    "nothing left to write."
+                                ),
+                                records_processed=skip_n,
+                            )
+                            return TransferResult(
+                                success=True,
+                                operation=request.operation,
+                                job_id=job_id,
+                                records_transferred=skip_n,
+                                destination_summary={
+                                    "resumed_from": skip_n,
+                                    "rows_written": 0,
+                                    "note": "checkpoint ahead of or equal to source size",
+                                },
+                            )
+                        records = records[skip_n:]
+                        total_rows = len(records)
+                        mongo.update_job_status(
+                            job_id,
+                            "running",
+                            total_rows=total_rows,
+                            records_processed=0,
+                            message=f"Resuming after {skip_n:,} committed row(s)…",
+                        )
                 if resume and checkpoint_has_progress and write_mode == "insert":
                     # Non-idempotent resume would duplicate; force upsert when PK known.
                     if conflict_columns:
@@ -3111,6 +3186,10 @@ class UniversalTransferEngine:
 
             is_streaming = True
             stream_contract = resolve_sync_contract(request.stream_contracts)
+            effective_sync = resolve_effective_sync_mode(
+                request.sync_mode,
+                stream_contract.sync_mode if stream_contract else None,
+            )
             if should_drop_destination_for_sync(
                 request_sync_mode=request.sync_mode,
                 contract_sync_mode=stream_contract.sync_mode

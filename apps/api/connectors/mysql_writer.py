@@ -140,9 +140,20 @@ def _to_mysql_value(value: Any, source_type: str) -> Any:
         except Exception:
             # Lossless wrap so scalars still load into JSON columns.
             return _json.dumps(text, ensure_ascii=False)
-    if upper in {"BOOLEAN", "BOOL", "TINYINT"} and isinstance(value, bool):
-        # Explicit 0/1 — MySQL BOOLEAN is TINYINT(1); keep False distinct from NULL.
-        return 1 if value else 0
+    if upper in {"BOOLEAN", "BOOL", "TINYINT"}:
+        # Mongo wire uses cell_to_string → "true"/"false"; quarantine replay may
+        # also land string bools. Bind 0/1 — never leave False-like strings unbound.
+        if isinstance(value, bool):
+            return 1 if value else 0
+        if isinstance(value, (int, float)) and value in (0, 1):
+            return int(value)
+        if isinstance(value, str):
+            token = value.strip().lower()
+            if token in {"true", "t", "yes", "y", "1", "on"}:
+                return 1
+            if token in {"false", "f", "no", "n", "0", "off"}:
+                return 0
+        return value
     return value
 
 def _open_mysql(

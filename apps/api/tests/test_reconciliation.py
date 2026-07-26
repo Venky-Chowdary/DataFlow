@@ -293,6 +293,10 @@ def test_mysql_boolean_false_binds_as_zero():
 
     assert _to_mysql_value(False, "BOOLEAN") == 0
     assert _to_mysql_value(True, "BOOLEAN") == 1
+    # Mongo cell_to_string wire form
+    assert _to_mysql_value("false", "BOOLEAN") == 0
+    assert _to_mysql_value("true", "TINYINT") == 1
+    assert _to_mysql_value("0", "BOOLEAN") == 0
     assert _to_mysql_value("", "JSON") is None
     assert _to_mysql_value({"a": 1}, "JSON") == '{"a":1}'
     assert _to_mysql_value("not-json", "JSON") == '"not-json"'

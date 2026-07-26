@@ -31,6 +31,7 @@ from ..transfer.connector_capabilities import resolve_driver_type
 from ..transfer.connector_registry import run_probe
 
 router = APIRouter(prefix="/connectors", tags=["Connectors"])
+logger = logging.getLogger(__name__)
 
 
 def _actor_email(request: Request) -> str:
@@ -889,6 +890,52 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         if dest.kind == "file_export":
             raise HTTPException(status_code=400, detail="Quarantine replay is not supported for file_export destinations")
 
+        # Prefer stream-contract / identity PK — never hardcode only id/_id
+        # (Mongo→SQL users use `_id`→`id`, but many routes use user_id / code).
+        conflict_columns: list[str] = []
+        try:
+            from services.primary_key import resolve_primary_key_target
+            from services.sync_cursor import map_source_to_target, resolve_sync_contract
+
+            contract = resolve_sync_contract(transfer_req.stream_contracts)
+            if contract and contract.primary_key:
+                conflict_columns = [
+                    map_source_to_target(col, mappings)
+                    for col in contract.primary_key_columns()
+                ]
+            if not conflict_columns:
+                pk_tgt = resolve_primary_key_target(
+                    mappings,
+                    (dest.format or "").lower(),
+                    validation_mode=transfer_req.validation_mode or "balanced",
+                )
+                if pk_tgt:
+                    conflict_columns = [pk_tgt]
+            if not conflict_columns:
+                conflict_columns = [
+                    m.get("target") or m.get("target_column") or m.get("source")
+                    for m in mappings
+                    if (m.get("source") or "").lower() in {"id", "_id"}
+                    or (m.get("target") or "").lower() in {"id", "_id"}
+                ]
+            conflict_columns = [c for c in conflict_columns if c]
+        except Exception as exc:
+            logger.warning("quarantine replay PK resolve failed: %s", exc, exc_info=exc)
+            conflict_columns = []
+
+        write_mode = "upsert" if conflict_columns else "insert"
+        if write_mode == "insert":
+            # Refuse silent insert replay — partial loads + insert duplicates rows.
+            # Operator must set primary key on Map / stream contract first.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Quarantine replay needs a primary key (stream contract or "
+                    "id/_id mapping) so rows upsert instead of duplicating. "
+                    "Set primary_key on Map, then replay."
+                ),
+            )
+
         rows_written, ddl_log, dest_summary = write_destination_database(
             dest,
             records,
@@ -897,12 +944,8 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             mappings,
             validation_mode=transfer_req.validation_mode or "balanced",
             backfill_new_fields=bool(transfer_req.backfill_new_fields),
-            write_mode="upsert" if any(m.get("source", "").lower() in {"id", "_id"} for m in mappings) else "insert",
-            conflict_columns=[
-                m.get("target") or m.get("target_column") or m.get("source")
-                for m in mappings
-                if (m.get("source") or "").lower() in {"id", "_id"}
-            ] or None,
+            write_mode=write_mode,
+            conflict_columns=conflict_columns or None,
         )
         rejected = int(dest_summary.get("rejected_rows") or 0)
         status = "completed_with_quarantine" if rejected > 0 else "completed"

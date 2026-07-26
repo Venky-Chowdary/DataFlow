@@ -254,6 +254,8 @@ def analyze_coercion(
 
         use_wire = False
         wire_check_fn = None
+        use_json_wire = False
+        dest_l = (dest_db_type or "").strip().lower()
         try:
             from connectors.sql_temporal import (
                 dest_uses_sql_wire_probe,
@@ -262,7 +264,6 @@ def analyze_coercion(
             )
 
             use_wire = dest_uses_sql_wire_probe(dest_db_type) and is_temporal_ddl(tgt_type)
-            dest_l = (dest_db_type or "").strip().lower()
             if use_wire and dest_l in {"snowflake", "bigquery"}:
                 from connectors.warehouse_temporal import wire_check_warehouse
 
@@ -273,6 +274,11 @@ def analyze_coercion(
                 wire_check_fn = wire_check_temporal
         except ImportError:
             wire_check_fn = None
+
+        # MySQL JSON bind (error 3140 class) — probe after transform so Validate
+        # fails before write quarantines notifications-style nested fields.
+        if tgt_logical in _STRUCTURAL_LOGICALS and dest_l in {"mysql", "mariadb"}:
+            use_json_wire = True
 
         for idx, row in enumerate(rows):
             cell = cell_to_string(row.get(src))
@@ -318,6 +324,24 @@ def analyze_coercion(
                                 "wire_form": wire.get("wire_value"),
                                 "reason": wire.get("reason") or "Will normalize for destination",
                             })
+                if use_json_wire:
+                    try:
+                        from connectors.mysql_writer import _to_mysql_value
+
+                        bound = _to_mysql_value(converted, tgt_type or "JSON")
+                        if sample_wire_form is None and bound is not None:
+                            sample_wire_form = str(bound)[:120]
+                    except Exception as wire_exc:
+                        wire_failures += 1
+                        failed += 1
+                        if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
+                            sample_failures.append({
+                                "row": idx,
+                                "value": cell[:120],
+                                "reason": f"MySQL JSON bind failed: {wire_exc}",
+                            })
+                            raw_failure_values.append(cell[:120])
+                        continue
                 ok += 1
 
         # Only report columns that carry real coercion risk: a typed target with

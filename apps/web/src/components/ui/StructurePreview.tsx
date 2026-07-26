@@ -26,6 +26,33 @@ interface StructurePreviewProps {
   expandable?: boolean;
 }
 
+/** Table cells: compact JSON for objects/arrays and JSON-looking strings (Mongo wire). */
+function formatPreviewCell(raw: unknown): string {
+  if (raw == null) return "—";
+  if (typeof raw === "object") {
+    try {
+      return JSON.stringify(raw);
+    } catch {
+      return String(raw);
+    }
+  }
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (
+      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+      (trimmed.startsWith("[") && trimmed.endsWith("]"))
+    ) {
+      try {
+        return JSON.stringify(JSON.parse(trimmed));
+      } catch {
+        return raw;
+      }
+    }
+    return raw;
+  }
+  return String(raw);
+}
+
 function PreviewBody({
   columns,
   schema = {},
@@ -179,7 +206,7 @@ function PreviewBody({
                 <tr key={i}>
                   {previewCols.map((col) => {
                     const raw = row[col];
-                    const text = raw == null ? "—" : String(raw);
+                    const text = formatPreviewCell(raw);
                     return (
                       <td key={col} title={text} className={typeBadgeClass(schema[col])}>
                         {text.length > 48 ? `${text.slice(0, 48)}…` : text}
