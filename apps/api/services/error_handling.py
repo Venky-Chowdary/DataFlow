@@ -348,6 +348,83 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
             ),
         },
     ),
+    (
+        (
+            "unknown column",
+            "undefined column",
+            "column does not exist",
+            "no such column",
+            "invalid column name",
+            "unrecognized name",
+            "er_bad_field_error",
+            "(1054,",
+            "error 1054",
+        ),
+        {
+            "code": "destination_column_missing",
+            "category": "schema_mismatch",
+            "confidence": "high",
+            "title": "Write referenced a column that is not on the destination",
+            "fix": (
+                "Open Map and rematch the failing field, or run Validate again after the "
+                "destination schema reload. If this is create-new, confirm Destination shows "
+                "Table not found (create on write) — not Existing table with foreign columns. "
+                "Do not Resume until Map/Validate agree with the live destination DDL."
+            ),
+            "primary_action": "open_map",
+        },
+    ),
+    (
+        (
+            "relation does not exist",
+            "table doesn't exist",
+            "table does not exist",
+            "no such table",
+            "unknown table",
+            "er_no_such_table",
+            "(1146,",
+            "error 1146",
+            "invalid object name",
+        ),
+        {
+            "code": "destination_table_missing",
+            "category": "schema_mismatch",
+            "confidence": "high",
+            "title": "Destination table/relation was not found at write time",
+            "fix": (
+                "Confirm Database + Table on Destination (same namespace Validate probed). "
+                "If the table should be created, Destination must show create-on-write and "
+                "the connector role needs CREATE. If it should already exist, pick it from "
+                "the table list — do not rely on a name that only exists in another database "
+                "on the same host."
+            ),
+            "primary_action": "open_destination",
+        },
+    ),
+    (
+        (
+            "access denied",
+            "permission denied",
+            "insufficient privilege",
+            "not authorized",
+            "authorization failed",
+            "er_accessdenied_error",
+            "(1045,",
+            "(1142,",
+            "error 1142",
+        ),
+        {
+            "code": "destination_permission_denied",
+            "category": "destination_privileges",
+            "confidence": "medium",
+            "title": "Destination rejected the write for privileges/auth",
+            "fix": (
+                "Re-test the connector, then confirm the role can INSERT/UPDATE (and CREATE "
+                "if this is create-new). Validate G2 privilege notes should list what failed — "
+                "fix grants before Resume."
+            ),
+        },
+    ),
 )
 
 

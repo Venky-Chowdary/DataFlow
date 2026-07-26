@@ -523,6 +523,12 @@ def _destination_schema_probe(
     try:
         from .endpoint_intelligence import introspect_endpoint
 
+        # Match Studio Destination/Validate: destination probes stay in the
+        # operator-chosen namespace (no cross-DB/schema "heal").
+        destination.extra = {
+            **(destination.extra or {}),
+            "introspect_purpose": "destination",
+        }
         info = introspect_endpoint(destination)
         schema = dict(info.get("schema") or {})
         if "table_exists" in info:

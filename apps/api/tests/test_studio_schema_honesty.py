@@ -45,26 +45,22 @@ def test_mongo_missing_collection_is_create_new_not_existing():
 
 def test_inspect_destination_prefers_introspect_table_exists():
     from services.preflight_service import inspect_destination_for_preflight
+    from src.transfer.models import EndpointConfig
 
     with (
         patch("services.connector_probe.probe_saved_connector", return_value=(True, "ok", {"type": "postgresql"})),
         patch("services.connector_probe.endpoint_from_saved_connector") as ep_fn,
         patch("src.transfer.endpoint_intelligence.introspect_endpoint") as intro,
     ):
-        ep = MagicMock()
-        ep.collection = ""
-        ep.table = "jobs"
-        ep.schema = "public"
-        ep.host = "h"
-        ep.port = 5432
-        ep.database = "db"
-        ep.username = "u"
-        ep.password = "p"
-        ep.connection_string = ""
-        ep.warehouse = ""
-        ep.auth_role = ""
-        ep.service_account = ""
-        ep.ssl = False
+        ep = EndpointConfig(
+            kind="database",
+            format="postgresql",
+            host="h",
+            port=5432,
+            database="db",
+            schema="public",
+            table="jobs",
+        )
         ep_fn.return_value = ep
         intro.return_value = {
             "connected": True,
@@ -81,6 +77,24 @@ def test_inspect_destination_prefers_introspect_table_exists():
             dest_table="jobs",
         )
     assert out["table_exists"] is False
+    assert ep.extra.get("introspect_purpose") == "destination"
+    assert intro.called
+
+
+def test_execute_destination_schema_probe_stamps_destination_purpose():
+    from src.transfer.engine import _destination_schema_probe
+    from src.transfer.models import EndpointConfig
+
+    dest = EndpointConfig(kind="database", format="mysql", database="railway", table="users")
+    with patch(
+        "src.transfer.endpoint_intelligence.introspect_endpoint",
+        return_value={"schema": {}, "table_exists": False, "columns": []},
+    ) as intro:
+        schema, exists = _destination_schema_probe(dest, sync_mode="full_refresh_append")
+    assert schema == {}
+    assert exists is False
+    assert dest.extra.get("introspect_purpose") == "destination"
+    assert intro.called
 
 
 def test_destination_schema_probe_preserves_none():

@@ -1242,6 +1242,10 @@ def inspect_destination_for_preflight(
         out["message"] = "Destination not configured"
         return out
 
+    # Same honesty contract as /transfer/introspect: never steal columns from
+    # another DB/schema when Validate re-probes the destination.
+    endpoint.extra = {**(endpoint.extra or {}), "introspect_purpose": "destination"}
+
     from src.transfer.endpoint_intelligence import introspect_endpoint
 
     info = introspect_endpoint(endpoint)

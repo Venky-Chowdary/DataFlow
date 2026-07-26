@@ -94,6 +94,19 @@ def test_humanize_duplicate_primary_key_has_concrete_fix():
     assert "No mapped remediation" not in human["fix"]
 
 
+def test_humanize_missing_column_and_table_guide_to_map():
+    from services.error_handling import humanize_transfer_failure
+
+    col = humanize_transfer_failure(RuntimeError("(1054, \"Unknown column 'email' in 'field list'\")"))
+    assert col["code"] == "destination_column_missing"
+    assert col["confidence"] == "high"
+    assert "Map" in col["fix"]
+
+    missing = humanize_transfer_failure(RuntimeError('relation "railway.users" does not exist'))
+    assert missing["code"] == "destination_table_missing"
+    assert "Destination" in missing["fix"]
+
+
 def test_retry_budget_env_overrides(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DATAFLOW_RETRY_MAX_ATTEMPTS", "5")
     monkeypatch.setenv("DATAFLOW_RETRY_BASE_DELAY_SECONDS", "0.25")
