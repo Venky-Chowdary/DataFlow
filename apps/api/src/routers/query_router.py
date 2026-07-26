@@ -331,7 +331,7 @@ def _run_query(connector: connector_store.SavedConnector, body: QueryExecuteRequ
 
 def _run_mongodb_query(connector, body):
     try:
-        import pymongo
+        import pymongo  # noqa: F401
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"MongoDB driver unavailable: {exc}") from exc
 

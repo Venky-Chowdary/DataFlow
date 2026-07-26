@@ -1,4 +1,4 @@
-"""Redis writer — store records as JSON strings under key prefix."""
+"""Redis writer — store records as JSON strings under a key prefix."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from services.error_handling import format_exception_message
+from services.sync_cursor import is_overwrite_sync
 from services.value_serializer import json_default, sanitize_json_value
 
 from connectors.redis_reader import _redis_client
@@ -25,10 +26,47 @@ class WriteResult(_WriteResult):
     driver: str = "redis-py"
 
 
+def _infer_redis_conflict_columns(
+    target_cols: list[str],
+    mappings: list[dict[str, Any]],
+    conflict_columns: list[str] | None,
+) -> list[str]:
+    """Return the target column(s) to use as the Redis key identity.
+
+    1. Honor an explicit ``conflict_columns`` list when the targets exist.
+    2. Fall back to a source column named ``id``/``_id``/``..._id``/``pk``/``key``/``uuid``.
+    3. Fall back to a target column with an id-like name.
+    4. Last resort: the first target column (may duplicate — duplicate detection catches this).
+    """
+    if conflict_columns:
+        cols = [c for c in conflict_columns if c in target_cols]
+        if cols:
+            return cols
+
+    source_to_target: dict[str, str] = {}
+    for m in mappings:
+        src = str(m.get("source") or "")
+        if src:
+            source_to_target[src] = str(m.get("target") or src)
+
+    identity_sources = {"id", "_id", "pk", "key", "uuid"}
+    # Prefer exact identity source names, then anything ending with _id.
+    for src, tgt in source_to_target.items():
+        if src.lower() in identity_sources and tgt in target_cols:
+            return [tgt]
+    for src, tgt in source_to_target.items():
+        if src.lower().endswith("_id") and tgt in target_cols:
+            return [tgt]
+    for c in target_cols:
+        if c.lower() in identity_sources:
+            return [c]
+    if target_cols:
+        return [target_cols[0]]
+    return []
+
+
 def _resolve_redis_key_id(
     doc: dict[str, Any],
-    target_cols: list[str],
-    *,
     conflict_columns: list[str],
     row_index: int,
 ) -> tuple[str | None, str]:
@@ -41,15 +79,23 @@ def _resolve_redis_key_id(
                 return None, col
             parts.append(str(val))
         return "|".join(parts), conflict_columns[0]
-    id_col = next(
-        (c for c in target_cols if c.lower() in {"id", "_id", "pk", "key", "uuid"}),
-        target_cols[0] if target_cols else "id",
-    )
-    key_id = doc.get(id_col)
-    if key_id is None or str(key_id).strip() == "":
-        # Never invent batch-relative keys (prefix:0) — retries overwrite siblings.
-        return None, id_col
-    return str(key_id), id_col
+    return None, ""
+
+
+def _clear_redis_prefix(client: Any, prefix: str) -> None:
+    """Delete all existing keys under ``prefix:*`` for a full-refresh overwrite."""
+    if not prefix:
+        return
+    pattern = f"{prefix}:*"
+    # Delete in small chunks to avoid blocking Redis on large keyspaces.
+    batch: list[Any] = []
+    for key in client.scan_iter(match=pattern, count=500):
+        batch.append(key)
+        if len(batch) >= 1000:
+            client.delete(*batch)
+            batch.clear()
+    if batch:
+        client.delete(*batch)
 
 
 def write_mapped_rows(
@@ -72,15 +118,21 @@ def write_mapped_rows(
     error_policy: str | None = None,
     backfill_new_fields: bool = False,
     conflict_columns: list[str] | None = None,
+    write_mode: str = "upsert",
+    sync_mode: str = "",
     **_kwargs: Any,
 ) -> WriteResult:
     del create_table, backfill_new_fields
     policy = transform_error_policy(error_policy)
     prefix = table_name or schema or "dataflow"
     cfg = {
-        "host": host, "port": port, "database": database,
-        "username": username, "password": password,
-        "connection_string": connection_string, "ssl": ssl,
+        "host": host,
+        "port": port,
+        "database": database,
+        "username": username,
+        "password": password,
+        "connection_string": connection_string,
+        "ssl": ssl,
     }
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
@@ -95,23 +147,24 @@ def write_mapped_rows(
         error_policy=policy,
     )
 
-    conflict = [c for c in (conflict_columns or _kwargs.get("conflict_columns") or []) if c in target_cols]
+    conflict = _infer_redis_conflict_columns(target_cols, mappings, conflict_columns)
     client = _redis_client(cfg)
     try:
+        # Full-refresh overwrite must replace the destination keyspace, not layer
+        # new keys on top of a stale collection.
+        if is_overwrite_sync(sync_mode) or write_mode in {"overwrite", "replace", "truncate"}:
+            _clear_redis_prefix(client, prefix)
+
         written = 0
+        seen_keys: dict[str, int] = {}
         for i, row in enumerate(mapped_rows):
             doc = dict(zip(target_cols, row))
-            key_id, id_col = _resolve_redis_key_id(
-                doc, target_cols, conflict_columns=conflict, row_index=i
-            )
+            key_id, id_col = _resolve_redis_key_id(doc, conflict, row_index=i)
             if key_id is None:
                 msg = (
                     f"Redis identity missing for conflict_columns={conflict}"
                     if conflict
-                    else (
-                        f"Redis identity missing for column `{id_col}` — "
-                        "refuse batch-index key fabrication"
-                    )
+                    else "Redis identity missing — no id-like column found in mapping"
                 )
                 if policy == "fail":
                     return WriteResult(
@@ -125,27 +178,52 @@ def write_mapped_rows(
                         warnings=errors[:10],
                         rejected_rows=len({d["row"] for d in rejected_details}) + 1,
                         rejected_details=rejected_details[:100]
-                        + [{
-                            "row": i + 1,
-                            "column": id_col,
-                            "target": id_col,
-                            "value": "",
-                            "reason": msg,
-                            "policy": "write_fail",
-                            "chars": [],
-                        }],
+                        + [
+                            {
+                                "row": i + 1,
+                                "column": id_col or "",
+                                "target": id_col or "",
+                                "value": "",
+                                "reason": msg,
+                                "policy": "write_fail",
+                                "chars": [],
+                            }
+                        ],
                     )
-                rejected_details.append({
-                    "row": i + 1,
-                    "column": id_col,
-                    "target": id_col,
-                    "value": "",
-                    "reason": msg,
-                    "policy": "write_quarantine",
-                    "chars": [],
-                })
+                rejected_details.append(
+                    {
+                        "row": i + 1,
+                        "column": id_col or "",
+                        "target": id_col or "",
+                        "value": "",
+                        "reason": msg,
+                        "policy": "write_quarantine",
+                        "chars": [],
+                    }
+                )
                 continue
+
             key = f"{prefix}:{sanitize_identifier(str(key_id), preserve_case=True)}"
+            if key in seen_keys:
+                prev = seen_keys[key]
+                msg = (
+                    f"Duplicate Redis key '{key}' for rows {prev + 1} and {i + 1} "
+                    f"(conflict on '{id_col}'). Use a unique primary key or deduplicate the source."
+                )
+                return WriteResult(
+                    ok=False,
+                    rows_written=written,
+                    table_name=prefix,
+                    target_schema=f"db{database or 0}",
+                    checksum="",
+                    chunks_completed=0,
+                    error=msg,
+                    warnings=errors[:10],
+                    rejected_rows=len({d["row"] for d in rejected_details}),
+                    rejected_details=rejected_details[:100],
+                )
+            seen_keys[key] = i
+
             try:
                 # Pre-sanitize so extreme Decimals never raise mid-dumps.
                 safe_doc = sanitize_json_value(doc)
@@ -165,25 +243,29 @@ def write_mapped_rows(
                         warnings=errors[:10],
                         rejected_rows=len({d["row"] for d in rejected_details}) + 1,
                         rejected_details=rejected_details[:100]
-                        + [{
-                            "row": i + 1,
-                            "column": id_col,
-                            "target": id_col,
-                            "value": str(key_id)[:120],
-                            "reason": msg,
-                            "policy": "write_fail",
-                            "chars": [],
-                        }],
+                        + [
+                            {
+                                "row": i + 1,
+                                "column": id_col,
+                                "target": id_col,
+                                "value": str(key_id)[:120],
+                                "reason": msg,
+                                "policy": "write_fail",
+                                "chars": [],
+                            }
+                        ],
                     )
-                rejected_details.append({
-                    "row": i + 1,
-                    "column": id_col,
-                    "target": id_col,
-                    "value": str(key_id)[:120],
-                    "reason": msg,
-                    "policy": "write_quarantine",
-                    "chars": [],
-                })
+                rejected_details.append(
+                    {
+                        "row": i + 1,
+                        "column": id_col,
+                        "target": id_col,
+                        "value": str(key_id)[:120],
+                        "reason": msg,
+                        "policy": "write_quarantine",
+                        "chars": [],
+                    }
+                )
                 errors.append(msg)
         if on_checkpoint:
             on_checkpoint(1, 1, written)

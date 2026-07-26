@@ -288,7 +288,6 @@ def run_integrity_audit(
     required_targets = {t.lower() for t in (required_targets or [])}
     mappings = mappings or []
     source_to_target = {m.get("source"): m.get("target") for m in mappings if m.get("source")}
-    target_to_source = {m.get("target"): m.get("source") for m in mappings if m.get("target")}
 
     total = len(rows)
     header_index = {h: i for i, h in enumerate(headers)}

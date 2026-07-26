@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import tempfile
@@ -13,8 +12,6 @@ from preflight.models import (
     GateResult,
     GateStatus,
     PreflightContext,
-    PreflightResult,
-    TransferPlan,
 )
 
 GateFn = Callable[[PreflightContext], GateResult]

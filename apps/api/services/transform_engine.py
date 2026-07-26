@@ -14,6 +14,7 @@ import unicodedata
 import uuid as uuid_lib
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, Overflow
+from collections.abc import Iterable
 from typing import Any
 
 from services.pii_guard import mask as pii_mask

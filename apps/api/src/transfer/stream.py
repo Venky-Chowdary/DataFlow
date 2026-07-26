@@ -491,6 +491,7 @@ def _write_batch(
     *,
     write_mode: str = "insert",
     conflict_columns: list[str] | None = None,
+    sync_mode: str = "",
     backfill_new_fields: bool = False,
     error_policy: str | None = None,
     connection: Any | None = None,
@@ -773,6 +774,10 @@ def _write_batch(
             "error_policy": error_policy,
             "on_checkpoint": lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         }
+        if dest_type == "redis":
+            kwargs["write_mode"] = write_mode
+            kwargs["conflict_columns"] = conflict_columns
+            kwargs["sync_mode"] = sync_mode
         if dest_type in ("pgvector", "qdrant", "weaviate", "pinecone", "milvus"):
             extra = getattr(dest, "extra", {}) or {}
             kwargs["content_column"] = extra.get("content_column")
@@ -1542,6 +1547,7 @@ def stream_database_transfer(
             rows_so_far=0,
             write_mode=write_mode,
             conflict_columns=pk_target_cols or None,
+            sync_mode=effective_sync,
             backfill_new_fields=backfill_new_fields,
             error_policy=stream_error_policy,
             job_id=job_id,

@@ -243,8 +243,6 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "rowid": LOGICAL_STRING,
     "urowid": LOGICAL_STRING,
     "currency": LOGICAL_DECIMAL,
-    "halfvec": LOGICAL_VECTOR,
-    "sparsevec": LOGICAL_VECTOR,
 }
 
 DDL_TYPES: Final[dict[str, dict[str, str]]] = {
