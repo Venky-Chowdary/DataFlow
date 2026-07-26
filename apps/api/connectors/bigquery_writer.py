@@ -148,6 +148,22 @@ def write_mapped_rows(
             checksum=checksum, chunks_completed=chunks, driver="stub",
         )
 
+    from connectors.bigquery_conn import _is_local_endpoint
+
+    is_local, _ = _is_local_endpoint(host, connection_string)
+    creds_ref = (service_account or connection_string or "").strip()
+    has_creds = bool(creds_ref) and not creds_ref.lower().startswith(("http://", "https://"))
+    if stub_writes_allowed() and not is_local and not has_creds:
+        # No live endpoint/credentials and dev/test stubs are allowed.
+        rows, checksum, chunks = simulate_stub_write(
+            data_rows=data_rows, table_name=table_name, target_schema=dataset_id,
+            on_checkpoint=on_checkpoint,
+        )
+        return WriteResult(
+            ok=True, rows_written=rows, table_name=table_name, target_schema=dataset_id,
+            checksum=checksum, chunks_completed=chunks, driver="stub",
+        )
+
     from connectors.writer_common import sample_values_by_source_from_batch
 
     batch_samples = sample_values_by_source_from_batch(headers, data_rows, mappings)
