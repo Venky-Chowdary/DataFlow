@@ -111,7 +111,15 @@ def introspect_schema(
     catalog_type: str = "",
     auth_source: str = "",
     api_key: str = "",
+    strict_namespace: bool = False,
 ) -> dict[str, Any]:
+    """Load tables/columns for ``table`` in the requested database/schema.
+
+    ``strict_namespace=True`` (destination probes): never steal columns from
+    another database/schema. A missing object in the operator-chosen namespace
+    must report empty columns so Studio can honestly create-on-write — not
+    claim ``users`` exists in ``railway`` because another DB on the host has it.
+    """
     if db_type in {
         "generic_sql",
         "duckdb",
@@ -146,6 +154,7 @@ def introspect_schema(
             connection_string=connection_string,
             ssl=ssl,
             table=table,
+            strict_namespace=strict_namespace,
         )
     if db_type == "snowflake":
         return _introspect_snowflake(
@@ -157,6 +166,7 @@ def introspect_schema(
             connection_string=connection_string,
             warehouse=warehouse,
             table=table,
+            strict_namespace=strict_namespace,
         )
     if db_type == "mysql":
         return _introspect_mysql(
@@ -168,6 +178,8 @@ def introspect_schema(
             connection_string=connection_string,
             ssl=ssl,
             table=table,
+            schema=schema,
+            strict_namespace=strict_namespace,
         )
     if db_type in ("oracle", "oracle_db", "amazon_rds_oracle"):
         return _introspect_oracle(
@@ -192,6 +204,7 @@ def introspect_schema(
             connection_string=connection_string,
             ssl=ssl,
             table=table,
+            strict_namespace=strict_namespace,
         )
     if db_type == "bigquery":
         return _introspect_bigquery(
@@ -199,6 +212,7 @@ def introspect_schema(
             schema=schema or "dataflow",
             connection_string=connection_string,
             table=table,
+            strict_namespace=strict_namespace,
         )
     if db_type == "mongodb":
         return _introspect_mongodb(
@@ -399,7 +413,9 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                 columns = _pg_fetch_columns(cur, schema, target)
                 # Table may live outside the requested schema (common when UI
                 # schema is blank / wrong but database+table are correct).
-                if not columns:
+                # Destination probes must NOT do this — wrong-schema columns
+                # falsely mark create-new targets as "existing".
+                if not columns and not bool(kwargs.get("strict_namespace")):
                     cur.execute(
                         """
                         SELECT table_schema, table_name
@@ -638,7 +654,7 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
                     (schema, target_table),
                 )
                 col_rows = list(cur.fetchall() or [])
-                if not col_rows:
+                if not col_rows and not bool(kwargs.get("strict_namespace")):
                     cur.execute(
                         """
                         SELECT table_schema, table_name
@@ -802,15 +818,19 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                         (db_name, requested or target),
                     )
                     rows = cur.fetchall()
-                # Wrong database in the form is common (UI filled schema as DB).
-                # Search other schemas the account can see before inventing create-new.
-                if not rows:
+                # Wrong database in the form is common for *source* discovery.
+                # Destination probes must stay in the operator-chosen database —
+                # otherwise a host-wide `users` table makes railway.users look real.
+                if not rows and not bool(kwargs.get("strict_namespace")):
                     cur.execute(
                         """
                         SELECT table_schema, table_name
                         FROM information_schema.tables
                         WHERE table_type = 'BASE TABLE'
                           AND LOWER(table_name) = LOWER(%s)
+                          AND table_schema NOT IN (
+                            'mysql', 'information_schema', 'performance_schema', 'sys'
+                          )
                         ORDER BY CASE
                           WHEN table_schema = %s THEN 0
                           ELSE 1
@@ -869,8 +889,8 @@ def _introspect_bigquery(**kwargs) -> dict[str, Any]:
                 tbl = client.get_table(f"{project_id}.{dataset_id}.{target}")
             except Exception:
                 tbl = None
-            if tbl is None and table:
-                # Wrong dataset in the form — scan a bounded set of datasets.
+            if tbl is None and table and not bool(kwargs.get("strict_namespace")):
+                # Wrong dataset in the form — scan a bounded set of datasets (source only).
                 try:
                     datasets = list(client.list_datasets(max_results=25))
                 except Exception:
@@ -1416,7 +1436,7 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                 ),
                 {"schema": schema, "table": table},
             ).fetchall()
-            if not col_rows:
+            if not col_rows and not bool(kwargs.get("strict_namespace")):
                 found = conn.execute(
                     sa.text(
                         """

@@ -16,6 +16,7 @@ import { useToast } from "../components/Toast";
 import { TransferMapStep } from "./transfer/TransferMapStep";
 import { DestinationPicker } from "../components/transfer/DestinationPicker";
 import { DestinationAdvancedDrawer } from "../components/transfer/DestinationAdvancedDrawer";
+import { ObjectNameCombobox } from "../components/transfer/ObjectNameCombobox";
 import { Button } from "../components/ui/Button";
 import { SourceStepAside } from "../components/transfer/SourceStepAside";
 import { ValidateActionsRail } from "../components/transfer/ValidateActionsRail";
@@ -1341,39 +1342,39 @@ export function TransferPage({
           || rawLeaf === wantLeaf
         );
       });
-      // Probe list / columns win over a soft-fail "missing" flag (MySQL jobs bug).
+      // Trust the destination probe. Never sticky-promote "exists" across a
+      // table rename — that showed "Existing table detected" for missing names.
       let resolvedExists: boolean | null;
       if (destination.connected === false) {
-        // Never invent create-new when the destination is unreachable.
         resolvedExists = null;
-      } else if (listed || destination.table_exists === true || columns.length > 0) {
-        resolvedExists = true;
       } else if (destination.table_exists === false) {
         resolvedExists = false;
-      } else if (objectNames.length > 0 && want && !listed) {
-        // Connected + object list loaded + name not present → new table (create-on-write).
+      } else if (listed || destination.table_exists === true || columns.length > 0) {
+        resolvedExists = true;
+      } else if (objectNames.length > 0 && want) {
         resolvedExists = false;
       } else {
         resolvedExists = null;
       }
-      // Never demote a confirmed table to "missing" on a flaky empty re-probe —
-      // that falsely flips Map into the create-new ribbon.
-      if (destTableExists === true && resolvedExists === false && columns.length === 0) {
-        resolvedExists = true;
-      } else if (destTableExists === true && resolvedExists == null) {
-        resolvedExists = true;
-      } else if (destColumns.length > 0 && resolvedExists == null) {
+      // Same-table flaky re-probe only: keep prior exists when the new result is
+      // uncertain (null), never when the API says missing.
+      if (
+        resolvedExists == null
+        && destSchemaTableKeyRef.current === tableKey
+        && destTableExists === true
+      ) {
         resolvedExists = true;
       }
-      // Never wipe a known schema with an empty probe for the *same* table —
-      // that falsely flips Map into "create-new" / identity 93% mode.
-      // Never keepPrior across a different table/collection (wrong DDL attribution).
+      // Confirmed missing → wipe prior columns (do not attribute another table's DDL).
+      // Empty probe for the *same* existing table → keep prior schema (avoid create-new flicker).
+      const sameTable = destSchemaTableKeyRef.current === tableKey;
       const keepPrior =
-        columns.length === 0
-        && destSchemaTableKeyRef.current === tableKey
-        && (resolvedExists !== false || destTableExists === true || destColumns.length > 0);
-      const nextColumns = keepPrior ? destColumns : columns;
-      const nextSchema = keepPrior ? destSchemaMap : schema;
+        resolvedExists !== false
+        && columns.length === 0
+        && sameTable
+        && (resolvedExists === true || destTableExists === true || destColumns.length > 0);
+      const nextColumns = resolvedExists === false ? [] : (keepPrior ? destColumns : columns);
+      const nextSchema = resolvedExists === false ? {} : (keepPrior ? destSchemaMap : schema);
       setDestColumns(nextColumns);
       setDestSchemaMap(nextSchema);
       setDestTableExists(resolvedExists);
@@ -4819,131 +4820,159 @@ export function TransferPage({
           {destType ? (
             <>
           <div className="df2-dest-section df2-dest-target-fields">
-            <label className="df2-label">Target location</label>
-            <div className="df2-form-row df2-dest-target-row">
-            <div className="df2-field df2-field-flex">
-              <label className="df2-label" htmlFor="dest-db">
-                {destDriverType === "bigquery"
-                  ? "GCP Project ID"
-                  : destDriverType === "dynamodb"
-                    ? "AWS region or local endpoint"
-                    : destDriverType === "iceberg"
-                      ? "Namespace (optional)"
-                      : destDriverType === "pinecone" || destDriverType === "qdrant" || destDriverType === "weaviate" || destDriverType === "milvus"
-                        ? "Unused (optional)"
-                        : "Database"}
+            <div className="df2-dest-target-head">
+              <label className="df2-label" id="dest-target-location-label">
+                Target location
               </label>
-              <input
-                id="dest-db"
-                className="df2-input"
-                value={destDriverType === "iceberg" ? destSchema : targetDb}
-                onChange={(e) => {
-                  if (destDriverType === "iceberg") setDestSchema(e.target.value);
-                  else setTargetDb(e.target.value);
-                }}
-                placeholder={
-                  destDriverType === "bigquery"
-                    ? "my-gcp-project"
-                    : destDriverType === "dynamodb"
-                      ? "us-east-1"
-                      : destDriverType === "iceberg"
-                        ? "analytics"
-                        : destDriverType === "milvus"
-                          ? "default"
-                          : "test_db"
-                }
-              />
+              {destObjectNames.length > 0 && !destSchemaLoading && (
+                <span className="df2-dest-target-count" aria-live="polite">
+                  {destObjectNames.length} existing{" "}
+                  {destDriverType === "mongodb" ? "collection" : "table"}
+                  {destObjectNames.length === 1 ? "" : "s"}
+                </span>
+              )}
             </div>
-            {destDriverType === "bigquery" && (
-              <div className="df2-field df2-field-flex">
-                <label className="df2-label">Dataset</label>
-                <input className="df2-input" value={destSchema} onChange={(e) => setDestSchema(e.target.value)} placeholder="dataflow" />
+            <div
+              className={`df2-dest-target-grid${
+                destDriverType === "bigquery"
+                  ? " has-dataset"
+                  : destDriverType === "snowflake"
+                    || destDriverType.includes("mssql")
+                    || getGenericSqlGroup(destType) === "postgresql+psycopg2"
+                    ? " has-schema"
+                    : ""
+              }`}
+              role="group"
+              aria-labelledby="dest-target-location-label"
+            >
+              <div className="df2-field">
+                <label className="df2-label" htmlFor="dest-db">
+                  {destDriverType === "bigquery"
+                    ? "GCP Project ID"
+                    : destDriverType === "dynamodb"
+                      ? "AWS region or local endpoint"
+                      : destDriverType === "iceberg"
+                        ? "Namespace (optional)"
+                        : destDriverType === "pinecone" || destDriverType === "qdrant" || destDriverType === "weaviate" || destDriverType === "milvus"
+                          ? "Unused (optional)"
+                          : "Database"}
+                </label>
+                <input
+                  id="dest-db"
+                  className="df2-input"
+                  value={destDriverType === "iceberg" ? destSchema : targetDb}
+                  onChange={(e) => {
+                    if (destDriverType === "iceberg") setDestSchema(e.target.value);
+                    else setTargetDb(e.target.value);
+                  }}
+                  placeholder={
+                    destDriverType === "bigquery"
+                      ? "my-gcp-project"
+                      : destDriverType === "dynamodb"
+                        ? "us-east-1"
+                        : destDriverType === "iceberg"
+                          ? "analytics"
+                          : destDriverType === "milvus"
+                            ? "default"
+                            : "test_db"
+                  }
+                  autoComplete="off"
+                  spellCheck={false}
+                />
               </div>
-            )}
-            <div className="df2-field df2-field-flex">
-              <label className="df2-label" htmlFor="dest-col">
-                {destDriverType === "mongodb"
-                  ? "Collection"
-                  : destDriverType === "dynamodb"
-                    ? "DynamoDB table"
-                    : destDriverType === "iceberg"
-                      ? "Iceberg table"
-                      : destDriverType === "pinecone"
-                        ? "Namespace"
-                        : destDriverType === "weaviate"
-                          ? "Class name"
-                          : destDriverType === "qdrant" || destDriverType === "milvus"
-                            ? "Collection"
-                            : "Table"}
-              </label>
-              <input
+              {destDriverType === "bigquery" && (
+                <div className="df2-field">
+                  <label className="df2-label" htmlFor="dest-dataset">Dataset</label>
+                  <input
+                    id="dest-dataset"
+                    className="df2-input"
+                    value={destSchema}
+                    onChange={(e) => setDestSchema(e.target.value)}
+                    placeholder="dataflow"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </div>
+              )}
+              <ObjectNameCombobox
                 id="dest-col"
-                className="df2-input"
-                list={destObjectNames.length ? "df2-dest-table-list" : undefined}
+                label={
+                  destDriverType === "mongodb"
+                    ? "Collection"
+                    : destDriverType === "dynamodb"
+                      ? "DynamoDB table"
+                      : destDriverType === "iceberg"
+                        ? "Iceberg table"
+                        : destDriverType === "pinecone"
+                          ? "Namespace"
+                          : destDriverType === "weaviate"
+                            ? "Class name"
+                            : destDriverType === "qdrant" || destDriverType === "milvus"
+                              ? "Collection"
+                              : "Table"
+                }
                 value={targetCollection}
-                aria-busy={destSchemaLoading || undefined}
-                onChange={(e) => {
-                  // Do not blank schema on every keystroke — debounce reload keeps last columns
-                  // until the new table probe returns (avoids demo flicker).
-                  setTargetCollection(e.target.value);
-                  setPreflight(null);
-                  setValidatedContractKey(null);
-                  setCellPreview(null);
-                }}
+                options={destObjectNames}
+                loading={destSchemaLoading && !targetCollection.trim()}
+                objectNoun={destDriverType === "mongodb" ? "collection" : "table"}
                 placeholder={
                   destDriverType === "mongodb"
-                    ? "my_collection"
+                    ? "Pick collection or type new"
                     : destDriverType === "dynamodb"
                       ? "orders"
                       : destDriverType === "iceberg"
                         ? "orders"
-                      : destDriverType === "pinecone"
-                        ? "default"
-                        : destDriverType === "weaviate"
-                          ? "DataflowChunk"
-                          : destDriverType === "qdrant" || destDriverType === "milvus"
-                            ? "chunks"
-                            : "my_table — pick existing or type a new name"
+                        : destDriverType === "pinecone"
+                          ? "default"
+                          : destDriverType === "weaviate"
+                            ? "DataflowChunk"
+                            : destDriverType === "qdrant" || destDriverType === "milvus"
+                              ? "chunks"
+                              : "Pick table or type new name"
                 }
+                emptyHint={
+                  destDriverType === "mongodb"
+                    ? "No collections discovered yet — type a name to create."
+                    : "No tables discovered yet — type a name to create."
+                }
+                onChange={(next) => {
+                  setTargetCollection(next);
+                  // Do not claim existence for a name we have not probed yet.
+                  setDestTableExists(null);
+                  setDestColumns([]);
+                  setDestSchemaMap({});
+                  setPreflight(null);
+                  setValidatedContractKey(null);
+                  setCellPreview(null);
+                }}
               />
-              {destObjectNames.length > 0 && (
-                <datalist id="df2-dest-table-list">
-                  {destObjectNames.slice(0, 200).map((name) => (
-                    <option key={name} value={name} />
-                  ))}
-                </datalist>
+              {(destDriverType === "snowflake"
+                || destDriverType.includes("mssql")
+                || getGenericSqlGroup(destType) === "postgresql+psycopg2") && (
+                <div className="df2-field df2-dest-target-schema">
+                  <label className="df2-label" htmlFor="dest-schema">Schema</label>
+                  <input
+                    id="dest-schema"
+                    className="df2-input"
+                    value={destSchema}
+                    onChange={(e) => setDestSchema(e.target.value)}
+                    placeholder={destDriverType === "snowflake" ? "PUBLIC" : destDriverType.includes("mssql") ? "dbo" : "public"}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </div>
               )}
-              <small className="df2-label-hint" aria-live="polite">
-                {destObjectNames.length > 0
-                  ? `${destObjectNames.length} existing table${destObjectNames.length === 1 ? "" : "s"} found — pick one or type a new name to create.`
-                  : "\u00a0"}
-              </small>
             </div>
-            {(destDriverType === "snowflake"
-              || destDriverType.includes("mssql")
-              || getGenericSqlGroup(destType) === "postgresql+psycopg2") && (
-              <div className="df2-field df2-field-120">
-                <label className="df2-label">Schema</label>
-                <input
-                  className="df2-input"
-                  value={destSchema}
-                  onChange={(e) => setDestSchema(e.target.value)}
-                  placeholder={destDriverType === "snowflake" ? "PUBLIC" : destDriverType.includes("mssql") ? "dbo" : "public"}
-                />
-              </div>
-            )}
-          </div>
-            {/* Status lives below the row so dynamic copy never shifts aligned inputs */}
-            {destDriverType !== "dynamodb" && (
+            {/* Status only when probing / resolved — idle copy lives in the combobox */}
+            {destDriverType !== "dynamodb"
+              && (destSchemaLoading || destTableExists === true || destTableExists === false) && (
               <div
                 className={`df2-dest-target-status${
                   destSchemaLoading
                     ? " is-loading"
                     : destTableExists === true
                       ? " is-existing"
-                      : destTableExists === false
-                        ? " is-create"
-                        : ""
+                      : " is-create"
                 }`}
                 aria-live="polite"
                 role="status"
@@ -4968,7 +4997,7 @@ export function TransferPage({
                       ) : null}
                     </p>
                   </>
-                ) : destTableExists === false ? (
+                ) : (
                   <>
                     <DtIcon name="sparkle" size={14} />
                     <p>
@@ -4976,15 +5005,6 @@ export function TransferPage({
                         {destDriverType === "mongodb" ? "Collection not found." : "Table not found."}
                       </strong>{" "}
                       DataFlow will create it automatically on first write.
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <DtIcon name="activity" size={14} />
-                    <p>
-                      {destDriverType === "mongodb"
-                        ? "Enter a collection name. If it does not exist yet, DataFlow creates it on first write."
-                        : "Enter a table name. If it does not exist yet, DataFlow creates it on first write."}
                     </p>
                   </>
                 )}

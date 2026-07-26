@@ -645,16 +645,28 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         )
         # Prefer the case-correct name from SHOW TABLES / information_schema list.
         resolve_table = listed or table
+        purpose = str((endpoint.extra or {}).get("introspect_purpose") or "").lower()
+        # Destination: stay in the operator-chosen DB/schema. Cross-namespace
+        # "heal" invents Existing table when another DB on the host has the name.
+        strict_namespace = purpose == "destination"
         # Always attempt column introspect — even when the schema-scoped probe list
         # missed the name (LIMIT 50, wrong default schema, cross-schema table).
         # Short-circuiting on table_exists=False falsely flipped Map into create-new
         # while writers still appended into the real table (e.g. railway.airports).
-        schema_map = _introspect_table_schema(fmt, cfg, resolve_table, [])
+        # For destination, same-namespace-only (strict) — LIMIT miss still works.
+        schema_map = _introspect_table_schema(
+            fmt, cfg, resolve_table, [], strict_namespace=strict_namespace
+        )
         if not schema_map and listed and listed != table:
-            schema_map = _introspect_table_schema(fmt, cfg, table, [])
+            schema_map = _introspect_table_schema(
+                fmt, cfg, table, [], strict_namespace=strict_namespace
+            )
         if not schema_map and not listed:
-            # Last chance: bare leaf name may live outside the connector schema.
-            schema_map = _introspect_table_schema(fmt, cfg, table, [])
+            # Last chance: bare leaf name may live outside the connector schema
+            # for *source* discovery only. Destination stays strict above.
+            schema_map = _introspect_table_schema(
+                fmt, cfg, table, [], strict_namespace=strict_namespace
+            )
         if schema_map:
             out["columns"] = list(schema_map.keys())
             out["schema"] = schema_map

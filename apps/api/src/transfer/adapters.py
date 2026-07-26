@@ -663,8 +663,14 @@ def _introspect_table_schema(
     table: str,
     headers: list[str],
     records: list[dict] | None = None,
+    *,
+    strict_namespace: bool = False,
 ) -> dict[str, str]:
-    """Load column types from INFORMATION_SCHEMA or infer from sample records."""
+    """Load column types from INFORMATION_SCHEMA or infer from sample records.
+
+    ``strict_namespace`` is required for destination probes so missing tables in
+    the chosen DB/schema are not "healed" from another namespace on the host.
+    """
     if db_type == "generic_sql":
         try:
             from connectors.generic_sql import introspect_table_schema
@@ -710,6 +716,7 @@ def _introspect_table_schema(
         catalog_type=cfg.get("type", ""),
         auth_source=cfg.get("auth_source", ""),
         api_key=cfg.get("api_key", ""),
+        strict_namespace=strict_namespace,
     )
     if info.get("ok") and info.get("columns"):
         return {c["name"]: c["inferred_type"] for c in info["columns"]}
@@ -751,6 +758,7 @@ def _introspect_table_schema(
             catalog_type=cfg.get("type", ""),
             auth_source=cfg.get("auth_source", ""),
             api_key=cfg.get("api_key", ""),
+            strict_namespace=strict_namespace,
         )
         if info_retry.get("ok") and info_retry.get("columns"):
             return {c["name"]: c["inferred_type"] for c in info_retry["columns"]}
