@@ -157,9 +157,7 @@ class FilePreflightContext(PreflightContext):
                 source_types=source_types,
                 dest_types=dest_types,
                 dest_db_type=self.plan.destination.db_type,
-                table_exists=bool(
-                    getattr(self.plan.destination, "table_exists", False)
-                ),
+                table_exists=getattr(self.plan.destination, "table_exists", False),
             )
         except Exception as exc:
             logger.warning(
@@ -716,9 +714,8 @@ def run_file_preflight(
         if destination_can_write is not None
         else destination_connected
     )
-    dest_table_exists = (
-        destination_table_exists if destination_table_exists is not None else False
-    )
+    # Keep tri-state: None = probe unknown. Never coerce unknown → create-new.
+    dest_table_exists = destination_table_exists
 
     from services.ddl_compatibility import evaluate_ddl_compatibility
     from services.schema_drift import detect_schema_drift
@@ -1344,7 +1341,11 @@ def inspect_destination_for_preflight(
                 username=str(cfg.get("username") or ""),
                 password=str(cfg.get("password") or ""),
                 connection_string=str(cfg.get("connection_string") or ""),
-                table_exists=bool(out.get("table_exists")),
+                table_exists=(
+                    out.get("table_exists")
+                    if isinstance(out.get("table_exists"), bool)
+                    else None
+                ),
                 ssl=bool(cfg.get("ssl") or False),
                 warehouse=str(
                     cfg.get("warehouse")

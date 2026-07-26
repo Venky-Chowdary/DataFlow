@@ -26,6 +26,8 @@ from connectors.mysql_writer import (  # noqa: E402
     _apply_physical_temporal_types,
     _to_mysql_value,
 )
+from connectors.sql_bind import normalize_sql_bind_value  # noqa: E402
+from connectors.generic_sql import _to_sa_value  # noqa: E402
 from connectors.sqlite_writer import _to_sqlite_value  # noqa: E402
 from connectors.sql_temporal import (  # noqa: E402
     coerce_sql_temporal,
@@ -99,6 +101,13 @@ def _bind_value(ddl_key: str, ddl: str, value: Any) -> Any:
         if is_temporal_ddl(ddl) or sql_base_type(ddl) == "INTERVAL":
             return format_bigquery_bind(value, ddl)
         return value
+
+    if eng in {"postgresql", "postgres", "generic_sql", "redshift", "duckdb"}:
+        base = sql_base_type(ddl) or ddl
+        if base.upper() in {"BOOLEAN", "BOOL", "JSON", "JSONB"} or is_temporal_ddl(ddl):
+            if eng == "generic_sql" and base.upper() in {"BOOLEAN", "BOOL", "JSON", "JSONB"}:
+                return _to_sa_value(value, base.lower() if base.lower() != "jsonb" else "json")
+            return normalize_sql_bind_value(value, ddl, engine=eng)
 
     if eng in _SQL_BIND_ENGINES and is_temporal_ddl(ddl):
         rows = normalize_temporal_cells([(value,)], [ddl], engine=eng)

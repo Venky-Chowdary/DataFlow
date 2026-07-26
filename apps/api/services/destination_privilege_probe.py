@@ -141,7 +141,7 @@ def _finalize(
     engine: str,
     can_write: bool,
     can_create: bool,
-    table_exists: bool,
+    table_exists: bool | None,
     table: str,
     schema: str,
     need_update: bool,
@@ -151,7 +151,7 @@ def _finalize(
 ) -> PrivilegeProbeResult:
     """Map measured flags into ok/denied with operator-facing detail."""
     target = f"{schema}.{table}" if schema and table else (table or schema or "destination")
-    if table_exists and table and not can_write:
+    if table_exists is True and table and not can_write:
         update_suffix = "/UPDATE" if need_update and write_action == "INSERT" else ""
         return PrivilegeProbeResult(
             can_write=False,
@@ -161,7 +161,7 @@ def _finalize(
             engine=engine,
             method=method,
         )
-    if not table_exists and not can_create:
+    if table_exists is False and not can_create:
         return PrivilegeProbeResult(
             can_write=False,
             can_create_table=False,
@@ -194,7 +194,7 @@ def probe_destination_privileges(
     username: str = "",
     password: str = "",
     connection_string: str = "",
-    table_exists: bool = False,
+    table_exists: bool | None = False,
     sync_mode: str = "",
     ssl: bool = False,
     warehouse: str = "",

@@ -205,7 +205,7 @@ def analyze_coercion(
     dest_types: dict[str, str] | None = None,
     dest_db_type: str = "",
     sample_limit: int = DEFAULT_SAMPLE_LIMIT,
-    table_exists: bool = False,
+    table_exists: bool | None = False,
 ) -> dict[str, Any]:
     """Predict per-value write coercion for each mapping against sampled rows.
 
@@ -275,10 +275,28 @@ def analyze_coercion(
         except ImportError:
             wire_check_fn = None
 
-        # MySQL JSON bind (error 3140 class) — probe after transform so Validate
-        # fails before write quarantines notifications-style nested fields.
-        if tgt_logical in _STRUCTURAL_LOGICALS and dest_l in {"mysql", "mariadb"}:
+        # SQL JSON/JSONB bind (MySQL 3140 / empty-string class) — probe after
+        # transform so Validate fails before write quarantines nested fields.
+        if tgt_logical in _STRUCTURAL_LOGICALS and dest_l in {
+            "mysql",
+            "mariadb",
+            "postgresql",
+            "postgres",
+            "generic_sql",
+            "redshift",
+            "duckdb",
+        }:
             use_json_wire = True
+        use_bool_wire = tgt_logical == "boolean" and dest_l in {
+            "mysql",
+            "mariadb",
+            "postgresql",
+            "postgres",
+            "generic_sql",
+            "sqlserver",
+            "mssql",
+            "duckdb",
+        }
 
         for idx, row in enumerate(rows):
             cell = cell_to_string(row.get(src))
@@ -324,11 +342,15 @@ def analyze_coercion(
                                 "wire_form": wire.get("wire_value"),
                                 "reason": wire.get("reason") or "Will normalize for destination",
                             })
-                if use_json_wire:
+                if use_json_wire or use_bool_wire:
                     try:
-                        from connectors.mysql_writer import _to_mysql_value
+                        from connectors.sql_bind import normalize_sql_bind_value
 
-                        bound = _to_mysql_value(converted, tgt_type or "JSON")
+                        bound = normalize_sql_bind_value(
+                            converted,
+                            tgt_type or ("JSON" if use_json_wire else "BOOLEAN"),
+                            engine=dest_l or "mysql",
+                        )
                         if sample_wire_form is None and bound is not None:
                             sample_wire_form = str(bound)[:120]
                     except Exception as wire_exc:
@@ -338,7 +360,7 @@ def analyze_coercion(
                             sample_failures.append({
                                 "row": idx,
                                 "value": cell[:120],
-                                "reason": f"MySQL JSON bind failed: {wire_exc}",
+                                "reason": f"SQL bind failed: {wire_exc}",
                             })
                             raw_failure_values.append(cell[:120])
                         continue
@@ -387,7 +409,8 @@ def analyze_coercion(
 
         tgt_name = str(m.get("target", src) or src)
         dest_col_exists = bool(
-            table_exists and (
+            table_exists is True
+            and (
                 tgt_name in dest_types
                 or tgt_name.lower() in {k.lower() for k in dest_types}
             )

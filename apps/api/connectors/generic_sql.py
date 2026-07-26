@@ -956,6 +956,7 @@ def _to_sa_value(
     from services.type_system import (
         LOGICAL_ARRAY,
         LOGICAL_BINARY,
+        LOGICAL_BOOLEAN,
         LOGICAL_DECIMAL,
         LOGICAL_INTEGER,
         LOGICAL_JSON,
@@ -965,28 +966,27 @@ def _to_sa_value(
     t = normalize_logical_type(logical)
 
     if t in (LOGICAL_JSON, LOGICAL_ARRAY):
-        if isinstance(value, str):
+        from connectors.sql_bind import coerce_json_wire
+
+        # Empty JSON wire → SQL NULL (MySQL 3140 / JSONB empty-string class).
+        if isinstance(value, str) and not value.strip():
+            return None
+        as_text = _is_string_type(sa_type)
+        bound = coerce_json_wire(value, as_text=as_text)
+        if as_text:
+            return bound
+        if isinstance(bound, str) and not _is_string_type(sa_type):
+            # Valid JSON text → native for JSONB; wrap leftovers stay text.
             try:
-                parsed = json.loads(value)
-            except (json.JSONDecodeError, ValueError):
-                parsed = value
-        else:
-            parsed = value
+                return json.loads(bound)
+            except (json.JSONDecodeError, ValueError, TypeError):
+                return bound
+        return bound
 
-        if isinstance(parsed, (dict, list)):
-            if _is_string_type(sa_type):
-                from services.value_serializer import json_default
+    if t == LOGICAL_BOOLEAN:
+        from connectors.sql_bind import coerce_boolean_wire
 
-                return json.dumps(
-                    parsed,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    default=json_default,
-                )
-            return parsed
-        if isinstance(value, str):
-            return value
-        return value
+        return coerce_boolean_wire(value, as_int=False)
 
     if t == LOGICAL_BINARY:
         if isinstance(value, bytes):
@@ -1098,7 +1098,7 @@ def _to_sa_value(
                 return value
         return value
 
-    # boolean, uuid, string/text are already bound-friendly
+    # uuid, string/text are already bound-friendly
     return value
 
 

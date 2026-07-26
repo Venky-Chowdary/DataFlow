@@ -59,7 +59,8 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
     status = str(probe.get("status") or "").strip()
     # Create-new cannot trust connectivity-only fallback — fail closed until the
     # privilege catalog is readable or the target table already exists.
-    if status == "unavailable" and not dest.table_exists:
+    # table_exists=None (unknown) must not be treated as create-new.
+    if status == "unavailable" and dest.table_exists is False:
         detail = str(probe.get("detail") or "privilege catalog unavailable").strip()
         return _block(
             GateId.G2_DESTINATION,
@@ -69,16 +70,33 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
             start,
             details,
         )
+    if status == "unavailable" and dest.table_exists is None:
+        detail = str(probe.get("detail") or "privilege catalog unavailable").strip()
+        return _block(
+            GateId.G2_DESTINATION,
+            "Destination table existence unknown and privilege catalog unavailable — "
+            f"cannot prove CREATE or INSERT ({detail}). Re-check table/schema and grants.",
+            start,
+            details,
+        )
 
     if not dest.can_write:
         # Prefer probe.detail (engine-specific privilege) over generic SQL wording.
         if probe.get("detail") and probe.get("status") == "denied":
             return _block(GateId.G2_DESTINATION, str(probe["detail"]), start, details)
-        if not dest.table_exists and not dest.can_create_table:
+        if dest.table_exists is False and not dest.can_create_table:
             return _block(
                 GateId.G2_DESTINATION,
                 "Insufficient privileges to CREATE the destination table "
                 "(connected, but schema CREATE / CREATE privilege denied)",
+                start,
+                details,
+            )
+        if dest.table_exists is None:
+            return _block(
+                GateId.G2_DESTINATION,
+                "Destination table existence unknown — cannot prove CREATE or INSERT "
+                "privileges. Re-check table/schema name and credentials.",
                 start,
                 details,
             )
@@ -91,10 +109,12 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
         )
 
     create_note = ""
-    if not dest.table_exists and dest.can_create_table:
+    if dest.table_exists is False and dest.can_create_table:
         create_note = "; CREATE table allowed"
-    elif dest.table_exists:
+    elif dest.table_exists is True:
         create_note = "; target table exists"
+    elif dest.table_exists is None:
+        create_note = "; table existence unknown"
 
     method = str(probe.get("method") or "").strip()
     if status == "unavailable" and probe.get("detail"):

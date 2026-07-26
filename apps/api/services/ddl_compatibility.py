@@ -101,7 +101,7 @@ def evaluate_ddl_compatibility(
     source_schema: dict[str, str] | None = None,
     target_schema: dict[str, str] | None = None,
     sample_rows: list[dict] | None = None,
-    table_exists: bool = False,
+    table_exists: bool | None = False,
     dest_connected: bool = False,
     dest_db_type: str = "postgresql",
     allow_create: bool = False,
@@ -145,19 +145,32 @@ def evaluate_ddl_compatibility(
     # means Validate cannot prove columns exist — do not pretend the table is new.
     # When table_exists is False (create-new), empty target_schema is expected —
     # SCD2 / upsert / incremental first runs must not be blocked here.
+    # table_exists=None means probe unknown — never coerce to create-new.
     if (
         dest_connected
         and not schemaless
         and named_target
         and not overwrite
         and not target_schema
-        and table_exists
+        and table_exists is True
     ):
         issues.append(
             "Could not load destination schema for existing target — "
             "Validate cannot prove mapped columns exist. Re-check table/schema name "
             "and credentials, refresh destination columns on Map, or use "
             "full_refresh_overwrite to recreate the table."
+        )
+    if (
+        dest_connected
+        and not schemaless
+        and named_target
+        and not overwrite
+        and table_exists is None
+    ):
+        issues.append(
+            "Destination table existence is unknown (introspect probe failed) — "
+            "re-check credentials/schema/table before Validate can approve create-new "
+            "or existing-table DDL. Do not assume the table is missing."
         )
 
     seen_targets: set[str] = set()
@@ -175,7 +188,7 @@ def evaluate_ddl_compatibility(
         src_type = ci_get(source_schema, src) or "VARCHAR"
         tgt_type = ci_get(target_schema, tgt)
 
-        if not schemaless and table_exists and target_schema and tgt_type is None:
+        if not schemaless and table_exists is True and target_schema and tgt_type is None:
             if will_add_columns:
                 continue
             issues.append(
@@ -265,7 +278,7 @@ def evaluate_ddl_compatibility(
                             )
                             break
 
-        if not schemaless and not table_exists and allow_create:
+        if not schemaless and table_exists is False and allow_create:
             inferred_ddl = ddl_type(dest_db_type, src_type)
             width = _parse_varchar_width(inferred_ddl)
             if width is not None and sample_rows:
@@ -279,7 +292,7 @@ def evaluate_ddl_compatibility(
     # check is not duplicated here. G6 focuses on DDL shape and target
     # compatibility; G9 audits source values (duplicates, nulls, precision).
 
-    if not schemaless and table_exists and target_schema:
+    if not schemaless and table_exists is True and target_schema:
         mapped_targets = {str(m.get("target")).lower() for m in mappings if m.get("target")}
         required_unmapped = [
             c

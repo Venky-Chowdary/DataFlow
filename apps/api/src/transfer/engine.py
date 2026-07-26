@@ -1653,11 +1653,7 @@ class UniversalTransferEngine:
                         request.validation_mode
                     ),
                     destination_column_types=dest_schema_types,
-                    destination_table_exists=(
-                        dest_table_exists_flag
-                        if dest_table_exists_flag is not None
-                        else bool(dest_schema_types)
-                    ),
+                    destination_table_exists=dest_table_exists_flag,
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
@@ -2428,11 +2424,7 @@ class UniversalTransferEngine:
                         request.validation_mode
                     ),
                     destination_column_types=dest_schema_types,
-                    destination_table_exists=(
-                        dest_table_exists_flag
-                        if dest_table_exists_flag is not None
-                        else bool(dest_schema_types)
-                    ),
+                    destination_table_exists=dest_table_exists_flag,
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
@@ -3000,11 +2992,7 @@ class UniversalTransferEngine:
                         request.validation_mode
                     ),
                     destination_column_types=dest_schema_types,
-                    destination_table_exists=(
-                        dest_table_exists_flag
-                        if dest_table_exists_flag is not None
-                        else bool(dest_schema_types)
-                    ),
+                    destination_table_exists=dest_table_exists_flag,
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,

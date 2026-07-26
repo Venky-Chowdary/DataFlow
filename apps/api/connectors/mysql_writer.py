@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import logging
 import time
 from collections.abc import Callable
@@ -14,7 +13,6 @@ from services.type_system import ddl_type
 from connectors.mysql_conn import get_connection
 from connectors.schema_drift import is_wider_type, widen_existing_columns_native
 from connectors.sql_temporal import (
-    coerce_sql_temporal,
     extract_column_from_sql_error,
     is_sql_data_error,
 )
@@ -103,58 +101,9 @@ def _apply_physical_temporal_types(
 
 def _to_mysql_value(value: Any, source_type: str) -> Any:
     """Normalize transform-engine values to forms pymysql/MySQL can bind."""
-    if value is None:
-        return None
-    temporal = coerce_sql_temporal(value, source_type)
-    if temporal is not value:
-        return temporal
-    from connectors.sql_temporal import sql_base_type
+    from connectors.sql_bind import normalize_sql_bind_value
 
-    upper = sql_base_type(source_type)
-    if upper in {"BINARY", "BLOB", "LONGBLOB", "VARBINARY", "BYTEA"}:
-        if isinstance(value, bytes):
-            return value
-        if isinstance(value, str):
-            try:
-                return base64.b64decode(value, validate=True)
-            except Exception:
-                return value.encode("utf-8")
-        return value
-    if upper in {"JSON"}:
-        # MySQL JSON rejects '' / bare words (error 3140). Bind compact JSON text
-        # or SQL NULL — never an empty string.
-        import json as _json
-
-        from services.value_serializer import json_default
-
-        if isinstance(value, (dict, list, tuple)):
-            return _json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=json_default)
-        if isinstance(value, (bool, int, float)):
-            return _json.dumps(value, allow_nan=False)
-        text = str(value).strip()
-        if not text:
-            return None
-        try:
-            _json.loads(text)
-            return text
-        except Exception:
-            # Lossless wrap so scalars still load into JSON columns.
-            return _json.dumps(text, ensure_ascii=False)
-    if upper in {"BOOLEAN", "BOOL", "TINYINT"}:
-        # Mongo wire uses cell_to_string → "true"/"false"; quarantine replay may
-        # also land string bools. Bind 0/1 — never leave False-like strings unbound.
-        if isinstance(value, bool):
-            return 1 if value else 0
-        if isinstance(value, (int, float)) and value in (0, 1):
-            return int(value)
-        if isinstance(value, str):
-            token = value.strip().lower()
-            if token in {"true", "t", "yes", "y", "1", "on"}:
-                return 1
-            if token in {"false", "f", "no", "n", "0", "off"}:
-                return 0
-        return value
-    return value
+    return normalize_sql_bind_value(value, source_type, engine="mysql")
 
 def _open_mysql(
     *,

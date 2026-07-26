@@ -20,7 +20,6 @@ from services.value_serializer import json_default
 from connectors.postgresql_conn import get_connection
 from connectors.schema_drift import is_wider_type, widen_existing_columns_native
 from connectors.sql_temporal import (
-    coerce_sql_temporal,
     extract_column_from_sql_error,
     is_sql_data_error,
 )
@@ -442,22 +441,39 @@ def write_mapped_rows(
         mapped_rows = converted
 
     # ISO-8601 / CSV timestamps → Python datetime so COPY/INSERT never send raw "…Z".
+    # Boolean/JSON wire: Mongo cell_to_string ("true"/"false", JSON text, "") must
+    # match MySQL's shared sql_bind path — never leave string bools for BOOLEAN.
+    from connectors.sql_bind import normalize_sql_bind_value
     from connectors.sql_temporal import sql_base_type as _sql_base_type
 
-    temporal_positions = [
+    bind_positions = [
         i
         for i, t in enumerate(target_types)
         if _sql_base_type(t)
-        in {"DATE", "TIME", "DATETIME", "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMP_TZ", "TIMESTAMP_LTZ"}
+        in {
+            "DATE",
+            "TIME",
+            "DATETIME",
+            "TIMESTAMP",
+            "TIMESTAMPTZ",
+            "TIMESTAMP_TZ",
+            "TIMESTAMP_LTZ",
+            "BOOLEAN",
+            "BOOL",
+            "JSON",
+            "JSONB",
+        }
     ]
-    if temporal_positions:
-        converted_temporal: list[tuple] = []
+    if bind_positions:
+        converted_bind: list[tuple] = []
         for row in mapped_rows:
             row_list = list(row)
-            for idx in temporal_positions:
-                row_list[idx] = coerce_sql_temporal(row_list[idx], target_types[idx])
-            converted_temporal.append(tuple(row_list))
-        mapped_rows = converted_temporal
+            for idx in bind_positions:
+                row_list[idx] = normalize_sql_bind_value(
+                    row_list[idx], target_types[idx], engine="postgresql"
+                )
+            converted_bind.append(tuple(row_list))
+        mapped_rows = converted_bind
 
     rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
     coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
