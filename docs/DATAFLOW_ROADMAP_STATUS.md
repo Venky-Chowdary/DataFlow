@@ -1,6 +1,6 @@
 **Report:** `dataflow_research_report.md` (July 2026)  
-**Branch:** `devin/backend-hardening-p5`  
-**Last updated:** 2026-07-25  
+**Branch:** `devin/deep-audit-1784855991`  
+**Last updated:** 2026-07-26  
 
 This document tracks every item from the market/algorithm research report against the current codebase so progress is transparent and the remaining work is explicit.
 
@@ -13,6 +13,8 @@ Backend batch reliability is **beta / early production** for batch transfers on 
 - Test counts on this branch are reported by CI/pytest artifacts on each push — do not rely on stale marketing numbers.
 - `pytest` full-suite status and pass/fail/skip counts are captured in the current PR verification section, not in this static doc.
 - CDC is **at-least-once upsert** by default. PG/MySQL/Mongo shared-reader paths have live integration coverage; SQL Server/Oracle need cred-gated live matrices before they can be called certified.
+- Lakehouse Iceberg is now a real catalog path (REST/Glue/Nessie/SQL) with `append`/`overwrite`/`upsert` MERGE and additive schema evolution; the legacy filesystem CoW writer remains for bare local paths.
+- SaaS reverse-ETL is transfer-ready for **Stripe, Airtable, and Shopify**; Zendesk and Notion remain source-only until write paths are added.
 - The product is **not** “100% CDC” and **not** platform-wide better than Airbyte/Debezium — integrity (mapping/preflight/quarantine/reconcile) can win *trust*; Airbyte/Debezium still win *CDC fleet coverage, edge-case years, and Connect-scale ops*.
 
 ---
@@ -343,12 +345,12 @@ Ship a generic Singer tap/target bridge and a connector SDK so the community can
 | Dimension                   | DataFlow today | Airbyte/Fivetran | Gap                                                              |
 | --------------------------- | -------------- | ---------------- | ---------------------------------------------------------------- |
 | Batch reliability           | 8/10           | 9/10             | small                                                            |
-| Connector depth             | 4/10           | 9/10             | large                                                            |
+| Connector depth             | 5/10           | 9/10             | large (3 transfer-ready SaaS writers added; still far behind)    |
 | CDC / real-time             | **7.2/10**     | 8/10             | large (incremental snapshot UI + row_filter evidence; AG dual-node gated) |
 | Vector / AI-ready           | 2/10           | 6/10             | large                                                            |
 | Data contracts / governance | 6/10           | 5/10             | small lead                                                       |
 | GitOps / as-code            | **7/10**       | 5/10             | lead (CLI+HTTP+UI+CI+signed CD gate)                             |
-| Lakehouse / Iceberg         | **4/10**       | 5/10             | medium (filesystem CoW + Studio form; REST catalog open)         |
+| Lakehouse / Iceberg         | **6/10**       | 5/10             | small lead (pyiceberg REST/Glue/Nessie/SQL + filesystem CoW)     |
 | Semantic mapping            | 7/10           | 3/10             | lead                                                             |
 | UX (Transfer Studio)        | 7/10           | 6/10             | small lead                                                       |
 | Enterprise SSO/audit/RBAC   | 5/10           | 8/10             | medium                                                           |
@@ -376,8 +378,14 @@ The defensible moat is **provable, AI-assisted data movement**: semantic mapping
 
 ## Test verification
 
-- Full backend suite: `python -m pytest tests` — 2003 passed / 182 skipped / 0 failed
-- Route matrix: `tests/test_execute_tracked_universal_matrix.py` — 529 passed / 121 skipped
-- Contract + data-quality tests: `tests/test_contracts_router.py`, `tests/test_data_contract.py`, `tests/test_data_quality_history.py` — green
-- CI: `api-and-web` on PR #16 — green
+Do not trust stale counts — the authoritative pass/fail/skip artifacts are in the current PR description. As of the latest push to PR #28:
+
+- `pytest tests/test_iceberg_upsert.py` — 9 passed
+- `pytest tests/test_cdc_*.py` — 97 passed / 8 skipped
+- `pytest tests/test_snowflake_*.py tests/test_bigquery_*.py tests/test_execute_tracked_*_to_bigquery.py tests/test_execute_tracked_*snowflake*.py` — ~40 passed / honest emulator+credential skips
+- `pytest tests/test_saas_connectors.py` — 23 passed
+- `pytest tests/test_connector_wiring.py` — 110 passed
+- `pytest --collect-only` — 10,533 tests, 0 collection errors
+- `ruff check --select F`, `bandit -r`, `pip-audit --local`, `npm audit` — clean
+- CI: `api-and-web` on PR #28 — re-running on each push
 
