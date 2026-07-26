@@ -77,23 +77,34 @@ def _is_encoding_blocker(text: str) -> bool:
 
 
 def _is_duplicate_key_blocker(text: str, gate_ids: set[str] | None = None) -> bool:
-    """True when uniqueness/identity-key collisions are the root preflight failure."""
+    """True when uniqueness/identity-key collisions are the root preflight failure.
+
+    Do not match the generic G9 why boilerplate ("duplicate keys, required nulls,
+    financial precision…") — that made null/empty blockers look like duplicates.
+    """
     t = (text or "").lower()
-    if any(
-        k in t
-        for k in (
-            "duplicate key",
-            "duplicate target key",
-            "keys repeat",
-            "primary key candidate",
-            "expect_column_unique",
-            "duplicate value(s) in source sample",
-        )
+    explicit = (
+        "duplicate key values",
+        "duplicate key value",
+        "duplicate target key",
+        "keys repeat",
+        "primary key candidate",
+        "expect_column_unique",
+        "duplicate value(s) in source sample",
+        "duplicate identity",
+    )
+    if any(k in t for k in explicit):
+        return True
+    # Concrete null findings own the narrative. Also ignore G9 boilerplate that
+    # lists "duplicate keys, required nulls, …" as a catalog of possible rules.
+    if (
+        "null/empty" in t
+        or "null rate" in t
+        or "for required field" in t
+        or "duplicate keys, required nulls" in t
     ):
-        return True
-    ids = gate_ids or set()
-    if {"g6_target_ddl", "g8_reconciliation", "g9_data_integrity"} & ids and "duplicate" in t:
-        return True
+        return False
+    _ = gate_ids  # reserved for future gate-scoped heuristics
     return False
 
 

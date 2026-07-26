@@ -267,16 +267,17 @@ def _check_required_nulls(
     primary_key: str | None = None,
     validation_mode: str = "strict",
 ) -> dict[str, Any]:
-    """Only enforce nullability on the inferred primary key and canonical key columns.
+    """Enforce nullability on the resolved identity key and exact canonical keys only.
 
-    Foreign-key / PII columns (email, phone, ssn, user_id, etc.) can legitimately
-    be sparse in source data; blocking transfer because of nulls in those
-    columns causes false preflight failures for schemaless/NoSQL sources.
-    In strict/maximum mode we also hold `*_id` columns to the same standard.
+    Optional FK / OAuth fields (``googleId`` → ``google_id``, ``providerId``,
+    ``user_id``, …) are often sparse on Mongo/NoSQL sources. Treating every
+    ``*_id`` target as required falsely blocked Validate while the real PK
+    (``_id`` / ``id``) was populated. Strict mode still requires the resolved
+    primary-key source (including a sole ``*_id`` when that is the identity).
     """
     issues: list[str] = []
     schemaless = dest_kind in SCHEMALESS_DESTS
-    mode = (validation_mode or "strict").strip().lower()
+    _ = (validation_mode or "strict").strip().lower()
 
     # Resolve the source column that maps to the primary key target.
     pk_source = ""
@@ -300,12 +301,9 @@ def _check_required_nulls(
 
         # The inferred primary key is always required.
         is_pk = bool(pk_source and src == pk_source)
-        # Exact canonical key columns are always required; `*_id` columns are
-        # also treated as required in strict/maximum validation mode.
+        # Exact canonical key names only — not every snake_case ``*_id`` FK.
         reserved_exact = {"id", "_id", "uuid", "pk", "key"}
         is_reserved_key = src_lower in reserved_exact or tgt_lower in reserved_exact
-        if mode in {"strict", "maximum"} and not is_reserved_key:
-            is_reserved_key = src_lower.endswith("_id") or tgt_lower.endswith("_id")
         if not is_pk and not is_reserved_key:
             continue
 

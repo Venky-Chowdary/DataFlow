@@ -114,6 +114,33 @@ def test_integrity_blocks_nulls_on_required_id():
     assert null_check["blocks_transfer"] is True
 
 
+def test_integrity_allows_sparse_oauth_ids_when_real_pk_present():
+    """Mongo users often lack googleId/providerId — do not block on those FKs."""
+    rows = [
+        {"_id": "a1", "email": "a@x.com", "googleId": "", "providerId": ""},
+        {"_id": "a2", "email": "b@x.com", "googleId": "g-2", "providerId": "google"},
+        {"_id": "a3", "email": "c@x.com", "googleId": "", "providerId": ""},
+    ]
+    mappings = [
+        {"source": "_id", "target": "id", "confidence": 0.99},
+        {"source": "email", "target": "email", "confidence": 0.95},
+        {"source": "googleId", "target": "google_id", "confidence": 0.93},
+        {"source": "providerId", "target": "provider_id", "confidence": 0.93},
+    ]
+    report = run_integrity_audit(
+        source_columns=["_id", "email", "googleId", "providerId"],
+        mappings=mappings,
+        sample_rows=rows,
+        destination_db_type="mysql",
+        validation_mode="strict",
+        sync_mode="full_refresh_append",
+    )
+    null_check = next((c for c in report["checks"] if c["check"] == "required_nulls"), None)
+    assert null_check is not None
+    assert null_check["blocks_transfer"] is False, null_check.get("issues")
+    assert not any("googleId" in i or "providerId" in i for i in (null_check.get("issues") or []))
+
+
 # ── Duplicate key detection ──────────────────────────────────────────────────
 
 def test_integrity_blocks_duplicate_primary_keys():
