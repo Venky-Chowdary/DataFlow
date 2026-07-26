@@ -263,17 +263,43 @@ def write_mapped_rows(
     written = 0
     digest = hashlib.sha256()
     key_col = (conflict_columns or [None])[0]
+    null_key_rejected = 0
     try:
         for idx, row in enumerate(mapped_rows):
             if isinstance(row, dict):
                 payload = row
             else:
                 payload = {c: row[i] if i < len(row) else None for i, c in enumerate(target_cols)}
-            key = (
-                str(payload.get(key_col))
-                if key_col and payload.get(key_col) is not None
-                else None
-            )
+            raw_key = payload.get(key_col) if key_col else None
+            if key_col and (raw_key is None or str(raw_key).strip() == ""):
+                null_key_rejected += 1
+                rejected_details.append({
+                    "row": idx + 1,
+                    "column": str(key_col),
+                    "target": topic,
+                    "value": "",
+                    "reason": (
+                        f"Kafka message key `{key_col}` missing/empty — refuse "
+                        "null-key produce when conflict_columns are configured "
+                        "(compaction / ordering would silently collapse)"
+                    ),
+                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                })
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=topic,
+                        target_schema="",
+                        checksum=digest.hexdigest()[:16] if written else "",
+                        chunks_completed=1,
+                        error=f"Kafka produce blocked: null key on `{key_col}`",
+                        rejected_details=rejected_details,
+                        rejected_rows=len(rejected_details),
+                        driver="kafka",
+                    )
+                continue
+            key = str(raw_key) if key_col and raw_key is not None else None
             fut = producer.send(topic, value=payload, key=key)
             fut.get(timeout=30)
             written += 1
@@ -294,13 +320,19 @@ def write_mapped_rows(
         except Exception as exc:
             logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
+    fail_closed = policy == "fail" and null_key_rejected > 0 and written == 0
     return WriteResult(
-        ok=True,
+        ok=not fail_closed,
         rows_written=written,
         table_name=topic,
         target_schema="",
         checksum=digest.hexdigest()[:16] if written else "",
         chunks_completed=1,
+        error=(
+            f"Kafka produce blocked: {null_key_rejected} row(s) missing key `{key_col}`"
+            if fail_closed
+            else None
+        ),
         rejected_details=rejected_details,
         rejected_rows=len(rejected_details),
         driver="kafka",

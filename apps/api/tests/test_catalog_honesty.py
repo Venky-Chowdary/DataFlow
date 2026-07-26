@@ -41,17 +41,8 @@ def test_dedicated_saas_source_only_drivers() -> None:
 
 
 def test_dedicated_saas_transfer_ready_drivers() -> None:
-    """SaaS connectors with live SKU proof are certified for full transfer."""
-    certified = ("stripe", "shopify", "airtable")
-    planned = ("zendesk", "notion")
-    for brand in certified:
-        row = enrich_catalog_entry(
-            {"id": brand, "name": brand.title(), "category": "saas", "status": "live", "description": ""}
-        )
-        assert row["transfer_ready"] is True, brand
-        assert row["effective_status"] == "live", brand
-        assert row["certification_tier"] == "certified", brand
-        assert "Full transfer" in row["capability_label"], brand
+    """Writers exist for Stripe/Shopify/Airtable but stay Planned until PRODUCTION_SKU."""
+    planned = ("stripe", "shopify", "airtable", "zendesk", "notion")
     for brand in planned:
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live", "description": ""}
@@ -63,9 +54,9 @@ def test_dedicated_saas_transfer_ready_drivers() -> None:
 
 
 def test_dedicated_saas_drivers_activation_and_source_only() -> None:
-    """Certified activation/CRM connectors are reverse-ETL write-ready.
-    Zendesk/Notion remain Planned until they pass the live SKU matrix."""
-    certified = ("hubspot", "salesforce", "stripe", "airtable", "shopify")
+    """HubSpot/Salesforce are reverse-ETL write-ready; Stripe/Shopify/Airtable Planned."""
+    certified = ("hubspot", "salesforce")
+    planned = ("stripe", "airtable", "shopify", "zendesk", "notion")
     for brand in certified:
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live", "description": ""}
@@ -73,7 +64,13 @@ def test_dedicated_saas_drivers_activation_and_source_only() -> None:
         assert row["transfer_ready"] is True, brand
         assert row["certification_tier"] == "certified", brand
         assert row["effective_status"] == "live", brand
-
+    for brand in planned:
+        row = enrich_catalog_entry(
+            {"id": brand, "name": brand.title(), "category": "saas", "status": "live", "description": ""}
+        )
+        assert row["transfer_ready"] is False, brand
+        assert row["certification_tier"] == "planned", brand
+        assert row["effective_status"] == "planned", brand
 
 def test_first_class_rest_api_is_source_only() -> None:
     row = enrich_catalog_entry(

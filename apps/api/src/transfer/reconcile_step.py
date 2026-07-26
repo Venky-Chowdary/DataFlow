@@ -351,8 +351,49 @@ def run_reconciliation(
         )
         return report.to_dict()
 
-    # We have a verified read-back. Run the full reconciliation; allow extra
-    # rows because destinations may legitimately contain pre-existing data.
+    # We have a verified read-back. Extra dest rows are legitimate for append /
+    # upsert into a non-empty sink; overwrite/mirror/replace must not soft-pass
+    # extras (Airbyte/Fivetran-class honesty: mode-aware reconcile).
+    from services.sync_cursor import is_overwrite_sync
+
+    sync_mode = str(
+        dest_summary.get("sync_mode")
+        or dest_summary.get("effective_sync_mode")
+        or ""
+    )
+    allow_extra = not is_overwrite_sync(sync_mode)
+    if sync_mode.lower() in {"full_refresh_mirror", "mirror", "scd2"}:
+        allow_extra = False
+
+    # Streaming append/upsert soft-pass of extra dest rows without a stashed
+    # sample cannot claim key-aligned proof (Airbyte/Fivetran honesty bar).
+    is_streaming = bool(dest_summary.get("streaming"))
+    if (
+        strict_checksum
+        and is_streaming
+        and allow_extra
+        and int(rows_written or 0) > 0
+        and not sample_compare
+        and not sample_records
+        and db_type
+        not in {"pinecone", "qdrant", "weaviate", "milvus", "pgvector", "email", "kafka"}
+    ):
+        from services.reconciliation import ReconciliationReport
+
+        return ReconciliationReport(
+            passed=False,
+            source_rows=source_rows,
+            target_rows=target_rows,
+            source_checksum=source_checksum,
+            target_checksum=target_checksum,
+            message=(
+                "Gate-8 refused: streaming write completed but no reconcile_sample "
+                "was stashed for key-aligned proof. Re-run with sample stash enabled."
+            ),
+            rejected_rows=rejected_rows,
+            coerced_null_rows=coerced_null_rows,
+        ).to_dict()
+
     report = reconcile(
         source_rows=source_rows,
         target_rows=target_rows,
@@ -360,7 +401,7 @@ def run_reconciliation(
         target_checksum=target_checksum,
         rejected_rows=rejected_rows,
         strict_checksum=strict_checksum,
-        allow_extra_rows=True,
+        allow_extra_rows=allow_extra,
         sample_compare=sample_compare,
         coerced_null_rows=coerced_null_rows,
         rows_skipped=rows_skipped,

@@ -388,22 +388,28 @@ async def sso_callback(sso_type: str, code: str = "", state: str = "", error: st
     verifier = (state_info.get("extra") or {}).get("code_verifier", "")
     redirect_uri = (state_info.get("extra") or {}).get("redirect_uri", "")
     client_id = (state_info.get("extra") or {}).get("client_id", "")
-    client_secret = ""
+    client_secret = str((state_info.get("extra") or {}).get("client_secret") or "")
     token_url = (state_info.get("extra") or {}).get("token_url", "")
 
-    # Fallback to config if state_info is incomplete (legacy / misconfigured).
-    if not token_url:
-        from services.integrations_store import get_sso_config_raw
+    # Always load confidential-client secret from SSO config (Azure AD / OIDC).
+    # Token URL in state must not skip secret — that broke Azure confidential apps.
+    from services.integrations_store import get_sso_config_raw
 
+    try:
         cfg = get_sso_config_raw(sso_type)
-        if sso_type == "azure_ad":
+    except Exception:
+        cfg = {}
+    if not client_secret and isinstance(cfg, dict):
+        client_secret = str(cfg.get("client_secret") or "")
+    if not token_url:
+        if sso_type == "azure_ad" and isinstance(cfg, dict) and cfg.get("tenant_id"):
             tenant = cfg["tenant_id"]
             token_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
-        else:
-            token_url = f"{cfg['issuer'].rstrip('/')}/token"
-        redirect_uri = cfg["redirect_uri"]
-        client_id = cfg["client_id"]
-        client_secret = cfg["client_secret"]
+        elif isinstance(cfg, dict) and cfg.get("issuer"):
+            token_url = f"{str(cfg['issuer']).rstrip('/')}/token"
+        if isinstance(cfg, dict):
+            redirect_uri = redirect_uri or str(cfg.get("redirect_uri") or "")
+            client_id = client_id or str(cfg.get("client_id") or "")
     if not token_url or not client_id:
         raise HTTPException(status_code=400, detail="Missing SSO token endpoint configuration")
 

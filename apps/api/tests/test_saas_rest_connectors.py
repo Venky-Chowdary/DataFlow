@@ -124,9 +124,9 @@ def test_source_only_saas_tiers():
 
 
 def test_transfer_ready_saas_tiers():
-    """SaaS connectors with live SKU proof are certified; others stay Planned."""
-    certified = {"stripe", "shopify", "airtable"}
-    planned = {"zendesk", "notion"}
+    """HubSpot/Salesforce certified; Stripe/Shopify/Airtable/Zendesk/Notion Planned."""
+    certified = {"hubspot", "salesforce"}
+    planned = {"stripe", "shopify", "airtable", "zendesk", "notion"}
     for brand in certified:
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live"}

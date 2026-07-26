@@ -1970,7 +1970,9 @@ def resolve_write_flags(
 ) -> tuple[bool, bool, dict[str, Any]]:
     """Merge connectivity with privilege probe into (can_write, can_create, meta).
 
-    Unavailable probes keep connectivity-based defaults (no false block).
+    Unavailable probes: allow write attempts (connectivity already proven) but
+    refuse optimistic ``can_create=True`` soft-pass — create-table must be proven
+    or the operator must enable create after an explicit probe.
     Explicit deny fails closed.
     """
     meta: dict[str, Any] = {}
@@ -1981,8 +1983,10 @@ def resolve_write_flags(
         return False, False, meta
 
     if probe is None or probe.status == "unavailable":
-        return True, True, meta
+        meta.setdefault("privilege_verified", False)
+        return True, False, meta
 
     can_write = bool(probe.can_write)
     can_create = bool(probe.can_create_table)
+    meta["privilege_verified"] = True
     return can_write, can_create, meta

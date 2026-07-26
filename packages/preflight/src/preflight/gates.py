@@ -485,6 +485,29 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                         "remediation_kind": "fix_source_keys",
                     },
                 )
+        else:
+            # Key-addressed / upsert destinations must resolve an identity key.
+            try:
+                from services.primary_key import sync_requires_unique_identity
+
+                if sync_requires_unique_identity(
+                    getattr(ctx.plan, "sync_mode", "") or "",
+                    dest_kind=dest_kind,
+                ):
+                    return _block(
+                        GateId.G6_TARGET_DDL,
+                        "Identity key required — set Primary key on Map "
+                        "(code/id/_id/iso) before Run to a key-addressed destination",
+                        start,
+                        {
+                            "schemaless": True,
+                            "rule_id": "g6_target_ddl.missing_identity",
+                            "remediation_kind": "set_primary_key",
+                            "dest_kind": dest_kind,
+                        },
+                    )
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return _pass(
             GateId.G6_TARGET_DDL,
             "Schemaless destination — no DDL contract (identity key checked)",

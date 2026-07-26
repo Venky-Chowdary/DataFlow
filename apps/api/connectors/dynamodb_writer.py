@@ -168,7 +168,33 @@ def write_mapped_rows(
         key_ok = True
         for key_col, attr_type in key_types.items():
             if key_col not in target_cols:
-                continue
+                key_ok = False
+                detail = {
+                    "row": row_idx + 1,
+                    "column": key_col,
+                    "target": key_col,
+                    "value": "",
+                    "reason": (
+                        f"DynamoDB key attribute `{key_col}` is not mapped — "
+                        "refuse silent PutItem without HASH/RANGE identity"
+                    ),
+                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                    "chars": [],
+                }
+                rejected_details.append(detail)
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table,
+                        target_schema=host or "",
+                        checksum="",
+                        chunks_completed=0,
+                        error=detail["reason"],
+                        rejected_rows=len({d["row"] for d in rejected_details}),
+                        rejected_details=rejected_details[:100],
+                    )
+                break
             i = target_cols.index(key_col)
             value = row[i] if i < len(row) else None
             if value is None or (attr_type == "S" and str(value).strip() == ""):

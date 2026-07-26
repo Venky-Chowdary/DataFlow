@@ -170,6 +170,31 @@ def write_mapped_rows(
             merge_field=merge_field,
         )
         if not payload["records"]:
+            for j, row in enumerate(batch_dicts):
+                all_rejected.append({
+                    "row": i + j + 1,
+                    "column": merge_field or "id",
+                    "target": table,
+                    "value": "",
+                    "reason": (
+                        "Airtable batch produced zero records — update mode "
+                        "requires an id (or merge field); refuse silent skip"
+                    ),
+                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                })
+            if policy == "fail":
+                return WriteResult(
+                    ok=False,
+                    rows_written=written,
+                    table_name=table,
+                    target_schema=base_id,
+                    checksum=digest.hexdigest()[:32] if written else "",
+                    chunks_completed=chunks,
+                    error="Airtable write blocked: empty batch (missing record id)",
+                    rejected_details=all_rejected,
+                    rejected_rows=len(all_rejected),
+                    driver="airtable",
+                )
             continue
 
         key = f"dataflow-{base_id}-{table}-{i}-{hashlib.sha256(str(payload).encode()).hexdigest()[:16]}"

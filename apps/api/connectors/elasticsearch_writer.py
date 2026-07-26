@@ -141,7 +141,9 @@ def write_mapped_rows(
 
     conflict = [c for c in (conflict_columns or []) if c]
     mode = (write_mode or "insert").lower()
-    requires_identity = mode in {"upsert", "update", "merge", "cdc", "incremental"}
+    # Elasticsearch is key-addressed: auto-generated ids break idempotent retry /
+    # upsert / CDC and hide collisions. Always require resolvable document identity.
+    requires_identity = True
 
     client = _client(cfg)
     try:
@@ -172,7 +174,7 @@ def write_mapped_rows(
 
         identity_missing = 0
         actions: list[dict[str, Any]] = []
-        for row in mapped_rows:
+        for row_idx, row in enumerate(mapped_rows):
             source = {
                 target_cols[i]: _to_es_value(value, logical_types[i])
                 for i, value in enumerate(row)
@@ -189,12 +191,23 @@ def write_mapped_rows(
                 # Insert/append must not silently overwrite existing docs (index vs create).
                 if mode in {"insert", "append", "create"}:
                     action["_op_type"] = "create"
-            elif requires_identity:
+            else:
                 identity_missing += 1
+                rejected_details.append({
+                    "row": row_idx + 1,
+                    "column": ",".join(conflict) if conflict else "_id",
+                    "target": index,
+                    "value": "",
+                    "reason": (
+                        "elasticsearch requires document identity — map a primary "
+                        "key to _id or configure conflict_columns"
+                    ),
+                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                })
                 continue
             actions.append(action)
 
-        written, bulk_errors = bulk(client, actions, raise_on_error=False)
+        written, bulk_errors = bulk(client, actions, raise_on_error=False) if actions else (0, [])
         try:
             client.indices.refresh(index=index)
         except Exception as exc:
@@ -231,30 +244,16 @@ def write_mapped_rows(
                 "policy": policy,
             })
 
-        if identity_missing:
-            bulk_details.append({
-                "row": "",
-                "column": ",".join(conflict) if conflict else "_id",
-                "target": index,
-                "value": "",
-                "reason": (
-                    f"elasticsearch upsert requires document identity "
-                    f"({identity_missing} row(s) skipped) — map a primary key "
-                    "to _id or configure conflict_columns"
-                )[:500],
-                "policy": policy,
-            })
-
         all_rejected = list(rejected_details) + bulk_details
-        fail_closed = policy == "fail" and bool(bulk_details)
+        fail_closed = policy == "fail" and bool(bulk_details or identity_missing)
         if requires_identity and identity_missing > 0 and written == 0:
             fail_closed = True
         err_msg = None
         if fail_closed:
             if identity_missing and written == 0:
                 err_msg = (
-                    f"elasticsearch upsert blocked: {identity_missing} row(s) "
-                    "lack document identity"
+                    f"elasticsearch blocked: {identity_missing} row(s) "
+                    "lack document identity — set Primary key on Map"
                 )
             elif bulk_errors:
                 err_msg = f"elasticsearch bulk rejected {len(bulk_errors)} item(s)"
@@ -269,9 +268,7 @@ def write_mapped_rows(
             chunks_completed=1,
             error=err_msg,
             warnings=(errors + [str(e) for e in (bulk_errors or [])[:5]])[:10],
-            rejected_rows=len({str(d.get("row")) for d in all_rejected if d.get("row") not in (None, "")})
-            + (1 if identity_missing else 0)
-            + len(bulk_errors or []),
+            rejected_rows=len({str(d.get("row")) for d in all_rejected if d.get("row") not in (None, "")}),
             rejected_details=all_rejected[:100],
         )
     except Exception as exc:

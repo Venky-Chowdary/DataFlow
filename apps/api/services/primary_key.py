@@ -5,9 +5,10 @@ Connector-specific patches that reinvent ``*_id`` heuristics cause false blocks
 (Mongo ``user_id`` dupes) or silent misses. Prefer explicit contract keys; fall
 back only to exact ``id`` / ``_id`` (and mode-gated ``*_id`` for required-nulls).
 
-Redis is key-addressed on every write (SET by identity), so it always requires
-a unique key and uses natural-key ranking (``code`` / ``iso`` / ``name``) —
-never Mongo's ``_id``-only rule and never weak attributes like ``capital``.
+Key-addressed sinks (Redis, DynamoDB, Elasticsearch, vector upserts) always
+require a unique identity — append still collides on the key. Redis uses
+natural-key ranking (``code`` / ``iso`` / ``name``) — never Mongo's ``_id``-only
+rule and never weak attributes like ``capital``.
 """
 
 from __future__ import annotations
@@ -21,9 +22,21 @@ Purpose = Literal["uniqueness", "required_nulls"]
 _EXACT_SQL_KEYS = ("id", "_id", "uuid", "pk", "key")
 _DOCUMENT_STORE_DESTS = frozenset({"mongodb", "dynamodb"})
 
+# Destinations where every write is identity-keyed (SET/PutItem/upsert by id).
+# Validate must always enforce uniqueness — append still collides on the key.
+KEY_ADDRESSED_DESTS = frozenset({
+    "redis",
+    "dynamodb",
+    "elasticsearch",
+    "pinecone",
+    "qdrant",
+    "weaviate",
+    "milvus",
+    "pgvector",
+})
+
 # Sync modes that must enforce identity uniqueness on the Validate sample for
-# SQL / document stores. Redis is handled separately (always unique — see
-# ``sync_requires_unique_identity``).
+# SQL / document stores. Key-addressed sinks always require uniqueness.
 _UNIQUE_IDENTITY_SYNC_MODES = frozenset({
     "upsert",
     "incremental_deduped",
@@ -88,17 +101,21 @@ def sync_requires_unique_identity(
 ) -> bool:
     """True when Validate must fail-closed on duplicate identity keys.
 
-    Redis always returns True: every write is ``SET prefix:identity``, so
-    append/overwrite still collide on duplicate keys (countries:capital bug).
+    Key-addressed destinations (Redis, DynamoDB, ES, vector upserts) always
+    return True: every write is keyed, so append still collides on duplicates.
     """
     kind = normalize_dest_kind(dest_kind) if dest_kind else ""
-    if kind == "redis":
+    if kind in KEY_ADDRESSED_DESTS:
         return True
     return (sync_mode or "").strip().lower() in _UNIQUE_IDENTITY_SYNC_MODES
 
 
 def pick_redis_identity_column(candidates: list[str]) -> str | None:
-    """Pick the best Redis key column from an ordered candidate list."""
+    """Pick the best Redis key column from an ordered candidate list.
+
+    Returns ``None`` when only weak (non-unique) attributes remain — force the
+    operator to set an explicit primary key rather than invent ``capital``.
+    """
     if not candidates:
         return None
     lower_map = {c.lower(): c for c in candidates}
@@ -114,7 +131,7 @@ def pick_redis_identity_column(candidates: list[str]) -> str | None:
     for c in candidates:
         if c.lower() not in _REDIS_WEAK_KEYS:
             return c
-    return candidates[0]
+    return None
 
 
 def infer_redis_conflict_columns(

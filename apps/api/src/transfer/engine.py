@@ -559,11 +559,11 @@ def _destination_schema_types(
 
 
 def _infer_primary_key(columns: list[str], mappings: list[dict[str, Any]]) -> str:
-    """Infer the primary key target column for mirror/upsert/Redis transfers.
+    """Infer the primary key target column for mirror/upsert/key-addressed transfers.
 
     Prefers ``id`` / ``*_id`` / ``uuid``, then natural keys (``code``, ``iso``,
-    ``name``, ``sku``, …). Never prefers known non-unique attributes like
-    ``capital`` when a stronger candidate exists — that caused Redis keys such as
+    ``name``, ``sku``, …). Never invents a weak attribute like ``capital`` when
+    no strong candidate exists — that caused Redis keys such as
     ``countries:Abu_Dhabi`` when column order put ``capital`` first.
     """
     if not columns:
@@ -580,10 +580,8 @@ def _infer_primary_key(columns: list[str], mappings: list[dict[str, Any]]) -> st
     inferred = infer_redis_conflict_columns(target_cols, mappings or [], None)
     if inferred:
         return inferred[0]
-    mapping_dict = {
-        m.get("source", ""): m.get("target", m.get("source", "")) for m in mappings
-    }
-    return str(mapping_dict.get(columns[0], columns[0]) or "")
+    # Refuse first-column fallback — weak attrs must be set explicitly on Map.
+    return ""
 
 
 def _checkpoint_has_progress(checkpoint: Any) -> bool:
@@ -1483,13 +1481,14 @@ class UniversalTransferEngine:
                 inferred_pk = _infer_primary_key(columns, mappings)
                 if inferred_pk:
                     conflict_columns = [inferred_pk]
-            # Redis is always key-addressed — every sync mode needs an identity column.
-            # Without this, full_refresh_append fell through to target_cols[0] (often
-            # ``capital`` on countries) and fail-closed on duplicate non-unique values.
+            # Key-addressed sinks (Redis/Dynamo/ES/vectors) always need identity —
+            # append still collides on the key. Infer from natural keys; never invent
+            # weak attrs (countries:capital bug).
+            from services.primary_key import KEY_ADDRESSED_DESTS
             from .connector_capabilities import resolve_driver_type
 
             dest_driver = resolve_driver_type(request.destination.format or "")
-            if not conflict_columns and dest_driver == "redis":
+            if not conflict_columns and dest_driver in KEY_ADDRESSED_DESTS:
                 inferred_pk = _infer_primary_key(columns, mappings)
                 if inferred_pk:
                     conflict_columns = [inferred_pk]
@@ -2003,6 +2002,8 @@ class UniversalTransferEngine:
                 processed=int(rows_written or 0),
                 total=int(rows_written or 0),
             ):
+                if isinstance(dest_summary, dict):
+                    dest_summary.setdefault("sync_mode", effective_sync)
                 recon = run_reconciliation(
                     endpoint=request.destination,
                     records=records,
@@ -2591,6 +2592,9 @@ class UniversalTransferEngine:
                 processed=int(rows_written or 0),
                 total=int(rows_written or 0),
             ):
+                if isinstance(dest_summary, dict):
+                    dest_summary.setdefault("sync_mode", effective_sync)
+                    dest_summary.setdefault("streaming", True)
                 recon = run_reconciliation(
                     endpoint=request.destination,
                     records=[],
@@ -3073,6 +3077,9 @@ class UniversalTransferEngine:
                 processed=int(rows_written or 0),
                 total=int(rows_written or 0),
             ):
+                if isinstance(dest_summary, dict):
+                    dest_summary.setdefault("sync_mode", effective_sync)
+                    dest_summary.setdefault("streaming", True)
                 recon = run_reconciliation(
                     endpoint=request.destination,
                     records=[],

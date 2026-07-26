@@ -24,12 +24,15 @@ from services.destination_privilege_probe import (
 
 
 def test_unsupported_engine_is_unavailable_not_deny():
-    result = probe_destination_privileges("elasticsearch", host="x", database="d")
+    # Use a sink without a privilege catalog probe (ES/S3/Redis are supported).
+    result = probe_destination_privileges("pinecone", host="x", database="d")
     assert result.status == "unavailable"
     assert result.can_write is None
     can_write, can_create, meta = resolve_write_flags(True, result)
-    assert can_write is True and can_create is True
+    # Write may proceed on connectivity; create must not soft-pass as proven.
+    assert can_write is True and can_create is False
     assert meta["status"] == "unavailable"
+    assert meta.get("privilege_verified") is False
 
 
 def test_resolve_write_flags_denies_on_explicit_probe_deny():
@@ -382,7 +385,7 @@ def test_redis_probe_acl_unavailable_is_soft():
         result = probe_destination_privileges("redis", host="localhost", table="k")
     assert result.status == "unavailable"
     can_w, can_c, _ = resolve_write_flags(True, result)
-    assert can_w is True and can_c is True
+    assert can_w is True and can_c is False
 
 
 def test_kafka_acl_deny_matrix():

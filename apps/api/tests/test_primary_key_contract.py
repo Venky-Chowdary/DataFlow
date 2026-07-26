@@ -42,12 +42,37 @@ def test_redis_prefers_code_over_capital():
 
 
 def test_redis_always_requires_unique_identity():
-    from services.primary_key import sync_requires_unique_identity
+    from services.primary_key import KEY_ADDRESSED_DESTS, sync_requires_unique_identity
 
     assert sync_requires_unique_identity("full_refresh_append", dest_kind="redis")
     assert sync_requires_unique_identity("full_refresh_overwrite", dest_kind="redis")
     assert not sync_requires_unique_identity("full_refresh_append", dest_kind="postgresql")
+    for kind in KEY_ADDRESSED_DESTS:
+        assert sync_requires_unique_identity("full_refresh_append", dest_kind=kind), kind
 
+
+def test_redis_refuses_weak_only_identity():
+    from services.primary_key import pick_redis_identity_column, resolve_identity_key
+
+    assert pick_redis_identity_column(["capital", "continent", "region"]) is None
+    src, tgt = resolve_identity_key(
+        mappings=[
+            {"source": "capital", "target": "capital"},
+            {"source": "continent", "target": "continent"},
+        ],
+        source_columns=["capital", "continent"],
+        dest_kind="redis",
+        purpose="uniqueness",
+    )
+    assert src is None and tgt is None
+
+
+def test_key_addressed_dests_require_unique_on_append():
+    from services.primary_key import sync_requires_unique_identity
+
+    for kind in ("dynamodb", "elasticsearch", "pinecone", "qdrant"):
+        assert sync_requires_unique_identity("", dest_kind=kind), kind
+        assert sync_requires_unique_identity("full_refresh_append", dest_kind=kind), kind
 
 
 def test_sql_uniqueness_ignores_foreign_key_star_id():

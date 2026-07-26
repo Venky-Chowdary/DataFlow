@@ -27,6 +27,9 @@ def test_sync_requires_unique_identity_modes():
     # Redis is always key-addressed — uniqueness required even on append.
     assert sync_requires_unique_identity("full_refresh_append", dest_kind="redis")
     assert sync_requires_unique_identity("", dest_kind="redis")
+    assert sync_requires_unique_identity("full_refresh_append", dest_kind="dynamodb")
+    assert sync_requires_unique_identity("full_refresh_append", dest_kind="elasticsearch")
+    assert sync_requires_unique_identity("full_refresh_append", dest_kind="pinecone")
 
 
 def test_ddl_skips_duplicate_pk_for_append():
