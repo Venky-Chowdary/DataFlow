@@ -932,9 +932,11 @@ def get_connector_capability(key: str) -> dict[str, Any]:
             # Catch-all rest_api / unknown → not transfer_ready under this brand name
             cap["transfer_ready"] = False
         # Sidecar entries may advertise upsert/append/overwrite/merge for source-only
-        # or planned brands.  Force write-related flags to match the real driver caps.
-        can_write = bool(caps.get("write"))
-        if not can_write:
+        # or planned brands.  Force write-related flags off for source-only drivers;
+        # for first-class duplex drivers keep the static registry flags so CDC sink
+        # classification is not degraded when the native client library is simply
+        # absent on the current machine.
+        if caps.get("source_only") or caps.get("dest_only") and not caps.get("write"):
             cap["supports_upsert"] = False
             cap["supports_append"] = False
             cap["supports_overwrite"] = False

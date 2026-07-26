@@ -869,7 +869,10 @@ function DataTransferAppInner() {
   }, []);
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
+    // Tokens now come in the URL fragment (not the query string) so they are
+    // never sent to the server or logged by proxies.
+    const fragment = window.location.hash.replace(/^#/, "");
+    const params = new URLSearchParams(fragment || window.location.search);
     const token = params.get("sso_token");
     const expiresRaw = params.get("expires_at");
     const email = params.get("sso_email");
@@ -887,7 +890,7 @@ function DataTransferAppInner() {
       },
       true,
     );
-    window.history.replaceState({}, "", window.location.pathname + window.location.hash);
+    window.history.replaceState({}, "", window.location.pathname + window.location.search);
     setUserEmail(email);
     setStage("app");
   }, []);

@@ -123,6 +123,7 @@ def write_mapped_rows(
     **_kwargs: Any,
 ) -> WriteResult:
     del create_table, backfill_new_fields
+    file_batch_idx = int(_kwargs.pop("file_batch_idx", 0) or 0)
     policy = transform_error_policy(error_policy)
     prefix = table_name or schema or "dataflow"
     cfg = {
@@ -150,9 +151,11 @@ def write_mapped_rows(
     conflict = _infer_redis_conflict_columns(target_cols, mappings, conflict_columns)
     client = _redis_client(cfg)
     try:
-        # Full-refresh overwrite must replace the destination keyspace, not layer
-        # new keys on top of a stale collection.
-        if is_overwrite_sync(sync_mode) or write_mode in {"overwrite", "replace", "truncate"}:
+        # Full-refresh overwrite must replace the destination keyspace once per job,
+        # not once per chunk. Only the first chunk clears stale keys.
+        if file_batch_idx in (0, 1) and (
+            is_overwrite_sync(sync_mode) or write_mode in {"overwrite", "replace", "truncate"}
+        ):
             _clear_redis_prefix(client, prefix)
 
         written = 0

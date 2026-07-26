@@ -25,6 +25,7 @@ if str(_API_ROOT) not in sys.path:
 from src.transfer.adapters import write_destination_database  # noqa: E402
 from src.transfer.connector_capabilities import (  # noqa: E402
     default_port,
+    driver_available,
     resolve_driver_type,
 )
 from src.transfer.engine import UniversalTransferEngine  # noqa: E402
@@ -69,6 +70,8 @@ def _endpoint_reachable(endpoint: EndpointConfig) -> bool:
     if endpoint.kind != "database":
         return True
     driver = resolve_driver_type(endpoint.format)
+    if not driver_available(driver, endpoint.format):
+        return False
     if driver in {"sqlite", "generic_sql"} and _is_file_based_sql(endpoint):
         return True
     if driver == "snowflake":

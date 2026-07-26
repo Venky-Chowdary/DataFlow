@@ -148,6 +148,9 @@ ingress:
 
 networkPolicy:
   enabled: true
+  egress:
+    # Restrict outbound to these CIDRs. Empty = allow all (default for real transfers).
+    cidrs: []
 
 podDisruptionBudget:
   enabled: true

@@ -24,6 +24,7 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setenv("DATAFLOW_TRAINING", "off")
     monkeypatch.setenv("DATAFLOW_AUTH_SECRET", "x" * 64)
     monkeypatch.setenv("DATAFLOW_SECRETS_KEY", "y" * 32)
+    monkeypatch.setenv("DATAFLOW_SSO_AUTO_PROVISION", "1")
     monkeypatch.setattr(integrations_store, "STORE_PATH", tmp_path / "integrations.json")
     monkeypatch.setattr(auth_router, "get_and_pop", lambda state, sso_type: bool(state))
 
@@ -85,9 +86,12 @@ def test_sso_saml_callback_creates_token(client, monkeypatch, tmp_path):
             follow_redirects=False,
         )
 
+    from urllib.parse import unquote
+
     assert response.status_code in (302, 307)
-    assert "sso_token=" in response.headers["location"]
-    assert "saml-user@example.com" in response.headers["location"]
+    location = unquote(response.headers["location"])
+    assert "sso_token=" in location
+    assert "saml-user@example.com" in location
 
 
 def test_sso_saml_callback_rejects_invalid_response(client, monkeypatch, tmp_path):

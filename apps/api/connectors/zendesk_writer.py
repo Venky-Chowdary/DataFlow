@@ -189,14 +189,12 @@ def write_mapped_rows(
         url = _make_url(shop_host, obj, record_id if update else None)
         method = "PUT" if update else "POST"
 
-        idem_key = f"dataflow-{shop_host}-{obj}-{i}-{hashlib.sha256(str(payload).encode()).hexdigest()[:16]}"
         try:
             resp = request(
                 method=method,
                 url=url,
                 token=access_token,
                 auth_scheme=scheme,
-                headers={"Idempotency-Key": idem_key},
                 data=payload,
                 timeout=30,
             )

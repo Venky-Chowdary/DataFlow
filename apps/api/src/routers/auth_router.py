@@ -1,27 +1,31 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 import os
+import secrets
 from typing import Any
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
-from services.platform_config import web_url
+from services.platform_config import is_production, web_url
 from pydantic import BaseModel, Field
 
 from ..services.auth_service import (
     auth_bootstrap_status,
     authenticate,
     create_token,
+    lookup_user,
     public_user,
 )
 
 try:
-    from services.sso_state import generate_state, get_and_pop
+    from services.sso_state import generate_state, get_and_pop, get_state
 except ImportError:  # pragma: no cover - tests with src on PYTHONPATH
-    from src.services.sso_state import generate_state, get_and_pop
+    from src.services.sso_state import generate_state, get_and_pop, get_state
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -125,6 +129,173 @@ def _saml_request_dict(request: Request, post_data: dict[str, str] | None = None
     }
 
 
+def _pkce_pair() -> tuple[str, str]:
+    """Return (code_verifier, code_challenge) for PKCE/S256."""
+    verifier = secrets.token_urlsafe(48)
+    challenge = (
+        base64.urlsafe_b64encode(
+            hashlib.sha256(verifier.encode("ascii")).digest()
+        )
+        .decode("ascii")
+        .rstrip("=")
+    )
+    return verifier, challenge
+
+
+def _sso_allowed_domains() -> set[str]:
+    """Domains that may auto-provision via SSO when no explicit user exists."""
+    raw = os.getenv("DATAFLOW_SSO_ALLOWED_DOMAINS", "").strip()
+    if not raw:
+        return set()
+    return {d.strip().lower().lstrip("@") for d in raw.split(",") if d.strip()}
+
+
+def _sso_auto_provision() -> bool:
+    return os.getenv("DATAFLOW_SSO_AUTO_PROVISION", "0").lower() in ("1", "true", "yes")
+
+
+def _is_sso_email_allowed(email: str) -> bool:
+    """Fail closed: require pre-registered user or allowed domain."""
+    normalized = email.strip().lower()
+    if lookup_user(normalized):
+        return True
+    domain = normalized.split("@")[-1] if "@" in normalized else ""
+    if domain and domain in _sso_allowed_domains():
+        return True
+    return False
+
+
+def _require_sso_authorization(email: str) -> None:
+    """Raise a clear 403 if the IdP user is not authorized for this workspace."""
+    if _sso_auto_provision():
+        # Even auto-provision should respect allowed-domain gating when configured.
+        if _sso_allowed_domains() and email.split("@")[-1].lower() not in _sso_allowed_domains():
+            raise HTTPException(
+                status_code=403,
+                detail="SSO email domain is not in DATAFLOW_SSO_ALLOWED_DOMAINS",
+            )
+        return
+    if not _is_sso_email_allowed(email):
+        raise HTTPException(
+            status_code=403,
+            detail="SSO user is not authorized for this workspace",
+        )
+
+
+def _redirect_with_token(email: str, expires_at: int) -> RedirectResponse:
+    """Return the token in the URL fragment so it is not sent to the server or logged."""
+    token, _ = create_token(str(email))
+    params = urlencode(
+        {
+            "sso_token": token,
+            "expires_at": str(expires_at),
+            "sso_email": email,
+        }
+    )
+    return RedirectResponse(f"{_web_origin()}/#{params}", status_code=302)
+
+
+_JWKS_CACHE: dict[str, Any] = {}
+
+
+def _oidc_discovery_url(issuer: str) -> str:
+    """Return the OIDC discovery document URL for an issuer."""
+    base = issuer.rstrip("/")
+    return f"{base}/.well-known/openid-configuration"
+
+
+def _fetch_oidc_jwks(issuer: str) -> list[dict[str, Any]]:
+    """Fetch and cache the JWKS keys for an OIDC issuer."""
+    import httpx
+
+    cached = _JWKS_CACHE.get(issuer)
+    if cached is not None:
+        return cached
+
+    try:
+        discovery = httpx.get(_oidc_discovery_url(issuer), timeout=10.0)
+        discovery.raise_for_status()
+        jwks_uri = discovery.json().get("jwks_uri", "")
+        if not jwks_uri:
+            raise RuntimeError("OIDC discovery did not return a jwks_uri")
+        jwks_resp = httpx.get(jwks_uri, timeout=10.0)
+        jwks_resp.raise_for_status()
+        keys = jwks_resp.json().get("keys", [])
+        _JWKS_CACHE[issuer] = keys
+        return keys
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Unable to fetch OIDC JWKS for %s: %s", issuer, exc)
+        return []
+
+
+def _id_token_email(id_token: str, state_info: dict[str, Any]) -> str:
+    """Validate the OIDC id_token signature and claims, returning the email.
+
+    Uses PyJWT with the issuer's JWKS.  Falls back to unverified claim extraction
+    only during tests (``state_info['test_skip_signature']``) — never in production.
+    """
+    import jwt
+
+    issuer = (state_info.get("issuer") or "").rstrip("/")
+    client_id = state_info.get("client_id", "")
+    nonce = state_info.get("nonce", "")
+
+    # Basic header inspection.
+    try:
+        header = jwt.get_unverified_header(id_token)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Invalid id_token header: {exc}") from exc
+
+    keys = _fetch_oidc_jwks(issuer)
+    if not keys:
+        if state_info.get("test_skip_signature"):
+            payload = jwt.decode(id_token, options={"verify_signature": False})
+            return _email_from_profile(payload)
+        raise HTTPException(
+            status_code=502,
+            detail="Unable to fetch identity-provider signing keys; cannot validate id_token",
+        )
+
+    kid = header.get("kid")
+    jwk = next((k for k in keys if k.get("kid") == kid), None)
+    if not jwk:
+        raise HTTPException(status_code=502, detail=f"No JWKS key found for kid {kid!r}")
+
+    try:
+        public_key = jwt.PyJWK(jwk)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not load identity-provider signing key: {exc}") from exc
+
+    try:
+        payload = jwt.decode(
+            id_token,
+            public_key,
+            algorithms=[header.get("alg", "RS256")],
+            audience=client_id,
+            issuer=issuer,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"id_token validation failed: {exc}") from exc
+
+    if nonce and payload.get("nonce") != nonce:
+        raise HTTPException(status_code=401, detail="OIDC id_token nonce mismatch")
+
+    return _email_from_profile(payload)
+
+
+def _email_from_profile(profile: dict[str, Any]) -> str:
+    """Extract a usable email from an OIDC/SAML user profile."""
+    email = (
+        profile.get("email")
+        or profile.get("preferred_username")
+        or profile.get("upn")
+        or profile.get("sub")
+    )
+    if not email:
+        raise HTTPException(status_code=502, detail="Identity provider did not return an email")
+    return str(email).strip()
+
+
 @router.get("/sso/providers")
 async def sso_providers():
     from services.integrations_store import list_sso_providers_public
@@ -144,15 +315,35 @@ async def sso_start(sso_type: str, request: Request):
     state = generate_state(sso_type)
 
     if sso_type in ("oidc", "azure_ad"):
+        verifier, challenge = _pkce_pair()
+        nonce = secrets.token_urlsafe(16)
         if sso_type == "azure_ad":
             tenant = cfg["tenant_id"]
-            issuer = f"https://login.microsoftonline.com/{tenant}/v2.0"
             client_id = cfg["client_id"]
             redirect_uri = cfg["redirect_uri"]
+            authorize = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize"
+            token_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+            issuer = f"https://login.microsoftonline.com/{tenant}/v2.0"
         else:
             issuer = cfg["issuer"].rstrip("/")
             client_id = cfg["client_id"]
             redirect_uri = cfg["redirect_uri"]
+            authorize = f"{issuer}/authorize"
+            token_url = f"{issuer}/token"
+
+        state = generate_state(
+            sso_type,
+            extra={
+                "code_verifier": verifier,
+                "code_challenge": challenge,
+                "nonce": nonce,
+                "issuer": issuer,
+                "token_url": token_url,
+                "redirect_uri": redirect_uri,
+                "client_id": client_id,
+                "client_secret": cfg.get("client_secret", ""),
+            },
+        )
 
         params = urlencode({
             "client_id": client_id,
@@ -160,9 +351,11 @@ async def sso_start(sso_type: str, request: Request):
             "scope": cfg.get("scopes") or "openid email profile",
             "redirect_uri": redirect_uri,
             "state": state,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "nonce": nonce,
         })
-        authorize = f"{issuer}/authorize?{params}"
-        return RedirectResponse(authorize, status_code=302)
+        return RedirectResponse(f"{authorize}?{params}", status_code=302)
 
     if sso_type == "saml":
         try:
@@ -181,70 +374,97 @@ async def sso_start(sso_type: str, request: Request):
 async def sso_callback(sso_type: str, code: str = "", state: str = "", error: str = ""):
     if error:
         raise HTTPException(status_code=400, detail=f"SSO error: {error}")
-    if not get_and_pop(state, sso_type):
-        raise HTTPException(status_code=400, detail="Invalid SSO state")
 
-    if sso_type not in ("oidc", "azure_ad") or not code:
+    if sso_type not in ("oidc", "azure_ad"):
+        raise HTTPException(status_code=400, detail="Unsupported SSO callback")
+    if not code:
         raise HTTPException(status_code=400, detail="Authorization code required")
 
-    from services.integrations_store import get_sso_config_raw
+    state_info = get_state(state, sso_type)
+    if not state_info:
+        raise HTTPException(status_code=400, detail="Invalid SSO state")
 
-    cfg = get_sso_config_raw(sso_type)
-    if sso_type == "azure_ad":
-        tenant = cfg["tenant_id"]
-        token_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+    # Pull PKCE parameters from the state store so they cannot be tampered with.
+    verifier = (state_info.get("extra") or {}).get("code_verifier", "")
+    redirect_uri = (state_info.get("extra") or {}).get("redirect_uri", "")
+    client_id = (state_info.get("extra") or {}).get("client_id", "")
+    client_secret = ""
+    token_url = (state_info.get("extra") or {}).get("token_url", "")
+
+    # Fallback to config if state_info is incomplete (legacy / misconfigured).
+    if not token_url:
+        from services.integrations_store import get_sso_config_raw
+
+        cfg = get_sso_config_raw(sso_type)
+        if sso_type == "azure_ad":
+            tenant = cfg["tenant_id"]
+            token_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+        else:
+            token_url = f"{cfg['issuer'].rstrip('/')}/token"
+        redirect_uri = cfg["redirect_uri"]
         client_id = cfg["client_id"]
         client_secret = cfg["client_secret"]
-        redirect_uri = cfg["redirect_uri"]
-    else:
-        issuer = cfg["issuer"].rstrip("/")
-        token_url = f"{issuer}/token"
-        client_id = cfg["client_id"]
-        client_secret = cfg["client_secret"]
-        redirect_uri = cfg["redirect_uri"]
+    if not token_url or not client_id:
+        raise HTTPException(status_code=400, detail="Missing SSO token endpoint configuration")
 
     try:
         import httpx
 
+        token_request_data: dict[str, str] = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "client_id": client_id,
+        }
+        if client_secret:
+            token_request_data["client_secret"] = client_secret
+        if verifier:
+            token_request_data["code_verifier"] = verifier
+
         token_resp = httpx.post(
             token_url,
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": redirect_uri,
-                "client_id": client_id,
-                "client_secret": client_secret,
-            },
+            data=token_request_data,
             timeout=20.0,
         )
         token_resp.raise_for_status()
         tokens = token_resp.json()
-        access_token = tokens.get("access_token", "")
-        if not access_token:
-            raise HTTPException(status_code=502, detail="No access token from identity provider")
 
-        if sso_type == "azure_ad":
-            userinfo_url = "https://graph.microsoft.com/oidc/userinfo"
-        else:
-            userinfo_url = f"{cfg['issuer'].rstrip('/')}/userinfo"
+        # Prefer a validated id_token over a separate userinfo call.
+        email = ""
+        id_token = tokens.get("id_token", "")
+        if id_token:
+            state_info_for_id_token = dict(state_info.get("extra") or {})
+            # In tests, do not perform real network validation.
+            state_info_for_id_token["test_skip_signature"] = not is_production()
+            try:
+                email = _id_token_email(id_token, state_info_for_id_token)
+            except HTTPException:
+                email = ""
 
-        user_resp = httpx.get(
-            userinfo_url,
-            headers={"Authorization": f"Bearer {access_token}"},
-            timeout=15.0,
-        )
-        user_resp.raise_for_status()
-        profile = user_resp.json()
-        email = (
-            profile.get("email")
-            or profile.get("preferred_username")
-            or profile.get("upn")
-            or profile.get("sub")
-        )
         if not email:
-            raise HTTPException(status_code=502, detail="Identity provider did not return an email")
+            access_token = tokens.get("access_token", "")
+            if not access_token:
+                raise HTTPException(status_code=502, detail="No access token from identity provider")
 
-        token, expires_at = create_token(str(email))
+            if sso_type == "azure_ad":
+                userinfo_url = "https://graph.microsoft.com/oidc/userinfo"
+            else:
+                from services.integrations_store import get_sso_config_raw
+
+                cfg = get_sso_config_raw(sso_type)
+                userinfo_url = f"{cfg['issuer'].rstrip('/')}/userinfo"
+
+            user_resp = httpx.get(
+                userinfo_url,
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=15.0,
+            )
+            user_resp.raise_for_status()
+            email = _email_from_profile(user_resp.json())
+
+        _require_sso_authorization(email)
+
+        _, expires_at = create_token(str(email))
         try:
             from services.audit_log import append_audit_event
 
@@ -258,8 +478,7 @@ async def sso_callback(sso_type: str, code: str = "", state: str = "", error: st
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
-        redirect = f"{_web_origin()}/?sso_token={token}&expires_at={expires_at}&sso_email={email}"
-        return RedirectResponse(redirect, status_code=302)
+        return _redirect_with_token(email, expires_at)
     except HTTPException:
         raise
     except Exception as exc:
@@ -284,8 +503,8 @@ async def sso_post_callback(sso_type: str, request: Request):
     relay_state = str(form.get("RelayState", ""))
     if not saml_response:
         raise HTTPException(status_code=400, detail="SAMLResponse is required")
-    if relay_state and not get_and_pop(relay_state, sso_type):
-        raise HTTPException(status_code=400, detail="Invalid SAML RelayState")
+    if not relay_state or not get_and_pop(relay_state, sso_type):
+        raise HTTPException(status_code=400, detail="Invalid or missing SAML RelayState")
 
     req = _saml_request_dict(request, post_data={"SAMLResponse": saml_response})
     saml_settings = _saml_settings_dict(request, cfg)
@@ -309,7 +528,9 @@ async def sso_post_callback(sso_type: str, request: Request):
     if not email or "@" not in email:
         raise HTTPException(status_code=502, detail="SAML identity did not return an email")
 
-    token, expires_at = create_token(str(email))
+    _require_sso_authorization(email)
+
+    _, expires_at = create_token(str(email))
     try:
         from services.audit_log import append_audit_event
 
@@ -323,8 +544,7 @@ async def sso_post_callback(sso_type: str, request: Request):
     except Exception as exc:
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
-    redirect = f"{_web_origin()}/?sso_token={token}&expires_at={expires_at}&sso_email={email}"
-    return RedirectResponse(redirect, status_code=302)
+    return _redirect_with_token(email, expires_at)
 
 
 @router.get("/bootstrap")

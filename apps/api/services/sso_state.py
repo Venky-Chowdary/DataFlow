@@ -65,45 +65,56 @@ def _cleanup(states: dict[str, Any]) -> dict[str, Any]:
     return {state: info for state, info in states.items() if not _is_expired(info.get("created_at", ""))}
 
 
-def set_state(state: str, sso_type: str) -> str:
+def set_state(state: str, sso_type: str, extra: dict[str, Any] | None = None) -> str:
     """Store an SSO state token and return it."""
     svc = _mongo_backend()
+    payload = {
+        "sso_type": sso_type,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if extra:
+        payload["extra"] = extra
     if svc:
         db = svc.get_database()
         db["sso_states"].replace_one(
             {"_id": state},
-            {
-                "_id": state,
-                "sso_type": sso_type,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            },
+            {"_id": state, **payload},
             upsert=True,
         )
         return state
     states = _cleanup(_load_file())
-    states[state] = {"sso_type": sso_type, "created_at": datetime.now(timezone.utc).isoformat()}
+    states[state] = payload
     _save_file(states)
     return state
 
 
-def get_and_pop(state: str, sso_type: str) -> bool:
-    """Validate a state token, require the expected SSO type, and consume it."""
+def get_state(state: str, sso_type: str) -> dict[str, Any] | None:
+    """Validate a state token, return its metadata, and consume it."""
     if not state:
-        return False
+        return None
     svc = _mongo_backend()
     if svc:
         db = svc.get_database()
         doc = db["sso_states"].find_one_and_delete({"_id": state})
         if not doc:
-            return False
-        return doc.get("sso_type") == sso_type and not _is_expired(doc.get("created_at", ""))
+            return None
+        if doc.get("sso_type") != sso_type or _is_expired(doc.get("created_at", "")):
+            return None
+        return doc
     states = _cleanup(_load_file())
     info = states.pop(state, None)
     _save_file(states)
     if not info:
-        return False
-    return info.get("sso_type") == sso_type and not _is_expired(info.get("created_at", ""))
+        return None
+    if info.get("sso_type") != sso_type or _is_expired(info.get("created_at", "")):
+        return None
+    return info
 
 
-def generate_state(sso_type: str) -> str:
-    return set_state(secrets.token_urlsafe(16), sso_type)
+def get_and_pop(state: str, sso_type: str) -> bool:
+    """Validate a state token, require the expected SSO type, and consume it."""
+    return get_state(state, sso_type) is not None
+
+
+def generate_state(sso_type: str, extra: dict[str, Any] | None = None) -> str:
+    return set_state(secrets.token_urlsafe(16), sso_type, extra=extra)

@@ -40,8 +40,8 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "hubspot": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "stripe": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True},
     "shopify": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True},
-    "zendesk": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True},
-    "notion": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
+    "zendesk": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True, "certified": False},
+    "notion": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True, "certified": False},
     "airtable": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True},
     "rest_api": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "influxdb": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
@@ -489,6 +489,17 @@ def _module_is_installed(name: str | None) -> bool:
         return False
 
 
+def _import_test(name: str | None) -> bool:
+    """Actually import a module to catch missing native shared libraries."""
+    if not name:
+        return False
+    try:
+        __import__(name)
+        return True
+    except Exception:
+        return False
+
+
 @lru_cache(maxsize=1)
 def _generic_sql_drivername_map() -> dict[str, str]:
     """Lazy import of generic_sql drivername map to avoid heavy startup import."""
@@ -536,7 +547,11 @@ def driver_available(driver_type: str, catalog_id: str | None = None) -> bool:
         return True
 
     if driver_type == "sqlserver":
-        return _module_is_installed("pyodbc") or _module_is_installed("pymssql")
+        # pyodbc may be installed while its system ODBC library is missing,
+        # so a real import is the only safe check.
+        return _import_test("pyodbc") or _import_test("pymssql")
+    if driver_type == "oracle":
+        return _import_test("oracledb") or _import_test("cx_Oracle")
     module = _DRIVER_MODULE.get(driver_type)
     return _module_is_installed(module)
 
@@ -650,6 +665,10 @@ def _catalog_transfer_ready(catalog_id: str, driver: str, caps: dict[str, bool])
     """
     if not transfer_ready(caps):
         return False
+    # Drivers may implement read+write but still be uncertified until they pass
+    # the live PRODUCTION_SKU matrix.
+    if caps.get("certified") is False:
+        return False
     # Wire-compatible brand engines (e.g. SingleStore, CockroachDB, TiDB) are not
     # automatically Certified just because they speak the mysql/postgresql protocol.
     if catalog_id in _WIRE_COMPATIBLE_UNCERTIFIED_BRANDS:
@@ -731,6 +750,10 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
         label = capability_label(caps)
         is_connect_only = connect_only(caps) and not ready
     tier = certification_tier(catalog_id, driver, caps, transfer_ready_flag=ready)
+    # Uncertified/Planned drivers must not show a "live" status or "Full transfer" label.
+    if tier == "planned":
+        eff = "planned"
+        label = "Planned"
     out = dict(entry)
     out["driver_type"] = driver
     out["capabilities"] = caps

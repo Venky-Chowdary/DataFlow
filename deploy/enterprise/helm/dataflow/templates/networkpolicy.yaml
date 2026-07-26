@@ -21,15 +21,48 @@ spec:
         - protocol: TCP
           port: 3000
   egress:
+    # Intra-namespace traffic (DNS, sidecars, service mesh, metadata).
     - to:
         - namespaceSelector: {}
       ports:
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 53
+    # Allow outbound to all destinations on common database / API ports.
+    # The default is permissive so transfers to arbitrary SaaS APIs, warehouses,
+    # and managed DBs do not fail out of the box; tighten with networkPolicy.egress.cidrs.
+    - to:
+        {{- range .Values.networkPolicy.egress.cidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- else }}
+        - ipBlock:
+            cidr: 0.0.0.0/0
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 80
         - protocol: TCP
           port: 443
         - protocol: TCP
           port: 5432
         - protocol: TCP
+          port: 3306
+        - protocol: TCP
+          port: 1433
+        - protocol: TCP
+          port: 1521
+        - protocol: TCP
           port: 27017
         - protocol: TCP
           port: 6379
+        - protocol: TCP
+          port: 9200
+        - protocol: TCP
+          port: 9092
+        - protocol: TCP
+          port: 22
+        - protocol: TCP
+          port: 21
 {{- end }}

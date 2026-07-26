@@ -778,6 +778,7 @@ def _write_batch(
             kwargs["write_mode"] = write_mode
             kwargs["conflict_columns"] = conflict_columns
             kwargs["sync_mode"] = sync_mode
+            kwargs["file_batch_idx"] = chunk_idx
         if dest_type in ("pgvector", "qdrant", "weaviate", "pinecone", "milvus"):
             extra = getattr(dest, "extra", {}) or {}
             kwargs["content_column"] = extra.get("content_column")

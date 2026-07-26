@@ -267,14 +267,47 @@ def write_mapped_rows(
                     has_title = True
 
         if title_name and not has_title:
-            # Notion requires a title on create; fall back to first non-empty value.
+            # Notion requires a title on create; fall back to the first non-empty value.
+            fallback_value = ""
+            fallback_col = ""
             for col, val in row_dict.items():
                 if val is not None and str(val).strip():
-                    notion_properties[title_name] = _as_property_value(val, "title", title_name, warnings, i)
-                    has_title = True
+                    fallback_value = str(val).strip()
+                    fallback_col = col
                     break
-            if not has_title:
-                warnings.append(f"row {i}: no title value available for Notion page; skipped.")
+            if fallback_value:
+                notion_properties[title_name] = _as_property_value(fallback_value, "title", title_name, warnings, i)
+                warnings.append(
+                    f"row {i}: missing Notion title; used '{fallback_col}' value as fallback title."
+                )
+                has_title = True
+            else:
+                msg = f"row {i}: Notion requires a title property; no value available."
+                detail = {
+                    "row": i,
+                    "column": title_name,
+                    "target": title_name,
+                    "value": "",
+                    "reason": msg,
+                    "policy": policy,
+                    "values": dict(row_dict),
+                }
+                all_rejected.append(detail)
+                warnings.append(msg)
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=table_name,
+                        target_schema=database_id,
+                        checksum=digest.hexdigest()[:32],
+                        chunks_completed=chunks,
+                        error=msg,
+                        rejected_details=all_rejected,
+                        rejected_rows=len(all_rejected),
+                        warnings=warnings[:20],
+                        driver="notion",
+                    )
                 continue
 
         if record_id:
@@ -289,13 +322,12 @@ def write_mapped_rows(
                 "properties": notion_properties,
             }
 
-        idem_key = f"dataflow-notion-{database_id}-{i}-{hashlib.sha256(str(payload).encode()).hexdigest()[:16]}"
         try:
             resp = request(
                 method=method,
                 url=url,
                 token=access_token,
-                headers={"Notion-Version": NOTION_VERSION, "Idempotency-Key": idem_key},
+                headers={"Notion-Version": NOTION_VERSION},
                 data=payload,
                 timeout=30,
             )
