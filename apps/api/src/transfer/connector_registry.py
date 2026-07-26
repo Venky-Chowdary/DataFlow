@@ -145,8 +145,8 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
     ),
     "iceberg": ConnectorModules(
         probe=("connectors.iceberg_writer", "test_iceberg"),
-        reader=None,
-        reader_fn="",
+        reader="connectors.iceberg_reader",
+        reader_fn="read_table_batch",
         writer="connectors.iceberg_writer",
     ),
     "kafka": ConnectorModules(
@@ -513,6 +513,7 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         "role": cfg.get("role", ""),
         "api_key": cfg.get("api_key", ""),
         "service_account": cfg.get("service_account", ""),
+        "region": cfg.get("region", ""),
     }
 
     if resolved == "generic_sql":
@@ -539,6 +540,12 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
     accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
     if not accepts_var_kw:
         probe_kwargs = {k: v for k, v in probe_kwargs.items() if k in sig.parameters}
+    else:
+        # Forward additional resolved config fields (warehouse, region, extra catalog
+        # properties) to probes that accept arbitrary keyword args.
+        for k, v in cfg.items():
+            if k not in probe_kwargs and v not in (None, ""):
+                probe_kwargs[k] = v
     result = probe_fn(**probe_kwargs)
     if hasattr(result, "ok"):
         if result.ok:

@@ -1111,6 +1111,21 @@ def read_source_database(
         )
         return records, batch.headers, schema
 
+    if db_type == "iceberg":
+        from .connector_dispatch import read_via_registry
+
+        table = endpoint.table
+        if not table:
+            raise ValueError("Source Iceberg table name required")
+        batch = read_via_registry("iceberg", cfg=cfg, table=table, limit=limit)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, table)
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        schema = _introspect_table_schema(
+            db_type, cfg, table, batch.headers, records=records
+        )
+        return records, batch.headers, schema
+
     if db_type == "sftp":
         from connectors.sftp_reader import read_object
 

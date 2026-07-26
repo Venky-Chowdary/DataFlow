@@ -33,7 +33,7 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "oracle": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "sftp": {"test": True, "read": True, "write": True, "introspect": False, "preflight": False},
     "email": {"test": True, "read": False, "write": True, "introspect": False, "preflight": False, "dest_only": True},
-    "iceberg": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
+    "iceberg": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "kafka": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     # Reverse-ETL destinations: full read+write (warehouse → CRM activation).
     "salesforce": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},

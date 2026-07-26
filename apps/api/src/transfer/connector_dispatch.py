@@ -92,9 +92,10 @@ def read_via_registry(
 ) -> Any:
     """Invoke the registered batch reader (SQL-style signature or SaaS object)."""
     fn = load_reader(driver)
-    # SaaS readers use read_object(cfg=, object=, limit=)
-    if driver in {"salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase"}:
-        return fn(cfg=cfg, object=table, limit=limit, offset=offset)
+    # SaaS readers use read_object(cfg=, object=, limit=). Iceberg needs the full
+    # resolved config (warehouse, region, extra catalog properties) too.
+    if driver in {"salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase", "iceberg"}:
+        return fn(cfg=cfg, object=table, limit=limit, offset=offset, columns=columns)
 
     kwargs: dict[str, Any] = {
         "host": cfg.get("host", ""),

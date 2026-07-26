@@ -426,6 +426,12 @@ def _read_batch_impl(
         from .connector_dispatch import read_via_registry
 
         return read_via_registry(src_type, cfg=cfg, table=table, limit=limit, offset=offset)
+    if src_type == "iceberg":
+        from .connector_dispatch import read_via_registry
+
+        return read_via_registry(
+            "iceberg", cfg=cfg, table=table, limit=limit, offset=offset, columns=columns
+        )
     raise ValueError(f"Streaming read not supported for source type '{src_type}'")
 
 
@@ -853,6 +859,14 @@ def _write_batch(
                 or cfg.get("schema_registry_url")
                 or ""
             )
+        if dest_type == "iceberg":
+            # Forward catalog properties (warehouse, region, catalog_type, token, rest.*,
+            # glue.*, etc.) that are not already part of the common writer kwargs.
+            extra = {
+                k: v
+                for k, v in cfg.items()
+                if k not in common and v not in (None, "")
+            }
         result = write_via_registry(
             dest_type,
             common=common,

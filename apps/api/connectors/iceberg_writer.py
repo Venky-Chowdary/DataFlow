@@ -1,17 +1,14 @@
-"""Apache Iceberg destination writer (filesystem / object-store root).
+"""Apache Iceberg destination writer.
 
-Implements Iceberg V2 *append* commit semantics without requiring the full
-``pyiceberg`` stack at runtime:
+Two paths:
 
-1. Map + coerce rows (quarantine on transform failure).
-2. Write a data file (Parquet when pyarrow is available, else JSONL).
-3. Atomically update ``metadata/v{N}.metadata.json`` with schema evolution
-   (additive columns only) and a new snapshot pointing at the data file.
+1. Catalog mode (default when ``extra.catalog_type`` / connection string indicate
+   REST / Glue / SQL / Nessie): uses ``pyiceberg`` to read/write real Iceberg
+   tables. Supports append, overwrite, and MERGE/upsert via ``Table.upsert``.
 
-Warehouse root is taken from ``connection_string`` / ``database`` / ``host``
-(local path or ``file://`` URI). This is a real table-format writer suitable
-for lakehouse landing; REST catalog / Glue committers can wrap the same
-snapshot algorithm later.
+2. Legacy filesystem CoW mode (bare local path, no catalog): keeps the original
+   V2 metadata-file writer for backwards compatibility and environments without
+   ``pyiceberg``.
 """
 
 from __future__ import annotations
@@ -32,6 +29,21 @@ from connectors.writer_common import (
     resolve_target_columns,
     transform_error_policy,
 )
+
+try:
+    import pyarrow as pa
+    import pyarrow.ipc as pa_ipc
+except ImportError:  # pragma: no cover
+    pa = None  # type: ignore[assignment]
+    pa_ipc = None  # type: ignore[assignment]
+
+
+def _pyiceberg_available() -> bool:
+    try:
+        import pyiceberg.catalog  # noqa: F401
+        return True
+    except Exception:
+        return False
 
 
 def _warehouse_root(host: str, database: str, connection_string: str) -> Path:
@@ -273,8 +285,9 @@ def _logical_to_arrow_type(logical: str, pa: Any) -> Any:
     if logical_n == LOGICAL_TIME:
         return pa.time64("us")
     if logical_n == LOGICAL_BINARY:
-        return pa.binary()
-    return pa.string()
+        return pa.large_binary()
+    # PyIceberg maps Iceberg string -> large_string; use it consistently.
+    return pa.large_string()
 
 
 def _coerce_arrow_cell(value: Any, arrow_type: Any, pa: Any) -> Any:
@@ -340,7 +353,7 @@ def _coerce_arrow_cell(value: Any, arrow_type: Any, pa: Any) -> Any:
         if isinstance(value, datetime):
             return value.time()
         return time.fromisoformat(str(value))
-    if pa.types.is_binary(arrow_type):
+    if pa.types.is_binary(arrow_type) or pa.types.is_large_binary(arrow_type):
         if isinstance(value, (bytes, bytearray)):
             return bytes(value)
         return str(value).encode("utf-8")
@@ -407,6 +420,247 @@ def _write_data_file(
     return rel, len(dict_rows), digest.hexdigest()[:16], warnings
 
 
+def _checksum_arrow_table(pa_table: Any) -> str:
+    """Stable deterministic checksum of an Arrow table for reconciliation."""
+    out = pa.BufferOutputStream()
+    with pa.ipc.new_file(out, pa_table.schema) as writer:
+        writer.write_table(pa_table)
+    return hashlib.sha256(out.getvalue().to_pybytes()).hexdigest()[:32]
+
+
+def _pyiceberg_should_use(endpoint: dict[str, Any]) -> bool:
+    """Return True if the endpoint points to a real Iceberg catalog."""
+    if not _pyiceberg_available():
+        return False
+    from connectors.iceberg_catalog import parse_iceberg_catalog_config
+
+    try:
+        cfg = parse_iceberg_catalog_config(endpoint)
+        return cfg["catalog_type"] != "filesystem"
+    except Exception:
+        return False
+
+
+def _write_mapped_rows_pyiceberg(
+    endpoint: dict[str, Any],
+    *,
+    headers: list[str],
+    data_rows: list[list[str]],
+    mappings: list[dict],
+    column_types: dict[str, str],
+    on_checkpoint: Callable[..., None] | None,
+    create_table: bool,
+    error_policy: str | None,
+    write_mode: str,
+    conflict_columns: list[str] | None,
+) -> WriteResult:
+    """Write a batch through a real pyiceberg catalog with MERGE/upsert support."""
+    if pa is None:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=endpoint.get("table", ""),
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error="pyarrow is required for Iceberg catalog writes",
+            driver="iceberg",
+        )
+
+    try:
+        from connectors.iceberg_catalog import (
+            ensure_namespace,
+            load_catalog,
+            parse_iceberg_catalog_config,
+        )
+        from pyiceberg.exceptions import NoSuchTableError
+    except Exception as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=endpoint.get("table", ""),
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error=f"Iceberg catalog support unavailable: {exc}",
+            driver="iceberg",
+        )
+
+    config = parse_iceberg_catalog_config(endpoint)
+    table = config["table_name"]
+    namespace = config["namespace"]
+    target_schema = ".".join(namespace + (table,))
+
+    target_cols, target_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    dest_types = {
+        target_cols[i]: (
+            mappings[i].get("target_type")
+            or column_types.get(mappings[i]["source"])
+            or (target_types[i] if i < len(target_types) else "string")
+        )
+        for i in range(len(target_cols))
+    }
+    policy = transform_error_policy(error_policy)
+    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        error_policy=policy,
+        dest_types=dest_types,
+        preserve_case=True,
+    )
+    if transform_errors and policy == "fail":
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=target_schema,
+            checksum="",
+            chunks_completed=0,
+            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            rejected_details=rejected_details,
+            driver="iceberg",
+        )
+
+    if not mapped_rows:
+        return WriteResult(
+            ok=True,
+            rows_written=0,
+            table_name=table,
+            target_schema=target_schema,
+            checksum="",
+            chunks_completed=1,
+            rejected_details=rejected_details,
+            rejected_rows=len(rejected_details),
+            driver="iceberg",
+        )
+
+    try:
+        catalog = load_catalog(endpoint)
+        identifier = namespace + (table,)
+        tbl = catalog.load_table(identifier)
+    except NoSuchTableError:
+        if not create_table:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=target_schema,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Iceberg table {target_schema} does not exist and "
+                    "create_table is disabled"
+                ),
+                driver="iceberg",
+            )
+        ensure_namespace(catalog, namespace)
+        arrow_types = [_logical_to_arrow_type(dest_types.get(c, "string"), pa) for c in target_cols]
+        arrow_schema = pa.schema([(c, t) for c, t in zip(target_cols, arrow_types)])
+        tbl = catalog.create_table(identifier, schema=arrow_schema)
+    except Exception as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=target_schema,
+            checksum="",
+            chunks_completed=0,
+            error=f"Unable to load or create Iceberg table: {exc}",
+            driver="iceberg",
+        )
+
+    mode = (write_mode or "append").lower()
+    upsert_modes = {"upsert", "merge", "cdc", "incremental_deduped"}
+
+    try:
+        existing_arrow = tbl.schema().as_arrow()
+        arrow_types = [_logical_to_arrow_type(dest_types.get(c, "string"), pa) for c in target_cols]
+        type_locked_warnings: list[str] = []
+        new_fields: list[tuple[str, Any]] = []
+        for c, at in zip(target_cols, arrow_types):
+            if c not in existing_arrow.names:
+                new_fields.append((c, at))
+            else:
+                existing_type = existing_arrow.field(c).type
+                if not existing_type.equals(at):
+                    type_locked_warnings.append(
+                        f"type_locked: keep {c}:{existing_type} (incoming {at})"
+                    )
+
+        if new_fields:
+            new_schema = pa.schema(new_fields)
+            with tbl.update_schema() as update:
+                update.union_by_name(new_schema)
+            # Refresh the table so the final schema includes the new columns.
+            tbl = catalog.load_table(identifier)
+            existing_arrow = tbl.schema().as_arrow()
+
+        final_arrow = existing_arrow
+        dict_rows = [_row_as_dict(target_cols, r) for r in mapped_rows]
+        arrays = []
+        for field in final_arrow:
+            at = field.type
+            cells = [_coerce_arrow_cell(r.get(field.name), at, pa) for r in dict_rows]
+            arrays.append(pa.array(cells, type=at))
+        pa_table = pa.Table.from_arrays(arrays, schema=final_arrow)
+        checksum = _checksum_arrow_table(pa_table)
+
+        if mode in upsert_modes:
+            pk_cols = [c for c in (conflict_columns or []) if c in target_cols]
+            if not pk_cols:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=target_schema,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        "Iceberg upsert/merge requires explicit conflict_columns "
+                        "(record key); refusing to invent PK from the first column"
+                    ),
+                    driver="iceberg",
+                )
+            upsert_result = tbl.upsert(pa_table, join_cols=pk_cols)
+            rows_written = upsert_result.rows_updated + upsert_result.rows_inserted
+        elif mode in {"overwrite", "replace"}:
+            tbl.overwrite(pa_table)
+            rows_written = len(pa_table)
+        else:
+            tbl.append(pa_table)
+            rows_written = len(pa_table)
+    except Exception as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=target_schema,
+            checksum="",
+            chunks_completed=0,
+            error=f"Iceberg {mode} failed: {exc}",
+            driver="iceberg",
+        )
+
+    if on_checkpoint:
+        on_checkpoint(rows_written, rows_written, 1)
+
+    return WriteResult(
+        ok=True,
+        rows_written=rows_written,
+        table_name=table,
+        target_schema=target_schema,
+        checksum=checksum,
+        chunks_completed=1,
+        rejected_details=rejected_details,
+        rejected_rows=len(rejected_details),
+        warnings=type_locked_warnings[:20],
+        driver="iceberg",
+    )
+
+
 def test_iceberg(
     *,
     host: str = "",
@@ -420,18 +674,25 @@ def test_iceberg(
     ssl: bool = False,
     **_kwargs: Any,
 ) -> tuple[bool, str]:
-    try:
-        root = _warehouse_root(host, database, connection_string)
-        root.mkdir(parents=True, exist_ok=True)
-        probe = root / ".dataflow_iceberg_probe"
-        probe.write_text("ok", encoding="utf-8")
-        probe.unlink(missing_ok=True)
-        return True, f"Iceberg warehouse writable at {root}"
-    except Exception as exc:
-        return False, f"Iceberg warehouse not writable: {exc}"
+    """Probe filesystem or real catalog reachability."""
+    from connectors.iceberg_catalog import test_iceberg_catalog
+
+    endpoint = {
+        "host": host,
+        "port": port,
+        "database": database,
+        "table": table,
+        "connection_string": connection_string,
+        "api_key": api_key,
+        "username": username,
+        "password": password,
+        "ssl": ssl,
+        **_kwargs,
+    }
+    return test_iceberg_catalog(endpoint)
 
 
-def write_mapped_rows(
+def _write_mapped_rows_filesystem(
     *,
     host: str = "",
     port: int = 0,
@@ -453,6 +714,7 @@ def write_mapped_rows(
     conflict_columns: list[str] | None = None,
     **_kwargs: Any,
 ) -> WriteResult:
+    """Legacy filesystem-only copy-on-write writer."""
     headers = headers or []
     data_rows = data_rows or []
     mappings = mappings or []
@@ -648,4 +910,84 @@ def write_mapped_rows(
         rejected_rows=len(rejected_details),
         warnings=(list(evolve_notes) + list(file_warnings))[:20],
         driver="iceberg",
+    )
+
+
+def write_mapped_rows(
+    *,
+    host: str = "",
+    port: int = 0,
+    database: str = "",
+    username: str = "",
+    password: str = "",
+    schema: str = "",
+    connection_string: str = "",
+    ssl: bool = False,
+    table_name: str = "",
+    headers: list[str] | None = None,
+    data_rows: list[list[str]] | None = None,
+    mappings: list[dict] | None = None,
+    column_types: dict[str, str] | None = None,
+    on_checkpoint: Callable[..., None] | None = None,
+    create_table: bool = True,
+    error_policy: str | None = None,
+    write_mode: str = "append",
+    conflict_columns: list[str] | None = None,
+    **_kwargs: Any,
+) -> WriteResult:
+    """Dispatch between real Iceberg catalog writes and legacy filesystem CoW."""
+    headers = headers or []
+    data_rows = data_rows or []
+    mappings = mappings or []
+    column_types = column_types or {}
+    table = (table_name or "events").strip()
+
+    endpoint = {
+        "host": host,
+        "port": port,
+        "database": database,
+        "username": username,
+        "password": password,
+        "schema": schema,
+        "connection_string": connection_string,
+        "ssl": ssl,
+        "table": table,
+        "table_name": table,
+        **_kwargs,
+    }
+
+    if _pyiceberg_should_use(endpoint):
+        return _write_mapped_rows_pyiceberg(
+            endpoint,
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            column_types=column_types,
+            on_checkpoint=on_checkpoint,
+            create_table=create_table,
+            error_policy=error_policy,
+            write_mode=write_mode,
+            conflict_columns=conflict_columns,
+        )
+
+    return _write_mapped_rows_filesystem(
+        host=host,
+        port=port,
+        database=database,
+        username=username,
+        password=password,
+        schema=schema,
+        connection_string=connection_string,
+        ssl=ssl,
+        table_name=table_name,
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        column_types=column_types,
+        on_checkpoint=on_checkpoint,
+        create_table=create_table,
+        error_policy=error_policy,
+        write_mode=write_mode,
+        conflict_columns=conflict_columns,
+        **_kwargs,
     )
