@@ -5,8 +5,9 @@
 # S3
 # ------------------------------
 resource "aws_s3_bucket" "data" {
-  bucket_prefix = "${local.name}-data-"
-  force_destroy = var.environment != "prod"
+  bucket_prefix      = "${local.name}-data-"
+  force_destroy      = var.environment != "prod"
+  object_lock_enabled = true
 
   tags = local.tags
 }
@@ -31,6 +32,34 @@ resource "aws_s3_bucket_versioning" "data" {
   }
 }
 
+resource "aws_s3_bucket_object_lock_configuration" "data" {
+  bucket = aws_s3_bucket.data.id
+
+  rule {
+    default_retention {
+      mode = "GOVERNANCE"
+      days = 1
+    }
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "data" {
+  bucket = aws_s3_bucket.data.id
+
+  rule {
+    id     = "expire-noncurrent"
+    status = "Enabled"
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 1
+    }
+  }
+}
+
 resource "aws_s3_bucket_public_access_block" "data" {
   bucket = aws_s3_bucket.data.id
 
@@ -41,8 +70,9 @@ resource "aws_s3_bucket_public_access_block" "data" {
 }
 
 resource "aws_s3_bucket" "backups" {
-  bucket_prefix = "${local.name}-backups-"
-  provider      = aws.secondary
+  bucket_prefix       = "${local.name}-backups-"
+  provider            = aws.secondary
+  object_lock_enabled = true
 
   tags = merge(local.tags, { Region = var.secondary_region })
 }
@@ -73,7 +103,8 @@ resource "aws_s3_bucket_object_lock_configuration" "backups" {
 }
 
 resource "aws_s3_bucket" "audit" {
-  bucket_prefix = "${local.name}-audit-"
+  bucket_prefix       = "${local.name}-audit-"
+  object_lock_enabled = true
 
   tags = local.tags
 }
