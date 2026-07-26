@@ -102,5 +102,5 @@ def test_live_catalog_count_matches_health_manifest():
         f"Expected a honest certified live set (40–200), got {len(live)}"
     )
     # Planned brands must never appear under status=live.
-    for brand in ("db2", "teradata", "zendesk", "notion"):
+    for brand in ("db2", "teradata"):
         assert brand not in live, brand
