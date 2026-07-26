@@ -285,9 +285,46 @@ jobs:
   # Separate job: SQL Server image is large/slow; keep main CI lean.
   cdc-sqlserver:
     runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: public.ecr.aws/docker/library/mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: dataflow
+          MYSQL_DATABASE: dataflow
+          MYSQL_USER: dataflow
+          MYSQL_PASSWORD: dataflow
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -pdataflow"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Start Postgres with logical CDC
+        run: |
+          docker build -t dataflow-postgres-cdc:ci -f apps/api/docker/Dockerfile.postgres-cdc apps/api/docker
+          docker run -d --name dataflow-postgres-cdc \
+            -e POSTGRES_USER=dataflow \
+            -e POSTGRES_PASSWORD=dataflow \
+            -e POSTGRES_DB=dataflow \
+            -p 5432:5432 \
+            dataflow-postgres-cdc:ci
+          for i in $(seq 1 30); do
+            if docker exec dataflow-postgres-cdc pg_isready -U dataflow; then
+              wal=$(docker exec dataflow-postgres-cdc psql -U dataflow -d dataflow -Atc "SHOW wal_level")
+              echo "wal_level=${wal}"
+              test "${wal}" = "logical"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Postgres CDC container failed to become ready" >&2
+          docker logs dataflow-postgres-cdc || true
+          exit 1
 
       - name: Start SQL Server
         run: |
@@ -339,6 +376,34 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      - name: Grant MySQL CDC privileges
+        run: |
+          python - <<'PY'
+          import sys, time
+          import pymysql
+          conn = None
+          for _ in range(60):
+              try:
+                  conn = pymysql.connect(
+                      host="127.0.0.1",
+                      port=3306,
+                      user="root",
+                      password="dataflow",
+                      database="dataflow",
+                  )
+                  break
+              except Exception:
+                  time.sleep(1)
+          if conn is None:
+              print("MySQL not reachable; skipping CDC privilege grant", file=sys.stderr)
+              sys.exit(0)
+          with conn.cursor() as cur:
+              cur.execute("GRANT REPLICATION SLAVE, REPLICATION CLIENT, RELOAD ON *.* TO 'dataflow'@'%'")
+              cur.execute("GRANT ALL PRIVILEGES ON dataflow.* TO 'dataflow'@'%'")
+              cur.execute("FLUSH PRIVILEGES")
+          conn.close()
+          PY
+
       - name: Run SQL Server CDC tests
         working-directory: apps/api
         run: |
@@ -352,6 +417,48 @@ jobs:
           DATAFLOW_JOB_STORE: memory
           DATAFLOW_DISABLE_OBJECT_STORE: "1"
           DATAFLOW_CDC_LEASE_BACKEND: memory
+
+      - name: SQL Server warehouse SKU proof report
+        # Prove the production SQL Server routes (PG↔SQL Server, MySQL↔SQL Server)
+        # against the real mssql/server container without cloud credentials.
+        working-directory: apps/api
+        run: |
+          python -m pytest \
+            tests/test_production_sku_matrix.py \
+            -k "sqlserver" \
+            -q --tb=short --durations=0 \
+            | tee sqlserver_sku_report.txt
+          passed=$(grep -oP '^\d+(?= passed)' sqlserver_sku_report.txt | head -1 || echo "0")
+          skipped=$(grep -oP '^\d+(?= skipped)' sqlserver_sku_report.txt | head -1 || echo "0")
+          echo "### SQL Server warehouse SKU proof" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ${passed:-0} passed, ${skipped:-0} skipped (SQL Server via mssql/server container; PG/MySQL peers via service containers)" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          DATAFLOW_PII_HASH_KEY: test-pii-key
+          DATAFLOW_ALLOW_STUB_WRITES: "1"
+
+      - name: SQL Server warehouse SKU proof report
+        # SQL Server is a first-class production destination; prove file→SQL Server
+        # and database→SQL Server routes with the local mssql/server container.
+        working-directory: apps/api
+        run: |
+          python -m pytest \
+            tests/test_production_sku_matrix.py \
+            tests/test_execute_tracked_universal_matrix.py \
+            -k "sqlserver" \
+            -q --tb=short --durations=0 \
+            | tee sqlserver_sku_report.txt
+          passed=$(grep -oP '^\d+(?= passed)' sqlserver_sku_report.txt | head -1 || echo "0")
+          skipped=$(grep -oP '^\d+(?= skipped)' sqlserver_sku_report.txt | head -1 || echo "0")
+          echo "### SQL Server warehouse SKU proof" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ${passed:-0} passed, ${skipped:-0} skipped (SQL Server via mssql/server container)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Oracle routes remain credential-gated and skipped when no secret is present" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          DATAFLOW_PII_HASH_KEY: test-pii-key
+          DATAFLOW_ALLOW_STUB_WRITES: "1"
 
   # Optional: enable via repo variable ENABLE_ORACLE_CDC=true.
   # Secrets must NOT appear in job `if:` (GitHub rejects `secrets` there).

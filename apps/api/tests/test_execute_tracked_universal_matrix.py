@@ -98,8 +98,8 @@ def _build_db_endpoint(driver: str, tmp_path: Path, role: str, suffix: str) -> E
     # matrix test cannot stand up a real server here, so these routes are skipped.
     if driver in {"sftp", "email", "qdrant", "rest_api", "salesforce", "hubspot", "kafka"}:
         pytest.skip(f"No local emulator for {driver}")
-    if driver in {"sqlserver", "oracle"}:
-        pytest.skip(f"No local {driver} emulator on this runner")
+    if driver == "oracle":
+        pytest.skip("No local Oracle emulator on this runner")
     if driver == "pgvector":
         # Require the Postgres vector extension; homebrew PG without pgvector must skip.
         try:
@@ -205,6 +205,17 @@ def _build_db_endpoint(driver: str, tmp_path: Path, role: str, suffix: str) -> E
             password="dataflow",
             schema="public",
             table="payments_pgvector",
+        ),
+        "sqlserver": EndpointConfig(
+            kind="database",
+            format="sqlserver",
+            host="127.0.0.1",
+            port=1433,
+            database="dataflow",
+            username="sa",
+            password="DataFlow_CDC_2022!",
+            schema="dbo",
+            table="payments_sqlserver",
         ),
     }
     template = _DB_TEMPLATES.get(driver) or _COMPOSE_DEFAULTS.get(driver)
