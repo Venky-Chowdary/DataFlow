@@ -228,7 +228,10 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
   }), [jobs]);
 
   const rowsMoved = useMemo(
-    () => jobs.reduce((sum, j) => sum + (j.records_processed || 0), 0),
+    () =>
+      jobs
+        .filter((j) => isJobSuccess(j.status))
+        .reduce((sum, j) => sum + (j.records_processed || 0), 0),
     [jobs],
   );
   const successRate = counts.all
@@ -542,6 +545,16 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
       ...extra,
     });
   }, [openStudio, selectedId, liveJob, jobRepairMappings]);
+  const openMapInStudio = useCallback((extra?: Partial<JobsStudioIntent>) => {
+    openStudio({
+      step: "map",
+      jobId: selectedId || liveJob?._id || undefined,
+      mappings: jobRepairMappings,
+      preflight: liveJob?.preflight,
+      validationMode: liveJob?.transfer_request?.validation_mode,
+      ...extra,
+    });
+  }, [openStudio, selectedId, liveJob, jobRepairMappings]);
   const destSummary = (liveJob?.destination_summary ?? {}) as Record<string, unknown>;
   const loadHistory =
     liveJob?.load_history_report
@@ -577,6 +590,10 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
       liveJob.error_confidence,
     )
     : null;
+  const duplicateKeyFailure = Boolean(
+    failureHint?.code === "duplicate_primary_key"
+    || /duplicate redis key|duplicate primary key/i.test(String(liveJob?.error || "")),
+  );
 
   // Reset tabs only when the operator picks a different job.
   useEffect(() => {
@@ -645,7 +662,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               ariaLabel="Jobs summary"
               stats={[
                 { label: "Total jobs", value: counts.all, icon: "jobs" },
-                { label: "Rows moved", value: rowsMoved.toLocaleString(), icon: "layers", tone: "muted", title: "Records processed across all transfer jobs" },
+                { label: "Rows moved", value: rowsMoved.toLocaleString(), icon: "layers", tone: "muted", title: "Records from completed jobs only (failed/cancelled runs are excluded so the total does not jump when a retry fails)" },
                 {
                   label: "Success rate",
                   value: successRate != null ? `${successRate}%` : "—",
@@ -1229,7 +1246,16 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
 
                             {selected.status === "failed" && (
                               <div className="df2-jobs-v3-actions">
-                                {liveJob?.checkpoint && (liveJob.checkpoint.rows_processed ?? 0) > 0 && (
+                                {duplicateKeyFailure && onStartTransfer && (
+                                  <button
+                                    type="button"
+                                    className="df2-btn df2-btn-primary"
+                                    onClick={() => openMapInStudio()}
+                                  >
+                                    <DtIcon name="layers" size={16} /> Open Map · set primary key
+                                  </button>
+                                )}
+                                {liveJob?.checkpoint && (liveJob.checkpoint.rows_processed ?? 0) > 0 && !duplicateKeyFailure && (
                                   <button
                                     type="button"
                                     className="df2-btn df2-btn-primary"
@@ -1241,7 +1267,12 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                 )}
                                 <button
                                   type="button"
-                                  className={liveJob?.checkpoint && (liveJob.checkpoint.rows_processed ?? 0) > 0 ? "df2-btn" : "df2-btn df2-btn-primary"}
+                                  className={
+                                    duplicateKeyFailure
+                                      || (liveJob?.checkpoint && (liveJob.checkpoint.rows_processed ?? 0) > 0)
+                                      ? "df2-btn"
+                                      : "df2-btn df2-btn-primary"
+                                  }
                                   onClick={() => void handleRetry()}
                                   disabled={retrying}
                                 >

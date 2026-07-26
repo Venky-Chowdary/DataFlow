@@ -559,26 +559,31 @@ def _destination_schema_types(
 
 
 def _infer_primary_key(columns: list[str], mappings: list[dict[str, Any]]) -> str:
-    """Infer the primary key target column for mirror/upsert transfers.
+    """Infer the primary key target column for mirror/upsert/Redis transfers.
 
-    Prefers a mapping whose source column is named ``id`` or ends with ``_id``,
-    then any source column that looks like a unique identifier.  Returns the
-    target column name (or the source name if the mapping has no explicit target).
+    Prefers ``id`` / ``*_id`` / ``uuid``, then natural keys (``code``, ``iso``,
+    ``name``, ``sku``, …). Never prefers known non-unique attributes like
+    ``capital`` when a stronger candidate exists — that caused Redis keys such as
+    ``countries:Abu_Dhabi`` when column order put ``capital`` first.
     """
     if not columns:
         return ""
+    from services.primary_key import infer_redis_conflict_columns
+
+    target_cols = [
+        str(m.get("target") or m.get("source") or "")
+        for m in (mappings or [])
+        if (m.get("target") or m.get("source"))
+    ]
+    if not target_cols:
+        target_cols = list(columns)
+    inferred = infer_redis_conflict_columns(target_cols, mappings or [], None)
+    if inferred:
+        return inferred[0]
     mapping_dict = {
         m.get("source", ""): m.get("target", m.get("source", "")) for m in mappings
     }
-    candidates = [c for c in columns if c.lower() == "id" or c.lower().endswith("_id")]
-    if not candidates:
-        # Fall back to the first short, non-nullable-looking column name.
-        candidates = [columns[0]]
-    for src in candidates:
-        tgt = mapping_dict.get(src, src)
-        if tgt:
-            return tgt
-    return mapping_dict.get(columns[0], columns[0])
+    return str(mapping_dict.get(columns[0], columns[0]) or "")
 
 
 def _checkpoint_has_progress(checkpoint: Any) -> bool:
@@ -1475,6 +1480,16 @@ class UniversalTransferEngine:
                 "mirror",
                 "scd2",
             ):
+                inferred_pk = _infer_primary_key(columns, mappings)
+                if inferred_pk:
+                    conflict_columns = [inferred_pk]
+            # Redis is always key-addressed — every sync mode needs an identity column.
+            # Without this, full_refresh_append fell through to target_cols[0] (often
+            # ``capital`` on countries) and fail-closed on duplicate non-unique values.
+            from .connector_capabilities import resolve_driver_type
+
+            dest_driver = resolve_driver_type(request.destination.format or "")
+            if not conflict_columns and dest_driver == "redis":
                 inferred_pk = _infer_primary_key(columns, mappings)
                 if inferred_pk:
                     conflict_columns = [inferred_pk]

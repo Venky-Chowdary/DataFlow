@@ -9,7 +9,7 @@ from services.primary_key import (
 )
 
 
-def test_schemaless_only_uses_underscore_id():
+def test_schemaless_mongodb_only_uses_underscore_id():
     mappings = [
         {"source": "user_id", "target": "user_id"},
         {"source": "_id", "target": "_id"},
@@ -22,7 +22,32 @@ def test_schemaless_only_uses_underscore_id():
         purpose="uniqueness",
     )
     assert src == "_id" and tgt == "_id"
-    assert resolve_primary_key_target(mappings, "redis") == "_id"
+
+
+def test_redis_prefers_code_over_capital():
+    """Validate + Execute must agree: countries capital before code → use code."""
+    mappings = [
+        {"source": "capital", "target": "capital"},
+        {"source": "code", "target": "code"},
+        {"source": "name", "target": "name"},
+    ]
+    src, tgt = resolve_identity_key(
+        mappings=mappings,
+        source_columns=["capital", "code", "name"],
+        dest_kind="redis",
+        purpose="uniqueness",
+    )
+    assert src == "code" and tgt == "code"
+    assert resolve_primary_key_target(mappings, "redis") == "code"
+
+
+def test_redis_always_requires_unique_identity():
+    from services.primary_key import sync_requires_unique_identity
+
+    assert sync_requires_unique_identity("full_refresh_append", dest_kind="redis")
+    assert sync_requires_unique_identity("full_refresh_overwrite", dest_kind="redis")
+    assert not sync_requires_unique_identity("full_refresh_append", dest_kind="postgresql")
+
 
 
 def test_sql_uniqueness_ignores_foreign_key_star_id():

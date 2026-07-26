@@ -4905,11 +4905,11 @@ export function TransferPage({
                   ))}
                 </datalist>
               )}
-              {destObjectNames.length > 0 && (
-                <small className="df2-label-hint">
-                  {destObjectNames.length} existing table{destObjectNames.length === 1 ? "" : "s"} found — pick one or type a new name to create.
-                </small>
-              )}
+              <small className="df2-label-hint" aria-live="polite">
+                {destObjectNames.length > 0
+                  ? `${destObjectNames.length} existing table${destObjectNames.length === 1 ? "" : "s"} found — pick one or type a new name to create.`
+                  : "\u00a0"}
+              </small>
             </div>
             {(destDriverType === "snowflake"
               || destDriverType.includes("mssql")

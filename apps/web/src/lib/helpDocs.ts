@@ -396,6 +396,11 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
         body: "Watermark incremental tracks a monotonic column. Upsert merges on primary keys. Failed rows quarantine without stopping the pipeline.",
       },
       {
+        id: "redis-keys",
+        title: "Redis destination keys",
+        body: "Redis stores each row under prefix:identity. DataFlow prefers id / *_id / uuid, then natural keys (code, iso, name, sku). Non-unique attributes like capital or city are never chosen when a stronger key exists — that avoids failures such as duplicate countries:Abu_Dhabi. Set Primary key on Map if you need an explicit column.",
+      },
+      {
         id: "monitoring",
         title: "Pipeline monitoring",
         body: "Each scheduled run appears in Job Theater with the same preflight and proof stages as ad-hoc transfers. Email and webhook alerts fire on gate failure or quarantine threshold breaches.",

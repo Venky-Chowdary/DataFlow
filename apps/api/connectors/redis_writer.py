@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from services.error_handling import format_exception_message
+from services.primary_key import (
+    infer_redis_conflict_columns,
+    pick_redis_identity_column,
+)
 from services.sync_cursor import is_overwrite_sync
 from services.value_serializer import json_default, sanitize_json_value
 
@@ -26,43 +30,9 @@ class WriteResult(_WriteResult):
     driver: str = "redis-py"
 
 
-def _infer_redis_conflict_columns(
-    target_cols: list[str],
-    mappings: list[dict[str, Any]],
-    conflict_columns: list[str] | None,
-) -> list[str]:
-    """Return the target column(s) to use as the Redis key identity.
-
-    1. Honor an explicit ``conflict_columns`` list when the targets exist.
-    2. Fall back to a source column named ``id``/``_id``/``..._id``/``pk``/``key``/``uuid``.
-    3. Fall back to a target column with an id-like name.
-    4. Last resort: the first target column (may duplicate — duplicate detection catches this).
-    """
-    if conflict_columns:
-        cols = [c for c in conflict_columns if c in target_cols]
-        if cols:
-            return cols
-
-    source_to_target: dict[str, str] = {}
-    for m in mappings:
-        src = str(m.get("source") or "")
-        if src:
-            source_to_target[src] = str(m.get("target") or src)
-
-    identity_sources = {"id", "_id", "pk", "key", "uuid"}
-    # Prefer exact identity source names, then anything ending with _id.
-    for src, tgt in source_to_target.items():
-        if src.lower() in identity_sources and tgt in target_cols:
-            return [tgt]
-    for src, tgt in source_to_target.items():
-        if src.lower().endswith("_id") and tgt in target_cols:
-            return [tgt]
-    for c in target_cols:
-        if c.lower() in identity_sources:
-            return [c]
-    if target_cols:
-        return [target_cols[0]]
-    return []
+# Thin aliases — tests/engine may import these names from the writer module.
+_infer_redis_conflict_columns = infer_redis_conflict_columns
+_pick_redis_identity_column = pick_redis_identity_column
 
 
 def _resolve_redis_key_id(
@@ -73,23 +43,16 @@ def _resolve_redis_key_id(
 ) -> tuple[str | None, str]:
     """Return (key_id, identity_column) — None key_id means identity missing.
 
-    If ``conflict_columns`` is empty, infer an identity column from ``target_cols``:
-    id-like names first, then the first target column.
+    Identity ranking matches Validate via ``services.primary_key`` (never prefer
+    ``capital`` over ``code``).
     """
+    del row_index  # retained for call-site compatibility / future diagnostics
     cols = list(conflict_columns or [])
-    if not cols and target_cols:
-        identity_names = {"id", "_id", "pk", "key", "uuid"}
-        for c in target_cols:
-            if c.lower() in identity_names:
-                cols = [c]
-                break
-        if not cols:
-            for c in target_cols:
-                if c.lower().endswith("_id"):
-                    cols = [c]
-                    break
-        if not cols:
-            cols = [target_cols[0]]
+    if not cols:
+        picked = pick_redis_identity_column(list(target_cols))
+        cols = [picked] if picked else []
+    if not cols:
+        return None, ""
 
     parts: list[str] = []
     for col in cols:

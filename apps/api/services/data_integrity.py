@@ -389,7 +389,7 @@ def _check_duplicate_keys(
     # and the destination PK is not known to include the mapped target.
     enforce = (
         schemaless
-        or sync_requires_unique_identity(sync)
+        or sync_requires_unique_identity(sync, dest_kind=dest_kind)
         or _is_overwrite_like(sync)
         or not _is_append_like(sync)
     )

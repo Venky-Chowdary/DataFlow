@@ -413,7 +413,10 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     try:
         from services.primary_key import sync_requires_unique_identity
 
-        require_unique = sync_requires_unique_identity(getattr(ctx.plan, "sync_mode", "") or "")
+        require_unique = sync_requires_unique_identity(
+            getattr(ctx.plan, "sync_mode", "") or "",
+            dest_kind=dest_kind,
+        )
     except Exception:
         require_unique = True
 
@@ -457,7 +460,10 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             try:
                 from services.primary_key import sync_requires_unique_identity
 
-                if not sync_requires_unique_identity(getattr(ctx.plan, "sync_mode", "") or ""):
+                if not sync_requires_unique_identity(
+                    getattr(ctx.plan, "sync_mode", "") or "",
+                    dest_kind=dest_kind,
+                ):
                     return _pass(
                         GateId.G6_TARGET_DDL,
                         "Schemaless destination — uniqueness not required for this sync mode",
@@ -672,6 +678,7 @@ def _apply_write_path_transform(value: str, transform: str | None) -> tuple[str 
 def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
     """Dry-run reconciliation: ensure sample rows survive mapping without loss."""
     start = time.perf_counter()
+    dest_kind = (ctx.plan.destination.db_type or "").lower()
     sample_rows = getattr(ctx, "sample_rows", None) or []
     if not sample_rows:
         return GateResult(
@@ -738,7 +745,10 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
     try:
         from services.primary_key import sync_requires_unique_identity
 
-        require_unique = sync_requires_unique_identity(getattr(ctx.plan, "sync_mode", "") or "")
+        require_unique = sync_requires_unique_identity(
+            getattr(ctx.plan, "sync_mode", "") or "",
+            dest_kind=dest_kind,
+        )
     except Exception:
         require_unique = True
 

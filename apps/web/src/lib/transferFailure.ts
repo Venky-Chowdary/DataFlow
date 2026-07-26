@@ -120,6 +120,22 @@ export function inferTransferFailureHint(
     };
   }
   if (
+    text.includes("duplicate redis key")
+    || text.includes("duplicate primary key")
+    || text.includes("duplicate key values")
+    || (text.includes("conflict on") && text.includes("duplicate"))
+    || text.includes("keys repeat")
+  ) {
+    return {
+      code: errorCode || "duplicate_primary_key",
+      title: errorTitle || "Duplicate identity-key values in a write batch",
+      confidence: "high",
+      fix:
+        errorFix
+        || "Open Map and set Primary key to a unique column (code, id, iso, name — not capital/city). Or set stream-contract primary_key. If the source truly duplicates that key, dedupe upstream before Resume.",
+    };
+  }
+  if (
     text.includes("json file must be an array")
     || text.includes("json must be an array of objects")
     || text.includes("json array must contain objects")

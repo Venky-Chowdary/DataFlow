@@ -221,6 +221,7 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     ),
     (
         (
+            "duplicate redis key",
             "duplicate primary key",
             "keys repeat",
             "duplicate key values",
@@ -232,15 +233,14 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
             "confidence": "high",
             "title": "Duplicate identity-key values in a write batch",
             "fix": (
-                "DataFlow blocked the batch because the identity key repeats inside it "
-                "(same rule Validate uses: `_id` on Mongo/Redis/Dynamo; `id`/`_id` on SQL). "
-                "Business fields named `id` that are not the document key are not treated as "
-                "primary keys on schemaless routes. To proceed: (1) Open Validate — if this "
-                "was a false `id` block on Mongo→Redis, restart API and Resume; (2) If the "
-                "identity key truly duplicates, dedupe the source or switch sync mode to "
-                "upsert with that key; (3) Or set an explicit stream-contract primary_key. "
-                "No rows from the failed batch were committed."
+                "DataFlow blocked the write because the Redis/document identity key repeats "
+                "(or a non-unique column such as `capital` was used as the key). "
+                "Next step: (1) Open Map and set Primary key to a unique column "
+                "(`code`, `id`, `iso`, `name`, …); (2) Or set stream-contract primary_key; "
+                "(3) If the source truly duplicates that key, dedupe upstream. "
+                "No rows from the failed batch were committed as a completed transfer."
             ),
+            "primary_action": "open_map_primary_key",
         },
     ),
     (
@@ -495,6 +495,11 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
             message = (
                 f"{title}. Driver reported: {raw}. "
                 "ISO 'T'/'Z' literals must be normalized before MySQL DATETIME bind."
+            )
+        elif matched.get("code") == "duplicate_primary_key":
+            message = (
+                f"{title}. Driver reported: {raw}. "
+                "Set a unique primary key on Map (code/id/iso/name) before Resume."
             )
         else:
             message = (

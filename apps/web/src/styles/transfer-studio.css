@@ -2322,13 +2322,21 @@ th.df2-type-string .df2-type-badge {
   color: #115e59;
 }
 
-/* Target DB/table row — keep inputs aligned; status is a reserved band below */
+/* Target DB/table row — top-align so an under-field hint cannot lift siblings */
 .df2-dest-target-row {
-  align-items: flex-end;
+  align-items: flex-start;
 }
 
 .df2-dest-target-row > .df2-field {
   margin-bottom: 0;
+}
+
+/* Reserve hint space under Table so introspect results don't jump the row */
+.df2-dest-target-row .df2-label-hint {
+  display: block;
+  min-height: 2.6em;
+  margin: 4px 0 0;
+  line-height: 1.35;
 }
 
 .df2-dest-target-status {

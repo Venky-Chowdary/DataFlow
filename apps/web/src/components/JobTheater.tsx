@@ -403,6 +403,9 @@ export function JobTheaterView({
     )
     : null;
   const capacityFailure = isDestinationCapacityFailure(failureHint, job.error || job.message);
+  const duplicateKeyFailure =
+    failureHint?.code === "duplicate_primary_key"
+    || /duplicate redis key|duplicate primary key|conflict on '/i.test(String(job.error || job.message || ""));
 
   // Prefer row-derived progress while writing. Once reconcile starts (or all rows
   // are written), hold 99% — never imply "done" until status is terminal success.
@@ -628,7 +631,9 @@ export function JobTheaterView({
                     ? "Recover · CDC cursor gap"
                     : job.cdc_append_only_sink || job.error_code === "cdc_append_only_sink"
                       ? "Recover · append-only sink"
-                      : "Recover from failure"}
+                      : duplicateKeyFailure
+                        ? "Recover · set unique primary key"
+                        : "Recover from failure"}
             </strong>
             <span>
               {isCancelled
@@ -642,13 +647,20 @@ export function JobTheaterView({
                   ? "Reset the watermark, then re-run with snapshot when_needed or initial — Resume with the same cursor will hit the same gap."
                 : job.cdc_append_only_sink || job.error_code === "cdc_append_only_sink"
                   ? "Switch to a PK upsert destination or enable Allow append-only CDC in Destination Advanced."
+                : duplicateKeyFailure
+                  ? "Open Map and set Primary key to a unique column (code / id / iso / name — not capital). Then re-run from Validate."
                 : capacityFailure
                   ? "Free destination capacity first, then Resume from checkpoint — Resume alone will hit the same error."
                   : "Resume from the last checkpoint, or fix mappings and re-run from Validate."}
             </span>
           </div>
           <div className="df2-theater-v3-next-actions">
-            {onResume && (job.chunk_current != null || job.checkpoint) && !job.cdc_lease_conflict && !job.cdc_cursor_gap && (
+            {duplicateKeyFailure && onBackToMap && (
+              <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={onBackToMap}>
+                <DtIcon name="layers" size={14} /> Open Map · set primary key
+              </button>
+            )}
+            {onResume && (job.chunk_current != null || job.checkpoint) && !job.cdc_lease_conflict && !job.cdc_cursor_gap && !duplicateKeyFailure && (
               <button
                 type="button"
                 className="df2-btn df2-btn-sm df2-btn-primary"
@@ -658,7 +670,7 @@ export function JobTheaterView({
                 <DtIcon name="play" size={14} /> {resuming ? "Resuming…" : "Resume from checkpoint"}
               </button>
             )}
-            {onBackToMap && (
+            {onBackToMap && !duplicateKeyFailure && (
               <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={onBackToMap}>
                 <DtIcon name="layers" size={14} /> Back to Map
               </button>

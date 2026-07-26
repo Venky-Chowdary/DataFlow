@@ -403,7 +403,7 @@ def infer_expectations_for_schema(
     try:
         from services.primary_key import sync_requires_unique_identity
 
-        require_unique = sync_requires_unique_identity(sync_mode)
+        require_unique = sync_requires_unique_identity(sync_mode, dest_kind=dest_kind)
     except Exception:
         require_unique = True
     for col in columns:

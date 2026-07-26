@@ -24,6 +24,9 @@ def test_sync_requires_unique_identity_modes():
     assert not sync_requires_unique_identity("full_refresh_overwrite")
     assert not sync_requires_unique_identity("incremental_append")
     assert not sync_requires_unique_identity("")
+    # Redis is always key-addressed — uniqueness required even on append.
+    assert sync_requires_unique_identity("full_refresh_append", dest_kind="redis")
+    assert sync_requires_unique_identity("", dest_kind="redis")
 
 
 def test_ddl_skips_duplicate_pk_for_append():
