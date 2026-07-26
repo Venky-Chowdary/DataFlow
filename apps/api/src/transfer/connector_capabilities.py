@@ -582,6 +582,11 @@ def _source_only_ready(caps: dict[str, bool]) -> bool:
 
 def transfer_ready(caps: dict[str, bool]) -> bool:
     """True when connector supports production read+write transfer."""
+    # ``certified: False`` marks drivers that implement read+write but have not
+    # yet passed the live PRODUCTION_SKU matrix; they must not advertise as
+    # transfer-ready until they earn certification.
+    if caps.get("certified") is False:
+        return False
     if caps.get("file_source"):
         return True
     if caps.get("dest_only") and caps.get("write"):
@@ -590,7 +595,11 @@ def transfer_ready(caps: dict[str, bool]) -> bool:
 
 
 def connect_only(caps: dict[str, bool]) -> bool:
-    return bool(caps.get("test") and not (transfer_ready(caps) or _source_only_ready(caps)))
+    """True when a connector only supports a connection test (no read/write)."""
+    can_rw = bool(
+        caps.get("read") or caps.get("write") or caps.get("file_source") or caps.get("file_export")
+    )
+    return bool(caps.get("test") and not (transfer_ready(caps) or _source_only_ready(caps) or can_rw))
 
 
 def effective_status(caps: dict[str, bool], catalog_status: str = "") -> str:
@@ -771,14 +780,16 @@ def source_ready(caps: dict[str, bool]) -> bool:
         return True
     if caps.get("source_only") and caps.get("read"):
         return True
-    return bool(caps.get("read") and caps.get("write") and not caps.get("dest_only"))
+    # Duplex sources must be certified for production transfer.
+    return bool(transfer_ready(caps) and not caps.get("dest_only"))
 
 
 def dest_ready(caps: dict[str, bool]) -> bool:
     """True when connector can act as a transfer destination."""
     if caps.get("file_export"):
         return True
-    return bool(caps.get("write") and (caps.get("read") or caps.get("dest_only")))
+    # Destination-only and duplex writers must be certified.
+    return bool(caps.get("write") and (caps.get("read") or caps.get("dest_only")) and transfer_ready(caps))
 
 
 def endpoint_allowed_for_role(catalog_id: str, role: str) -> tuple[bool, str]:

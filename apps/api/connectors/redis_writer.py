@@ -67,19 +67,37 @@ def _infer_redis_conflict_columns(
 
 def _resolve_redis_key_id(
     doc: dict[str, Any],
-    conflict_columns: list[str],
+    target_cols: list[str],
+    conflict_columns: list[str] | None,
     row_index: int,
 ) -> tuple[str | None, str]:
-    """Return (key_id, identity_column) — None key_id means identity missing."""
-    if conflict_columns:
-        parts: list[str] = []
-        for col in conflict_columns:
-            val = doc.get(col)
-            if val is None or str(val).strip() == "":
-                return None, col
-            parts.append(str(val))
-        return "|".join(parts), conflict_columns[0]
-    return None, ""
+    """Return (key_id, identity_column) — None key_id means identity missing.
+
+    If ``conflict_columns`` is empty, infer an identity column from ``target_cols``:
+    id-like names first, then the first target column.
+    """
+    cols = list(conflict_columns or [])
+    if not cols and target_cols:
+        identity_names = {"id", "_id", "pk", "key", "uuid"}
+        for c in target_cols:
+            if c.lower() in identity_names:
+                cols = [c]
+                break
+        if not cols:
+            for c in target_cols:
+                if c.lower().endswith("_id"):
+                    cols = [c]
+                    break
+        if not cols:
+            cols = [target_cols[0]]
+
+    parts: list[str] = []
+    for col in cols:
+        val = doc.get(col)
+        if val is None or str(val).strip() == "":
+            return None, col
+        parts.append(str(val))
+    return "|".join(parts), cols[0]
 
 
 def _clear_redis_prefix(client: Any, prefix: str) -> None:
@@ -162,7 +180,7 @@ def write_mapped_rows(
         seen_keys: dict[str, int] = {}
         for i, row in enumerate(mapped_rows):
             doc = dict(zip(target_cols, row))
-            key_id, id_col = _resolve_redis_key_id(doc, conflict, row_index=i)
+            key_id, id_col = _resolve_redis_key_id(doc, target_cols, conflict, row_index=i)
             if key_id is None:
                 msg = (
                     f"Redis identity missing for conflict_columns={conflict}"

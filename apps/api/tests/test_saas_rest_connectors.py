@@ -124,11 +124,20 @@ def test_source_only_saas_tiers():
 
 
 def test_transfer_ready_saas_tiers():
-    """SaaS connectors with real reverse-ETL writers are certified."""
-    for brand in ("stripe", "shopify", "airtable", "zendesk", "notion"):
+    """SaaS connectors with live SKU proof are certified; others stay Planned."""
+    certified = {"stripe", "shopify", "airtable"}
+    planned = {"zendesk", "notion"}
+    for brand in certified:
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live"}
         )
         assert row["transfer_ready"] is True, brand
         assert row["certification_tier"] == "certified", brand
         assert row["effective_status"] == "live", brand
+    for brand in planned:
+        row = enrich_catalog_entry(
+            {"id": brand, "name": brand.title(), "category": "saas", "status": "live"}
+        )
+        assert row["transfer_ready"] is False, brand
+        assert row["certification_tier"] == "planned", brand
+        assert row["effective_status"] == "planned", brand

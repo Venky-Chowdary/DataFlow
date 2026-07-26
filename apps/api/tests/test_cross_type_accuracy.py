@@ -51,6 +51,11 @@ def test_every_db_driver_has_probe_read_write(driver: str):
     """Declared caps + modules exist; runtime caps only when the DBAPI is installed."""
     declared = _DRIVER_CAPS[driver]
     assert declared.get("test"), driver
+    if declared.get("certified") is False:
+        # Planned drivers are intentionally not transfer-ready until they pass the
+        # live PRODUCTION_SKU matrix.
+        assert not transfer_ready(declared), driver
+        pytest.skip(f"{driver} is Planned (certified=False) — not transfer-ready yet")
     if declared.get("source_only"):
         assert declared.get("read"), driver
     else:

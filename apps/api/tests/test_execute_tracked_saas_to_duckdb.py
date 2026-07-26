@@ -153,6 +153,10 @@ def test_shopify_products_to_duckdb(tmp_path: Path):
 
 def test_zendesk_tickets_to_duckdb(tmp_path: Path):
     pytest.importorskip("duckdb")
+    from src.transfer.connector_capabilities import _DRIVER_CAPS, transfer_ready
+
+    if not transfer_ready(_DRIVER_CAPS["zendesk"]):
+        pytest.skip("zendesk is Planned until live SKU proof")
     table = "zendesk_tickets_" + uuid.uuid4().hex[:8]
     payload = {
         "tickets": [
@@ -189,6 +193,10 @@ def test_zendesk_tickets_to_duckdb(tmp_path: Path):
 
 def test_notion_databases_to_duckdb(tmp_path: Path):
     pytest.importorskip("duckdb")
+    from src.transfer.connector_capabilities import _DRIVER_CAPS, transfer_ready
+
+    if not transfer_ready(_DRIVER_CAPS["notion"]):
+        pytest.skip("notion is Planned until live SKU proof")
     table = "notion_pages_" + uuid.uuid4().hex[:8]
     payload = {
         "results": [
