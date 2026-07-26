@@ -156,6 +156,17 @@ services:
         /opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P 'DataFlow_CDC_2022!' -C -i /cdc_init.sql
         echo "sqlserver CT + native CDC init done"
 
+  # BigQuery emulator for always-on local warehouse SKU proofs without cloud creds.
+  bigquery-emulator:
+    image: ghcr.io/goccy/bigquery-emulator:latest
+    command:
+      - --project=dataflow-test
+      - --dataset=dataflow
+      - --log-level=error
+    ports:
+      - "9050:9050"
+      - "9060:9060"
+
 volumes:
   pgdata:
   miniodata:

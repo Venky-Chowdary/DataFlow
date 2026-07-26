@@ -147,20 +147,24 @@ def validate_transfer(source_kind: str, source_format: str, dest_kind: str, dest
 
 
 # Production SKU: the source × destination combinations we explicitly commit to
-# supporting and verifying in CI. Every pair listed here is exercised by the
-# live transfer matrix when the required local emulators are running.
+# supporting and verifying in CI. Snowflake routes use fakesnow and BigQuery
+# routes use the goccy/bigquery-emulator, so the warehouse matrix is always-on
+# in CI without cloud credentials. Salesforce/HubSpot reverse-ETL destinations
+# remain credential-gated and are skipped when no real tenant token is present.
 PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     # File sources
     ("file", "csv", "database", "sqlite"),
     ("file", "csv", "database", "postgresql"),
     ("file", "csv", "database", "mongodb"),
     ("file", "csv", "database", "mysql"),
+    ("file", "csv", "database", "bigquery"),
     ("file", "csv", "file_export", "csv"),
     ("file", "csv", "file_export", "json"),
     ("file", "json", "database", "sqlite"),
     ("file", "json", "database", "postgresql"),
     ("file", "json", "database", "mongodb"),
     ("file", "json", "database", "mysql"),
+    ("file", "json", "database", "bigquery"),
     ("file", "json", "file_export", "csv"),
     ("file", "json", "file_export", "json"),
     # Database sources

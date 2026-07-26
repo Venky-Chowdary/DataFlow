@@ -148,6 +148,27 @@ jobs:
           docker logs dataflow-postgres-cdc || true
           exit 1
 
+      - name: Start BigQuery emulator
+        # goccy/bigquery-emulator gives us an always-on BigQuery API surface in CI
+        # so the warehouse SKU matrix (file→BigQuery, PG→BigQuery) is proven without
+        # production credentials. Snowflake is exercised through fakesnow.
+        run: |
+          docker run -d --name dataflow-bigquery-emulator \
+            -p 9050:9050 -p 9060:9060 \
+            ghcr.io/goccy/bigquery-emulator:latest \
+            --project=dataflow-test --dataset=dataflow --log-level=error
+          for i in $(seq 1 30); do
+            # The emulator does not serve /; use the BigQuery discovery API.
+            if curl -fsS http://127.0.0.1:9050/discovery/v1/apis/bigquery/v2/rest >/dev/null 2>&1; then
+              echo "BigQuery emulator ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "BigQuery emulator failed to start" >&2
+          docker logs dataflow-bigquery-emulator || true
+          exit 1
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -233,6 +254,30 @@ jobs:
           MYSQL_DATABASE: dataflow
           DATAFLOW_CDC_LEASE_BACKEND: redis
           DATAFLOW_CDC_LEASE_REDIS_URL: redis://127.0.0.1:6379/15
+
+      - name: Warehouse SKU proof report
+        # Always-on Snowflake (fakesnow) + BigQuery (goccy emulator) proof.
+        # SaaS reverse-ETL destinations (Salesforce/HubSpot) skip without creds.
+        working-directory: apps/api
+        run: |
+          python -m pytest \
+            tests/test_production_sku_matrix.py \
+            tests/test_execute_tracked_csv_to_bigquery.py \
+            tests/test_execute_tracked_csv_to_bigquery_upsert.py \
+            tests/test_execute_tracked_csv_to_snowflake_upsert.py \
+            -k "snowflake or bigquery" \
+            -q --tb=short --durations=0 \
+            | tee warehouse_sku_report.txt
+          passed=$(grep -oP '^\d+(?= passed)' warehouse_sku_report.txt | head -1 || echo "0")
+          skipped=$(grep -oP '^\d+(?= skipped)' warehouse_sku_report.txt | head -1 || echo "0")
+          echo "### Warehouse SKU proof" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ${passed:-0} passed, ${skipped:-0} skipped (Snowflake via fakesnow, BigQuery via emulator)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- SaaS reverse-ETL endpoints (Salesforce/HubSpot) skipped when credentials are absent" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          DATAFLOW_PII_HASH_KEY: test-pii-key
+          DATAFLOW_ALLOW_STUB_WRITES: "1"
 
       - name: Build web
         run: npm run build
