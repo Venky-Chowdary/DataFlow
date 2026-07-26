@@ -41,8 +41,10 @@ def test_dedicated_saas_source_only_drivers() -> None:
 
 
 def test_dedicated_saas_transfer_ready_drivers() -> None:
-    """SaaS connectors with real reverse-ETL writers are certified for full transfer."""
-    for brand in ("stripe", "shopify", "airtable", "zendesk", "notion"):
+    """SaaS connectors with live SKU proof are certified for full transfer."""
+    certified = ("stripe", "shopify", "airtable")
+    planned = ("zendesk", "notion")
+    for brand in certified:
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live", "description": ""}
         )
@@ -50,11 +52,21 @@ def test_dedicated_saas_transfer_ready_drivers() -> None:
         assert row["effective_status"] == "live", brand
         assert row["certification_tier"] == "certified", brand
         assert "Full transfer" in row["capability_label"], brand
+    for brand in planned:
+        row = enrich_catalog_entry(
+            {"id": brand, "name": brand.title(), "category": "saas", "status": "live", "description": ""}
+        )
+        assert row["transfer_ready"] is False, brand
+        assert row["effective_status"] == "planned", brand
+        assert row["certification_tier"] == "planned", brand
+        assert row["capability_label"] == "Planned", brand
 
 
 def test_dedicated_saas_drivers_activation_and_source_only() -> None:
-    """Salesforce/HubSpot/Stripe/Airtable/Shopify/Zendesk/Notion are reverse-ETL write-ready."""
-    for brand in ("hubspot", "salesforce", "stripe", "airtable", "shopify", "zendesk", "notion"):
+    """Certified activation/CRM connectors are reverse-ETL write-ready.
+    Zendesk/Notion remain Planned until they pass the live SKU matrix."""
+    certified = ("hubspot", "salesforce", "stripe", "airtable", "shopify")
+    for brand in certified:
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live", "description": ""}
         )
