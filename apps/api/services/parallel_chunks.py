@@ -209,8 +209,19 @@ class OrderedChunkRunner(ChunkDispatcher):
                     self.submit(idx, item, process)
 
                 if not self._pending:
-                    # No work in flight and input is done; we are finished.
-                    break
+                    if input_exhausted:
+                        # No work in flight and the reader has sent the sentinel.
+                        break
+                    # The reader is still producing items but none are buffered.
+                    # Block on the prefetch queue instead of spinning with a short
+                    # timeout; this prevents dropping remaining batches on slow CI.
+                    msg = self._prefetch.get()
+                    if msg is None:
+                        input_exhausted = True
+                        break
+                    idx, item = msg
+                    self.submit(idx, item, process)
+                    continue
 
                 # Block until at least one worker finishes, then yield all
                 # consecutive in-order results that are ready.
