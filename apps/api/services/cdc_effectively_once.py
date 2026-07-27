@@ -45,11 +45,12 @@ def should_apply_pk_row(
 ) -> EffectivelyOnceResult:
     """Return whether an upsert may overwrite an existing PK row.
 
-    Rules
-    -----
+    Aligned with ``filter_stale_lsn_rows`` / SQL ``>`` guards (strict-newer):
+
     - Missing incoming LSN → apply (legacy / non-CDC paths; at-least-once).
     - Missing existing LSN → apply (first write).
-    - Incoming newer or equal → apply (equal = idempotent redelivery).
+    - Incoming strictly newer → apply.
+    - Incoming equal → skip (idempotent redelivery; do not rewrite payload).
     - Incoming older → skip (prevents silent regression under redelivery).
     """
     if incoming_lsn is None or str(incoming_lsn).strip() == "":
@@ -67,10 +68,17 @@ def should_apply_pk_row(
             incoming_lsn=str(incoming_lsn),
         )
     cmp = compare_lsn(incoming_lsn, existing_lsn)
-    if cmp >= 0:
+    if cmp > 0:
         return EffectivelyOnceResult(
             applied=True,
-            reason="newer_or_equal",
+            reason="newer_lsn",
+            prior_lsn=str(existing_lsn),
+            incoming_lsn=str(incoming_lsn),
+        )
+    if cmp == 0:
+        return EffectivelyOnceResult(
+            applied=False,
+            reason="equal_lsn_skipped",
             prior_lsn=str(existing_lsn),
             incoming_lsn=str(incoming_lsn),
         )
@@ -130,6 +138,9 @@ _LSN_GUARD_ENGINES = frozenset({
     "oracle",
     "oracle_db",
     "sqlite",
+    "mongodb",
+    "mongo",
+    "iceberg",
 })
 
 

@@ -83,13 +83,20 @@ def test_should_apply_rejects_stale_lsn() -> None:
 
     newer = should_apply_pk_row(existing_lsn="0/100", incoming_lsn="0/200")
     assert newer.applied is True
+    assert newer.reason == "newer_lsn"
+
+    # Equal LSN matches writers (filter_stale / SQL >) — skip, do not rewrite.
+    equal = should_apply_pk_row(existing_lsn="0/200", incoming_lsn="0/200")
+    assert equal.applied is False
+    assert equal.reason == "equal_lsn_skipped"
 
 
 def test_chaos_redeliver_older_then_newer_holds_state() -> None:
     sink = chaos_redeliver_older_then_newer("42")
     assert sink.rejected_stale >= 1
     row = sink.rows["42"]
-    assert row["v"] in ("new", "new-again")
+    # Equal redelivery of 0/200 with "new-again" is skipped — payload stays "new".
+    assert row["v"] == "new"
     assert compare_lsn(row[DF_LSN_COL], "0/200") == 0
 
 

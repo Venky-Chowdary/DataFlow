@@ -476,21 +476,33 @@ def extract_cdc_lsn(resume_token: Any) -> str | None:
 def postgres_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL) -> str:
     """WHERE fragment for ON CONFLICT when ``_df_lsn`` is present.
 
-    Real PG ``hi/lo`` LSNs use ``::pg_lsn``. Mixed CDC stamps (``file:pos``,
-    zero-padded versions, opaque tokens) use strict text ``>`` so an *older*
-    redelivery does not win — never ``IS DISTINCT FROM`` (any different stamp).
-    GTID sets remain best-effort lexicographic (still at-least-once, not causal).
+    Real PG ``hi/lo`` LSNs use ``::pg_lsn``. Mixed CDC stamps use family-aware
+    compare for ``file:pos`` (file then integer pos) and text ``>`` fallback for
+    zero-padded versions / opaque tokens — never ``IS DISTINCT FROM``.
     """
     pg_pat = r"^[0-9A-Fa-f]+/[0-9A-Fa-f]+$"
     excl = f'EXCLUDED."{lsn_column}"'
     dest = f'"{table_name}"."{lsn_column}"'
+    both_filepos = (
+        f"({excl} LIKE '%%:%%' AND {excl} NOT LIKE 'gtid:%%' "
+        f"AND COALESCE({dest}, '') LIKE '%%:%%' AND COALESCE({dest}, '') NOT LIKE 'gtid:%%')"
+    )
+    # split_part is Postgres-native (same dialect as ON CONFLICT).
+    filepos_newer = (
+        f"(split_part({excl}, ':', 1) > split_part({dest}, ':', 1) "
+        f"OR (split_part({excl}, ':', 1) = split_part({dest}, ':', 1) "
+        f"AND NULLIF(split_part({excl}, ':', 2), '')::bigint "
+        f"> NULLIF(split_part({dest}, ':', 2), '')::bigint))"
+    )
     return (
         f"( "
         f"({excl} ~ '{pg_pat}' AND COALESCE({dest}, '') ~ '{pg_pat}' "
         f"AND {excl}::pg_lsn > COALESCE(NULLIF({dest}, '')::pg_lsn, '0/0'::pg_lsn)) "
         f"OR "
         f"({excl} !~ '{pg_pat}' AND ("
-        f"{dest} IS NULL OR {dest} = '' OR {excl} > {dest}"
+        f"{dest} IS NULL OR {dest} = '' "
+        f"OR ({both_filepos} AND {filepos_newer}) "
+        f"OR (NOT ({both_filepos}) AND {excl} > {dest})"
         f")) "
         f")"
     )
@@ -524,14 +536,32 @@ def mysql_lsn_values_newer_sql(lsn_column: str = DF_LSN_COL, *, quote: str = "`"
 
 
 def sqlite_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL) -> str:
-    """WHERE fragment for SQLite ``ON CONFLICT DO UPDATE`` (lexicographic LSN).
+    """WHERE fragment for SQLite ``ON CONFLICT DO UPDATE``.
 
-    Callers should stamp ``file:pos`` via :func:`extract_cdc_lsn` so positions
-    are zero-padded and text order matches :func:`compare_lsn`.
+    Family-aware for ``file:pos`` (file then integer pos). PG ``hi/lo`` hex is
+    best-effort text here (SQLite lacks portable hex→int); writers also run
+    :func:`filter_stale_lsn_rows` / :func:`compare_lsn` in Python before bind.
     """
     excl = f'excluded."{lsn_column}"'
     dest = f'"{table_name}"."{lsn_column}"'
-    return f"({dest} IS NULL OR {dest} = '' OR {excl} > {dest})"
+    both_filepos = (
+        f"({excl} LIKE '%:%' AND {excl} NOT LIKE 'gtid:%' "
+        f"AND {dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%')"
+    )
+    # instr/substr — portable without REGEXP extension.
+    excl_file = f"substr({excl}, 1, instr({excl}, ':') - 1)"
+    dest_file = f"substr({dest}, 1, instr({dest}, ':') - 1)"
+    excl_pos = f"CAST(substr({excl}, instr({excl}, ':') + 1) AS INTEGER)"
+    dest_pos = f"CAST(substr({dest}, instr({dest}, ':') + 1) AS INTEGER)"
+    filepos_newer = (
+        f"({excl_file} > {dest_file} "
+        f"OR ({excl_file} = {dest_file} AND {excl_pos} > {dest_pos}))"
+    )
+    return (
+        f"({dest} IS NULL OR {dest} = '' "
+        f"OR ({both_filepos} AND {filepos_newer}) "
+        f"OR (NOT ({both_filepos}) AND {excl} > {dest}))"
+    )
 
 
 def snowflake_lsn_match_predicate(

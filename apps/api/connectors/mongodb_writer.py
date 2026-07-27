@@ -513,7 +513,11 @@ def write_mapped_rows(
             rows_skipped=skipped_total,
             table_name=collection_name,
             target_schema=db_name,
-            checksum=row_checksum(mapped_rows, target_cols),
+            checksum=row_checksum(
+                mapped_rows,
+                target_cols,
+                dest_db_type="mongodb",
+            ),
             chunks_completed=chunks,
             rejected_rows=max(rejected_rows, len(data_rows) - written - skipped_total),
             rejected_details=rejected_details,

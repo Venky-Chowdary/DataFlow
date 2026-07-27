@@ -75,6 +75,12 @@ def test_sql_guards_mention_lsn_column():
     assert "VALUES(" in mysql and "SUBSTRING_INDEX" in mysql
     sqlite = sqlite_lsn_update_guard_sql("orders")
     assert "excluded." in sqlite and DF_LSN_COL in sqlite
+    # SQLite now family-aware for file:pos (not bare text > only).
+    assert "instr(" in sqlite and "CAST(" in sqlite
+    pg = postgres_lsn_update_guard_sql("orders")
+    assert "split_part" in pg
+    assert "file:pos" not in pg  # logic present, not a comment
+    assert "bigint" in pg
 
 
 def test_snowflake_lsn_predicate_covers_pg_hex_family():
@@ -98,3 +104,18 @@ def test_redshift_caps_advertise_lsn_guard():
     )
     assert posture["class"] == SINK_EFFECTIVELY_ONCE_ELIGIBLE
     assert posture.get("has_lsn_guard") is True
+
+
+def test_mongodb_and_iceberg_classify_as_lsn_eligible():
+    from services.cdc_effectively_once import (
+        SINK_EFFECTIVELY_ONCE_ELIGIBLE,
+        classify_sink_delivery,
+    )
+    from services.connector_capability_registry import get_connector_capability
+
+    for brand in ("mongodb", "iceberg", "postgresql", "mysql", "snowflake", "bigquery"):
+        assert get_connector_capability(brand).get("supports_lsn_guard") is True, brand
+        posture = classify_sink_delivery(
+            dest_type=brand, has_primary_key=True, write_mode="upsert"
+        )
+        assert posture["class"] == SINK_EFFECTIVELY_ONCE_ELIGIBLE, brand

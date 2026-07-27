@@ -231,7 +231,7 @@ def _merge_upsert_rows(
             best[key] = dict(row)
             continue
         if lsn_col in row or lsn_col in prev:
-            if compare_lsn(row.get(lsn_col), prev.get(lsn_col)) >= 0:
+            if compare_lsn(row.get(lsn_col), prev.get(lsn_col)) > 0:
                 best[key] = dict(row)
         else:
             best[key] = dict(row)
