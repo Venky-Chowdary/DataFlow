@@ -1153,13 +1153,14 @@ def stream_database_transfer(
                 schema = {c: "string" for c in columns}
         elif src_type == "redis":
             schema = {c: "string" for c in columns}
-        elif src_type == "kafka":
-            # Prefer probe native_types / sample inference over all-TEXT fiction.
+        else:
+            # Prefer reader-declared native_types (Kafka, thin SaaS typed flatten,
+            # Dynamo) over all-string fiction from a failed SQL introspect.
             probe_meta = getattr(probe, "meta", None) or {}
-            native = probe_meta.get("native_types") or {}
-            if native:
-                schema = {c: native.get(c, "TEXT") for c in columns}
-            else:
+            native = probe_meta.get("native_types") or probe_meta.get("schema") or {}
+            if isinstance(native, dict) and native:
+                schema = {c: str(native.get(c) or "string") for c in columns}
+            elif src_type == "kafka":
                 try:
                     from services.file_parser import FileParser
 
@@ -1170,10 +1171,10 @@ def stream_database_transfer(
                     schema = {c: inferred.get(c, "TEXT") for c in columns}
                 except Exception:
                     schema = {c: "TEXT" for c in columns}
-        else:
-            schema = _introspect_table_schema(src_type, src_cfg, table, columns)
-            if not schema:
-                schema = {c: "string" for c in columns}
+            else:
+                schema = _introspect_table_schema(src_type, src_cfg, table, columns)
+                if not schema:
+                    schema = {c: "string" for c in columns}
 
     column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in columns}
     if not mappings:
@@ -2366,9 +2367,14 @@ def peek_stream_source(source: EndpointConfig) -> tuple[list[str], dict[str, str
     elif src_type == "redis":
         schema = {c: "string" for c in columns}
     else:
-        schema = _introspect_table_schema(src_type, src_cfg, table, columns)
-        if not schema:
-            schema = {c: "string" for c in columns}
+        probe_meta = getattr(probe, "meta", None) or {}
+        native = probe_meta.get("native_types") or probe_meta.get("schema") or {}
+        if isinstance(native, dict) and native:
+            schema = {c: str(native.get(c) or "string") for c in columns}
+        else:
+            schema = _introspect_table_schema(src_type, src_cfg, table, columns)
+            if not schema:
+                schema = {c: "string" for c in columns}
     sample_rows = [dict(zip(probe.headers, row)) for row in probe.rows[:100]]
     return columns, schema, probe.total_rows, sample_rows
 

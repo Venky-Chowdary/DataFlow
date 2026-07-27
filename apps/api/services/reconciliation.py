@@ -1335,6 +1335,46 @@ def verify_target(
     return fallback_rows, fallback_checksum
 
 
+def fingerprint_for_reconcile(
+    value: Any,
+    *,
+    ddl_type: str = "",
+    engine: str = "",
+    transform: str | None = None,
+) -> str:
+    """Canonical Gate-8 fingerprint: transform → destination bind → normalize_cell.
+
+    Source samples and destination read-back must share this path so Mongo
+    ``\"true\"`` / MySQL ``0`` / Postgres ``False`` compare as equal.
+    """
+    from services.transform_engine import apply_transform
+    from services.value_serializer import cell_to_string
+
+    wire: Any = value
+    tname = (transform or "").strip().lower()
+    if tname and tname not in {"", "none", "identity", "passthrough"}:
+        cell = cell_to_string(value, preserve_sql_null=True) if value is not None else None
+        if value is None:
+            converted, err = None, None
+        else:
+            converted, err = apply_transform(
+                cell if cell is not None else "", transform or "none"
+            )
+        if not err:
+            wire = converted
+    elif value is not None and not isinstance(value, (str, int, float, bool, bytes)):
+        wire = cell_to_string(value, preserve_sql_null=True)
+
+    if ddl_type:
+        try:
+            from connectors.sql_bind import normalize_sql_bind_value
+
+            wire = normalize_sql_bind_value(wire, ddl_type, engine=engine)
+        except Exception:
+            pass
+    return normalize_cell(wire)
+
+
 def normalize_cell(value: Any) -> str:
     if value is None:
         # Distinct from empty string — SQL/Dynamo NULL must not checksum as "".
@@ -1502,12 +1542,17 @@ def build_reconciliation_proof(
     *,
     primary_key: str | None = None,
     sample_size: int = 50,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic proof object for row-level transfer verification.
 
     The proof is based on exact primary-key matching and normalized mapped-value
     comparison across a bounded sample. It returns a score suitable for a
     preflight/reconciliation gate, not a legal audit guarantee.
+
+    When ``dest_db_type`` / ``dest_types`` are set, sample compare uses the same
+    write-path fingerprint as live Gate-8 (bool/JSON bind parity).
     """
     if not source_records and not target_records:
         return {
@@ -1576,6 +1621,8 @@ def build_reconciliation_proof(
             mappings,
             sample_size=sample_size,
             sort_key=None,
+            dest_db_type=dest_db_type,
+            dest_types=dest_types,
         )
         sample_compare = {
             **sample_compare,
@@ -1607,6 +1654,8 @@ def build_reconciliation_proof(
         mappings,
         sample_size=sample_size,
         sort_key=key_col,
+        dest_db_type=dest_db_type,
+        dest_types=dest_types,
     )
 
     matched_key_count = len(matched_keys)
@@ -1650,14 +1699,23 @@ def sample_compare_rows(
     target_columns: list[str] | None = None,
     sample_size: int = 50,
     sort_key: str | None = None,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """
     Compare mapped column values between source records and destination read-back.
     Rows are aligned by a stable key (e.g. primary key) when available, so upserts
     and out-of-order writes compare correctly. Falls back to sorted index alignment.
+
+    When ``dest_db_type`` / ``dest_types`` are provided, both sides are fingerprinted
+    through the same write-path bind helpers as MySQL/Postgres/Snowflake writers
+    (``fingerprint_for_reconcile``) so Gate-8 does not false-fail on bool/JSON wire.
     """
     if not source_records or not target_rows or not mappings:
         return {"passed": True, "compared": 0, "mismatches": [], "skipped": True}
+
+    dest_types = dest_types or {}
+    eng = (dest_db_type or "").strip().lower()
 
     def _as_dict(tgt_raw: Any) -> dict[str, Any] | None:
         if isinstance(tgt_raw, dict):
@@ -1688,7 +1746,24 @@ def sample_compare_rows(
             if key and key not in target_by_key:
                 target_by_key[key] = d
 
-    def _normalize_source(raw: Any, transform: str | None) -> str:
+    def _fingerprint(raw: Any, *, transform: str | None, tgt_col: str) -> str:
+        ddl = (
+            dest_types.get(tgt_col)
+            or dest_types.get(tgt_col.lower())
+            or ""
+        )
+        if not ddl:
+            for m in mappings:
+                if str(m.get("target") or "") == tgt_col:
+                    ddl = str(m.get("target_type") or m.get("inferredType") or "")
+                    break
+        if eng and ddl:
+            try:
+                return fingerprint_for_reconcile(
+                    raw, ddl_type=ddl, engine=eng, transform=transform
+                )
+            except Exception:
+                pass
         if transform:
             try:
                 converted, _ = apply_transform(raw, transform)
@@ -1763,8 +1838,14 @@ def sample_compare_rows(
                 # Column absent from read-back sample — do not invent NULL mismatch.
                 continue
             transform = m.get("transform")
-            src_val = _normalize_source(src.get(src_col), transform)
-            tgt_val = normalize_cell(tgt.get(physical_tgt))
+            src_val = _fingerprint(
+                src.get(src_col), transform=transform, tgt_col=tgt_col
+            )
+            # Destination already applied bind at write — fingerprint without
+            # re-transform so read-back bools/JSON match source write-path form.
+            tgt_val = _fingerprint(
+                tgt.get(physical_tgt), transform=None, tgt_col=tgt_col
+            )
             compared += 1
             if src_val != tgt_val:
                 mismatches.append(

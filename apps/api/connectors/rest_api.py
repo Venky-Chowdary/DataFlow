@@ -441,6 +441,7 @@ def read_object(
     """Read up to ``limit`` rows from a generic REST API source, paginating as needed."""
     cfg = _resolve_config({**cfg, "table": object or cfg.get("table", "")})
     pagination_type = cfg["pagination_type"]
+    catalog_id = (cfg.get("type") or cfg.get("format") or "").lower().strip()
 
     all_rows: list[dict[str, Any]] = []
     next_url: str | None = None
@@ -542,6 +543,29 @@ def read_object(
     all_rows = all_rows[:limit]
     if not all_rows:
         return ReadBatch(headers=[], rows=[], offset=0, total_rows=0)
+
+    # Thin SaaS (Airtable/Notion/Stripe): typed flatten for Map/Validate honesty.
+    # Does not promote Planned → TRANSFER_READY — certification stays separate.
+    from connectors.saas_typed_schema import rows_and_schema_from_saas
+
+    typed_keys, typed_rows, typed_schema = rows_and_schema_from_saas(catalog_id, all_rows)
+    if typed_keys and typed_rows:
+        total_rows = len(typed_rows) if pagination_type == "none" else None
+        return ReadBatch(
+            headers=typed_keys,
+            rows=typed_rows,
+            offset=0,
+            total_rows=total_rows,
+            meta={
+                # native_types is the canonical wire consumed by stream/introspect
+                # (same key as Dynamo/Kafka). schema kept for debug/UI.
+                "native_types": typed_schema,
+                "schema": typed_schema,
+                "saas_typed": True,
+                "catalog_id": catalog_id,
+                "certification": "planned_typed_read",
+            },
+        )
 
     # Union all keys because flattened records may differ across pages.
     keys: list[str] = []

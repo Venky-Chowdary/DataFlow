@@ -851,14 +851,36 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 return "" if v is None else str(v)
 
         mismatches: list[str] = []
+        dest_eng = dest_kind
         for row_idx, row in enumerate(sample_rows, start=1):
             for m in ctx.plan.mappings:
                 tname = str(m.transform or "").lower().strip()
-                # Identity / rename-only: raw must equal transformed after normalize.
+                # Identity / rename-only: raw must equal transformed after write-path bind.
                 if tname in {"", "none", "identity", "passthrough", "string", "varchar", "text"}:
                     raw = row.get(m.source, "")
                     got = mapped_rows[row_idx - 1].get(m.target)
-                    if normalize_cell(raw) != normalize_cell(got):
+                    ddl = ""
+                    try:
+                        tgt_col = next(
+                            (c for c in ctx.plan.destination.target_columns if c.name == m.target),
+                            None,
+                        )
+                        ddl = (tgt_col.type if tgt_col else "") or ""
+                    except Exception:
+                        ddl = ""
+                    try:
+                        from services.reconciliation import fingerprint_for_reconcile
+
+                        left = fingerprint_for_reconcile(
+                            raw, ddl_type=ddl or "VARCHAR", engine=dest_eng, transform=None
+                        )
+                        right = fingerprint_for_reconcile(
+                            got, ddl_type=ddl or "VARCHAR", engine=dest_eng, transform=None
+                        )
+                        same = left == right
+                    except Exception:
+                        same = normalize_cell(raw) == normalize_cell(got)
+                    if not same:
                         mismatches.append(
                             f"row {row_idx} {m.source}→{m.target}: identity transform altered value"
                         )

@@ -265,6 +265,17 @@ def introspect_schema(
             username=username,
             password=password,
         )
+    if db_type in ("stripe", "airtable", "notion", "rest_api"):
+        return _introspect_thin_saas(
+            db_type,
+            host=host,
+            database=database,
+            table=table,
+            connection_string=connection_string,
+            api_key=api_key,
+            username=username,
+            password=password,
+        )
     if db_type == "kafka":
         return _introspect_kafka(
             host=host,
@@ -2232,6 +2243,79 @@ def _introspect_salesforce(**kwargs: Any) -> dict[str, Any]:
         if f.get("name")
     ]
     return {"ok": True, "columns": columns, "tables": tables, "schema": table}
+
+
+def _thin_saas_logical_to_carrier(logical: str) -> str:
+    """Map thin-SaaS logical types to Map/DDL carrier names."""
+    lt = (logical or "string").strip().lower()
+    return {
+        "boolean": "BOOLEAN",
+        "integer": "INTEGER",
+        "decimal": "DECIMAL",
+        "float": "FLOAT",
+        "datetime": "TIMESTAMP",
+        "date": "DATE",
+        "json": "JSON",
+        "array": "ARRAY",
+        "string": "TEXT",
+        "text": "TEXT",
+    }.get(lt, "TEXT")
+
+
+def _introspect_thin_saas(brand: str, **kwargs: Any) -> dict[str, Any]:
+    """Sample-based typed introspect for Airtable/Notion/Stripe/REST.
+
+    Honesty: improves Map types via ``native_types``; does **not** certify the
+    connector as TRANSFER_READY / PRODUCTION_SKU.
+    """
+    table = (kwargs.get("table") or kwargs.get("database") or "").strip()
+    if not table:
+        return {"ok": True, "columns": [], "tables": [], "schema": ""}
+
+    cfg = {
+        **_saas_cfg(**kwargs),
+        "type": brand,
+        "format": brand,
+    }
+    try:
+        if brand == "stripe":
+            from connectors.stripe import read_object
+        else:
+            from connectors.rest_api import read_object
+
+        batch = read_object(cfg=cfg, object=table, limit=25, offset=0)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "columns": [],
+            "tables": [table] if table else [],
+        }
+
+    meta = getattr(batch, "meta", None) or {}
+    native = meta.get("native_types") or meta.get("schema") or {}
+    if not isinstance(native, dict):
+        native = {}
+    headers = list(batch.headers or [])
+    columns = [
+        {
+            "name": name,
+            "inferred_type": _thin_saas_logical_to_carrier(str(native.get(name) or "string")),
+            "nullable": True,
+            "data_type": str(native.get(name) or "string"),
+            "label": name,
+        }
+        for name in headers
+        if name
+    ]
+    return {
+        "ok": True,
+        "columns": columns,
+        "tables": [table],
+        "schema": table,
+        "certification": meta.get("certification") or "planned_typed_read",
+        "saas_typed": bool(meta.get("saas_typed")),
+    }
 
 
 def _introspect_hubspot(**kwargs: Any) -> dict[str, Any]:

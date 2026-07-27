@@ -119,6 +119,27 @@ def read_object(
             )
         starting_after = str(last["id"])
 
+    # Typed flatten for Map/Validate — does not promote Planned → TRANSFER_READY.
+    from connectors.saas_typed_schema import rows_and_schema_from_saas
+
+    typed_keys, typed_rows, typed_schema = rows_and_schema_from_saas(
+        "stripe", items[:requested]
+    )
+    if typed_keys and typed_rows:
+        return ReadBatch(
+            headers=typed_keys,
+            rows=typed_rows,
+            offset=0,
+            total_rows=None,
+            meta={
+                "native_types": typed_schema,
+                "schema": typed_schema,
+                "saas_typed": True,
+                "catalog_id": "stripe",
+                "certification": "planned_typed_read",
+            },
+        )
+
     batch = extract_records(items[:requested])
     # Stripe list APIs do not publish authoritative totals — never claim the
     # fetched page length is the object cardinality (stream early-stop trap).

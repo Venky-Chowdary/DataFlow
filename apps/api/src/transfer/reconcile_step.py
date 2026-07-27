@@ -274,6 +274,13 @@ def run_reconciliation(
             key_values=key_values or None,
         )
         if target_sample:
+            dest_types = {
+                str(m.get("target") or ""): str(
+                    m.get("target_type") or m.get("inferredType") or ""
+                )
+                for m in mapping_dicts
+                if m.get("target")
+            }
             sample_compare = sample_compare_rows(
                 sample_records,
                 target_sample,
@@ -281,6 +288,8 @@ def run_reconciliation(
                 target_columns=target_cols,
                 sample_size=min(50, len(sample_records)),
                 sort_key=sort_key,
+                dest_db_type=db_type,
+                dest_types=dest_types,
             )
 
     # No read-back verifier available for this destination.
