@@ -545,6 +545,48 @@ def snowflake_lsn_match_predicate(
     )
 
 
+def bigquery_lsn_match_predicate(
+    target_alias: str = "T",
+    source_alias: str = "S",
+    lsn_column: str = DF_LSN_COL,
+) -> str:
+    """MATCHED guard for BigQuery MERGE — mirrors :func:`compare_lsn` families.
+
+    Plain ``S.lsn > T.lsn`` is unsafe for PG ``hi/lo`` hex (``0/100`` vs ``0/20``)
+    and unpadded ``file:pos``. Parse those families with SPLIT/SAFE_CAST; fall
+    back to text order for zero-padded versions / opaque tokens.
+    """
+    inc = f"{source_alias}.`{lsn_column}`"
+    dest = f"COALESCE({target_alias}.`{lsn_column}`, '')"
+    pg_re = r"^[0-9A-Fa-f]+/[0-9A-Fa-f]+$"
+    both_filepos = (
+        f"({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%' "
+        f"AND {dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%')"
+    )
+    filepos_newer = (
+        f"(SPLIT({inc}, ':')[OFFSET(0)] > SPLIT({dest}, ':')[OFFSET(0)] "
+        f"OR (SPLIT({inc}, ':')[OFFSET(0)] = SPLIT({dest}, ':')[OFFSET(0)] "
+        f"AND SAFE_CAST(ARRAY_REVERSE(SPLIT({inc}, ':'))[OFFSET(0)] AS INT64) "
+        f"> SAFE_CAST(ARRAY_REVERSE(SPLIT({dest}, ':'))[OFFSET(0)] AS INT64)))"
+    )
+    both_pg = (
+        f"(REGEXP_CONTAINS({inc}, r'{pg_re}') AND REGEXP_CONTAINS({dest}, r'{pg_re}'))"
+    )
+    inc_hi = f"SAFE_CAST(CONCAT('0x', SPLIT({inc}, '/')[OFFSET(0)]) AS INT64)"
+    dest_hi = f"SAFE_CAST(CONCAT('0x', SPLIT({dest}, '/')[OFFSET(0)]) AS INT64)"
+    inc_lo = f"SAFE_CAST(CONCAT('0x', SPLIT({inc}, '/')[OFFSET(1)]) AS INT64)"
+    dest_lo = f"SAFE_CAST(CONCAT('0x', SPLIT({dest}, '/')[OFFSET(1)]) AS INT64)"
+    pg_newer = (
+        f"({inc_hi} > {dest_hi} OR ({inc_hi} = {dest_hi} AND {inc_lo} > {dest_lo}))"
+    )
+    return (
+        f"({dest} = '' "
+        f"OR ({both_filepos} AND {filepos_newer}) "
+        f"OR ({both_pg} AND {pg_newer}) "
+        f"OR (NOT ({both_filepos}) AND NOT ({both_pg}) AND {inc} > {dest}))"
+    )
+
+
 def transform_error_policy(policy: str | None = None) -> str:
     selected = (policy or TRANSFORM_ERROR_POLICY or "quarantine").strip().lower()
     return selected if selected in VALID_ERROR_POLICIES else "quarantine"

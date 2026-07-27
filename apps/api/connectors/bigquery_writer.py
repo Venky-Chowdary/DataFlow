@@ -74,9 +74,9 @@ def build_bigquery_merge_sql(
     )
     matched = "WHEN MATCHED"
     if lsn_column and lsn_column in target_cols:
-        matched += (
-            f" AND S.`{lsn_column}` > COALESCE(T.`{lsn_column}`, '')"
-        )
+        from connectors.writer_common import bigquery_lsn_match_predicate
+
+        matched += f" AND {bigquery_lsn_match_predicate('T', 'S', lsn_column)}"
     matched += f" THEN UPDATE SET {set_clause}"  # nosec B608
     insert_cols = ", ".join(f"`{c}`" for c in target_cols)
     insert_vals = ", ".join(f"S.`{c}`" for c in target_cols)
@@ -386,7 +386,13 @@ def write_mapped_rows(
 
         return WriteResult(
             ok=True, rows_written=written, table_name=table_name, target_schema=dataset_id,
-            checksum=row_checksum(mapped_rows, target_cols), chunks_completed=chunks_completed or chunks,
+            checksum=row_checksum(
+                mapped_rows,
+                target_cols,
+                dest_db_type="bigquery",
+                dest_types=dest_types,
+            ),
+            chunks_completed=chunks_completed or chunks,
             rejected_rows=max(rejected_rows, len(data_rows) - written),
             rejected_details=rejected_details,
             coerced_null_rows=coerced_null_rows,
