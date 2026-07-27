@@ -1514,6 +1514,7 @@ export function ValidateDashboard({
         ).slice(0, 6);
         return (
           <div
+            id="df2-vd-cell-preview"
             className={`df2-vd-cell-preview${coerceOnly ? " is-info" : " is-warn"}`}
             aria-label="Sample cell transform preview"
           >
@@ -1536,7 +1537,8 @@ export function ValidateDashboard({
                 </>
               ) : (
                 <>
-                  Quarantine isolates unfit cells for Inspect / CSV export after Run — they are not silently deleted.
+                  Quarantine <strong>holds unfit rows out</strong> of the primary write for Inspect / CSV
+                  export after Run — they are not silently deleted and are not NULL-invented in the table.
                   Fix mappings or types below, then re-run preflight.
                 </>
               )}
@@ -2145,11 +2147,22 @@ export function ValidateDashboard({
       </div>
 
       {reconciliation && (
-        <Gate8ProofCard
-          report={reconciliation as Gate8Reconciliation}
-          className="df2-vd-gate8"
-          compact
-        />
+        <div id="df2-vd-gate8">
+          <Gate8ProofCard
+            report={reconciliation as Gate8Reconciliation}
+            className="df2-vd-gate8"
+            compact
+            onOpenValidate={onReviewMappings ? () => onReviewMappings() : undefined}
+            onOpenQuarantine={
+              cellPreview && (cellPreview.quarantine_count > 0 || cellPreview.coerce_count > 0)
+                ? () => document.getElementById("df2-vd-cell-preview")?.scrollIntoView({ behavior: "smooth", block: "start" })
+                : onQuarantineAndRerun
+                  ? () => { void onQuarantineAndRerun(); }
+                  : undefined
+            }
+            onRerun={onRunPreflight ? () => { void onRunPreflight(); } : undefined}
+          />
+        </div>
       )}
 
       {sampleCompare && !sampleCompare.skipped && (

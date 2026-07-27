@@ -1232,13 +1232,13 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                 <div className="df2-data-integrity-metrics">
                                   <article className="df2-data-integrity-metric is-dropped">
                                     <strong>{Math.max(rejectedCount - (liveJob.coerced_null_rows ?? 0), 0).toLocaleString()}</strong>
-                                    <span>Rows dropped / rejected</span>
-                                    <small>Isolated in quarantine — not written to the destination.</small>
+                                    <span>Rows held out (quarantine)</span>
+                                    <small>Not written to the primary table — not silently dropped or NULL-invented.</small>
                                   </article>
                                   <article className="df2-data-integrity-metric is-coerced">
                                     <strong>{(liveJob.coerced_null_rows ?? 0).toLocaleString()}</strong>
                                     <span>Values coerced to NULL</span>
-                                    <small>Row kept, but a value was altered to NULL — the original value was not preserved.</small>
+                                    <small>coerce_null policy only — row kept with a NULL cell; original value not in primary.</small>
                                   </article>
                                 </div>
                               </div>

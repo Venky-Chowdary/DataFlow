@@ -85,11 +85,17 @@ export function Gate8ProofCard({
   const passed = Boolean(report.passed);
   const sourceRows = Number(report.source_rows ?? 0);
   const targetRows = Number(report.target_rows ?? 0);
-  const delta = targetRows - sourceRows;
+  const rejectedRows = Number(report.rejected_rows ?? 0);
+  const coercedNullRows = Number(report.coerced_null_rows ?? 0);
+  // Quarantine hold-outs are counted in source_rows but not written — delta vs
+  // expected (source − held_out), not raw source−dest (that falsely warns on pass).
+  const heldOut = Math.max(rejectedRows - coercedNullRows, 0);
+  const expectedRows = Math.max(sourceRows - heldOut, 0);
+  const delta = targetRows - expectedRows;
   const mismatches = report.sample_compare?.mismatches ?? [];
   const missingKeys = Number(report.missing_key_count ?? 0);
   const extraKeys = Number(report.extra_key_count ?? 0);
-  const hasFindings = !passed || mismatches.length > 0 || missingKeys > 0 || extraKeys > 0;
+  const hasFindings = !passed || mismatches.length > 0 || missingKeys > 0 || extraKeys > 0 || heldOut > 0;
 
   return (
     <section
@@ -110,8 +116,8 @@ export function Gate8ProofCard({
         After the write finishes, DataFlow compares <strong>row counts</strong> and
         {" "}
         <strong>content checksums</strong> so silent truncation or corruption cannot
-        look like success. This is not the writer checksum alone — it is an independent
-        source↔destination proof.
+        look like success. Quarantined rows are <strong>held out</strong> of the primary
+        table (not NULL-invented) and still counted in the proof.
       </p>
 
       {report.message && (
@@ -128,11 +134,24 @@ export function Gate8ProofCard({
           <dd>{targetRows.toLocaleString()}</dd>
         </div>
         <div>
-          <dt>Delta</dt>
+          <dt>Expected dest</dt>
+          <dd title="source − quarantine hold-outs">{expectedRows.toLocaleString()}</dd>
+        </div>
+        <div>
+          <dt>Delta vs expected</dt>
           <dd className={delta === 0 ? "is-ok" : "is-warn"}>
             {delta === 0 ? "0" : `${delta > 0 ? "+" : ""}${delta.toLocaleString()}`}
           </dd>
         </div>
+        {(heldOut > 0 || coercedNullRows > 0) && (
+          <div>
+            <dt>Quarantine</dt>
+            <dd className={heldOut > 0 || coercedNullRows > 0 ? "is-warn" : "is-ok"}>
+              {heldOut > 0 ? `${heldOut.toLocaleString()} held out` : "0 held out"}
+              {coercedNullRows > 0 ? ` · ${coercedNullRows.toLocaleString()} coerced NULL` : ""}
+            </dd>
+          </div>
+        )}
         <div>
           <dt>Source checksum</dt>
           <dd title={report.source_checksum || undefined}>{shortChecksum(report.source_checksum)}</dd>

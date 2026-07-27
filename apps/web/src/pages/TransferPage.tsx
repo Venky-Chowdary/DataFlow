@@ -3325,7 +3325,7 @@ export function TransferPage({
         return { onPrimaryFix: () => executePreflight(), primaryFixLabel: action.label };
       case "quarantine_and_rerun":
         return {
-          onPrimaryFix: () => void stripControlCharsAndRerun("balanced"),
+          onPrimaryFix: () => void quarantineAndRerun(),
           primaryFixLabel: action.label,
         };
       case "check_connection":
@@ -3335,7 +3335,7 @@ export function TransferPage({
       default:
         return { onPrimaryFix: undefined, primaryFixLabel: undefined };
     }
-  }, [duplicateKeyRoot, openIdentitySettings, preflight, syncMode, executePreflight]);
+  }, [duplicateKeyRoot, openIdentitySettings, preflight, syncMode, executePreflight, quarantineAndRerun]);
 
   const executeTransfer = async () => {
     if (multiStreamUnsupportedMode) {

@@ -162,7 +162,7 @@ export function TransferResultDashboard({
   const subtitle = !result.success
     ? "Review failure details and bad-data findings below, then fix on Validate or Map."
     : hasIntegrityLoss
-      ? `${rec.toLocaleString()} records landed, but some rows were rejected or values coerced to NULL`
+      ? `${rec.toLocaleString()} records landed; some rows were held out in quarantine or values coerced to NULL`
       : `${rec.toLocaleString()} records moved and reconciled`;
 
   const metaChips: Array<{ label: string; value: string; tone?: "warn" | "ok"; title?: string }> = [];
@@ -277,15 +277,15 @@ export function TransferResultDashboard({
         <MetricCell value={targetRows.toLocaleString()} label="At destination" />
         <MetricCell
           value={droppedRows.toLocaleString()}
-          label="Rejected"
+          label="Held out"
           tone={droppedRows > 0 ? "warn" : undefined}
-          title="Rows isolated in quarantine — not silently dropped"
+          title="Rows held out of the primary table into quarantine — not silently dropped or NULL-invented"
         />
         <MetricCell
           value={coercedNull.toLocaleString()}
           label="Coerced NULL"
           tone={coercedNull > 0 ? "warn" : undefined}
-          title="Real NULL coercions only — ISO→DATETIME normalize is not counted here"
+          title="Rows kept with a cell forced to NULL (coerce_null policy only) — ISO→DATETIME normalize is not counted here"
         />
         <MetricCell
           value={passed ? "Passed" : "Failed"}
@@ -525,12 +525,12 @@ export function TransferResultDashboard({
             </header>
             <p>
               {result.reconciliation?.message
-                || `${coercedNull > 0 ? `${coercedNull.toLocaleString()} row(s) had a value coerced to NULL. ` : ""}${droppedRows > 0 ? `${droppedRows.toLocaleString()} row(s) were rejected.` : ""}`.trim()
+                || `${coercedNull > 0 ? `${coercedNull.toLocaleString()} row(s) had a value coerced to NULL. ` : ""}${droppedRows > 0 ? `${droppedRows.toLocaleString()} row(s) were held out in quarantine (not written to the primary table).` : ""}`.trim()
                 || "Some rows were affected during this transfer."}
             </p>
             <div className="df2-result-fidelity-inline">
               <span className="is-dropped">
-                <strong>{droppedRows.toLocaleString()}</strong> dropped / rejected
+                <strong>{droppedRows.toLocaleString()}</strong> held out (quarantine)
               </span>
               <span className="is-coerced">
                 <strong>{coercedNull.toLocaleString()}</strong> coerced to NULL
@@ -587,7 +587,7 @@ export function TransferResultDashboard({
               {droppedRows > 0 && (
                 <div>
                   <dt>Rejected</dt>
-                  <dd>{droppedRows.toLocaleString()} rows isolated in quarantine — not silently dropped.</dd>
+                  <dd>{droppedRows.toLocaleString()} rows held out in quarantine — not written to the primary table, not silently dropped.</dd>
                 </div>
               )}
               {coercedNull > 0 && (

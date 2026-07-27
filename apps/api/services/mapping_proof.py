@@ -48,8 +48,9 @@ _PRESERVE_TRANSFORMS = frozenset({"none", "identity", ""})
 IDENTITY_PASSTHROUGH_CONF_CAP = 0.93
 
 QUARANTINE_POSTURE = (
-    "Bad or unparseable rows are quarantined and surfaced for review — "
-    "DataFlow does not silently drop them."
+    "Bad or unparseable rows are held out of the primary write and surfaced in "
+    "quarantine for review — DataFlow does not silently drop them or invent NULL "
+    "in place (coerce_null policy only)."
 )
 
 DELIVERY_SEMANTICS = (
@@ -163,8 +164,9 @@ def _mapping_risks(
             "code": "coerce_cast",
             "severity": "warn",
             "message": (
-                f"Cast via '{transform}' may fail or coerce-to-null on bad samples; "
-                "failures quarantine rather than silent drop."
+                f"Cast via '{transform}' may fail on bad samples; under quarantine "
+                "those rows are held out of the primary table (not NULL-invented). "
+                "coerce_null policy only writes NULL in place."
             ),
         })
 

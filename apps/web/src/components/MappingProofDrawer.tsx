@@ -78,6 +78,11 @@ export interface MappingProof {
 }
 
 const CREATE_NEW_CAP = 0.93;
+/** Schema-pending must never look like proven identity create-new. */
+const SCHEMA_PENDING_CAP = 0.55;
+
+const CAST_QUARANTINE_RISK =
+  "Cast may fail on bad samples; under quarantine those rows are held out of the primary table (not NULL-invented). coerce_null policy only writes NULL in place.";
 
 function fidelityOf(transform?: string): string {
   const t = (transform || "none").toLowerCase();
@@ -124,6 +129,7 @@ export function buildClientMappingProof(
   const rows: MappingProofRow[] = mappings.map((m) => {
     let conf = m.confidence;
     if (destMode === "create_new") conf = Math.min(conf, CREATE_NEW_CAP);
+    if (destMode === "schema_pending") conf = Math.min(conf, SCHEMA_PENDING_CAP);
     const transform = m.transform ?? "none";
     const fidelity = fidelityOf(transform);
     const risks: MappingProofRisk[] = [];
@@ -138,7 +144,7 @@ export function buildClientMappingProof(
       risks.push({
         code: "coerce_cast",
         severity: "warn",
-        message: `Cast '${transform}' may coerce-to-null on bad samples; failures quarantine.`,
+        message: CAST_QUARANTINE_RISK,
       });
     }
     if (m.isPii || (m.reason || "").toLowerCase().includes("email")) {
@@ -202,7 +208,7 @@ export function buildClientMappingProof(
     dest_mode: destMode,
     destination_db_type: opts.destType || "",
     quarantine_posture:
-      "Bad or unparseable rows are quarantined and surfaced for review — DataFlow does not silently drop them.",
+      "Bad or unparseable rows are held out of the primary write and surfaced in quarantine — not silently dropped or NULL-invented (coerce_null only).",
     delivery_semantics:
       "Default delivery is at-least-once with upsert/idempotent write where supported; exactly-once is not claimed unless a route proves it. Incremental snapshots use Debezium-style windows (stream events win over snapshot READ on PK collision).",
     summary: {
@@ -241,12 +247,14 @@ export function mergeMappingProof(
         ? "create_new"
         : "schema_pending";
   const createNew = destMode === "create_new";
+  const schemaPending = destMode === "schema_pending";
   const mergedRows = mappingProof.mappings.map((row) => {
     const live = bySource.get(row.source);
     if (!live) return row;
     const transform = live.transform || row.transform;
     let confidence = live.confidence;
     if (createNew) confidence = Math.min(confidence, CREATE_NEW_CAP);
+    if (schemaPending) confidence = Math.min(confidence, SCHEMA_PENDING_CAP);
     const fidelity = fidelityOf(transform);
     const risks = [...(row.risks || [])];
     // Refresh mutate/cast risk when operator changes transform in Map.
@@ -263,7 +271,7 @@ export function mergeMappingProof(
       withoutTransformRisks.push({
         code: "coerce_cast",
         severity: "warn",
-        message: `Cast '${transform}' may coerce-to-null on bad samples; failures quarantine.`,
+        message: CAST_QUARANTINE_RISK,
       });
     }
     return {
@@ -274,24 +282,31 @@ export function mergeMappingProof(
       transform_fidelity: fidelity,
       confidence,
       reasoning: live.reason || row.reasoning,
-      requires_review: live.requiresReview,
+      requires_review: live.requiresReview || schemaPending,
       risks: withoutTransformRisks,
     };
   });
+  const cappedMax = createNew
+    ? Math.min(client.summary?.max_confidence ?? CREATE_NEW_CAP, CREATE_NEW_CAP)
+    : schemaPending
+      ? Math.min(client.summary?.max_confidence ?? SCHEMA_PENDING_CAP, SCHEMA_PENDING_CAP)
+      : client.summary?.max_confidence;
   return {
     ...mappingProof,
     dest_mode: destMode,
     destination_db_type: mappingProof.destination_db_type || opts.destType || "",
+    quarantine_posture:
+      mappingProof.quarantine_posture
+      || "Bad or unparseable rows are held out of the primary write and surfaced in quarantine — not silently dropped or NULL-invented (coerce_null only).",
     mappings: mergedRows,
     summary: {
       ...mappingProof.summary,
       mapped_count: mergedRows.length,
       avg_confidence: client.summary?.avg_confidence,
-      max_confidence: createNew
-        ? Math.min(client.summary?.max_confidence ?? CREATE_NEW_CAP, CREATE_NEW_CAP)
-        : client.summary?.max_confidence,
+      max_confidence: cappedMax,
       risk_count: new Set(mergedRows.flatMap((r) => (r.risks || []).map((x) => x.code))).size,
       review_count: mergedRows.filter((r) => r.requires_review).length,
+      confidence_cap_create_new: createNew ? CREATE_NEW_CAP : schemaPending ? SCHEMA_PENDING_CAP : mappingProof.summary?.confidence_cap_create_new,
     },
   };
 }
@@ -521,6 +536,8 @@ export function MappingProofDrawer({
               {pct(summary?.avg_confidence)} / {pct(summary?.max_confidence)}
               {proof.dest_mode === "create_new" ? (
                 <span className="df2-map-proof-cap"> · cap {pct(summary?.confidence_cap_create_new ?? CREATE_NEW_CAP)}</span>
+              ) : proof.dest_mode === "schema_pending" ? (
+                <span className="df2-map-proof-cap"> · pending cap {pct(SCHEMA_PENDING_CAP)}</span>
               ) : null}
             </strong>
           </div>

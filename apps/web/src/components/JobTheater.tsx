@@ -224,7 +224,7 @@ export function JobTheater({
           const quarantine = update.status === "completed_with_quarantine";
           append(
             quarantine
-              ? `Job completed with quarantine — ${processed.toLocaleString()} rows landed, some rows rejected or coerced to NULL`
+              ? `Job completed with quarantine — ${processed.toLocaleString()} rows landed; some rows held out or coerced to NULL`
               : `Job completed — ${processed.toLocaleString()} rows transferred`,
           );
           onComplete?.(update);
@@ -1225,7 +1225,7 @@ export function JobTheaterView({
             <strong>Completed with quarantine — not full fidelity</strong>
             <p>
               {processed.toLocaleString()} rows landed
-              {droppedRows > 0 ? `, ${droppedRows.toLocaleString()} dropped/rejected` : ""}
+              {droppedRows > 0 ? `, ${droppedRows.toLocaleString()} held out in quarantine` : ""}
               {coercedNullRows > 0 ? `, ${coercedNullRows.toLocaleString()} value(s) coerced to NULL` : ""}. Review the details below.
             </p>
           </div>
@@ -1256,7 +1256,7 @@ export function JobTheaterView({
                     ? `${rejectedRows.toLocaleString()} quarantined row(s) — inspect findings`
                     : "Inspect preflight / quarantine findings")
                   : droppedRows > 0
-                    ? `${droppedRows.toLocaleString()} rows quarantined`
+                    ? `${droppedRows.toLocaleString()} rows held out in quarantine`
                     : `${coercedNullRows.toLocaleString()} value(s) coerced to NULL`}
               </strong>
               <p>
