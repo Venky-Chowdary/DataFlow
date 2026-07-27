@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from services.value_serializer import json_default

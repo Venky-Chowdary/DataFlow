@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 
-import pytest
 
-from services.platform_config import data_dir, upload_dir
 
 
 def test_upload_registry_persists_across_reload(tmp_path, monkeypatch):
@@ -38,7 +34,6 @@ def test_upload_registry_persists_across_reload(tmp_path, monkeypatch):
 
 
 def test_auth_middleware_sets_user_email():
-    from src.middleware.auth_middleware import AuthMiddleware
     from src.services.auth_service import create_token
 
     token, _ = create_token("test@gmail.com")

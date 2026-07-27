@@ -16,9 +16,9 @@ tracked separately in PRODUCTION_SKU / execute_tracked matrices.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 import pytest
 

@@ -298,7 +298,7 @@ def test_real_mongo_messy_docs_to_typed_snowflake_validation():
 def test_real_mongo_messy_docs_roundtrip_variant_queryable():
     """End-to-end: messy Mongo docs → Snowflake VARIANT, then query the nested
     values back to prove queryability (no data loss, no JSON-in-VARCHAR)."""
-    fakesnow = pytest.importorskip("fakesnow")
+    pytest.importorskip("fakesnow")
     try:
         with socket.create_connection(("localhost", 27017), timeout=1):
             pass

@@ -17,10 +17,6 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 from src.transfer.adapters import write_destination_database  # noqa: E402
-from src.transfer.connector_capabilities import (  # noqa: E402
-    default_port,
-    resolve_driver_type,
-)
 from src.transfer.engine import UniversalTransferEngine  # noqa: E402
 from src.transfer.models import EndpointConfig, TransferRequest  # noqa: E402
 
@@ -28,7 +24,6 @@ sys.path.insert(0, str(_API_ROOT / "tests"))
 from test_execute_tracked_universal_matrix import (  # noqa: E402
     _build_db_endpoint,
     _endpoint_reachable,
-    _seed_source,
 )
 
 SOURCE_RECORDS = [

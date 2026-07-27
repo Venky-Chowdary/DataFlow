@@ -51,7 +51,7 @@ def _run(request: TransferRequest, job_id: str) -> None:
 
 
 def test_postgresql_to_snowflake():
-    fakesnow = pytest.importorskip("fakesnow")
+    pytest.importorskip("fakesnow")
     try:
         with socket.create_connection(("localhost", 5432), timeout=1):
             pass
@@ -94,7 +94,7 @@ def test_postgresql_to_snowflake():
 
 
 def test_mysql_to_snowflake():
-    fakesnow = pytest.importorskip("fakesnow")
+    pytest.importorskip("fakesnow")
     try:
         with socket.create_connection(("localhost", 3306), timeout=1):
             pass
@@ -145,7 +145,7 @@ def test_mongodb_to_snowflake_messy_docs_with_preflight_and_roundtrip():
     placeholder values, runs the real preflight/validation path, and then
     round-trips the VARIANT columns back to prove queryability with no data loss.
     """
-    fakesnow = pytest.importorskip("fakesnow")
+    pytest.importorskip("fakesnow")
     try:
         with socket.create_connection(("localhost", 27017), timeout=1):
             pass
@@ -249,7 +249,7 @@ def test_mongodb_to_snowflake_messy_docs_with_preflight_and_roundtrip():
 
 
 def test_dynamodb_to_snowflake():
-    fakesnow = pytest.importorskip("fakesnow")
+    pytest.importorskip("fakesnow")
     try:
         with socket.create_connection(("localhost", 8000), timeout=1):
             pass
@@ -296,7 +296,7 @@ def test_dynamodb_to_snowflake():
 
 
 def test_s3_minio_to_snowflake():
-    fakesnow = pytest.importorskip("fakesnow")
+    pytest.importorskip("fakesnow")
     try:
         with socket.create_connection(("localhost", 9000), timeout=1):
             pass
@@ -343,7 +343,7 @@ def test_s3_minio_to_snowflake():
 
 
 def test_gcs_to_snowflake():
-    fakesnow = pytest.importorskip("fakesnow")
+    pytest.importorskip("fakesnow")
     try:
         with socket.create_connection(("localhost", 4443), timeout=1):
             pass
@@ -392,7 +392,7 @@ def test_gcs_to_snowflake():
 
 
 def test_adls_to_snowflake():
-    fakesnow = pytest.importorskip("fakesnow")
+    pytest.importorskip("fakesnow")
     try:
         with socket.create_connection(("localhost", 10000), timeout=1):
             pass
@@ -438,7 +438,7 @@ def test_adls_to_snowflake():
 
 
 def test_redis_to_snowflake():
-    fakesnow = pytest.importorskip("fakesnow")
+    pytest.importorskip("fakesnow")
     try:
         with socket.create_connection(("localhost", 6379), timeout=1):
             pass
@@ -475,7 +475,7 @@ def test_redis_to_snowflake():
 
 
 def test_elasticsearch_to_snowflake():
-    fakesnow = pytest.importorskip("fakesnow")
+    pytest.importorskip("fakesnow")
     try:
         with socket.create_connection(("localhost", 9200), timeout=1):
             pass

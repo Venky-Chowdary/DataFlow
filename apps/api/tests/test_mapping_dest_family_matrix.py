@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mapping_golden_enterprise.json"
 PROOF_DIR = Path(__file__).resolve().parents[1] / "data" / "proofs"

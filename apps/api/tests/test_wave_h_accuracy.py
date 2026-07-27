@@ -24,7 +24,7 @@ def test_generic_sql_wide_numeric_stays_decimal():
 
 
 def test_arrow_schema_preserves_decimal_tz_nested():
-    pyarrow = pytest.importorskip("pyarrow")
+    pytest.importorskip("pyarrow")
     import pyarrow as pa
 
     from services.arrow_schema import columns_from_arrow_schema, schema_from_arrow

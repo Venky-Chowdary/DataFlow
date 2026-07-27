@@ -9,7 +9,6 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-import pytest
 
 from services.checkpoint_service import Checkpoint
 from services.resilience import (
@@ -37,9 +36,7 @@ class _MemoryCheckpointService:
 
 
 def _make_batcher(job_id: str, write_fn, read_next_fn, cp=None, max_attempts: int = 3):
-    from services.checkpoint_service import Checkpoint
     from services.error_handling import RetryBudget
-    from services.resilience import BatchResult
 
     if cp is None:
         cp = _MemoryCheckpointService()

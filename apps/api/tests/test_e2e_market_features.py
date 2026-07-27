@@ -9,7 +9,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from src.transfer.adapters import write_destination_database
 from src.transfer.connector_dispatch import has_reader, has_writer, load_writer

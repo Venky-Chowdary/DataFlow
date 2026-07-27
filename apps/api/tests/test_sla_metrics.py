@@ -5,7 +5,6 @@ import sys
 import uuid
 from pathlib import Path
 
-import pytest
 
 _API_ROOT = Path(__file__).resolve().parents[2]
 if str(_API_ROOT) not in sys.path:
@@ -13,7 +12,7 @@ if str(_API_ROOT) not in sys.path:
 
 from src.transfer.adapters import write_destination_database  # noqa: E402
 from src.transfer.engine import UniversalTransferEngine  # noqa: E402
-from src.transfer.models import EndpointConfig, TransferRequest  # noqa: E402
+from src.transfer.models import TransferRequest  # noqa: E402
 
 sys.path.insert(0, str(_API_ROOT / "tests"))
 from test_execute_tracked_universal_matrix import _build_db_endpoint  # noqa: E402

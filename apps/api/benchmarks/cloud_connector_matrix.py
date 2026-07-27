@@ -229,7 +229,6 @@ def _run_transfer(source: dict[str, Any], destination: dict[str, Any], rows: int
 
 
 def _seed_postgres(table: str, rows: list[dict[str, Any]]) -> None:
-    import psycopg2
     from psycopg2.extras import Json
     conn = _pg_conn()
     conn.autocommit = True
@@ -271,8 +270,6 @@ def _seed_mongodb(db_name: str, collection: str, rows: list[dict[str, Any]]) -> 
 
 
 def _seed_snowflake(sf_cfg: dict[str, Any], table: str, rows: list[dict[str, Any]]) -> None:
-    import snowflake.connector
-    import tempfile
     import csv
     from pathlib import Path
     from services.value_serializer import cell_to_string

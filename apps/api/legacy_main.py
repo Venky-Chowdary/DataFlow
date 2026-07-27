@@ -44,9 +44,8 @@ from services.object_store import storage_status
 from services.preflight_runtime import RuntimePreflightContext, compute_capacity
 from services.schema_introspect import introspect_schema
 from services.semantic_analyzer import analyze_schema
-from services.semantic_mapper import map_columns
 from services.transfer_worker import dispatch_file_to_database
-from services.workflow import WorkflowPhase, get_phase, set_phase
+from services.workflow import WorkflowPhase, set_phase
 
 app = FastAPI(
     title="DataFlow API",

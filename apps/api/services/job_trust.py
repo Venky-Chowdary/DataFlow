@@ -204,7 +204,7 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
                 ).strip()
 
     # Confidence from evidence coverage
-    evidence = sum(1 for f in factors if f.get("present") is True or f["id"] in {"completeness", "quarantine", "coercion"})
+    sum(1 for f in factors if f.get("present") is True or f["id"] in {"completeness", "quarantine", "coercion"})
     # always have completeness/quarantine/coercion; +1 reconcile +1 freshness
     covered = 3 + sum(1 for f in factors if f.get("present") is True)
     if covered >= 5:

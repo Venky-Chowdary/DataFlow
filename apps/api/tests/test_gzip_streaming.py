@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import gzip
-import io
 import json
 import sys
 import uuid
 from pathlib import Path
 
-import pytest
 
 _API_ROOT = Path(__file__).resolve().parents[2]
 if str(_API_ROOT) not in sys.path:

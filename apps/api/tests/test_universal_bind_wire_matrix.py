@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import sys
 from datetime import date, datetime, time
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 

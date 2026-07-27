@@ -19,7 +19,6 @@ import io
 import logging
 import re
 from html.parser import HTMLParser
-from typing import Any
 
 logger = logging.getLogger(__name__)
 

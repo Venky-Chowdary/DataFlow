@@ -21,7 +21,6 @@ from src.services.data_contract import (
     CircuitBreaker,
     ColumnRule,
     ContractEnforcer,
-    ContractStatus,
     ContractViolation,
     DataContract,
     build_contract_from_preflight,

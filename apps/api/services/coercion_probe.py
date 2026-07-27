@@ -35,7 +35,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from services.transform_engine import NULL_SENTINELS, apply_transform
+from services.transform_engine import apply_transform
 from services.transform_resolver import resolve_transform
 from services.type_system import ddl_type, normalize_logical_type
 from services.value_serializer import cell_to_string
@@ -70,38 +70,6 @@ def samples_coerce_mapping(
     transform = resolve_transform(item, column_types=source_types, dest_types=target_types)
     checked = 0
     for row in rows[:DEFAULT_SAMPLE_LIMIT]:
-        raw = cell_to_string(row.get(src, ""))
-        if not str(raw).strip():
-            continue
-        checked += 1
-        _val, err = apply_transform(raw, transform)
-        if err:
-            return False
-    return checked > 0
-
-
-def samples_coerce_mapping(
-    mapping: dict,
-    *,
-    source_types: dict[str, str],
-    target_types: dict[str, str],
-    rows: list[dict[str, Any]],
-) -> bool:
-    """True when every non-empty sample coerces via the write-path transform.
-
-    Used by G5 integrity, G6 DDL, and schema-drift so declared VARCHAR→NUMBER
-    (JSON/CSV numeric strings) does not false-block when values cast cleanly.
-    """
-    src = str(mapping.get("source") or "")
-    if not src or not rows:
-        return False
-    item = dict(mapping)
-    tgt = item.get("target")
-    if not item.get("target_type") and tgt and target_types:
-        item["target_type"] = target_types.get(str(tgt))
-    transform = resolve_transform(item, column_types=source_types, dest_types=target_types)
-    checked = 0
-    for row in rows[:200]:
         raw = cell_to_string(row.get(src, ""))
         if not str(raw).strip():
             continue

@@ -81,7 +81,7 @@ def test_csv_to_postgresql_backfill_new_fields():
         user="dataflow", password="dataflow",
     )
     with conn.cursor() as cur:
-        cur.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = %s ORDER BY ordinal_position", (table_name,))
+        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = %s ORDER BY ordinal_position", (table_name,))
         cols = [r[0] for r in cur.fetchall()]
     assert "currency" not in cols, cols
 
@@ -94,7 +94,7 @@ def test_csv_to_postgresql_backfill_new_fields():
     assert result2.records_transferred == 3
 
     with conn.cursor() as cur:
-        cur.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = %s ORDER BY ordinal_position", (table_name,))
+        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = %s ORDER BY ordinal_position", (table_name,))
         cols = [r[0] for r in cur.fetchall()]
         cur.execute(f'SELECT id, amount, currency FROM public."{table_name}" ORDER BY id')
         rows = cur.fetchall()

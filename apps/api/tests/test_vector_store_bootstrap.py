@@ -1,5 +1,3 @@
-import os
-import shutil
 
 from src.ai.rag.bootstrap import rebuild_vector_store
 

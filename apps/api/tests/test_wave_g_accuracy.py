@@ -65,7 +65,6 @@ def test_saas_extract_unions_late_fields():
 
 def test_generic_sql_mssql_sample_uses_top(monkeypatch):
     from connectors import generic_sql as gs
-    import sqlalchemy as sa
 
     seen: list[str] = []
 

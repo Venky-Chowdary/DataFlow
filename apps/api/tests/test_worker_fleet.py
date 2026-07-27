@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from unittest import mock
 
 from services.worker_fleet import enqueue_job, fleet_enabled

@@ -584,7 +584,7 @@ def read_pg_row(table: str, row_id: int = 1) -> dict[str, Any]:
             out = dict(zip(FIDELITY_COLUMNS, row))
             # Native type metadata for FLOAT vs NUMERIC honesty.
             cur.execute(
-                f"""
+                """
                 SELECT a.attname, format_type(a.atttypid, a.atttypmod)
                 FROM pg_attribute a
                 JOIN pg_class c ON a.attrelid = c.oid

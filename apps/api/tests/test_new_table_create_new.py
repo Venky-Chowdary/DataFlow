@@ -72,7 +72,6 @@ def test_attach_db_sample_miss_still_probes_before_create_new():
 
 
 def test_attach_db_sample_exception_preserves_false():
-    from src.transfer import endpoint_intelligence as ei
 
     out = {"table_exists": False, "columns": [], "schema": {}, "message": "missing"}
     if out.get("table_exists") not in (True, False):

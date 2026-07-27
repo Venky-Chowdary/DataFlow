@@ -6,7 +6,6 @@ from services.dialect_profiles import (
     default_schema_for,
     fold_identifier,
     normalize_schema,
-    quote_char_for,
     schema_from_cfg,
 )
 from connectors.sql_identifiers import quote_table_ref

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from connectors.writer_common import build_mapped_rows, build_mapped_rows_with_details
+from connectors.writer_common import build_mapped_rows_with_details
 from services.ddl_compatibility import evaluate_ddl_compatibility
 from services.schema_introspect import _mysql_to_logical, _pg_to_logical
 from services.transform_engine import apply_transform, infer_transform_for_mapping

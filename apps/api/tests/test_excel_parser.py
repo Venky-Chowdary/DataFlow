@@ -2,7 +2,6 @@
 
 import pytest
 
-from services.excel_parser import parse_excel_preview
 
 
 def test_parse_excel_requires_openpyxl():

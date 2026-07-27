@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mapping_golden.json"
 PROOF_DIR = Path(__file__).resolve().parents[1] / "data" / "proofs"
@@ -28,7 +27,7 @@ def test_mapping_golden_accuracy_with_proof_artifact(tmp_path: Path) -> None:
     assert len(cases) >= 15, "golden fixture too small for a meaningful eval"
 
     sources = [c["source"] for c in cases]
-    targets = list({c["target"] for c in cases})
+    list({c["target"] for c in cases})
     # Also include targets as a flat list preserving order for mapper
     target_list = [c["target"] for c in cases]
 

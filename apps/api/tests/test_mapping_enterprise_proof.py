@@ -11,7 +11,6 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-import pytest
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mapping_golden_enterprise.json"
 LEGACY_FIXTURE = Path(__file__).parent / "fixtures" / "mapping_golden.json"

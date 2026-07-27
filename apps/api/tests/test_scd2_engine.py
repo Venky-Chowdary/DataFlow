@@ -7,7 +7,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import pytest
 
 _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
@@ -15,7 +14,6 @@ if str(_API_ROOT) not in sys.path:
 
 from src.services.scd2_engine import (
     IS_CURRENT_COLUMN,
-    ROW_HASH_COLUMN,
     VALID_FROM_COLUMN,
     VALID_TO_COLUMN,
     apply_scd2,

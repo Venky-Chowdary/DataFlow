@@ -1,6 +1,5 @@
 """Writer fail-closed policy when drivers are missing."""
 
-import os
 
 from connectors.mysql_writer import write_mapped_rows
 

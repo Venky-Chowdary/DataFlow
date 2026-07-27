@@ -6,8 +6,6 @@ This complements `test_execute_tracked_all_sources_to_postgresql.py` by proving
 
 from __future__ import annotations
 
-import contextlib
-import socket
 import sys
 import uuid
 from dataclasses import replace

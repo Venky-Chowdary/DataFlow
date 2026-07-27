@@ -1,8 +1,6 @@
 """Tests for production platform services."""
 
-import os
 
-import pytest
 
 
 def test_secret_vault_roundtrip(monkeypatch):

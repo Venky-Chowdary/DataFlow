@@ -41,7 +41,7 @@ def _patch_mongodb_service(monkeypatch):
 
 
 def test_edge_types_csv_to_snowflake():
-    fakesnow = pytest.importorskip("fakesnow")
+    pytest.importorskip("fakesnow")
 
     rows = [
         {

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from connectors.postgresql_change_stream import PostgreSqlChangeStreamCdc, encode_pg_resume_token
 from services.cdc_engine import ChangeBatch

@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from services.connector_capability_registry import get_connector_capability
 from services.team_store import can_read_workspace, require_workspace_isolation

@@ -19,7 +19,6 @@ from services.cdc_lease import (
     LeaseStoreError,
     acquire_lease,
     configure_store,
-    get_lease,
     get_store,
     release_lease,
     renew_lease,

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -89,7 +88,6 @@ def test_admin_can_run_transfer(rbac_env, monkeypatch):
 
 
 def test_viewer_cannot_run_transfer(rbac_env, monkeypatch):
-    from services.rbac import _ROLE_PERMISSIONS, normalize_role
 
     # Patch viewer so admin token is treated as viewer for the permission check.
     import services.rbac as rbac_mod
