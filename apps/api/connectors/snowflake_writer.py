@@ -153,7 +153,12 @@ def _quarantine_unfit_decimals(
     rejected_details: list[dict[str, Any]],
     policy: str,
 ) -> list[tuple]:
-    """NULL cells that cannot fit their NUMBER(p,s); never abort the whole load."""
+    """Hold out / NULL cells that cannot fit NUMBER(p,s).
+
+    ``quarantine`` omits the whole row from the primary write (no NULL invent).
+    ``coerce_null`` keeps the row with a NULL cell. ``fail`` leaves rows unchanged
+    so the driver/strict path can abort.
+    """
     if policy == "fail":
         return mapped_rows
     number_cols: list[tuple[int, int, int]] = []
@@ -167,7 +172,7 @@ def _quarantine_unfit_decimals(
     out: list[tuple] = []
     for row_idx, row in enumerate(mapped_rows):
         cells = list(row)
-        changed = False
+        hold_out = False
         for col_idx, precision, scale in number_cols:
             if col_idx >= len(cells) or cells[col_idx] is None:
                 continue
@@ -188,9 +193,14 @@ def _quarantine_unfit_decimals(
                     "chars": [],
                 }
             )
-            cells[col_idx] = None
-            changed = True
-        out.append(tuple(cells) if changed else row)
+            if policy == "coerce_null":
+                cells[col_idx] = None
+            else:
+                hold_out = True
+                break
+        if hold_out:
+            continue
+        out.append(tuple(cells))
     return out
 
 

@@ -436,11 +436,15 @@ def run_mapping_pipeline(
         src_type = schema_by_name.get(m["source"], {}).get("inferred_type", "VARCHAR")
         src_type = ddl_carrier_type(str(src_type))
         tgt_type = target_by_name.get(m["target"], {}).get("inferred_type")
-        # Create-new / missing dest type: auto-widen unsigned 64-bit to DECIMAL.
+        # Create-new / missing dest type: auto-widen unsigned widths.
         # Preserve DECIMAL(p,s) / VECTOR(n) / TIMESTAMPTZ carriers — never strip params.
         if not tgt_type:
-            if normalize_logical_type(src_type) == "decimal" and "unsigned" in str(src_type).lower():
+            src_l = str(src_type).lower()
+            if "unsigned" in src_l and ("bigint" in src_l or normalize_logical_type(src_type) == "decimal"):
                 tgt_type = "DECIMAL"
+            elif "unsigned" in src_l:
+                # INT/MEDIUMINT/SMALLINT UNSIGNED → BIGINT create-new (signed INT overflows).
+                tgt_type = "BIGINT"
             elif destination_db_type:
                 tgt_type = ddl_type(destination_db_type, src_type)
             else:

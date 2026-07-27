@@ -1819,7 +1819,9 @@ def stream_database_transfer(
     dest_summary["watermark"] = running_cursor
     dest_summary["chunk_size"] = chunk_size
     dest_summary["batches"] = batches_completed
-    dest_summary["source_row_count"] = int(dest_summary.get("source_row_count") or written or 0)
+    if not isinstance(dest_summary.get("source_row_count"), int) or dest_summary.get("source_row_count", 0) <= 0:
+        held_out = max(int(rejected_total or 0) - int(coerced_null_total or 0), 0)
+        dest_summary["source_row_count"] = int(written or 0) + held_out
     if reconcile_sample:
         dest_summary["reconcile_sample"] = reconcile_sample[:_RECONCILE_SAMPLE_CAP]
     if load_methods_seen:

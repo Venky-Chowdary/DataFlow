@@ -616,6 +616,11 @@ def _parse_boolean(value: str) -> bool | None:
     return None
 
 
+def _json_reject_nonfinite(name: str) -> None:
+    """Refuse NaN/Infinity → null (silent data loss on JSON/VARIANT/SUPER)."""
+    raise ValueError(f"non-finite JSON constant: {name}")
+
+
 def _parse_json(value: Any) -> str | None:
     """Normalize a cell into JSON-valid text for a semi-structured target.
 
@@ -624,13 +629,17 @@ def _parse_json(value: Any) -> str | None:
     database drivers that return parsed JSON objects round-trip deterministically.
     A bare scalar that is not valid JSON on its own is losslessly wrapped as a
     JSON string literal so it still loads into a VARIANT / JSON / SUPER column.
+
+    Non-finite constants (NaN / Infinity) are rejected — never mapped to JSON null.
     """
     if value is None:
         return None
     if isinstance(value, str):
         try:
-            parsed = json.loads(value, parse_constant=lambda v: None)
-        except (json.JSONDecodeError, ValueError):
+            parsed = json.loads(value, parse_constant=_json_reject_nonfinite)
+        except ValueError:
+            raise
+        except (json.JSONDecodeError, TypeError):
             parsed = value  # wrap the raw scalar as a JSON string literal
     elif isinstance(value, (dict, list, tuple, set, frozenset)):
         parsed = value
@@ -643,6 +652,29 @@ def _parse_json(value: Any) -> str | None:
         default=json_default,
         allow_nan=False,
     )
+
+
+def _parse_vector(value: str) -> list[float] | None:
+    """Parse a vector literal into a float list; reject dim-mismatched later."""
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        if text.startswith("["):
+            parsed = json.loads(text, parse_constant=_json_reject_nonfinite)
+        else:
+            parsed = [float(x.strip()) for x in text.split(",") if x.strip()]
+        if not isinstance(parsed, list) or not parsed:
+            return None
+        out: list[float] = []
+        for x in parsed:
+            f = float(x)
+            if f != f or f in (float("inf"), float("-inf")):  # NaN / Inf
+                return None
+            out.append(f)
+        return out
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
 
 
 def _parse_uuid(value: str) -> str | None:
@@ -828,8 +860,10 @@ def infer_transform_for_mapping(
             return "time"
         if tgt == "uuid":
             return "uuid"
+        if tgt == "vector":
+            return "vector"
         # Specialty types travel as identity text/binary payloads — never invent a cast.
-        if tgt in {"interval", "geography", "vector"}:
+        if tgt in {"interval", "geography"}:
             return "none"
 
     # Source type is the pivot when the target is generic (e.g., VARCHAR).
@@ -853,7 +887,9 @@ def infer_transform_for_mapping(
         return "time"
     if src == "uuid":
         return "uuid"
-    if src in {"interval", "geography", "vector"}:
+    if src == "vector":
+        return "vector"
+    if src in {"interval", "geography"}:
         return "none"
 
     # Semantic column names drive the transform for generic string targets.
@@ -939,9 +975,19 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         return None, None
 
     # Null/missing sentinels for typed transforms are treated as None.
-    if transform_l in {"decimal", "integer", "boolean", "date", "datetime", "time", "json", "uuid", "binary"}:
-        if text.lower() in NULL_SENTINELS:
-            return None, None
+    # Exception: NaN / ±Infinity are NOT SQL null for JSON/vector — reject as
+    # non-finite (never invent JSON null / empty embedding).
+    _NONFINITE = frozenset({"nan", "infinity", "+infinity", "-infinity"})
+    if transform_l in {
+        "decimal", "integer", "boolean", "date", "datetime", "time",
+        "json", "uuid", "binary", "vector",
+    }:
+        low = text.lower()
+        if low in NULL_SENTINELS:
+            if transform_l in {"json", "vector"} and low in _NONFINITE:
+                pass  # fall through to typed parsers that reject non-finite
+            else:
+                return None, None
 
     if transform == "decimal":
         parsed = _parse_decimal(text)
@@ -981,10 +1027,19 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
 
     if transform == "json":
         json_input = raw if isinstance(raw, (dict, list, tuple, set, frozenset)) else text
-        parsed_json = _parse_json(json_input)
+        try:
+            parsed_json = _parse_json(json_input)
+        except ValueError as exc:
+            return None, str(exc)
         if parsed_json is None:
             return None, f"Invalid JSON: {text!r}"
         return parsed_json, None
+
+    if transform == "vector":
+        parsed_vec = _parse_vector(text)
+        if parsed_vec is None:
+            return None, f"Invalid vector: {text!r}"
+        return parsed_vec, None
 
     if transform == "binary":
         parsed_binary = _parse_binary(text)

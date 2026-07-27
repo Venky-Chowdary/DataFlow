@@ -86,14 +86,22 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
             return value
         if ctype in {"json", "array", "object", "struct"}:
             try:
-                return json.loads(text, parse_constant=lambda v: None)
+                def _reject(name: str) -> None:
+                    raise ValueError(f"non-finite JSON constant: {name}")
+
+                return json.loads(text, parse_constant=_reject)
+            except ValueError:
+                return value  # leave raw; transform path should have rejected
             except json.JSONDecodeError:
                 return value
         if ctype in {"text", "string", "varchar", "uuid", "binary"}:
             return value
         try:
-            return json.loads(text, parse_constant=lambda v: None)
-        except json.JSONDecodeError:
+            def _reject2(name: str) -> None:
+                raise ValueError(f"non-finite JSON constant: {name}")
+
+            return json.loads(text, parse_constant=_reject2)
+        except (json.JSONDecodeError, ValueError):
             return value
     return value
 
@@ -692,12 +700,13 @@ def _rejected_row_count(
 ) -> int:
     """Return the number of rows that were rejected or quarantined.
 
-    For ``fail`` the dropped rows are ``len(data_rows) - len(mapped_rows)``.
-    For ``quarantine``/``coerce_null`` the rows are preserved with a NULL bad cell,
-    so the count is the number of distinct source row numbers with at least one
-    rejected cell.
+    For ``fail`` / ``quarantine`` the held-out rows are
+    ``len(data_rows) - len(mapped_rows)`` (quarantine never writes NULL into the
+    primary table for a bad cell). For ``coerce_null`` the rows are preserved
+    with a NULL bad cell, so the count is distinct source row numbers with at
+    least one rejected cell.
     """
-    if policy in {"quarantine", "coerce_null"}:
+    if policy == "coerce_null":
         return len({d["row"] for d in rejected_details})
     return len(data_rows) - len(mapped_rows)
 
@@ -705,12 +714,10 @@ def _rejected_row_count(
 def _coerced_null_row_count(rejected_details: list[dict[str, Any]], policy: str) -> int:
     """Distinct source rows that were KEPT but had a cell coerced to NULL.
 
-    Only meaningful under ``quarantine``/``coerce_null`` — under ``fail`` the
-    offending rows are dropped, not coerced, so this is 0. ``rejected_details``
-    only contains cells whose ``apply_transform`` returned an error, so genuine
-    empty->NULL sentinels (no error) are correctly excluded.
+    Only ``coerce_null`` alters primary cells in place. ``quarantine`` holds the
+    whole row out of the primary write (details go to DLQ) so this is 0.
     """
-    if policy in {"quarantine", "coerce_null"}:
+    if policy == "coerce_null":
         return len({d["row"] for d in rejected_details})
     return 0
 
@@ -850,16 +857,19 @@ def build_mapped_rows_with_details(
                 rejected_details.append(detail)
                 if len(errors) < 10:
                     errors.append(f"row {row_number} {src_name}→{tgt_name}: {err}")
-                if policy in {"coerce_null", "quarantine"}:
-                    # Quarantine preserves the row; the bad cell becomes NULL and the
-                    # error is surfaced as a warning so the transfer does not silently
-                    # lose data.
+                if policy == "coerce_null":
+                    # Explicit NULL-in-place — operator opted into altered primary rows.
+                    converted = None
+                elif policy == "quarantine":
+                    # Hold the whole row out of the primary write — never invent NULL
+                    # in place of a bad cell (that is silent primary alteration).
+                    row_has_error = True
                     converted = None
                 else:
                     continue
             if target_idx >= 0:
                 out[target_idx] = converted
-        if row_has_error and policy == "fail":
+        if row_has_error and policy in {"fail", "quarantine"}:
             continue
         mapped.append(tuple(out))
 

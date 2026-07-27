@@ -7,8 +7,9 @@ These tests prove the four audit fixes end-to-end:
   2. Postgres/MySQL/Mongo/BigQuery writers emit structured ``rejected_details``
      (row/column/target/value/reason/policy) — proven directly against real
      local services when available, and via the shared builder they all call.
-  3. A kept-but-altered row is counted as ``coerced_null_rows`` so reconciliation
-     can NOT report "100% fidelity" when a cell was forced to NULL.
+  3. Quarantine holds bad rows out of the primary table (no NULL invent); explicit
+     ``coerce_null`` is the only policy that alters a kept cell to NULL, counted
+     as ``coerced_null_rows`` so reconciliation cannot claim 100% fidelity.
   4. Such a run is reported with the terminal status ``completed_with_quarantine``
      rather than a clean ``completed``.
 
@@ -98,23 +99,21 @@ def test_stream_strict_fails_instead_of_silent_null(mode):
         assert "amount" in str(exc.value) or "decimal" in str(exc.value).lower()
 
 
-# --- Tasks 2 + 3: balanced keeps the row, records the coercion --------------
+# --- Tasks 2 + 3: balanced quarantines bad rows out of primary --------------
 
-def test_stream_balanced_keeps_row_and_records_coercion():
+def test_stream_balanced_holds_out_bad_row_and_records_rejection():
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         src = _sqlite_source_with_bad_value(tmp_path)
         dst = tmp_path / "dst.db"
         rows_written, _ddl, summary, _cols = _stream(src, dst, "balanced")
 
-        # All three rows are kept (no data dropped).
-        assert rows_written == 3
-        # The altered row is counted as a data-alteration statistic.
-        assert summary["coerced_null_rows"] == 1
+        # Good rows land; bad row is held out of primary (not NULL-invented).
+        assert rows_written == 2
+        assert summary.get("coerced_null_rows", 0) == 0
         assert summary["rejected_rows"] >= 1
         assert summary["error_policy"] == "quarantine"
 
-        # Structured drill-down detail is present for the destination.
         details = summary["rejected_details"]
         assert details, "rejected_details must be populated"
         bad = details[0]
@@ -123,12 +122,13 @@ def test_stream_balanced_keeps_row_and_records_coercion():
         assert bad["value"] == "not-a-number"
         assert bad["policy"] == "quarantine"
 
-        # The kept row really landed with a NULL amount (not dropped).
         conn = sqlite3.connect(dst)
         got = dict(conn.execute('SELECT "id", "amount" FROM "out"').fetchall())
         conn.close()
-        assert got[2] is None
-        assert len(got) == 3
+        assert 2 not in got
+        assert len(got) == 2
+        assert got[1] is not None
+        assert got[3] is not None
 
 
 # --- Task 3: reconciliation honesty -----------------------------------------
@@ -238,12 +238,13 @@ def test_engine_file_to_sqlite_sets_completed_with_quarantine():
         result = engine.execute(request)
 
         assert result.success is True
-        assert result.destination_summary.get("coerced_null_rows", 0) >= 1
+        assert result.destination_summary.get("rejected_rows", 0) >= 1
+        assert result.destination_summary.get("coerced_null_rows", 0) == 0
         # Reconciliation must not claim 100% fidelity.
         assert "100% row fidelity" not in (result.reconciliation.get("message") or "")
-        assert result.reconciliation.get("coerced_null_rows", 0) >= 1
+        assert result.reconciliation.get("rejected_rows", 0) >= 1
 
-        # The persisted terminal status reflects the alteration.
+        # The persisted terminal status reflects the quarantine hold-out.
         job = get_mongodb_service().get_job(result.job_id)
         assert job is not None
         assert job.get("status") == "completed_with_quarantine"
@@ -272,10 +273,10 @@ def test_shared_builder_detail_shape_and_counts():
         dest_types={"id": "string", "age": "integer"},
     )
 
-    # Quarantine: row kept, detail recorded, counted as coerced.
+    # Quarantine: bad row held out of primary; detail recorded; not coerced.
     mapped_q, _errs_q, details_q = build_mapped_rows_with_details(error_policy="quarantine", **kwargs)
-    assert len(mapped_q) == 3
-    assert _coerced_null_row_count(details_q, "quarantine") == 1
+    assert len(mapped_q) == 2
+    assert _coerced_null_row_count(details_q, "quarantine") == 0
     assert _rejected_row_count(data_rows, mapped_q, details_q, "quarantine") == 1
     d = next(x for x in details_q if x["value"] == "nope")
     assert d["row"] == 2
@@ -292,6 +293,11 @@ def test_shared_builder_detail_shape_and_counts():
     assert len(mapped_f) == 2
     assert _coerced_null_row_count(details_f, "fail") == 0
     assert _rejected_row_count(data_rows, mapped_f, details_f, "fail") == 1
+
+    # coerce_null: keep row with NULL cell.
+    mapped_c, _errs_c, details_c = build_mapped_rows_with_details(error_policy="coerce_null", **kwargs)
+    assert len(mapped_c) == 3
+    assert _coerced_null_row_count(details_c, "coerce_null") == 1
 
 
 # --- Task 2: real-service proofs (skip cleanly when unavailable) ------------
@@ -339,11 +345,11 @@ def test_postgres_writer_emits_details_and_coercion():
     common = dict(host="localhost", port=5432, database="dataflow",
                   username="dataflow", password="dataflow", schema="public",
                   connection_string="", ssl=False)
-    # Quarantine keeps rows and records details.
+    # Quarantine holds bad rows out of primary and records details.
     res = write_mapped_rows(**common, error_policy="quarantine", **_bad_row_kwargs(table))
     _skip_if_not_connected(res)
-    assert res.rows_written == 3
-    assert res.coerced_null_rows == 1
+    assert res.rows_written == 2
+    assert res.coerced_null_rows == 0
     assert any(d["value"] == "not-a-number" for d in res.rejected_details)
     # Fail-fast rejects the whole write.
     res2 = write_mapped_rows(**common, error_policy="fail", **_bad_row_kwargs(table + "_f"))
@@ -362,7 +368,8 @@ def test_mysql_writer_emits_details_and_coercion():
                   connection_string="", ssl=False)
     res = write_mapped_rows(**common, error_policy="quarantine", **_bad_row_kwargs(table))
     _skip_if_not_connected(res)
-    assert res.coerced_null_rows == 1
+    assert res.rows_written == 2
+    assert res.coerced_null_rows == 0
     assert any(d["value"] == "not-a-number" for d in res.rejected_details)
     res2 = write_mapped_rows(**common, error_policy="fail", **_bad_row_kwargs(table + "_f"))
     assert res2.ok is False
@@ -380,7 +387,8 @@ def test_mongodb_writer_emits_details_and_coercion():
     try:
         res = write_mapped_rows(**common, error_policy="quarantine", **_bad_row_kwargs(coll))
         _skip_if_not_connected(res)
-        assert res.coerced_null_rows == 1
+        assert res.rows_written == 2
+        assert res.coerced_null_rows == 0
         assert any(d["value"] == "not-a-number" for d in res.rejected_details)
     finally:
         try:

@@ -29,9 +29,9 @@ def test_number_type_preserves_large_integer_digits():
     assert _fits_snowflake_number(huge, precision, scale)
 
 
-def test_quarantine_unfit_decimal_nulls_cell():
-    # NUMBER(10,2) cannot hold a 20-digit integer.
-    rows = [("99999999999999999999", "ok")]
+def test_quarantine_unfit_decimal_holds_out_row():
+    # NUMBER(10,2) cannot hold a 20-digit integer — quarantine omits the row.
+    rows = [("99999999999999999999", "ok"), ("1.50", "fine")]
     details: list[dict] = []
     out = _quarantine_unfit_decimals(
         rows,
@@ -40,9 +40,23 @@ def test_quarantine_unfit_decimal_nulls_cell():
         details,
         policy="quarantine",
     )
+    assert out == [("1.50", "fine")]
+    assert details and "does not fit" in details[0]["reason"]
+
+
+def test_coerce_null_unfit_decimal_nulls_cell():
+    rows = [("99999999999999999999", "ok")]
+    details: list[dict] = []
+    out = _quarantine_unfit_decimals(
+        rows,
+        ["amount", "label"],
+        ["NUMBER(10,2)", "VARCHAR"],
+        details,
+        policy="coerce_null",
+    )
     assert out[0][0] is None
     assert out[0][1] == "ok"
-    assert details and "does not fit" in details[0]["reason"]
+    assert details
 
 
 def test_format_overflow_error_is_readable():

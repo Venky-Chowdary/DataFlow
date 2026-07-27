@@ -397,9 +397,10 @@ def reconcile(
     coerced_null_rows = max(int(coerced_null_rows or 0), 0)
     rows_skipped = max(int(rows_skipped or 0), 0)
     # Coerced rows are KEPT in the destination (a cell became NULL), so they do
-    # not lower the expected row count — only genuinely DROPPED rows do. Under a
-    # quarantine policy rejected_rows == coerced_null_rows (kept), so dropped==0;
-    # under a fail policy coerced_null_rows==0, so dropped==rejected_rows.
+    # not lower the expected row count — only genuinely DROPPED / held-out rows do.
+    # Under quarantine, bad rows are held out of the primary write (rejected >
+    # coerced); under coerce_null, rejected == coerced and dropped == 0.
+    # Under fail, coerced == 0 so dropped == rejected.
     # Skipped rows are neither dropped nor written (e.g. stale CDC LSN
     # redelivery) and must be excluded from the expected destination count.
     dropped_rows = max(max(rejected_rows, 0) - coerced_null_rows, 0)

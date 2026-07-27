@@ -469,7 +469,8 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_STRING: "VARCHAR",
         LOGICAL_TEXT: "VARCHAR",
         LOGICAL_INTEGER: "BIGINT",
-        LOGICAL_DECIMAL: "DOUBLE",
+        # Never map bare DECIMAL → DOUBLE (IEEE loss). Prefer parametric DECIMAL.
+        LOGICAL_DECIMAL: "DECIMAL(38,15)",
         LOGICAL_BOOLEAN: "BOOLEAN",
         LOGICAL_DATE: "DATE",
         LOGICAL_DATETIME: "TIMESTAMP",
@@ -1055,6 +1056,10 @@ def _decimal_ddl_for_dest(db: str, inferred: str | None) -> str:
         # Preserve digits as text rather than silently truncating scale.
         return DEFAULT_DDL.get(db, "TEXT")
 
+    # Precision clamp is also silent data loss — refuse and use lossless text.
+    if src_p > cap_p:
+        return DEFAULT_DDL.get(db, "TEXT")
+
     out_s = min(src_s, cap_s)
     out_p = min(max(src_p, out_s), cap_p)
     if out_p < out_s:
@@ -1202,12 +1207,19 @@ _TZ_AWARE_DDL: Final[dict[str, str]] = {
     "postgresql": "TIMESTAMPTZ",
     "redshift": "TIMESTAMPTZ",
     "snowflake": "TIMESTAMP_TZ",
-    "mysql": "TIMESTAMP(6)",
+    # MySQL TIMESTAMP is session-TZ — not offset-preserving. Prefer DATETIME(6)
+    # and document UTC-normalize at write rather than invent TIMESTAMPTZ fidelity.
+    "mysql": "DATETIME(6)",
     "sqlserver": "DATETIMEOFFSET",
     "oracle": "TIMESTAMP WITH TIME ZONE",
     "bigquery": "TIMESTAMP",
     "duckdb": "TIMESTAMPTZ",
     "timescaledb": "timestamptz",
+    "databricks": "TIMESTAMP",
+    "clickhouse": "DateTime64(6, 'UTC')",
+    "trino": "timestamp(6) with time zone",
+    "presto": "timestamp with time zone",
+    "iceberg": "timestamptz",
 }
 _TZ_NAIVE_DDL: Final[dict[str, str]] = {
     "postgresql": "TIMESTAMP",
@@ -1219,6 +1231,11 @@ _TZ_NAIVE_DDL: Final[dict[str, str]] = {
     "bigquery": "DATETIME",
     "duckdb": "TIMESTAMP",
     "timescaledb": "timestamp",
+    "databricks": "TIMESTAMP_NTZ",
+    "clickhouse": "DateTime64(6)",
+    "trino": "timestamp(6)",
+    "presto": "timestamp",
+    "iceberg": "timestamp",
 }
 
 
@@ -1271,6 +1288,23 @@ def decimal_scale_would_truncate(source_type: str | None, dest_db_type: str | No
     if scale is None:
         return False
     return scale > _DECIMAL_CAPS[db][1]
+
+
+def decimal_precision_would_truncate(source_type: str | None, dest_db_type: str | None) -> bool:
+    """True when mapping source DECIMAL(p,s) onto dest would clamp precision.
+
+    Mirror of ``decimal_scale_would_truncate`` — silent ``min(src_p, cap_p)`` is
+    data loss for values that need the full digit width.
+    """
+    db = _normalize_dest_db(dest_db_type)
+    if normalize_logical_type(source_type) != LOGICAL_DECIMAL:
+        return False
+    if db not in _DECIMAL_CAPS:
+        return False
+    precision, _scale = parse_numeric_precision_scale(source_type)
+    if precision is None:
+        return False
+    return precision > _DECIMAL_CAPS[db][0]
 
 
 def vector_dim_mismatch(source_type: str | None, target_type: str | None) -> bool:

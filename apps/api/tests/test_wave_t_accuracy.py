@@ -134,7 +134,7 @@ def test_email_quarantine_policy_still_sends_valid_rows():
             error_policy="quarantine",
         )
     assert result.ok is True
-    assert result.rows_written == 2  # quarantine keeps row with nullified cell
+    assert result.rows_written == 1  # quarantine holds out the bad row
     assert result.rejected_details
     server.sendmail.assert_called_once()
 

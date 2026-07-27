@@ -164,9 +164,8 @@ def run_reconciliation(
     rejected_rows = int(dest_summary.get("rejected_rows", 0) or 0)
     coerced_null_rows = int(dest_summary.get("coerced_null_rows", 0) or 0)
     rows_skipped = int(dest_summary.get("rows_skipped", 0) or 0)
-    # Coerced rows are KEPT (a cell became NULL); only genuinely dropped rows are
-    # absent from the destination. Skipped rows (e.g. stale CDC LSN) are not
-    # dropped, but they are also not written to the destination.
+    # Coerced rows are KEPT (a cell became NULL); quarantine hold-outs are absent
+    # from the destination. Skipped rows (e.g. stale CDC LSN) are not written.
     dropped_rows = max(rejected_rows - coerced_null_rows, 0)
     # Prefer independent source accounting when the caller provides it
     # (streaming paths should pass source_row_count from the read side).

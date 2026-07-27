@@ -1030,6 +1030,44 @@ def _pg_fetch_columns(cur: Any, schema: str, table: str) -> list[dict]:
     return columns
 
 
+def _pg_elem_to_logical(elem: str) -> str:
+    """Map a PG array element type to a logical carrier (no array recursion)."""
+    e = (elem or "").strip().lower()
+    if not e:
+        return "VARCHAR"
+    # Avoid re-entering array branch — strip one level only.
+    if e.endswith("[]"):
+        e = e[:-2].strip()
+    m = re.match(r"^(numeric|decimal)\s*\(\s*(\d+)\s*(?:,\s*(\d+))?\s*\)$", e)
+    if m:
+        if m.group(3) is not None:
+            return f"DECIMAL({m.group(2)},{m.group(3)})"
+        return f"DECIMAL({m.group(2)})"
+    if e in {"integer", "int", "int4", "smallint", "int2", "bigint", "int8", "serial", "bigserial"}:
+        return "INTEGER"
+    if e in {"real", "float4", "double precision", "float8"}:
+        return "FLOAT"
+    if e in {"boolean", "bool"}:
+        return "BOOLEAN"
+    if e == "date":
+        return "DATE"
+    if e.startswith("timestamp"):
+        return "TIMESTAMPTZ" if "with time zone" in e or e.endswith("tz") else "TIMESTAMP_NTZ"
+    if e.startswith("time"):
+        return "TIME"
+    if e in {"uuid"}:
+        return "UUID"
+    if e in {"json", "jsonb"}:
+        return "JSON"
+    if e in {"bytea", "varbyte"}:
+        return "BINARY"
+    if e in {"text", "varchar", "character varying", "character", "char", "citext", "name"}:
+        return "VARCHAR"
+    if e.startswith("character varying") or e.startswith("varchar") or e.startswith("character("):
+        return "VARCHAR"
+    return "VARCHAR"
+
+
 def _pg_to_logical(dtype: str) -> str:
     """Map PostgreSQL ``format_type`` / data_type strings to DataFlow logical carriers.
 
@@ -1088,7 +1126,16 @@ def _pg_to_logical(dtype: str) -> str:
         return "JSON"
     if d == "varbyte" or d.startswith("varbyte("):
         return "BINARY"
-    if d in {"json", "jsonb"} or d.endswith("[]") or " array" in d:
+    # Typed arrays — preserve element carrier (never invent bare JSON).
+    if d.endswith("[]"):
+        elem = d[:-2].strip()
+        elem_logical = _pg_elem_to_logical(elem)
+        return f"ARRAY<{elem_logical}>"
+    if " array" in d:
+        elem = d.replace(" array", "").strip()
+        elem_logical = _pg_elem_to_logical(elem)
+        return f"ARRAY<{elem_logical}>"
+    if d in {"json", "jsonb"}:
         return "JSON"
     if d.startswith("bit(") or d == "bit" or d.startswith("bit varying") or d == "varbit":
         # BIT(1) → boolean via type_system; BIT(n>1) → binary.
@@ -1127,8 +1174,18 @@ def _mysql_to_logical(dtype: str) -> str:
         return "GEOGRAPHY"
     # BIGINT UNSIGNED exceeds signed 64-bit — DECIMAL carrier (matches type_system CANONICAL).
     # Must run BEFORE the generic "int" branch ("int" is a substring of "bigint").
-    if "unsigned" in d and "bigint" in d:
-        return "BIGINT UNSIGNED"
+    # Preserve ALL unsigned widths so Map/preflight can auto-widen / range-check.
+    if "unsigned" in d:
+        if "bigint" in d:
+            return "BIGINT UNSIGNED"
+        if "mediumint" in d:
+            return "MEDIUMINT UNSIGNED"
+        if "smallint" in d:
+            return "SMALLINT UNSIGNED"
+        if "tinyint" in d and "tinyint(1)" not in d:
+            return "TINYINT UNSIGNED"
+        if "int" in d:
+            return "INT UNSIGNED"
     if d == "year" or d.startswith("year("):
         return "INTEGER"
     if "int" in d:

@@ -8,6 +8,7 @@ from typing import Any
 from services.db_type_utils import SCHEMALESS_DESTS, ci_get, normalize_dest_kind
 from services.type_system import (
     ddl_type,
+    decimal_precision_would_truncate,
     decimal_scale_would_truncate,
     is_lossy_coercion,
     is_precision_collapse_coercion,
@@ -219,6 +220,15 @@ def evaluate_ddl_compatibility(
             issues.append(
                 f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type or 'proposed'}) "
                 f"— scale truncates on {dest_kind}"
+            )
+        if (
+            not schemaless
+            and decimal_precision_would_truncate(src_type, dest_kind)
+            and normalize_logical_type(tgt_type or "") not in {"string", "text", "json"}
+        ):
+            issues.append(
+                f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type or 'proposed'}) "
+                f"— precision clamps on {dest_kind}"
             )
         if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type):
             # Sample-aware soft-pass only for textual→typed coercions that the

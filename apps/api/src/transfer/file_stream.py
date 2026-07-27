@@ -1042,9 +1042,11 @@ def stream_file_to_database(
         if source_filter:
             filtered_sample = apply_row_filter(sample_rows, source_filter)
         dest_summary["reconcile_sample"] = (filtered_sample or [])[:50]
-    # Record the filtered/written source row count so reconciliation expects the
-    # same number of rows the checksum accumulator actually fingerprinted.
-    dest_summary["source_row_count"] = written
+    # Source row count must include quarantined hold-outs so Gate-8 expects
+    # written == source - held_out. Never set this to `written` alone under
+    # quarantine (that double-subtracts rejected and falsely fails reconcile).
+    held_out = max(int(rejected_total or 0) - int(coerced_null_total or 0), 0)
+    dest_summary["source_row_count"] = int(written or 0) + held_out
 
     if dest_type in ("postgresql", "mysql", "redshift") and job_id:
         try:
