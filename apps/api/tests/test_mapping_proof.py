@@ -29,6 +29,7 @@ def test_create_new_proof_mode_and_cap():
         }],
         target_columns=[],
         destination_db_type="snowflake",
+        destination_table_exists=False,
     )
     assert proof["dest_mode"] == "create_new"
     assert proof["summary"]["max_confidence"] <= 0.93
@@ -37,6 +38,28 @@ def test_create_new_proof_mode_and_cap():
     assert proof["mappings"][0]["match_quality"] == "exact_name"
     bd = proof["mappings"][0]["evidence"]["confidence_breakdown"]
     assert abs(sum(bd.values()) - proof["mappings"][0]["confidence"]) < 0.002
+
+
+def test_schema_pending_never_invents_create_new():
+    """Unknown existence + empty targets → schema_pending (shared across connectors)."""
+    proof = build_mapping_proof(
+        [{
+            "source": "id",
+            "target": "id",
+            "confidence": 0.55,
+            "source_type": "INTEGER",
+            "target_type": "INTEGER",
+            "transform": "none",
+            "assignment_strategy": "pending_dest_schema",
+            "create_new": False,
+            "requires_review": True,
+        }],
+        target_columns=[],
+        destination_db_type="postgresql",
+        destination_table_exists=None,
+    )
+    assert proof["dest_mode"] == "schema_pending"
+    assert "PENDING" in proof["mappings"][0]["schema_decision"]
 
 
 def test_match_existing_proof_mode():
@@ -73,6 +96,7 @@ def test_proof_lists_trim_fidelity_risk():
         }],
         target_columns=[],
         destination_db_type="mysql",
+        destination_table_exists=False,
     )
     risks = proof["mappings"][0]["risks"]
     assert any(r["code"] == "trim_mutates" for r in risks)
@@ -104,6 +128,7 @@ def test_unsigned_and_float_sku_risks():
         ],
         target_columns=[],
         destination_db_type="snowflake",
+        destination_table_exists=False,
     )
     codes = {r["code"] for m in proof["mappings"] for r in m["risks"]}
     assert "unsigned_range" in codes
@@ -124,6 +149,7 @@ def test_bigint_unsigned_lakehouse_risk():
         }],
         target_columns=[],
         destination_db_type="databricks",
+        destination_table_exists=False,
     )
     row = proof["mappings"][0]
     # Auto-widen: unsigned 64-bit → DECIMAL DDL on lakehouse
@@ -193,6 +219,7 @@ def test_cdc_metadata_and_delivery_posture():
         target_columns=[],
         destination_db_type="iceberg",
         sync_mode="cdc",
+        destination_table_exists=False,
     )
     assert proof["summary"]["cdc_detected"] is True
     assert any(r["code"] == "cdc_delivery_posture" for r in proof["global_risks"])
@@ -217,6 +244,7 @@ def test_cdc_append_only_sink_surfaces_in_mapping_proof():
         target_columns=[],
         destination_db_type="csv",
         sync_mode="cdc",
+        destination_table_exists=False,
     )
     assert any(r["code"] == "cdc_append_only_sink" for r in proof["global_risks"])
     assert any(r["severity"] == "error" for r in proof["global_risks"] if r["code"] == "cdc_append_only_sink")
@@ -238,11 +266,38 @@ def test_semi_structured_and_sample_preview():
         }],
         target_columns=[],
         destination_db_type="snowflake",
+        destination_table_exists=False,
     )
     row = proof["mappings"][0]
     assert any(r["code"] == "semi_structured" for r in row["risks"])
     assert row["sample_preview"]
     assert row["evidence"]["sample_preview"]
+
+
+def test_pipeline_preserves_decimal_params_and_demotes_bare_varchar():
+    typed = run_mapping_pipeline(
+        ["amount"],
+        [],
+        source_schemas=[{"name": "amount", "inferred_type": "DECIMAL(18,4)", "samples": ["1.2500"]}],
+        destination_db_type="postgresql",
+        use_llm=False,
+        destination_table_exists=False,
+    )
+    assert "18" in str(typed["mappings"][0]["target_type"]) or "18" in str(
+        typed["mapping_proof"]["mappings"][0].get("dest_native_type") or ""
+    )
+
+    weak = run_mapping_pipeline(
+        ["notes"],
+        ["notes"],
+        source_schemas=[{"name": "notes", "inferred_type": "VARCHAR", "samples": []}],
+        target_schemas=[{"name": "notes", "inferred_type": "VARCHAR", "samples": []}],
+        destination_db_type="postgresql",
+        use_llm=False,
+        destination_table_exists=True,
+    )
+    assert weak["mappings"][0]["confidence"] <= 0.78
+    assert weak["mappings"][0].get("requires_review") is True
 
 
 def test_confidence_breakdown_sums_to_display():

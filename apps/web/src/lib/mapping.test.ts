@@ -274,3 +274,46 @@ describe("Approve honesty + type badges", () => {
     assert.equal(typeFamily("TIMESTAMPTZ"), "temporal");
   });
 });
+
+describe("destination schema honesty", () => {
+  it("does not invent create-new from empty dest columns", () => {
+    const editable = editableFromPipelineMappings(
+      [{
+        source: "id",
+        target: "id",
+        confidence: 0.9,
+        source_type: "INTEGER",
+        target_type: "INTEGER",
+        assignment_strategy: "pending_dest_schema",
+        create_new: false,
+        requires_review: true,
+      }],
+      [],
+      [],
+      0.75,
+    );
+    assert.equal(editable[0].createNew, false);
+    assert.equal(editable[0].assignmentStrategy, "pending_dest_schema");
+    assert.equal(editable[0].approved, false);
+    assert.ok(editable[0].confidence <= 0.55);
+  });
+
+  it("honors confirmed identity_passthrough create-new without inventing from empty cols alone", () => {
+    const editable = editableFromPipelineMappings(
+      [{
+        source: "id",
+        target: "id",
+        confidence: 0.92,
+        source_type: "INTEGER",
+        target_type: "INTEGER",
+        assignment_strategy: "identity_passthrough",
+        create_new: true,
+      }],
+      [],
+      [],
+      0.75,
+    );
+    assert.equal(editable[0].createNew, true);
+    assert.ok(editable[0].confidence <= 0.93);
+  });
+});

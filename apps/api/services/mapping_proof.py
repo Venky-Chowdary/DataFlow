@@ -376,15 +376,27 @@ def _schema_decision(mapping: dict, *, dest_mode: str, destination_db_type: str)
     tgt = mapping.get("target") or ""
     src_type = mapping.get("source_type") or "VARCHAR"
     tgt_type = mapping.get("target_type") or mapping.get("dest_type") or src_type
+    # Prefer operator/pipeline target type for DDL display — preserve DECIMAL(p,s).
+    try:
+        from services.type_system import ddl_carrier_type
+
+        carrier = ddl_carrier_type(str(tgt_type or src_type))
+    except Exception:
+        carrier = str(tgt_type or src_type)
     dest = (destination_db_type or "").strip().lower()
-    if dest_mode == "create_new":
-        native = ddl_type(dest, src_type) if dest else tgt_type
+    create_row = bool(mapping.get("create_new")) or str(
+        mapping.get("assignment_strategy") or ""
+    ) in {"identity_passthrough", "create_compatible_new", "pending_dest_schema"}
+    if dest_mode == "schema_pending" or str(mapping.get("assignment_strategy") or "") == "pending_dest_schema":
+        return f"PENDING destination schema for `{tgt}` ({carrier}) — confirm table before create-new"
+    if dest_mode == "create_new" or (create_row and mapping.get("exists_in_destination") is False):
+        native = ddl_type(dest, carrier) if dest else carrier
         return f"CREATE column `{tgt}` as {native}"
     exists = mapping.get("exists_in_destination")
-    if exists is False:
-        native = ddl_type(dest, src_type) if dest else tgt_type
+    if exists is False or create_row:
+        native = ddl_type(dest, carrier) if dest else carrier
         return f"ADD new column `{tgt}` as {native} (not in introspected schema)"
-    return f"MATCH existing `{tgt}` ({tgt_type})"
+    return f"MATCH existing `{tgt}` ({carrier})"
 
 
 def _sample_preview(mapping: dict) -> list[str]:
@@ -504,6 +516,7 @@ def mapping_proof_or_build(
     source_kind: str = "",
     dest_kind: str = "",
     sync_mode: str = "",
+    destination_table_exists: bool | None = None,
 ) -> dict[str, Any]:
     """Prefer a persisted proof; otherwise build from the mappings that ran."""
     if isinstance(existing, dict) and existing.get("mappings"):
@@ -518,6 +531,7 @@ def mapping_proof_or_build(
         source_kind=source_kind,
         dest_kind=dest_kind,
         sync_mode=sync_mode,
+        destination_table_exists=destination_table_exists,
     )
 
 
@@ -529,17 +543,31 @@ def build_mapping_proof(
     source_kind: str = "",
     dest_kind: str = "",
     sync_mode: str = "",
+    destination_table_exists: bool | None = None,
 ) -> dict[str, Any]:
-    """Build universal mapping proof for Map/Validate UI — any connector pair."""
+    """Build universal mapping proof for Map/Validate UI — any connector pair.
+
+    ``dest_mode`` is tri-state honest:
+    - ``create_new`` — confirmed missing table (or every mapping is create-new with no targets)
+    - ``schema_pending`` — destination existence/schema unknown; refuse invent create-new
+    - ``match_existing`` — destination columns present (adds are per-row, not whole-plan create)
+    """
     has_targets = bool(target_columns)
-    identity = any(
-        m.get("assignment_strategy") == "identity_passthrough" or m.get("create_new")
+    pending = any(
+        str(m.get("assignment_strategy") or "") == "pending_dest_schema"
         for m in mappings
     )
-    dest_mode = "create_new" if (not has_targets or identity) else "match_existing"
-    # If some targets exist but mappings invent new cols, still match_existing with adds.
-    if has_targets and not identity:
+    # Never invent whole-plan create-new from empty targets + unknown existence.
+    # Confirmed missing table → create_new. Known/listed targets → match_existing
+    # (per-column ADD stays on rows; does not flip the plan).
+    if pending or (destination_table_exists is None and not has_targets):
+        dest_mode = "schema_pending"
+    elif destination_table_exists is False:
+        dest_mode = "create_new"
+    elif has_targets or destination_table_exists is True:
         dest_mode = "match_existing"
+    else:
+        dest_mode = "schema_pending"
 
     rows: list[dict[str, Any]] = []
     all_risks: list[dict[str, str]] = []
@@ -581,8 +609,17 @@ def build_mapping_proof(
             "source_type": m.get("source_type") or "VARCHAR",
             "target_type": m.get("target_type") or m.get("dest_type") or m.get("source_type") or "VARCHAR",
             "dest_native_type": (
-                ddl_type(destination_db_type, str(m.get("source_type") or "VARCHAR"))
-                if destination_db_type else None
+                ddl_type(
+                    destination_db_type,
+                    str(
+                        m.get("target_type")
+                        or m.get("dest_type")
+                        or m.get("source_type")
+                        or "VARCHAR"
+                    ),
+                )
+                if destination_db_type
+                else None
             ),
             "transform": transform,
             "transform_fidelity": fidelity,

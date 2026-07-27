@@ -224,6 +224,9 @@ def add_mapping_revision(
             source_kind=str(src.get("kind") or ""),
             dest_kind=str(dest.get("kind") or ""),
             sync_mode=str((plan.policies or {}).get("sync_mode") or ""),
+            destination_table_exists=(
+                dest.get("table_exists") if isinstance(dest.get("table_exists"), bool) else None
+            ),
         )
         rev = PlanRevision(
             version=version,
@@ -338,6 +341,9 @@ def sync_ui_mappings(
             source_kind=str(src.get("kind") or ""),
             dest_kind=str(dest.get("kind") or ""),
             sync_mode=str((plan.policies or {}).get("sync_mode") or ""),
+            destination_table_exists=(
+                dest.get("table_exists") if isinstance(dest.get("table_exists"), bool) else None
+            ),
         )
         rev = PlanRevision(
             version=version,

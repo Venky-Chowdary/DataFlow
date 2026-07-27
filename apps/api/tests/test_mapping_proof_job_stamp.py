@@ -73,6 +73,7 @@ def test_stamp_rebuild_from_transfer_request_mappings():
         source_kind="file",
         dest_kind="database",
         sync_mode="full_refresh_overwrite",
+        destination_table_exists=False,
     )
     assert proof["dest_mode"] == "create_new"
     assert proof["mappings"][0]["source"] == "sku"

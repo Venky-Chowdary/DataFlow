@@ -619,7 +619,10 @@ function boostIdentityConfidence(
   target: string,
   confidence: number,
   createNew = false,
+  pendingDestSchema = false,
 ): number {
+  // Pending / unknown destination — never inflate toward create-new certainty.
+  if (pendingDestSchema) return Math.min(confidence, 0.55);
   const norm = normalizeMappingTarget(source);
   if (norm === target || source.toLowerCase() === target.toLowerCase()) {
     if (createNew) return Math.min(Math.max(confidence, 0.9), 0.93);
@@ -765,9 +768,8 @@ export function editableFromPipelineMappings(
   destSchema?: Record<string, string>,
 ): EditableMapping[] {
   const destSet = new Set((destColumns ?? []).map((c) => c.toLowerCase()));
-  const createNew =
-    (destColumns?.length ?? 0) === 0
-    || mappings.some((m) => m.assignment_strategy === "identity_passthrough" || m.create_new);
+  // Never invent plan-level create-new from empty dest columns alone.
+  // Only honor explicit pipeline strategies / create_new flags.
   const destTypeByLower = new Map(
     Object.entries(destSchema || {}).map(([k, v]) => [k.toLowerCase(), v]),
   );
@@ -775,8 +777,20 @@ export function editableFromPipelineMappings(
     const sampleVal = sampleRows?.find((r) => r[m.source] != null)?.[m.source];
     const existsInDest = destSet.has(m.target.toLowerCase());
     const liveDestType = destTypeByLower.get(m.target.toLowerCase());
-    const conf = boostIdentityConfidence(m.source, m.target, m.confidence, createNew);
-    const requiresReview = Boolean(m.requires_review);
+    const pendingDest = m.assignment_strategy === "pending_dest_schema";
+    const rowCreateNew =
+      !pendingDest
+      && (Boolean(m.create_new)
+        || m.assignment_strategy === "create_compatible_new"
+        || m.assignment_strategy === "identity_passthrough");
+    const conf = boostIdentityConfidence(
+      m.source,
+      m.target,
+      m.confidence,
+      rowCreateNew,
+      pendingDest,
+    );
+    const requiresReview = Boolean(m.requires_review) || pendingDest;
     const identityMatch = normalizeMappingTarget(m.source) === m.target.toLowerCase();
     const sourceType = m.source_type;
     const destType = liveDestType || m.target_type || m.source_type;
@@ -807,7 +821,13 @@ export function editableFromPipelineMappings(
       inferredType: sourceType,
       destType,
       sample: sampleVal != null ? String(sampleVal) : undefined,
-      approved: !requiresReview && !specialty && !structish && !arrayish && (conf >= threshold || identityMatch),
+      approved:
+        !requiresReview
+        && !specialty
+        && !structish
+        && !arrayish
+        && !pendingDest
+        && (conf >= threshold || (identityMatch && !rowCreateNew)),
       isPii: m.is_pii,
       reason: specialty && !(m.reasoning || "").toLowerCase().includes("identity")
         ? [m.reasoning, `${sourceType || destType} — identity payload (dim/SRID not rewritten)`].filter(Boolean).join(" · ")
@@ -822,7 +842,7 @@ export function editableFromPipelineMappings(
       transform: uiTf === "none" && (structish || arrayish) ? "parse_json" : uiTf,
       engineTransform: engineTf || (structish || arrayish ? "json" : undefined),
       semanticRole: m.semantic_role,
-      createNew: Boolean(m.create_new) || m.assignment_strategy === "create_compatible_new",
+      createNew: rowCreateNew,
       assignmentStrategy: m.assignment_strategy,
       structPolicy: structPolicy ?? (arrayish ? "store_as_json" : undefined),
       structDerived: Boolean(m.struct_derived),

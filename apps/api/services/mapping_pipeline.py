@@ -6,9 +6,11 @@ import re
 
 from services.semantic_mapper import map_columns
 from services.transform_engine import infer_transform_for_mapping
-from services.type_system import normalize_logical_type
+from services.type_system import ddl_carrier_type, ddl_type, normalize_logical_type
 
 CONFIDENCE_FLOOR = 0.72
+# Untyped VARCHAR with no samples — refuse inflated confidence (thin SaaS / failed introspect).
+_UNTYPED_VARCHAR_CONF_CAP = 0.78
 
 
 # When the destination schema is generic or unknown, create-new columns should
@@ -26,6 +28,44 @@ _TYPED_TRANSFORM_TARGET_TYPE: dict[str, str] = {
     "currency": "DECIMAL",
     "percentage": "DECIMAL",
 }
+
+
+def _canonicalize_schema_rows(schemas: list[dict] | None) -> list[dict] | None:
+    """Prefer native_type / parametric carriers over collapsed VARCHAR labels."""
+    if not schemas:
+        return schemas
+    out: list[dict] = []
+    for s in schemas:
+        raw = s.get("native_type") or s.get("inferred_type") or "VARCHAR"
+        carrier = ddl_carrier_type(str(raw))
+        out.append({**s, "inferred_type": carrier})
+    return out
+
+
+def _demote_untyped_varchar_confidence(
+    mappings: list[dict],
+    *,
+    source_schemas: list[dict] | None,
+) -> list[dict]:
+    """Cap confidence when Map only has bare VARCHAR and zero samples."""
+    by_name = {s["name"]: s for s in (source_schemas or [])}
+    refined: list[dict] = []
+    for m in mappings:
+        out = dict(m)
+        src = by_name.get(m.get("source") or "", {})
+        src_type = str(out.get("source_type") or src.get("inferred_type") or "VARCHAR")
+        samples = src.get("samples") or []
+        logical = normalize_logical_type(src_type)
+        if logical in {"string", "text", "varchar", "unknown"} and not samples:
+            conf = min(float(out.get("confidence") or 0), _UNTYPED_VARCHAR_CONF_CAP)
+            out["confidence"] = round(conf, 3)
+            out["requires_review"] = True
+            reason = str(out.get("reasoning") or "")
+            note = "weak type evidence (VARCHAR, no samples)"
+            if note not in reason.lower():
+                out["reasoning"] = f"{reason} · {note}".strip(" ·")
+        refined.append(out)
+    return refined
 
 
 def classify_format(source_columns: list[str], file_format: str | None = None) -> dict:
@@ -284,6 +324,8 @@ def run_mapping_pipeline(
     from services.semantic_analyzer import analyze_schema
 
     classification = classify_format(source_columns, file_format)
+    source_schemas = _canonicalize_schema_rows(source_schemas)
+    target_schemas = _canonicalize_schema_rows(target_schemas)
     enrichments = enrich_columns(source_columns, source_schemas)
 
     if source_schemas is None and source_columns:
@@ -392,13 +434,19 @@ def run_mapping_pipeline(
         if enrichment and enrichment not in reasoning.lower():
             reasoning = f"{reasoning} · enriched: {enrichment}"
         src_type = schema_by_name.get(m["source"], {}).get("inferred_type", "VARCHAR")
+        src_type = ddl_carrier_type(str(src_type))
         tgt_type = target_by_name.get(m["target"], {}).get("inferred_type")
         # Create-new / missing dest type: auto-widen unsigned 64-bit to DECIMAL.
+        # Preserve DECIMAL(p,s) / VECTOR(n) / TIMESTAMPTZ carriers — never strip params.
         if not tgt_type:
             if normalize_logical_type(src_type) == "decimal" and "unsigned" in str(src_type).lower():
                 tgt_type = "DECIMAL"
+            elif destination_db_type:
+                tgt_type = ddl_type(destination_db_type, src_type)
             else:
                 tgt_type = src_type
+        else:
+            tgt_type = ddl_carrier_type(str(tgt_type))
 
         col_samples = [
             str(x) for x in (schema_by_name.get(m["source"], {}).get("samples") or [])[:8]
@@ -408,10 +456,18 @@ def run_mapping_pipeline(
         )
         # New/generic destinations: the DDL type should match the chosen typed
         # transform so a date column is created for "date" transforms, etc.
+        # Do not collapse parametric DECIMAL(p,s) → bare DECIMAL.
         if normalize_logical_type(tgt_type) in {"string", "text", "varchar", "unknown"}:
             typed_target = _TYPED_TRANSFORM_TARGET_TYPE.get(transform)
             if typed_target:
-                tgt_type = typed_target
+                if typed_target == "DECIMAL" and normalize_logical_type(src_type) == "decimal":
+                    tgt_type = (
+                        ddl_type(destination_db_type, src_type)
+                        if destination_db_type
+                        else src_type
+                    )
+                else:
+                    tgt_type = typed_target
 
         enriched_mappings.append(
             {
@@ -445,6 +501,10 @@ def run_mapping_pipeline(
     )
 
     enriched_mappings = refine_mappings_with_quality(
+        enriched_mappings,
+        source_schemas=source_schemas,
+    )
+    enriched_mappings = _demote_untyped_varchar_confidence(
         enriched_mappings,
         source_schemas=source_schemas,
     )
@@ -557,6 +617,7 @@ def run_mapping_pipeline(
         target_columns=target_columns,
         destination_db_type=destination_db_type,
         sync_mode=sync_mode,
+        destination_table_exists=destination_table_exists,
     )
     plan_summary["dest_mode"] = mapping_proof.get("dest_mode")
     plan_summary["mapping_proof_summary"] = mapping_proof.get("summary")

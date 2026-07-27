@@ -73,6 +73,10 @@ def run_plan_mapping(
     ]
 
     policies = getattr(plan, "policies", None) or {}
+    dest = plan.destination if isinstance(plan.destination, dict) else {}
+    table_exists = dest.get("table_exists")
+    if not isinstance(table_exists, bool):
+        table_exists = None
     result = run_mapping_pipeline(
         plan.source_columns,
         plan.target_columns,
@@ -85,6 +89,7 @@ def run_plan_mapping(
         destination_db_type=(plan.destination.get("format") or plan.destination.get("type") or "").lower(),
         schema_policy=policies.get("schema_policy", "manual_review"),
         sync_mode=str(policies.get("sync_mode") or ""),
+        destination_table_exists=table_exists,
     )
 
     updated = add_mapping_revision(plan_id, result)

@@ -497,12 +497,27 @@ def _mapping_proof_for_request(request: TransferRequest) -> dict[str, Any]:
     mappings = list(request.mappings or [])
     if not mappings:
         return {}
+    dest_extra = getattr(request.destination, "extra", None) or {}
+    table_exists = dest_extra.get("table_exists") if isinstance(dest_extra, dict) else None
+    if not isinstance(table_exists, bool):
+        pending = any(
+            str(m.get("assignment_strategy") or "") == "pending_dest_schema" for m in mappings
+        )
+        all_create = (not pending) and all(
+            bool(m.get("create_new"))
+            or str(m.get("assignment_strategy") or "")
+            in {"identity_passthrough", "create_compatible_new"}
+            for m in mappings
+        )
+        # Whole-plan identity create-new only — never flip match_existing ADDs.
+        table_exists = False if all_create else None
     return build_mapping_proof(
         mappings,
         destination_db_type=(request.destination.format or "").lower(),
         source_kind=request.source.kind or "",
         dest_kind=request.destination.kind or "",
         sync_mode=request.sync_mode or "",
+        destination_table_exists=table_exists,
     )
 
 

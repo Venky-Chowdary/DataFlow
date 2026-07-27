@@ -2475,22 +2475,21 @@ export function TransferPage({
       bump(42, "Building transfer plan…");
       await loadTransferPlan();
       let mapped: EditableMapping[] = [];
-      // Create-new when the table is confirmed missing OR still unknown after probe
-      // (operator typed a name; Destination already promises CREATE IF NOT EXISTS).
-      // Never invent create-new when the destination was unreachable.
+      // Create-new only when the destination object is confirmed missing (or file export).
+      // Unknown existence → schema_pending (never invent CREATE / fake 93% identity).
       const canCreateNew =
         destKindMode !== "database"
-        || loadedTableExists === false
-        || (
-          loadedTableExists == null
-          && freshDestCols.length === 0
-          && Boolean(targetCollection.trim())
-          && loadedConnected !== false
-        );
+        || loadedTableExists === false;
+      const schemaPending =
+        destKindMode === "database"
+        && loadedTableExists == null
+        && freshDestCols.length === 0
+        && Boolean(targetCollection.trim())
+        && loadedConnected !== false;
       const mapTargets =
         freshDestCols.length > 0
           ? freshDestCols
-          : canCreateNew
+          : canCreateNew || schemaPending
             ? undefined
             : null;
       if (mapTargets === null) {
@@ -2506,31 +2505,37 @@ export function TransferPage({
           tone: "warning",
         });
         mapped = columnMappings;
-      } else if (freshDestCols.length === 0 && canCreateNew) {
+      } else if (freshDestCols.length === 0 && (canCreateNew || schemaPending)) {
         if (loadedTableExists === false) {
           toast({
             title: "New table — create on first write",
             message: `${targetCollection.trim()} was not found. Mapping source columns as create-new fields.`,
             tone: "info",
           });
-        } else if (loadedTableExists == null) {
+        } else if (schemaPending) {
           toast({
-            title: "Treating as new table",
-            message: `${targetCollection.trim()} was not confirmed on the destination. Mapping as create-new — DataFlow will CREATE TABLE on first write. If the table already exists, go back and retry schema load.`,
-            tone: "info",
+            title: "Destination schema pending",
+            message: `${targetCollection.trim()} was not confirmed. Map stays pending — retry Destination schema load or confirm the table is missing before create-new.`,
+            tone: "warning",
           });
-          setDestTableExists(false);
+          // Keep tri-state null — do not invent destTableExists=false.
         }
+        const existsForEmpty =
+          loadedTableExists === false
+            ? false
+            : schemaPending
+              ? null
+              : loadedTableExists;
         if (sourceKind === "file" && parsed) {
           if (!analysis?.columns.length || !columnMappings.length) {
             bump(58, "Profiling source columns…");
             await runSourceColumnAnalysis(parsed, { manageAnalyzing: false });
           }
-          bump(72, "Matching source to create-new fields…");
-          mapped = await applyPipelineMappings(undefined, {}, undefined, loadedTableExists === false ? false : loadedTableExists) ?? [];
+          bump(72, schemaPending ? "Holding map until destination schema confirms…" : "Matching source to create-new fields…");
+          mapped = await applyPipelineMappings(undefined, {}, undefined, existsForEmpty) ?? [];
         } else if (analysis?.columns.length || currentSourceColumns.length) {
-          bump(65, "Matching source to create-new fields…");
-          mapped = await applyPipelineMappings(undefined, {}, undefined, loadedTableExists === false ? false : loadedTableExists) ?? [];
+          bump(65, schemaPending ? "Holding map until destination schema confirms…" : "Matching source to create-new fields…");
+          mapped = await applyPipelineMappings(undefined, {}, undefined, existsForEmpty) ?? [];
         } else {
           toast({
             title: "Source schema required",
@@ -4967,16 +4972,21 @@ export function TransferPage({
                 </div>
               )}
             </div>
-            {/* Status only when probing / resolved — idle copy lives in the combobox */}
+            {/* Status when probing / resolved — including pending unknown existence */}
             {destDriverType !== "dynamodb"
-              && (destSchemaLoading || destTableExists === true || destTableExists === false) && (
+              && (destSchemaLoading
+                || destTableExists === true
+                || destTableExists === false
+                || (Boolean(targetCollection.trim()) && destTableExists == null && !destSchemaLoading)) && (
               <div
                 className={`df2-dest-target-status${
                   destSchemaLoading
                     ? " is-loading"
                     : destTableExists === true
                       ? " is-existing"
-                      : " is-create"
+                      : destTableExists === false
+                        ? " is-create"
+                        : " is-pending"
                 }`}
                 aria-live="polite"
                 role="status"
@@ -4998,10 +5008,12 @@ export function TransferPage({
                       Open Advanced settings to switch to overwrite or incremental sync.
                       {destColumns.length > 0 ? (
                         <> · {destColumns.length} columns loaded.</>
-                      ) : null}
+                      ) : (
+                        <> · Column metadata pending — retry schema load before Map invents create-new.</>
+                      )}
                     </p>
                   </>
-                ) : (
+                ) : destTableExists === false ? (
                   <>
                     <DtIcon name="sparkle" size={14} />
                     <p>
@@ -5009,6 +5021,14 @@ export function TransferPage({
                         {destDriverType === "mongodb" ? "Collection not found." : "Table not found."}
                       </strong>{" "}
                       DataFlow will create it automatically on first write.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <DtIcon name="database" size={14} />
+                    <p>
+                      <strong>Destination not confirmed yet.</strong> Retry schema load — Map will stay
+                      schema-pending until the table is found or confirmed missing (no invent create-new).
                     </p>
                   </>
                 )}

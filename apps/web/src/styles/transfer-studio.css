@@ -2577,6 +2577,16 @@ th.df2-type-string .df2-type-badge {
   color: #2563eb;
 }
 
+.df2-dest-target-status.is-pending {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #92400e;
+}
+
+.df2-dest-target-status.is-pending svg {
+  color: #d97706;
+}
+
 .df2-dest-target-status.is-loading {
   background: #f8fafc;
   border-color: #cbd5e1;

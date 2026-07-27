@@ -55,7 +55,7 @@ export interface MappingProofRow {
 }
 
 export interface MappingProof {
-  dest_mode: "create_new" | "match_existing" | string;
+  dest_mode: "create_new" | "match_existing" | "schema_pending" | string;
   destination_db_type?: string;
   source_kind?: string;
   dest_kind?: string;
@@ -233,15 +233,14 @@ export function mergeMappingProof(
   const client = buildClientMappingProof(mappings, opts);
   if (!mappingProof?.mappings?.length) return client;
   const bySource = new Map(mappings.map((m) => [m.source, m]));
-  // Empty dest columns alone must NOT force create-new when the table exists or is unknown.
-  const createNew =
-    opts.destTableExists === false
-    || (mappingProof.dest_mode === "create_new" && opts.destTableExists !== true && (opts.destColumns?.length ?? 0) === 0);
-  const destMode = createNew
-    ? "create_new"
-    : (opts.destColumns?.length ?? 0) > 0 || opts.destTableExists === true
+  // Live existence wins over stale API dest_mode — never invent create-new from empty cols.
+  const destMode =
+    (opts.destColumns?.length ?? 0) > 0 || opts.destTableExists === true
       ? "match_existing"
-      : client.dest_mode;
+      : opts.destTableExists === false
+        ? "create_new"
+        : "schema_pending";
+  const createNew = destMode === "create_new";
   const mergedRows = mappingProof.mappings.map((row) => {
     const live = bySource.get(row.source);
     if (!live) return row;
