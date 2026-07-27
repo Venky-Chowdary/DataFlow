@@ -399,6 +399,8 @@ def _gate_cdc_sink(
         dest_type=dest_type,
         has_primary_key=has_primary_key,
         write_mode="upsert",
+        # CDC transfer always stamps DF_LSN_COL on upsert routes.
+        has_lsn_column=True,
         allow_append_only=_truthy_cfg(
             dest_cfg, "allow_append_only", "cdc_allow_append_only"
         ),

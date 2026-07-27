@@ -75,13 +75,54 @@ def _get_case_insensitive(rec: dict[str, Any], key: str | None) -> Any:
     return None
 
 
+def _fingerprint_cell(
+    value: Any,
+    *,
+    column: str = "",
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
+) -> str:
+    """Cell fingerprint — bind-aware when destination types are known."""
+    eng = (dest_db_type or "").strip().lower()
+    types = dest_types or {}
+    ddl = ""
+    if column and types:
+        ddl = str(types.get(column) or types.get(column.lower()) or "")
+        if not ddl:
+            for k, v in types.items():
+                if str(k).lower() == column.lower():
+                    ddl = str(v or "")
+                    break
+    if eng and ddl:
+        try:
+            # Defined later in this module; resolved at call time.
+            return fingerprint_for_reconcile(value, ddl_type=ddl, engine=eng)
+        except Exception:
+            pass
+    return normalize_cell(value)
+
+
 def _iter_fingerprints(
     rows: Iterable[Any],
     columns: list[str] | None = None,
     *,
     sort_key: str | None = None,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
 ):
-    """Yield (row_key, fingerprint) tuples for each row without materializing the full list."""
+    """Yield (row_key, fingerprint) tuples for each row without materializing the full list.
+
+    When ``dest_db_type`` / ``dest_types`` are set, cells are fingerprinted through
+    the same write-path bind helpers as Gate-8 sample compare.
+    """
+    eng = (dest_db_type or "").strip().lower()
+    types = dest_types or {}
+
+    def _fp(val: Any, col: str = "") -> str:
+        return _fingerprint_cell(
+            val, column=col, dest_db_type=eng, dest_types=types
+        )
+
     if columns is not None:
         cols = columns
         sorted_cols = sorted(cols, key=lambda x: x.lower())
@@ -96,25 +137,26 @@ def _iter_fingerprints(
         for row in rows:
             if isinstance(row, dict):
                 parts = [
-                    f"{c.lower()}={normalize_cell(row.get(c))}" for c in sorted_cols
+                    f"{c.lower()}={_fp(row.get(c), c)}" for c in sorted_cols
                 ]
                 if sort_key:
-                    row_key = normalize_cell(row.get(sort_key))
-                    if row_key is None:
+                    row_key = _fp(row.get(sort_key), sort_key)
+                    if row_key is None or row_key == "":
                         for k, v in row.items():
                             if k.lower() == sort_key_lower:
-                                row_key = normalize_cell(v)
+                                row_key = _fp(v, sort_key)
                                 break
                 else:
                     row_key = ""
             else:
                 parts = [
-                    f"{c.lower()}={normalize_cell(row[col_index[c]] if col_index[c] < len(row) else None)}"
+                    f"{c.lower()}={_fp(row[col_index[c]] if col_index[c] < len(row) else None, c)}"
                     for c in sorted_cols
                 ]
                 row_key = (
-                    normalize_cell(
-                        row[sort_idx] if sort_idx >= 0 and sort_idx < len(row) else None
+                    _fp(
+                        row[sort_idx] if sort_idx >= 0 and sort_idx < len(row) else None,
+                        sort_key or "",
                     )
                     if sort_key
                     else ""
@@ -125,15 +167,15 @@ def _iter_fingerprints(
         for row in rows:
             if isinstance(row, dict):
                 keys = sorted(row.keys(), key=lambda x: x.lower())
-                parts = [f"{k.lower()}={normalize_cell(row.get(k))}" for k in keys]
+                parts = [f"{k.lower()}={_fp(row.get(k), k)}" for k in keys]
                 fingerprint = "\x1f".join(parts)
                 row_key = (
-                    normalize_cell(_get_case_insensitive(row, sort_key))
+                    _fp(_get_case_insensitive(row, sort_key), sort_key or "")
                     if sort_key
                     else ""
                 )
             else:
-                fingerprint = "|".join(sorted(normalize_cell(v) for v in row))
+                fingerprint = "|".join(sorted(_fp(v) for v in row))
                 row_key = ""
             yield (row_key, fingerprint)
 
@@ -249,6 +291,8 @@ def canonical_checksum(
     columns: list[str] | None = None,
     *,
     sort_key: str | None = None,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
 ) -> str:
     """Stable, order-independent checksum that preserves column identity.
 
@@ -257,11 +301,22 @@ def canonical_checksum(
     columns cannot collide. Column labels are normalized to lowercase so source
     and target casing differences do not produce false mismatches. When no
     columns are provided, the legacy cell-only fallback is used for matrices.
+
+    Pass ``dest_db_type`` / ``dest_types`` so source wire and destination
+    read-back share write-path bind fingerprints (bool/JSON parity).
     """
     if not rows:
         return hashlib.sha256(b"").hexdigest()[:16]
     return _hash_fingerprints(
-        list(_iter_fingerprints(rows, columns, sort_key=sort_key))
+        list(
+            _iter_fingerprints(
+                rows,
+                columns,
+                sort_key=sort_key,
+                dest_db_type=dest_db_type,
+                dest_types=dest_types,
+            )
+        )
     )
 
 
@@ -271,6 +326,8 @@ def canonical_checksum_from_iter(
     *,
     sort_key: str | None = None,
     limit: int = 0,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
 ) -> str:
     """Streaming variant of canonical_checksum with optional sample limit.
 
@@ -279,7 +336,13 @@ def canonical_checksum_from_iter(
     """
     fingerprints: list[tuple[str, str]] = []
     for i, (row_key, fp) in enumerate(
-        _iter_fingerprints(rows, columns, sort_key=sort_key)
+        _iter_fingerprints(
+            rows,
+            columns,
+            sort_key=sort_key,
+            dest_db_type=dest_db_type,
+            dest_types=dest_types,
+        )
     ):
         if limit and i >= limit:
             break
@@ -287,9 +350,17 @@ def canonical_checksum_from_iter(
     return _hash_fingerprints(fingerprints)
 
 
-def checksum_rows(rows: list[Any], columns: list[str] | None = None) -> str:
+def checksum_rows(
+    rows: list[Any],
+    columns: list[str] | None = None,
+    *,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
+) -> str:
     """Canonical, order-independent checksum over a matrix or list of dicts."""
-    return canonical_checksum(rows, columns)
+    return canonical_checksum(
+        rows, columns, dest_db_type=dest_db_type, dest_types=dest_types
+    )
 
 
 def aggregate_checksum(
@@ -297,9 +368,17 @@ def aggregate_checksum(
     columns: list[str] | None = None,
     *,
     sort_key: str | None = None,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
 ) -> str:
     """Order-independent checksum for reconciliation with column identity."""
-    return canonical_checksum(records, columns, sort_key=sort_key)
+    return canonical_checksum(
+        records,
+        columns,
+        sort_key=sort_key,
+        dest_db_type=dest_db_type,
+        dest_types=dest_types,
+    )
 
 
 def reconcile(
@@ -423,21 +502,47 @@ def reconcile(
                 rejected_rows=rejected_rows,
                 rows_skipped=rows_skipped,
             )
+        # Balanced: never soft-pass a checksum mismatch without key-aligned
+        # sample proof (compared>0). Cross-engine "rendering" is not an excuse
+        # for green Gate-8 — bind-aware fingerprints close that class of drift.
+        compared = int((sample_compare or {}).get("compared") or 0)
+        sample_ok = (
+            bool(sample_compare)
+            and bool(sample_compare.get("passed", False))
+            and compared > 0
+        )
+        if sample_ok:
+            return ReconciliationReport(
+                passed=True,
+                source_rows=source_rows,
+                target_rows=target_rows,
+                source_checksum=source_checksum,
+                target_checksum=target_checksum,
+                message=(
+                    f"Transfer verified by key-aligned sample ({compared} compared; "
+                    f"{target_rows} rows"
+                    + (f", {rejected_rows} rejected" if rejected_rows else "")
+                    + "; whole-table checksums differed — sample is the authority)"
+                ),
+                rejected_rows=rejected_rows,
+                coerced_null_rows=coerced_null_rows,
+                rows_skipped=rows_skipped,
+                sample_compare=sample_compare,
+            )
         return ReconciliationReport(
-            passed=True,
+            passed=False,
             source_rows=source_rows,
             target_rows=target_rows,
             source_checksum=source_checksum,
             target_checksum=target_checksum,
             message=(
-                f"Row count verified ({target_rows} rows"
-                + (f", {rejected_rows} rejected" if rejected_rows else "")
-                + "); checksums differ due to "
-                "cross-engine type rendering — not a data loss signal"
+                "Checksum mismatch in balanced mode: key-aligned sample compare "
+                "with compared>0 is required (refuse unverified soft-pass)"
             ),
             rejected_rows=rejected_rows,
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
+            sample_compare=sample_compare,
         )
     if coerced_null_rows:
         # Row counts and checksums can still match here because the SAME failed
@@ -491,6 +596,7 @@ def verify_postgres_table(
     table_name: str,
     target_columns: list[str] | None = None,
     limit: int = 0,
+    dest_types: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     try:
         from connectors.postgresql_conn import get_connection
@@ -516,7 +622,11 @@ def verify_postgres_table(
             names = [d[0] for d in cur.description] if cur.description else []
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(
-                _iter_fetchmany(cur), columns, limit=limit
+                _iter_fetchmany(cur),
+                columns,
+                limit=limit,
+                dest_db_type="postgresql",
+                dest_types=dest_types,
             )
         conn.close()
         return count, checksum
@@ -611,6 +721,7 @@ def verify_snowflake_table(
     table_name: str,
     target_columns: list[str] | None = None,
     limit: int = 0,
+    dest_types: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     try:
         from connectors.snowflake_conn import (
@@ -651,7 +762,11 @@ def verify_snowflake_table(
             names = [d[0] for d in cur.description] if cur.description else []
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(
-                _iter_fetchmany(cur), columns, limit=limit
+                _iter_fetchmany(cur),
+                columns,
+                limit=limit,
+                dest_db_type="snowflake",
+                dest_types=dest_types,
             )
         conn.close()
         return count, checksum
@@ -672,6 +787,7 @@ def verify_mysql_table(
     table_name: str,
     target_columns: list[str] | None = None,
     limit: int = 0,
+    dest_types: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     try:
         from connectors.mysql_conn import get_connection
@@ -695,7 +811,11 @@ def verify_mysql_table(
             names = [d[0] for d in cur.description] if cur.description else []
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(
-                _iter_fetchmany(cur), columns, limit=limit
+                _iter_fetchmany(cur),
+                columns,
+                limit=limit,
+                dest_db_type="mysql",
+                dest_types=dest_types,
             )
         conn.close()
         return count, checksum
@@ -1146,6 +1266,7 @@ def verify_target(
     fallback_checksum: str,
     target_columns: list[str] | None = None,
     limit: int = 0,
+    dest_types: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     if db_type == "iceberg":
         count, chk = verify_iceberg_table(
@@ -1253,6 +1374,7 @@ def verify_target(
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,
+            dest_types=dest_types,
         )
     elif db_type == "redis":
         count, chk = verify_redis_prefix(
@@ -1279,6 +1401,7 @@ def verify_target(
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,
+            dest_types=dest_types,
         )
     elif db_type == "mysql":
         count, chk = verify_mysql_table(
@@ -1292,6 +1415,7 @@ def verify_target(
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,
+            dest_types=dest_types,
         )
     elif db_type == "bigquery":
         count, chk = verify_bigquery_table(
@@ -1360,7 +1484,12 @@ def fingerprint_for_reconcile(
             converted, err = apply_transform(
                 cell if cell is not None else "", transform or "none"
             )
-        if not err:
+        if err:
+            # Quarantine / coerce_null write path stores SQL NULL for failed cells.
+            # Fingerprint must match that — not the raw bad wire — or Gate-8
+            # false-fails every quarantined coercion as a sample mismatch.
+            wire = None
+        else:
             wire = converted
     elif value is not None and not isinstance(value, (str, int, float, bool, bytes)):
         wire = cell_to_string(value, preserve_sql_null=True)
@@ -1766,9 +1895,11 @@ def sample_compare_rows(
                 pass
         if transform:
             try:
-                converted, _ = apply_transform(raw, transform)
+                converted, err = apply_transform(raw, transform)
             except Exception:
-                converted = raw
+                converted, err = raw, "transform_failed"
+            if err:
+                converted = None
         else:
             converted = raw
         return normalize_cell(converted)
@@ -1838,6 +1969,24 @@ def sample_compare_rows(
                 # Column absent from read-back sample — do not invent NULL mismatch.
                 continue
             transform = m.get("transform")
+            if not transform or str(transform).strip().lower() in {
+                "",
+                "none",
+                "identity",
+                "passthrough",
+            }:
+                # Mirror writer_common.resolve_transform so quarantine coerces
+                # (integer/date/…) fingerprint as NULL like the write path.
+                try:
+                    from services.transform_resolver import resolve_transform
+
+                    transform = resolve_transform(
+                        m,
+                        column_types={},
+                        dest_types=dest_types,
+                    )
+                except Exception:
+                    transform = m.get("transform")
             src_val = _fingerprint(
                 src.get(src_col), transform=transform, tgt_col=tgt_col
             )

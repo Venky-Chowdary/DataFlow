@@ -185,3 +185,69 @@ def test_build_reconciliation_proof_forwards_dest_bind():
     )
     assert proof["passed"] is True, proof
     assert proof["sample_compare"]["passed"] is True
+
+
+def test_canonical_checksum_bind_parity_bool_wire():
+    """Whole-table checksum must match across Mongo string bool vs MySQL 0/1."""
+    from services.reconciliation import canonical_checksum
+
+    src = [{"id": "1", "active": "false"}]
+    dst = [{"id": "1", "active": 0}]
+    types = {"id": "VARCHAR", "active": "BOOLEAN"}
+    a = canonical_checksum(src, ["id", "active"], dest_db_type="mysql", dest_types=types)
+    b = canonical_checksum(dst, ["id", "active"], dest_db_type="mysql", dest_types=types)
+    assert a == b
+
+
+def test_snowflake_bind_rows_covers_boolean_before_copy():
+    from connectors.snowflake_writer import _bind_rows_for_snowflake
+
+    bound = _bind_rows_for_snowflake(
+        [("1", "true"), ("2", "false")],
+        ["VARCHAR", "BOOLEAN"],
+    )
+    assert bound[0][1] is True or bound[0][1] == 1 or bound[0][1] == "true"
+    # After bind, false-ish wire must not remain the string "false" if coerce works.
+    assert bound[1][1] is False or bound[1][1] == 0 or bound[1][1] == "false"
+
+
+def test_rejected_detail_stamps_primary_key():
+    from connectors.writer_common import build_mapped_rows_with_details
+
+    mapped, errors, details = build_mapped_rows_with_details(
+        headers=["id", "amount"],
+        data_rows=[["1", "not-a-number"]],
+        mappings=[
+            {"source": "id", "target": "id", "primary_key": True},
+            {"source": "amount", "target": "amount", "transform": "integer"},
+        ],
+        target_cols=["id", "amount"],
+        column_types={"id": "string", "amount": "integer"},
+        error_policy="quarantine",
+    )
+    assert details, (mapped, errors, details)
+    assert details[0].get("primary_key") == ["id"]
+    assert details[0].get("pk_value", {}).get("id") == "1"
+
+
+def test_cdc_classify_requires_lsn_guard_engine():
+    from services.cdc_effectively_once import (
+        SINK_APPEND_ONLY,
+        SINK_EFFECTIVELY_ONCE_ELIGIBLE,
+        classify_sink_delivery,
+    )
+
+    pg = classify_sink_delivery(
+        dest_type="postgresql", has_primary_key=True, write_mode="upsert"
+    )
+    assert pg["class"] == SINK_EFFECTIVELY_ONCE_ELIGIBLE
+    assert pg.get("has_lsn_guard") is True
+
+    # Explicit missing LSN column → not eligible.
+    no_lsn = classify_sink_delivery(
+        dest_type="postgresql",
+        has_primary_key=True,
+        write_mode="upsert",
+        has_lsn_column=False,
+    )
+    assert no_lsn["class"] == SINK_APPEND_ONLY

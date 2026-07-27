@@ -267,6 +267,30 @@ def _format_write_error(exc: BaseException) -> str:
     return msg
 
 
+def _bind_rows_for_snowflake(
+    mapped_rows: list[tuple],
+    target_types: list[str],
+) -> list[tuple]:
+    """Normalize every cell with shared sql_bind before COPY / INSERT / MERGE.
+
+    Production volume uses COPY (≥ COPY_THRESHOLD); without this, BOOLEAN/VARIANT
+    bind only on the small JSON INSERT path and Mongo ``\"true\"`` wire drifts.
+    """
+    from connectors.sql_bind import normalize_sql_bind_value
+
+    bound: list[tuple] = []
+    for row in mapped_rows:
+        converted: list[Any] = []
+        for v, t in zip(row, target_types):
+            ddl = (t or "VARCHAR").strip() or "VARCHAR"
+            converted.append(normalize_sql_bind_value(v, ddl, engine="snowflake"))
+        # Preserve trailing columns if types list is shorter (defensive).
+        if len(row) > len(target_types):
+            converted.extend(row[len(target_types) :])
+        bound.append(tuple(converted))
+    return bound
+
+
 def _write_temp_csv(
     path: Path, target_cols: list[str], mapped_rows: list[tuple]
 ) -> None:
@@ -368,6 +392,8 @@ def _load_rows_into_table(
 
     Returns the load method used: ``copy_into`` or ``insert``.
     """
+    # Bind once for all load paths (COPY, plain INSERT, JSON INSERT).
+    mapped_rows = _bind_rows_for_snowflake(mapped_rows, target_types)
     total = len(mapped_rows)
     use_copy = (
         prefer_copy and total >= COPY_THRESHOLD and not _is_fakesnow_connection(conn)
@@ -391,6 +417,7 @@ def _load_rows_into_table(
 
     has_json = any(_is_json_type(t) for t in target_types)
     if has_json:
+        # Already bound — _batch_insert_rows still stringifies VARIANT safely.
         _batch_insert_rows(cur, table_name, target_cols, target_types, mapped_rows)
     else:
         col_list = ", ".join(quote_sql_identifier(c) for c in target_cols)
@@ -886,7 +913,14 @@ def write_mapped_rows(
             rows_written=written,
             table_name=table_name,
             target_schema=schema,
-            checksum=row_checksum(mapped_rows, target_cols),
+            checksum=row_checksum(
+                mapped_rows,
+                target_cols,
+                dest_db_type="snowflake",
+                dest_types={c: target_types[i] for i, c in enumerate(target_cols)}
+                if target_types
+                else None,
+            ),
             chunks_completed=chunks,
             rejected_rows=rejected_rows,
             warnings=transform_errors,
@@ -900,7 +934,14 @@ def write_mapped_rows(
             rows_written=written,
             table_name=table_name,
             target_schema=schema,
-            checksum=row_checksum(mapped_rows[:written], target_cols)
+            checksum=row_checksum(
+                mapped_rows[:written],
+                target_cols,
+                dest_db_type="snowflake",
+                dest_types={c: target_types[i] for i, c in enumerate(target_cols)}
+                if target_types
+                else None,
+            )
             if written
             else "",
             chunks_completed=chunks if written else 0,

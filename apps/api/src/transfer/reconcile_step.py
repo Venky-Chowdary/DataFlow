@@ -18,6 +18,17 @@ from .adapters import records_to_matrix, resolve_connector_config
 from .models import EndpointConfig
 
 
+def _dest_types_from_mappings(mappings: list[dict]) -> dict[str, str]:
+    return {
+        str(m.get("target") or ""): str(
+            m.get("target_type") or m.get("inferredType") or ""
+        )
+        for m in mappings
+        if m.get("target")
+        and (m.get("target_type") or m.get("inferredType"))
+    }
+
+
 def _compute_source_checksum(
     records: list[dict],
     columns: list[str],
@@ -25,6 +36,9 @@ def _compute_source_checksum(
     source_schema: dict[str, str] | None,
     writer_checksum: str,
     target_cols: list[str] | None = None,
+    *,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
 ) -> str:
     """Return the writer checksum, or recompute it from mapped source rows."""
     if writer_checksum:
@@ -41,9 +55,15 @@ def _compute_source_checksum(
         target_cols=target_cols,
         column_types=source_schema or {},
         error_policy="quarantine",
+        dest_types=dest_types or {},
         preserve_case=True,
     )
-    return checksum_rows(mapped_rows, target_cols)
+    return checksum_rows(
+        mapped_rows,
+        target_cols,
+        dest_db_type=dest_db_type,
+        dest_types=dest_types,
+    )
 
 
 def _mapped_targets(mappings: list[dict], columns: list[str]) -> list[str]:
@@ -176,6 +196,13 @@ def run_reconciliation(
     table_name = dest_summary.get("table") or endpoint.table or endpoint.collection or ""
 
     mapping_dicts = mappings or [{"source": col, "target": col} for col in columns]
+    dest_types = _dest_types_from_mappings(mapping_dicts)
+    # Prefer physical types stamped by the writer when present.
+    physical = dest_summary.get("column_types") or dest_summary.get("target_types")
+    if isinstance(physical, dict):
+        for k, v in physical.items():
+            if v:
+                dest_types[str(k)] = str(v)
     if source_schema:
         try:
             from services.transform_resolver import attach_transforms_to_mappings
@@ -183,14 +210,21 @@ def run_reconciliation(
             mapping_dicts = attach_transforms_to_mappings(
                 mapping_dicts,
                 column_types=source_schema,
-                dest_types={},
+                dest_types=dest_types,
             )
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     target_cols = _mapped_targets(mapping_dicts, columns)
     source_checksum = _compute_source_checksum(
-        records, columns, mapping_dicts, source_schema, writer_checksum, target_cols=target_cols
+        records,
+        columns,
+        mapping_dicts,
+        source_schema,
+        writer_checksum,
+        target_cols=target_cols,
+        dest_db_type=db_type,
+        dest_types=dest_types,
     )
 
     # Mirror (inferred-delete) and SCD2 transfers already compute an active-row
@@ -235,6 +269,7 @@ def run_reconciliation(
         fallback_checksum="",
         target_columns=target_cols,
         limit=checksum_limit,
+        dest_types=dest_types,
     )
 
     strict_checksum = validation_mode in ("strict", "maximum")
@@ -274,13 +309,6 @@ def run_reconciliation(
             key_values=key_values or None,
         )
         if target_sample:
-            dest_types = {
-                str(m.get("target") or ""): str(
-                    m.get("target_type") or m.get("inferredType") or ""
-                )
-                for m in mapping_dicts
-                if m.get("target")
-            }
             sample_compare = sample_compare_rows(
                 sample_records,
                 target_sample,

@@ -193,8 +193,16 @@ class WriteResult:
     rows_skipped: int = 0
 
 
-def row_checksum(rows: list[Any], columns: list[str] | None = None) -> str:
-    return checksum_rows(rows, columns)
+def row_checksum(
+    rows: list[Any],
+    columns: list[str] | None = None,
+    *,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
+) -> str:
+    return checksum_rows(
+        rows, columns, dest_db_type=dest_db_type, dest_types=dest_types
+    )
 
 
 def filter_stale_lsn_rows(
@@ -677,7 +685,11 @@ def build_mapped_rows_with_details(
             converted, err = apply_transform(val, transform)
             if err:
                 row_has_error = True
-                detail = {
+                values = {
+                    h: (str(raw[i]) if i < len(raw) and raw[i] is not None else "")
+                    for i, h in enumerate(headers)
+                }
+                detail: dict[str, Any] = {
                     "row": row_number,
                     "column": src_name,
                     "target": tgt_name,
@@ -685,11 +697,51 @@ def build_mapped_rows_with_details(
                     "reason": err,
                     "policy": policy,
                     # Full source row so quarantine replay can rewrite without re-reading.
-                    "values": {
-                        h: (str(raw[i]) if i < len(raw) and raw[i] is not None else "")
-                        for i, h in enumerate(headers)
-                    },
+                    "values": values,
                 }
+                # Stamp durable identity for upsert replay (composite / non-id PKs).
+                pk_cols: list[str] = []
+                try:
+                    from services.primary_key import resolve_identity_key
+
+                    src_key, tgt_key = resolve_identity_key(
+                        mappings=mappings,
+                        source_columns=headers,
+                        purpose="uniqueness",
+                    )
+                    # Prefer source column names — rejected.values is source-shaped.
+                    if src_key and src_key in values:
+                        pk_cols = [src_key]
+                    elif tgt_key:
+                        # Map target → source via mapping when needed.
+                        for m in mappings:
+                            if str(m.get("target") or "") == tgt_key and m.get("source"):
+                                pk_cols = [str(m["source"])]
+                                break
+                        if not pk_cols and tgt_key in values:
+                            pk_cols = [tgt_key]
+                except Exception:
+                    pk_cols = []
+                if not pk_cols:
+                    flagged = [
+                        str(m.get("source") or m.get("target") or "")
+                        for m in mappings
+                        if m.get("primary_key")
+                        or m.get("is_primary_key")
+                        or m.get("identity")
+                    ]
+                    pk_cols = [c for c in flagged if c]
+                if not pk_cols:
+                    if "id" in values:
+                        pk_cols = ["id"]
+                    elif "_id" in values:
+                        pk_cols = ["_id"]
+                if pk_cols:
+                    detail["primary_key"] = pk_cols
+                    detail["pk_value"] = {
+                        c: values.get(c) or values.get(str(c).lower(), "")
+                        for c in pk_cols
+                    }
                 rejected_details.append(detail)
                 if len(errors) < 10:
                     errors.append(f"row {row_number} {src_name}→{tgt_name}: {err}")

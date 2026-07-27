@@ -68,7 +68,8 @@ def test_reconcile_fails_checksum_mismatch_strict():
     assert "checksum" in r.message.lower()
 
 
-def test_reconcile_allows_checksum_mismatch_balanced():
+def test_reconcile_refuses_unverified_checksum_mismatch_balanced():
+    """Balanced must not soft-pass checksum drift without sample proof."""
     r = reconcile(
         source_rows=10,
         target_rows=10,
@@ -76,7 +77,21 @@ def test_reconcile_allows_checksum_mismatch_balanced():
         target_checksum="xyz",
         strict_checksum=False,
     )
+    assert not r.passed
+    assert "compared>0" in r.message or "sample" in r.message.lower()
+
+
+def test_reconcile_balanced_passes_with_key_aligned_sample():
+    r = reconcile(
+        source_rows=10,
+        target_rows=10,
+        source_checksum="abc",
+        target_checksum="xyz",
+        strict_checksum=False,
+        sample_compare={"passed": True, "compared": 5, "mismatches": []},
+    )
     assert r.passed
+    assert "sample" in r.message.lower()
 
 
 def test_aggregate_checksum_order_independent():

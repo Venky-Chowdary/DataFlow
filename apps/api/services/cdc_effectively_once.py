@@ -115,29 +115,59 @@ def chaos_redeliver_older_then_newer(pk: str = "1") -> PkSinkState:
     return sink
 
 
+# Engines where writers apply filter_stale_lsn_rows / MERGE `_df_lsn` guards.
+_LSN_GUARD_ENGINES = frozenset({
+    "postgresql",
+    "postgres",
+    "mysql",
+    "mariadb",
+    "snowflake",
+    "bigquery",
+    "sqlserver",
+    "mssql",
+    "azure_sql",
+    "oracle",
+    "oracle_db",
+})
+
+
 def classify_sink_delivery(
     *,
     dest_type: str,
     has_primary_key: bool,
     write_mode: str = "upsert",
+    has_lsn_column: bool | None = None,
 ) -> dict[str, Any]:
-    """Classify CDC sink delivery guard posture (not platform exactly-once)."""
+    """Classify CDC sink delivery guard posture (not platform exactly-once).
+
+    Eligibility requires PK upsert **and** a live ``_df_lsn`` guard path.
+    Upsert alone is not enough (Redshift delete+insert without LSN, etc.).
+    """
     from services.connector_capability_registry import get_connector_capability
 
-    caps = get_connector_capability(dest_type or "")
+    dest = (dest_type or "").strip().lower()
+    caps = get_connector_capability(dest)
     mode = (write_mode or "insert").strip().lower()
     # SQL Server/Oracle MERGE is the upsert path; treat supports_merge as upsert-capable.
     upsert_capable = bool(caps.get("supports_upsert") or caps.get("supports_merge"))
     upsert_mode = mode in {"upsert", "merge"}
-    eligible = bool(has_primary_key and upsert_capable and upsert_mode)
+    caps_lsn = caps.get("supports_lsn_guard")
+    if caps_lsn is None:
+        caps_lsn = dest in _LSN_GUARD_ENGINES
+    # Explicit False from caller means LSN was not stamped on this route.
+    lsn_ok = True if has_lsn_column is None else bool(has_lsn_column)
+    eligible = bool(
+        has_primary_key and upsert_capable and upsert_mode and caps_lsn and lsn_ok
+    )
     if eligible:
         return {
             "class": SINK_EFFECTIVELY_ONCE_ELIGIBLE,
             "exactly_once": False,
             "effectively_once_pk_sink": True,
             "duplicates_on_redelivery": False,
-            "dest_type": (dest_type or "").lower(),
+            "dest_type": dest,
             "supports_upsert": upsert_capable,
+            "has_lsn_guard": True,
             "notes": [
                 "PK upsert + _df_lsn can reject stale redelivery (row state).",
                 "Log capture remains at-least-once; not exactly-once delivery.",
@@ -148,10 +178,11 @@ def classify_sink_delivery(
         "exactly_once": False,
         "effectively_once_pk_sink": False,
         "duplicates_on_redelivery": True,
-        "dest_type": (dest_type or "").lower(),
+        "dest_type": dest,
         "supports_upsert": upsert_capable,
+        "has_lsn_guard": bool(caps_lsn and lsn_ok),
         "notes": [
-            "Append-only / non-upsert sinks duplicate rows under at-least-once CDC.",
+            "Append-only / non-upsert / missing _df_lsn sinks duplicate rows under at-least-once CDC.",
             "Refuse exactly-once / LSN-guarded idempotency claims for this route.",
         ],
     }
@@ -164,6 +195,7 @@ def gate_cdc_destination(
     write_mode: str = "upsert",
     allow_append_only: bool = False,
     require_effectively_once: bool = False,
+    has_lsn_column: bool | None = None,
 ) -> dict[str, Any]:
     """Fail-fast when CDC would write append-only without an explicit allow.
 
@@ -175,6 +207,7 @@ def gate_cdc_destination(
         dest_type=dest_type,
         has_primary_key=has_primary_key,
         write_mode=write_mode,
+        has_lsn_column=has_lsn_column,
     )
     if posture["class"] == SINK_EFFECTIVELY_ONCE_ELIGIBLE:
         return posture

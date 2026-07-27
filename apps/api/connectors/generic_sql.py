@@ -986,7 +986,13 @@ def _to_sa_value(
     if t == LOGICAL_BOOLEAN:
         from connectors.sql_bind import coerce_boolean_wire
 
-        return coerce_boolean_wire(value, as_int=False)
+        # MySQL TINYINT(1) expects 0/1; Postgres/others accept native bool.
+        as_int = (db_type or dialect_name or "").strip().lower() in {
+            "mysql",
+            "mariadb",
+            "tidb",
+        }
+        return coerce_boolean_wire(value, as_int=as_int)
 
     if t == LOGICAL_BINARY:
         if isinstance(value, bytes):

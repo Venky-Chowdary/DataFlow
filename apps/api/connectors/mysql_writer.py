@@ -522,7 +522,12 @@ def write_mapped_rows(
         close_quietly(conn)
         return WriteResult(
             ok=True, rows_written=written, table_name=table_name, target_schema=database,
-            checksum=row_checksum(mapped_rows, target_cols),
+            checksum=row_checksum(
+                converted_rows or mapped_rows,
+                target_cols,
+                dest_db_type="mysql",
+                dest_types={c: target_types[i] for i, c in enumerate(target_cols)},
+            ),
             chunks_completed=chunks_completed or chunks,
             rejected_rows=max(rejected_rows, len(data_rows) - written),
             rejected_details=rejected_details,
@@ -537,7 +542,16 @@ def write_mapped_rows(
             rows_written=written,
             table_name=table_name,
             target_schema=database,
-            checksum=row_checksum(mapped_rows, target_cols) if written else "",
+            checksum=row_checksum(
+                converted_rows or mapped_rows,
+                target_cols,
+                dest_db_type="mysql",
+                dest_types={c: target_types[i] for i, c in enumerate(target_cols)}
+                if target_types
+                else None,
+            )
+            if written
+            else "",
             chunks_completed=chunks_completed,
             error=str(exc),
             rejected_rows=rejected_rows,
