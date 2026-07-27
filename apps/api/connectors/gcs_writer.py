@@ -164,7 +164,7 @@ def write_mapped_rows(
                 ) from exc
         blob = bucket_obj.blob(key)
         blob.upload_from_string(body, content_type=content_type)
-        checksum = row_checksum(mapped_rows, target_cols)
+        checksum = row_checksum(mapped_rows, target_cols, dest_db_type="gcs")
         if on_checkpoint:
             on_checkpoint(1, 1, len(records))
         return WriteResult(

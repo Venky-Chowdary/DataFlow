@@ -179,7 +179,7 @@ def write_mapped_rows(
                     f"S3 bucket {bucket!r} is missing or inaccessible and create_table is disabled"
                 ) from exc
         client.put_object(Bucket=bucket, Key=key, Body=body, ContentType=content_type)
-        checksum = row_checksum(mapped_rows, target_cols)
+        checksum = row_checksum(mapped_rows, target_cols, dest_db_type="s3")
         if on_checkpoint:
             on_checkpoint(1, 1, len(records))
         return WriteResult(

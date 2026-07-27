@@ -264,7 +264,11 @@ def write_mapped_rows(
             rows_written=written,
             table_name=index,
             target_schema=host or "localhost",
-            checksum=row_checksum(mapped_rows, target_cols) if not fail_closed else "",
+            checksum=row_checksum(
+                mapped_rows, target_cols, dest_db_type="elasticsearch"
+            )
+            if not fail_closed
+            else "",
             chunks_completed=1,
             error=err_msg,
             warnings=(errors + [str(e) for e in (bulk_errors or [])[:5]])[:10],

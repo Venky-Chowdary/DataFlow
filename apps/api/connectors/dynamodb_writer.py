@@ -267,7 +267,12 @@ def write_mapped_rows(
             rows_written=written,
             table_name=table,
             target_schema=endpoint or region,
-            checksum=row_checksum(valid_rows, target_cols),
+            checksum=row_checksum(
+                valid_rows,
+                target_cols,
+                dest_db_type="dynamodb",
+                dest_types=dest_types,
+            ),
             chunks_completed=chunks if valid_rows else 0,
             warnings=errors[:10],
             rejected_rows=len({d["row"] for d in rejected_details}),

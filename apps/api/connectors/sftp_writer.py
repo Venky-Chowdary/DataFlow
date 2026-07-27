@@ -189,7 +189,9 @@ def write_mapped_rows(
             rows_written=len(records),
             table_name=filename,
             target_schema=cfg.host,
-            checksum=row_checksum(mapped_rows, target_cols),
+            checksum=row_checksum(
+                mapped_rows, target_cols, dest_db_type="sftp"
+            ),
             chunks_completed=1,
             warnings=transform_errors[:10],
             rejected_rows=rejected_rows,

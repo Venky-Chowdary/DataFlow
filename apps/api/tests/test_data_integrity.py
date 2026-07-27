@@ -161,6 +161,28 @@ def test_integrity_blocks_duplicate_primary_keys():
     assert dup_check["blocks_transfer"] is True
 
 
+def test_integrity_balanced_still_blocks_dupes_on_upsert():
+    """Balanced must not green-light PK collisions for upsert/CDC routes."""
+    rows = [
+        {"id": "1"},
+        {"id": "1"},
+    ]
+    mappings = [{"source": "id", "target": "id", "confidence": 0.99, "primary_key": True}]
+    report = run_integrity_audit(
+        source_columns=["id"],
+        mappings=mappings,
+        sample_rows=rows,
+        validation_mode="balanced",
+        destination_db_type="postgresql",
+        sync_mode="upsert",
+    )
+    dup_check = next((c for c in report["checks"] if c["check"] == "duplicate_keys"), None)
+    assert dup_check is not None
+    assert dup_check["blocks_transfer"] is True
+    assert dup_check["passed"] is False
+    assert dup_check.get("warnings") or dup_check.get("issues")
+
+
 # ── Coercion safety ──────────────────────────────────────────────────────────
 
 def test_integrity_blocks_lossy_coercion():

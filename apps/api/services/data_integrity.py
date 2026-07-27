@@ -429,10 +429,31 @@ def _check_duplicate_keys(
         sample = ", ".join(f"{v}×{c}" for v, c in dupes[:3])
         issues.append(f"{primary_key}: duplicate key values ({sample})")
     blocks = len(issues) > 0
-    if blocks and (validation_mode or "").strip().lower() == "balanced":
-        # Balanced mode surfaces duplicate identity keys as warnings so the
-        # operator can remediate (dedupe, choose a composite key, or switch sync
-        # mode) without a hard block. Strict/maximum still fail closed.
+    mode = (validation_mode or "").strip().lower()
+    if blocks and mode == "balanced":
+        # Balanced may warn-only for append-like routes where duplicates can be
+        # legal. Upsert/CDC/mirror/SCD2/overwrite/schemaless still fail-closed —
+        # Studio "strip+rerun balanced" must not green-light PK collisions.
+        must_block = (
+            schemaless
+            or sync_requires_unique_identity(sync, dest_kind=dest_kind)
+            or _is_overwrite_like(sync)
+        )
+        if must_block:
+            return {
+                "check": "duplicate_keys",
+                "passed": False,
+                "blocks_transfer": True,
+                "issues": issues[:15],
+                "warnings": issues[:15],
+                "primary_key": primary_key,
+                "dest_kind": dest_kind,
+                "note": (
+                    "Balanced still blocks duplicate identity for upsert/CDC/"
+                    "overwrite/schemaless — remediations: dedupe source, composite key, "
+                    "or switch sync mode"
+                ),
+            }
         return {
             "check": "duplicate_keys",
             "passed": True,

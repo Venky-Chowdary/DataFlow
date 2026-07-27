@@ -1102,6 +1102,7 @@ def verify_mongodb_collection(
     table_name: str = "",
     target_columns: list[str] | None = None,
     limit: int = 0,
+    dest_types: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     """Reconcile a MongoDB target by counting and fingerprinting documents."""
     try:
@@ -1136,7 +1137,13 @@ def verify_mongodb_collection(
         columns = target_columns or sorted(
             set(k for doc in coll.find({}).limit(100) for k in doc.keys())
         )
-        checksum = canonical_checksum_from_iter(_doc_iter(), columns, limit=limit)
+        checksum = canonical_checksum_from_iter(
+            _doc_iter(),
+            columns,
+            limit=limit,
+            dest_db_type="mongodb",
+            dest_types=dest_types,
+        )
         return int(count), checksum
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
@@ -1216,6 +1223,7 @@ def verify_dynamodb_table(
     password: str = "local",
     target_columns: list[str] | None = None,
     limit: int = 0,
+    dest_types: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     """Reconcile a DynamoDB target by Scan count and item fingerprint."""
     try:
@@ -1249,7 +1257,11 @@ def verify_dynamodb_table(
 
         columns = target_columns or []
         return int(count), canonical_checksum_from_iter(
-            _item_iter(), columns, limit=limit
+            _item_iter(),
+            columns,
+            limit=limit,
+            dest_db_type="dynamodb",
+            dest_types=dest_types,
         )
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
@@ -1289,6 +1301,7 @@ def verify_target(
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,
+            dest_types=dest_types,
         )
     elif db_type == "dynamodb":
         from connectors.aws_common import resolve_endpoint_url
@@ -1302,6 +1315,7 @@ def verify_target(
             password=dest.get("password", "local"),
             target_columns=target_columns,
             limit=limit,
+            dest_types=dest_types,
         )
     elif db_type == "sqlite":
         count, chk = verify_sqlite_table(
