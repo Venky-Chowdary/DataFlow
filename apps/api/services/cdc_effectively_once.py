@@ -119,6 +119,7 @@ def chaos_redeliver_older_then_newer(pk: str = "1") -> PkSinkState:
 _LSN_GUARD_ENGINES = frozenset({
     "postgresql",
     "postgres",
+    "redshift",  # delete+insert path honors compare_lsn when `_df_lsn` present
     "mysql",
     "mariadb",
     "snowflake",
@@ -128,6 +129,7 @@ _LSN_GUARD_ENGINES = frozenset({
     "azure_sql",
     "oracle",
     "oracle_db",
+    "sqlite",
 })
 
 

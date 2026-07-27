@@ -192,6 +192,8 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_overwrite": True,
         # Native MERGE not yet wired; upsert uses delete+insert (at-least-once).
         "supports_merge": False,
+        # Application-side compare_lsn before delete+insert when `_df_lsn` is present.
+        "supports_lsn_guard": True,
         "requires_schema": True,
         "supports_binary": True,
         "common_issues": [

@@ -539,9 +539,42 @@ def snowflake_lsn_match_predicate(
     source_alias: str = "s",
     lsn_column: str = DF_LSN_COL,
 ) -> str:
-    """MATCHED guard for Snowflake MERGE using lexicographic LSN text order."""
+    """MATCHED guard for Snowflake MERGE — mirrors :func:`compare_lsn` families.
+
+    Bare ``s.lsn > t.lsn`` mis-orders PG ``0/100`` vs ``0/20`` and unpadded
+    ``file:pos``. Parse those with SPLIT_PART / TO_NUMBER; text fallback for
+    zero-padded versions and opaque tokens.
+    """
+    inc = f'{source_alias}."{lsn_column}"'
+    dest = f'COALESCE({target_alias}."{lsn_column}", \'\')'
+    pg_re = r"^[0-9A-Fa-f]+/[0-9A-Fa-f]+$"
+    both_filepos = (
+        f"({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%' "
+        f"AND {dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%')"
+    )
+    # SPLIT_PART(..., -1) = last segment (pos) in Snowflake.
+    filepos_newer = (
+        f"(SPLIT_PART({inc}, ':', 1) > SPLIT_PART({dest}, ':', 1) "
+        f"OR (SPLIT_PART({inc}, ':', 1) = SPLIT_PART({dest}, ':', 1) "
+        f"AND TRY_TO_NUMBER(SPLIT_PART({inc}, ':', -1)) "
+        f"> TRY_TO_NUMBER(SPLIT_PART({dest}, ':', -1))))"
+    )
+    both_pg = (
+        f"(REGEXP_LIKE({inc}, '{pg_re}') AND REGEXP_LIKE({dest}, '{pg_re}'))"
+    )
+    # Hex hi/lo via TO_NUMBER with hex format mask.
+    inc_hi = f"TRY_TO_NUMBER(SPLIT_PART({inc}, '/', 1), 'XXXXXXXXXXXXXXXX')"
+    dest_hi = f"TRY_TO_NUMBER(SPLIT_PART({dest}, '/', 1), 'XXXXXXXXXXXXXXXX')"
+    inc_lo = f"TRY_TO_NUMBER(SPLIT_PART({inc}, '/', 2), 'XXXXXXXXXXXXXXXX')"
+    dest_lo = f"TRY_TO_NUMBER(SPLIT_PART({dest}, '/', 2), 'XXXXXXXXXXXXXXXX')"
+    pg_newer = (
+        f"({inc_hi} > {dest_hi} OR ({inc_hi} = {dest_hi} AND {inc_lo} > {dest_lo}))"
+    )
     return (
-        f'{source_alias}."{lsn_column}" > COALESCE({target_alias}."{lsn_column}", \'\')'
+        f"({dest} = '' "
+        f"OR ({both_filepos} AND {filepos_newer}) "
+        f"OR ({both_pg} AND {pg_newer}) "
+        f"OR (NOT ({both_filepos}) AND NOT ({both_pg}) AND {inc} > {dest}))"
     )
 
 

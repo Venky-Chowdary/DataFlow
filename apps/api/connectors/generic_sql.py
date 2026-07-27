@@ -2537,7 +2537,12 @@ def write_mapped_rows(
             rows_written=written,
             table_name=table_name,
             target_schema=schema or database,
-            checksum=row_checksum(mapped_rows, target_cols),
+            checksum=row_checksum(
+                mapped_rows,
+                target_cols,
+                dest_db_type=str(cfg.get("type") or "generic_sql"),
+                dest_types=target_column_types,
+            ),
             chunks_completed=chunks_completed or chunks,
             rejected_rows=max(
                 _rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
@@ -2554,7 +2559,14 @@ def write_mapped_rows(
             rows_written=written,
             table_name=table_name,
             target_schema=schema or database,
-            checksum=row_checksum(mapped_rows, target_cols) if mapped_rows else "",
+            checksum=row_checksum(
+                mapped_rows,
+                target_cols,
+                dest_db_type=str(cfg.get("type") or "generic_sql"),
+                dest_types=target_column_types,
+            )
+            if mapped_rows
+            else "",
             chunks_completed=chunks_completed,
             error=str(exc),
             rejected_rows=_rejected_row_count(

@@ -65,8 +65,36 @@ def test_sql_guards_mention_lsn_column():
     # Older opaque stamps must not win via IS DISTINCT FROM.
     assert "IS DISTINCT FROM" not in pg
     assert ">" in pg
-    assert DF_LSN_COL in snowflake_lsn_match_predicate()
+    sf = snowflake_lsn_match_predicate()
+    assert DF_LSN_COL in sf
+    # Family-aware — not bare s."_df_lsn" > COALESCE(...).
+    assert "REGEXP_LIKE" in sf
+    assert "SPLIT_PART" in sf
+    assert "TRY_TO_NUMBER" in sf
     mysql = mysql_lsn_values_newer_sql()
     assert "VALUES(" in mysql and "SUBSTRING_INDEX" in mysql
     sqlite = sqlite_lsn_update_guard_sql("orders")
     assert "excluded." in sqlite and DF_LSN_COL in sqlite
+
+
+def test_snowflake_lsn_predicate_covers_pg_hex_family():
+    pred = snowflake_lsn_match_predicate()
+    # Must parse hex hi/lo — bare text would order 0/100 < 0/20 incorrectly.
+    assert "SPLIT_PART" in pred and "/" in pred
+    assert compare_lsn("0/100", "0/20") == 1
+
+
+def test_redshift_caps_advertise_lsn_guard():
+    from services.cdc_effectively_once import (
+        SINK_EFFECTIVELY_ONCE_ELIGIBLE,
+        classify_sink_delivery,
+    )
+    from services.connector_capability_registry import get_connector_capability
+
+    caps = get_connector_capability("redshift")
+    assert caps.get("supports_lsn_guard") is True
+    posture = classify_sink_delivery(
+        dest_type="redshift", has_primary_key=True, write_mode="upsert"
+    )
+    assert posture["class"] == SINK_EFFECTIVELY_ONCE_ELIGIBLE
+    assert posture.get("has_lsn_guard") is True

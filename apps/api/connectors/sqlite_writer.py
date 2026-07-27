@@ -361,7 +361,12 @@ def write_mapped_rows(
                 target_schema=schema or "main",
                 # Checksum must reflect the values as stored in SQLite so the read-back
                 # verifier can match them exactly (e.g. booleans become 0/1 integers).
-                checksum=row_checksum(converted_rows, target_cols),
+                checksum=row_checksum(
+                    converted_rows,
+                    target_cols,
+                    dest_db_type="sqlite",
+                    dest_types=dest_types,
+                ),
                 chunks_completed=chunks,
                 rejected_rows=max(rejected_rows, len(data_rows) - written),
                 rejected_details=rejected_details,
