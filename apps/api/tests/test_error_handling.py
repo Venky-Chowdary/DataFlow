@@ -89,8 +89,10 @@ def test_humanize_duplicate_primary_key_has_concrete_fix():
     )
     assert human["code"] == "duplicate_primary_key"
     assert human["confidence"] == "high"
-    assert "identity key" in human["fix"].lower() or "_id" in human["fix"]
+    assert "source batch" in human["fix"].lower() or "identity" in human["fix"].lower()
+    assert "destination table does not exist" in human["fix"].lower() or "primary" in human["fix"].lower()
     assert "No mapped remediation" not in human["fix"]
+    assert "Redis" not in human["fix"]
 
 
 def test_humanize_missing_column_and_table_guide_to_map():
