@@ -233,11 +233,14 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
             "confidence": "high",
             "title": "Duplicate identity-key values in a write batch",
             "fix": (
-                "DataFlow blocked the write because the Redis/document identity key repeats "
-                "(or a non-unique column such as `capital` was used as the key). "
-                "Next step: (1) Open Map and set Primary key to a unique column "
-                "(`code`, `id`, `iso`, `name`, …); (2) Or set stream-contract primary_key; "
-                "(3) If the source truly duplicates that key, dedupe upstream. "
+                "DataFlow blocked the write because the mapped identity / primary-key column "
+                "has duplicate values in the source batch (or a non-unique column was chosen as the key). "
+                "This is a source-data check — it happens even when the destination table does not exist yet. "
+                "Next step: (1) Open Map and set Primary key to a column that is unique in the source "
+                "(`code`, `email`, composite key, … — not a repeating `id`/`capital`); "
+                "(2) Or set stream-contract primary_key to that unique column; "
+                "(3) If the source truly duplicates that key and you need every row, use append sync "
+                "without declaring that column as destination PK, or dedupe upstream. "
                 "No rows from the failed batch were committed as a completed transfer."
             ),
             "primary_action": "open_map_primary_key",
@@ -580,7 +583,8 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
         elif matched.get("code") == "duplicate_primary_key":
             message = (
                 f"{title}. Driver reported: {raw}. "
-                "Set a unique primary key on Map (code/id/iso/name) before Resume."
+                "Open Map and set Primary key to a column that is unique in the source "
+                "(or use append without that PK / dedupe upstream) before Resume."
             )
         else:
             message = (

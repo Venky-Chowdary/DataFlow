@@ -648,7 +648,7 @@ export function JobTheaterView({
                 : job.cdc_append_only_sink || job.error_code === "cdc_append_only_sink"
                   ? "Switch to a PK upsert destination or enable Allow append-only CDC in Destination Advanced."
                 : duplicateKeyFailure
-                  ? "Open Map and set Primary key to a unique column (code / id / iso / name — not capital). Then re-run from Validate."
+                  ? "Open Map and set Primary key to a column that is unique in the source (not a repeating id). Or use append without that PK / dedupe upstream, then re-run from Validate."
                 : capacityFailure
                   ? "Free destination capacity first, then Resume from checkpoint — Resume alone will hit the same error."
                   : "Resume from the last checkpoint, or fix mappings and re-run from Validate."}
