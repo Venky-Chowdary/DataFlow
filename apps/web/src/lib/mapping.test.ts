@@ -15,6 +15,7 @@ import {
   engineTransformToUi,
   inferLogicalFromSample,
   mappingHealthSummary,
+  mappingsFromAnalysis,
   uiTransformToEngine,
   widenMappingToVarchar,
   type EditableMapping,
@@ -347,5 +348,50 @@ describe("destination schema honesty", () => {
     ]);
     assert.equal(fromColumns[0].create_new, true);
     assert.ok((fromColumns[0].confidence as number) <= 0.93);
+  });
+
+  it("caps Map bootstrap identity when dest column is missing (even without createNew flag)", () => {
+    const fromBootstrap = buildPreflightMappings([], [
+      {
+        source: "id",
+        target: "id",
+        confidence: 0.95,
+        transform: "none",
+        approved: true,
+        requiresReview: false,
+        isPii: false,
+        existsInDestination: false,
+        inferredType: "INTEGER",
+      },
+    ]);
+    assert.equal(fromBootstrap[0].create_new, true);
+    assert.ok((fromBootstrap[0].confidence as number) <= 0.93);
+  });
+
+  it("mappingsFromAnalysis caps create-new and pending dest honestly", () => {
+    const cols = [{
+      column_name: "id",
+      confidence: 0.99,
+      inferred_type: "INTEGER",
+      is_pii: false,
+      compliance: [],
+    }];
+    const unknownDest = mappingsFromAnalysis(cols);
+    assert.ok(unknownDest[0].confidence <= 0.93);
+
+    const pending = mappingsFromAnalysis(cols, undefined, []);
+    assert.equal(pending[0].assignmentStrategy, "pending_dest_schema");
+    assert.ok(pending[0].confidence <= 0.55);
+    assert.equal(pending[0].createNew, undefined);
+
+    const create = mappingsFromAnalysis(cols, undefined, ["other_col"]);
+    assert.equal(create[0].existsInDestination, false);
+    assert.equal(create[0].createNew, true);
+    assert.ok(create[0].confidence <= 0.93);
+
+    const existing = mappingsFromAnalysis(cols, undefined, ["id"]);
+    assert.equal(existing[0].existsInDestination, true);
+    assert.equal(existing[0].createNew, undefined);
+    assert.ok(existing[0].confidence >= 0.95);
   });
 });

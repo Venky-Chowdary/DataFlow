@@ -634,11 +634,28 @@ function boostIdentityConfidence(
 export function mappingsFromAnalysis(
   columns: ColumnAnalysis[],
   sampleRows?: Record<string, unknown>[],
+  destColumns?: string[],
 ): EditableMapping[] {
+  const destKnown = destColumns !== undefined;
+  const destSet = destKnown
+    ? new Set(destColumns.map((c) => c.toLowerCase()))
+    : null;
+  const pendingDest = destKnown && destSet!.size === 0;
+
   return columns.map((col) => {
     const target = normalizeMappingTarget(col.column_name, col);
     const sampleVal = sampleRows?.find((r) => r[col.column_name] != null)?.[col.column_name];
-    const conf = boostIdentityConfidence(col.column_name, target, col.confidence);
+    const existsInDestination = destSet ? destSet.has(target.toLowerCase()) : undefined;
+    // Empty dest list → schema pending (not invent create-new). Missing target on a
+    // known dest → create-compatible new. Unknown dest → cap like create-new (never 95%).
+    const createNew = Boolean(destSet && !pendingDest && existsInDestination === false);
+    const conf = boostIdentityConfidence(
+      col.column_name,
+      target,
+      col.confidence,
+      createNew || !destKnown,
+      pendingDest,
+    );
     const inferred = col.semantic_type || col.inferred_type || "string";
     const specialty = isSpecialtyLogicalType(inferred);
     const structish = isStructLogicalType(inferred);
@@ -649,7 +666,7 @@ export function mappingsFromAnalysis(
       confidence: conf,
       inferredType: inferred,
       sample: sampleVal != null ? String(sampleVal) : undefined,
-      approved: conf >= 0.9 && !col.is_pii && !specialty && !structish && !arrayish,
+      approved: conf >= 0.9 && !col.is_pii && !specialty && !structish && !arrayish && !pendingDest,
       isPii: col.is_pii,
       reason: specialty
         ? `${inferred} — identity payload (no invented cast/dim)`
@@ -657,7 +674,11 @@ export function mappingsFromAnalysis(
           ? "STRUCT/JSON — choose JSON blob, flatten keys, or deep flatten"
           : arrayish
             ? "ARRAY — serialize as JSON/list or explode rows (Map policy)"
-            : (col.semantic_type || col.inferred_type || "Semantic match"),
+            : pendingDest
+              ? "Identity match — destination schema not loaded yet"
+              : createNew
+                ? "Identity match — will create destination column"
+                : (col.semantic_type || col.inferred_type || "Semantic match"),
       transform: col.is_pii
         ? "hash_pii"
         : specialty
@@ -666,8 +687,15 @@ export function mappingsFromAnalysis(
             ? "parse_json"
             : "none",
       engineTransform: structish || arrayish ? "json" : undefined,
-      requiresReview: specialty || structish || arrayish || undefined,
+      requiresReview: specialty || structish || arrayish || pendingDest || undefined,
       structPolicy: structish || arrayish ? "store_as_json" : undefined,
+      existsInDestination,
+      createNew: createNew || undefined,
+      assignmentStrategy: pendingDest
+        ? "pending_dest_schema"
+        : createNew
+          ? "create_compatible_new"
+          : undefined,
     };
   });
 }
@@ -697,13 +725,20 @@ export function buildPreflightMappings(
           : enumBool && m.existsInDestination
             ? flagExistingEnumBooleanConflict(m)
             : m;
+      const pendingDest = safe.assignmentStrategy === "pending_dest_schema";
+      // Missing dest column (when schema is known) is create-new even if createNew flag lagged.
+      const isCreateNew = Boolean(
+        safe.createNew
+        || safe.assignmentStrategy === "create_compatible_new"
+        || (safe.existsInDestination === false && !pendingDest),
+      );
       return {
         source: safe.source,
         target: safe.target,
         confidence: (
-          Boolean(safe.createNew || safe.assignmentStrategy === "create_compatible_new")
+          isCreateNew
             ? Math.min(safe.confidence, 0.93)
-            : safe.assignmentStrategy === "pending_dest_schema"
+            : pendingDest
               ? Math.min(safe.confidence, 0.55)
               : safe.confidence
         ),
@@ -717,15 +752,10 @@ export function buildPreflightMappings(
         requires_review: Boolean((safe.requiresReview || enumBool) && !safe.approved),
         score_gap: safe.scoreGap ?? 1,
         semantic_role: safe.semanticRole,
-        create_new: Boolean(
-          safe.createNew
-          || safe.assignmentStrategy === "create_compatible_new",
-        ),
+        create_new: isCreateNew,
         assignment_strategy:
           safe.assignmentStrategy
-          || (safe.createNew || safe.assignmentStrategy === "create_compatible_new"
-            ? "create_compatible_new"
-            : undefined),
+          || (isCreateNew ? "create_compatible_new" : undefined),
         struct_policy: safe.structPolicy,
         struct_derived: safe.structDerived || undefined,
         struct_parent: safe.structParent,

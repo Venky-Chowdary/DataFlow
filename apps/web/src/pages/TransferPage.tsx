@@ -1041,27 +1041,32 @@ export function TransferPage({
   ) => {
     const rows = parsed?.data ?? parsed?.sample_data;
     if (columns?.length) {
-      const destSet = new Set((targetCols ?? destColumns).map((c) => c.toLowerCase()));
-      return mappingsFromAnalysis(columns, rows).map((m) => ({
-        ...m,
-        existsInDestination: destSet.has(m.target.toLowerCase()),
-      }));
+      const destCols = targetCols ?? destColumns;
+      return mappingsFromAnalysis(columns, rows, destCols);
     }
     const sourceCols = parsed?.columns ?? transferPlan?.source_columns ?? [];
     if (!sourceCols.length) return [];
     const destSet = new Set((targetCols ?? destColumns).map((c) => c.toLowerCase()));
+    const pendingDest = destSet.size === 0;
     return sourceCols.map((col) => ({
       source: col,
       target: col,
-      confidence: 0.7,
+      confidence: pendingDest ? Math.min(0.7, 0.55) : 0.7,
       inferredType: parsed?.schema?.[col] ?? transferPlan?.source_schema?.[col] ?? "string",
       sample: rows?.find((r) => r[col] != null)?.[col] != null
         ? String(rows!.find((r) => r[col] != null)![col])
         : undefined,
       approved: false,
       existsInDestination: destSet.has(col.toLowerCase()),
-      reason: "Identity mapping (pipeline unavailable)",
+      createNew: !pendingDest && !destSet.has(col.toLowerCase()) ? true : undefined,
+      assignmentStrategy: pendingDest
+        ? "pending_dest_schema" as const
+        : (!destSet.has(col.toLowerCase()) ? "create_compatible_new" as const : undefined),
+      reason: pendingDest
+        ? "Identity mapping — destination schema not loaded yet"
+        : "Identity mapping (pipeline unavailable)",
       transform: "none" as const,
+      requiresReview: pendingDest || undefined,
     }));
   }, [parsed, transferPlan, destColumns]);
 
