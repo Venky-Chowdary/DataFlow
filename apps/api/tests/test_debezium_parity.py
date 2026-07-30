@@ -35,14 +35,15 @@ from services.cdc_transaction_buffer import TransactionBuffer
 
 
 def test_transaction_buffer_emits_only_on_commit() -> None:
+    """COMMIT emits per-PK net effect (INSERT+UPDATE → one insert with final row)."""
     buf = TransactionBuffer()
     buf.begin("42")
     buf.insert({"id": "1"})
     buf.update({"id": "1", "v": "2"})
     buf.delete("9")
     assert buf.commit(resume_token="lsn-1") == ChangeBatch(
-        inserts=[{"id": "1"}],
-        updates=[{"id": "1", "v": "2"}],
+        inserts=[{"id": "1", "v": "2"}],
+        updates=[],
         deletes=["9"],
         resume_token="lsn-1",
     )

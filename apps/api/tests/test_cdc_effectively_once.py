@@ -68,6 +68,12 @@ def test_classify_and_gate_append_only_sink() -> None:
     assert allowed["class"] == SINK_APPEND_ONLY
 
     gate_cdc_destination(dest_type="postgresql", has_primary_key=True)
+    # SQLAlchemy generic path now runs sparse CDC + `_df_lsn` guards.
+    generic = classify_sink_delivery(
+        dest_type="generic_sql", has_primary_key=True, write_mode="upsert"
+    )
+    assert generic["class"] == SINK_EFFECTIVELY_ONCE_ELIGIBLE
+    gate_cdc_destination(dest_type="generic_sql", has_primary_key=True)
     # SQL Server MERGE is the upsert path — CDC must treat it as PK-eligible.
     mssql = classify_sink_delivery(
         dest_type="sqlserver", has_primary_key=True, write_mode="upsert"

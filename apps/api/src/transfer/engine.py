@@ -529,10 +529,12 @@ def _destination_schema_probe(
 
     ``table_exists`` is independent of whether columns loaded — a listed table
     with empty column metadata must not be treated as missing / create-new.
+
+    Overwrite sync still needs a proven existence boolean for preflight DDL
+    gates; stale destination *types* are cleared so recreate is not typed
+    against the old table shape.
     """
     if destination.kind != "database":
-        return {}, None
-    if is_overwrite_sync(sync_mode):
         return {}, None
     try:
         from .endpoint_intelligence import introspect_endpoint
@@ -554,6 +556,8 @@ def _destination_schema_probe(
             exists = True
         else:
             exists = None
+        if is_overwrite_sync(sync_mode):
+            return {}, exists
         return schema, exists
     except Exception as exc:
         logger.warning(

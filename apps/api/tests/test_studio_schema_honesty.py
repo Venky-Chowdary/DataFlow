@@ -109,3 +109,19 @@ def test_destination_schema_probe_preserves_none():
     }):
         _schema, exists = _destination_schema_probe(dest, sync_mode="full_refresh_append")
     assert exists is None
+
+
+def test_destination_schema_probe_overwrite_keeps_existence_clears_types():
+    """Overwrite must not invent unknown existence — still probe, drop stale types."""
+    from src.transfer.engine import _destination_schema_probe
+    from src.transfer.models import EndpointConfig
+
+    dest = EndpointConfig(kind="database", format="sqlite", database="/tmp/x.db", table="out")
+    with patch(
+        "src.transfer.endpoint_intelligence.introspect_endpoint",
+        return_value={"schema": {"id": "INTEGER", "legacy": "TEXT"}, "table_exists": False},
+    ) as intro:
+        schema, exists = _destination_schema_probe(dest, sync_mode="full_refresh_overwrite")
+    assert schema == {}
+    assert exists is False
+    assert intro.called

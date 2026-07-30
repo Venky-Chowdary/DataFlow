@@ -800,6 +800,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_append": True,
         "supports_overwrite": True,
         "supports_merge": True,
+        "supports_lsn_guard": True,
         "requires_schema": True,
         "supports_binary": True,
         "common_issues": [

@@ -225,6 +225,8 @@ _LSN_GUARD_ENGINES = frozenset({
     "mongodb",
     "mongo",
     "iceberg",
+    # SQLAlchemy path — sparse CDC upsert + `_df_lsn` via writer_common.
+    "generic_sql",
 })
 
 
