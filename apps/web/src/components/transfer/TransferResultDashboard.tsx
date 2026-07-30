@@ -9,7 +9,7 @@ import { LiveEventLog } from "../ui/LiveEventLog";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./NotificationDeliveryStrip";
 import { QuarantinePanel } from "./QuarantinePanel";
-import { Gate8ProofCard, type Gate8Reconciliation } from "./Gate8ProofCard";
+import { Gate8ProofCard, classifyGate8Status, type Gate8Reconciliation } from "./Gate8ProofCard";
 import { JobTrustScoreCard } from "./JobTrustScoreCard";
 import { CdcCursorGapPanel } from "./CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./CdcRetentionPanel";
@@ -99,16 +99,11 @@ export function TransferResultDashboard({
   const showQuarantine = Boolean(result.job_id) && (!result.success || hasIntegrityLoss || rejected > 0 || issueFindings > 0);
   const sourceRows = result.reconciliation?.source_rows ?? rec;
   const targetRows = result.reconciliation?.target_rows ?? rec;
-  // Never infer Gate-8 Passed from job success alone.
-  const reconPassed = result.reconciliation?.passed;
-  const reconcileLabel =
-    reconPassed === true
-      ? "Passed"
-      : reconPassed === false
-        ? "Failed"
-        : "Pending";
+  // Never infer Gate-8 Passed from job success alone — and never call writer-ack “Passed”.
+  const gate8 = classifyGate8Status(result.reconciliation as Gate8Reconciliation | undefined);
+  const reconcileLabel = gate8.label;
   const reconcileTone =
-    reconPassed === true ? "ok" : reconPassed === false ? "danger" : undefined;
+    gate8.tone === "ok" ? "ok" : gate8.tone === "danger" ? "danger" : gate8.tone === "warn" ? "warn" : undefined;
   const throughput = result.records_per_second ?? ds?.records_per_second;
   const checksum = fmt(ds?.checksum) || fmt(result.reconciliation?.target_checksum);
 
@@ -172,7 +167,11 @@ export function TransferResultDashboard({
     ? "Review failure details and bad-data findings below, then fix on Validate or Map."
     : hasIntegrityLoss
       ? `${rec.toLocaleString()} records landed; some rows were held out in quarantine or values coerced to NULL`
-      : `${rec.toLocaleString()} records moved and reconciled`;
+      : gate8.fullPass
+        ? `${rec.toLocaleString()} records moved and reconciled`
+        : gate8.label === "Writer ack"
+          ? `${rec.toLocaleString()} records written — writer acknowledged; independent Gate-8 read-back still pending`
+          : `${rec.toLocaleString()} records moved — Gate-8 ${gate8.label.toLowerCase()}`;
 
   const metaChips: Array<{ label: string; value: string; tone?: "warn" | "ok"; title?: string }> = [];
   if (ds?.load_method) {
@@ -593,13 +592,13 @@ export function TransferResultDashboard({
                 <dd>
                   {hasIntegrityLoss
                     ? result.reconciliation?.message || "Completed, but not full fidelity — see fidelity note above."
-                    : reconPassed === true
-                      ? (String(result.reconciliation?.phase || "").includes("writer_ack")
+                    : gate8.fullPass
+                      ? "Source and destination row counts and checksums matched"
+                      : gate8.label === "Writer ack"
                         ? "Writer acknowledged rows — independent source/destination checksum compare not available"
-                        : "Source and destination row counts and checksums matched")
-                      : reconPassed === false
-                        ? result.reconciliation?.message || "Reconciliation failed"
-                        : result.reconciliation?.message || "Gate-8 reconcile not captured for this job yet"}
+                        : gate8.label === "Failed"
+                          ? result.reconciliation?.message || "Reconciliation failed"
+                          : result.reconciliation?.message || `Gate-8 ${gate8.label.toLowerCase()} for this job`}
                 </dd>
               </div>
               {droppedRows > 0 && (
@@ -639,15 +638,18 @@ export function TransferResultDashboard({
                   <div>
                     <dt>Match</dt>
                     <dd>
-                      {result.reconciliation?.source_checksum
+                      {gate8.fullPass
+                        && result.reconciliation?.source_checksum
                         && result.reconciliation?.target_checksum
                         && result.reconciliation.source_checksum === result.reconciliation.target_checksum
                         ? "Yes — fingerprints equal"
-                        : String(result.reconciliation?.phase || "").includes("writer_ack")
+                        : gate8.label === "Writer ack"
                           ? "Writer ack only — no independent destination fingerprint"
-                          : result.reconciliation?.passed
-                            ? "Passed (see reconcile message)"
-                            : "Not matched"}
+                          : gate8.label === "Failed"
+                            ? "Not matched"
+                            : gate8.label === "Passed"
+                              ? "Passed (see reconcile message)"
+                              : `${gate8.label} — not independent Verified`}
                     </dd>
                   </div>
                 </dl>

@@ -116,19 +116,48 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
 
   if (recon) {
     const passed = recon.passed;
+    const phase = String(recon.phase || "").toLowerCase();
+    const msg = String(recon.message || "").toLowerCase();
+    const preview = recon.preview === true || recon.post_write_pending === true;
+    const writerAck =
+      phase.includes("writer_ack")
+      || /verified by writer|read-back verifier not available/i.test(msg)
+      || (passed === true && Boolean(recon.source_checksum) && !recon.target_checksum);
+    const preWrite =
+      preview
+      || phase.includes("pre_write")
+      || phase.includes("post_write_pending")
+      || /writer checksum|still pending|may still be loading|compare still pending/i.test(msg);
+
     let reconScore = 70;
     const fidelity = recon.row_fidelity_score;
     if (typeof fidelity === "number" && Number.isFinite(fidelity)) {
       reconScore = fidelity <= 1 ? fidelity * 100 : Math.max(0, Math.min(100, fidelity));
-    } else if (passed === true) reconScore = 100;
-    else if (passed === false) reconScore = 18;
+    } else if (passed === true && !writerAck && !preWrite) {
+      reconScore = 100;
+    } else if (passed === false) {
+      reconScore = 18;
+    } else if (writerAck || preWrite) {
+      // Acknowledgment / simulation is not independent Gate-8 proof.
+      reconScore = Math.min(reconScore, 58);
+    }
+
     const missing = num(recon.missing_key_count);
     const extra = num(recon.extra_key_count);
-    let rNote = passed === false
-      ? String(recon.message || "Gate-8 reconcile failed.")
-      : missing || extra
-        ? `Keys missing=${missing} extra=${extra}.`
-        : "Gate-8 reconcile passed.";
+    let rNote: string;
+    if (passed === false) {
+      rNote = String(recon.message || "Gate-8 reconcile failed.");
+    } else if (preWrite) {
+      rNote = "Pre-write / pending Gate-8 — not independent post-write proof.";
+    } else if (writerAck) {
+      rNote = "Writer acknowledgment only — independent read-back not captured.";
+    } else if (missing || extra) {
+      rNote = `Keys missing=${missing} extra=${extra}.`;
+    } else if (passed === true) {
+      rNote = "Gate-8 reconcile passed.";
+    } else {
+      rNote = "Gate-8 reconcile pending.";
+    }
     if (missing || extra) reconScore = Math.min(reconScore, 70);
     factors.push({
       id: "reconcile",

@@ -5461,11 +5461,40 @@ export function TransferPage({
           <div className="df2-card-body df2-run-center">
             <div className="df2-run-readiness" aria-label="Run readiness summary">
               <div className="df2-run-readiness-head">
-                <span className="df2-badge df2-badge-live">
-                  <DtIcon name="check" size={12} /> Preflight passed
-                </span>
+                {(() => {
+                  const decision = preflight?.proof_bundle?.transfer_decision?.decision;
+                  const apiCleared = Boolean(preflight?.passed) && decision !== "review" && decision !== "block";
+                  if (apiCleared) {
+                    return (
+                      <span className="df2-badge df2-badge-live">
+                        <DtIcon name="check" size={12} /> Preflight passed
+                      </span>
+                    );
+                  }
+                  if (preflight?.passed && decision === "review") {
+                    return (
+                      <span className="df2-badge df2-badge-warn">
+                        <DtIcon name="alert" size={12} /> Review-grade preflight
+                      </span>
+                    );
+                  }
+                  if (preflight) {
+                    return (
+                      <span className="df2-badge df2-badge-warn">
+                        <DtIcon name="alert" size={12} /> Preflight incomplete
+                      </span>
+                    );
+                  }
+                  return (
+                    <span className="df2-badge df2-badge-warn">
+                      <DtIcon name="alert" size={12} /> Preflight not proven
+                    </span>
+                  );
+                })()}
                 <span className="df2-run-readiness-score">
-                  {preflight ? `${preflight.passed_count}/${preflight.total_gates} checks` : "Validated"}
+                  {preflight
+                    ? `${preflight.passed_count}/${preflight.total_gates} checks`
+                    : "No API preflight"}
                 </span>
               </div>
               <div className="df2-run-readiness-route">
@@ -5474,13 +5503,23 @@ export function TransferPage({
                 <strong>{mapDestRouteLabel}</strong>
               </div>
               <p>
-                Execute now to start governed transfer with live theater progress and reconciliation evidence.
+                {preflight?.passed && preflight?.proof_bundle?.transfer_decision?.decision !== "review"
+                  ? "Execute now to start governed transfer with live theater progress and reconciliation evidence."
+                  : "Re-open Validate to confirm API preflight before treating this run as fully cleared."}
               </p>
             </div>
             <EmptyState
               icon="transfer"
-              title="Ready to transfer"
-              description="Preflight passed on Validate. Re-open gate cards anytime, or execute here to start the write."
+              title={
+                preflight?.passed && preflight?.proof_bundle?.transfer_decision?.decision !== "review"
+                  ? "Ready to transfer"
+                  : "Confirm Validate before write"
+              }
+              description={
+                preflight?.passed && preflight?.proof_bundle?.transfer_decision?.decision !== "review"
+                  ? "Preflight passed on Validate. Re-open gate cards anytime, or execute here to start the write."
+                  : "This Run step is available, but preflight is missing or review-grade. Prefer Validate → API pass before Execute."
+              }
               action={
                 <div className="df2-run-ready-actions">
                   <button

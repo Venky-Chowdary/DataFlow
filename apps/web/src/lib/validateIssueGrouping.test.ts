@@ -231,4 +231,23 @@ describe("buildExecutiveSummary", () => {
     assert.equal(summary!.aiPromptHint, "Why are duplicate IDs blocking this transfer?");
     assert.match(summary!.readinessCaption, /10\/13 gates/);
   });
+
+  it("does not claim Execute unlocked for review-grade passed preflight", () => {
+    const pf = basePreflight({
+      passed: true,
+      passed_count: 13,
+      proof_bundle: {
+        transfer_decision: {
+          decision: "review",
+          blockers: [],
+          reason: "browser-local preflight",
+        },
+      } as never,
+    });
+    const summary = buildExecutiveSummary(pf);
+    assert.ok(summary);
+    assert.equal(summary!.title, "Review before Execute");
+    assert.match(summary!.subtitle, /review-grade/i);
+    assert.ok(!/Execute unlocked/i.test(summary!.subtitle));
+  });
 });

@@ -19,7 +19,7 @@ import { cancelJob, fetchJob, fetchJobMappingProof, renameJob, retryJob, resumeJ
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
-import { Gate8ProofCard } from "../components/transfer/Gate8ProofCard";
+import { Gate8ProofCard, classifyGate8Status } from "../components/transfer/Gate8ProofCard";
 import { CdcLeaseConflictPanel } from "../components/transfer/CdcLeaseConflictPanel";
 import { CdcCursorGapPanel } from "../components/transfer/CdcCursorGapPanel";
 import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
@@ -528,7 +528,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
   const mappingCount = jobMappings.length || Object.keys(columnTypes).length;
   const rejectedCount = liveJob?.rejected_rows ?? 0;
   const recon = liveJob?.reconciliation;
-  const reconPassed = recon?.passed;
+  const gate8 = classifyGate8Status(recon);
   const jobDuration = formatJobDuration(liveJob?.started_at, liveJob?.completed_at);
   const triggeredBy = liveJob?.triggered_by || liveJob?.created_by || "";
   const syncModeLabel = formatSyncModeLabel(
@@ -890,23 +890,23 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                       </article>
                       <article
                         className={`is-metric-reconcile${
-                          reconPassed === true
+                          gate8.tone === "ok"
                             ? " is-ok"
-                            : reconPassed === false || selected.status === "failed"
+                            : gate8.tone === "danger" || selected.status === "failed"
                               ? " is-bad"
-                              : ""
+                              : gate8.tone === "warn"
+                                ? " is-warn"
+                                : ""
                         }`}
                       >
                         <strong>
-                          {reconPassed === true
-                            ? "Passed"
-                            : reconPassed === false
-                              ? "Failed"
-                              : isJobSuccess(liveJob.status)
-                                ? "Pending"
-                                : selected.status === "failed"
-                                  ? "Failed"
-                                  : "—"}
+                          {gate8.label !== "Pending"
+                            ? gate8.label
+                            : isJobSuccess(liveJob.status)
+                              ? "Pending"
+                              : selected.status === "failed"
+                                ? "Failed"
+                                : "—"}
                         </strong>
                         <span>Reconcile</span>
                       </article>
@@ -1011,9 +1011,11 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                   description: "Source vs destination row counts and checksums",
                                   icon: "shield",
                                   meta: recon
-                                    ? (recon.passed ? "Passed" : "Needs review")
+                                    ? gate8.label
                                     : "Not captured",
-                                  tone: recon ? (recon.passed ? "ok" : "warn") : "default",
+                                  tone: recon
+                                    ? (gate8.tone === "ok" ? "ok" : gate8.tone === "danger" ? "warn" : "warn")
+                                    : "default",
                                   disabled: !recon,
                                   onOpen: () => setEvidenceDrawer("gate8"),
                                 },

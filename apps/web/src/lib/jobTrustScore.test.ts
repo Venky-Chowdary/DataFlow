@@ -69,4 +69,28 @@ describe("computeJobTrustScore", () => {
     const completeness = without.factors.find((f) => f.id === "completeness");
     assert.ok(completeness && (completeness.score as number) <= 82);
   });
+
+  it("does not treat writer-ack as full Gate-8 pass", () => {
+    const full = computeJobTrustScore({
+      status: "completed",
+      records_processed: 1000,
+      rejected_rows: 0,
+      reconciliation: { passed: true, phase: "post_write", source_checksum: "a", target_checksum: "a" },
+    });
+    const ack = computeJobTrustScore({
+      status: "completed",
+      records_processed: 1000,
+      rejected_rows: 0,
+      reconciliation: {
+        passed: true,
+        phase: "post_write_writer_ack",
+        message: "Transfer verified by writer: 10 rows written (read-back verifier not available)",
+        source_checksum: "abc",
+      },
+    });
+    assert.ok(ack.score < full.score);
+    const factor = ack.factors.find((f) => f.id === "reconcile");
+    assert.ok(factor?.note.toLowerCase().includes("writer"));
+    assert.ok((factor?.score as number) <= 58);
+  });
 });

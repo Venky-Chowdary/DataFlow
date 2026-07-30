@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { isGate8PreWriteSimulation, isGate8WriterAckOnly } from "./Gate8ProofCard";
+import { classifyGate8Status, isGate8PreWriteSimulation, isGate8WriterAckOnly } from "./Gate8ProofCard";
 
 /** Mirror of Gate8ProofCard expected-dest math (quarantine hold-out). */
 function gate8ExpectedDest(sourceRows: number, rejectedRows: number, coercedNullRows: number) {
@@ -102,5 +102,16 @@ describe("Gate-8 pre-write simulation honesty", () => {
       }),
       true,
     );
+  });
+
+  it("classifyGate8Status never labels writer-ack as Passed", () => {
+    const view = classifyGate8Status({
+      passed: true,
+      phase: "post_write_writer_ack",
+      message: "Transfer verified by writer: 10 rows written (read-back verifier not available)",
+    });
+    assert.equal(view.label, "Writer ack");
+    assert.equal(view.fullPass, false);
+    assert.equal(view.tone, "warn");
   });
 });

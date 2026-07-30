@@ -384,6 +384,18 @@ export function buildExecutiveSummary(
   ) && rootCauseCount > 0 && blockedGates === 0;
 
   if (preflight.passed) {
+    const decision = preflight.proof_bundle?.transfer_decision?.decision;
+    if (decision === "review") {
+      return {
+        title: "Review before Execute",
+        subtitle: `${passed}/${total} checks passed · review-grade / local preflight — confirm API Validate before Execute`,
+        untilLines: ["Confirm API preflight (not browser-local only)"],
+        rootCauseCount: 0,
+        readinessCaption,
+        railLine: "Review-grade — Execute not fully unlocked",
+        aiPromptHint: "Why is this transfer still in review after Validate?",
+      };
+    }
     return {
       title: "Ready to transfer",
       subtitle: `${passed}/${total} checks passed · Execute unlocked`,

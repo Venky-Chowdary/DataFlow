@@ -84,6 +84,8 @@ export function isGate8WriterAckOnly(report: Gate8Reconciliation): boolean {
 
 /** True when evidence is pre-write only — never show Verified / match claims. */
 export function isGate8PreWriteSimulation(report: Gate8Reconciliation): boolean {
+  // Writer-ack is post-write limited proof — not a pre-write simulation.
+  if (isGate8WriterAckOnly(report)) return false;
   if (report.preview === true || report.post_write_pending === true) return true;
   if (String(report.phase || "").toLowerCase().includes("pre_write")) return true;
   if (String(report.phase || "").toLowerCase().includes("post_write_pending")) return true;
@@ -106,6 +108,35 @@ export function isGate8PreWriteSimulation(report: Gate8Reconciliation): boolean 
     return true;
   }
   return false;
+}
+
+export type Gate8StatusView = {
+  label: string;
+  tone: "ok" | "warn" | "danger" | "muted";
+  /** Independent post-write source↔dest proof — not writer-ack or pre-write. */
+  fullPass: boolean;
+};
+
+/** Shared operator label for Gate-8 — never call writer-ack / pre-write “Passed”. */
+export function classifyGate8Status(
+  report: Gate8Reconciliation | null | undefined,
+): Gate8StatusView {
+  if (!report) {
+    return { label: "Pending", tone: "muted", fullPass: false };
+  }
+  if (report.passed === false) {
+    return { label: "Failed", tone: "danger", fullPass: false };
+  }
+  if (isGate8WriterAckOnly(report)) {
+    return { label: "Writer ack", tone: "warn", fullPass: false };
+  }
+  if (isGate8PreWriteSimulation(report)) {
+    return { label: "Pre-write only", tone: "warn", fullPass: false };
+  }
+  if (report.passed === true) {
+    return { label: "Passed", tone: "ok", fullPass: true };
+  }
+  return { label: "Pending", tone: "muted", fullPass: false };
 }
 
 /**
