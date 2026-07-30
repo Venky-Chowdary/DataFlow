@@ -760,6 +760,7 @@ def write_mapped_rows(
     )
 
     sparse_rows: list[tuple] = []
+    rows_for_checksum: list[tuple] = list(mapped_rows)
     # Within a single batch, the last occurrence of an upsert key wins.
     if write_mode == "upsert" and conflict_columns:
         mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
@@ -980,7 +981,7 @@ def write_mapped_rows(
             table_name=table_name,
             target_schema=schema,
             checksum=row_checksum(
-                mapped_rows,
+                rows_for_checksum,
                 target_cols,
                 dest_db_type="snowflake",
                 dest_types={c: target_types[i] for i, c in enumerate(target_cols)}
@@ -1001,7 +1002,7 @@ def write_mapped_rows(
             table_name=table_name,
             target_schema=schema,
             checksum=row_checksum(
-                mapped_rows[:written],
+                rows_for_checksum[:written] if written else [],
                 target_cols,
                 dest_db_type="snowflake",
                 dest_types={c: target_types[i] for i, c in enumerate(target_cols)}

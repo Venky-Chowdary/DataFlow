@@ -1318,6 +1318,16 @@ def split_dense_sparse_rows(
     return dense, sparse
 
 
+def combined_mapped_rows_for_checksum(
+    dense_rows: list[tuple],
+    sparse_rows: list[tuple] | None = None,
+) -> list[tuple]:
+    """Dense + sparse rows for writer ack checksum (sparse must not vanish from proof)."""
+    if not sparse_rows:
+        return list(dense_rows)
+    return list(dense_rows) + list(sparse_rows)
+
+
 def sparse_present_bindings(
     row: tuple | list,
     target_cols: list[str],

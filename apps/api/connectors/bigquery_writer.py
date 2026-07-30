@@ -461,6 +461,7 @@ def write_mapped_rows(
             dialect_label="BigQuery STRING",
         )
         sparse_rows: list[tuple] = []
+        rows_for_checksum: list[tuple] = list(mapped_rows)
         if write_mode == "upsert" and conflict_columns:
             mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
             if DF_LSN_COL in target_cols:
@@ -618,7 +619,7 @@ def write_mapped_rows(
         return WriteResult(
             ok=True, rows_written=written, table_name=table_name, target_schema=dataset_id,
             checksum=row_checksum(
-                mapped_rows,
+                rows_for_checksum,
                 target_cols,
                 dest_db_type="bigquery",
                 dest_types=dest_types,

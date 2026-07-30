@@ -2347,7 +2347,10 @@ export function ValidateDashboard({
               : null;
             const scopeNote = evidenceScope?.note != null ? String(evidenceScope.note) : "";
             return (
-              <article key={`${meta.key}-${index}`} className={`df2-vd-rule status-${status}`}>
+              <article
+                key={`${meta.key}-${index}`}
+                className={`df2-vd-rule status-${status}${status === "pass" || status === "skip" ? " is-compact" : ""}`}
+              >
                 <div className="df2-vd-rule-top">
                   <span className="df2-vd-rule-icon"><DtIcon name={meta.icon} size={15} /></span>
                   <span className={`df2-vd-rule-status status-${status}`}>
@@ -2358,9 +2361,16 @@ export function ValidateDashboard({
                   </span>
                 </div>
                 <strong className="df2-vd-rule-label">{meta.label}</strong>
-                <p className="df2-vd-rule-desc">{meta.rule}</p>
-                {status !== "pending" && message && <p className="df2-vd-rule-msg">{message}</p>}
-                {status !== "pending" && evidenceScope && (
+                {(status === "block" || status === "running" || status === "pending") && (
+                  <p className="df2-vd-rule-desc">{meta.rule}</p>
+                )}
+                {status !== "pending" && status !== "pass" && message && (
+                  <p className="df2-vd-rule-msg">{message}</p>
+                )}
+                {status === "pass" && message && (
+                  <p className="df2-vd-rule-msg is-compact-msg" title={message}>{message}</p>
+                )}
+                {status !== "pending" && status !== "pass" && evidenceScope && (
                   <p className="df2-vd-rule-scope" title={scopeNote || undefined}>
                     <span className={`df2-vd-scope-chip cov-${scopeCoverage || "na"}`}>
                       {scopeCoverage === "sample"

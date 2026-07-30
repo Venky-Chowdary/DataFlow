@@ -1192,11 +1192,23 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     audit = getattr(ctx, "run_integrity_audit", None)
     if not callable(audit):
-        return GateResult(
-            gate_id=GateId.G9_DATA_INTEGRITY,
-            status=GateStatus.SKIP,
-            message="Skipped — integrity audit not available",
-            duration_ms=(time.perf_counter() - start) * 1000,
+        return _block(
+            GateId.G9_DATA_INTEGRITY,
+            "Gate-9 cannot prove data integrity — integrity audit not available",
+            start,
+            _with_scope(
+                {
+                    "note": (
+                        "Refuse Execute unlock without an integrity audit adapter; "
+                        "same fail-closed class as Gate-8 without samples"
+                    ),
+                },
+                evidence_scope(
+                    kind="data_integrity",
+                    coverage="none",
+                    note="Integrity audit adapter missing — Gate-9 blocked",
+                ),
+            ),
         )
     report = audit()
     sample_rows = getattr(ctx, "sample_rows", None) or []

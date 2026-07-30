@@ -528,6 +528,7 @@ def write_mapped_rows(
         dialect_label="PostgreSQL VARCHAR",
     )
     sparse_rows: list[tuple] = []
+    rows_for_checksum: list[tuple] = list(mapped_rows)
     if write_mode == "upsert" and conflict_columns:
         from connectors.writer_common import split_dense_sparse_rows
 
@@ -1025,7 +1026,7 @@ def write_mapped_rows(
             table_name=table_name,
             target_schema=schema,
             checksum=row_checksum(
-                mapped_rows,
+                rows_for_checksum if "rows_for_checksum" in locals() else mapped_rows,
                 target_cols,
                 dest_db_type="postgresql",
                 dest_types={c: target_types[i] for i, c in enumerate(target_cols)},
@@ -1045,7 +1046,7 @@ def write_mapped_rows(
             table_name=table_name,
             target_schema=schema or "public",
             checksum=row_checksum(
-                mapped_rows,
+                rows_for_checksum if "rows_for_checksum" in locals() else mapped_rows,
                 target_cols,
                 dest_db_type="postgresql",
                 dest_types={c: target_types[i] for i, c in enumerate(target_cols)}

@@ -2487,6 +2487,7 @@ def write_mapped_rows(
         dialect_label="VARCHAR",
     )
     sparse_rows: list[tuple] = []
+    rows_for_checksum: list[tuple] = list(mapped_rows)
     if write_mode == "upsert" and conflict_columns:
         mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
 
@@ -2751,7 +2752,7 @@ def write_mapped_rows(
             table_name=table_name,
             target_schema=schema or database,
             checksum=row_checksum(
-                mapped_rows,
+                rows_for_checksum,
                 target_cols,
                 dest_db_type=str(cfg.get("type") or "generic_sql"),
                 dest_types=target_column_types,
@@ -2775,12 +2776,12 @@ def write_mapped_rows(
             table_name=table_name,
             target_schema=schema or database,
             checksum=row_checksum(
-                mapped_rows,
+                rows_for_checksum,
                 target_cols,
                 dest_db_type=str(cfg.get("type") or "generic_sql"),
                 dest_types=target_column_types,
             )
-            if mapped_rows
+            if rows_for_checksum
             else "",
             chunks_completed=chunks_completed,
             error=str(exc),

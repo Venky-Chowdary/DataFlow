@@ -25,6 +25,7 @@ from services.value_serializer import json_default
 
 from connectors.writer_common import (
     WriteResult,
+    _rejected_row_count,
     build_mapped_rows_with_details,
     quarantine_unfit_decimals,
     resolve_target_columns,
@@ -603,7 +604,9 @@ def _write_mapped_rows_pyiceberg(
             checksum="",
             chunks_completed=1,
             rejected_details=rejected_details,
-            rejected_rows=len(rejected_details),
+            rejected_rows=_rejected_row_count(
+                data_rows, mapped_rows, rejected_details, policy
+            ),
             driver="iceberg",
         )
 
@@ -704,7 +707,9 @@ def _write_mapped_rows_pyiceberg(
                 checksum="",
                 chunks_completed=1,
                 rejected_details=rejected_details,
-                rejected_rows=len(rejected_details),
+                rejected_rows=_rejected_row_count(
+                data_rows, mapped_rows, rejected_details, policy
+            ),
                 warnings=type_locked_warnings[:20],
                 driver="iceberg",
             )
@@ -758,12 +763,41 @@ def _write_mapped_rows_pyiceberg(
                     driver="iceberg",
                 )
             expanded: list[tuple] = list(dense_rows)
+            from connectors.writer_common import DF_LSN_COL, assert_sparse_upsert_has_pk
+            from services.cdc_effectively_once import should_apply_pk_row
+
             for srow in sparse_rows:
                 present = sparse_present_bindings(srow, target_cols)
+                assert_sparse_upsert_has_pk(present, pk_cols)
                 key = tuple(str(present.get(c, "")) for c in pk_cols)
-                base = dict(existing_by_pk.get(key) or {})
-                base.update(present)
-                expanded.append(tuple(base.get(c) for c in target_cols))
+                base = existing_by_pk.get(key)
+                if base is None:
+                    # Refuse NULL-invent for absent columns on a new PK
+                    # (SQL sparse paths INSERT only present cols; Arrow upsert cannot).
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table,
+                        target_schema=target_schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=(
+                            "Iceberg sparse CDC insert of unknown primary key "
+                            f"{key!r} refused — would invent NULL for absent fields. "
+                            "Require a full row image (no DF_MISSING) or an existing "
+                            "destination row to overlay."
+                        ),
+                        driver="iceberg",
+                    )
+                if DF_LSN_COL in present:
+                    if not should_apply_pk_row(
+                        existing_lsn=base.get(DF_LSN_COL),
+                        incoming_lsn=present[DF_LSN_COL],
+                    ).applied:
+                        continue
+                merged = dict(base)
+                merged.update(present)
+                expanded.append(tuple(merged.get(c) for c in target_cols))
             mapped_rows = expanded
 
         dict_rows = [_row_as_dict(target_cols, r) for r in mapped_rows]
@@ -827,7 +861,9 @@ def _write_mapped_rows_pyiceberg(
         checksum=checksum,
         chunks_completed=1,
         rejected_details=rejected_details,
-        rejected_rows=len(rejected_details),
+        rejected_rows=_rejected_row_count(
+            data_rows, mapped_rows, rejected_details, policy
+        ),
         warnings=type_locked_warnings[:20],
         driver="iceberg",
     )
@@ -1091,7 +1127,9 @@ def _write_mapped_rows_filesystem(
         checksum=checksum,
         chunks_completed=1,
         rejected_details=rejected_details,
-        rejected_rows=len(rejected_details),
+        rejected_rows=_rejected_row_count(
+            data_rows, mapped_rows, rejected_details, policy
+        ),
         warnings=(list(evolve_notes) + list(file_warnings))[:20],
         driver="iceberg",
     )
