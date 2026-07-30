@@ -1,6 +1,7 @@
 /**
  * Persist Data Pilot conversations locally so refresh / nav does not wipe chats.
  * Scoped per browser profile (localStorage) — not a server transcript store.
+ * Secrets (passwords, connection URLs with credentials) are redacted before write.
  */
 
 import type { CopilotAction, CopilotChatMessage, CopilotPendingAction } from "./api";
@@ -29,6 +30,8 @@ export interface PilotSession {
   history: CopilotChatMessage[];
   toolLog: PilotToolLogEntry[];
   updatedAt: number;
+  /** Last durable sample/query result ref from the API. */
+  lastResultId?: string;
 }
 
 export interface PilotRailState {
@@ -47,6 +50,54 @@ const MAX_SESSIONS = 40;
 const MAX_MESSAGES = 120;
 const MAX_HISTORY = 40;
 const MAX_TOOL_LOG = 40;
+
+/** Redact passwords / connection URLs before localStorage persistence. */
+export function redactSecrets(text: string): string {
+  if (!text) return text;
+  let out = text;
+  // postgres://user:pass@host → postgres://user:***@host
+  out = out.replace(
+    /\b((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|mssql|sqlserver|redis):\/\/[^:@/\s]+:)([^@/\s]+)(@)/gi,
+    "$1***$3",
+  );
+  // password: secret / "password": "secret"
+  out = out.replace(
+    /\b(password|passwd|pwd|secret|api[_-]?key|token|private[_-]?key)\b(\s*[:=]\s*)(["']?)([^\s"'\\,;]+)(["']?)/gi,
+    "$1$2$3***$5",
+  );
+  // Authorization: Bearer …
+  out = out.replace(/\b(Bearer\s+)[A-Za-z0-9._\-+=/]+/gi, "$1***");
+  return out;
+}
+
+function redactMessage(m: PilotMessage): PilotMessage {
+  return {
+    ...m,
+    text: redactSecrets(m.text || ""),
+    pending_actions: (m.pending_actions || []).map((a) => {
+      const payload = a.payload && typeof a.payload === "object"
+        ? Object.fromEntries(
+          Object.entries(a.payload as Record<string, unknown>).map(([k, v]) => {
+            const key = k.toLowerCase();
+            if (["password", "passwd", "pwd", "api_key", "token", "private_key", "connection_string"].includes(key)) {
+              return [k, typeof v === "string" && v ? "***" : v];
+            }
+            if (typeof v === "string") return [k, redactSecrets(v)];
+            return [k, v];
+          }),
+        )
+        : a.payload;
+      return { ...a, payload };
+    }),
+  };
+}
+
+function redactHistory(h: CopilotChatMessage[]): CopilotChatMessage[] {
+  return (h || []).map((msg) => ({
+    ...msg,
+    content: redactSecrets(String(msg.content || "")),
+  }));
+}
 
 function readJson<T>(key: string): T | null {
   try {
@@ -69,8 +120,8 @@ function writeJson(key: string, value: unknown) {
 function trimSession(s: PilotSession): PilotSession {
   return {
     ...s,
-    messages: (s.messages || []).slice(-MAX_MESSAGES),
-    history: (s.history || []).slice(-MAX_HISTORY),
+    messages: (s.messages || []).map(redactMessage).slice(-MAX_MESSAGES),
+    history: redactHistory(s.history || []).slice(-MAX_HISTORY),
     toolLog: (s.toolLog || []).slice(0, MAX_TOOL_LOG),
     updatedAt: s.updatedAt || Date.now(),
   };
@@ -140,8 +191,8 @@ export function loadRailChat(): PilotRailState | null {
 
 export function saveRailChat(state: Pick<PilotRailState, "messages" | "history">) {
   writeJson(RAIL_KEY, {
-    messages: state.messages.slice(-MAX_MESSAGES),
-    history: state.history.slice(-MAX_HISTORY),
+    messages: state.messages.map(redactMessage).slice(-MAX_MESSAGES),
+    history: redactHistory(state.history).slice(-MAX_HISTORY),
     updatedAt: Date.now(),
   });
 }

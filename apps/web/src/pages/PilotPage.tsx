@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
 import {
+  confirmCopilotAction,
   copilotChat,
   CopilotAction,
   CopilotChatMessage,
@@ -11,7 +12,6 @@ import {
   formatPilotReachError,
   ModelCapabilities,
   runScheduleNow,
-  saveConnector,
 } from "../lib/api";
 import { AUTOMATION_CATEGORIES, AUTOMATION_IDEAS } from "../lib/automationIdeas";
 import { useActiveData } from "../lib/DataContext";
@@ -35,6 +35,22 @@ import {
 
 interface PilotPageProps {
   onNavigate: (screen: Screen) => void;
+}
+
+function extractResultIdFromTools(
+  tools?: { name: string; success: boolean; summary: string }[],
+): string | undefined {
+  if (!tools?.length) return undefined;
+  for (let i = tools.length - 1; i >= 0; i -= 1) {
+    const t = tools[i];
+    if (!t.success) continue;
+    if (!["sample_connector_object", "run_query", "filter_result", "analyze_result"].includes(t.name)) {
+      continue;
+    }
+    const m = /\b(pr_[a-f0-9]+)\b/i.exec(t.summary || "");
+    if (m) return m[1];
+  }
+  return undefined;
 }
 
 const SCREEN_LABELS: Record<string, string> = {
@@ -141,27 +157,26 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
         });
       } else if (action.type === "create_connector") {
         const p = action.payload || {};
-        const name = String(p.name || "Connector");
-        const type = String(p.type || "");
-        if (!type) throw new Error("Missing connector type");
-        await saveConnector({
-          name,
-          type,
-          host: String(p.host || ""),
-          port: Number(p.port || 0),
-          database: String(p.database || ""),
-          username: String(p.username || ""),
-          password: String(p.password || ""),
-          connection_string: String(p.connection_string || ""),
-          schema: String(p.schema || ""),
-          ssl: Boolean(p.ssl),
-          auth_mode: String(p.auth_mode || ""),
+        const ackId = String(p.ack_id || "");
+        if (!ackId) {
+          throw new Error(
+            "This approval is missing a server ack_id (credentials are not stored in the browser). Ask Pilot to create the connector again.",
+          );
+        }
+        const preview = (p.preview && typeof p.preview === "object"
+          ? (p.preview as Record<string, unknown>)
+          : {}) as Record<string, unknown>;
+        const res = await confirmCopilotAction({
+          ack_id: ackId,
+          actor: "pilot-ui",
+          reason: "operator confirmed create_connector",
         });
+        const name = String(res.name || preview.name || "Connector");
         window.dispatchEvent(new CustomEvent("df2:connectors-changed"));
         onNavigate("connectors");
         toast({
-          title: "Connector saved",
-          message: `“${name}” (${type}) is ready in Connectors.`,
+          title: res.idempotent ? "Connector already saved" : "Connector saved",
+          message: `“${name}” (${res.type || preview.type || "connector"}) is ready in Connectors.`,
           tone: "success",
         });
       } else {
@@ -212,15 +227,35 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
     updateSession(activeId, { messages: nextMessages, title });
 
     try {
-      const res = await copilotChat(q, session.history, activeData);
+      const pilotContext = {
+        name: activeData?.name || "pilot",
+        columns: activeData?.columns || [],
+        row_count: activeData?.row_count ?? 0,
+        filename: activeData?.filename,
+        samples: activeData?.samples,
+        preflight_run_id: activeData?.preflight_run_id,
+        job_id: activeData?.job_id,
+        validation_status: activeData?.validation_status,
+        route: activeData?.route,
+        blockers: activeData?.blockers,
+        pilot_session_id: activeId,
+        last_result_id: session.lastResultId,
+      };
+      const res = await copilotChat(q, session.history, pilotContext);
       const newHistory: CopilotChatMessage[] = [
         ...session.history,
         { role: "user" as const, content: q },
         { role: "assistant" as const, content: res.answer },
       ].slice(-20);
 
+      const nextResultId =
+        res.data_insight?.last_result_id
+        || extractResultIdFromTools(res.tools_used)
+        || session.lastResultId;
+
       updateSession(activeId, {
         history: newHistory,
+        lastResultId: nextResultId,
         messages: [
           ...nextMessages,
           {
@@ -229,6 +264,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
             actions: res.suggested_actions,
             pending_actions: res.pending_actions,
             suggested_prompts: res.suggested_prompts,
+            tools_used: res.tools_used,
           },
         ],
       });

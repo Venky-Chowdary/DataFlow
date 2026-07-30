@@ -210,7 +210,7 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "search_connectors",
-        "description": "Search 620+ connector catalog — Postgres, Snowflake, Shopify, S3, etc.",
+        "description": "Search the connector catalog (tiles ≠ transfer-ready — prefer list_connectors for saved live connections).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -384,6 +384,83 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "sample_connector_object",
+        "description": (
+            "Sample live rows from a table/collection on a saved connector "
+            "(read-only). Use for “show me data from airports on Local Postgres” "
+            "or “analyze the orders table”. Returns preview rows + light column profile "
+            "+ durable result_id for follow-ups."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "connector_id": {"type": "string"},
+                "connector_name": {"type": "string"},
+                "table": {"type": "string", "description": "Table or collection name (schema.table ok)"},
+                "limit": {"type": "integer", "default": 25},
+                "analyze": {"type": "boolean", "default": True},
+                "session_id": {"type": "string"},
+            },
+            "required": ["table"],
+        },
+    },
+    {
+        "name": "run_query",
+        "description": (
+            "Run a read-only SQL SELECT (or Mongo JSON filter) against a saved connector. "
+            "Destructive SQL is rejected. Returns capped preview rows + durable result_id."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "connector_id": {"type": "string"},
+                "connector_name": {"type": "string"},
+                "query": {"type": "string", "description": "SELECT … or Mongo filter JSON"},
+                "collection": {"type": "string", "description": "Mongo collection when needed"},
+                "limit": {"type": "integer", "default": 100},
+                "analyze": {"type": "boolean", "default": False},
+                "session_id": {"type": "string"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "analyze_result",
+        "description": (
+            "Profile a previously sampled/queried result by result_id (or the latest "
+            "result in this Pilot session). Use for follow-ups like “analyze that”, "
+            "“null rates”, “top values of email” — does not re-query the warehouse."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "result_id": {"type": "string"},
+                "session_id": {"type": "string"},
+                "column": {"type": "string", "description": "Optional single-column focus"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "filter_result",
+        "description": (
+            "Filter rows in a stored Pilot result (eq/ne/contains/gt/lt/is_null/…). "
+            "Use for “show rows where email is null” or “filter status = active”."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "result_id": {"type": "string"},
+                "session_id": {"type": "string"},
+                "column": {"type": "string"},
+                "op": {"type": "string", "default": "eq"},
+                "value": {"type": "string"},
+                "limit": {"type": "integer", "default": 25},
+            },
+            "required": ["column"],
+        },
+    },
+    {
         "name": "introspect_connector_schema",
         "description": (
             "Live-introspect columns and types for a table/collection on a saved connector. "
@@ -450,7 +527,19 @@ TOOL_FAMILIES: list[dict] = [
     {
         "id": "profile",
         "label": "Profile",
-        "tools": ["analyze_dataset", "compare_datasets", "profile_quality_rules", "list_connector_objects", "introspect_connector_schema", "diff_schemas", "map_connector_schemas"],
+        "tools": [
+            "analyze_dataset",
+            "compare_datasets",
+            "profile_quality_rules",
+            "list_connector_objects",
+            "introspect_connector_schema",
+            "sample_connector_object",
+            "run_query",
+            "analyze_result",
+            "filter_result",
+            "diff_schemas",
+            "map_connector_schemas",
+        ],
         "generated_actions": 240,
     },
     {
@@ -552,6 +641,10 @@ class DataPilotTools:
             "open_schedule": self._open_schedule,
             "start_transfer_studio": self._start_transfer_studio,
             "list_connector_objects": self._list_connector_objects,
+            "sample_connector_object": self._sample_connector_object,
+            "run_query": self._run_query,
+            "analyze_result": self._analyze_result,
+            "filter_result": self._filter_result,
             "introspect_connector_schema": self._introspect_connector_schema,
             "diff_schemas": self._diff_schemas,
             "map_connector_schemas": self._map_connector_schemas,
@@ -730,9 +823,18 @@ class DataPilotTools:
             "database": draft.get("database") or "",
             "username": draft.get("username") or "",
             "ssl": bool(draft.get("ssl")),
+            "auth_mode": draft.get("auth_mode") or "",
+            "schema": draft.get("schema") or "",
             "has_password": bool(draft.get("password") or draft.get("connection_string")),
             "test": probe_msg or "skipped",
         }
+        from .ack_ledger import get_ack_ledger
+
+        ack_id = get_ack_ledger().put(
+            kind="create_connector",
+            payload=draft,
+            preview=safe_preview,
+        )
         return ToolResult(
             name="create_connector",
             success=True,
@@ -741,7 +843,8 @@ class DataPilotTools:
                 "label": f"Save connector “{draft['name']}” ({draft['type']})",
                 "risk": "mutate",
                 "requires_confirm": True,
-                "connector": draft,
+                "ack_id": ack_id,
+                # Secrets stay on the server ledger — client only gets preview + ack_id.
                 "preview": safe_preview,
             },
         )
@@ -1012,9 +1115,12 @@ class DataPilotTools:
                     "Inspect schema risk, mappings, and validation failures",
                     "Triage jobs by ID (validation runs or job IDs)",
                     "Search your uploaded datasets for columns, PII, and quality",
-                    "Look up live tables and columns on saved connectors",
-                    "Create a saved connector from a URL or host/user/password (with Confirm)",
-                    "Compare source vs destination schemas",
+                    "List tables and describe schemas on saved connectors",
+                    "Sample and analyze live table data (read-only)",
+                    "Run read-only SQL / Mongo queries on saved connectors",
+                    "Follow up on the last sample/query (analyze / filter stored results)",
+                    "Create a saved connector from a URL or host/user/password (server ack + Confirm)",
+                    "Compare source vs destination schemas and map columns",
                     "List and run pipeline schedules (with confirmation)",
                     "Open any app screen (Transfer, Jobs, Pipelines, Contracts, Query, …)",
                 ],
@@ -1060,6 +1166,13 @@ class DataPilotTools:
                 score = float(d.score or 0)
                 # Drop low-score noise and raw ontology shards that read like debug dumps.
                 if score < 0.28:
+                    continue
+                meta_type = str(d.metadata.get("type") or "").lower()
+                # Prefer real product/docs hits over synthetic catalog training docs.
+                if meta_type in {"synthetic_catalog", "catalog_schema", "generated_qna"} and score < 0.55:
+                    continue
+                if "650+" in text or "620+" in text:
+                    # Catalog marketing counts are not transfer-ready evidence.
                     continue
                 if _is_raw_knowledge_shard(text) and not _query_targets_semantic_type(query, text):
                     continue
@@ -1363,6 +1476,82 @@ class DataPilotTools:
 
         return list_connector_objects(connector_id, connector_name, limit)
 
+    def _sample_connector_object(
+        self,
+        connector_id: str = "",
+        connector_name: str = "",
+        table: str = "",
+        limit: int = 25,
+        analyze: bool = True,
+        session_id: str = "",
+    ) -> ToolResult:
+        from .query_tools import sample_connector_object
+
+        return sample_connector_object(
+            connector_id=connector_id,
+            connector_name=connector_name,
+            table=table,
+            limit=limit,
+            analyze=analyze,
+            session_id=session_id,
+        )
+
+    def _run_query(
+        self,
+        connector_id: str = "",
+        connector_name: str = "",
+        query: str = "",
+        collection: str = "",
+        limit: int = 100,
+        analyze: bool = False,
+        session_id: str = "",
+    ) -> ToolResult:
+        from .query_tools import run_connector_query
+
+        return run_connector_query(
+            connector_id=connector_id,
+            connector_name=connector_name,
+            query=query,
+            collection=collection,
+            limit=limit,
+            analyze=analyze,
+            session_id=session_id,
+        )
+
+    def _analyze_result(
+        self,
+        result_id: str = "",
+        session_id: str = "",
+        column: str = "",
+    ) -> ToolResult:
+        from .query_tools import analyze_stored_result
+
+        return analyze_stored_result(
+            result_id=result_id,
+            session_id=session_id,
+            column=column,
+        )
+
+    def _filter_result(
+        self,
+        result_id: str = "",
+        session_id: str = "",
+        column: str = "",
+        op: str = "eq",
+        value: str = "",
+        limit: int = 25,
+    ) -> ToolResult:
+        from .query_tools import filter_stored_result
+
+        return filter_stored_result(
+            result_id=result_id,
+            session_id=session_id,
+            column=column,
+            op=op,
+            value=value,
+            limit=limit,
+        )
+
     def _introspect_connector_schema(
         self,
         connector_id: str = "",
@@ -1544,7 +1733,11 @@ _TOOL_PRIORITY: dict[str, int] = {
     "map_connector_schemas": 100,
     "diff_schemas": 95,
     "introspect_connector_schema": 90,
-    "list_connector_objects": 85,
+    "sample_connector_object": 88,
+    "run_query": 87,
+    "analyze_result": 86,
+    "filter_result": 85,
+    "list_connector_objects": 84,
     "create_connector": 82,
     "remediate_validation": 80,
     "run_schedule_now": 78,
@@ -1578,6 +1771,10 @@ _LIVE_SCHEMA_TOOLS = frozenset({
     "map_connector_schemas",
     "diff_schemas",
     "introspect_connector_schema",
+    "sample_connector_object",
+    "run_query",
+    "analyze_result",
+    "filter_result",
     "list_connector_objects",
 })
 
@@ -1836,6 +2033,137 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     if tables_on and "introspect_connector_schema" not in [p[0] for p in planned]:
         cname = tables_on.group(1).strip().strip("\"'")
         planned.append(("list_connector_objects", {"connector_name": cname}))
+
+    # Sample / analyze live table data
+    sample_m = re.search(
+        r"(?:sample|preview|show(?:\s+me)?(?:\s+some)?(?:\s+data)?(?:\s+from)?|rows?\s+from|"
+        r"analyze|profile|peek(?:\s+at)?)\s+(?:the\s+)?"
+        r"[\"']?([a-zA-Z0-9_.-]+)[\"']?\s+(?:table|collection)?"
+        r"(?:\s+(?:on|in|from|using)\s+[\"']?([^\"'\n]+?))[\"']?\s*$",
+        lower,
+    ) or re.search(
+        r"(?:sample|preview|show(?:\s+me)?(?:\s+data)?(?:\s+from)?|analyze)\s+"
+        r"[\"']?([a-zA-Z0-9_.-]+)[\"']?"
+        r"\s+(?:on|in|from|using)\s+[\"']?([^\"'\n]+?)[\"']?\s*$",
+        lower,
+    ) or re.search(
+        r"(?:data|rows)\s+(?:in|from)\s+[\"']?([a-zA-Z0-9_.-]+)[\"']?"
+        r"(?:\s+(?:on|in|from|using)\s+[\"']?([^\"'\n]+?))[\"']?",
+        lower,
+    )
+    if sample_m and "sample_connector_object" not in [p[0] for p in planned]:
+        # Don't steal pure schema introspect intents
+        if "schema" not in lower and "columns" not in lower and "describe" not in lower:
+            table = (sample_m.group(1) or "").strip()
+            cname = (sample_m.group(2) or "").strip() if sample_m.lastindex and sample_m.lastindex >= 2 else ""
+            cname = re.sub(r"\b(please|now|table|schema|collection)\b", "", cname).strip(" .,")
+            if table and table not in {"data", "rows", "me", "some", "the"}:
+                args = {"table": table, "analyze": "analy" in lower or "profile" in lower}
+                if cname:
+                    args["connector_name"] = cname
+                planned.append(("sample_connector_object", args))
+
+    # Explicit SQL
+    sql_m = re.search(
+        r"(?:run|execute)\s+(?:this\s+)?(?:sql|query)\s*[:\-]?\s*(.+)$",
+        message,
+        re.IGNORECASE | re.DOTALL,
+    ) or re.search(
+        r"\b((?:SELECT|WITH)\s+.+)\s*$",
+        message,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if sql_m and "run_query" not in [p[0] for p in planned]:
+        sql = (sql_m.group(1) or "").strip().strip("`")
+        # Optional "on Connector" suffix
+        on_m = re.search(r"\s+(?:on|using|against)\s+[\"']?([^\"'\n]+?)[\"']?\s*$", sql, re.IGNORECASE)
+        cname = ""
+        if on_m:
+            cname = on_m.group(1).strip()
+            sql = sql[: on_m.start()].strip()
+        args = {"query": sql, "analyze": "analy" in lower}
+        if cname:
+            args["connector_name"] = cname
+        planned.append(("run_query", args))
+
+    # Follow-ups on last stored sample/query
+    analyze_follow = re.search(
+        r"\b(?:analyze|profile|summarize|null\s*rates?|top\s+values?|"
+        r"cardinality|stats?(?:\s+on)?)\b.*\b(?:that|this|these|it|result|sample|rows?)\b",
+        lower,
+    ) or re.search(
+        r"\b(?:analyze|profile)\s+(?:that|this|these|it|the\s+result|the\s+sample)\b",
+        lower,
+    ) or (
+        re.search(r"\b(?:null\s*rates?|top\s+values?|column\s+profile)\b", lower)
+        and not sample_m
+    )
+    focus_col = re.search(
+        r"(?:of|for|on)\s+[\"']?([a-zA-Z_][a-zA-Z0-9_]*)[\"']?\s*$",
+        lower,
+    )
+    if analyze_follow and "analyze_result" not in [p[0] for p in planned]:
+        # Don't steal fresh table sample intents
+        if "sample_connector_object" not in [p[0] for p in planned]:
+            args = {}
+            if focus_col and focus_col.group(1) not in {
+                "that", "this", "these", "result", "sample", "rows", "data", "null",
+            }:
+                args["column"] = focus_col.group(1)
+            planned.append(("analyze_result", args))
+
+    filter_m = re.search(
+        r"(?:filter|show\s+rows?)\s+(?:where\s+)?"
+        r"[\"']?([a-zA-Z_][a-zA-Z0-9_]*)[\"']?\s*"
+        r"(is\s+not\s+null|is\s+null|equals?|=|!=|<>|contains|like|>|>=|<|<=)\s*"
+        r"[\"']?([^\"'\n]*?)[\"']?\s*$",
+        lower,
+    ) or re.search(
+        r"(?:rows?\s+where|where)\s+"
+        r"[\"']?([a-zA-Z_][a-zA-Z0-9_]*)[\"']?\s*"
+        r"(is\s+not\s+null|is\s+null|equals?|=|!=|<>|contains|like|>|>=|<|<=)\s*"
+        r"[\"']?([^\"'\n]*?)[\"']?\s*$",
+        lower,
+    ) or re.search(
+        r"(?:filter|where)\s+[\"']?([a-zA-Z_][a-zA-Z0-9_]*)[\"']?\s*"
+        r"(is\s+not\s+null|is\s+null)",
+        lower,
+    )
+    if filter_m and "filter_result" not in [p[0] for p in planned]:
+        if "sample_connector_object" not in [p[0] for p in planned] and "run_query" not in [
+            p[0] for p in planned
+        ]:
+            col = (filter_m.group(1) or "").strip()
+            if col in {"where", "rows", "row", "show", "filter", "the", "a"}:
+                col = ""
+            op_raw = ""
+            val = ""
+            if filter_m.lastindex and filter_m.lastindex >= 2:
+                op_raw = (filter_m.group(2) or "").strip()
+            if filter_m.lastindex and filter_m.lastindex >= 3:
+                val = (filter_m.group(3) or "").strip().strip("\"'")
+            op = "eq"
+            if "not null" in op_raw:
+                op = "not_null"
+                val = ""
+            elif "null" in op_raw:
+                op = "is_null"
+                val = ""
+            elif op_raw in {"!=", "<>"}:
+                op = "ne"
+            elif op_raw in {">"}:
+                op = "gt"
+            elif op_raw in {">="}:
+                op = "gte"
+            elif op_raw in {"<"}:
+                op = "lt"
+            elif op_raw in {"<="}:
+                op = "lte"
+            elif "contain" in op_raw or "like" in op_raw:
+                op = "contains"
+            args = {"column": col, "op": op, "value": val}
+            if col:
+                planned.append(("filter_result", args))
 
     diff_m = re.search(
         r"diff\s+[\"']?([a-zA-Z0-9_.-]+)[\"']?\s+(?:on|in)\s+[\"']?(.+?)[\"']?\s+vs\s+"

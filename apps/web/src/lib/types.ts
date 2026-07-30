@@ -367,6 +367,10 @@ export interface ActiveDataContext {
   validation_status?: "passed" | "blocked" | "running" | string;
   route?: string;
   blockers?: string[];
+  /** Pilot chat session id — scopes durable query result refs. */
+  pilot_session_id?: string;
+  /** Last sampled/query result_id for follow-up analyze/filter. */
+  last_result_id?: string;
 }
 
 export interface ColumnAnalysis {

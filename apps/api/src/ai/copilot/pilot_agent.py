@@ -60,7 +60,7 @@ def _tools_used(turn: "PilotTurn") -> list[dict]:
 def _tool_summary(tr: ToolResult) -> str:
     if not tr.success:
         return tr.error or "failed"
-    o = tr.output
+    o = tr.output or {}
     if tr.name == "list_datasets":
         return f"{o.get('count', 0)} datasets"
     if tr.name == "analyze_dataset":
@@ -81,6 +81,18 @@ def _tool_summary(tr: ToolResult) -> str:
         return f"run {o.get('name') or o.get('schedule_id')}"
     if tr.name == "list_connector_objects":
         return f"{o.get('count', 0)} objects on {o.get('connector_name')}"
+    if tr.name == "sample_connector_object":
+        rid = o.get("result_id") or ""
+        base = f"{o.get('row_count', 0)} rows from {o.get('table')}"
+        return f"{base} · {rid}" if rid else base
+    if tr.name == "run_query":
+        rid = o.get("result_id") or ""
+        base = f"{o.get('row_count', 0)} query rows"
+        return f"{base} · {rid}" if rid else base
+    if tr.name == "analyze_result":
+        return f"profiled {o.get('result_id') or 'result'}"
+    if tr.name == "filter_result":
+        return f"{o.get('match_count', 0)} filtered rows"
     if tr.name == "introspect_connector_schema":
         return f"{o.get('column_count', 0)} cols on {o.get('table')}"
     if tr.name == "diff_schemas":
@@ -227,7 +239,7 @@ class DataPilotAgent:
         if self.anthropic.is_available():
             llm_futs.append(
                 _executor.submit(
-                    self._anthropic_agent_loop, message, history or [], system
+                    self._anthropic_agent_loop, message, history or [], system, data_context
                 )
             )
         if openai_ready:
@@ -363,11 +375,14 @@ class DataPilotAgent:
 
         if tr.name == "create_connector":
             turn.pending_actions.append({
-                "id": f"create_connector:{(out.get('connector') or {}).get('name') or len(turn.pending_actions)}",
+                "id": f"create_connector:{out.get('ack_id') or len(turn.pending_actions)}",
                 "type": "create_connector",
                 "label": out.get("label") or "Save connector",
                 "risk": "mutate",
-                "payload": out.get("connector") or out,
+                "payload": {
+                    "ack_id": out.get("ack_id"),
+                    "preview": out.get("preview") or {},
+                },
             })
             turn.actions.append({
                 "type": "navigate",
@@ -411,6 +426,7 @@ class DataPilotAgent:
         message: str,
         history: list[dict],
         system: str,
+        data_context: dict | None = None,
     ) -> CopilotResponse | None:
         messages: list[dict] = []
         for msg in history[-12:]:
@@ -463,7 +479,8 @@ class DataPilotAgent:
                     "name": tc["name"],
                     "input": tc["input"],
                 })
-                tr = self.tools.execute(tc["name"], tc.get("input") or {})
+                args = self._with_result_context(tc["name"], tc.get("input") or {}, data_context)
+                tr = self.tools.execute(tc["name"], args)
                 turn.tool_results.append(tr)
                 self._append_tool_actions(turn, tr)
                 tool_results_content.append({
@@ -476,6 +493,23 @@ class DataPilotAgent:
             messages.append({"role": "user", "content": tool_results_content})
 
         return None
+
+    def _with_result_context(self, name: str, args: dict | None, data_context: dict | None) -> dict:
+        """Inject session / last_result_id so follow-ups hit the real stored rows."""
+        out = dict(args or {})
+        ctx = data_context or {}
+        session_id = str(ctx.get("pilot_session_id") or "").strip()
+        last_result_id = str(ctx.get("last_result_id") or "").strip()
+        if session_id and name in (
+            "sample_connector_object",
+            "run_query",
+            "analyze_result",
+            "filter_result",
+        ):
+            out.setdefault("session_id", session_id)
+        if last_result_id and name in ("analyze_result", "filter_result"):
+            out.setdefault("result_id", last_result_id)
+        return out
 
     def _openai_agent(
         self,
@@ -492,7 +526,7 @@ class DataPilotAgent:
         planned = infer_tools_from_message(message)
         turn = PilotTurn()
         for name, args in planned:
-            tr = self.tools.execute(name, args)
+            tr = self.tools.execute(name, self._with_result_context(name, args, data_context))
             turn.tool_results.append(tr)
             self._append_tool_actions(turn, tr)
 
@@ -544,7 +578,7 @@ Respond as Data Pilot in natural language. Ground your answer in tool results an
         planned = infer_tools_from_message(message)
         turn = PilotTurn()
         for name, args in planned:
-            tr = self.tools.execute(name, args)
+            tr = self.tools.execute(name, self._with_result_context(name, args, data_context))
             turn.tool_results.append(tr)
             self._append_tool_actions(turn, tr)
 
@@ -593,7 +627,7 @@ Respond as Data Pilot — grounded in tool results."""
 
         # Always try relevant tools locally
         for name, args in infer_tools_from_message(message):
-            tr = self.tools.execute(name, args)
+            tr = self.tools.execute(name, self._with_result_context(name, args, data_context))
             turn.tool_results.append(tr)
             self._append_tool_actions(turn, tr)
 
@@ -629,6 +663,10 @@ Respond as Data Pilot — grounded in tool results."""
             tr.name in (
                 "list_connector_objects",
                 "introspect_connector_schema",
+                "sample_connector_object",
+                "run_query",
+                "analyze_result",
+                "filter_result",
                 "diff_schemas",
                 "map_connector_schemas",
                 "list_connectors",
@@ -899,6 +937,126 @@ Respond as Data Pilot — grounded in tool results."""
                 for w in (o.get("warnings") or [])[:3]:
                     lines.append(f"⚠ {w}")
                 parts.append("\n".join(lines))
+            elif tr.name in ("sample_connector_object", "run_query") and tr.success:
+                o = tr.output or {}
+                cols = o.get("columns") or []
+                rows = o.get("rows") or []
+                title = (
+                    f"Live sample **{o.get('connector_name')}**.`{o.get('table')}`"
+                    if tr.name == "sample_connector_object"
+                    else f"Query on **{o.get('connector_name')}**"
+                )
+                lines = [
+                    f"{title} ({o.get('type')}) — **{o.get('row_count', len(rows))} rows**"
+                    + (" (truncated)" if o.get("truncated") else "")
+                    + f" · {len(cols)} columns · read-only"
+                ]
+                if o.get("result_id"):
+                    lines.append(f"Result ref `{o['result_id']}` (ask to analyze or filter this).")
+                if tr.name == "run_query" and o.get("query"):
+                    q = str(o.get("query") or "")
+                    lines.append(f"```sql\n{q[:500]}{'…' if len(q) > 500 else ''}\n```")
+                # Compact markdown table (cap columns/rows for chat)
+                show_cols = cols[:8]
+                if show_cols and rows:
+                    header = "| " + " | ".join(f"`{c}`" for c in show_cols) + " |"
+                    sep = "| " + " | ".join("---" for _ in show_cols) + " |"
+                    lines.append(header)
+                    lines.append(sep)
+                    for r in rows[:8]:
+                        cells = []
+                        for c in show_cols:
+                            v = r.get(c)
+                            s = "∅" if v is None else str(v)
+                            if len(s) > 40:
+                                s = s[:37] + "…"
+                            cells.append(s.replace("|", "\\|"))
+                        lines.append("| " + " | ".join(cells) + " |")
+                    if len(cols) > 8:
+                        lines.append(f"_Showing {len(show_cols)}/{len(cols)} columns_")
+                analysis = o.get("analysis") or {}
+                for cprof in (analysis.get("columns") or [])[:6]:
+                    ex = ", ".join(f"`{e}`" for e in (cprof.get("examples") or [])[:2])
+                    null_pct = round(100 * float(cprof.get("null_rate") or 0))
+                    lines.append(
+                        f"• `{cprof.get('column')}` — {cprof.get('inferred_kind', '?')} · "
+                        f"{cprof.get('non_null')}/{analysis.get('row_count_sampled')} non-null"
+                        f" ({null_pct}% null)"
+                        + (f" · e.g. {ex}" if ex else "")
+                    )
+                signals = analysis.get("signals") or {}
+                if signals.get("null_heavy_columns"):
+                    lines.append(
+                        "Null-heavy: "
+                        + ", ".join(f"`{c}`" for c in signals["null_heavy_columns"][:6])
+                    )
+                lines.append("Open **Query** for larger results or exports.")
+                parts.append("\n".join(lines))
+            elif tr.name == "analyze_result" and tr.success:
+                o = tr.output or {}
+                analysis = o.get("analysis") or {}
+                lines = [
+                    f"Profile of stored result `{o.get('result_id')}`"
+                    + (f" · **{o.get('connector_name')}**.`{o.get('table')}`" if o.get("table") else "")
+                    + f" — **{analysis.get('row_count_sampled', o.get('row_count', 0))} rows**, "
+                    f"{analysis.get('column_count', 0)} columns"
+                ]
+                for cprof in (analysis.get("columns") or [])[:12]:
+                    kind = cprof.get("inferred_kind") or "?"
+                    null_pct = round(100 * float(cprof.get("null_rate") or 0))
+                    bit = (
+                        f"• `{cprof.get('column')}` — **{kind}** · "
+                        f"{null_pct}% null · {cprof.get('distinct_in_sample')} distinct"
+                    )
+                    num = cprof.get("numeric") or {}
+                    if num:
+                        bit += f" · min {num.get('min')} / max {num.get('max')} / mean {num.get('mean')}"
+                    top = cprof.get("top_values") or []
+                    if top and kind in {"string", "boolean", "integer"}:
+                        tv = ", ".join(f"`{t.get('value')}`×{t.get('count')}" for t in top[:3])
+                        bit += f" · top {tv}"
+                    lines.append(bit)
+                signals = analysis.get("signals") or {}
+                if signals.get("null_heavy_columns"):
+                    lines.append(
+                        "Null-heavy columns: "
+                        + ", ".join(f"`{c}`" for c in signals["null_heavy_columns"][:8])
+                    )
+                if signals.get("high_cardinality_columns"):
+                    lines.append(
+                        "High cardinality: "
+                        + ", ".join(f"`{c}`" for c in signals["high_cardinality_columns"][:8])
+                    )
+                parts.append("\n".join(lines))
+            elif tr.name == "filter_result" and tr.success:
+                o = tr.output or {}
+                cols = o.get("columns") or []
+                rows = o.get("rows") or []
+                filt = o.get("filter") or {}
+                lines = [
+                    f"Filtered `{filt.get('column')}` **{filt.get('op')}** "
+                    f"`{filt.get('value') or ''}` → **{o.get('match_count', 0)}** / "
+                    f"{o.get('source_row_count', 0)} rows"
+                    + (f" · ref `{o.get('result_id')}`" if o.get("result_id") else "")
+                ]
+                show_cols = cols[:8]
+                if show_cols and rows:
+                    header = "| " + " | ".join(f"`{c}`" for c in show_cols) + " |"
+                    sep = "| " + " | ".join("---" for _ in show_cols) + " |"
+                    lines.append(header)
+                    lines.append(sep)
+                    for r in rows[:8]:
+                        cells = []
+                        for c in show_cols:
+                            v = r.get(c)
+                            s = "∅" if v is None else str(v)
+                            if len(s) > 40:
+                                s = s[:37] + "…"
+                            cells.append(s.replace("|", "\\|"))
+                        lines.append("| " + " | ".join(cells) + " |")
+                elif not rows:
+                    lines.append("_No rows matched that filter on the stored sample._")
+                parts.append("\n".join(lines))
             elif tr.name == "diff_schemas" and tr.success:
                 o = tr.output or {}
                 src = o.get("source") or {}
@@ -1065,6 +1223,10 @@ Respond as Data Pilot — grounded in tool results."""
                 tr.name in (
                     "navigate",
                     "introspect_connector_schema",
+                    "sample_connector_object",
+                    "run_query",
+                    "analyze_result",
+                    "filter_result",
                     "list_connector_objects",
                     "diff_schemas",
                     "map_connector_schemas",
@@ -1170,12 +1332,40 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
                     "pii_count": len(o.get("pii_columns", [])),
                     "quality_score": o.get("quality_score", 0),
                 }
+            if tr.name in ("sample_connector_object", "run_query", "filter_result", "analyze_result") and tr.success:
+                o = tr.output or {}
+                rid = o.get("result_id")
+                if rid:
+                    return {
+                        "dataset": o.get("table") or o.get("connector_name") or "pilot_result",
+                        "columns": len(o.get("columns") or (o.get("analysis") or {}).get("columns") or []),
+                        "rows": o.get("row_count") or o.get("match_count") or (o.get("analysis") or {}).get("row_count_sampled") or 0,
+                        "pii_count": 0,
+                        "quality_score": 0,
+                        "last_result_id": rid,
+                    }
         return None
 
     def _follow_ups(self, message: str, turn: PilotTurn) -> list[str]:
         prompts = []
         if turn.pending_actions:
             prompts.append("What happens if I confirm?")
+        has_result = any(
+            tr.name in ("sample_connector_object", "run_query", "filter_result", "analyze_result") and tr.success
+            for tr in turn.tool_results
+        )
+        if has_result:
+            prompts.extend([
+                "Analyze that result",
+            ])
+            # Prefer a concrete column filter if we know columns
+            for tr in turn.tool_results:
+                if tr.success and (tr.output or {}).get("columns"):
+                    col = (tr.output or {})["columns"][0]
+                    prompts.append(f"Filter where {col} is not null")
+                    break
+            else:
+                prompts.append("Null rates on that result")
         if not any(tr.name == "analyze_dataset" for tr in turn.tool_results):
             prompts.append("Analyze my logistics data")
         prompts.extend([
@@ -1184,7 +1374,14 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
             "Take me to contracts",
             "How does mapping assurance work?",
         ])
-        return prompts[:4]
+        # Dedupe preserve order
+        seen: set[str] = set()
+        out: list[str] = []
+        for p in prompts:
+            if p not in seen:
+                seen.add(p)
+                out.append(p)
+        return out[:4]
 
     def get_suggested_prompts(self) -> list[str]:
         return self._starter_prompts()

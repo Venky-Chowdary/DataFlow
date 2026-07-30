@@ -69,6 +69,12 @@ class TrainRequest(BaseModel):
     force: bool = Field(False, description="Force full retrain")
 
 
+class ConfirmActionRequest(BaseModel):
+    ack_id: str = Field(..., description="Server-side approval id from pending_actions")
+    actor: str = Field("", description="Who confirmed (user email / local id)")
+    reason: str = Field("", description="Optional reason for audit trail")
+
+
 class TrainResponse(BaseModel):
     run_id: str
     status: str
@@ -103,6 +109,68 @@ async def copilot_chat(request: CopilotChatRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/confirm")
+async def copilot_confirm(request: ConfirmActionRequest):
+    """Consume a Pilot mutation ack (e.g. create_connector) — secrets never leave the ledger."""
+    from services.connector_store import create_connector
+
+    from ..ai.copilot.ack_ledger import get_ack_ledger
+
+    ack_id = (request.ack_id or "").strip()
+    if not ack_id:
+        raise HTTPException(status_code=400, detail="ack_id required")
+
+    ledger = get_ack_ledger()
+    peek = ledger.peek(ack_id)
+    if not peek:
+        raise HTTPException(
+            status_code=404,
+            detail="Approval not found or expired. Ask Pilot to create the connector again.",
+        )
+
+    payload, err = ledger.claim(
+        ack_id,
+        actor=request.actor or "pilot-ui",
+        reason=request.reason or "confirmed",
+    )
+    if err:
+        raise HTTPException(status_code=409 if "already" in err.lower() else 400, detail=err)
+    assert payload is not None
+
+    if payload.get("_idempotent"):
+        return {
+            "ok": True,
+            "idempotent": True,
+            "kind": peek.get("kind"),
+            "connector_id": payload.get("connector_id"),
+            "name": payload.get("name"),
+            "type": payload.get("type"),
+        }
+
+    kind = peek.get("kind") or ""
+    if kind == "create_connector":
+        try:
+            conn = create_connector(payload)
+        except Exception as exc:
+            ledger.release_claim(ack_id)
+            raise HTTPException(status_code=400, detail=f"Failed to save connector: {exc}") from exc
+        result = {
+            "connector_id": conn.id,
+            "name": conn.name,
+            "type": conn.type,
+        }
+        ledger.finalize(
+            ack_id,
+            actor=request.actor or "pilot-ui",
+            reason=request.reason or "confirmed",
+            result=result,
+        )
+        return {"ok": True, "idempotent": False, "kind": kind, **result}
+
+    ledger.release_claim(ack_id)
+    raise HTTPException(status_code=400, detail=f"Unsupported approval kind: {kind}")
 
 
 @router.get("/datasets")

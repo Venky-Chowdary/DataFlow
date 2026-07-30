@@ -506,6 +506,7 @@ export interface CopilotChatResponse {
     rows: number;
     pii_count: number;
     quality_score: number;
+    last_result_id?: string;
   };
   tools_used?: { name: string; success: boolean; summary: string }[];
 }
@@ -588,6 +589,8 @@ export async function copilotChat(
       validation_status: dataContext.validation_status,
       route: dataContext.route,
       blockers: dataContext.blockers,
+      pilot_session_id: dataContext.pilot_session_id,
+      last_result_id: dataContext.last_result_id,
     };
   }
   let res: Response;
@@ -605,6 +608,30 @@ export async function copilotChat(
   if (!res.ok) {
     const detail = await parseApiError(res, `Copilot chat failed (${res.status})`);
     throw new Error(formatPilotReachError(new Error(`${res.status}: ${detail}`), API_BASE));
+  }
+  return res.json();
+}
+
+/** Confirm a Pilot mutation ack (create_connector). Secrets stay server-side. */
+export async function confirmCopilotAction(payload: {
+  ack_id: string;
+  actor?: string;
+  reason?: string;
+}): Promise<{
+  ok: boolean;
+  idempotent?: boolean;
+  kind?: string;
+  connector_id?: string;
+  name?: string;
+  type?: string;
+}> {
+  const res = await apiFetch(`${API_BASE}/copilot/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    throw new Error(await parseApiError(res, "Failed to confirm Pilot action"));
   }
   return res.json();
 }

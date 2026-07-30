@@ -34,6 +34,8 @@ apps/api/data/cdc_schema_history/
 apps/api/data/*.json.lock
 apps/api/data/contracts.json
 apps/api/data/connectors.json
+apps/api/data/pilot_results.json
+apps/api/data/pilot_acks.json
 apps/api/data/quarantine_dlq.jsonl
 apps/api/data/usage_metering.json
 apps/api/data/agentic_repair_audit.jsonl
