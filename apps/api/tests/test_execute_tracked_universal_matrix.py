@@ -78,7 +78,28 @@ def _endpoint_reachable(endpoint: EndpointConfig) -> bool:
         return True  # exercised through fakesnow
     host = endpoint.host or "localhost"
     port = endpoint.port or default_port(driver)
-    return _is_reachable(host, port)
+    if not _is_reachable(host, port):
+        return False
+    # Port open ≠ authenticated. Half-dead QEMU mssql on ARM listens then
+    # rejects login — fail-skip instead of failing the matrix.
+    if driver in {"sqlserver", "mssql", "azure_sql"}:
+        try:
+            import pymssql
+
+            conn = pymssql.connect(
+                server=host,
+                port=int(port),
+                user=endpoint.username or "sa",
+                password=endpoint.password or "",
+                database=endpoint.database or "master",
+                login_timeout=3,
+                timeout=3,
+            )
+            conn.close()
+            return True
+        except Exception:
+            return False
+    return True
 
 
 # Build a lookup of canonical emulator endpoint templates keyed by the exact

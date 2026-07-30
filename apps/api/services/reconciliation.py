@@ -881,6 +881,60 @@ def verify_mysql_table(
         return -1, ""
 
 
+def verify_sqlserver_table(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    connection_string: str,
+    schema: str = "dbo",
+    table_name: str,
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Independent SQL Server / Azure SQL Edge read-back for Gate-8 reconcile."""
+    try:
+        import pymssql
+
+        from connectors.sql_identifiers import quote_table_ref
+
+        conn = pymssql.connect(
+            server=host or "127.0.0.1",
+            port=int(port or 1433),
+            user=username or "sa",
+            password=password or "",
+            database=database or "master",
+            login_timeout=10,
+            timeout=30,
+        )
+        sch = (schema or "dbo").strip() or "dbo"
+        table_ref = quote_table_ref(table_name, schema=sch, dialect="sqlserver")
+        cur = conn.cursor()
+        try:
+            cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
+            count = int(cur.fetchone()[0])
+            cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
+            names = [d[0] for d in cur.description] if cur.description else []
+            columns = names or target_columns or []
+            checksum = canonical_checksum_from_iter(
+                _iter_fetchmany(cur),
+                columns,
+                limit=limit,
+                dest_db_type="sqlserver",
+                dest_types=dest_types,
+            )
+        finally:
+            cur.close()
+            conn.close()
+        return count, checksum
+    except Exception as exc:
+        logger.warning("SQL Server reconciliation read-back failed: %s", exc, exc_info=exc)
+        return -1, ""
+
+
 def verify_bigquery_table(
     *,
     project_id: str,
@@ -1483,6 +1537,20 @@ def verify_target(
             password=dest.get("password", ""),
             connection_string=dest.get("connection_string", ""),
             ssl=dest.get("ssl", False),
+            table_name=table_name,
+            target_columns=target_columns,
+            limit=limit,
+            dest_types=dest_types,
+        )
+    elif db_type in {"sqlserver", "mssql", "azure_sql"}:
+        count, chk = verify_sqlserver_table(
+            host=dest.get("host", ""),
+            port=int(dest.get("port") or 1433),
+            database=dest.get("database", ""),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            connection_string=dest.get("connection_string", ""),
+            schema=schema or dest.get("schema") or "dbo",
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,

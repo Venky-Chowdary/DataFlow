@@ -116,8 +116,12 @@ services:
 
   # SQL Server Change Tracking + native CDC for integration tests.
   # Auto-init after first boot (sqlserver-init). Manual: sqlserver_ct_init.sql + sqlserver_cdc_init.sql
+  # On Apple Silicon, mssql/server:2022 crashes under QEMU (VA layout). Use profile
+  # ``arm-sql`` → azure-sql-edge for batch SKU + Change Tracking; native CDC stays amd64 CI.
   sqlserver:
     image: mcr.microsoft.com/mssql/server:2022-latest
+    profiles: ["amd64-sql"]
+    platform: linux/amd64
     environment:
       ACCEPT_EULA: "Y"
       MSSQL_SA_PASSWORD: "DataFlow_CDC_2022!"
@@ -141,6 +145,8 @@ services:
 
   sqlserver-init:
     image: mcr.microsoft.com/mssql/server:2022-latest
+    profiles: ["amd64-sql"]
+    platform: linux/amd64
     depends_on:
       sqlserver:
         condition: service_healthy
@@ -155,6 +161,30 @@ services:
         /opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P 'DataFlow_CDC_2022!' -C -i /ct_init.sql
         /opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P 'DataFlow_CDC_2022!' -C -i /cdc_init.sql
         echo "sqlserver CT + native CDC init done"
+
+  # Azure SQL Edge — arm64-friendly. Supports Change Tracking for local SKU;
+  # does not replace full SQL Server native CDC proofs (use amd64-sql / CI).
+  sqlserver-edge:
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    profiles: ["arm-sql"]
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "DataFlow_CDC_2022!"
+      MSSQL_PID: Developer
+    ports:
+      - "1433:1433"
+    volumes:
+      - mssqledgedata:/var/opt/mssql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "timeout 1 bash -c '</dev/tcp/127.0.0.1/1433' || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 40s
 
   # BigQuery emulator for always-on local warehouse SKU proofs without cloud creds.
   bigquery-emulator:
@@ -173,3 +203,4 @@ volumes:
   mongodata:
   mysqldata:
   mssqldata:
+  mssqledgedata:

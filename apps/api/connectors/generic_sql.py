@@ -2609,6 +2609,13 @@ def write_mapped_rows(
                             "TIMESTAMP WITHOUT TIME ZONE", "TIMESTAMP"
                         ).replace("TIMESTAMP WITH TIME ZONE", "TIMESTAMP")
                         conn.execute(sa.text(ddl))
+                    elif (
+                        (dialect_name or "").lower() == "mssql"
+                        or db_type in {"sqlserver", "mssql", "azure_sql"}
+                    ):
+                        # T-SQL has no CREATE TABLE IF NOT EXISTS. Existence was
+                        # already probed via inspector — emit plain CREATE TABLE.
+                        conn.execute(sa.schema.CreateTable(table_obj))
                     else:
                         conn.execute(
                             sa.schema.CreateTable(table_obj, if_not_exists=True)
