@@ -1060,7 +1060,8 @@ class PostgreSqlChangeStreamCdc:
                         tbl = table_by_lower.get(
                             (change.relation or "").lower(), change.relation or self.table
                         )
-                        buf.insert(tbl, change.new_tuple, lsn=lsn)
+                        pk = self._pk_value(change.new_tuple, table=tbl)
+                        buf.insert(tbl, change.new_tuple, pk=pk or None, lsn=lsn)
                     elif change.op == "update" and change.new_tuple:
                         if change.toast_incomplete:
                             from services.cdc_toast import CdcToastIncompleteError
@@ -1074,7 +1075,8 @@ class PostgreSqlChangeStreamCdc:
                         tbl = table_by_lower.get(
                             (change.relation or "").lower(), change.relation or self.table
                         )
-                        buf.update(tbl, change.new_tuple, lsn=lsn)
+                        pk = self._pk_value(change.new_tuple, table=tbl)
+                        buf.update(tbl, change.new_tuple, pk=pk or None, lsn=lsn)
                     elif change.op == "delete" and change.old_tuple:
                         tbl = table_by_lower.get(
                             (change.relation or "").lower(), change.relation or self.table
@@ -1120,9 +1122,11 @@ class PostgreSqlChangeStreamCdc:
                 op, old_key, new_tuple = parsed
                 self._last_event_at = datetime.now(timezone.utc)
                 if op == "insert" and new_tuple:
-                    buf.insert(tbl, new_tuple, lsn=lsn)
+                    pk = self._pk_value(new_tuple, table=tbl)
+                    buf.insert(tbl, new_tuple, pk=pk or None, lsn=lsn)
                 elif op == "update" and new_tuple:
-                    buf.update(tbl, new_tuple, lsn=lsn)
+                    pk = self._pk_value(new_tuple, table=tbl)
+                    buf.update(tbl, new_tuple, pk=pk or None, lsn=lsn)
                 elif op == "delete" and old_key:
                     pk = self._pk_value(old_key, table=tbl)
                     if pk:

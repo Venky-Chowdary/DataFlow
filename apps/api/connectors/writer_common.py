@@ -945,3 +945,330 @@ def resolve_target_columns(
                 )
             target_types.append(str(proposed))
     return target_cols, target_types
+
+
+# ---------------------------------------------------------------------------
+# Shared DECIMAL(p,s) / NUMBER(p,s) / BIGNUMERIC(p,s) fit — fail-closed.
+# Used by Snowflake, MySQL, Postgres, generic_sql, BigQuery writers.
+# ---------------------------------------------------------------------------
+
+_DECIMAL_TYPE_RE = re.compile(
+    r"^(?:NUMBER|DECIMAL|NUMERIC|BIGNUMERIC)\s*(?:\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\))?\s*$",
+    re.IGNORECASE,
+)
+
+# Platform defaults when the type is bare (BigQuery SchemaField without params).
+_BARE_DECIMAL_DEFAULTS: dict[str, tuple[int, int]] = {
+    "NUMERIC": (38, 9),
+    "BIGNUMERIC": (76, 38),
+}
+
+
+def parse_decimal_precision_scale(type_str: str) -> tuple[int, int] | None:
+    """Parse DECIMAL/NUMERIC/NUMBER/BIGNUMERIC(p[,s]) → (precision, scale).
+
+    Bare ``NUMERIC`` / ``BIGNUMERIC`` use BigQuery platform defaults (38,9) /
+    (76,38). Bare ``DECIMAL`` / ``NUMBER`` return None (ambiguous capacity).
+    """
+    text = (type_str or "").strip()
+    m = _DECIMAL_TYPE_RE.match(text)
+    if not m:
+        return None
+    base_m = re.match(r"^(NUMBER|DECIMAL|NUMERIC|BIGNUMERIC)", text, re.IGNORECASE)
+    if not base_m:
+        return None
+    base = base_m.group(1).upper()
+    if m.group(1) is None:
+        return _BARE_DECIMAL_DEFAULTS.get(base)
+    precision = int(m.group(1))
+    scale = int(m.group(2)) if m.group(2) is not None else 0
+    if precision < 1 or scale < 0 or scale > precision:
+        return None
+    return precision, scale
+
+
+def decimal_int_digits_and_scale(value: Any) -> tuple[int, int]:
+    """Return (integer_digits, fractional_scale) for a cell value."""
+    from decimal import Decimal, InvalidOperation, Overflow
+
+    try:
+        text = str(value).strip() if value is not None else ""
+        if not text:
+            return 0, 0
+        d = Decimal(text)
+        if not d.is_finite():
+            return 0, 0
+        _sign, digits, exponent = d.as_tuple()
+        scale = -exponent if exponent < 0 else 0
+        int_digits = max(0, len(digits) + exponent)
+        return int_digits, scale
+    except (InvalidOperation, Overflow, ValueError, TypeError):
+        return 0, 0
+
+
+def fits_decimal(value: Any, precision: int, scale: int) -> bool:
+    """True if value can be stored in DECIMAL/NUMBER(precision, scale).
+
+    Scale overflow is fail-closed — never silently quantize/round into (p,s).
+    """
+    from decimal import Decimal, InvalidOperation, Overflow
+
+    if value is None:
+        return True
+    try:
+        d = Decimal(str(value).strip())
+        if not d.is_finite():
+            return False
+        int_digits, value_scale = decimal_int_digits_and_scale(d)
+        if value_scale > scale:
+            return False
+        max_int = max(0, precision - scale)
+        return int_digits <= max_int and value_scale <= scale
+    except (InvalidOperation, Overflow, ValueError, TypeError):
+        return False
+
+
+def quarantine_unfit_decimals(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    target_types: list[str],
+    rejected_details: list[dict[str, Any]],
+    policy: str,
+    *,
+    dialect_label: str = "DECIMAL",
+) -> list[tuple]:
+    """Hold out / NULL cells that cannot fit DECIMAL/NUMBER(p,s).
+
+    ``quarantine`` omits the whole row from the primary write (no NULL invent).
+    ``coerce_null`` keeps the row with a NULL cell. ``fail`` leaves rows unchanged
+    so the driver/strict path can abort.
+    """
+    if policy == "fail":
+        return mapped_rows
+    number_cols: list[tuple[int, int, int]] = []
+    for i, typ in enumerate(target_types):
+        parsed = parse_decimal_precision_scale(typ)
+        if parsed:
+            number_cols.append((i, parsed[0], parsed[1]))
+    if not number_cols:
+        return mapped_rows
+
+    from services.value_serializer import cell_to_string
+
+    out: list[tuple] = []
+    for row_idx, row in enumerate(mapped_rows):
+        cells = list(row)
+        hold_out = False
+        for col_idx, precision, scale in number_cols:
+            if col_idx >= len(cells) or cells[col_idx] is None:
+                continue
+            if fits_decimal(cells[col_idx], precision, scale):
+                continue
+            sample = cell_to_string(cells[col_idx])[:120]
+            rejected_details.append(
+                {
+                    "row": row_idx + 1,
+                    "column": target_cols[col_idx],
+                    "target": target_cols[col_idx],
+                    "value": sample,
+                    "reason": (
+                        f"decimal does not fit {dialect_label}({precision},{scale}) "
+                        "— quarantined (would truncate/overflow on write)"
+                    ),
+                    "policy": "write_quarantine",
+                    "chars": [],
+                }
+            )
+            if policy == "coerce_null":
+                cells[col_idx] = None
+            else:
+                hold_out = True
+                break
+        if hold_out:
+            continue
+        out.append(tuple(cells))
+    return out
+
+
+def string_storage_units(value: Any, type_str: str) -> int:
+    """Character / UTF-16 code-unit length for bounded string DDL fit checks."""
+    from services.value_serializer import cell_to_string
+
+    if value is None:
+        return 0
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        try:
+            text = bytes(value).decode("utf-8")
+        except UnicodeDecodeError:
+            text = cell_to_string(value)
+    else:
+        text = value if isinstance(value, str) else cell_to_string(value)
+    upper = (type_str or "").upper()
+    # SQL Server / Oracle national types store UTF-16 code units.
+    if any(token in upper for token in ("NVARCHAR", "NCHAR", "NVARCHAR2")):
+        return len(text.encode("utf-16-le")) // 2
+    return len(text)
+
+
+def fits_varchar(value: Any, width: int, type_str: str = "") -> bool:
+    """True if value fits a bounded VARCHAR/CHAR/NVARCHAR(width) column."""
+    if value is None:
+        return True
+    return string_storage_units(value, type_str) <= width
+
+
+def quarantine_unfit_strings(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    target_types: list[str],
+    rejected_details: list[dict[str, Any]],
+    policy: str,
+    *,
+    dialect_label: str = "VARCHAR",
+) -> list[tuple]:
+    """Hold out / NULL cells that exceed bounded VARCHAR/NVARCHAR/CHAR width.
+
+    Preflight only sees samples — production rows longer than samples used to
+    reach SQL Server and silently truncate. Quarantine is fail-closed.
+    Unlimited carriers (TEXT, NVARCHAR(MAX), STRING) are skipped.
+    """
+    if policy == "fail":
+        return mapped_rows
+
+    from services.ddl_compatibility import parse_varchar_width
+
+    width_cols: list[tuple[int, int, str]] = []
+    for i, typ in enumerate(target_types):
+        width = parse_varchar_width(typ)
+        if width is not None:
+            width_cols.append((i, width, typ))
+    if not width_cols:
+        return mapped_rows
+
+    from services.value_serializer import cell_to_string
+
+    out: list[tuple] = []
+    for row_idx, row in enumerate(mapped_rows):
+        cells = list(row)
+        hold_out = False
+        for col_idx, width, typ in width_cols:
+            if col_idx >= len(cells) or cells[col_idx] is None:
+                continue
+            if fits_varchar(cells[col_idx], width, typ):
+                continue
+            sample = cell_to_string(cells[col_idx])[:120]
+            units = string_storage_units(cells[col_idx], typ)
+            rejected_details.append(
+                {
+                    "row": row_idx + 1,
+                    "column": target_cols[col_idx],
+                    "target": target_cols[col_idx],
+                    "value": sample,
+                    "reason": (
+                        f"value length {units} exceeds {dialect_label}({width}) "
+                        "— quarantined (would truncate on write)"
+                    ),
+                    "policy": "write_quarantine",
+                    "chars": [],
+                }
+            )
+            if policy == "coerce_null":
+                cells[col_idx] = None
+            else:
+                hold_out = True
+                break
+        if hold_out:
+            continue
+        out.append(tuple(cells))
+    return out
+
+
+def _specialty_column_kind(type_str: str) -> str | None:
+    """Return 'geography' / 'interval' when the destination DDL is specialty-typed.
+
+    String/VARCHAR carriers (Databricks/Iceberg) are skipped — any text is valid
+    there; quarantine applies only when the destination expects spatial/interval.
+    """
+    from services.type_system import normalize_logical_type
+
+    logical = normalize_logical_type(type_str)
+    if logical == "geography":
+        return "geography"
+    if logical == "interval":
+        return "interval"
+    upper = (type_str or "").upper()
+    if re.search(
+        r"\b(GEOGRAPHY|GEOMETRY|SDO_GEOMETRY|POINT|LINESTRING|POLYGON|"
+        r"MULTIPOINT|MULTILINESTRING|MULTIPOLYGON|GEOMETRYCOLLECTION)\b",
+        upper,
+    ):
+        return "geography"
+    if re.search(r"\bINTERVAL\b", upper):
+        return "interval"
+    return None
+
+
+def quarantine_unfit_specialty_types(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    target_types: list[str],
+    rejected_details: list[dict[str, Any]],
+    policy: str,
+) -> list[tuple]:
+    """Hold out / NULL cells that are not valid GEOGRAPHY or INTERVAL wire.
+
+    Specialty types travel as identity payloads (WKT/GeoJSON/ISO-8601). Values
+    that cannot possibly bind are quarantined fail-closed — never silently
+    coerced into an empty geometry or invent a cast.
+    """
+    if policy == "fail":
+        return mapped_rows
+    specialty_cols: list[tuple[int, str]] = []
+    for i, typ in enumerate(target_types):
+        kind = _specialty_column_kind(typ)
+        if kind:
+            specialty_cols.append((i, kind))
+    if not specialty_cols:
+        return mapped_rows
+
+    from services.schema_inference import is_geography_wire, is_interval_wire
+    from services.value_serializer import cell_to_string
+
+    out: list[tuple] = []
+    for row_idx, row in enumerate(mapped_rows):
+        cells = list(row)
+        hold_out = False
+        for col_idx, kind in specialty_cols:
+            if col_idx >= len(cells) or cells[col_idx] is None:
+                continue
+            ok = (
+                is_geography_wire(cells[col_idx])
+                if kind == "geography"
+                else is_interval_wire(cells[col_idx])
+            )
+            if ok:
+                continue
+            sample = cell_to_string(cells[col_idx])[:120]
+            rejected_details.append(
+                {
+                    "row": row_idx + 1,
+                    "column": target_cols[col_idx],
+                    "target": target_cols[col_idx],
+                    "value": sample,
+                    "reason": (
+                        f"value is not a valid {kind} wire payload "
+                        "— quarantined (would fail destination bind or invent a cast)"
+                    ),
+                    "policy": "write_quarantine",
+                    "chars": [],
+                }
+            )
+            if policy == "coerce_null":
+                cells[col_idx] = None
+            else:
+                hold_out = True
+                break
+        if hold_out:
+            continue
+        out.append(tuple(cells))
+    return out

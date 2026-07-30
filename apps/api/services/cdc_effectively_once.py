@@ -90,6 +90,51 @@ def should_apply_pk_row(
     )
 
 
+def should_apply_pk_delete(
+    *,
+    existing_lsn: Any,
+    incoming_lsn: Any,
+) -> EffectivelyOnceResult:
+    """Return whether a CDC DELETE may remove an existing PK row.
+
+    Under at-least-once redelivery a stale DELETE must not wipe a row that was
+    recreated/updated at a newer ``_df_lsn``. Apply when:
+
+    - No incoming LSN (legacy path) → apply
+    - No existing LSN → apply
+    - Incoming >= existing → apply (equal = idempotent redelivery of same delete)
+    - Incoming older → skip
+    """
+    if incoming_lsn is None or str(incoming_lsn).strip() == "":
+        return EffectivelyOnceResult(
+            applied=True,
+            reason="no_incoming_lsn",
+            prior_lsn=str(existing_lsn) if existing_lsn is not None else None,
+            incoming_lsn=None,
+        )
+    if existing_lsn is None or str(existing_lsn).strip() == "":
+        return EffectivelyOnceResult(
+            applied=True,
+            reason="no_existing_lsn",
+            prior_lsn=None,
+            incoming_lsn=str(incoming_lsn),
+        )
+    cmp = compare_lsn(incoming_lsn, existing_lsn)
+    if cmp >= 0:
+        return EffectivelyOnceResult(
+            applied=True,
+            reason="delete_lsn_ok" if cmp > 0 else "equal_lsn_delete",
+            prior_lsn=str(existing_lsn),
+            incoming_lsn=str(incoming_lsn),
+        )
+    return EffectivelyOnceResult(
+        applied=False,
+        reason="stale_delete_rejected",
+        prior_lsn=str(existing_lsn),
+        incoming_lsn=str(incoming_lsn),
+    )
+
+
 @dataclass
 class PkSinkState:
     """In-memory PK sink used for chaos proofs (mirrors upsert+_df_lsn guard)."""
@@ -97,6 +142,8 @@ class PkSinkState:
     rows: dict[str, dict[str, Any]] = field(default_factory=dict)
     rejected_stale: int = 0
     applied_count: int = 0
+    deleted_count: int = 0
+    rejected_stale_deletes: int = 0
 
     def upsert(self, pk: str, row: dict[str, Any]) -> EffectivelyOnceResult:
         existing = self.rows.get(pk)
@@ -110,6 +157,18 @@ class PkSinkState:
             self.rejected_stale += 1
         return decision
 
+    def delete(self, pk: str, *, incoming_lsn: Any = None) -> EffectivelyOnceResult:
+        existing = self.rows.get(pk)
+        prior = existing.get(DF_LSN_COL) if existing else None
+        decision = should_apply_pk_delete(existing_lsn=prior, incoming_lsn=incoming_lsn)
+        if not decision.applied:
+            self.rejected_stale_deletes += 1
+            return decision
+        if existing is not None:
+            del self.rows[pk]
+            self.deleted_count += 1
+        return decision
+
 
 def chaos_redeliver_older_then_newer(pk: str = "1") -> PkSinkState:
     """Canonical chaos: apply new LSN, redeliver older, then equal — state holds."""
@@ -120,6 +179,31 @@ def chaos_redeliver_older_then_newer(pk: str = "1") -> PkSinkState:
     sink.upsert(pk, {"id": pk, "v": "stale", DF_LSN_COL: "0/100"})
     # Idempotent equal LSN redelivery.
     sink.upsert(pk, {"id": pk, "v": "new-again", DF_LSN_COL: "0/200"})
+    return sink
+
+
+def filter_keys_for_lsn_delete(
+    keys: list[str],
+    existing_lsn_by_pk: dict[str, Any],
+    incoming_lsn: Any,
+) -> list[str]:
+    """Keep only PK keys whose DELETE is safe under ``incoming_lsn``."""
+    out: list[str] = []
+    for key in keys:
+        prior = existing_lsn_by_pk.get(key)
+        if should_apply_pk_delete(existing_lsn=prior, incoming_lsn=incoming_lsn).applied:
+            out.append(key)
+    return out
+
+
+def chaos_stale_delete_after_recreate(pk: str = "1") -> PkSinkState:
+    """DELETE@100 must not wipe a row recreated at LSN 200."""
+    sink = PkSinkState()
+    sink.upsert(pk, {"id": pk, "v": "v1", DF_LSN_COL: "0/50"})
+    sink.delete(pk, incoming_lsn="0/100")
+    sink.upsert(pk, {"id": pk, "v": "recreated", DF_LSN_COL: "0/200"})
+    # Stale delete redelivery (at-least-once).
+    sink.delete(pk, incoming_lsn="0/100")
     return sink
 
 

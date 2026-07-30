@@ -172,25 +172,53 @@ def delete_by_primary_keys(
     primary_key_column: str,
     keys: list[str],
     schema: str | None = None,
+    *,
+    incoming_lsn: str | None = None,
+    lsn_column: str = "_df_lsn",
 ) -> int:
     """Delete rows from a destination by primary key values.
 
     Supports SQL engines (PostgreSQL, MySQL, SQLite, generic_sql) and MongoDB.
     Returns the number of rows deleted. Unsupported drivers return 0.
+
+    When ``incoming_lsn`` is set, stale deletes that would wipe a newer
+    ``_df_lsn`` row are skipped (at-least-once CDC redelivery safety).
     """
     if not keys:
         return 0
+    work_keys = list(keys)
+    if incoming_lsn:
+        try:
+            existing = _fetch_pk_lsn_map(
+                db_type,
+                cfg,
+                table_name,
+                primary_key_column,
+                work_keys,
+                schema,
+                lsn_column=lsn_column,
+            )
+            from services.cdc_effectively_once import filter_keys_for_lsn_delete
+
+            work_keys = filter_keys_for_lsn_delete(work_keys, existing, incoming_lsn)
+        except Exception as exc:
+            logger.warning(
+                "CDC LSN delete guard unavailable (%s); applying unconditional delete",
+                exc,
+            )
+    if not work_keys:
+        return 0
     dt = (db_type or "").lower().strip()
     if dt in ("postgresql", "redshift"):
-        return _delete_postgresql(cfg, table_name, primary_key_column, keys, schema)
+        return _delete_postgresql(cfg, table_name, primary_key_column, work_keys, schema)
     if dt == "mysql":
-        return _delete_mysql(cfg, table_name, primary_key_column, keys, schema)
+        return _delete_mysql(cfg, table_name, primary_key_column, work_keys, schema)
     if dt == "sqlite":
-        return _delete_sqlite(cfg, table_name, primary_key_column, keys, schema)
+        return _delete_sqlite(cfg, table_name, primary_key_column, work_keys, schema)
     if dt == "generic_sql":
-        return _delete_generic_sql(cfg, table_name, primary_key_column, keys, schema)
+        return _delete_generic_sql(cfg, table_name, primary_key_column, work_keys, schema)
     if dt == "mongodb":
-        return _delete_mongodb(cfg, table_name, primary_key_column, keys)
+        return _delete_mongodb(cfg, table_name, primary_key_column, work_keys)
     if dt in {"sqlserver", "mssql", "oracle", "snowflake", "bigquery", "redshift"}:
         # Route warehouse/SQL dialects through the generic SQLAlchemy deleter.
         from connectors.generic_sql import delete_by_primary_keys as _generic_delete
@@ -199,10 +227,84 @@ def delete_by_primary_keys(
             {**cfg, "db_type": dt if dt != "mssql" else "sqlserver"},
             table_name,
             primary_key_column,
-            keys,
+            work_keys,
             schema=schema,
         )
     return 0
+
+
+def _fetch_pk_lsn_map(
+    db_type: str,
+    cfg: dict[str, Any],
+    table_name: str,
+    primary_key_column: str,
+    keys: list[str],
+    schema: str | None,
+    *,
+    lsn_column: str,
+) -> dict[str, Any]:
+    """Return ``{pk: _df_lsn_or_None}`` for keys (missing rows → None)."""
+    existing: dict[str, Any] = {str(k): None for k in keys}
+    dt = (db_type or "").lower().strip()
+    if dt in ("postgresql", "redshift"):
+        from psycopg2 import sql
+
+        from connectors.postgresql_conn import get_connection
+
+        conn = get_connection(
+            host=cfg.get("host", "") or "127.0.0.1",
+            port=int(cfg.get("port") or 5432),
+            database=cfg.get("database", ""),
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=bool(cfg.get("ssl")),
+        )
+        try:
+            placeholders = sql.SQL(",").join(sql.Placeholder() * len(keys))
+            query = sql.SQL("SELECT {}, {} FROM {}.{} WHERE {} IN ({})").format(
+                sql.Identifier(primary_key_column),
+                sql.Identifier(lsn_column),
+                sql.Identifier(schema or "public"),
+                sql.Identifier(table_name),
+                sql.Identifier(primary_key_column),
+                placeholders,
+            )
+            with conn.cursor() as cur:
+                cur.execute(query, keys)
+                for row in cur.fetchall() or []:
+                    existing[str(row[0])] = row[1]
+        finally:
+            conn.close()
+        return existing
+    if dt == "mysql":
+        from connectors.mysql_conn import get_connection
+        from connectors.writer_common import quote_sql_identifier
+
+        conn = get_connection(
+            host=cfg.get("host", "") or "127.0.0.1",
+            port=int(cfg.get("port") or 3306),
+            database=cfg.get("database") or schema or "",
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=bool(cfg.get("ssl")),
+        )
+        try:
+            pk_q = quote_sql_identifier(primary_key_column, "`")
+            lsn_q = quote_sql_identifier(lsn_column, "`")
+            table_q = quote_sql_identifier(table_name, "`")
+            placeholders = ", ".join(["%s"] * len(keys))
+            query = f"SELECT {pk_q}, {lsn_q} FROM {table_q} WHERE {pk_q} IN ({placeholders})"
+            with conn.cursor() as cur:
+                cur.execute(query, keys)
+                for row in cur.fetchall() or []:
+                    existing[str(row[0])] = row[1]
+        finally:
+            conn.close()
+        return existing
+    # Other engines: treat all as no existing LSN (apply deletes) until wired.
+    return existing
 
 
 class UnsupportedCdcDeleteError(RuntimeError):

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 from services.cdc_engine import ChangeBatch
+from services.cdc_net_effect import CdcTxnEvent, coalesce_cdc_txn_events, infer_row_pk
 from services.cdc_transaction_buffer import (
     CdcTxnBufferOverflow,
     default_txn_buffer_max_events,
@@ -71,9 +72,7 @@ def can_share_log_reader(src_type: str, table_count: int) -> bool:
 
 @dataclass
 class _TableBuf:
-    inserts: list[dict[str, Any]] = field(default_factory=list)
-    updates: list[dict[str, Any]] = field(default_factory=list)
-    deletes: list[str] = field(default_factory=list)
+    events: list[CdcTxnEvent] = field(default_factory=list)
 
 
 @dataclass
@@ -138,19 +137,37 @@ class MultiTableTransactionBuffer:
         elif lsn:
             self._open.last_lsn = lsn
 
-    def insert(self, table: str, row: dict[str, Any], *, lsn: str | None = None) -> None:
+    def insert(
+        self,
+        table: str,
+        row: dict[str, Any],
+        *,
+        pk: str | None = None,
+        lsn: str | None = None,
+    ) -> None:
         self._ensure_open(lsn)
         if self._open is None:
             raise RuntimeError("CDC multi-table buffer is not open after insert")
-        self._bucket(table).inserts.append(row)
+        self._bucket(table).events.append(
+            CdcTxnEvent(op="i", pk=infer_row_pk(row, explicit=pk), row=dict(row), lsn=lsn)
+        )
         self._open.event_count += 1
         self._maybe_overflow()
 
-    def update(self, table: str, row: dict[str, Any], *, lsn: str | None = None) -> None:
+    def update(
+        self,
+        table: str,
+        row: dict[str, Any],
+        *,
+        pk: str | None = None,
+        lsn: str | None = None,
+    ) -> None:
         self._ensure_open(lsn)
         if self._open is None:
             raise RuntimeError("CDC multi-table buffer is not open after update")
-        self._bucket(table).updates.append(row)
+        self._bucket(table).events.append(
+            CdcTxnEvent(op="u", pk=infer_row_pk(row, explicit=pk), row=dict(row), lsn=lsn)
+        )
         self._open.event_count += 1
         self._maybe_overflow()
 
@@ -160,7 +177,7 @@ class MultiTableTransactionBuffer:
         self._ensure_open(lsn)
         if self._open is None:
             raise RuntimeError("CDC multi-table buffer is not open after delete")
-        self._bucket(table).deletes.append(pk)
+        self._bucket(table).events.append(CdcTxnEvent(op="d", pk=str(pk), row=None, lsn=lsn))
         self._open.event_count += 1
         self._maybe_overflow()
 
@@ -200,15 +217,16 @@ class MultiTableTransactionBuffer:
         batches: list[ChangeBatch] = []
         for name in order:
             buf = self._open.by_table.get(name)
-            if not buf:
+            if not buf or not buf.events:
                 continue
-            if not (buf.inserts or buf.updates or buf.deletes):
+            inserts, updates, deletes = coalesce_cdc_txn_events(list(buf.events))
+            if not (inserts or updates or deletes):
                 continue
             batches.append(
                 ChangeBatch(
-                    inserts=list(buf.inserts),
-                    updates=list(buf.updates),
-                    deletes=list(buf.deletes),
+                    inserts=inserts,
+                    updates=updates,
+                    deletes=deletes,
                     resume_token=resume_token,
                     table=name,
                     ack_barrier=False,

@@ -37,34 +37,50 @@ def _numeric_precision_scale(type_name: str) -> tuple[int | None, int | None]:
 
 
 def _integer_bit_width(type_name: str) -> int | None:
+    """Signed bit width; UNSIGNED adds +1 so INT UNSIGNED is wider than INT."""
     upper = (type_name or "").upper()
+    unsigned = "UNSIGNED" in upper
+    base: int | None = None
     if "BIGSERIAL" in upper or "BIGINT" in upper or "INT8" in upper:
-        return 64
-    if "MEDIUMINT" in upper:
-        return 24
-    if "SMALLSERIAL" in upper or "SMALLINT" in upper or "INT2" in upper:
-        return 16
-    if "TINYSERIAL" in upper or "TINYINT" in upper or "INT1" in upper:
-        return 8
-    if "SERIAL" in upper or "INTEGER" in upper or "INT4" in upper or "INT" in upper:
-        return 32
-    return None
+        base = 64
+    elif "MEDIUMINT" in upper:
+        base = 24
+    elif "SMALLSERIAL" in upper or "SMALLINT" in upper or "INT2" in upper:
+        base = 16
+    elif "TINYSERIAL" in upper or "TINYINT" in upper or "INT1" in upper:
+        base = 8
+    elif "SERIAL" in upper or "INTEGER" in upper or "INT4" in upper or re.search(
+        r"\bINT\b", upper
+    ):
+        base = 32
+    if base is None:
+        return None
+    if unsigned:
+        # Unsigned same nominal width holds larger max → needs signed width+1
+        # (e.g. INT UNSIGNED → treat as 33 so BIGINT is a valid widen).
+        return base + 1
+    return base
 
 
 def _integer_max_digits(type_name: str) -> int | None:
     width = _integer_bit_width(type_name)
     if width is None:
         return None
-    if width == 8:
-        return 4  # -128..127
-    if width == 16:
-        return 6  # -32768..32767
-    if width == 24:
-        return 8  # -8388608..8388607
-    if width == 32:
-        return 11  # -2147483648..2147483647
-    if width == 64:
-        return 20  # -9223372036854775808..9223372036854775807
+    # Use effective width for digit capacity (unsigned already bumped).
+    if width <= 8:
+        return 4  # -128..127 / 0..255
+    if width <= 16:
+        return 6
+    if width <= 24:
+        return 8
+    if width <= 32:
+        return 11
+    if width <= 33:
+        return 10  # UINT32: 0..4294967295
+    if width <= 64:
+        return 20
+    if width <= 65:
+        return 20  # UINT64 needs DECIMAL carrier in practice
     return None
 
 

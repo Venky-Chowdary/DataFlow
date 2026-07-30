@@ -64,12 +64,25 @@ try:
         from trino.sqlalchemy.datatype import TIMESTAMP as TrinoTimestamp
     except (ImportError, AttributeError):  # pragma: no cover
         TrinoTimestamp = None
+
+    class _DialectNativeType(sa.types.UserDefinedType):
+        """Compile to an exact dialect DDL token (SDO_GEOMETRY, INTERVAL, …)."""
+
+        cache_ok = True
+
+        def __init__(self, col_spec: str) -> None:
+            self._col_spec = col_spec
+
+        def get_col_spec(self, **_kw: Any) -> str:
+            return self._col_spec
+
 except (ImportError, AttributeError):  # pragma: no cover
     SQLALCHEMY_AVAILABLE = False
     ch_engines = None
     ChDateTime64 = None
     ChNullable = None
     TrinoTimestamp = None
+    _DialectNativeType = None  # type: ignore[misc, assignment]
 
 from connectors.writer_common import (
     CHUNK_SIZE,
@@ -78,6 +91,9 @@ from connectors.writer_common import (
     _rejected_row_count,
     build_mapped_rows_with_details,
     compare_lsn,
+    quarantine_unfit_decimals,
+    quarantine_unfit_specialty_types,
+    quarantine_unfit_strings,
     quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
@@ -484,7 +500,32 @@ def _engine(cfg: dict[str, Any]) -> Any:
             if db_type == "duckdb" or "duckdb" in connection_string:
                 engine.dialect.supports_native_decimal = True
             return engine
-        return create_engine(url, pool_pre_ping=True, pool_recycle=600)
+        engine = create_engine(url, pool_pre_ping=True, pool_recycle=600)
+        # SQL Server: refuse silent VARCHAR truncation at the session level.
+        if (
+            db_type in {
+                "mssql",
+                "sql_server",
+                "sqlserver",
+                "microsoft_sql_server",
+                "azure_sql_database",
+                "amazon_rds_sql_server",
+                "google_cloud_sql_sql_server",
+                "synapse_analytics",
+                "azure_synapse_dedicated",
+                "azure_synapse_serverless",
+            }
+            or "mssql" in str(getattr(url, "drivername", "")).lower()
+        ):
+            from sqlalchemy import event
+
+            from connectors.write_resilience import apply_mssql_session_guards
+
+            @event.listens_for(engine, "connect")
+            def _mssql_fail_closed_session(dbapi_conn, _connection_record):  # noqa: ANN001
+                apply_mssql_session_guards(dbapi_conn)
+
+        return engine
     except (NoSuchModuleError, ImportError) as exc:
         # SQLAlchemy raises NoSuchModuleError when the dialect is not installed.
         # Convert it to a clear RuntimeError so callers can surface a 4xx/5xx
@@ -801,10 +842,15 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
         LOGICAL_DATETIME,
         LOGICAL_DECIMAL,
         LOGICAL_FLOAT,
+        LOGICAL_GEOGRAPHY,
         LOGICAL_INTEGER,
+        LOGICAL_INTERVAL,
         LOGICAL_JSON,
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
         LOGICAL_TIME,
         LOGICAL_UUID,
+        ddl_type,
         normalize_logical_type,
         parse_numeric_precision_scale,
     )
@@ -929,6 +975,22 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
         if db_type in ("clickhouse", "trino", "questdb", "presto"):
             return _maybe_nullable(sa.Text())
         return sa.LargeBinary()
+    if t in (LOGICAL_GEOGRAPHY, LOGICAL_INTERVAL):
+        # Typed specialty DDL — never invent TEXT for Oracle SDO_GEOMETRY / PG INTERVAL.
+        # String carriers (Databricks/Iceberg/MySQL interval→TEXT) stay Text honestly.
+        engine_key = (db_type or dialect_name or "").lower()
+        logical_name = "geography" if t == LOGICAL_GEOGRAPHY else "interval"
+        native = ddl_type(engine_key, logical_name) if engine_key else ""
+        native_logical = normalize_logical_type(native)
+        if (
+            not native
+            or native_logical in {LOGICAL_STRING, LOGICAL_TEXT}
+            or native.upper() in {"STRING", "TEXT", "VARCHAR", "NVARCHAR", "VARCHAR2"}
+        ):
+            return _maybe_nullable(sa.Text())
+        if _DialectNativeType is None:
+            return _maybe_nullable(sa.Text())
+        return _maybe_nullable(_DialectNativeType(native))
     return _maybe_nullable(sa.Text())
 
 
@@ -2299,6 +2361,30 @@ def write_mapped_rows(
         error_policy=policy,
         dest_types=target_column_types,
         preserve_case=True,
+    )
+    # Fail-closed DECIMAL/NUMERIC/NUMBER(p,s) fit across SQLAlchemy destinations.
+    mapped_rows = quarantine_unfit_decimals(
+        mapped_rows,
+        target_cols,
+        [str(target_column_types.get(c, "") or "") for c in target_cols],
+        rejected_details,
+        policy,
+        dialect_label="DECIMAL",
+    )
+    mapped_rows = quarantine_unfit_specialty_types(
+        mapped_rows,
+        target_cols,
+        [str(target_column_types.get(c, "") or "") for c in target_cols],
+        rejected_details,
+        policy,
+    )
+    mapped_rows = quarantine_unfit_strings(
+        mapped_rows,
+        target_cols,
+        [str(target_column_types.get(c, "") or "") for c in target_cols],
+        rejected_details,
+        policy,
+        dialect_label="VARCHAR",
     )
 
     if transform_errors and policy == "fail":

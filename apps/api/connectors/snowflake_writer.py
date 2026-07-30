@@ -5,11 +5,10 @@ from __future__ import annotations
 import csv
 import logging
 import os
-import re
 import tempfile
 import uuid
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation, Overflow
+from decimal import Overflow
 from pathlib import Path
 from typing import Any, Callable
 
@@ -49,8 +48,6 @@ logger = logging.getLogger(__name__)
 # rows shrink stream chunks below the threshold and force slow INSERT loops.
 COPY_THRESHOLD = int(os.getenv("DATAFLOW_SNOWFLAKE_COPY_THRESHOLD", "200"))
 MAX_BIND_INSERT_ROWS = int(os.getenv("DATAFLOW_SF_BIND_INSERT_ROWS", "1000"))
-_NUMBER_TYPE_RE = re.compile(r"^NUMBER\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)$", re.I)
-
 
 @dataclass
 class WriteResult(_WriteResult):
@@ -71,48 +68,22 @@ def _is_fakesnow_connection(conn: Any) -> bool:
 
 
 def _parse_number_type(sf_type_str: str) -> tuple[int, int] | None:
-    m = _NUMBER_TYPE_RE.match((sf_type_str or "").strip())
-    if not m:
-        return None
-    return int(m.group(1)), int(m.group(2))
+    from connectors.writer_common import parse_decimal_precision_scale
+
+    return parse_decimal_precision_scale(sf_type_str)
 
 
 def _decimal_scale_and_int_digits(value: Any) -> tuple[int, int]:
-    """Return (integer_digits, fractional_scale) for a decimal cell value."""
-    try:
-        text = str(value).strip() if value is not None else ""
-        if not text:
-            return 0, 0
-        d = Decimal(text)
-        if not d.is_finite():
-            return 0, 0
-        _sign, digits, exponent = d.as_tuple()
-        scale = -exponent if exponent < 0 else 0
-        int_digits = max(0, len(digits) + exponent)
-        return int_digits, scale
-    except (InvalidOperation, Overflow, ValueError, TypeError):
-        return 0, 0
+    from connectors.writer_common import decimal_int_digits_and_scale
+
+    return decimal_int_digits_and_scale(value)
 
 
 def _fits_snowflake_number(value: Any, precision: int, scale: int) -> bool:
-    """True if value can be stored in Snowflake NUMBER(precision, scale).
+    """True if value can be stored in Snowflake NUMBER(precision, scale)."""
+    from connectors.writer_common import fits_decimal
 
-    Scale overflow is fail-closed (quarantine) — never silently quantize/round.
-    """
-    if value is None:
-        return True
-    try:
-        d = Decimal(str(value).strip())
-        if not d.is_finite():
-            return False
-        int_digits, value_scale = _decimal_scale_and_int_digits(d)
-        # Do not silently round fractional digits into an existing NUMBER(p,s).
-        if value_scale > scale:
-            return False
-        max_int = max(0, precision - scale)
-        return int_digits <= max_int and value_scale <= scale
-    except (InvalidOperation, Overflow, ValueError, TypeError):
-        return False
+    return fits_decimal(value, precision, scale)
 
 
 def _snowflake_decimal_type(col_idx: int, mapped_rows: list[tuple]) -> str:
@@ -153,55 +124,17 @@ def _quarantine_unfit_decimals(
     rejected_details: list[dict[str, Any]],
     policy: str,
 ) -> list[tuple]:
-    """Hold out / NULL cells that cannot fit NUMBER(p,s).
+    """Hold out / NULL cells that cannot fit NUMBER(p,s)."""
+    from connectors.writer_common import quarantine_unfit_decimals
 
-    ``quarantine`` omits the whole row from the primary write (no NULL invent).
-    ``coerce_null`` keeps the row with a NULL cell. ``fail`` leaves rows unchanged
-    so the driver/strict path can abort.
-    """
-    if policy == "fail":
-        return mapped_rows
-    number_cols: list[tuple[int, int, int]] = []
-    for i, typ in enumerate(target_types):
-        parsed = _parse_number_type(typ)
-        if parsed:
-            number_cols.append((i, parsed[0], parsed[1]))
-    if not number_cols:
-        return mapped_rows
-
-    out: list[tuple] = []
-    for row_idx, row in enumerate(mapped_rows):
-        cells = list(row)
-        hold_out = False
-        for col_idx, precision, scale in number_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            if _fits_snowflake_number(cells[col_idx], precision, scale):
-                continue
-            sample = cell_to_string(cells[col_idx])[:120]
-            rejected_details.append(
-                {
-                    "row": row_idx + 1,
-                    "column": target_cols[col_idx],
-                    "target": target_cols[col_idx],
-                    "value": sample,
-                    "reason": (
-                        f"decimal does not fit Snowflake NUMBER({precision},{scale}) "
-                        "— quarantined (would raise decimal.Overflow)"
-                    ),
-                    "policy": "write_quarantine",
-                    "chars": [],
-                }
-            )
-            if policy == "coerce_null":
-                cells[col_idx] = None
-            else:
-                hold_out = True
-                break
-        if hold_out:
-            continue
-        out.append(tuple(cells))
-    return out
+    return quarantine_unfit_decimals(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="Snowflake NUMBER",
+    )
 
 
 def _widen_existing_number_columns(
@@ -708,9 +641,24 @@ def write_mapped_rows(
     mapped_rows = _quarantine_unfit_decimals(
         mapped_rows, target_cols, target_types, rejected_details, policy
     )
-    # Destination-native temporal normalize (ISO-Z → TIMESTAMP_NTZ wall clock).
-    from connectors.writer_common import normalize_temporal_cells
+    from connectors.writer_common import (
+        normalize_temporal_cells,
+        quarantine_unfit_specialty_types,
+        quarantine_unfit_strings,
+    )
 
+    mapped_rows = quarantine_unfit_specialty_types(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_strings(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="Snowflake VARCHAR",
+    )
+    # Destination-native temporal normalize (ISO-Z → TIMESTAMP_NTZ wall clock).
     mapped_rows = normalize_temporal_cells(
         mapped_rows, target_types, target_cols, engine="snowflake"
     )

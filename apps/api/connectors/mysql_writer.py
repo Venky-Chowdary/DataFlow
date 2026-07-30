@@ -36,6 +36,9 @@ from connectors.writer_common import (
     dedupe_rows,
     dedupe_rows_by_pk_and_lsn,
     filter_stale_lsn_rows,
+    quarantine_unfit_decimals,
+    quarantine_unfit_specialty_types,
+    quarantine_unfit_strings,
     quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
@@ -214,6 +217,26 @@ def write_mapped_rows(
         dest_types=dest_types,
         error_policy=policy,
         preserve_case=True,
+    )
+    # Fail-closed DECIMAL(p,s) fit — never silently truncate/round into target.
+    mapped_rows = quarantine_unfit_decimals(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="MySQL DECIMAL",
+    )
+    mapped_rows = quarantine_unfit_specialty_types(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_strings(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="MySQL VARCHAR",
     )
 
     if write_mode == "upsert" and conflict_columns:

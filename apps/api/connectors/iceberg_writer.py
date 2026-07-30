@@ -26,6 +26,7 @@ from services.value_serializer import json_default
 from connectors.writer_common import (
     WriteResult,
     build_mapped_rows_with_details,
+    quarantine_unfit_decimals,
     resolve_target_columns,
     transform_error_policy,
 )
@@ -60,6 +61,48 @@ def _logical_to_iceberg_type(logical: str) -> str:
     from services.type_system import ddl_type
 
     return ddl_type("iceberg", logical or "string")
+
+
+def _ensure_iceberg_decimal_carrier(type_str: str) -> str:
+    """Bare ``decimal`` → ``decimal(38,10)`` so shared fit quarantine can parse (p,s)."""
+    from services.type_system import normalize_logical_type
+    from connectors.writer_common import parse_decimal_precision_scale
+
+    raw = (type_str or "string").strip()
+    if normalize_logical_type(raw) != "decimal":
+        return raw
+    if parse_decimal_precision_scale(raw) is not None:
+        return raw
+    return _logical_to_iceberg_type(raw)
+
+
+def _decimal_target_types_for_iceberg_write(
+    target_cols: list[str],
+    dest_types: dict[str, str],
+    *,
+    write_types: dict[str, str] | None = None,
+    arrow_schema: Any | None = None,
+    pa_mod: Any | None = None,
+) -> list[str]:
+    """Prefer committed Arrow/Iceberg (p,s); else mapped carriers with params."""
+    out: list[str] = []
+    for col in target_cols:
+        if (
+            arrow_schema is not None
+            and pa_mod is not None
+            and col in getattr(arrow_schema, "names", [])
+        ):
+            field = arrow_schema.field(col)
+            if pa_mod.types.is_decimal(field.type):
+                out.append(f"DECIMAL({field.type.precision},{field.type.scale})")
+                continue
+        raw = ""
+        if write_types and col in write_types:
+            raw = str(write_types.get(col) or "")
+        if not raw:
+            raw = str(dest_types.get(col) or "string")
+        out.append(_ensure_iceberg_decimal_carrier(raw))
+    return out
 
 
 def _iceberg_type_to_logical_carrier(iceberg_type: Any) -> str:
@@ -295,7 +338,12 @@ def _coerce_arrow_cell(value: Any, arrow_type: Any, pa: Any) -> Any:
     from datetime import date, datetime, time
     from decimal import Decimal, InvalidOperation
 
-    if value is None or value == "":
+    if value is None:
+        return None
+    if value == "":
+        # Keep empty string for string carriers — never invent NULL from "".
+        if pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
+            return ""
         return None
     if pa.types.is_decimal(arrow_type):
         try:
@@ -613,6 +661,34 @@ def _write_mapped_rows_pyiceberg(
             existing_arrow = tbl.schema().as_arrow()
 
         final_arrow = existing_arrow
+        # Fail-closed DECIMAL(p,s) — quarantine before pa.array (batch abort → row hold-out).
+        decimal_types = _decimal_target_types_for_iceberg_write(
+            target_cols,
+            dest_types,
+            arrow_schema=final_arrow,
+            pa_mod=pa,
+        )
+        mapped_rows = quarantine_unfit_decimals(
+            mapped_rows,
+            target_cols,
+            decimal_types,
+            rejected_details,
+            policy,
+            dialect_label="Iceberg decimal",
+        )
+        if not mapped_rows:
+            return WriteResult(
+                ok=True,
+                rows_written=0,
+                table_name=table,
+                target_schema=target_schema,
+                checksum="",
+                chunks_completed=1,
+                rejected_details=rejected_details,
+                rejected_rows=len(rejected_details),
+                warnings=type_locked_warnings[:20],
+                driver="iceberg",
+            )
         dict_rows = [_row_as_dict(target_cols, r) for r in mapped_rows]
         arrays = []
         for field in final_arrow:
@@ -815,6 +891,18 @@ def _write_mapped_rows_filesystem(
     # Always write Parquet/JSONL using committed field types — never diverge from
     # type_locked metadata (incoming dest_types may differ).
     write_types = _write_types_from_schema(schema_json, dest_types)
+    # Fail-closed DECIMAL(p,s) against committed schema — never let pa.array abort
+    # the whole batch on one overflow row.
+    mapped_rows = quarantine_unfit_decimals(
+        mapped_rows,
+        target_cols,
+        _decimal_target_types_for_iceberg_write(
+            target_cols, dest_types, write_types=write_types
+        ),
+        rejected_details,
+        policy,
+        dialect_label="Iceberg decimal",
+    )
     file_warnings: list[str] = []
     if write_mode in {"overwrite", "replace"} and current_meta:
         # Drop prior data refs; keep schema evolution

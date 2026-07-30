@@ -11,6 +11,23 @@ def test_normalize_common_source_types():
     assert normalize_logical_type("BYTEA") == "binary"
 
 
+def test_oracle_sdo_geometry_normalizes_to_geography():
+    """DDL carriers must stay geography — never collapse to string (Map/SA bind)."""
+    from services.type_system import is_lossy_coercion
+
+    for raw in (
+        "SDO_GEOMETRY",
+        "MDSYS.SDO_GEOMETRY",
+        "sdo_geometry",
+        "ST_GEOMETRY",
+    ):
+        assert normalize_logical_type(raw) == "geography", raw
+    assert ddl_type("oracle", "geography") == "SDO_GEOMETRY"
+    # geography → SDO_GEOMETRY is identity, not a lossy sink-to-string.
+    assert is_lossy_coercion("geography", "SDO_GEOMETRY") is False
+    assert is_lossy_coercion("geography", "VARCHAR2") is False  # allowlisted text sink
+
+
 def test_type_system_redshift_ddl():
     assert ddl_type("redshift", "integer") == "BIGINT"
     assert ddl_type("redshift", "json") == "SUPER"

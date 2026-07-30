@@ -286,6 +286,59 @@ def _looks_like_interval(value: str) -> bool:
     return False
 
 
+def is_geography_wire(value: Any) -> bool:
+    """True when a cell can travel as GEOGRAPHY/GEOMETRY without inventing a cast.
+
+    Accepts WKT, EWKT (SRID=…;…), GeoJSON text/objects, and raw EWKB bytes.
+    Rejects empty / clearly non-spatial strings so writers can quarantine fail-closed
+    instead of letting the driver invent NULLs or abort mid-batch.
+    """
+    if value is None:
+        return True
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return len(value) > 0
+    if isinstance(value, dict):
+        return _looks_like_geojson(value)
+    text = str(value).strip()
+    if not text:
+        return False
+    if _WKT_RE.match(text):
+        return True
+    if text[0] in "{[":
+        try:
+            import json
+
+            parsed = json.loads(text)
+        except Exception:
+            return False
+        return _looks_like_geojson(parsed)
+    # Hex EWKB (PostGIS / MySQL common wire) — even-length hex, WKB byte order 0/1.
+    if len(text) >= 10 and len(text) % 2 == 0 and re.fullmatch(r"[0-9a-fA-F]+", text):
+        return text[:2].lower() in {"00", "01"}
+    return False
+
+
+def is_interval_wire(value: Any) -> bool:
+    """True when a cell looks like an INTERVAL identity payload (ISO-8601 / SQL)."""
+    if value is None:
+        return True
+    if isinstance(value, (int, float)):
+        # Raw numeric seconds/days is ambiguous — refuse inventing INTERVAL.
+        return False
+    # datetime.timedelta travels as string via serializers; accept native too.
+    try:
+        from datetime import timedelta
+
+        if isinstance(value, timedelta):
+            return True
+    except Exception:
+        pass
+    text = str(value).strip()
+    if not text:
+        return False
+    return _looks_like_interval(text)
+
+
 def _classify_jsonish(value: str, *, field_name: str | None = None) -> str | None:
     """Classify JSON / array / GeoJSON / VECTOR candidates. None → not JSON-shaped."""
     s = value.strip()

@@ -18,6 +18,9 @@ from connectors.writer_common import (
     build_mapped_rows_with_details,
     dedupe_rows,
     dedupe_rows_by_pk_and_lsn,
+    quarantine_unfit_decimals,
+    quarantine_unfit_specialty_types,
+    quarantine_unfit_strings,
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
@@ -53,6 +56,44 @@ def bq_type(inferred: str) -> str:
             return "STRING"
         return "BIGNUMERIC"
     return raw
+
+
+def resolve_bigquery_decimal_target_types(
+    target_cols: list[str],
+    logical_types: list[str],
+    table_schema: list[Any] | None = None,
+) -> list[str]:
+    """Prefer physical SchemaField (p,s); else mapped ``ddl_type`` / BQ defaults.
+
+    CREATE uses bare ``BIGNUMERIC`` (client limitation), but quarantine must still
+    honor a narrower existing column (e.g. ``NUMERIC`` with precision/scale) so
+    append paths never silently overflow into streaming/load errors.
+    """
+    by_name: dict[str, Any] = {}
+    if table_schema:
+        for field in table_schema:
+            name = getattr(field, "name", None)
+            if name:
+                by_name[str(name)] = field
+
+    out: list[str] = []
+    for col, logical in zip(target_cols, logical_types):
+        field = by_name.get(col)
+        if field is not None:
+            ftype = str(getattr(field, "field_type", "") or "").upper()
+            if ftype in {"NUMERIC", "BIGNUMERIC", "DECIMAL"}:
+                precision = getattr(field, "precision", None)
+                scale = getattr(field, "scale", None)
+                if precision is not None and scale is not None:
+                    out.append(f"{ftype}({int(precision)},{int(scale)})")
+                else:
+                    out.append(ftype)
+                continue
+            out.append(ftype or bq_type(logical))
+            continue
+        # No physical field yet — use parameterized ddl when available.
+        out.append(ddl_type("bigquery", logical))
+    return out
 
 
 def build_bigquery_merge_sql(
@@ -242,6 +283,38 @@ def write_mapped_rows(
             column_types=column_types,
             dest_types=dest_types,
             error_policy=policy,
+        )
+        # Prefer physical table (p,s) so append into NUMERIC never silent-overflows.
+        physical_schema = None
+        try:
+            physical_schema = list(client.get_table(table_id).schema)
+        except Exception:
+            physical_schema = None
+        decimal_target_types = resolve_bigquery_decimal_target_types(
+            target_cols, logical_types, physical_schema
+        )
+        mapped_rows = quarantine_unfit_decimals(
+            mapped_rows,
+            target_cols,
+            decimal_target_types,
+            rejected_details,
+            policy,
+            dialect_label="BigQuery NUMERIC",
+        )
+        mapped_rows = quarantine_unfit_specialty_types(
+            mapped_rows,
+            target_cols,
+            decimal_target_types,
+            rejected_details,
+            policy,
+        )
+        mapped_rows = quarantine_unfit_strings(
+            mapped_rows,
+            target_cols,
+            decimal_target_types,
+            rejected_details,
+            policy,
+            dialect_label="BigQuery STRING",
         )
         if write_mode == "upsert" and conflict_columns:
             if DF_LSN_COL in target_cols:

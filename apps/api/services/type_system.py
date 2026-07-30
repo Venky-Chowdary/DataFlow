@@ -173,6 +173,9 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "multilinestring": LOGICAL_GEOGRAPHY,
     "multipolygon": LOGICAL_GEOGRAPHY,
     "geometrycollection": LOGICAL_GEOGRAPHY,
+    # Oracle Spatial / Esri ST_GEOMETRY — must not collapse to string.
+    "sdo geometry": LOGICAL_GEOGRAPHY,
+    "st geometry": LOGICAL_GEOGRAPHY,
     "hstore": LOGICAL_JSON,
     "map": LOGICAL_JSON,
     "xml": LOGICAL_TEXT,
@@ -873,6 +876,9 @@ def normalize_logical_type(inferred: str | None) -> str:
 
     key = re.sub(r"\([^)]*\)", "", raw).strip().lower()
     key = key.replace("_", " ")
+    # Schema-qualified Oracle/SQL types (MDSYS.SDO_GEOMETRY → sdo geometry).
+    if "." in key and not key.startswith(("array<", "struct<", "map<", "record<", "list<")):
+        key = key.rsplit(".", 1)[-1].strip()
     # Transfer fidelity: unsigned 64-bit integers must not land as signed BIGINT.
     if "unsigned" in key and ("bigint" in key or key in {"uint64", "ubyte8"}):
         return LOGICAL_DECIMAL

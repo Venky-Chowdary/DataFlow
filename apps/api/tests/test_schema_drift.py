@@ -298,6 +298,18 @@ def test_is_wider_type_decimal_to_float_is_lossy():
     assert is_wider_type("DECIMAL(5,2)", "REAL") is False
 
 
+def test_is_wider_type_unsigned_int_needs_signed_widen():
+    from connectors.schema_drift import is_wider_type
+
+    # INT UNSIGNED holds values above signed INT max → not a no-op widen to INT.
+    assert is_wider_type("INT UNSIGNED", "INT") is False
+    assert is_wider_type("INT", "INT UNSIGNED") is True
+    # Signed BIGINT covers INT UNSIGNED range.
+    assert is_wider_type("INT UNSIGNED", "BIGINT") is True
+    assert is_wider_type("MEDIUMINT UNSIGNED", "INT") is True
+    assert is_wider_type("SMALLINT UNSIGNED", "SMALLINT") is False
+
+
 def test_sanitize_ddl_type_rejects_injection():
     from connectors.schema_drift import _sanitize_ddl_type
 

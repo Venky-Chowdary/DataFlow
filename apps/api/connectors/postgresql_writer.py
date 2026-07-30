@@ -44,6 +44,9 @@ from connectors.writer_common import (
     dedupe_rows_by_pk_and_lsn,
     filter_stale_lsn_rows,
     postgres_lsn_update_guard_sql,
+    quarantine_unfit_decimals,
+    quarantine_unfit_specialty_types,
+    quarantine_unfit_strings,
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
@@ -409,6 +412,26 @@ def write_mapped_rows(
         dest_types=dest_types,
         error_policy=policy,
         preserve_case=True,
+    )
+    # Fail-closed NUMERIC/DECIMAL(p,s) fit — never silently truncate/round into target.
+    mapped_rows = quarantine_unfit_decimals(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="PostgreSQL NUMERIC",
+    )
+    mapped_rows = quarantine_unfit_specialty_types(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_strings(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="PostgreSQL VARCHAR",
     )
 
     if write_mode == "upsert" and conflict_columns:

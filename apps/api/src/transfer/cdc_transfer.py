@@ -497,6 +497,8 @@ def _apply_change_batch(
             primary_key_column=pk_target_col,
             keys=change.deletes,
             schema=dest_cfg.get("schema"),
+            incoming_lsn=extract_cdc_lsn(change.resume_token),
+            lsn_column=DF_LSN_COL,
         )
         # Fail closed: unsupported destinations used to silently no-op deletes.
         if deleted == 0 and change.deletes:

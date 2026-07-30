@@ -186,12 +186,15 @@ def apply_postgres_session_guards(conn: Any) -> None:
 
 
 def apply_mysql_session_guards(conn: Any) -> None:
-    """Raise MySQL session I/O / wait timeouts for long bulk loads.
+    """Raise MySQL session I/O / wait timeouts and enable fail-closed sql_mode.
 
     ``wait_timeout`` / ``interactive_timeout`` are raised so long-running transfers
     are not killed.  ``lock_wait_timeout`` / ``innodb_lock_wait_timeout`` are set
     to 2 minutes so a contended metadata lock or row lock fails fast instead of
     hanging the transfer indefinitely.
+
+    STRICT_TRANS_TABLES (+ related modes) prevent silent truncation / invalid-date
+    coercion that would otherwise look like a successful write with data loss.
     """
     try:
         with conn.cursor() as cur:
@@ -201,6 +204,81 @@ def apply_mysql_session_guards(conn: Any) -> None:
             cur.execute("SET SESSION net_write_timeout = 600")
             cur.execute("SET SESSION lock_wait_timeout = 120")
             cur.execute("SET SESSION innodb_lock_wait_timeout = 120")
+            _ensure_mysql_strict_sql_mode(cur)
+    except Exception as exc:
+        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+
+
+_MYSQL_STRICT_MODES = (
+    "STRICT_TRANS_TABLES",
+    "STRICT_ALL_TABLES",
+    "ERROR_FOR_DIVISION_BY_ZERO",
+    "NO_ZERO_DATE",
+    "NO_ZERO_IN_DATE",
+    "NO_ENGINE_SUBSTITUTION",
+)
+
+
+def _ensure_mysql_strict_sql_mode(cur: Any) -> None:
+    """Append fail-closed sql_mode flags without wiping existing session modes."""
+    try:
+        cur.execute("SELECT @@SESSION.sql_mode")
+        row = cur.fetchone()
+        current = (row[0] if row else "") or ""
+    except Exception as exc:
+        logger.warning("Could not read MySQL sql_mode: %s", exc, exc_info=exc)
+        return
+    parts = [p.strip().upper() for p in str(current).split(",") if p.strip()]
+    changed = False
+    for mode in _MYSQL_STRICT_MODES:
+        if mode not in parts:
+            parts.append(mode)
+            changed = True
+    if not changed:
+        return
+    # Modes are fixed constants / server-returned tokens — not user input.
+    new_mode = ",".join(parts)
+    try:
+        cur.execute("SET SESSION sql_mode = %s", (new_mode,))
+    except Exception as exc:
+        logger.warning(
+            "Could not enable MySQL STRICT sql_mode (%s): %s",
+            new_mode,
+            exc,
+            exc_info=exc,
+        )
+
+
+def apply_mssql_session_guards(conn: Any) -> None:
+    """Fail-closed SQL Server session: reject silent string truncation.
+
+    With ``ANSI_WARNINGS OFF`` (common default on some drivers), oversized
+    VARCHAR/NVARCHAR inserts truncate quietly. Force warnings ON so the
+    engine errors; write-path ``quarantine_unfit_strings`` is the primary
+    hold-out, this is defense-in-depth.
+    """
+    try:
+        cur = getattr(conn, "cursor", None)
+        if callable(cur):
+            with conn.cursor() as c:
+                c.execute("SET ANSI_WARNINGS ON")
+                c.execute("SET ANSI_PADDING ON")
+                try:
+                    c.execute("SET CONCAT_NULL_YIELDS_NULL ON")
+                except Exception:
+                    pass
+            return
+        # SQLAlchemy Connection
+        execute = getattr(conn, "execute", None)
+        if callable(execute):
+            import sqlalchemy as sa
+
+            conn.execute(sa.text("SET ANSI_WARNINGS ON"))
+            conn.execute(sa.text("SET ANSI_PADDING ON"))
+            try:
+                conn.execute(sa.text("SET CONCAT_NULL_YIELDS_NULL ON"))
+            except Exception:
+                pass
     except Exception as exc:
         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 

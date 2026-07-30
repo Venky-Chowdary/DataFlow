@@ -40,7 +40,9 @@ def test_multi_table_txn_buffer_demux_and_ack_barrier() -> None:
     assert len(batches) == 2
     assert batches[0].table == "orders"
     assert batches[0].ack_barrier is False
-    assert len(batches[0].inserts) == 1 and len(batches[0].updates) == 1
+    # insert+update same PK nets to one insert (recreation-safe coalesce).
+    assert len(batches[0].inserts) == 1 and batches[0].updates == []
+    assert batches[0].inserts[0]["amount"] == "9"
     assert batches[1].table == "users"
     assert batches[1].ack_barrier is True
     assert batches[0].resume_token == batches[1].resume_token

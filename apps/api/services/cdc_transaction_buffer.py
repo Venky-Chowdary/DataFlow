@@ -7,8 +7,8 @@ DML before COMMIT breaks transactional consistency (partial transactions land
 on the destination). This buffer:
 
 1. On BEGIN — open a new in-memory transaction keyed by xid (or anonymous).
-2. On DML — append to the open transaction (never emit).
-3. On COMMIT — flush the full ChangeBatch atomically to the caller.
+2. On DML — append to the open transaction **in event order** (never emit).
+3. On COMMIT — coalesce per-PK net effect (DELETE+INSERT → insert), then flush.
 4. On ROLLBACK / ABORT — discard the open transaction.
 
 When an open transaction grows large, events **spill to a temp JSONL file**
@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from services.cdc_engine import ChangeBatch
+from services.cdc_net_effect import CdcTxnEvent, coalesce_cdc_txn_events, infer_row_pk
 
 
 def default_txn_buffer_max_events() -> int:
@@ -77,9 +78,7 @@ class CdcTxnBufferOverflow(RuntimeError):
 @dataclass
 class _OpenTxn:
     xid: str
-    inserts: list[dict[str, Any]] = field(default_factory=list)
-    updates: list[dict[str, Any]] = field(default_factory=list)
-    deletes: list[str] = field(default_factory=list)
+    events: list[CdcTxnEvent] = field(default_factory=list)
     last_lsn: str | None = None
     spilled_count: int = 0
     spill_path: str | None = None
@@ -115,12 +114,7 @@ class TransactionBuffer:
     def open_event_count(self) -> int:
         if self._open is None:
             return 0
-        return (
-            self._open.spilled_count
-            + len(self._open.inserts)
-            + len(self._open.updates)
-            + len(self._open.deletes)
-        )
+        return self._open.spilled_count + len(self._open.events)
 
     def begin(self, xid: str | None = None, *, lsn: str | None = None) -> None:
         if self._open is not None:
@@ -132,18 +126,34 @@ class TransactionBuffer:
         self._anonymous_seq += 1
         self._open = _OpenTxn(xid=xid or f"anon-{self._anonymous_seq}", last_lsn=lsn)
 
-    def insert(self, row: dict[str, Any], *, lsn: str | None = None) -> None:
+    def insert(
+        self,
+        row: dict[str, Any],
+        *,
+        pk: str | None = None,
+        lsn: str | None = None,
+    ) -> None:
         self._ensure_open(lsn)
         if self._open is None:
             raise RuntimeError("CDC transaction buffer is not open after insert")
-        self._open.inserts.append(row)
+        self._open.events.append(
+            CdcTxnEvent(op="i", pk=infer_row_pk(row, explicit=pk), row=dict(row), lsn=lsn)
+        )
         self._after_dml()
 
-    def update(self, row: dict[str, Any], *, lsn: str | None = None) -> None:
+    def update(
+        self,
+        row: dict[str, Any],
+        *,
+        pk: str | None = None,
+        lsn: str | None = None,
+    ) -> None:
         self._ensure_open(lsn)
         if self._open is None:
             raise RuntimeError("CDC transaction buffer is not open after update")
-        self._open.updates.append(row)
+        self._open.events.append(
+            CdcTxnEvent(op="u", pk=infer_row_pk(row, explicit=pk), row=dict(row), lsn=lsn)
+        )
         self._after_dml()
 
     def delete(self, pk: str, *, lsn: str | None = None) -> None:
@@ -152,7 +162,7 @@ class TransactionBuffer:
         self._ensure_open(lsn)
         if self._open is None:
             raise RuntimeError("CDC transaction buffer is not open after delete")
-        self._open.deletes.append(pk)
+        self._open.events.append(CdcTxnEvent(op="d", pk=str(pk), row=None, lsn=lsn))
         self._after_dml()
 
     def commit(self, *, lsn: str | None = None, resume_token: Any = None) -> ChangeBatch | None:
@@ -204,9 +214,9 @@ class TransactionBuffer:
             if op == "begin":
                 self.begin(payload.get("xid"), lsn=lsn)
             elif op == "insert":
-                self.insert(payload["row"], lsn=lsn)
+                self.insert(payload["row"], pk=payload.get("pk"), lsn=lsn)
             elif op == "update":
-                self.update(payload["row"], lsn=lsn)
+                self.update(payload["row"], pk=payload.get("pk"), lsn=lsn)
             elif op == "delete":
                 self.delete(str(payload.get("pk") or ""), lsn=lsn)
             elif op == "commit":
@@ -245,7 +255,7 @@ class TransactionBuffer:
     def _memory_event_count(self) -> int:
         if self._open is None:
             return 0
-        return len(self._open.inserts) + len(self._open.updates) + len(self._open.deletes)
+        return len(self._open.events)
 
     def _maybe_spill(self) -> None:
         if self._open is None:
@@ -257,7 +267,7 @@ class TransactionBuffer:
     def _spill_memory_to_disk(self) -> None:
         if self._open is None:
             raise RuntimeError("CDC transaction buffer is not open during spill")
-        if not self._open.inserts and not self._open.updates and not self._open.deletes:
+        if not self._open.events:
             return
         path = self._open.spill_path
         if not path:
@@ -269,23 +279,21 @@ class TransactionBuffer:
             os.close(fd)
             self._open.spill_path = path
         with open(path, "a", encoding="utf-8") as fh:
-            for row in self._open.inserts:
-                fh.write(json.dumps({"op": "i", "row": row}, default=str) + "\n")
-            for row in self._open.updates:
-                fh.write(json.dumps({"op": "u", "row": row}, default=str) + "\n")
-            for pk in self._open.deletes:
-                fh.write(json.dumps({"op": "d", "pk": pk}, default=str) + "\n")
-        self._open.spilled_count += self._memory_event_count()
-        self._open.inserts.clear()
-        self._open.updates.clear()
-        self._open.deletes.clear()
+            for ev in self._open.events:
+                fh.write(
+                    json.dumps(
+                        {"op": ev.op, "pk": ev.pk, "row": ev.row, "lsn": ev.lsn},
+                        default=str,
+                    )
+                    + "\n"
+                )
+        self._open.spilled_count += len(self._open.events)
+        self._open.events.clear()
 
     def _materialize_open(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
         if self._open is None:
             raise RuntimeError("CDC transaction buffer is not open during materialize")
-        inserts: list[dict[str, Any]] = []
-        updates: list[dict[str, Any]] = []
-        deletes: list[str] = []
+        ordered: list[CdcTxnEvent] = []
         if self._open.spill_path and Path(self._open.spill_path).exists():
             with open(self._open.spill_path, encoding="utf-8") as fh:
                 for line in fh:
@@ -297,16 +305,17 @@ class TransactionBuffer:
                     except json.JSONDecodeError:
                         continue
                     op = rec.get("op")
-                    if op == "i" and isinstance(rec.get("row"), dict):
-                        inserts.append(rec["row"])
-                    elif op == "u" and isinstance(rec.get("row"), dict):
-                        updates.append(rec["row"])
-                    elif op == "d" and rec.get("pk") is not None:
-                        deletes.append(str(rec["pk"]))
-        inserts.extend(self._open.inserts)
-        updates.extend(self._open.updates)
-        deletes.extend(self._open.deletes)
-        return inserts, updates, deletes
+                    if op not in {"i", "u", "d"}:
+                        continue
+                    row = rec.get("row") if isinstance(rec.get("row"), dict) else None
+                    pk = str(rec.get("pk") or "")
+                    if not pk and row is not None:
+                        pk = infer_row_pk(row)
+                    ordered.append(
+                        CdcTxnEvent(op=op, pk=pk, row=row, lsn=rec.get("lsn"))
+                    )
+        ordered.extend(self._open.events)
+        return coalesce_cdc_txn_events(ordered)
 
     @staticmethod
     def _cleanup_spill(path: str | None) -> None:

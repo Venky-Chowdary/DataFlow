@@ -17,7 +17,19 @@ from services.type_system import (
     vector_dim_unknown_for_native,
 )
 
-_VARCHAR_WIDTH = re.compile(r"(?:varchar|char|character\s+varying)\s*\(\s*(\d+)\s*\)", re.I)
+_VARCHAR_WIDTH = re.compile(
+    r"(?:n?varchar2?|n?char|character\s+varying|character)\s*\(\s*(\d+)\s*\)",
+    re.I,
+)
+_UNBOUNDED_STRING = re.compile(
+    r"(?:n?varchar2?|n?char|character\s+varying)\s*\(\s*max\s*\)",
+    re.I,
+)
+_UNBOUNDED_TEXT_TYPES = re.compile(
+    r"^(?:n?text|clob|nclob|longtext|mediumtext|tinytext|long\s+varchar|"
+    r"string|bytes|json|jsonb|xml|super|variant)\b",
+    re.I,
+)
 _DECIMAL_PRECISION = re.compile(r"(?:decimal|numeric|number)\s*\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)", re.I)
 _NUMBERISH = re.compile(r"^(?:decimal|numeric|number|float|double|real|int|bigint|smallint)", re.I)
 
@@ -26,9 +38,28 @@ def _max_string_len(values: list[str]) -> int:
     return max((len(v) for v in values if v), default=0)
 
 
+def parse_varchar_width(ddl: str) -> int | None:
+    """Return bounded VARCHAR/CHAR/NVARCHAR width, or None if unlimited/unknown.
+
+    ``NVARCHAR(MAX)``, ``TEXT``, ``STRING``, and bare ``VARCHAR`` are unlimited
+    for write-path quarantine — only parameterized widths are enforced.
+    """
+    text = (ddl or "").strip()
+    if not text:
+        return None
+    if _UNBOUNDED_STRING.search(text):
+        return None
+    if _UNBOUNDED_TEXT_TYPES.match(text):
+        return None
+    m = _VARCHAR_WIDTH.search(text)
+    if not m:
+        return None
+    width = int(m.group(1))
+    return width if width > 0 else None
+
+
 def _parse_varchar_width(ddl: str) -> int | None:
-    m = _VARCHAR_WIDTH.search(ddl or "")
-    return int(m.group(1)) if m else None
+    return parse_varchar_width(ddl)
 
 
 def _parse_decimal_capacity(ddl: str) -> tuple[int, int] | None:

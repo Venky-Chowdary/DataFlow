@@ -297,3 +297,57 @@ def test_iceberg_sql_catalog_schema_evolution(tmp_path: Path) -> None:
     rows = {row[headers.index("id")]: row for row in batch.rows}
     assert rows["1"][headers.index("w")] == ""
     assert rows["2"][headers.index("w")] == "x"
+
+
+def test_iceberg_decimal_overflow_quarantines_row(tmp_path: Path) -> None:
+    """Unfit DECIMAL rows quarantine — do not abort the whole Parquet batch."""
+    pytest.importorskip("pyarrow")
+    warehouse = str(tmp_path / "wh")
+    mappings = [
+        {"source": "id", "target": "id", "transform": "direct", "target_type": "string"},
+        {
+            "source": "amt",
+            "target": "amt",
+            "transform": "direct",
+            "target_type": "DECIMAL(5,2)",
+        },
+    ]
+    result = write_mapped_rows(
+        connection_string=warehouse,
+        table_name="payments",
+        headers=["id", "amt"],
+        data_rows=[
+            ["1", "1.50"],  # fits
+            ["2", "1.234"],  # scale overflow
+            ["3", "999999"],  # int digits overflow
+        ],
+        mappings=mappings,
+        column_types={"id": "string", "amt": "DECIMAL(5,2)"},
+        write_mode="append",
+        error_policy="quarantine",
+        create_table=True,
+    )
+    assert result.ok, result.error
+    assert result.rows_written == 1
+    assert result.rejected_details
+    assert any("Iceberg decimal(5,2)" in (d.get("reason") or "") for d in result.rejected_details)
+
+
+def test_iceberg_empty_string_preserved_on_string_column(tmp_path: Path) -> None:
+    """Empty string must not become NULL on Iceberg string carriers."""
+    pa = pytest.importorskip("pyarrow")
+    import pyarrow.parquet as pq
+
+    data_dir = tmp_path / "tbl" / "data"
+    rel, n, _chk, _warnings = _write_data_file(
+        data_dir,
+        ["id", "note"],
+        [{"id": "1", "note": ""}, {"id": "2", "note": "x"}],
+        column_types={"id": "string", "note": "string"},
+    )
+    assert n == 2
+    table = pq.read_table(tmp_path / "tbl" / rel)
+    notes = table.column("note").to_pylist()
+    assert notes[0] == ""
+    assert notes[1] == "x"
+
