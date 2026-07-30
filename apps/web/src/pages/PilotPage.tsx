@@ -248,10 +248,19 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
         { role: "assistant" as const, content: res.answer },
       ].slice(-20);
 
-      const nextResultId =
+      const liveTools = (res.tools_used || []).filter((t) =>
+        ["sample_connector_object", "run_query", "filter_result"].includes(t.name),
+      );
+      const freshId =
         res.data_insight?.last_result_id
-        || extractResultIdFromTools(res.tools_used)
-        || session.lastResultId;
+        || extractResultIdFromTools(res.tools_used);
+      let nextResultId = session.lastResultId;
+      if (freshId) {
+        nextResultId = freshId;
+      } else if (liveTools.length > 0 && liveTools.every((t) => !t.success)) {
+        // Failed live sample/query must not leave a stale ref for “analyze that”.
+        nextResultId = undefined;
+      }
 
       updateSession(activeId, {
         history: newHistory,

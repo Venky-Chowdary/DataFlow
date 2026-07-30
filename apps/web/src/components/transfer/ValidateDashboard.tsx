@@ -792,16 +792,21 @@ export function ValidateDashboard({
     verifiedRunRef.current = runKey;
     pendingVerifyRef.current = false;
     const dry = preflight.gates?.find((g) => /dry_run|integrity/i.test(g.id));
-    const cleared = Boolean(preflight.passed || dry?.status === "pass");
-    const outcome = cleared
+    // Execute unlock requires full preflight.passed — a single dry-run/integrity pass
+    // is progress, not clearance.
+    const fullyCleared = Boolean(preflight.passed);
+    const dryPass = dry?.status === "pass";
+    const outcome = fullyCleared
       ? "Preflight passed — Execute unlocked; Gate-8 post-write proof still pending"
-      : "Still blocked — remap columns on Map";
+      : dryPass
+        ? "Dry-run/integrity improved — still blocked by other gates"
+        : "Still blocked — remap columns on Map";
     const op = lastOpRef.current;
     const resultSteps: string[] = [];
     if (op?.steps?.length) {
       resultSteps.push(...op.steps);
     }
-    if (cleared) {
+    if (fullyCleared) {
       resultSteps.push(
         `Re-validation: ${preflight.passed_count ?? 0}/${preflight.total_gates ?? 0} gates passed.`,
         op?.kind === "strip_controls" || op?.kind === "quarantine_strip"
@@ -810,15 +815,18 @@ export function ValidateDashboard({
       );
     } else {
       resultSteps.push(
-        `Still blocked: ${dry?.message || "see Validation rules"}.`,
+        `Still blocked: ${preflight.passed_count ?? 0}/${preflight.total_gates ?? 0} gates passed` +
+          (dryPass ? " (dry-run/integrity ok)." : `. ${dry?.message || "see Validation rules"}.`),
         "Quarantine/Strip cannot fix wrong column type mappings — use Map.",
       );
     }
-    const detail = cleared
+    const detail = fullyCleared
       ? (op
         ? `${op.title} succeeded. ${op.columnsChanged.length} mapping(s) now use strip_controls.`
-        : "Dry-run / integrity now passes — Execute unlocks when all gates pass.")
-      : `Dry-run still blocked: ${dry?.message || "see Validation rules"}.`;
+        : "All gates passed — Execute unlocked.")
+      : dryPass
+        ? `Dry-run/integrity passes, but preflight is not fully clear (${preflight.passed_count ?? 0}/${preflight.total_gates ?? 0}). Execute stays locked.`
+        : `Dry-run still blocked: ${dry?.message || "see Validation rules"}.`;
     setRemediationLog((prev) => {
       const next = prev.map((row, idx) =>
         idx === 0 && /waiting for re-validation/i.test(row.outcome)
@@ -839,6 +847,7 @@ export function ValidateDashboard({
         ...next,
       ].slice(0, 8);
     });
+    lastOpRef.current = null;
   }, [preflight, running]);
 
   const copyRunId = async () => {

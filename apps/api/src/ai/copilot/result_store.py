@@ -165,10 +165,17 @@ class PilotResultStore:
         result_id: str = "",
         session_id: str = "",
     ) -> dict[str, Any] | None:
-        """Resolve explicit id, else this session's latest. Never cross-session."""
-        if result_id:
-            return self.get(result_id)
+        """Resolve explicit id or this session's latest. Never cross-session."""
         sid = (session_id or "").strip()
+        if result_id:
+            doc = self.get(result_id)
+            if not doc:
+                return None
+            owner = str(doc.get("session_id") or "").strip()
+            # Session-scoped rows require a matching session_id.
+            if owner and owner != sid:
+                return None
+            return doc
         if not sid:
             return None
         with self._lock:

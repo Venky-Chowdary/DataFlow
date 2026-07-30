@@ -73,6 +73,7 @@ def test_result_store_put_resolve_filter(tmp_path: Path) -> None:
 
         eq = filter_stored_result(
             result_id=rid,
+            session_id="sess1",
             column="status",
             op="eq",
             value="active",
@@ -80,12 +81,22 @@ def test_result_store_put_resolve_filter(tmp_path: Path) -> None:
         assert eq.success is True
         assert eq.output["match_count"] == 1
 
+        # Cross-session result_id must not resolve
+        denied = filter_stored_result(
+            result_id=rid,
+            session_id="other",
+            column="status",
+            op="eq",
+            value="active",
+        )
+        assert denied.success is False
+
         analyzed = analyze_stored_result(session_id="sess1")
         # session latest is the filtered child
         assert analyzed.success is True
         assert analyzed.output["analysis"]["row_count_sampled"] >= 1
 
-        focused = analyze_stored_result(result_id=rid, column="id")
+        focused = analyze_stored_result(result_id=rid, session_id="sess1", column="id")
         assert focused.success is True
         cols = focused.output["analysis"]["columns"]
         assert len(cols) == 1
@@ -157,7 +168,7 @@ def test_ack_ledger_redact_and_finalize(tmp_path: Path) -> None:
 
 def test_result_store_no_cross_session_leak(tmp_path: Path) -> None:
     store = PilotResultStore(path=tmp_path / "results2.json", ttl_sec=600)
-    store.put(
+    rid = store.put(
         rows=[{"id": 1}],
         columns=["id"],
         meta={"table": "secret"},
@@ -166,6 +177,26 @@ def test_result_store_no_cross_session_leak(tmp_path: Path) -> None:
     )
     assert store.resolve(session_id="other") is None
     assert store.resolve() is None
+    assert store.resolve(result_id=rid, session_id="other") is None
+    assert store.resolve(result_id=rid) is None  # owned rows require session
+    assert store.resolve(result_id=rid, session_id="owner") is not None
+
+
+def test_ack_ledger_reload_keeps_consumed_for_idempotent_replay(tmp_path: Path) -> None:
+    path = tmp_path / "acks_reload.json"
+    ledger = PilotAckLedger(path=path, ttl_sec=600)
+    aid = ledger.put(
+        kind="create_connector",
+        payload={"name": "X", "type": "postgresql", "password": "secret"},
+        preview={"name": "X", "type": "postgresql"},
+    )
+    ledger.finalize(aid, actor="tester", reason="ok", result={"connector_id": "c9", "name": "X"})
+    # Simulate API restart
+    reloaded = PilotAckLedger(path=path, ttl_sec=600)
+    payload, err = reloaded.claim(aid, actor="tester")
+    assert err == ""
+    assert payload.get("_idempotent") is True
+    assert payload.get("connector_id") == "c9"
 
 
 def test_sample_still_routes() -> None:

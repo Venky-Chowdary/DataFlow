@@ -70,7 +70,14 @@ class PilotAckLedger:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
             now = _now()
             for aid, doc in (raw.get("entries") or {}).items():
-                if float(doc.get("expires_at") or 0) > now and not doc.get("consumed_at"):
+                consumed = float(doc.get("consumed_at") or 0)
+                exp = float(doc.get("expires_at") or 0)
+                if consumed:
+                    # Keep successful consumes for ~1h so confirm retries stay idempotent
+                    # across API restarts.
+                    if consumed + 3600 > now:
+                        self._entries[str(aid)] = doc
+                elif exp > now:
                     self._entries[str(aid)] = doc
         except (OSError, json.JSONDecodeError, TypeError) as exc:
             _log.warning("pilot ack ledger load failed: %s", exc)
