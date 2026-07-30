@@ -2121,50 +2121,60 @@ def _generic_apply_sparse_upsert(
     target_cols: list[str],
     conflict_columns: list[str],
     sparse_rows: list[dict[str, Any]],
-) -> int:
+) -> tuple[int, int, list[tuple]]:
     """Per-row upsert omitting DF_MISSING — never SET col=NULL for absent CDC fields."""
-    from services.cdc_effectively_once import should_apply_pk_row
+    from connectors.writer_common import run_sparse_cdc_upsert
     from services.value_serializer import is_missing_sentinel
 
     conflict = [c for c in conflict_columns if c in target_cols]
     if not conflict:
         raise ValueError("sparse SQLAlchemy upsert requires conflict_columns")
-    written = 0
+
+    # Normalize dict rows to target_cols tuples for the shared loop.
+    from services.value_serializer import DF_MISSING_SENTINEL
+
+    as_tuples: list[tuple] = []
     for row in sparse_rows:
-        present = {
-            k: v
-            for k, v in row.items()
-            if k in target_cols and not is_missing_sentinel(v)
-        }
-        assert_sparse_upsert_has_pk(present, conflict)
-        non_pk = {k: v for k, v in present.items() if k not in conflict}
-        pk_clause = sa.and_(*[table_obj.c[c] == present[c] for c in conflict])
-        if DF_LSN_COL in present and DF_LSN_COL in target_cols and DF_LSN_COL in table_obj.c:
-            existing = conn.execute(
-                sa.select(table_obj.c[DF_LSN_COL]).where(pk_clause)
-            ).fetchone()
-            if existing is not None:
-                if not should_apply_pk_row(
-                    existing_lsn=existing[0],
-                    incoming_lsn=present[DF_LSN_COL],
-                ).applied:
-                    continue
-        if non_pk:
-            result = conn.execute(
-                sa.update(table_obj).where(pk_clause).values(**non_pk)
+        as_tuples.append(
+            tuple(
+                (
+                    row[c]
+                    if c in row and not is_missing_sentinel(row.get(c))
+                    else DF_MISSING_SENTINEL
+                )
+                for c in target_cols
             )
-            if getattr(result, "rowcount", None) and result.rowcount > 0:
-                written += 1
-                continue
-        try:
-            conn.execute(sa.insert(table_obj).values(**present))
-            written += 1
-        except Exception:
-            if not non_pk:
-                raise
-            conn.execute(sa.update(table_obj).where(pk_clause).values(**non_pk))
-            written += 1
-    return written
+        )
+
+    def fetch_existing(pk_vals: list[Any]) -> tuple | None:
+        pk_clause = sa.and_(
+            *[table_obj.c[c] == pk_vals[i] for i, c in enumerate(conflict)]
+        )
+        cols = [table_obj.c[c] for c in target_cols if c in table_obj.c]
+        if len(cols) != len(target_cols):
+            # Missing physical columns — return None so insert path can run.
+            return None
+        found = conn.execute(sa.select(*cols).where(pk_clause)).fetchone()
+        return tuple(found) if found is not None else None
+
+    def update_non_pk(non_pk: dict[str, Any], pk_vals: list[Any]) -> int:
+        pk_clause = sa.and_(
+            *[table_obj.c[c] == pk_vals[i] for i, c in enumerate(conflict)]
+        )
+        result = conn.execute(sa.update(table_obj).where(pk_clause).values(**non_pk))
+        return int(getattr(result, "rowcount", 0) or 0)
+
+    def insert_present(present: dict[str, Any]) -> None:
+        conn.execute(sa.insert(table_obj).values(**present))
+
+    return run_sparse_cdc_upsert(
+        target_cols=target_cols,
+        conflict_columns=conflict,
+        sparse_rows=as_tuples,
+        fetch_existing_row=fetch_existing,
+        update_non_pk=update_non_pk,
+        insert_present=insert_present,
+    )
 
 
 def _upsert_batch(
@@ -2635,13 +2645,22 @@ def write_mapped_rows(
                 )
 
             if sparse_converted and write_mode == "upsert" and conflict_columns:
-                written += _generic_apply_sparse_upsert(
-                    conn,
-                    table_obj,
-                    target_cols,
-                    conflict_columns,
-                    sparse_converted,
+                from connectors.writer_common import row_has_missing_sentinel
+
+                sparse_written, sparse_skipped, sparse_checksum = (
+                    _generic_apply_sparse_upsert(
+                        conn,
+                        table_obj,
+                        target_cols,
+                        conflict_columns,
+                        sparse_converted,
+                    )
                 )
+                written += sparse_written
+                rows_skipped += sparse_skipped
+                rows_for_checksum = [
+                    r for r in rows_for_checksum if not row_has_missing_sentinel(r)
+                ] + list(sparse_checksum)
                 conn.commit()
 
             total = len(converted_rows)

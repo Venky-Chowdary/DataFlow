@@ -394,4 +394,33 @@ describe("destination schema honesty", () => {
     assert.equal(existing[0].createNew, undefined);
     assert.ok(existing[0].confidence >= 0.95);
   });
+
+  it("intentional omit is first-class Map policy", () => {
+    const base: EditableMapping = {
+      source: "ssn",
+      target: "ssn",
+      confidence: 0.99,
+      approved: false,
+      transform: "none",
+      inferredType: "VARCHAR",
+    };
+    const omitted = applyTransformChange(base, "omit");
+    assert.equal(omitted.transform, "omit");
+    assert.equal(omitted.target, "");
+    assert.equal(omitted.approved, true);
+    const health = mappingHealthSummary([
+      { source: "id", target: "id", confidence: 0.99, approved: true, transform: "none" },
+      omitted,
+    ]);
+    assert.equal(health.intentionalOmit, 1);
+    assert.equal(health.unmappedTarget, 0);
+    assert.equal(health.weak, false);
+    const payload = buildPreflightMappings([], [
+      { source: "id", target: "id", confidence: 0.99, approved: true, transform: "none" },
+      omitted,
+    ]);
+    assert.equal(payload[1].transform, "omit");
+    assert.equal(payload[1].intentional_omit, true);
+    assert.equal(payload[1].target, "");
+  });
 });

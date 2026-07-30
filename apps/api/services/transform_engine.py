@@ -966,6 +966,8 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
 
     text = raw_s.strip()
     transform_l = (transform or "none").strip().lower()
+    if transform_l in {"omit", "intentional_omit", "drop", "exclude"}:
+        return None, "intentional omit — mapping should not project"
 
     # Identity / text transforms: empty string is a real value.
     _KEEP_EMPTY = frozenset({

@@ -75,10 +75,9 @@ def test_mysql_sparse_upsert_omits_missing_column():
     from connectors.mysql_writer import _mysql_apply_sparse_upsert
 
     cur = MagicMock()
-    # First SELECT for LSN (none), then UPDATE rowcount 1
-    cur.fetchone.return_value = None
+    cur.fetchone.return_value = ("1", "old", "keep-extra")
     cur.rowcount = 1
-    written = _mysql_apply_sparse_upsert(
+    written, skipped, checksum_rows = _mysql_apply_sparse_upsert(
         cur,
         table_q="`t`",
         target_cols=["id", "note", "extra"],
@@ -86,14 +85,14 @@ def test_mysql_sparse_upsert_omits_missing_column():
         sparse_rows=[("1", "only-note", DF_MISSING_SENTINEL)],
     )
     assert written == 1
-    # UPDATE should only SET note, never extra
+    assert skipped == 0
     update_sql = cur.execute.call_args_list[-1].args[0]
     assert "note" in update_sql.lower() or "NOTE" in update_sql
     assert "extra" not in update_sql.lower()
-    # Bound values: note + pk only
     bound = cur.execute.call_args_list[-1].args[1]
     assert "only-note" in bound
     assert DF_MISSING_SENTINEL not in bound
+    assert checksum_rows == [("1", "only-note", "keep-extra")]
 
 
 def test_generic_sparse_upsert_omits_missing_column():
@@ -109,10 +108,12 @@ def test_generic_sparse_upsert_omits_missing_column():
         sa.Column("extra", sa.String()),
     )
     conn = MagicMock()
+    sel_result = MagicMock()
+    sel_result.fetchone.return_value = ("1", "old", "keep-extra")
     upd_result = MagicMock()
     upd_result.rowcount = 1
-    conn.execute.return_value = upd_result
-    written = _generic_apply_sparse_upsert(
+    conn.execute.side_effect = [sel_result, upd_result]
+    written, skipped, checksum_rows = _generic_apply_sparse_upsert(
         conn,
         table,
         ["id", "note", "extra"],
@@ -120,7 +121,8 @@ def test_generic_sparse_upsert_omits_missing_column():
         [{"id": "1", "note": "only-note", "extra": DF_MISSING_SENTINEL}],
     )
     assert written == 1
-    stmt = conn.execute.call_args_list[0].args[0]
+    assert skipped == 0
+    stmt = conn.execute.call_args_list[1].args[0]
     compiled = str(stmt.compile(compile_kwargs={"literal_binds": False})).upper()
     assert "UPDATE" in compiled
     assert "NOTE" in compiled
@@ -132,6 +134,7 @@ def test_generic_sparse_upsert_omits_missing_column():
     assert "note" in set_cols
     assert "extra" not in set_cols
     assert DF_MISSING_SENTINEL not in values.values()
+    assert checksum_rows == [("1", "only-note", "keep-extra")]
 
 
 def test_lsn_delete_fails_closed_when_fetch_unavailable():
@@ -224,7 +227,9 @@ def test_records_for_bigquery_omits_missing():
 
 
 def test_bq_sparse_upsert_omits_missing_column():
-    from connectors.bigquery_writer import _bq_apply_sparse_upsert
+    from unittest.mock import MagicMock, patch
+
+    from connectors import bigquery_writer as bq_writer
 
     queries: list[str] = []
 
@@ -232,6 +237,9 @@ def test_bq_sparse_upsert_omits_missing_column():
         num_dml_affected_rows = 1
 
         def result(self):
+            # SELECT returns existing row so checksum hydration preserves ``extra``.
+            if queries and "SELECT" in queries[-1].upper():
+                return [("1", "old-note", "keep-extra")]
             return []
 
     class _Client:
@@ -239,28 +247,35 @@ def test_bq_sparse_upsert_omits_missing_column():
             queries.append(sql)
             return _Job()
 
-    written = _bq_apply_sparse_upsert(
-        _Client(),
-        "proj.ds.t",
-        ["id", "note", "extra"],
-        ["id"],
-        [("1", "only-note", DF_MISSING_SENTINEL)],
-        ["STRING", "STRING", "STRING"],
-    )
+    bq = MagicMock()
+    bq.ScalarQueryParameter = MagicMock(side_effect=lambda *a, **k: ("param", a, k))
+    bq.QueryJobConfig = MagicMock(side_effect=lambda **k: k)
+
+    with patch.object(bq_writer, "_bq_sdk", return_value=bq):
+        written, skipped, checksum_rows = bq_writer._bq_apply_sparse_upsert(
+            _Client(),
+            "proj.ds.t",
+            ["id", "note", "extra"],
+            ["id"],
+            [("1", "only-note", DF_MISSING_SENTINEL)],
+            ["STRING", "STRING", "STRING"],
+        )
     assert written == 1
+    assert skipped == 0
     assert any("UPDATE" in q.upper() for q in queries)
     upd = next(q for q in queries if "UPDATE" in q.upper())
     assert "`note`" in upd
     assert "`extra`" not in upd
+    assert checksum_rows == [("1", "only-note", "keep-extra")]
 
 
 def test_snowflake_sparse_upsert_omits_missing_column():
     from connectors.snowflake_writer import _sf_apply_sparse_upsert
 
     cur = MagicMock()
-    cur.fetchone.return_value = None
+    cur.fetchone.return_value = ("1", "old", "keep-extra")
     cur.rowcount = 1
-    written = _sf_apply_sparse_upsert(
+    written, skipped, checksum_rows = _sf_apply_sparse_upsert(
         cur,
         "T",
         ["id", "note", "extra"],
@@ -269,11 +284,13 @@ def test_snowflake_sparse_upsert_omits_missing_column():
         [("1", "only-note", DF_MISSING_SENTINEL)],
     )
     assert written == 1
+    assert skipped == 0
     upd = cur.execute.call_args_list[-1].args[0]
     assert "UPDATE" in upd.upper()
     assert "note" in upd.lower()
     assert "extra" not in upd.lower()
     assert DF_MISSING_SENTINEL not in cur.execute.call_args_list[-1].args[1]
+    assert checksum_rows == [("1", "only-note", "keep-extra")]
 
 
 def test_iceberg_sparse_merge_preserves_absent_fields():

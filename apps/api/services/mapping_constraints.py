@@ -12,6 +12,27 @@ def _norm(name: str) -> str:
     return re.sub(r"[\s-]+", "_", name.strip().lower())
 
 
+_OMIT_TRANSFORMS = frozenset({"omit", "intentional_omit", "drop", "exclude"})
+
+
+def is_intentional_omit(mapping: dict[str, Any] | None) -> bool:
+    """True when the operator explicitly excluded this source from the write map."""
+    if not mapping:
+        return False
+    if mapping.get("intentional_omit") or mapping.get("intentionalOmit"):
+        return True
+    for key in ("transform", "engine_transform", "engineTransform"):
+        raw = str(mapping.get(key) or "").strip().lower()
+        if raw in _OMIT_TRANSFORMS:
+            return True
+    return False
+
+
+def write_mappings(mappings: list[dict] | None) -> list[dict]:
+    """Mappings that participate in DDL / row projection (excludes intentional omits)."""
+    return [m for m in (mappings or []) if not is_intentional_omit(m)]
+
+
 def known_target(name: str, target_columns: list[str]) -> bool:
     """True when name matches a declared destination column (case/underscore insensitive)."""
     if not target_columns:
@@ -82,6 +103,8 @@ def detect_duplicate_targets(mappings: list[dict]) -> list[str]:
     seen: dict[str, str] = {}
     dupes: list[str] = []
     for m in mappings:
+        if is_intentional_omit(m) or not m.get("target"):
+            continue
         key = _norm(m["target"])
         if key in seen and seen[key] != m["source"]:
             dupes.append(m["target"])
@@ -90,8 +113,15 @@ def detect_duplicate_targets(mappings: list[dict]) -> list[str]:
 
 
 def unmapped_sources(source_columns: list[str], mappings: list[dict]) -> list[str]:
-    mapped = {m["source"] for m in mappings}
-    return [s for s in source_columns if s not in mapped]
+    """Sources with no map row and no intentional-omit policy."""
+    accounted = {
+        str(m.get("source") or "")
+        for m in mappings
+        if m.get("source") and (m.get("target") or is_intentional_omit(m))
+    }
+    # Also treat any mapping with a source as accounted — omit rows keep the source.
+    accounted |= {str(m.get("source") or "") for m in mappings if m.get("source")}
+    return [s for s in source_columns if s not in accounted]
 
 
 def mapping_plan_summary(
@@ -104,18 +134,22 @@ def mapping_plan_summary(
 ) -> dict[str, Any]:
     dropped = dropped_sources or []
     invented = invented_targets or []
+    active = write_mappings(mappings)
+    omitted = [m for m in mappings if is_intentional_omit(m)]
     dupes = detect_duplicate_targets(mappings)
     unmapped = unmapped_sources(source_columns, mappings)
-    coverage = len(mappings) / max(len(source_columns), 1)
+    coverage = len(active) / max(len(source_columns), 1)
     return {
         "source_count": len(source_columns),
         "target_count": len(target_columns),
-        "mapped_count": len(mappings),
+        "mapped_count": len(active),
+        "omitted_count": len(omitted),
         "coverage_pct": round(coverage * 100, 1),
         "unmapped_sources": unmapped,
         "dropped_sources": dropped,
+        "intentional_omits": [str(m.get("source") or "") for m in omitted if m.get("source")],
         "invented_targets_blocked": invented,
         "duplicate_targets": dupes,
-        "requires_review_count": sum(1 for m in mappings if m.get("requires_review")),
-        "low_confidence_count": sum(1 for m in mappings if float(m.get("confidence", 0)) < 0.75),
+        "requires_review_count": sum(1 for m in active if m.get("requires_review")),
+        "low_confidence_count": sum(1 for m in active if float(m.get("confidence", 0)) < 0.75),
     }

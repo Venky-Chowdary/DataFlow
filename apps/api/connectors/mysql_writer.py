@@ -119,69 +119,53 @@ def _mysql_apply_sparse_upsert(
     target_cols: list[str],
     conflict_columns: list[str],
     sparse_rows: list[tuple],
-) -> int:
+) -> tuple[int, int, list[tuple]]:
     """Per-row upsert that omits DF_MISSING columns (never SET col=NULL for absent)."""
-    from connectors.writer_common import (
-        DF_LSN_COL,
-        assert_sparse_upsert_has_pk,
-        sparse_present_bindings,
-    )
-    from services.cdc_effectively_once import should_apply_pk_row
+    from connectors.writer_common import run_sparse_cdc_upsert
 
     conflict = [c for c in conflict_columns if c in target_cols]
     if not conflict:
         raise ValueError("sparse MySQL upsert requires conflict_columns")
-    written = 0
-    for row in sparse_rows:
-        present = sparse_present_bindings(row, target_cols)
-        assert_sparse_upsert_has_pk(present, conflict)
-        non_pk = {k: v for k, v in present.items() if k not in conflict}
-        pk_vals = [present[c] for c in conflict]
-        where_sql = " AND ".join(
-            f"{quote_sql_identifier(c, '`')}=%s" for c in conflict
+    select_sql = ", ".join(quote_sql_identifier(c, "`") for c in target_cols)
+    where_sql = " AND ".join(
+        f"{quote_sql_identifier(c, '`')}=%s" for c in conflict
+    )
+
+    def fetch_existing(pk_vals: list[Any]) -> tuple | None:
+        cursor.execute(
+            f"SELECT {select_sql} FROM {table_q} WHERE {where_sql}",  # nosec B608
+            pk_vals,
         )
-        if DF_LSN_COL in present and DF_LSN_COL in target_cols:
-            lsn_q = quote_sql_identifier(DF_LSN_COL, "`")
-            cursor.execute(
-                f"SELECT {lsn_q} FROM {table_q} WHERE {where_sql}",  # nosec B608
-                pk_vals,
-            )
-            existing = cursor.fetchone()
-            if existing is not None:
-                decision = should_apply_pk_row(
-                    existing_lsn=existing[0],
-                    incoming_lsn=present[DF_LSN_COL],
-                )
-                if not decision.applied:
-                    continue
-        if non_pk:
-            set_cols = list(non_pk.keys())
-            set_sql = ", ".join(
-                f"{quote_sql_identifier(c, '`')}=%s" for c in set_cols
-            )
-            sql_u = f"UPDATE {table_q} SET {set_sql} WHERE {where_sql}"  # nosec B608
-            cursor.execute(sql_u, [non_pk[c] for c in set_cols] + pk_vals)
-            if cursor.rowcount and cursor.rowcount > 0:
-                written += 1
-                continue
+        return cursor.fetchone()
+
+    def update_non_pk(non_pk: dict[str, Any], pk_vals: list[Any]) -> int:
+        set_cols = list(non_pk.keys())
+        set_sql = ", ".join(
+            f"{quote_sql_identifier(c, '`')}=%s" for c in set_cols
+        )
+        cursor.execute(
+            f"UPDATE {table_q} SET {set_sql} WHERE {where_sql}",  # nosec B608
+            [non_pk[c] for c in set_cols] + pk_vals,
+        )
+        return int(cursor.rowcount or 0)
+
+    def insert_present(present: dict[str, Any]) -> None:
         cols = list(present.keys())
         col_sql = ", ".join(quote_sql_identifier(c, "`") for c in cols)
         ph = ", ".join(["%s"] * len(cols))
-        sql_i = f"INSERT INTO {table_q} ({col_sql}) VALUES ({ph})"  # nosec B608
-        try:
-            cursor.execute(sql_i, [present[c] for c in cols])
-            written += 1
-        except Exception:
-            if not non_pk:
-                raise
-            set_cols = list(non_pk.keys())
-            set_sql = ", ".join(
-                f"{quote_sql_identifier(c, '`')}=%s" for c in set_cols
-            )
-            sql_u = f"UPDATE {table_q} SET {set_sql} WHERE {where_sql}"  # nosec B608
-            cursor.execute(sql_u, [non_pk[c] for c in set_cols] + pk_vals)
-            written += 1
-    return written
+        cursor.execute(
+            f"INSERT INTO {table_q} ({col_sql}) VALUES ({ph})",  # nosec B608
+            [present[c] for c in cols],
+        )
+
+    return run_sparse_cdc_upsert(
+        target_cols=target_cols,
+        conflict_columns=conflict,
+        sparse_rows=sparse_rows,
+        fetch_existing_row=fetch_existing,
+        update_non_pk=update_non_pk,
+        insert_present=insert_present,
+    )
 
 def _open_mysql(
     *,
@@ -435,8 +419,16 @@ def write_mapped_rows(
             # Pick the wider of the mapping-proposed target DDL and the freshly
             # introspected source DDL, then widen any destination columns that are
             # now too narrow for the source drift.
+            from services.mapping_constraints import write_mappings
+
+            active_by_tgt: dict[str, dict] = {}
+            for mapping in write_mappings(mappings):
+                tgt = sanitize_identifier(str(mapping.get("target") or ""), preserve_case=False)
+                if tgt and tgt not in active_by_tgt:
+                    active_by_tgt[tgt] = mapping
             desired_types: list[str] = []
-            for mapping, target_type in zip(mappings, target_types):
+            for col, target_type in zip(target_cols, target_types):
+                mapping = active_by_tgt.get(col) or {}
                 source = mapping.get("source") or ""
                 source_type = (
                     column_types.get(source)
@@ -514,15 +506,23 @@ def write_mapped_rows(
                     tuple(_to_mysql_value(v, target_types[i]) for i, v in enumerate(row))
                     for row in sparse_rows
                 ]
-                sparse_written = _mysql_apply_sparse_upsert(
-                    cur,
-                    table_q=table_q,
-                    target_cols=target_cols,
-                    conflict_columns=conflict_columns,
-                    sparse_rows=sparse_converted,
+                sparse_written, sparse_skipped, sparse_checksum = (
+                    _mysql_apply_sparse_upsert(
+                        cur,
+                        table_q=table_q,
+                        target_cols=target_cols,
+                        conflict_columns=conflict_columns,
+                        sparse_rows=sparse_converted,
+                    )
                 )
                 conn.commit()
                 written += sparse_written
+                rows_skipped += sparse_skipped
+                from connectors.writer_common import row_has_missing_sentinel
+
+                rows_for_checksum = [
+                    r for r in rows_for_checksum if not row_has_missing_sentinel(r)
+                ] + list(sparse_checksum)
 
             for chunk_idx in range(chunks):
                 start = chunk_idx * chunk_size
@@ -651,7 +651,7 @@ def write_mapped_rows(
                 dest_types={c: target_types[i] for i, c in enumerate(target_cols)},
             ),
             chunks_completed=chunks_completed or chunks,
-            rejected_rows=max(rejected_rows, len(data_rows) - written),
+            rejected_rows=max(rejected_rows, len(data_rows) - written - rows_skipped),
             rejected_details=rejected_details,
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,

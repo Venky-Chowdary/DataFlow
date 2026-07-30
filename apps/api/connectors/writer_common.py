@@ -777,6 +777,13 @@ def build_mapped_rows_with_details(
 
     mapping_infos = []
     for m in mappings:
+        try:
+            from services.mapping_constraints import is_intentional_omit
+
+            if is_intentional_omit(m):
+                continue
+        except Exception:
+            pass
         src = m["source"]
         tgt = sanitize_identifier(m["target"], preserve_case=preserve_case)
         transform = resolve_transform(
@@ -898,6 +905,13 @@ def sample_values_by_source_from_batch(
     index = {h: i for i, h in enumerate(headers)}
     out: dict[str, list[str]] = {}
     for m in mappings:
+        try:
+            from services.mapping_constraints import is_intentional_omit
+
+            if is_intentional_omit(m):
+                continue
+        except Exception:
+            pass
         src = str(m.get("source") or "")
         if not src or src not in index:
             continue
@@ -935,6 +949,14 @@ def resolve_target_columns(
     target_types: list[str] = []
     samples = sample_values_by_source or {}
     for m in mappings:
+        try:
+            from services.mapping_constraints import is_intentional_omit
+
+            if is_intentional_omit(m) or not m.get("target"):
+                continue
+        except Exception:
+            if not m.get("target"):
+                continue
         tgt = sanitize_identifier(m["target"], preserve_case=preserve_case)
         if tgt not in target_cols:
             target_cols.append(tgt)
@@ -1362,6 +1384,75 @@ def materialize_sparse_row_for_checksum(
         else:
             out.append(None)
     return tuple(out)
+
+
+def run_sparse_cdc_upsert(
+    *,
+    target_cols: list[str],
+    conflict_columns: list[str],
+    sparse_rows: list[tuple],
+    fetch_existing_row: Callable[[list[Any]], tuple | list | None],
+    update_non_pk: Callable[[dict[str, Any], list[Any]], int],
+    insert_present: Callable[[dict[str, Any]], None],
+) -> tuple[int, int, list[tuple]]:
+    """Shared sparse CDC upsert: omit DF_MISSING, LSN skip, hydrate checksum rows.
+
+    ``fetch_existing_row(pk_vals)`` must return a full row in ``target_cols`` order
+    (or ``None``). ``update_non_pk(non_pk, pk_vals)`` returns affected rowcount.
+    """
+    from services.cdc_effectively_once import should_apply_pk_row
+
+    conflict = [c for c in conflict_columns if c in target_cols]
+    if not conflict:
+        raise ValueError("sparse CDC upsert requires conflict_columns")
+    written = 0
+    skipped = 0
+    checksum_rows: list[tuple] = []
+    for row in sparse_rows:
+        present = sparse_present_bindings(row, target_cols)
+        assert_sparse_upsert_has_pk(present, conflict)
+        non_pk = {k: v for k, v in present.items() if k not in conflict}
+        pk_vals = [present[c] for c in conflict]
+        existing_tuple = fetch_existing_row(pk_vals)
+        existing = (
+            dict(zip(target_cols, existing_tuple))
+            if existing_tuple is not None
+            else None
+        )
+        if (
+            existing is not None
+            and DF_LSN_COL in present
+            and DF_LSN_COL in target_cols
+        ):
+            if not should_apply_pk_row(
+                existing_lsn=existing.get(DF_LSN_COL),
+                incoming_lsn=present[DF_LSN_COL],
+            ).applied:
+                skipped += 1
+                continue
+        if non_pk:
+            affected = update_non_pk(non_pk, pk_vals)
+            if affected and affected > 0:
+                written += 1
+                checksum_rows.append(
+                    materialize_sparse_row_for_checksum(present, existing, target_cols)
+                )
+                continue
+        try:
+            insert_present(present)
+            written += 1
+            checksum_rows.append(
+                materialize_sparse_row_for_checksum(present, existing, target_cols)
+            )
+        except Exception:
+            if not non_pk:
+                raise
+            update_non_pk(non_pk, pk_vals)
+            written += 1
+            checksum_rows.append(
+                materialize_sparse_row_for_checksum(present, existing, target_cols)
+            )
+    return written, skipped, checksum_rows
 
 
 def assert_sparse_upsert_has_pk(

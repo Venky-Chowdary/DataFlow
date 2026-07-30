@@ -518,7 +518,23 @@ def detect_schema_drift(
     mapped_sources = {
         str(m.get("source")).lower() for m in mappings if m.get("source")
     }
-    mapped_targets = {str(m.get("target")).lower() for m in mappings if m.get("target")}
+    try:
+        from services.mapping_constraints import is_intentional_omit, write_mappings
+
+        active_mappings = write_mappings(mappings)
+        intentional_omits = [
+            str(m.get("source"))
+            for m in mappings
+            if is_intentional_omit(m) and m.get("source")
+        ]
+    except Exception:
+        active_mappings = list(mappings)
+        intentional_omits = []
+    mapped_targets = {
+        str(m.get("target")).lower()
+        for m in active_mappings
+        if m.get("target")
+    }
     unmapped_sources = [c for c in source_columns if c.lower() not in mapped_sources]
     try:
         from services.scd2_engine import SCD2_COLUMNS
@@ -539,7 +555,7 @@ def detect_schema_drift(
     if live_ddl_contract:
         from services.coercion_probe import samples_coerce_mapping
 
-        for m in mappings:
+        for m in active_mappings:
             src = str(m.get("source") or "")
             tgt = str(m.get("target") or "")
             if not src or not tgt:
@@ -714,7 +730,12 @@ def detect_schema_drift(
         "evolution_unmapped_sources": evolution_unmapped,
         "orphan_targets": orphan_targets,
         "type_mismatches": type_mismatches,
-        "mapping_coverage": round(len(mapped_sources) / max(len(source_columns), 1), 3),
+        "intentional_omits": intentional_omits,
+        "mapping_coverage": round(
+            len({str(m.get("source")).lower() for m in active_mappings if m.get("source")})
+            / max(len(source_columns), 1),
+            3,
+        ),
         "classification": classification,
         "schema_evolution": evolution,
         "table_exists": table_exists,

@@ -25,10 +25,12 @@ export type MappingTransform =
   | "currency"
   | "percentage"
   | "strip_controls"
-  | "identity_specialty";
+  | "identity_specialty"
+  | "omit";
 
 export const MAPPING_TRANSFORMS: { id: MappingTransform; label: string; detail: string }[] = [
   { id: "none", label: "None", detail: "Pass through as detected" },
+  { id: "omit", label: "Omit", detail: "Intentionally exclude this source column from the transfer" },
   { id: "trim", label: "Trim", detail: "Strip leading/trailing whitespace" },
   { id: "strip_controls", label: "Strip controls", detail: "Remove zero-width / null / format-control chars (warehouse-safe)" },
   { id: "upper", label: "Uppercase", detail: "Normalize to UPPER CASE" },
@@ -163,6 +165,7 @@ export const UI_TO_ENGINE_TRANSFORM: Record<MappingTransform, string> = {
   percentage: "percentage",
   strip_controls: "strip_controls",
   identity_specialty: "none",
+  omit: "omit",
 };
 
 /** Engine transform → UI MappingTransform (aligned with transform_resolver.ENGINE_TO_UI + extensions). */
@@ -195,6 +198,7 @@ export const ENGINE_TO_UI_TRANSFORM: Record<string, MappingTransform> = {
   currency: "currency",
   percentage: "percentage",
   base64: "binary",
+  omit: "omit",
 };
 
 function looksLikeStringEnumSample(sample?: string, semanticRole?: string): boolean {
@@ -595,12 +599,30 @@ export function applyDestTypeChange(m: EditableMapping, nextDestType: string): E
   return { ...m, destType: nextDestType, approved: false };
 }
 
+export function isIntentionalOmit(m: EditableMapping): boolean {
+  return m.transform === "omit" || m.engineTransform === "omit" || Boolean((m as { intentionalOmit?: boolean }).intentionalOmit);
+}
+
 export function applyTransformChange(m: EditableMapping, next: MappingTransform): EditableMapping {
+  if (next === "omit") {
+    return {
+      ...m,
+      transform: "omit",
+      engineTransform: "omit",
+      target: "",
+      approved: true,
+      requiresReview: false,
+      reason: "Intentionally omitted from transfer",
+    };
+  }
+  const restoring = m.transform === "omit";
   return {
     ...m,
     transform: next,
     // Operator override — drop pipeline engineTransform so UI→engine is authoritative.
     engineTransform: next === "none" ? undefined : UI_TO_ENGINE_TRANSFORM[next],
+    target: restoring && !String(m.target || "").trim() ? m.source : m.target,
+    reason: restoring && m.reason === "Intentionally omitted from transfer" ? undefined : m.reason,
     approved: false,
   };
 }
@@ -726,16 +748,19 @@ export function buildPreflightMappings(
             ? flagExistingEnumBooleanConflict(m)
             : m;
       const pendingDest = safe.assignmentStrategy === "pending_dest_schema";
+      const omitted = isIntentionalOmit(safe);
       // Missing dest column (when schema is known) is create-new even if createNew flag lagged.
-      const isCreateNew = Boolean(
+      const isCreateNew = !omitted && Boolean(
         safe.createNew
         || safe.assignmentStrategy === "create_compatible_new"
         || (safe.existsInDestination === false && !pendingDest),
       );
       return {
         source: safe.source,
-        target: safe.target,
-        confidence: (
+        target: omitted ? "" : safe.target,
+        confidence: omitted
+          ? 1
+          : (
           isCreateNew
             ? Math.min(safe.confidence, 0.93)
             : pendingDest
@@ -744,19 +769,24 @@ export function buildPreflightMappings(
         ),
         reason: safe.reason || "User reviewed",
         user_override: safe.approved && !enumBool,
-        transform: uiTransformToEngine(safe.transform, safe.engineTransform),
-        target_type: m.existsInDestination
+        transform: omitted ? "omit" : uiTransformToEngine(safe.transform, safe.engineTransform),
+        intentional_omit: omitted || undefined,
+        target_type: omitted
+          ? undefined
+          : m.existsInDestination
           ? (m.destType || safe.destType || safe.inferredType)
           : (safe.destType || safe.inferredType),
         source_type: safe.inferredType,
-        requires_review: Boolean((safe.requiresReview || enumBool) && !safe.approved),
+        requires_review: omitted ? false : Boolean((safe.requiresReview || enumBool) && !safe.approved),
         score_gap: safe.scoreGap ?? 1,
         semantic_role: safe.semanticRole,
         create_new: isCreateNew,
         assignment_strategy:
-          safe.assignmentStrategy
+          omitted
+            ? "intentional_omit"
+            : safe.assignmentStrategy
           || (isCreateNew ? "create_compatible_new" : undefined),
-        struct_policy: safe.structPolicy,
+        struct_policy: omitted ? undefined : safe.structPolicy,
         struct_derived: safe.structDerived || undefined,
         struct_parent: safe.structParent,
       };
@@ -916,6 +946,7 @@ export interface MappingHealthSummary {
   needsReview: number;
   lowConfidence: number;
   unmappedTarget: number;
+  intentionalOmit: number;
   specialtyIdentity: number;
   existingTypeConflict: number;
   weak: boolean;
@@ -929,17 +960,21 @@ export function mappingHealthSummary(
   threshold = 0.75,
 ): MappingHealthSummary {
   const total = mappings.length;
-  const needsReview = mappings.filter((m) => m.requiresReview && !m.approved).length;
-  const lowConfidence = mappings.filter((m) => m.confidence < threshold && !m.approved).length;
-  const unmappedTarget = mappings.filter((m) => !String(m.target || "").trim()).length;
-  const specialtyIdentity = mappings.filter(
+  const intentionalOmit = mappings.filter((m) => isIntentionalOmit(m)).length;
+  const active = mappings.filter((m) => !isIntentionalOmit(m));
+  const needsReview = active.filter((m) => m.requiresReview && !m.approved).length;
+  const lowConfidence = active.filter((m) => m.confidence < threshold && !m.approved).length;
+  const unmappedTarget = active.filter((m) => !String(m.target || "").trim()).length;
+  const specialtyIdentity = active.filter(
     (m) => m.transform === "identity_specialty" || isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType),
   ).length;
-  const existingTypeConflict = mappings.filter(
+  const existingTypeConflict = active.filter(
     (m) => isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m),
   ).length;
   const ready = mappings.filter(
-    (m) => m.approved && String(m.target || "").trim() && !m.requiresReview,
+    (m) =>
+      (isIntentionalOmit(m) && m.approved)
+      || (m.approved && String(m.target || "").trim() && !m.requiresReview),
   ).length;
   const weak =
     total === 0
@@ -950,12 +985,15 @@ export function mappingHealthSummary(
 
   let headline = "Map looks ready";
   let detail = `${ready}/${total} mappings approved for Validate.`;
+  if (intentionalOmit > 0 && !weak) {
+    detail = `${ready}/${total} ready · ${intentionalOmit} intentionally omitted.`;
+  }
   if (total === 0) {
     headline = "No mappings yet";
     detail = "Run analysis or rematch before Validate — Execute will fail with an empty map.";
   } else if (unmappedTarget > 0) {
     headline = `${unmappedTarget} mapping(s) missing a destination column`;
-    detail = "Every source field needs a target name (create-new or existing).";
+    detail = "Set a target, or choose Transform → Omit for intentional exclusions.";
   } else if (existingTypeConflict > 0) {
     headline = `${existingTypeConflict} existing-column type conflict(s)`;
     detail = "Remap to a compatible column or ALTER the destination — Map Widen cannot change DDL.";
@@ -965,6 +1003,9 @@ export function mappingHealthSummary(
   } else if (specialtyIdentity > 0) {
     headline = `${specialtyIdentity} specialty type(s) use identity`;
     detail = "VECTOR / INTERVAL / GEOGRAPHY travel as identity payloads — dimensions/SRID are not rewritten.";
+  } else if (intentionalOmit > 0) {
+    headline = `${intentionalOmit} column(s) intentionally omitted`;
+    detail = `${ready - intentionalOmit} columns transfer · ${intentionalOmit} excluded by Map policy.`;
   }
 
   return {
@@ -973,6 +1014,7 @@ export function mappingHealthSummary(
     needsReview,
     lowConfidence,
     unmappedTarget,
+    intentionalOmit,
     specialtyIdentity,
     existingTypeConflict,
     weak: weak || specialtyIdentity > 0,

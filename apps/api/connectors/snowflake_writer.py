@@ -273,9 +273,15 @@ def _sf_apply_sparse_upsert(
     target_types: list[str],
     conflict: list[str],
     sparse_rows: list[tuple],
-) -> int:
+) -> tuple[int, int, list[tuple]]:
     """Per-row Snowflake upsert omitting DF_MISSING — never SET col=NULL for absent."""
     from connectors.sql_bind import normalize_sql_bind_value
+    from connectors.writer_common import (
+        DF_LSN_COL,
+        assert_sparse_upsert_has_pk,
+        materialize_sparse_row_for_checksum,
+        sparse_present_bindings,
+    )
     from services.cdc_effectively_once import should_apply_pk_row
 
     if not conflict:
@@ -283,6 +289,11 @@ def _sf_apply_sparse_upsert(
     type_by_col = {c: t for c, t in zip(target_cols, target_types)}
     tbl = quote_sql_identifier(table_name)
     written = 0
+    skipped = 0
+    checksum_rows: list[tuple] = []
+    select_sql = ", ".join(quote_sql_identifier(c) for c in target_cols)
+    where_sql = " AND ".join(f"{quote_sql_identifier(c)} = %s" for c in conflict)
+
     for row in sparse_rows:
         raw_present = sparse_present_bindings(row, target_cols)
         present = {
@@ -293,25 +304,26 @@ def _sf_apply_sparse_upsert(
         }
         assert_sparse_upsert_has_pk(present, conflict)
         non_pk = {k: v for k, v in present.items() if k not in conflict}
-        where_sql = " AND ".join(
-            f"{quote_sql_identifier(c)} = %s" for c in conflict
-        )
         pk_vals = [present[c] for c in conflict]
-
-        if DF_LSN_COL in present and DF_LSN_COL in target_cols:
-            lsn_q = quote_sql_identifier(DF_LSN_COL)
-            cur.execute(
-                f"SELECT {lsn_q} FROM {tbl} WHERE {where_sql}",  # nosec B608
-                pk_vals,
-            )
-            existing = cur.fetchone()
-            if existing is not None:
-                if not should_apply_pk_row(
-                    existing_lsn=existing[0],
-                    incoming_lsn=present[DF_LSN_COL],
-                ).applied:
-                    continue
-
+        cur.execute(
+            f"SELECT {select_sql} FROM {tbl} WHERE {where_sql}",  # nosec B608
+            pk_vals,
+        )
+        existing_tuple = cur.fetchone()
+        existing = (
+            dict(zip(target_cols, existing_tuple)) if existing_tuple is not None else None
+        )
+        if (
+            existing is not None
+            and DF_LSN_COL in present
+            and DF_LSN_COL in target_cols
+        ):
+            if not should_apply_pk_row(
+                existing_lsn=existing.get(DF_LSN_COL),
+                incoming_lsn=present[DF_LSN_COL],
+            ).applied:
+                skipped += 1
+                continue
         if non_pk:
             set_cols = list(non_pk.keys())
             set_sql = ", ".join(
@@ -323,8 +335,10 @@ def _sf_apply_sparse_upsert(
             )
             if cur.rowcount and cur.rowcount > 0:
                 written += 1
+                checksum_rows.append(
+                    materialize_sparse_row_for_checksum(present, existing, target_cols)
+                )
                 continue
-
         cols = list(present.keys())
         col_sql = ", ".join(quote_sql_identifier(c) for c in cols)
         ph = ", ".join(["%s"] * len(cols))
@@ -334,6 +348,9 @@ def _sf_apply_sparse_upsert(
                 [present[c] for c in cols],
             )
             written += 1
+            checksum_rows.append(
+                materialize_sparse_row_for_checksum(present, existing, target_cols)
+            )
         except Exception:
             if not non_pk:
                 raise
@@ -346,7 +363,10 @@ def _sf_apply_sparse_upsert(
                 [non_pk[c] for c in set_cols] + pk_vals,
             )
             written += 1
-    return written
+            checksum_rows.append(
+                materialize_sparse_row_for_checksum(present, existing, target_cols)
+            )
+    return written, skipped, checksum_rows
 
 
 def _is_json_type(sf_type: str) -> bool:
@@ -830,6 +850,7 @@ def write_mapped_rows(
 
     conn = connection
     written = 0
+    rows_skipped = 0
     load_method = "insert"
     chunks = 1
     try:
@@ -938,14 +959,23 @@ def write_mapped_rows(
                 load_method = "merge_batch"
                 written = 0
                 if sparse_rows:
-                    written += _sf_apply_sparse_upsert(
-                        cur,
-                        table_name,
-                        target_cols,
-                        target_types,
-                        conflict,
-                        sparse_rows,
+                    from connectors.writer_common import row_has_missing_sentinel
+
+                    sparse_written, sparse_skipped, sparse_checksum = (
+                        _sf_apply_sparse_upsert(
+                            cur,
+                            table_name,
+                            target_cols,
+                            target_types,
+                            conflict,
+                            sparse_rows,
+                        )
                     )
+                    written += sparse_written
+                    rows_skipped += sparse_skipped
+                    rows_for_checksum = [
+                        r for r in rows_for_checksum if not row_has_missing_sentinel(r)
+                    ] + list(sparse_checksum)
                 # Stage once (COPY when large enough) and MERGE the dense batch.
                 written += _merge_batch_via_temp(
                     cur,
@@ -989,11 +1019,12 @@ def write_mapped_rows(
                 else None,
             ),
             chunks_completed=chunks,
-            rejected_rows=rejected_rows,
+            rejected_rows=max(rejected_rows, len(data_rows) - written - rows_skipped),
             warnings=transform_errors,
             rejected_details=rejected_details,
             coerced_null_rows=coerced_null_rows,
             load_method=load_method,
+            rows_skipped=rows_skipped,
         )
     except Exception as exc:
         return WriteResult(

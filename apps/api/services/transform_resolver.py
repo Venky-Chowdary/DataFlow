@@ -57,6 +57,7 @@ UI_TO_ENGINE: dict[str, str] = {
     "currency": "currency",
     "percentage": "percentage",
     "identity_specialty": "none",
+    "omit": "omit",
 }
 
 # Transforms that naturally produce string output and are safe for string targets.
@@ -113,6 +114,11 @@ def resolve_transform(
     raw = mapping.get("transform")
     if raw in UI_TO_ENGINE:
         raw = UI_TO_ENGINE[raw]
+    # Intentional omit never participates in row projection / type coercion.
+    if str(raw or "").lower() in {"omit", "intentional_omit", "drop", "exclude"}:
+        return "omit"
+    if mapping.get("intentional_omit") or mapping.get("intentionalOmit"):
+        return "omit"
 
     source_type = normalize_logical_type(column_types.get(mapping["source"], "VARCHAR"))
     target_type = normalize_logical_type(

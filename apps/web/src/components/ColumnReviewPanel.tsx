@@ -17,6 +17,7 @@ import {
   isArrayLogicalType,
   isEnumToBooleanConflict,
   isExistingEnumBooleanConflict,
+  isIntentionalOmit,
   isSpecialtyLogicalType,
   isStructLogicalType,
   pipelineTransformChip,
@@ -535,10 +536,11 @@ export function ColumnReviewPanel({
             {pageItems.map(({ mapping: m, index }) => {
               const tier = confidenceClass(m.confidence, confidenceThreshold, m.approved);
               const ready = isMappingReady(m, confidenceThreshold);
+              const omitted = isIntentionalOmit(m);
               return (
                 <tr
                   key={`${m.source}-${index}`}
-                  className={`df2-column-row ${tier}`}
+                  className={`df2-column-row ${tier}${omitted ? " is-omitted" : ""}`}
                   ref={(el) => {
                     if (el) rowRefs.current.set(m.source, el);
                     else rowRefs.current.delete(m.source);
@@ -548,11 +550,16 @@ export function ColumnReviewPanel({
                   <td className="df2-column-source-cell">
                     <div className="df2-column-cell-content">
                       <span className="df2-column-source">{m.source}</span>
+                      {omitted && (
+                        <span className="df2-badge df2-badge-muted df2-badge-xs" title="Excluded from write — intentional Map policy">
+                          omit
+                        </span>
+                      )}
                       {m.isPii && <span className="df2-badge df2-badge-run df2-badge-xs">PII</span>}
-                      {m.requiresReview && !m.approved && (
+                      {m.requiresReview && !m.approved && !omitted && (
                         <span className="df2-badge df2-badge-run df2-badge-xs">ambiguous</span>
                       )}
-                      {(m.semanticRole === "string_enum" || isEnumToBooleanConflict(m)) && (
+                      {(m.semanticRole === "string_enum" || isEnumToBooleanConflict(m)) && !omitted && (
                         <span className="df2-badge df2-badge-warn df2-badge-xs" title="Status/lifecycle labels — not true/false">
                           string enum
                         </span>
@@ -568,6 +575,12 @@ export function ColumnReviewPanel({
                   <td className="df2-column-arrow" aria-hidden>→</td>
                   <td className="df2-column-destination-cell">
                     <div className="df2-column-cell-content">
+                      {omitted ? (
+                        <span className="df2-column-omit-target" title="Not written to destination">
+                          — not transferred —
+                        </span>
+                      ) : (
+                        <>
                       <input
                         className="df2-input df2-column-target-input"
                         value={m.target}
@@ -593,7 +606,9 @@ export function ColumnReviewPanel({
                           </option>
                         ))}
                       </select>
-                      {(isStructLogicalType(m.inferredType) || isStructLogicalType(m.destType) || (m.structPolicy && !isArrayLogicalType(m.inferredType) && !isArrayLogicalType(m.destType))) && !m.structDerived && (
+                        </>
+                      )}
+                      {!omitted && (isStructLogicalType(m.inferredType) || isStructLogicalType(m.destType) || (m.structPolicy && !isArrayLogicalType(m.inferredType) && !isArrayLogicalType(m.destType))) && !m.structDerived && (
                         <select
                           className="df2-input df2-select df2-column-struct-policy"
                           value={m.structPolicy ?? "store_as_json"}
@@ -608,7 +623,7 @@ export function ColumnReviewPanel({
                           ))}
                         </select>
                       )}
-                      {(isArrayLogicalType(m.inferredType) || isArrayLogicalType(m.destType) || m.structPolicy === "explode_rows") && !m.structDerived && (
+                      {!omitted && (isArrayLogicalType(m.inferredType) || isArrayLogicalType(m.destType) || m.structPolicy === "explode_rows") && !m.structDerived && (
                         <select
                           className="df2-input df2-select df2-column-struct-policy"
                           value={m.structPolicy === "explode_rows" ? "explode_rows" : "store_as_json"}
@@ -623,6 +638,7 @@ export function ColumnReviewPanel({
                           ))}
                         </select>
                       )}
+                      {!omitted && (
                       <div className="df2-column-dest-badges">
                         {m.existsInDestination && (
                           <span className="df2-col-badge-exists">exists</span>
@@ -654,7 +670,8 @@ export function ColumnReviewPanel({
                           </span>
                         )}
                       </div>
-                      {isExistingEnumBooleanConflict(m) && (
+                      )}
+                      {!omitted && isExistingEnumBooleanConflict(m) && (
                         <button
                           type="button"
                           className="df2-btn df2-btn-sm df2-btn-ghost"
@@ -664,7 +681,7 @@ export function ColumnReviewPanel({
                           Remap / ALTER required
                         </button>
                       )}
-                      {isEnumToBooleanConflict(m) && canWidenMapping(m) && (
+                      {!omitted && isEnumToBooleanConflict(m) && canWidenMapping(m) && (
                         <button
                           type="button"
                           className="df2-btn df2-btn-sm df2-btn-ghost"
@@ -697,7 +714,7 @@ export function ColumnReviewPanel({
                             <option key={t.id} value={t.id}>{t.label}</option>
                           ))}
                         </select>
-                        {pipelineTransformChip(m.engineTransform) && (
+                        {pipelineTransformChip(m.engineTransform) && !omitted && (
                           <span
                             className="df2-col-badge-pipeline"
                             title={`Pipeline semantic transform '${pipelineTransformChip(m.engineTransform)}' — preserved on Validate/Execute unless you change the transform select`}
@@ -712,10 +729,12 @@ export function ColumnReviewPanel({
                     {m.reason || "Semantic match"}
                   </td>
                   <td className="df2-column-confidence">
-                    <span className={`df2-column-conf ${tier}`}>{(m.confidence * 100).toFixed(0)}%</span>
+                    <span className={`df2-column-conf ${tier}`}>{omitted ? "—" : `${(m.confidence * 100).toFixed(0)}%`}</span>
                   </td>
                   <td className="df2-column-status">
-                    {ready ? (
+                    {omitted ? (
+                      <span className="df2-badge df2-badge-muted df2-badge-xs">Omitted</span>
+                    ) : ready ? (
                       <span className="df2-badge df2-badge-live df2-badge-xs">Ready</span>
                     ) : (
                       <button

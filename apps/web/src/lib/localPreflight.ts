@@ -113,17 +113,26 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
 
   const mappedSources = new Set(input.mappings.map((m) => m.source));
   const unmapped = input.columns.filter((c) => !mappedSources.has(c));
+  const intentionalOmits = input.mappings.filter(
+    (m) => m.transform === "omit" || (m as { intentionalOmit?: boolean }).intentionalOmit,
+  );
   if (unmapped.length > 0) {
     block("g3_schema_contract", `${unmapped.length} source column(s) have no mapping.`, {
       kind: "schema_contract", coverage: "full_schema", note: "Unmapped source columns",
     });
   } else {
-    pass("g3_schema_contract", "All source columns mapped to destination fields.", {
+    const omitNote = intentionalOmits.length
+      ? ` · ${intentionalOmits.length} intentionally omitted`
+      : "";
+    pass("g3_schema_contract", `All source columns accounted for (mapped or omitted).${omitNote}`, {
       kind: "schema_contract", coverage: "full_schema", columns: input.mappings.length,
+      intentional_omits: intentionalOmits.map((m) => m.source),
     });
   }
 
-  const lowConfidence = input.mappings.filter((m) => m.confidence < threshold);
+  const lowConfidence = input.mappings.filter(
+    (m) => m.transform !== "omit" && m.confidence < threshold,
+  );
   if (lowConfidence.length > 0) {
     block(
       "g4_mapping_confidence",

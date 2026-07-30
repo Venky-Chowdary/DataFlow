@@ -165,6 +165,13 @@ def _bq_normalize_present(
     return recs[0] if recs else {}
 
 
+def _bq_sdk():
+    """Lazy BigQuery SDK import — kept patchable for unit tests without the client."""
+    from google.cloud import bigquery
+
+    return bigquery
+
+
 def _bq_apply_sparse_upsert(
     client: Any,
     table_id: str,
@@ -172,17 +179,24 @@ def _bq_apply_sparse_upsert(
     conflict_columns: list[str],
     sparse_rows: list[tuple],
     bq_types: list[str],
-) -> int:
+) -> tuple[int, int, list[tuple]]:
     """Per-row BigQuery DML omitting DF_MISSING — never SET col=NULL for absent CDC fields."""
-    from google.cloud import bigquery
-
+    from connectors.writer_common import (
+        DF_LSN_COL,
+        assert_sparse_upsert_has_pk,
+        materialize_sparse_row_for_checksum,
+        sparse_present_bindings,
+    )
     from services.cdc_effectively_once import should_apply_pk_row
 
+    bigquery = _bq_sdk()
     conflict = [c for c in conflict_columns if c in target_cols]
     if not conflict:
         raise ValueError("sparse BigQuery upsert requires conflict_columns")
     type_by_col = {c: bq_types[i] for i, c in enumerate(target_cols)}
     written = 0
+    skipped = 0
+    checksum_rows: list[tuple] = []
     for row in sparse_rows:
         present = _bq_normalize_present(
             sparse_present_bindings(row, target_cols),
@@ -206,23 +220,30 @@ def _bq_apply_sparse_upsert(
 
         pk_where = " AND ".join(f"`{c}` = @pk_{c}" for c in conflict)
         pk_params = _params({c: present[c] for c in conflict}, "pk_")
-
-        if DF_LSN_COL in present and DF_LSN_COL in target_cols:
-            sel = (
-                f"SELECT `{DF_LSN_COL}` FROM `{table_id}` WHERE {pk_where}"  # nosec B608
-            )
-            job = client.query(
-                sel,
-                job_config=bigquery.QueryJobConfig(query_parameters=pk_params),
-            )
-            existing = list(job.result())
-            if existing:
-                existing_lsn = existing[0][0]
-                if not should_apply_pk_row(
-                    existing_lsn=existing_lsn,
-                    incoming_lsn=present[DF_LSN_COL],
-                ).applied:
-                    continue
+        select_cols = ", ".join(f"`{c}`" for c in target_cols)
+        sel = (
+            f"SELECT {select_cols} FROM `{table_id}` WHERE {pk_where}"  # nosec B608
+        )
+        job = client.query(
+            sel,
+            job_config=bigquery.QueryJobConfig(query_parameters=pk_params),
+        )
+        existing_rows = list(job.result())
+        existing_tuple = tuple(existing_rows[0]) if existing_rows else None
+        existing = (
+            dict(zip(target_cols, existing_tuple)) if existing_tuple is not None else None
+        )
+        if (
+            existing is not None
+            and DF_LSN_COL in present
+            and DF_LSN_COL in target_cols
+        ):
+            if not should_apply_pk_row(
+                existing_lsn=existing.get(DF_LSN_COL),
+                incoming_lsn=present[DF_LSN_COL],
+            ).applied:
+                skipped += 1
+                continue
 
         if non_pk:
             set_clause = ", ".join(f"`{c}` = @v_{c}" for c in non_pk)
@@ -239,6 +260,9 @@ def _bq_apply_sparse_upsert(
             affected = getattr(job, "num_dml_affected_rows", None)
             if affected and affected > 0:
                 written += 1
+                checksum_rows.append(
+                    materialize_sparse_row_for_checksum(present, existing, target_cols)
+                )
                 continue
 
         cols = list(present.keys())
@@ -256,6 +280,9 @@ def _bq_apply_sparse_upsert(
             )
             job.result()
             written += 1
+            checksum_rows.append(
+                materialize_sparse_row_for_checksum(present, existing, target_cols)
+            )
         except Exception:
             if not non_pk:
                 raise
@@ -271,7 +298,10 @@ def _bq_apply_sparse_upsert(
             )
             job.result()
             written += 1
-    return written
+            checksum_rows.append(
+                materialize_sparse_row_for_checksum(present, existing, target_cols)
+            )
+    return written, skipped, checksum_rows
 
 
 def write_mapped_rows(
@@ -493,11 +523,14 @@ def write_mapped_rows(
         total = len(mapped_rows)
         chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE) if total else 0
         written = 0
+        rows_skipped = 0
         chunks_completed = 0
         use_merge = write_mode == "upsert" and any(c in target_cols for c in conflict_columns)
 
         if sparse_rows and use_merge:
-            written += _bq_apply_sparse_upsert(
+            from connectors.writer_common import row_has_missing_sentinel
+
+            sparse_written, sparse_skipped, sparse_checksum = _bq_apply_sparse_upsert(
                 client,
                 table_id,
                 target_cols,
@@ -505,6 +538,11 @@ def write_mapped_rows(
                 sparse_rows,
                 bq_types,
             )
+            written += sparse_written
+            rows_skipped += sparse_skipped
+            rows_for_checksum = [
+                r for r in rows_for_checksum if not row_has_missing_sentinel(r)
+            ] + list(sparse_checksum)
 
         if use_merge and mapped_rows:
             staging_name = sanitize_identifier(f"{table_name}_stg_{uuid.uuid4().hex[:8]}")
@@ -625,9 +663,10 @@ def write_mapped_rows(
                 dest_types=dest_types,
             ),
             chunks_completed=chunks_completed or chunks,
-            rejected_rows=max(rejected_rows, len(data_rows) - written),
+            rejected_rows=max(rejected_rows, len(data_rows) - written - rows_skipped),
             rejected_details=rejected_details,
             coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
             warnings=transform_errors,
         )
     except Exception as exc:

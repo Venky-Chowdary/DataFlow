@@ -1342,6 +1342,16 @@
   animation: df2-column-focus 2s ease-out;
 }
 
+.df2-column-row.is-omitted td {
+  opacity: 0.72;
+}
+
+.df2-column-omit-target {
+  font-size: 0.8125rem;
+  color: #64748b;
+  font-style: italic;
+}
+
 @keyframes df2-column-focus {
   0%, 15% { background: rgba(15, 118, 110, 0.14); }
   100% { background: transparent; }

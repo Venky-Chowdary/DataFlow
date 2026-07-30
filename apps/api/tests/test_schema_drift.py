@@ -435,6 +435,38 @@ def test_intentional_subset_mapping_create_new_continues():
     assert not report["drift_detected"]
 
 
+def test_intentional_omit_transform_excluded_from_write_coverage():
+    """Explicit Map omit is accounted policy — not unmapped drift / not a write column."""
+    from connectors.writer_common import resolve_target_columns
+    from services.mapping_constraints import is_intentional_omit, write_mappings
+
+    cols = ["id", "ssn", "name"]
+    schema = {c: "VARCHAR" for c in cols}
+    mappings = [
+        {"source": "id", "target": "id", "confidence": 0.99, "transform": "none"},
+        {"source": "ssn", "target": "", "confidence": 1.0, "transform": "omit"},
+        {"source": "name", "target": "name", "confidence": 0.95, "transform": "none"},
+    ]
+    assert is_intentional_omit(mappings[1])
+    assert [m["source"] for m in write_mappings(mappings)] == ["id", "name"]
+    report = detect_schema_drift(
+        source_columns=cols,
+        source_schema=schema,
+        target_columns=["id", "name"],
+        target_schema={},
+        mappings=mappings,
+        destination_db_type="postgresql",
+        schema_policy="manual_review",
+        table_exists=False,
+    )
+    assert report["unmapped_sources"] == []
+    assert report["intentional_omits"] == ["ssn"]
+    assert report["schema_evolution"]["action"] == "continue"
+    assert not report["drift_detected"]
+    targets, _types = resolve_target_columns(mappings, schema, table_exists=False)
+    assert targets == ["id", "name"]
+
+
 def test_case_insensitive_source_mapping_not_unmapped():
     report = detect_schema_drift(
         source_columns=["ID", "Name"],

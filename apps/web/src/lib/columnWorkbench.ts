@@ -32,6 +32,9 @@ export function mappingTier(
 }
 
 export function isMappingReady(m: EditableMapping, threshold: number): boolean {
+  if (m.transform === "omit" || m.engineTransform === "omit") {
+    return Boolean(m.approved);
+  }
   return m.approved || (!m.requiresReview && m.confidence >= threshold);
 }
 
