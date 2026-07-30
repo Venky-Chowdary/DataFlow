@@ -732,17 +732,27 @@ def run_file_preflight(
     dest_kind = normalize_dest_kind(destination_db_type, default="postgresql")
     schemaless = dest_kind in SCHEMALESS_DESTS
 
-    # Create-new must not inherit a stale Studio destSchemaMap as "live" DDL.
-    # Orphan / fingerprint comparisons against projected mapping targets are noise.
-    drift_dest_types = dict(destination_column_types or {})
-    if dest_table_exists is False:
+    # Split drift vs DDL contracts:
+    # - create-new / schemaless: no live dest types (stale Studio maps are noise)
+    # - unknown existence: keep type hints for G6 lossy/width checks, but drift
+    #   still treats the dest as non-live (no fingerprint / orphan locks)
+    # - existing table: full live contract
+    hinted_dest_types = dict(destination_column_types or {})
+    if schemaless or dest_table_exists is False:
+        drift_dest_types: dict[str, str] = {}
+        ddl_dest_types: dict[str, str] = {}
+    elif dest_table_exists is True:
+        drift_dest_types = hinted_dest_types
+        ddl_dest_types = hinted_dest_types
+    else:
         drift_dest_types = {}
+        ddl_dest_types = hinted_dest_types
 
     target_cols = list(drift_dest_types.keys())
     ddl_compatible, ddl_issues = evaluate_ddl_compatibility(
         mappings=mappings,
         source_schema=column_types,
-        target_schema=destination_column_types or {},
+        target_schema=ddl_dest_types,
         sample_rows=sample_rows,
         table_exists=dest_table_exists,
         dest_connected=destination_connected,
@@ -769,7 +779,8 @@ def run_file_preflight(
         previous_source_columns=previous_source_columns,
         previous_source_schema=previous_source_schema,
         previous_primary_key=None,
-        live_primary_key=destination_pk_columns,
+        # Source contract PK only — destination DDL PK must not invent PK change.
+        live_primary_key=None,
         cursor_fields=cursor_fields,
         schema_policy=schema_policy,
         table_exists=dest_table_exists,
@@ -1000,17 +1011,14 @@ def run_file_preflight(
     # Propagate auto-applies additive; manual_review keeps existing mappings.
     evolution = drift.get("schema_evolution") or {}
     action = evolution.get("action")
-    # Informational notes (e.g. extra dest columns while evolution says continue)
-    # must not unlock a false manual_review BLOCK — only pause/review/propagate.
+    # Evolution is the sole authority for pause|propagate|review|continue.
+    # Fingerprint flags alone must not bypass resolve_schema_evolution.
     requires_drift_decision = bool(
         evolution.get("should_pause")
         or evolution.get("should_propagate")
         or action not in (None, "continue")
     )
-    if requires_drift_decision or (
-        drift.get("drift_detected")
-        and (drift.get("source_changed") or drift.get("target_changed") or drift.get("type_mismatches"))
-    ):
+    if requires_drift_decision:
         policy = (schema_policy or "manual_review").strip().lower()
         if schemaless and not evolution.get("hard_breaking"):
             out.setdefault("warnings", []).append(
@@ -1285,7 +1293,7 @@ def inspect_destination_for_preflight(
     """Introspect destination for table existence and column schema."""
     out: dict[str, Any] = {
         "connected": False,
-        "table_exists": False,
+        "table_exists": None,
         "can_create_table": False,
         "column_types": {},
         "columns": [],

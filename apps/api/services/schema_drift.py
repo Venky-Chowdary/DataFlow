@@ -494,22 +494,32 @@ def detect_schema_drift(
     dest_kind = normalize_dest_kind(destination_db_type)
     schemaless = dest_kind in SCHEMALESS_DESTS
     create_new = table_exists is False
+    # Only an introspected existing table is a live DDL contract. Unknown
+    # (None) and create-new must not invent destination drift from Studio maps.
+    live_ddl_contract = bool(table_exists is True and target_schema and not schemaless)
 
     live_source_fp = fingerprint_schema(source_columns, source_schema)
-    live_target_fp = fingerprint_schema(target_columns, target_schema) if target_columns else ""
+    live_target_fp = (
+        fingerprint_schema(target_columns, target_schema)
+        if target_columns and live_ddl_contract
+        else ""
+    )
 
     source_changed = bool(stored_source_fp) and not schemas_match(
         stored_source_fp, source_columns, source_schema
     )
-    target_changed = bool(stored_target_fp and target_columns) and stored_target_fp != live_target_fp
-    if schemaless or create_new:
-        # No live destination DDL contract — mapping-projected columns / empty types
-        # must not masquerade as "Destination schema changed".
-        target_changed = False
+    target_changed = bool(
+        live_ddl_contract
+        and stored_target_fp
+        and target_columns
+        and not schemas_match(stored_target_fp, target_columns, target_schema)
+    )
 
-    mapped_sources = {str(m.get("source")) for m in mappings if m.get("source")}
+    mapped_sources = {
+        str(m.get("source")).lower() for m in mappings if m.get("source")
+    }
     mapped_targets = {str(m.get("target")).lower() for m in mappings if m.get("target")}
-    unmapped_sources = [c for c in source_columns if c not in mapped_sources]
+    unmapped_sources = [c for c in source_columns if c.lower() not in mapped_sources]
     try:
         from services.scd2_engine import SCD2_COLUMNS
 
@@ -522,13 +532,11 @@ def detect_schema_drift(
         for c in target_columns
         if c.lower() not in mapped_targets and c.lower() not in system_targets
     ]
-    # Create-new: Studio may still hold a stale destSchemaMap from a prior table.
-    # Those are not live destination columns — do not treat as orphan drift.
-    if create_new:
+    if not live_ddl_contract:
         orphan_targets = []
 
     type_mismatches: list[dict[str, str]] = []
-    if not schemaless:
+    if live_ddl_contract:
         from services.coercion_probe import samples_coerce_mapping
 
         for m in mappings:
@@ -536,9 +544,16 @@ def detect_schema_drift(
             tgt = str(m.get("target") or "")
             if not src or not tgt:
                 continue
-            src_type = source_schema.get(src) or "VARCHAR"
+            src_type = (
+                source_schema.get(src)
+                or next(
+                    (source_schema[k] for k in source_schema if k.lower() == src.lower()),
+                    None,
+                )
+                or "VARCHAR"
+            )
             tgt_type = ci_get(target_schema, tgt) or "VARCHAR"
-            if not (target_schema and is_lossy_coercion(src_type, tgt_type)):
+            if not is_lossy_coercion(src_type, tgt_type):
                 continue
             from services.type_system import is_precision_collapse_coercion
 
@@ -568,6 +583,7 @@ def detect_schema_drift(
     classification: dict[str, Any] | None = None
     prev_cols = list(previous_source_columns or [])
     prev_types = dict(previous_source_schema or {})
+    # Source PK evolution only — never wire destination DDL PK as live_primary_key.
     if prev_cols or prev_types:
         classification = classify_from_column_maps(
             prev_cols or list(prev_types.keys()),
@@ -579,8 +595,12 @@ def detect_schema_drift(
             cursor_fields=cursor_fields,
         )
     elif source_changed and mapped_sources:
-        still_present = [c for c in mapped_sources if c in source_columns]
-        dropped_mapped = [c for c in mapped_sources if c not in source_columns]
+        still_present = [c for c in source_columns if c.lower() in mapped_sources]
+        dropped_mapped = [
+            s for s in mapped_sources
+            if not any(c.lower() == s for c in source_columns)
+        ]
+        # Only columns that are new vs previous fingerprint revision.
         if still_present and unmapped_sources and not dropped_mapped:
             classification = {
                 "additive": [
@@ -638,10 +658,20 @@ def detect_schema_drift(
             })
         classification["severity"] = "breaking"
 
+    # Intentional subset maps (operator omitted columns) are not schema drift.
+    # Only columns that appeared since the previous revision drive evolution.
+    prev_lower = {str(c).lower() for c in prev_cols} | {str(c).lower() for c in prev_types}
+    if prev_lower:
+        evolution_unmapped = [c for c in unmapped_sources if c.lower() not in prev_lower]
+    elif source_changed:
+        evolution_unmapped = list(unmapped_sources)
+    else:
+        evolution_unmapped = []
+
     evolution = resolve_schema_evolution(
         classification,
         schema_policy=schema_policy,
-        unmapped_sources=unmapped_sources,
+        unmapped_sources=evolution_unmapped,
         source_changed=source_changed or target_changed,
     )
 
@@ -650,8 +680,13 @@ def detect_schema_drift(
         issues.append("Source schema changed since last mapping revision")
     if target_changed:
         issues.append("Destination schema changed since last mapping revision")
-    if unmapped_sources:
-        issues.append(f"{len(unmapped_sources)} source column(s) have no mapping")
+    if evolution_unmapped:
+        issues.append(f"{len(evolution_unmapped)} new source column(s) have no mapping")
+    elif unmapped_sources and not prev_lower and not source_changed:
+        # Subset mapping on first revision — informational only (not a blocker).
+        pass
+    elif unmapped_sources and prev_lower and not evolution_unmapped:
+        pass
     if orphan_targets:
         issues.append(f"{len(orphan_targets)} destination column(s) are unmapped")
     if type_mismatches:
@@ -662,7 +697,7 @@ def detect_schema_drift(
         )
 
     severity = evolution.get("severity") or "none"
-    if severity == "none" and (unmapped_sources or orphan_targets):
+    if severity == "none" and (evolution_unmapped or orphan_targets):
         severity = "warning"
     elif severity == "none" and issues:
         severity = "warning"
@@ -676,6 +711,7 @@ def detect_schema_drift(
         "source_changed": source_changed,
         "target_changed": target_changed,
         "unmapped_sources": unmapped_sources,
+        "evolution_unmapped_sources": evolution_unmapped,
         "orphan_targets": orphan_targets,
         "type_mismatches": type_mismatches,
         "mapping_coverage": round(len(mapped_sources) / max(len(source_columns), 1), 3),
@@ -683,4 +719,5 @@ def detect_schema_drift(
         "schema_evolution": evolution,
         "table_exists": table_exists,
         "create_new": create_new,
+        "live_ddl_contract": live_ddl_contract,
     }

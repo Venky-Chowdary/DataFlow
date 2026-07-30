@@ -172,27 +172,21 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         dest_kind=dest.get("kind", "database"),
     )
 
-    live_target_schema = dest_meta.get("column_types") or plan.target_schema
-    live_target_columns = list(live_target_schema.keys()) if live_target_schema else plan.target_columns
-
-    from services.schema_drift import detect_schema_drift
-
-    # Previous = revision snapshot (or empty for legacy revisions without snapshot).
-    prev_cols = list(rev.source_columns or [])
-    prev_schema = dict(rev.source_schema or {})
-    drift = detect_schema_drift(
-        source_columns=plan.source_columns,
-        source_schema=plan.source_schema,
-        target_columns=live_target_columns,
-        target_schema=live_target_schema,
-        stored_source_fp=rev.source_schema_hash,
-        stored_target_fp=rev.target_schema_hash,
-        mappings=rev.mappings,
-        destination_db_type=(dest.get("format") or dest.get("type") or "").lower(),
-        previous_source_columns=prev_cols or None,
-        previous_source_schema=prev_schema or None,
-        schema_policy=str((plan.policies or {}).get("schema_policy") or "manual_review"),
+    live_target_schema = dest_meta.get("column_types") or {}
+    # Prefer live introspect; fall back to plan snapshot only when meta is empty
+    # AND the table is known to exist (never for create-new / unknown).
+    table_exists = (
+        dest_meta.get("table_exists")
+        if isinstance(dest_meta.get("table_exists"), bool)
+        else (
+            dest.get("table_exists")
+            if isinstance(dest.get("table_exists"), bool)
+            else None
+        )
     )
+    if not live_target_schema and table_exists is True:
+        live_target_schema = plan.target_schema or {}
+    live_target_columns = list(live_target_schema.keys()) if live_target_schema else plan.target_columns
 
     policies = plan.policies
     validation_mode = policies.get("validation_mode", "balanced")
@@ -211,6 +205,11 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
 
     from services.primary_key import extract_contract_primary_key
 
+    # Previous = revision snapshot (or empty for legacy revisions without snapshot).
+    prev_cols = list(rev.source_columns or [])
+    prev_schema = dict(rev.source_schema or {})
+
+    # run_file_preflight is the SSOT for drift + gates — do not re-detect/overwrite.
     pf = run_file_preflight(
         columns=plan.source_columns,
         column_types=plan.source_schema,
@@ -227,15 +226,7 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         validation_mode=validation_mode,
         date_locale=policies.get("date_locale", ""),
         destination_column_types=live_target_schema,
-        destination_table_exists=(
-            dest_meta.get("table_exists")
-            if isinstance(dest_meta.get("table_exists"), bool)
-            else (
-                dest.get("table_exists")
-                if isinstance(dest.get("table_exists"), bool)
-                else None
-            )
-        ),
+        destination_table_exists=table_exists,
         destination_can_create=dest_meta.get("can_create_table"),
         destination_can_write=dest_meta.get("can_write"),
         privilege_probe=dest_meta.get("privilege_probe"),
@@ -263,23 +254,10 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         destination_db_type=(dest_meta.get("db_type") or dest.get("format") or dest.get("type") or "postgresql").lower(),
     )
 
-    if drift.get("drift_detected"):
-        pf["schema_drift"] = drift
-        evolution = drift.get("schema_evolution") or {}
-        if evolution.get("should_pause") or (
-            drift.get("severity") == "breaking"
-            and policies.get("schema_policy") == "pause_on_change"
-        ):
-            pf["passed"] = False
-            pf.setdefault("blockers", []).append({
-                "gate": "schema_drift",
-                "message": drift["issues"][0] if drift.get("issues") else "Schema drift detected",
-                "details": {"schema_evolution": evolution},
-            })
-        elif evolution.get("should_propagate") and pf.get("effective_mappings"):
-            rev_mappings = pf["effective_mappings"]
-            pf["mappings"] = rev_mappings
+    if pf.get("effective_mappings"):
+        pf["mappings"] = pf["effective_mappings"]
     add_preflight_run(plan_id, pf)
+    drift = pf.get("schema_drift") or {}
     append_audit_event(
         action="transfer_plan.preflight",
         resource=f"plan/{plan_id}",
@@ -292,7 +270,7 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
             "drift_detected": drift.get("drift_detected"),
         },
     )
-    return {"plan_id": plan_id, "mapping_version": rev.version, "schema_drift": drift, **pf}
+    return {"plan_id": plan_id, "mapping_version": rev.version, **pf}
 
 
 def build_run_payload(plan_id: str) -> dict[str, Any]:

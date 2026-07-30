@@ -164,6 +164,7 @@ def test_warns_on_unmapped_destination_columns():
         target_columns=["id", "legacy_flag"],
         target_schema={"id": "INTEGER", "legacy_flag": "BOOLEAN"},
         mappings=[{"source": "id", "target": "id", "confidence": 1.0}],
+        table_exists=True,
     )
     assert report["orphan_targets"] == ["legacy_flag"]
     assert report["severity"] == "warning"
@@ -176,6 +177,7 @@ def test_ignores_case_only_target_name_differences():
         target_columns=["USER_ID"],
         target_schema={"USER_ID": "INTEGER"},
         mappings=[{"source": "id", "target": "user_id", "confidence": 1.0}],
+        table_exists=True,
     )
     assert report["orphan_targets"] == []
 
@@ -206,6 +208,7 @@ def test_varchar_to_number_not_breaking_drift_when_samples_coerce():
         mappings=[{"source": "population", "target": "population", "confidence": 0.93}],
         destination_db_type="snowflake",
         sample_rows=[{"population": "331002651"}, {"population": "42"}],
+        table_exists=True,
     )
     assert report["type_mismatches"] == []
     assert report["severity"] == "none"
@@ -366,6 +369,125 @@ def test_manual_review_still_blocks_real_source_drift():
     )
     assert result["passed"] is False
     assert any(b.get("id") == "schema_drift" for b in result["blockers"])
+
+
+def test_fingerprint_synonyms_do_not_flip_contract():
+    from services.schema_fingerprint import (
+        fingerprint_schema,
+        fingerprint_schema_legacy,
+        schemas_match,
+    )
+
+    cols = ["id", "note"]
+    assert fingerprint_schema(cols, {"id": "INT", "note": "TEXT"}) == fingerprint_schema(
+        cols, {"id": "INTEGER", "note": "VARCHAR"}
+    )
+    assert fingerprint_schema(cols, {"id": "INTEGER", "note": "VARCHAR"}) == fingerprint_schema(
+        cols, {"id": "INTEGER", "note": "VARCHAR(255)"}
+    )
+    stored = fingerprint_schema_legacy(cols, {"id": "INTEGER", "note": "TEXT"})
+    assert schemas_match(stored, cols, {"id": "INT", "note": "VARCHAR(100)"})
+
+
+def test_unknown_table_exists_ignores_stale_dest_map():
+    report = detect_schema_drift(
+        source_columns=["a", "b"],
+        source_schema={"a": "VARCHAR", "b": "VARCHAR"},
+        target_columns=["legacy"],
+        target_schema={"legacy": "INTEGER"},
+        mappings=[
+            {"source": "a", "target": "a", "confidence": 0.9},
+            {"source": "b", "target": "b", "confidence": 0.9},
+        ],
+        stored_target_fp=fingerprint_schema(["legacy"], {"legacy": "TEXT"}),
+        destination_db_type="postgresql",
+        schema_policy="manual_review",
+        table_exists=None,
+    )
+    assert report["live_ddl_contract"] is False
+    assert report["target_changed"] is False
+    assert report["orphan_targets"] == []
+    assert report["type_mismatches"] == []
+    assert report["schema_evolution"]["action"] == "continue"
+
+
+def test_intentional_subset_mapping_create_new_continues():
+    """Operator mapped 3 of 5 columns on first create-new — not schema drift."""
+    cols = ["id", "a", "b", "c", "d"]
+    schema = {c: "VARCHAR" for c in cols}
+    mappings = [
+        {"source": "id", "target": "id", "confidence": 0.99},
+        {"source": "a", "target": "a", "confidence": 0.9},
+        {"source": "b", "target": "b", "confidence": 0.9},
+    ]
+    report = detect_schema_drift(
+        source_columns=cols,
+        source_schema=schema,
+        target_columns=["id", "a", "b"],
+        target_schema={},
+        mappings=mappings,
+        destination_db_type="postgresql",
+        schema_policy="manual_review",
+        table_exists=False,
+    )
+    assert report["schema_evolution"]["action"] == "continue"
+    assert report["evolution_unmapped_sources"] == []
+    assert not report["drift_detected"]
+
+
+def test_case_insensitive_source_mapping_not_unmapped():
+    report = detect_schema_drift(
+        source_columns=["ID", "Name"],
+        source_schema={"ID": "INTEGER", "Name": "VARCHAR"},
+        target_columns=["id", "name"],
+        target_schema={"id": "INTEGER", "name": "VARCHAR"},
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "name", "target": "name", "confidence": 1.0},
+        ],
+        destination_db_type="snowflake",
+        table_exists=True,
+        schema_policy="manual_review",
+    )
+    assert report["unmapped_sources"] == []
+    assert report["schema_evolution"]["action"] == "continue"
+
+
+def test_propagate_policy_synonym_target_fp_does_not_require_ack():
+    from services.preflight_service import run_file_preflight
+    from services.schema_fingerprint import fingerprint_schema_legacy
+
+    cols = ["id", "note"]
+    schema = {"id": "INTEGER", "note": "VARCHAR"}
+    mappings = [
+        {"source": "id", "target": "id", "confidence": 0.99, "transform": "none"},
+        {"source": "note", "target": "note", "confidence": 0.99, "transform": "none"},
+    ]
+    sample = [{"id": "1", "note": "x"}]
+    # Stored physical TEXT; live VARCHAR — synonym only
+    stale = fingerprint_schema_legacy(cols, {"id": "INTEGER", "note": "TEXT"})
+    result = run_file_preflight(
+        columns=cols,
+        column_types=schema,
+        row_count=1,
+        mappings=mappings,
+        destination_connected=True,
+        source_connected=True,
+        source_kind="file",
+        sample_rows=sample,
+        destination_column_types={"id": "INTEGER", "note": "VARCHAR"},
+        destination_table_exists=True,
+        destination_can_create=True,
+        destination_can_write=True,
+        destination_db_type="postgresql",
+        schema_policy="propagate_columns",
+        sync_mode="full_refresh_overwrite",
+        estimated_bytes=1000,
+        stored_target_fp=stale,
+    )
+    assert result["passed"] is True, result.get("blockers")
+    assert not any(g.get("id") == "schema_drift" and g.get("status") == "block" for g in result["gates"])
+
 
 def test_classify_no_change():
     schema = {

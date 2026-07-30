@@ -204,6 +204,20 @@ def evaluate_ddl_compatibility(
             "re-check credentials/schema/table before Validate can approve create-new "
             "or existing-table DDL. Do not assume the table is missing."
         )
+    if (
+        dest_connected
+        and not schemaless
+        and named_target
+        and overwrite
+        and table_exists is None
+    ):
+        # Overwrite still needs a proven existence probe — type hints alone are
+        # not enough to unlock Execute against an unknown table.
+        issues.append(
+            "Destination table existence is unknown — Validate cannot prove "
+            "overwrite DDL. Re-check credentials/schema/table or refresh "
+            "destination columns on Map."
+        )
 
     seen_targets: set[str] = set()
     for m in mappings:

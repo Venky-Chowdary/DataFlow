@@ -3247,7 +3247,7 @@ export function TransferPage({
             : undefined,
           destination_column_types:
             destKindMode === "database"
-            && destTableExists !== false
+            && destTableExists === true
             && Object.keys(destSchemaMap).length
               ? destSchemaMap
               : undefined,
