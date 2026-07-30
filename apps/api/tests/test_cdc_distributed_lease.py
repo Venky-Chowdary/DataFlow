@@ -231,3 +231,33 @@ def test_backend_name_in_theater(memory_store) -> None:
     assert fields["cdc_lease_backend"] == "memory"
     assert fields["cdc_lease_generation"] == 1
     g.release()
+
+
+def test_zombie_apply_refused_after_lease_steal(memory_store) -> None:
+    """Stolen holder cannot apply after fence — still at-least-once, not EO."""
+    from src.transfer.cdc_transfer import _assert_cdc_lease_before_apply
+
+    sink: list[str] = []
+
+    def apply_if_holder(guard: CdcLeaseGuard, row: str) -> None:
+        _assert_cdc_lease_before_apply(type("Cdc", (), {"_lease": guard})())
+        sink.append(row)
+
+    a = CdcLeaseGuard(cursor_key="ck-zw", resource="res-zw", holder_id="A", ttl_sec=2.0)
+    a.ensure()
+    apply_if_holder(a, "v1")
+    memory_store.debug_set_heartbeat("ck-zw", 0.0)
+    b = CdcLeaseGuard(cursor_key="ck-zw", resource="res-zw", holder_id="B", ttl_sec=2.0)
+    b.ensure()
+    assert a.renew() is None
+    with pytest.raises(CdcLeaseConflict, match="fenced|not held"):
+        apply_if_holder(a, "v_zombie")
+    apply_if_holder(b, "v2")
+    assert sink == ["v1", "v2"]
+    b.release()
+
+
+def test_assert_holder_raises_when_never_acquired(memory_store) -> None:
+    g = CdcLeaseGuard(cursor_key="ck-na", resource="res-na", holder_id="x")
+    with pytest.raises(CdcLeaseConflict, match="not held"):
+        g.assert_holder()

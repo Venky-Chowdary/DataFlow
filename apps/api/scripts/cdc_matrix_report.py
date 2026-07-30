@@ -114,6 +114,7 @@ def main() -> int:
                 "Append-only CDC sinks fail-fast unless allow_append_only.",
                 "Oracle live IT is env-gated (DATAFLOW_ORACLE_ENABLE=1); optional cdc-oracle CI job.",
                 "Leases: Redis multi-node (fail-closed) or file single-host; fencing generation on steal.",
+                "Apply-path lease assert_holder refuses zombie upsert after steal (still at-least-once).",
                 "PG TOAST merge + typed txn buffer overflow (no silent drop/wipe).",
                 "Shared multi-table live IT + ack-barrier chaos are in matrix.",
                 "_df_lsn PK-sink LSN-guarded idempotent upsert proofs are not platform exactly-once.",

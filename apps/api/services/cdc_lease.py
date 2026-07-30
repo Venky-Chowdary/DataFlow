@@ -456,6 +456,33 @@ class CdcLeaseGuard:
         self._generation = int(renewed.generation)
         return renewed
 
+    def assert_holder(self) -> CdcLease:
+        """Renew + fail-fast if this guard lost the fence — call before sink apply.
+
+        Stops a zombie dual-writer after steal from applying more batches.
+        Delivery remains **at-least-once** (the new holder may redeliver);
+        this does **not** claim platform exactly-once.
+        """
+        if not self._acquired or not self.holder_id or not self._generation:
+            raise CdcLeaseConflict(
+                f"CDC lease not held for resource '{self.resource}' "
+                f"(cursor={self.cursor_key})",
+                holder_id=self.holder_id,
+                resource=self.resource,
+                cursor_key=self.cursor_key,
+            )
+        renewed = self.renew()
+        if renewed is None:
+            raise CdcLeaseConflict(
+                f"CDC lease fenced for resource '{self.resource}' — "
+                f"another worker holds the stream (cursor={self.cursor_key}). "
+                "Refuse zombie apply under at-least-once delivery.",
+                holder_id=self.holder_id,
+                resource=self.resource,
+                cursor_key=self.cursor_key,
+            )
+        return renewed
+
     def release(self) -> bool:
         if not self._acquired or not self.holder_id:
             return False

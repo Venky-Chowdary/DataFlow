@@ -165,6 +165,34 @@ def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
     return out
 
 
+def _assert_cdc_lease_before_apply(cdc: Any) -> None:
+    """Refuse sink apply when the CDC resource lease was stolen (zombie fence).
+
+    No-op when the connector has no lease guard (unit mocks / non-leased paths).
+    Still at-least-once — does not claim platform exactly-once.
+    """
+    lease = getattr(cdc, "_lease", None)
+    if lease is None:
+        return
+    assert_holder = getattr(lease, "assert_holder", None)
+    if callable(assert_holder):
+        assert_holder()
+        return
+    # Older guard shape — renew and raise on fence loss.
+    renew = getattr(lease, "renew", None)
+    if not callable(renew):
+        return
+    if renew() is None and getattr(lease, "acquired", True) is False:
+        from services.cdc_lease import CdcLeaseConflict
+
+        raise CdcLeaseConflict(
+            "CDC lease fenced — refuse zombie apply under at-least-once delivery.",
+            holder_id=str(getattr(lease, "holder_id", "") or ""),
+            resource=str(getattr(lease, "resource", "") or ""),
+            cursor_key=str(getattr(lease, "cursor_key", "") or ""),
+        )
+
+
 def _source_ha_lag_fields(cdc: Any) -> dict[str, Any]:
     probe = getattr(cdc, "_source_ha", None)
     if probe is None:
@@ -908,6 +936,7 @@ def _run_cdc_shared_multi_table(
         if change.inserts or change.updates:
             sample = (change.inserts or change.updates)[0]
             headers = list(sample.keys())
+        _assert_cdc_lease_before_apply(cdc)
         rows_written, checksum, dest_summary, deleted = _apply_change_batch(
             dest_type,
             destination,
@@ -1573,6 +1602,10 @@ def _run_cdc_single_stream(
             if txn_hold_sleep > 0:
                 time.sleep(min(txn_hold_sleep, 2.0))
             return False
+
+        # Dual-writer fence: renew lease before sink apply. Zombie after steal
+        # must not upsert. Still at-least-once — new holder may redeliver.
+        _assert_cdc_lease_before_apply(cdc)
 
         rows_written, last_checksum, dest_summary, deleted = _apply_change_batch(
             dest_type,
