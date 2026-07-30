@@ -27,15 +27,21 @@ from connectors.writer_common import (
     DF_LSN_COL,
     _coerced_null_row_count,
     _rejected_row_count,
+    assert_sparse_upsert_has_pk,
     build_mapped_rows_with_details,
     dedupe_rows,
     dedupe_rows_by_pk_and_lsn,
+    quarantine_unfit_decimals,
+    quarantine_unfit_specialty_types,
+    quarantine_unfit_strings,
     quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
     sample_values_by_source_from_batch,
     sanitize_identifier,
     snowflake_lsn_match_predicate,
+    sparse_present_bindings,
+    split_dense_sparse_rows,
     transform_error_policy,
 )
 from connectors.writer_common import (
@@ -237,10 +243,17 @@ def _bind_rows_for_snowflake(
 def _write_temp_csv(
     path: Path, target_cols: list[str], mapped_rows: list[tuple]
 ) -> None:
+    from services.value_serializer import is_missing_sentinel
+
     with path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.writer(fh, quoting=csv.QUOTE_ALL)
         writer.writerow(target_cols)
         for row in mapped_rows:
+            if any(is_missing_sentinel(v) for v in row):
+                raise ValueError(
+                    "Snowflake COPY path refused DF_MISSING sentinel — "
+                    "sparse CDC rows must use omit-from-SET upsert, not CSV stage"
+                )
             # Temporal cells are already warehouse-normalized strings; other
             # types still go through cell_to_string for CSV safety.
             writer.writerow(
@@ -251,6 +264,89 @@ def _write_temp_csv(
                     for v in row
                 ]
             )
+
+
+def _sf_apply_sparse_upsert(
+    cur: Any,
+    table_name: str,
+    target_cols: list[str],
+    target_types: list[str],
+    conflict: list[str],
+    sparse_rows: list[tuple],
+) -> int:
+    """Per-row Snowflake upsert omitting DF_MISSING — never SET col=NULL for absent."""
+    from connectors.sql_bind import normalize_sql_bind_value
+    from services.cdc_effectively_once import should_apply_pk_row
+
+    if not conflict:
+        raise ValueError("sparse Snowflake upsert requires conflict_columns")
+    type_by_col = {c: t for c, t in zip(target_cols, target_types)}
+    tbl = quote_sql_identifier(table_name)
+    written = 0
+    for row in sparse_rows:
+        raw_present = sparse_present_bindings(row, target_cols)
+        present = {
+            k: normalize_sql_bind_value(
+                v, type_by_col.get(k, "VARCHAR"), engine="snowflake"
+            )
+            for k, v in raw_present.items()
+        }
+        assert_sparse_upsert_has_pk(present, conflict)
+        non_pk = {k: v for k, v in present.items() if k not in conflict}
+        where_sql = " AND ".join(
+            f"{quote_sql_identifier(c)} = %s" for c in conflict
+        )
+        pk_vals = [present[c] for c in conflict]
+
+        if DF_LSN_COL in present and DF_LSN_COL in target_cols:
+            lsn_q = quote_sql_identifier(DF_LSN_COL)
+            cur.execute(
+                f"SELECT {lsn_q} FROM {tbl} WHERE {where_sql}",  # nosec B608
+                pk_vals,
+            )
+            existing = cur.fetchone()
+            if existing is not None:
+                if not should_apply_pk_row(
+                    existing_lsn=existing[0],
+                    incoming_lsn=present[DF_LSN_COL],
+                ).applied:
+                    continue
+
+        if non_pk:
+            set_cols = list(non_pk.keys())
+            set_sql = ", ".join(
+                f"{quote_sql_identifier(c)} = %s" for c in set_cols
+            )
+            cur.execute(
+                f"UPDATE {tbl} SET {set_sql} WHERE {where_sql}",  # nosec B608
+                [non_pk[c] for c in set_cols] + pk_vals,
+            )
+            if cur.rowcount and cur.rowcount > 0:
+                written += 1
+                continue
+
+        cols = list(present.keys())
+        col_sql = ", ".join(quote_sql_identifier(c) for c in cols)
+        ph = ", ".join(["%s"] * len(cols))
+        try:
+            cur.execute(
+                f"INSERT INTO {tbl} ({col_sql}) VALUES ({ph})",  # nosec B608
+                [present[c] for c in cols],
+            )
+            written += 1
+        except Exception:
+            if not non_pk:
+                raise
+            set_cols = list(non_pk.keys())
+            set_sql = ", ".join(
+                f"{quote_sql_identifier(c)} = %s" for c in set_cols
+            )
+            cur.execute(
+                f"UPDATE {tbl} SET {set_sql} WHERE {where_sql}",  # nosec B608
+                [non_pk[c] for c in set_cols] + pk_vals,
+            )
+            written += 1
+    return written
 
 
 def _is_json_type(sf_type: str) -> bool:
@@ -663,8 +759,10 @@ def write_mapped_rows(
         mapped_rows, target_types, target_cols, engine="snowflake"
     )
 
+    sparse_rows: list[tuple] = []
     # Within a single batch, the last occurrence of an upsert key wins.
     if write_mode == "upsert" and conflict_columns:
+        mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
         if DF_LSN_COL in target_cols:
             mapped_rows = dedupe_rows_by_pk_and_lsn(
                 mapped_rows, conflict_columns, target_cols
@@ -673,7 +771,7 @@ def write_mapped_rows(
             mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
 
     rejected_rows = _rejected_row_count(
-        data_rows, mapped_rows, rejected_details, policy
+        data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
     )
     coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
 
@@ -837,8 +935,18 @@ def write_mapped_rows(
             ]
             if write_mode == "upsert" and conflict:
                 load_method = "merge_batch"
-                # Stage once (COPY when large enough) and MERGE the whole batch.
-                written = _merge_batch_via_temp(
+                written = 0
+                if sparse_rows:
+                    written += _sf_apply_sparse_upsert(
+                        cur,
+                        table_name,
+                        target_cols,
+                        target_types,
+                        conflict,
+                        sparse_rows,
+                    )
+                # Stage once (COPY when large enough) and MERGE the dense batch.
+                written += _merge_batch_via_temp(
                     cur,
                     table_name,
                     target_cols,

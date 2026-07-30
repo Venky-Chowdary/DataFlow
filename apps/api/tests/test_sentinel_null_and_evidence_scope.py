@@ -101,7 +101,7 @@ def test_g6_g7_g3_attach_evidence_scope() -> None:
     assert g7.status.value == "pass"
 
 
-def test_g8_skip_attaches_pending_evidence_scope() -> None:
+def test_g8_blocks_without_sample_attaches_evidence_scope() -> None:
     from preflight.gates import gate_g8_reconciliation
 
     plan = TransferPlan(
@@ -111,7 +111,7 @@ def test_g8_skip_attaches_pending_evidence_scope() -> None:
     )
     ctx = PreflightContext(plan=plan)
     result = gate_g8_reconciliation(ctx)
-    assert result.status.value == "skip"
+    assert result.status.value == "block"
     scope = (result.details or {}).get("evidence_scope") or {}
     assert scope.get("kind") == "reconciliation"
-    assert scope.get("coverage") == "pending"
+    assert scope.get("coverage") == "none"

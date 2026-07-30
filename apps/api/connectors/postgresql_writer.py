@@ -39,6 +39,7 @@ from connectors.writer_common import (
     DF_LSN_COL,
     _coerced_null_row_count,
     _rejected_row_count,
+    assert_sparse_upsert_has_pk,
     build_mapped_rows_with_details,
     dedupe_rows,
     dedupe_rows_by_pk_and_lsn,
@@ -50,6 +51,7 @@ from connectors.writer_common import (
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
+    sparse_present_bindings,
     transform_error_policy,
 )
 from connectors.writer_common import (
@@ -57,6 +59,98 @@ from connectors.writer_common import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+
+def _pg_apply_sparse_upsert(
+    cursor: Any,
+    sql: Any,
+    *,
+    schema: str,
+    table_name: str,
+    target_cols: list[str],
+    conflict_columns: list[str],
+    sparse_rows: list[tuple],
+) -> int:
+    """Per-row upsert omitting DF_MISSING — never SET col=NULL for absent CDC fields."""
+    from services.cdc_effectively_once import should_apply_pk_row
+
+    conflict = [c for c in conflict_columns if c in target_cols]
+    if not conflict:
+        raise ValueError("sparse PostgreSQL upsert requires conflict_columns")
+    written = 0
+    for row in sparse_rows:
+        present = sparse_present_bindings(row, target_cols)
+        assert_sparse_upsert_has_pk(present, conflict)
+        non_pk = {k: v for k, v in present.items() if k not in conflict}
+        pk_vals = [present[c] for c in conflict]
+        where = sql.SQL(" AND ").join(
+            sql.SQL("{} = %s").format(sql.Identifier(c)) for c in conflict
+        )
+        if DF_LSN_COL in present and DF_LSN_COL in target_cols:
+            cursor.execute(
+                sql.SQL("SELECT {} FROM {}.{} WHERE {}").format(
+                    sql.Identifier(DF_LSN_COL),
+                    sql.Identifier(schema),
+                    sql.Identifier(table_name),
+                    where,
+                ),
+                pk_vals,
+            )
+            existing = cursor.fetchone()
+            if existing is not None:
+                if not should_apply_pk_row(
+                    existing_lsn=existing[0],
+                    incoming_lsn=present[DF_LSN_COL],
+                ).applied:
+                    continue
+        if non_pk:
+            set_cols = list(non_pk.keys())
+            set_clause = sql.SQL(", ").join(
+                sql.SQL("{} = %s").format(sql.Identifier(c)) for c in set_cols
+            )
+            cursor.execute(
+                sql.SQL("UPDATE {}.{} SET {} WHERE {}").format(
+                    sql.Identifier(schema),
+                    sql.Identifier(table_name),
+                    set_clause,
+                    where,
+                ),
+                [non_pk[c] for c in set_cols] + pk_vals,
+            )
+            if cursor.rowcount and cursor.rowcount > 0:
+                written += 1
+                continue
+        cols = list(present.keys())
+        try:
+            cursor.execute(
+                sql.SQL("INSERT INTO {}.{} ({}) VALUES ({})").format(
+                    sql.Identifier(schema),
+                    sql.Identifier(table_name),
+                    sql.SQL(", ").join(sql.Identifier(c) for c in cols),
+                    sql.SQL(", ").join(sql.Placeholder() * len(cols)),
+                ),
+                [present[c] for c in cols],
+            )
+            written += 1
+        except Exception:
+            if not non_pk:
+                raise
+            set_cols = list(non_pk.keys())
+            set_clause = sql.SQL(", ").join(
+                sql.SQL("{} = %s").format(sql.Identifier(c)) for c in set_cols
+            )
+            cursor.execute(
+                sql.SQL("UPDATE {}.{} SET {} WHERE {}").format(
+                    sql.Identifier(schema),
+                    sql.Identifier(table_name),
+                    set_clause,
+                    where,
+                ),
+                [non_pk[c] for c in set_cols] + pk_vals,
+            )
+            written += 1
+    return written
 
 
 def uses_pg_on_conflict_upsert(engine: str) -> bool:
@@ -433,6 +527,11 @@ def write_mapped_rows(
         policy,
         dialect_label="PostgreSQL VARCHAR",
     )
+    sparse_rows: list[tuple] = []
+    if write_mode == "upsert" and conflict_columns:
+        from connectors.writer_common import split_dense_sparse_rows
+
+        mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
 
     if write_mode == "upsert" and conflict_columns:
         if DF_LSN_COL in target_cols:
@@ -445,12 +544,16 @@ def write_mapped_rows(
     if any(t == "BYTEA" for t in target_types):
         from base64 import b64decode
 
+        from services.value_serializer import is_missing_sentinel
+
         bytea_positions = [i for i, t in enumerate(target_types) if t == "BYTEA"]
-        converted: list[tuple] = []
-        for row in mapped_rows:
+
+        def _coerce_bytea_row(row: tuple) -> tuple:
             row_list = list(row)
             for idx in bytea_positions:
                 val = row_list[idx]
+                if is_missing_sentinel(val):
+                    continue
                 if isinstance(val, str):
                     try:
                         row_list[idx] = b64decode(val, validate=True)
@@ -460,14 +563,17 @@ def write_mapped_rows(
                     row_list[idx] = val
                 elif val is not None:
                     row_list[idx] = str(val).encode("utf-8")
-            converted.append(tuple(row_list))
-        mapped_rows = converted
+            return tuple(row_list)
+
+        mapped_rows = [_coerce_bytea_row(row) for row in mapped_rows]
+        sparse_rows = [_coerce_bytea_row(row) for row in sparse_rows]
 
     # ISO-8601 / CSV timestamps → Python datetime so COPY/INSERT never send raw "…Z".
     # Boolean/JSON wire: Mongo cell_to_string ("true"/"false", JSON text, "") must
     # match MySQL's shared sql_bind path — never leave string bools for BOOLEAN.
     from connectors.sql_bind import normalize_sql_bind_value
     from connectors.sql_temporal import sql_base_type as _sql_base_type
+    from services.value_serializer import is_missing_sentinel
 
     bind_positions = [
         i
@@ -488,17 +594,23 @@ def write_mapped_rows(
         }
     ]
     if bind_positions:
-        converted_bind: list[tuple] = []
-        for row in mapped_rows:
+
+        def _coerce_bind_row(row: tuple) -> tuple:
             row_list = list(row)
             for idx in bind_positions:
+                if is_missing_sentinel(row_list[idx]):
+                    continue
                 row_list[idx] = normalize_sql_bind_value(
                     row_list[idx], target_types[idx], engine="postgresql"
                 )
-            converted_bind.append(tuple(row_list))
-        mapped_rows = converted_bind
+            return tuple(row_list)
 
-    rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
+        mapped_rows = [_coerce_bind_row(row) for row in mapped_rows]
+        sparse_rows = [_coerce_bind_row(row) for row in sparse_rows]
+
+    rejected_rows = _rejected_row_count(
+        data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
+    )
     coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
     if transform_errors and policy == "fail":
         return WriteResult(
@@ -730,6 +842,21 @@ def write_mapped_rows(
                         raise
                     time.sleep(reconnect_backoff_seconds(setup_attempt))
                     _reconnect()
+
+            if sparse_rows and write_mode == "upsert" and conflict_columns:
+                from psycopg2 import sql as _psql
+
+                written_sparse = _pg_apply_sparse_upsert(
+                    cur,
+                    _psql,
+                    schema=schema,
+                    table_name=table_name,
+                    target_cols=target_cols,
+                    conflict_columns=conflict_columns,
+                    sparse_rows=sparse_rows,
+                )
+                conn.commit()
+                written += written_sparse
 
             insert = None if use_copy else _build_insert()
             redshift_upsert_cols = (

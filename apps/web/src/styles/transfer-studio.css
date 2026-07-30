@@ -6054,8 +6054,9 @@ th.df2-type-string .df2-type-badge {
 /* Metric rings */
 .df2-vd-metrics {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+  margin: 0 0 12px;
 }
 
 .df2-vd-append-warn {
@@ -6282,8 +6283,8 @@ th.df2-type-string .df2-type-badge {
 }
 .df2-vd-rules-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
   padding: 14px;
 }
 .df2-vd-rule {

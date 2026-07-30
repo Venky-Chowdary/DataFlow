@@ -89,6 +89,7 @@ from connectors.writer_common import (
     DF_LSN_COL,
     _coerced_null_row_count,
     _rejected_row_count,
+    assert_sparse_upsert_has_pk,
     build_mapped_rows_with_details,
     compare_lsn,
     quarantine_unfit_decimals,
@@ -97,6 +98,7 @@ from connectors.writer_common import (
     quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
+    split_dense_sparse_rows,
     transform_error_policy,
 )
 from connectors.writer_common import (
@@ -1014,6 +1016,11 @@ def _to_sa_value(
     """Convert transform-engine output values to Python objects SQLAlchemy accepts."""
     if value is None:
         return None
+    from services.value_serializer import is_missing_sentinel
+
+    # Sparse CDC: never coerce DF_MISSING → NULL (would wipe present destination cols).
+    if is_missing_sentinel(value):
+        return value
 
     from services.type_system import (
         LOGICAL_ARRAY,
@@ -1714,6 +1721,47 @@ def delete_by_primary_keys(
         engine.dispose()
 
 
+def fetch_pk_lsn_map(
+    cfg: dict[str, Any],
+    table: str,
+    primary_key_column: str,
+    keys: list[str],
+    schema: str | None = None,
+    *,
+    lsn_column: str = "_df_lsn",
+) -> dict[str, Any]:
+    """Return ``{pk: _df_lsn}`` for SQLAlchemy destinations (missing rows → None)."""
+    existing: dict[str, Any] = {str(k): None for k in keys}
+    if not SQLALCHEMY_AVAILABLE or not keys:
+        return existing
+    engine = _engine(cfg)
+    try:
+        schema = schema or _schema_name(cfg)
+        qualified = _qualified_table_ref(cfg, table, schema)
+        from services.dialect_profiles import quote_char_for
+
+        q = quote_char_for(_dialect_key(cfg)) or '"'
+        if q == "[":
+            pk_quoted = f"[{str(primary_key_column).replace(']', ']]')}]"
+            lsn_quoted = f"[{str(lsn_column).replace(']', ']]')}]"
+        else:
+            pk_quoted = quote_sql_identifier(primary_key_column, q)
+            lsn_quoted = quote_sql_identifier(lsn_column, q)
+        placeholders = ",".join([f":k{i}" for i in range(len(keys))])
+        params = {f"k{i}": k for i, k in enumerate(keys)}
+        stmt = (
+            f"SELECT {pk_quoted}, {lsn_quoted} FROM {qualified} "
+            f"WHERE {pk_quoted} IN ({placeholders})"
+        )  # nosec B608
+        with engine.connect() as conn:
+            result = conn.execute(sa.text(stmt), params)
+            for row in result.fetchall() or []:
+                existing[str(row[0])] = row[1]
+        return existing
+    finally:
+        engine.dispose()
+
+
 def _read_table_raw(
     conn: Any,
     table: str,
@@ -2067,6 +2115,58 @@ def _prefetch_existing_lsn(
     return existing
 
 
+def _generic_apply_sparse_upsert(
+    conn: Any,
+    table_obj: sa.Table,
+    target_cols: list[str],
+    conflict_columns: list[str],
+    sparse_rows: list[dict[str, Any]],
+) -> int:
+    """Per-row upsert omitting DF_MISSING — never SET col=NULL for absent CDC fields."""
+    from services.cdc_effectively_once import should_apply_pk_row
+    from services.value_serializer import is_missing_sentinel
+
+    conflict = [c for c in conflict_columns if c in target_cols]
+    if not conflict:
+        raise ValueError("sparse SQLAlchemy upsert requires conflict_columns")
+    written = 0
+    for row in sparse_rows:
+        present = {
+            k: v
+            for k, v in row.items()
+            if k in target_cols and not is_missing_sentinel(v)
+        }
+        assert_sparse_upsert_has_pk(present, conflict)
+        non_pk = {k: v for k, v in present.items() if k not in conflict}
+        pk_clause = sa.and_(*[table_obj.c[c] == present[c] for c in conflict])
+        if DF_LSN_COL in present and DF_LSN_COL in target_cols and DF_LSN_COL in table_obj.c:
+            existing = conn.execute(
+                sa.select(table_obj.c[DF_LSN_COL]).where(pk_clause)
+            ).fetchone()
+            if existing is not None:
+                if not should_apply_pk_row(
+                    existing_lsn=existing[0],
+                    incoming_lsn=present[DF_LSN_COL],
+                ).applied:
+                    continue
+        if non_pk:
+            result = conn.execute(
+                sa.update(table_obj).where(pk_clause).values(**non_pk)
+            )
+            if getattr(result, "rowcount", None) and result.rowcount > 0:
+                written += 1
+                continue
+        try:
+            conn.execute(sa.insert(table_obj).values(**present))
+            written += 1
+        except Exception:
+            if not non_pk:
+                raise
+            conn.execute(sa.update(table_obj).where(pk_clause).values(**non_pk))
+            written += 1
+    return written
+
+
 def _upsert_batch(
     conn: Any,
     table_obj: sa.Table,
@@ -2386,6 +2486,9 @@ def write_mapped_rows(
         policy,
         dialect_label="VARCHAR",
     )
+    sparse_rows: list[tuple] = []
+    if write_mode == "upsert" and conflict_columns:
+        mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
 
     if transform_errors and policy == "fail":
         return WriteResult(
@@ -2397,7 +2500,7 @@ def write_mapped_rows(
             chunks_completed=0,
             error=f"Transform errors: {'; '.join(transform_errors[:3])}",
             rejected_rows=_rejected_row_count(
-                data_rows, mapped_rows, rejected_details, policy
+                data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
             ),
             rejected_details=rejected_details,
             warnings=transform_errors,
@@ -2424,6 +2527,20 @@ def write_mapped_rows(
     converted_rows: list[dict] = []
     for row in mapped_rows:
         converted_rows.append(
+            {
+                target_cols[i]: _to_sa_value(
+                    row[i],
+                    target_column_types.get(target_cols[i], "string"),
+                    sa_col_types.get(target_cols[i]),
+                    dialect_name,
+                    cfg.get("type", ""),
+                )
+                for i in range(len(target_cols))
+            }
+        )
+    sparse_converted: list[dict] = []
+    for row in sparse_rows:
+        sparse_converted.append(
             {
                 target_cols[i]: _to_sa_value(
                     row[i],
@@ -2515,6 +2632,16 @@ def write_mapped_rows(
                     target_column_types,
                     conflict_columns=conflict_columns,
                 )
+
+            if sparse_converted and write_mode == "upsert" and conflict_columns:
+                written += _generic_apply_sparse_upsert(
+                    conn,
+                    table_obj,
+                    target_cols,
+                    conflict_columns,
+                    sparse_converted,
+                )
+                conn.commit()
 
             total = len(converted_rows)
             chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE) if total else 0
@@ -2631,7 +2758,9 @@ def write_mapped_rows(
             ),
             chunks_completed=chunks_completed or chunks,
             rejected_rows=max(
-                _rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
+                _rejected_row_count(
+                    data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
+                ),
                 len(data_rows) - written - rows_skipped if data_rows else 0,
             ),
             rejected_details=rejected_details,
@@ -2656,7 +2785,7 @@ def write_mapped_rows(
             chunks_completed=chunks_completed,
             error=str(exc),
             rejected_rows=_rejected_row_count(
-                data_rows, mapped_rows, rejected_details, policy
+                data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
             ),
             rejected_details=rejected_details,
             rows_skipped=rows_skipped,

@@ -105,8 +105,83 @@ def _apply_physical_temporal_types(
 def _to_mysql_value(value: Any, source_type: str) -> Any:
     """Normalize transform-engine values to forms pymysql/MySQL can bind."""
     from connectors.sql_bind import normalize_sql_bind_value
+    from services.value_serializer import is_missing_sentinel
 
+    if is_missing_sentinel(value):
+        return value
     return normalize_sql_bind_value(value, source_type, engine="mysql")
+
+
+def _mysql_apply_sparse_upsert(
+    cursor: Any,
+    *,
+    table_q: str,
+    target_cols: list[str],
+    conflict_columns: list[str],
+    sparse_rows: list[tuple],
+) -> int:
+    """Per-row upsert that omits DF_MISSING columns (never SET col=NULL for absent)."""
+    from connectors.writer_common import (
+        DF_LSN_COL,
+        assert_sparse_upsert_has_pk,
+        sparse_present_bindings,
+    )
+    from services.cdc_effectively_once import should_apply_pk_row
+
+    conflict = [c for c in conflict_columns if c in target_cols]
+    if not conflict:
+        raise ValueError("sparse MySQL upsert requires conflict_columns")
+    written = 0
+    for row in sparse_rows:
+        present = sparse_present_bindings(row, target_cols)
+        assert_sparse_upsert_has_pk(present, conflict)
+        non_pk = {k: v for k, v in present.items() if k not in conflict}
+        pk_vals = [present[c] for c in conflict]
+        where_sql = " AND ".join(
+            f"{quote_sql_identifier(c, '`')}=%s" for c in conflict
+        )
+        if DF_LSN_COL in present and DF_LSN_COL in target_cols:
+            lsn_q = quote_sql_identifier(DF_LSN_COL, "`")
+            cursor.execute(
+                f"SELECT {lsn_q} FROM {table_q} WHERE {where_sql}",  # nosec B608
+                pk_vals,
+            )
+            existing = cursor.fetchone()
+            if existing is not None:
+                decision = should_apply_pk_row(
+                    existing_lsn=existing[0],
+                    incoming_lsn=present[DF_LSN_COL],
+                )
+                if not decision.applied:
+                    continue
+        if non_pk:
+            set_cols = list(non_pk.keys())
+            set_sql = ", ".join(
+                f"{quote_sql_identifier(c, '`')}=%s" for c in set_cols
+            )
+            sql_u = f"UPDATE {table_q} SET {set_sql} WHERE {where_sql}"  # nosec B608
+            cursor.execute(sql_u, [non_pk[c] for c in set_cols] + pk_vals)
+            if cursor.rowcount and cursor.rowcount > 0:
+                written += 1
+                continue
+        cols = list(present.keys())
+        col_sql = ", ".join(quote_sql_identifier(c, "`") for c in cols)
+        ph = ", ".join(["%s"] * len(cols))
+        sql_i = f"INSERT INTO {table_q} ({col_sql}) VALUES ({ph})"  # nosec B608
+        try:
+            cursor.execute(sql_i, [present[c] for c in cols])
+            written += 1
+        except Exception:
+            if not non_pk:
+                raise
+            set_cols = list(non_pk.keys())
+            set_sql = ", ".join(
+                f"{quote_sql_identifier(c, '`')}=%s" for c in set_cols
+            )
+            sql_u = f"UPDATE {table_q} SET {set_sql} WHERE {where_sql}"  # nosec B608
+            cursor.execute(sql_u, [non_pk[c] for c in set_cols] + pk_vals)
+            written += 1
+    return written
 
 def _open_mysql(
     *,
@@ -238,6 +313,11 @@ def write_mapped_rows(
         policy,
         dialect_label="MySQL VARCHAR",
     )
+    sparse_rows: list[tuple] = []
+    if write_mode == "upsert" and conflict_columns:
+        from connectors.writer_common import split_dense_sparse_rows
+
+        mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
 
     if write_mode == "upsert" and conflict_columns:
         if DF_LSN_COL in target_cols:
@@ -247,7 +327,9 @@ def write_mapped_rows(
         else:
             mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
 
-    rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
+    rejected_rows = _rejected_row_count(
+        data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
+    )
     coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
     if transform_errors and policy == "fail":
         return WriteResult(
@@ -424,6 +506,22 @@ def write_mapped_rows(
                 ]
 
             rows_skipped = 0
+            sparse_written = 0
+            if sparse_rows and write_mode == "upsert" and conflict_columns:
+                # Convert sparse with physical types but keep DF_MISSING intact.
+                sparse_converted = [
+                    tuple(_to_mysql_value(v, target_types[i]) for i, v in enumerate(row))
+                    for row in sparse_rows
+                ]
+                sparse_written = _mysql_apply_sparse_upsert(
+                    cur,
+                    table_q=table_q,
+                    target_cols=target_cols,
+                    conflict_columns=conflict_columns,
+                    sparse_rows=sparse_converted,
+                )
+                conn.commit()
+                written += sparse_written
 
             for chunk_idx in range(chunks):
                 start = chunk_idx * chunk_size

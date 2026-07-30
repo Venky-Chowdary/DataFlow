@@ -697,18 +697,22 @@ def _rejected_row_count(
     mapped_rows: list[tuple],
     rejected_details: list[dict[str, Any]],
     policy: str,
+    *,
+    sparse_rows: list[tuple] | None = None,
 ) -> int:
     """Return the number of rows that were rejected or quarantined.
 
     For ``fail`` / ``quarantine`` the held-out rows are
-    ``len(data_rows) - len(mapped_rows)`` (quarantine never writes NULL into the
-    primary table for a bad cell). For ``coerce_null`` the rows are preserved
-    with a NULL bad cell, so the count is distinct source row numbers with at
-    least one rejected cell.
+    ``len(data_rows) - len(mapped_rows) - len(sparse_rows)`` (quarantine never
+    writes NULL into the primary table for a bad cell; sparse CDC rows are
+    still written via omit-from-SET and must not inflate rejected counts).
+    For ``coerce_null`` the rows are preserved with a NULL bad cell, so the
+    count is distinct source row numbers with at least one rejected cell.
     """
     if policy == "coerce_null":
         return len({d["row"] for d in rejected_details})
-    return len(data_rows) - len(mapped_rows)
+    kept = len(mapped_rows) + len(sparse_rows or [])
+    return max(0, len(data_rows) - kept)
 
 
 def _coerced_null_row_count(rejected_details: list[dict[str, Any]], policy: str) -> int:
@@ -794,6 +798,13 @@ def build_mapped_rows_with_details(
         row_has_error = False
         for source_idx, target_idx, transform, src_name, tgt_name in mapping_infos:
             val = raw[source_idx] if source_idx is not None and source_idx < len(raw) else None
+            # Preserve sparse-CDC missing before transforms (omit-from-SET, never NULL wipe).
+            from services.value_serializer import DF_MISSING_SENTINEL, is_missing_sentinel
+
+            if is_missing_sentinel(val):
+                if target_idx >= 0:
+                    out[target_idx] = DF_MISSING_SENTINEL
+                continue
             converted, err = apply_transform(val, transform)
             if err:
                 row_has_error = True
@@ -1015,6 +1026,10 @@ def fits_decimal(value: Any, precision: int, scale: int) -> bool:
 
     if value is None:
         return True
+    from services.value_serializer import is_missing_sentinel
+
+    if is_missing_sentinel(value):
+        return True
     try:
         d = Decimal(str(value).strip())
         if not d.is_finite():
@@ -1061,6 +1076,10 @@ def quarantine_unfit_decimals(
         hold_out = False
         for col_idx, precision, scale in number_cols:
             if col_idx >= len(cells) or cells[col_idx] is None:
+                continue
+            from services.value_serializer import is_missing_sentinel
+
+            if is_missing_sentinel(cells[col_idx]):
                 continue
             if fits_decimal(cells[col_idx], precision, scale):
                 continue
@@ -1154,6 +1173,10 @@ def quarantine_unfit_strings(
         for col_idx, width, typ in width_cols:
             if col_idx >= len(cells) or cells[col_idx] is None:
                 continue
+            from services.value_serializer import is_missing_sentinel
+
+            if is_missing_sentinel(cells[col_idx]):
+                continue
             if fits_varchar(cells[col_idx], width, typ):
                 continue
             sample = cell_to_string(cells[col_idx])[:120]
@@ -1241,6 +1264,10 @@ def quarantine_unfit_specialty_types(
         for col_idx, kind in specialty_cols:
             if col_idx >= len(cells) or cells[col_idx] is None:
                 continue
+            from services.value_serializer import is_missing_sentinel
+
+            if is_missing_sentinel(cells[col_idx]):
+                continue
             ok = (
                 is_geography_wire(cells[col_idx])
                 if kind == "geography"
@@ -1272,3 +1299,49 @@ def quarantine_unfit_specialty_types(
             continue
         out.append(tuple(cells))
     return out
+
+
+def row_has_missing_sentinel(row: tuple | list) -> bool:
+    from services.value_serializer import is_missing_sentinel
+
+    return any(is_missing_sentinel(v) for v in row)
+
+
+def split_dense_sparse_rows(
+    mapped_rows: list[tuple],
+) -> tuple[list[tuple], list[tuple]]:
+    """Partition mapped rows for bulk vs per-row sparse CDC upsert."""
+    dense: list[tuple] = []
+    sparse: list[tuple] = []
+    for row in mapped_rows:
+        (sparse if row_has_missing_sentinel(row) else dense).append(row)
+    return dense, sparse
+
+
+def sparse_present_bindings(
+    row: tuple | list,
+    target_cols: list[str],
+) -> dict[str, Any]:
+    """Column→value for cells that are present (not DF_MISSING)."""
+    from services.value_serializer import is_missing_sentinel
+
+    out: dict[str, Any] = {}
+    for col, val in zip(target_cols, row):
+        if is_missing_sentinel(val):
+            continue
+        out[col] = val
+    return out
+
+
+def assert_sparse_upsert_has_pk(
+    present: dict[str, Any],
+    conflict_columns: list[str],
+) -> None:
+    """Refuse sparse upsert that omits the conflict key (would invent a row)."""
+    missing = [c for c in conflict_columns if c not in present]
+    if missing:
+        raise ValueError(
+            "sparse CDC upsert is missing primary-key column(s) "
+            f"{missing}; refuse silent invent (require binlog_row_image=FULL / "
+            "REPLICA IDENTITY FULL)"
+        )

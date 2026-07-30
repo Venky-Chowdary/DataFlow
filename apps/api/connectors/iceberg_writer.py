@@ -258,26 +258,38 @@ def _merge_upsert_rows(
     pk_cols: list[str],
     lsn_col: str = "_df_lsn",
 ) -> list[dict[str, Any]]:
-    """PK upsert with LSN guard: keep row with higher/equal LSN; no LSN → last wins."""
+    """PK upsert with LSN guard: keep row with higher/equal LSN; no LSN → last wins.
+
+    Sparse CDC: ``DF_MISSING`` keys are omitted and never wipe prior column values.
+    """
     from connectors.writer_common import compare_lsn
+    from services.value_serializer import is_missing_sentinel
 
     def _key(row: dict[str, Any]) -> tuple:
         return tuple(str(row.get(c, "")) for c in pk_cols)
+
+    def _present(row: dict[str, Any]) -> dict[str, Any]:
+        return {k: v for k, v in row.items() if not is_missing_sentinel(v)}
 
     best: dict[tuple, dict[str, Any]] = {}
     for row in existing:
         best[_key(row)] = dict(row)
     for row in incoming:
+        clean = _present(row)
         key = _key(row)
         prev = best.get(key)
         if prev is None:
-            best[key] = dict(row)
+            best[key] = clean
             continue
-        if lsn_col in row or lsn_col in prev:
-            if compare_lsn(row.get(lsn_col), prev.get(lsn_col)) > 0:
-                best[key] = dict(row)
+        if lsn_col in clean or lsn_col in prev:
+            if compare_lsn(clean.get(lsn_col), prev.get(lsn_col)) > 0:
+                merged = dict(prev)
+                merged.update(clean)
+                best[key] = merged
         else:
-            best[key] = dict(row)
+            merged = dict(prev)
+            merged.update(clean)
+            best[key] = merged
     return list(best.values())
 
 
@@ -338,6 +350,13 @@ def _coerce_arrow_cell(value: Any, arrow_type: Any, pa: Any) -> Any:
     from datetime import date, datetime, time
     from decimal import Decimal, InvalidOperation
 
+    from services.value_serializer import is_missing_sentinel
+
+    if is_missing_sentinel(value):
+        raise ValueError(
+            "DF_MISSING reached Arrow coerce — sparse CDC must overlay onto "
+            "existing rows before building the Arrow batch"
+        )
     if value is None:
         return None
     if value == "":
@@ -689,7 +708,70 @@ def _write_mapped_rows_pyiceberg(
                 warnings=type_locked_warnings[:20],
                 driver="iceberg",
             )
+        # Sparse CDC: pyiceberg Table.upsert treats omitted/null as NULL-wipe.
+        # Overlay DF_MISSING onto existing rows before building the Arrow batch.
+        from connectors.writer_common import (
+            row_has_missing_sentinel,
+            sparse_present_bindings,
+            split_dense_sparse_rows,
+        )
+        from services.value_serializer import is_missing_sentinel
+
+        if mode in upsert_modes and any(row_has_missing_sentinel(r) for r in mapped_rows):
+            pk_cols = [c for c in (conflict_columns or []) if c in target_cols]
+            if not pk_cols:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=target_schema,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        "Iceberg sparse CDC upsert requires explicit conflict_columns"
+                    ),
+                    driver="iceberg",
+                )
+            dense_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
+            existing_by_pk: dict[tuple, dict[str, Any]] = {}
+            try:
+                scanned = tbl.scan().to_arrow()
+                for batch_idx in range(scanned.num_rows):
+                    row_dict = {
+                        name: scanned.column(name)[batch_idx].as_py()
+                        for name in scanned.column_names
+                    }
+                    key = tuple(str(row_dict.get(c, "")) for c in pk_cols)
+                    existing_by_pk[key] = row_dict
+            except Exception as exc:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=target_schema,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        "Iceberg sparse CDC requires a table scan to overlay "
+                        f"absent fields; scan failed: {exc}"
+                    ),
+                    driver="iceberg",
+                )
+            expanded: list[tuple] = list(dense_rows)
+            for srow in sparse_rows:
+                present = sparse_present_bindings(srow, target_cols)
+                key = tuple(str(present.get(c, "")) for c in pk_cols)
+                base = dict(existing_by_pk.get(key) or {})
+                base.update(present)
+                expanded.append(tuple(base.get(c) for c in target_cols))
+            mapped_rows = expanded
+
         dict_rows = [_row_as_dict(target_cols, r) for r in mapped_rows]
+        # Drop any residual missing sentinels (should not remain after expand).
+        for d in dict_rows:
+            for k in list(d.keys()):
+                if is_missing_sentinel(d[k]):
+                    del d[k]
         arrays = []
         for field in final_arrow:
             at = field.type
@@ -1099,3 +1181,208 @@ def write_mapped_rows(
         file_batch_idx=file_batch_idx,
         **_kwargs,
     )
+
+
+def _resolve_iceberg_table_dir(cfg: dict[str, Any], table_name: str, schema: str | None) -> Path:
+    host = str(cfg.get("host") or "")
+    database = str(cfg.get("database") or "")
+    connection_string = str(cfg.get("connection_string") or "")
+    root = _warehouse_root(host, database, connection_string)
+    table = (table_name or "").strip()
+    sch = (schema or cfg.get("schema") or "").strip()
+    table_dir = root / sch / table if sch else root / table
+    if "." in table and not sch:
+        parts = table.split(".", 1)
+        table_dir = root / parts[0] / parts[1]
+    return table_dir
+
+
+def delete_by_primary_keys(
+    cfg: dict[str, Any],
+    table_name: str,
+    primary_key_column: str,
+    keys: list[str],
+    schema: str | None = None,
+    *,
+    incoming_lsn: str | None = None,
+    lsn_column: str = "_df_lsn",
+) -> int:
+    """CDC delete with LSN guard for filesystem CoW and pyiceberg catalogs.
+
+    Stale deletes that would wipe a newer ``_df_lsn`` row are skipped
+    (at-least-once redelivery safety). Returns the number of rows removed.
+    """
+    if not keys:
+        return 0
+    key_set = {str(k) for k in keys}
+    endpoint = {
+        **cfg,
+        "table": table_name,
+        "table_name": table_name,
+        "schema": schema or cfg.get("schema") or "",
+    }
+    if _pyiceberg_should_use(endpoint):
+        return _delete_pyiceberg(
+            endpoint,
+            primary_key_column,
+            key_set,
+            incoming_lsn=incoming_lsn,
+            lsn_column=lsn_column,
+        )
+    return _delete_filesystem(
+        cfg,
+        table_name,
+        primary_key_column,
+        key_set,
+        schema=schema,
+        incoming_lsn=incoming_lsn,
+        lsn_column=lsn_column,
+    )
+
+
+def _filter_delete_keys_by_lsn(
+    rows: list[dict[str, Any]],
+    primary_key_column: str,
+    key_set: set[str],
+    *,
+    incoming_lsn: str | None,
+    lsn_column: str,
+) -> set[str]:
+    from services.cdc_effectively_once import filter_keys_for_lsn_delete
+
+    if not incoming_lsn:
+        return set(key_set)
+    existing = {
+        str(r.get(primary_key_column)): r.get(lsn_column)
+        for r in rows
+        if str(r.get(primary_key_column)) in key_set
+    }
+    # Keys absent from table: treat as already deleted (idempotent).
+    for k in key_set:
+        existing.setdefault(k, None)
+    kept = filter_keys_for_lsn_delete(list(key_set), existing, incoming_lsn)
+    return {str(k) for k in kept}
+
+
+def _delete_filesystem(
+    cfg: dict[str, Any],
+    table_name: str,
+    primary_key_column: str,
+    key_set: set[str],
+    *,
+    schema: str | None,
+    incoming_lsn: str | None,
+    lsn_column: str,
+) -> int:
+    table_dir = _resolve_iceberg_table_dir(cfg, table_name, schema)
+    meta_dir = table_dir / "metadata"
+    if not meta_dir.is_dir():
+        return 0
+    versions = sorted(meta_dir.glob("v*.metadata.json"))
+    if not versions:
+        return 0
+    current_meta = _load_metadata(versions[-1])
+    if not current_meta:
+        return 0
+    schema_json = (current_meta.get("schemas") or [{}])[-1] or current_meta.get("schema") or {}
+    columns = [str(f.get("name")) for f in (schema_json.get("fields") or []) if f.get("name")]
+    if primary_key_column not in columns:
+        columns = list(columns) + [primary_key_column]
+    existing = _load_existing_rows(table_dir, columns, current_meta)
+    work_keys = _filter_delete_keys_by_lsn(
+        existing,
+        primary_key_column,
+        key_set,
+        incoming_lsn=incoming_lsn,
+        lsn_column=lsn_column,
+    )
+    if not work_keys:
+        return 0
+    kept = [r for r in existing if str(r.get(primary_key_column)) not in work_keys]
+    deleted = len(existing) - len(kept)
+    write_types = _write_types_from_schema(schema_json, {})
+    rel_path, n_written, checksum, _warnings = _write_data_file(
+        table_dir / "data",
+        columns,
+        kept,
+        column_types=write_types,
+    )
+    snapshot_id = int(time.time() * 1000)
+    snapshots = list(current_meta.get("snapshots") or [])
+    snapshots.append({
+        "snapshot-id": snapshot_id,
+        "timestamp-ms": snapshot_id,
+        "summary": {
+            "operation": "overwrite",
+            "added-records": str(n_written),
+            "added-data-files": "1",
+            "dataflow.checksum": checksum,
+            "dataflow.write_mode": "cdc_delete",
+            "dataflow.deleted_keys": str(deleted),
+        },
+        "manifest-list": rel_path,
+        "schema-id": schema_json.get("schema-id", 0),
+    })
+    new_version = int(versions[-1].stem[1:].split(".")[0]) + 1
+    metadata = {
+        **current_meta,
+        "last-updated-ms": snapshot_id,
+        "snapshots": snapshots,
+        "current-snapshot-id": snapshot_id,
+        "data-files": [{"path": rel_path, "record-count": n_written, "checksum": checksum}],
+        "properties": {
+            **(current_meta.get("properties") or {}),
+            "dataflow.write_mode": "cdc_delete",
+        },
+    }
+    meta_path = meta_dir / f"v{new_version}.metadata.json"
+    tmp = meta_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(metadata, indent=2, default=json_default), encoding="utf-8")
+    os.replace(tmp, meta_path)
+    (meta_dir / "version-hint.text").write_text(str(new_version), encoding="utf-8")
+    return deleted
+
+
+def _delete_pyiceberg(
+    endpoint: dict[str, Any],
+    primary_key_column: str,
+    key_set: set[str],
+    *,
+    incoming_lsn: str | None,
+    lsn_column: str,
+) -> int:
+    from connectors.iceberg_catalog import load_catalog, parse_iceberg_catalog_config
+
+    config = parse_iceberg_catalog_config(endpoint)
+    catalog = load_catalog(endpoint)
+    identifier = config.table_identifier
+    tbl = catalog.load_table(identifier)
+    scanned = tbl.scan().to_arrow()
+    rows: list[dict[str, Any]] = []
+    for i in range(scanned.num_rows):
+        rows.append(
+            {name: scanned.column(name)[i].as_py() for name in scanned.column_names}
+        )
+    work_keys = _filter_delete_keys_by_lsn(
+        rows,
+        primary_key_column,
+        key_set,
+        incoming_lsn=incoming_lsn,
+        lsn_column=lsn_column,
+    )
+    if not work_keys:
+        return 0
+    kept = [r for r in rows if str(r.get(primary_key_column)) not in work_keys]
+    deleted = len(rows) - len(kept)
+    if deleted == 0:
+        return 0
+    if pa is None:
+        raise RuntimeError("pyarrow required for Iceberg CDC deletes")
+    arrays = []
+    for name in scanned.column_names:
+        field = scanned.schema.field(name)
+        cells = [r.get(name) for r in kept]
+        arrays.append(pa.array(cells, type=field.type))
+    remaining = pa.Table.from_arrays(arrays, schema=scanned.schema)
+    tbl.overwrite(remaining)
+    return deleted

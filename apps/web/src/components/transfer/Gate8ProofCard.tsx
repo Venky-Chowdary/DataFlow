@@ -243,20 +243,19 @@ export function Gate8ProofCard({
           <div>
             <dt>Pre-write simulation</dt>
             <dd className={simulationOk ? "is-ok" : "is-warn"}>
-              {simulationOk ? `Passed — ${sourceRows.toLocaleString()} sample row(s)` : "Needs review"}
+              {simulationOk
+                ? `Passed — ${sourceRows.toLocaleString()} sample row(s)`
+                : "Needs review"}
             </dd>
           </div>
           <div>
-            <dt>Post-write row-count</dt>
-            <dd className="is-warn">Pending</dd>
-          </div>
-          <div>
-            <dt>Post-write checksum</dt>
-            <dd className="is-warn">Pending</dd>
+            <dt>Post-write proof</dt>
+            <dd className="is-warn">Pending Execute</dd>
           </div>
         </dl>
       )}
 
+      {!preWrite && (
       <dl className="df2-gate8-proof-grid">
         <div>
           <dt>Source rows</dt>
@@ -264,18 +263,18 @@ export function Gate8ProofCard({
         </div>
         <div>
           <dt>Destination rows</dt>
-          <dd>{preWrite ? "—" : targetRows.toLocaleString()}</dd>
+          <dd>{targetRows.toLocaleString()}</dd>
         </div>
         <div>
           <dt>Expected dest</dt>
           <dd title="source − quarantine hold-outs">
-            {preWrite ? "—" : expectedRows.toLocaleString()}
+            {expectedRows.toLocaleString()}
           </dd>
         </div>
         <div>
           <dt>Delta vs expected</dt>
-          <dd className={preWrite ? undefined : (delta === 0 ? "is-ok" : "is-warn")}>
-            {preWrite ? "—" : (delta === 0 ? "0" : `${delta > 0 ? "+" : ""}${delta.toLocaleString()}`)}
+          <dd className={delta === 0 ? "is-ok" : "is-warn"}>
+            {delta === 0 ? "0" : `${delta > 0 ? "+" : ""}${delta.toLocaleString()}`}
           </dd>
         </div>
         {(heldOut > 0 || coercedNullRows > 0) && (
@@ -290,36 +289,30 @@ export function Gate8ProofCard({
         <div>
           <dt>Source checksum</dt>
           <dd title={report.source_checksum || undefined}>
-            {preWrite ? "—" : shortChecksum(report.source_checksum)}
+            {shortChecksum(report.source_checksum)}
           </dd>
         </div>
         <div>
           <dt>Destination checksum</dt>
           <dd title={report.target_checksum || undefined}>
-            {preWrite ? "—" : shortChecksum(report.target_checksum)}
+            {shortChecksum(report.target_checksum)}
           </dd>
         </div>
         <div>
           <dt>Checksums</dt>
           <dd className={
-            preWrite
-              ? "is-warn"
-              : (
-                report.source_checksum
-                && report.target_checksum
-                && report.source_checksum === report.target_checksum
-                  ? "is-ok"
-                  : "is-warn"
-              )
+            report.source_checksum
+            && report.target_checksum
+            && report.source_checksum === report.target_checksum
+              ? "is-ok"
+              : "is-warn"
           }>
-            {preWrite
-              ? "Pending"
-              : report.source_checksum && report.target_checksum
-                ? (report.source_checksum === report.target_checksum ? "Match" : "Mismatch")
-                : "—"}
+            {report.source_checksum && report.target_checksum
+              ? (report.source_checksum === report.target_checksum ? "Match" : "Mismatch")
+              : "—"}
           </dd>
         </div>
-        {(missingKeys > 0 || extraKeys > 0 || report.matched_key_count != null) && !preWrite && (
+        {(missingKeys > 0 || extraKeys > 0 || report.matched_key_count != null) && (
           <div>
             <dt>Keys</dt>
             <dd className={missingKeys || extraKeys ? "is-warn" : "is-ok"}>
@@ -330,6 +323,7 @@ export function Gate8ProofCard({
           </div>
         )}
       </dl>
+      )}
 
       {mismatches.length > 0 && (
         <div className="df2-gate8-proof-mismatches" aria-label="Sample value mismatches">

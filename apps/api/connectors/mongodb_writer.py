@@ -360,12 +360,24 @@ def write_mapped_rows(
                 break
 
             # Convert row tuples to documents; omit missing-field sentinels.
+            # Track sparse rows so upsert uses $set (never ReplaceOne — that
+            # would delete destination keys for fields absent in the CDC image).
             from services.value_serializer import is_missing_sentinel
 
-            docs = [
-                {k: v for k, v in dict(zip(target_cols, row)).items() if not is_missing_sentinel(v)}
-                for row in batch
-            ]
+            from connectors.writer_common import row_has_missing_sentinel
+
+            docs: list[dict[str, Any]] = []
+            sparse_flags: list[bool] = []
+            for row in batch:
+                sparse = row_has_missing_sentinel(row)
+                sparse_flags.append(sparse)
+                docs.append(
+                    {
+                        k: v
+                        for k, v in dict(zip(target_cols, row)).items()
+                        if not is_missing_sentinel(v)
+                    }
+                )
 
             # Preserve MongoDB ObjectId identity when a 24-char hex _id is present.
             from bson.objectid import ObjectId
@@ -380,7 +392,7 @@ def write_mapped_rows(
                             logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
             if write_mode == "upsert" and conflict_columns:
-                from pymongo import ReplaceOne
+                from pymongo import ReplaceOne, UpdateOne
 
                 requested_keys = [str(c) for c in conflict_columns if str(c)]
                 pk_cols = [c for c in requested_keys if c in target_cols]
@@ -405,20 +417,24 @@ def write_mapped_rows(
                 # Deduplicate within the batch on the conflict key, keeping the
                 # highest _df_lsn so ``bulk_write(ordered=False)`` does not apply
                 # same-PK updates in an undefined order.
+                # Pair each doc with its sparse flag through dedupe.
+                paired = list(zip(docs, sparse_flags))
                 if DF_LSN_COL in target_cols:
-                    best_docs: dict[tuple, dict[str, Any]] = {}
-                    for doc in docs:
+                    best_docs: dict[tuple, tuple[dict[str, Any], bool]] = {}
+                    for doc, sparse in paired:
                         key = tuple(doc.get(c) for c in pk_cols)
                         prev = best_docs.get(key)
-                        if prev is None or compare_lsn(doc.get(DF_LSN_COL), prev.get(DF_LSN_COL)) >= 0:
-                            best_docs[key] = doc
-                    docs = list(best_docs.values())
+                        if prev is None or compare_lsn(doc.get(DF_LSN_COL), prev[0].get(DF_LSN_COL)) >= 0:
+                            best_docs[key] = (doc, sparse)
+                    paired = list(best_docs.values())
                 else:
-                    seen_docs: dict[tuple, dict[str, Any]] = {}
-                    for doc in docs:
+                    seen_docs: dict[tuple, tuple[dict[str, Any], bool]] = {}
+                    for doc, sparse in paired:
                         key = tuple(doc.get(c) for c in pk_cols)
-                        seen_docs[key] = doc
-                    docs = list(seen_docs.values())
+                        seen_docs[key] = (doc, sparse)
+                    paired = list(seen_docs.values())
+                docs = [p[0] for p in paired]
+                sparse_flags = [p[1] for p in paired]
 
                 # Pre-fetch existing _df_lsn values for the batch keys so stale
                 # redelivery cannot regress destination state under CDC.
@@ -459,7 +475,7 @@ def write_mapped_rows(
 
                 ops = []
                 skipped_stale = 0
-                for doc_idx, doc in enumerate(docs):
+                for doc_idx, (doc, sparse) in enumerate(zip(docs, sparse_flags)):
                     filt = {c: doc.get(c) for c in pk_cols}
                     if any(v in (None, "") for v in filt.values()):
                         missing_cols = [c for c, v in filt.items() if v in (None, "")]
@@ -497,7 +513,12 @@ def write_mapped_rows(
                         if incoming_lsn is not None and not lsn_is_newer(incoming_lsn, prior_lsn):
                             skipped_stale += 1
                             continue
-                    ops.append(ReplaceOne(filt, doc, upsert=True))
+                    if sparse:
+                        # Partial CDC image: $set present fields only.
+                        # ReplaceOne would delete omitted destination keys.
+                        ops.append(UpdateOne(filt, {"$set": doc}, upsert=True))
+                    else:
+                        ops.append(ReplaceOne(filt, doc, upsert=True))
                 if ops:
                     coll.bulk_write(ops, ordered=False)
                 written += len(ops)

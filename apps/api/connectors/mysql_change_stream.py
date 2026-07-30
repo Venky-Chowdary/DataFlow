@@ -196,6 +196,13 @@ class MySqlChangeStreamCdc:
                 if not row or (row[1] or "").upper() != "ROW":
                     conn.close()
                     return False
+                # Debezium-class: MINIMAL/PARTIAL after-images omit unchanged cols
+                # and would NULL-wipe on SQL upsert — refuse until FULL.
+                cur.execute("SHOW VARIABLES LIKE 'binlog_row_image'")
+                row = cur.fetchone()
+                if row and (row[1] or "").upper() not in {"FULL", ""}:
+                    conn.close()
+                    return False
             conn.close()
 
             try:

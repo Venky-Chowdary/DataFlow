@@ -126,6 +126,8 @@ class PreflightContext:
     """Runtime adapters injected by connectors (DB probes, parsers)."""
 
     plan: TransferPlan
+    # Validate / Studio sample rows for Gate-5/8/9 dry-run proof (host may override).
+    sample_rows: list[dict[str, Any]] = field(default_factory=list)
 
     def probe_unique_constraint(self, columns: list[str]) -> list[dict[str, Any]]:
         return []

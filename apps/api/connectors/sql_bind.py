@@ -89,6 +89,11 @@ def normalize_sql_bind_value(
     """
     if value is None:
         return None
+    from services.value_serializer import is_missing_sentinel
+
+    # Sparse CDC sentinel must survive bind normalize — writers omit from SET.
+    if is_missing_sentinel(value):
+        return value
     from connectors.sql_temporal import coerce_sql_temporal, sql_base_type
 
     temporal = coerce_sql_temporal(value, ddl_type)

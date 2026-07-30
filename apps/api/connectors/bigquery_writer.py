@@ -15,6 +15,7 @@ from connectors.writer_common import (
     DF_LSN_COL,
     _coerced_null_row_count,
     _rejected_row_count,
+    assert_sparse_upsert_has_pk,
     build_mapped_rows_with_details,
     dedupe_rows,
     dedupe_rows_by_pk_and_lsn,
@@ -24,6 +25,8 @@ from connectors.writer_common import (
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
+    sparse_present_bindings,
+    split_dense_sparse_rows,
     transform_error_policy,
 )
 from connectors.writer_common import (
@@ -128,6 +131,147 @@ def build_bigquery_merge_sql(
         f"{matched}\n"
         f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})"
     )
+
+
+def _bq_query_param_type(bq_t: str) -> str:
+    t = (bq_t or "STRING").upper().split("(")[0].strip()
+    if t in {"INTEGER", "INT64"}:
+        return "INT64"
+    if t in {"FLOAT", "FLOAT64"}:
+        return "FLOAT64"
+    if t in {"BOOL", "BOOLEAN"}:
+        return "BOOL"
+    if t in {"NUMERIC", "BIGNUMERIC", "DECIMAL"}:
+        return "NUMERIC"
+    if t in {"TIMESTAMP", "DATETIME", "DATE", "TIME", "BYTES", "JSON"}:
+        return t
+    return "STRING"
+
+
+def _bq_normalize_present(
+    present: dict[str, Any],
+    target_cols: list[str],
+    bq_types: list[str],
+) -> dict[str, Any]:
+    """Normalize sparse present bindings the same way dense BQ records are."""
+    from connectors.warehouse_temporal import records_for_bigquery
+
+    cols = [c for c in target_cols if c in present]
+    if not cols:
+        return {}
+    types = [bq_types[target_cols.index(c)] for c in cols]
+    row = tuple(present[c] for c in cols)
+    recs = records_for_bigquery([row], cols, types)
+    return recs[0] if recs else {}
+
+
+def _bq_apply_sparse_upsert(
+    client: Any,
+    table_id: str,
+    target_cols: list[str],
+    conflict_columns: list[str],
+    sparse_rows: list[tuple],
+    bq_types: list[str],
+) -> int:
+    """Per-row BigQuery DML omitting DF_MISSING — never SET col=NULL for absent CDC fields."""
+    from google.cloud import bigquery
+
+    from services.cdc_effectively_once import should_apply_pk_row
+
+    conflict = [c for c in conflict_columns if c in target_cols]
+    if not conflict:
+        raise ValueError("sparse BigQuery upsert requires conflict_columns")
+    type_by_col = {c: bq_types[i] for i, c in enumerate(target_cols)}
+    written = 0
+    for row in sparse_rows:
+        present = _bq_normalize_present(
+            sparse_present_bindings(row, target_cols),
+            target_cols,
+            bq_types,
+        )
+        assert_sparse_upsert_has_pk(present, conflict)
+        non_pk = {k: v for k, v in present.items() if k not in conflict}
+
+        def _params(values: dict[str, Any], prefix: str) -> list[Any]:
+            out = []
+            for col, val in values.items():
+                out.append(
+                    bigquery.ScalarQueryParameter(
+                        f"{prefix}{col}",
+                        _bq_query_param_type(type_by_col.get(col, "STRING")),
+                        val,
+                    )
+                )
+            return out
+
+        pk_where = " AND ".join(f"`{c}` = @pk_{c}" for c in conflict)
+        pk_params = _params({c: present[c] for c in conflict}, "pk_")
+
+        if DF_LSN_COL in present and DF_LSN_COL in target_cols:
+            sel = (
+                f"SELECT `{DF_LSN_COL}` FROM `{table_id}` WHERE {pk_where}"  # nosec B608
+            )
+            job = client.query(
+                sel,
+                job_config=bigquery.QueryJobConfig(query_parameters=pk_params),
+            )
+            existing = list(job.result())
+            if existing:
+                existing_lsn = existing[0][0]
+                if not should_apply_pk_row(
+                    existing_lsn=existing_lsn,
+                    incoming_lsn=present[DF_LSN_COL],
+                ).applied:
+                    continue
+
+        if non_pk:
+            set_clause = ", ".join(f"`{c}` = @v_{c}" for c in non_pk)
+            upd = (
+                f"UPDATE `{table_id}` SET {set_clause} WHERE {pk_where}"  # nosec B608
+            )
+            job = client.query(
+                upd,
+                job_config=bigquery.QueryJobConfig(
+                    query_parameters=_params(non_pk, "v_") + pk_params
+                ),
+            )
+            job.result()
+            affected = getattr(job, "num_dml_affected_rows", None)
+            if affected and affected > 0:
+                written += 1
+                continue
+
+        cols = list(present.keys())
+        col_sql = ", ".join(f"`{c}`" for c in cols)
+        val_sql = ", ".join(f"@v_{c}" for c in cols)
+        ins = (
+            f"INSERT INTO `{table_id}` ({col_sql}) VALUES ({val_sql})"  # nosec B608
+        )
+        try:
+            job = client.query(
+                ins,
+                job_config=bigquery.QueryJobConfig(
+                    query_parameters=_params(present, "v_")
+                ),
+            )
+            job.result()
+            written += 1
+        except Exception:
+            if not non_pk:
+                raise
+            set_clause = ", ".join(f"`{c}` = @v_{c}" for c in non_pk)
+            upd = (
+                f"UPDATE `{table_id}` SET {set_clause} WHERE {pk_where}"  # nosec B608
+            )
+            job = client.query(
+                upd,
+                job_config=bigquery.QueryJobConfig(
+                    query_parameters=_params(non_pk, "v_") + pk_params
+                ),
+            )
+            job.result()
+            written += 1
+    return written
 
 
 def write_mapped_rows(
@@ -316,14 +460,18 @@ def write_mapped_rows(
             policy,
             dialect_label="BigQuery STRING",
         )
+        sparse_rows: list[tuple] = []
         if write_mode == "upsert" and conflict_columns:
+            mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
             if DF_LSN_COL in target_cols:
                 mapped_rows = dedupe_rows_by_pk_and_lsn(
                     mapped_rows, conflict_columns, target_cols
                 )
             else:
                 mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
-        rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
+        rejected_rows = _rejected_row_count(
+            data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
+        )
         coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
         if transform_errors and policy == "fail":
             return WriteResult(
@@ -347,7 +495,17 @@ def write_mapped_rows(
         chunks_completed = 0
         use_merge = write_mode == "upsert" and any(c in target_cols for c in conflict_columns)
 
-        if use_merge:
+        if sparse_rows and use_merge:
+            written += _bq_apply_sparse_upsert(
+                client,
+                table_id,
+                target_cols,
+                conflict_columns,
+                sparse_rows,
+                bq_types,
+            )
+
+        if use_merge and mapped_rows:
             staging_name = sanitize_identifier(f"{table_name}_stg_{uuid.uuid4().hex[:8]}")
             staging_id = f"{project_id}.{dataset_id}.{staging_name}"
             staging = bigquery.Table(staging_id, schema=schema_fields)

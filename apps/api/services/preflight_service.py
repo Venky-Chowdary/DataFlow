@@ -67,8 +67,7 @@ class FilePreflightContext(PreflightContext):
         source_duplicate_probe_ran: bool = False,
         source_duplicate_probe_pk: str = "",
     ):
-        super().__init__(plan=plan)
-        self.sample_rows = sample_rows or []
+        super().__init__(plan=plan, sample_rows=sample_rows or [])
         self.source_duplicate_findings = source_duplicate_findings or []
         self.source_duplicate_probe_ran = bool(source_duplicate_probe_ran)
         self.source_duplicate_probe_pk = str(source_duplicate_probe_pk or "")

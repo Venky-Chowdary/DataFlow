@@ -144,8 +144,7 @@ NULL_SENTINELS = frozenset({
     # Dynamo / SQL explicit NULL — distinct from missing attr / empty string.
     "__df_ddb_null__",
     "__df_sql_null__",
-    # Schemaless source field absent (Mongo/Dynamo/Couchbase unions).
-    "__df_missing__",
+    # NOTE: __df_missing__ is NOT a null — writers must omit the field (sparse CDC).
 })
 
 # Per-request date locale for ambiguous MDY/DMY parsing.  The engine and
@@ -956,6 +955,11 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         return None, None
     raw_s = str(raw)
     lowered = raw_s.strip().lower()
+    # Sparse CDC / schemaless absent field — never coerce to SQL NULL or identity text.
+    if lowered == "__df_missing__" or raw_s == "__DF_MISSING__":
+        from services.value_serializer import DF_MISSING_SENTINEL
+
+        return DF_MISSING_SENTINEL, None
     # Explicit NULL sentinels must never land as literal strings in any dest.
     if lowered in {"__df_sql_null__", "__df_ddb_null__"}:
         return None, None

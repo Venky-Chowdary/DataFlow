@@ -44,18 +44,35 @@ def _happy_plan() -> TransferPlan:
     )
 
 
+def _happy_ctx(plan: TransferPlan | None = None) -> PreflightContext:
+    return PreflightContext(
+        plan=plan or _happy_plan(),
+        sample_rows=[
+            {"AMT": "1500", "PAY_DT": "20250101"},
+            {"AMT": "2300", "PAY_DT": "20250102"},
+        ],
+    )
+
+
 def test_all_gates_pass():
     engine = PreflightEngine()
-    result = engine.run(PreflightContext(plan=_happy_plan()))
+    result = engine.run(_happy_ctx())
     assert result.passed
     assert result.blockers == []
     assert result.passed_count >= 7
 
 
+def test_g8_blocks_without_sample_rows():
+    """Execute must not unlock when Gate-8 has zero reconcile evidence."""
+    result = PreflightEngine().run(PreflightContext(plan=_happy_plan()))
+    assert not result.passed
+    assert any(b.gate_id.value == "g8_reconciliation" for b in result.blockers)
+
+
 def test_g1_blocks_unparseable_file():
     plan = _happy_plan()
     plan.source.parseable = False
-    result = PreflightEngine().run(PreflightContext(plan=plan))
+    result = PreflightEngine().run(_happy_ctx(plan))
     assert not result.passed
     assert result.blockers[0].gate_id.value == "g1_source"
 
@@ -63,7 +80,7 @@ def test_g1_blocks_unparseable_file():
 def test_g4_blocks_low_confidence():
     plan = _happy_plan()
     plan.mappings[0].confidence = 0.5
-    result = PreflightEngine().run(PreflightContext(plan=plan))
+    result = PreflightEngine().run(_happy_ctx(plan))
     assert not result.passed
     assert any(b.gate_id.value == "g4_mapping_confidence" for b in result.blockers)
 
@@ -72,7 +89,7 @@ def test_g4_allows_override():
     plan = _happy_plan()
     plan.mappings[0].confidence = 0.5
     plan.mappings[0].user_override = True
-    result = PreflightEngine().run(PreflightContext(plan=plan))
+    result = PreflightEngine().run(_happy_ctx(plan))
     assert result.passed
 
 
@@ -80,7 +97,7 @@ def test_g4_blocks_ambiguous_mapping():
     plan = _happy_plan()
     plan.mappings[0].requires_review = True
     plan.mappings[0].score_gap = 0.03
-    result = PreflightEngine().run(PreflightContext(plan=plan))
+    result = PreflightEngine().run(_happy_ctx(plan))
     assert not result.passed
     assert any(b.gate_id.value == "g4_mapping_confidence" for b in result.blockers)
 
@@ -89,7 +106,7 @@ def test_g4_allows_ambiguous_with_override():
     plan = _happy_plan()
     plan.mappings[0].requires_review = True
     plan.mappings[0].user_override = True
-    result = PreflightEngine().run(PreflightContext(plan=plan))
+    result = PreflightEngine().run(_happy_ctx(plan))
     assert result.passed
 
 
@@ -97,7 +114,7 @@ def test_fail_fast_stops_at_first_blocker():
     plan = _happy_plan()
     plan.source.parseable = False
     plan.destination.connected = False
-    result = PreflightEngine(fail_fast=True).run(PreflightContext(plan=plan))
+    result = PreflightEngine(fail_fast=True).run(_happy_ctx(plan))
     assert len(result.blockers) == 1
     assert len(result.gates) == 1
 

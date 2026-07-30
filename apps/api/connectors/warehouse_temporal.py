@@ -179,6 +179,7 @@ def records_for_bigquery(
 ) -> list[dict[str, Any]]:
     """Build insert_rows_json / load_table_from_json records with temporal + bool/JSON normalize."""
     from connectors.sql_bind import normalize_sql_bind_value
+    from services.value_serializer import is_missing_sentinel
 
     records: list[dict[str, Any]] = []
     for row in batch:
@@ -186,6 +187,9 @@ def records_for_bigquery(
         for i, col in enumerate(target_cols):
             val = row[i] if i < len(row) else None
             typ = logical_or_bq_types[i] if i < len(logical_or_bq_types) else "STRING"
+            # Sparse CDC: omit DF_MISSING — never leak sentinel or invent NULL via MERGE.
+            if is_missing_sentinel(val):
+                continue
             if val is not None and bigquery_temporal_ddl(typ):
                 rec[col] = format_bigquery_bind(val, typ)
             elif val is not None:

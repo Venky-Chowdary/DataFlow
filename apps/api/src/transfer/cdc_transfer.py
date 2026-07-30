@@ -505,6 +505,7 @@ def _apply_change_batch(
             from connectors.table_manager import UnsupportedCdcDeleteError
 
             # Re-check: 0 can mean keys already absent (idempotent). Probe support.
+            # Keep in sync with connectors.table_manager.delete_by_primary_keys.
             supported = (dest_type or "").lower() in {
                 "postgresql",
                 "redshift",
@@ -512,11 +513,24 @@ def _apply_change_batch(
                 "sqlite",
                 "generic_sql",
                 "mongodb",
+                "mongo",
                 "sqlserver",
                 "mssql",
                 "oracle",
+                "oracle_db",
+                "oracle_autonomous_warehouse",
                 "snowflake",
                 "bigquery",
+                "duckdb",
+                "databricks",
+                "synapse_analytics",
+                "azure_sql_database",
+                "amazon_rds_sql_server",
+                "google_cloud_sql_sql_server",
+                "azure_synapse_dedicated",
+                "azure_synapse_serverless",
+                "iceberg",
+                "apache_iceberg",
             }
             if not supported:
                 raise UnsupportedCdcDeleteError(
@@ -526,10 +540,14 @@ def _apply_change_batch(
     # Stash a bounded source sample so Gate-8 reconciliation can compare the
     # rows we just wrote against a read-back of the destination.
     sample_rows = list(change.inserts or []) + list(change.updates or [])
+    if dest_summary is None:
+        dest_summary = {}
     if sample_rows:
-        if dest_summary is None:
-            dest_summary = {}
         dest_summary["reconcile_sample"] = sample_rows[:50]
+    if change.deletes:
+        # PK tombstones for post-write absence proof (not full after-images).
+        dest_summary["reconcile_deletes"] = [str(k) for k in change.deletes[:50]]
+        dest_summary["reconcile_delete_count"] = len(change.deletes)
 
     return rows_written, last_checksum, dest_summary, deleted
 

@@ -324,6 +324,43 @@ def run_reconciliation(
                 dest_types=dest_types,
             )
 
+    # CDC delete proof: stashed PKs must be absent on destination read-back.
+    delete_pks = [
+        str(k)
+        for k in (dest_summary.get("reconcile_deletes") or [])
+        if k is not None and str(k) != ""
+    ]
+    if delete_pks and table_name and target_cols and strict_checksum:
+        sort_key = _sort_key_for_columns(target_cols, mapping_dicts)
+        if sort_key:
+            still_present = read_target_sample(
+                db_type,
+                cfg,
+                schema=schema,
+                table_name=table_name,
+                columns=[sort_key],
+                limit=len(delete_pks),
+                sort_key=sort_key,
+                key_values=delete_pks,
+            )
+            if still_present:
+                return _finalize_reconcile({
+                    "passed": False,
+                    "message": (
+                        f"Gate-8 delete proof failed: {len(still_present)} deleted "
+                        "PK(s) still present on destination after CDC delete"
+                    ),
+                    "source_rows": source_rows,
+                    "target_rows": target_rows,
+                    "source_checksum": source_checksum,
+                    "target_checksum": target_checksum,
+                    "rejected_rows": rejected_rows,
+                    "coerced_null_rows": coerced_null_rows,
+                    "rows_skipped": rows_skipped,
+                    "delete_keys_checked": len(delete_pks),
+                    "delete_keys_still_present": len(still_present),
+                })
+
     # No read-back verifier available for this destination.
     if target_rows < 0:
         # dest_only sinks (pgvector, milvus, …) have no independent SQL read-back

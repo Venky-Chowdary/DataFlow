@@ -846,6 +846,14 @@ def gate_g7_capacity(ctx: PreflightContext) -> GateResult:
             start,
             _with_scope({"needed": needed, "available": available}, g7_scope),
         )
+    if needed > 0 and not available:
+        # Unknown capacity used to PASS — that is not proof of headroom.
+        return _block(
+            GateId.G7_CAPACITY,
+            f"Staging capacity unknown — need {needed:,} bytes; cannot prove headroom",
+            start,
+            _with_scope({"needed": needed, "available": 0, "unknown": True}, g7_scope),
+        )
     ratio = f" ({available // max(needed, 1)}x headroom)" if available and needed else ""
     return _pass(
         GateId.G7_CAPACITY,
@@ -942,19 +950,27 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
     dest_kind = (ctx.plan.destination.db_type or "").lower()
     sample_rows = getattr(ctx, "sample_rows", None) or []
     if not sample_rows:
-        return GateResult(
-            gate_id=GateId.G8_RECONCILIATION,
-            status=GateStatus.SKIP,
-            message="No sample rows for dry-run reconciliation",
-            details=_with_scope(
-                {},
+        # Fail closed: SKIP used to unlock Execute with zero reconcile proof.
+        return _block(
+            GateId.G8_RECONCILIATION,
+            "Gate-8 cannot prove reconciliation without sample rows — "
+            "load a source sample before Execute",
+            start,
+            _with_scope(
+                {
+                    "preview_only": True,
+                    "source_rows": 0,
+                    "note": (
+                        "Pre-write Gate-8 simulation requires Validate sample rows; "
+                        "refusing Execute unlock without evidence"
+                    ),
+                },
                 evidence_scope(
                     kind="reconciliation",
-                    coverage="pending",
-                    note="No Validate sample rows — pre-write Gate-8 simulation skipped",
+                    coverage="none",
+                    note="No Validate sample rows — Gate-8 blocked until samples load",
                 ),
             ),
-            duration_ms=(time.perf_counter() - start) * 1000,
         )
 
     source_count = len(sample_rows)
