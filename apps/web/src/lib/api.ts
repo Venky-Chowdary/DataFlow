@@ -309,6 +309,12 @@ export async function runPreflight(payload: {
   date_locale?: string;
   /** Operator attested governance policy allows moving detected PII. */
   compliance_acknowledged?: boolean;
+  /** Operator acknowledged schema drift under manual_review for this run. */
+  schema_drift_acknowledged?: boolean;
+  /** Who acknowledged (email / display name). */
+  acknowledgment_actor?: string;
+  /** Why the exception was accepted. */
+  acknowledgment_reason?: string;
 }): Promise<import("./types").PreflightResult> {
   const res = await apiFetch(`${API_BASE}/preflight/run`, {
     method: "POST",

@@ -26,15 +26,29 @@ def test_lossy_coercion_blocks_when_low_confidence():
 
 
 def test_lossy_coercion_blocks_when_high_confidence():
-    """Lossy coercions always block at Validate — confidence must not green-light write failures."""
+    """Under strict, lossy coercions always block — confidence must not green-light write failures."""
     issues = validate_mapping_coercions(
         [{"source": "note", "target": "amount", "confidence": 0.95}],
         source_types={"note": "VARCHAR"},
         target_types={"amount": "INTEGER"},
+        validation_mode="strict",
     )
     assert issues
     assert issues[0]["severity"] == "block"
     assert coerce_blocks_transfer(issues) is True
+
+
+def test_lossy_coercion_warns_under_balanced():
+    """Balanced Map-time declared lossy pairs warn — mirrors G3; value probe still fail-fast on Validate."""
+    issues = validate_mapping_coercions(
+        [{"source": "note", "target": "amount", "confidence": 0.95}],
+        source_types={"note": "VARCHAR"},
+        target_types={"amount": "INTEGER"},
+        validation_mode="balanced",
+    )
+    assert issues
+    assert issues[0]["severity"] == "warn"
+    assert coerce_blocks_transfer(issues) is False
 
 
 def test_type_locked_blocks_any_logical_type_change():

@@ -49,10 +49,44 @@ def test_build_preflight_proof_bundle_returns_unified_decision() -> None:
 
     assert bundle["passed"] is True
     assert bundle["semantic_mapping_score"] >= 0.8
-    assert bundle["quality_score"] >= 0
+    assert bundle["quality_score"] is not None and bundle["quality_score"] >= 0
     assert bundle["compliance"]["risk_score"] >= 0.0
     assert bundle["reconciliation"]["passed"] is True
     assert bundle["transfer_decision"]["decision"] in {"approve", "review"}
+
+
+def test_preview_reconciliation_is_pre_write_not_verified() -> None:
+    bundle = build_preflight_proof_bundle(
+        columns=["id"],
+        sample_rows=[{"id": "1"}],
+        mappings=[{"source": "id", "target": "id", "confidence": 0.96}],
+        source_schemas=[{"name": "id", "inferred_type": "INTEGER", "samples": ["1"]}],
+        source_records=[{"id": "1"}],
+        target_records=[],
+        primary_key="id",
+    )
+    recon = bundle["reconciliation"]
+    assert recon["preview"] is True
+    assert recon["phase"] == "pre_write_simulation"
+    assert recon["post_write_pending"] is True
+    assert recon.get("source_checksum") in (None, "")
+    assert "pre-write" in (recon.get("message") or "").lower()
+    assert "pre-write" in (bundle.get("evidence_summary") or "").lower()
+
+
+def test_quality_not_profiled_when_no_sample_rows() -> None:
+    bundle = build_preflight_proof_bundle(
+        columns=["id"],
+        sample_rows=[],
+        mappings=[{"source": "id", "target": "id", "confidence": 0.96}],
+        source_schemas=[{"name": "id", "inferred_type": "INTEGER", "samples": []}],
+        source_records=[],
+        target_records=[],
+        primary_key="id",
+    )
+    assert bundle["quality_score"] is None
+    assert bundle["quality_grade"] == "not_profiled"
+    assert "not profiled" in (bundle.get("evidence_summary") or "").lower()
 
 
 def test_build_preflight_proof_bundle_blocks_on_pii_risk_and_missing_keys() -> None:
@@ -82,8 +116,9 @@ def test_build_preflight_proof_bundle_blocks_on_pii_risk_and_missing_keys() -> N
     )
 
     assert bundle["passed"] is False
-    assert bundle["transfer_decision"]["decision"] == "block"
+    assert bundle["transfer_decision"]["decision"] == "review"
     assert bundle["compliance"]["requires_review"] is True
+    assert bundle["transfer_decision"].get("compliance_only") is True
 
 
 def test_build_preflight_proof_bundle_requires_review_when_mapping_confidence_is_low() -> None:

@@ -29,6 +29,7 @@ import {
 } from "../components/MappingProofDrawer";
 import { useActiveData } from "../lib/DataContext";
 import { useStudioActions, type StudioAction } from "../lib/StudioActionsContext";
+import { readSession } from "../lib/session";
 import {
   analyzeDbTransfer,
   analyzeFileTransfer,
@@ -323,6 +324,7 @@ export function TransferPage({
   const [schemaPolicy, setSchemaPolicy] = useState<SchemaPolicy>("manual_review");
   const [validationMode, setValidationMode] = useState<ValidationMode>("strict");
   const [complianceAcknowledged, setComplianceAcknowledged] = useState(false);
+  const [schemaDriftAcknowledged, setSchemaDriftAcknowledged] = useState(false);
   const [dateLocale, setDateLocale] = useState<DateLocaleId>("");
   const [backfillNewFields, setBackfillNewFields] = useState(false);
   const [writeViaStaging, setWriteViaStaging] = useState(false);
@@ -2983,11 +2985,34 @@ export function TransferPage({
   const executePreflight = async (
     overrideMappings?: EditableMapping[],
     validationOverride?: ValidationMode,
-    opts?: { complianceAcknowledged?: boolean },
+    opts?: {
+      complianceAcknowledged?: boolean;
+      schemaDriftAcknowledged?: boolean;
+      acknowledgmentReason?: string;
+    },
   ) => {
     const activeMappings = overrideMappings ?? columnMappings;
     const activeValidation = validationOverride ?? validationMode;
     const ackCompliance = opts?.complianceAcknowledged ?? complianceAcknowledged;
+    const ackSchemaDrift = opts?.schemaDriftAcknowledged ?? schemaDriftAcknowledged;
+    const ackActor = readSession()?.email || readSession()?.name || "";
+    const ackReason = opts?.acknowledgmentReason || "";
+    if ((opts?.complianceAcknowledged || opts?.schemaDriftAcknowledged) && (!ackActor || ackActor.length < 2)) {
+      toast({
+        title: "Sign in required for acknowledgment",
+        message: "PII and schema-drift acknowledgments need a signed-in operator identity.",
+        tone: "warning",
+      });
+      return;
+    }
+    if ((opts?.complianceAcknowledged || opts?.schemaDriftAcknowledged) && ackReason.trim().length < 8) {
+      toast({
+        title: "Reason required",
+        message: "Provide a clear acknowledgment reason before re-validating.",
+        tone: "warning",
+      });
+      return;
+    }
     const threshold = confidenceThresholdForMode(activeValidation);
     if (
       sourceKind === "file"
@@ -3228,6 +3253,9 @@ export function TransferPage({
           backfill_new_fields: backfillNewFields,
           stream_contracts: streamContracts,
           compliance_acknowledged: ackCompliance,
+          schema_drift_acknowledged: ackSchemaDrift,
+          acknowledgment_actor: ackActor || undefined,
+          acknowledgment_reason: ackReason || undefined,
         });
       } catch (apiErr) {
         if (sourceKind === "file" && destKindMode === "file_export" && parsed) {
@@ -3860,6 +3888,12 @@ export function TransferPage({
   const mappingProofSummary = useMemo(() => {
     if (!columnMappings.length) return null;
     const rows = effectiveMappingProof.mappings ?? [];
+    const classCounts: Record<string, number> = {};
+    for (const r of rows) {
+      const label = String(r.evidence?.confidence_class_label || r.evidence?.confidence_class || "").trim();
+      if (!label) continue;
+      classCounts[label] = (classCounts[label] || 0) + 1;
+    }
     return {
       destMode: effectiveMappingProof.dest_mode,
       mappedCount: effectiveMappingProof.summary?.mapped_count ?? rows.length,
@@ -3868,6 +3902,7 @@ export function TransferPage({
       reviewCount: effectiveMappingProof.summary?.review_count ?? 0,
       avgConfidence: effectiveMappingProof.summary?.avg_confidence,
       maxConfidence: effectiveMappingProof.summary?.max_confidence,
+      classCounts,
     };
   }, [columnMappings.length, effectiveMappingProof]);
 
@@ -4040,6 +4075,7 @@ export function TransferPage({
     setAnalysis(null);
     setPreflight(null);
     setComplianceAcknowledged(false);
+    setSchemaDriftAcknowledged(false);
     setValidatedContractKey(null);
     setCellPreview(null);
     setAnalyzing(false);
@@ -5334,7 +5370,22 @@ export function TransferPage({
                 message: "Re-running Validate with governance approval for detected PII fields.",
                 tone: "info",
               });
-              void executePreflight(undefined, undefined, { complianceAcknowledged: true });
+              void executePreflight(undefined, undefined, {
+                complianceAcknowledged: true,
+                acknowledgmentReason: "Governance policy allows moving detected PII for this transfer",
+              });
+            }}
+            onAcknowledgeSchemaDrift={() => {
+              setSchemaDriftAcknowledged(true);
+              toast({
+                title: "Schema drift acknowledged",
+                message: "Re-running Validate — existing mappings kept for this run (exception recorded).",
+                tone: "info",
+              });
+              void executePreflight(undefined, undefined, {
+                schemaDriftAcknowledged: true,
+                acknowledgmentReason: "Keep existing mappings for this run; ignore new/changed columns",
+              });
             }}
             repairJobId={activeJobId || seedStudioIntent?.jobId || persistedPlanId || ""}
             seedRepairProposalId={seedRepairProposalId}

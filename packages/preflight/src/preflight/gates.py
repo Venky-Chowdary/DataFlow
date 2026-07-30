@@ -31,18 +31,78 @@ LOSSY_COERCIONS = {
 }
 
 
+def evidence_scope(
+    *,
+    kind: str,
+    sample_rows: int | None = None,
+    available_rows: int | None = None,
+    columns: int | None = None,
+    coverage: str = "sample",
+    note: str = "",
+) -> dict[str, Any]:
+    """Structured evidence scope for Validate gate cards (sample vs full vs pending)."""
+    scope: dict[str, Any] = {
+        "kind": kind,
+        "coverage": coverage,  # full_schema | sample | full_selected | pending | n/a
+    }
+    if sample_rows is not None:
+        scope["sample_rows"] = int(sample_rows)
+    if available_rows is not None:
+        scope["available_rows"] = int(available_rows)
+    if columns is not None:
+        scope["columns"] = int(columns)
+    if note:
+        scope["note"] = note
+    return scope
+
+
+def _with_scope(details: dict[str, Any] | None, scope: dict[str, Any]) -> dict[str, Any]:
+    out = dict(details or {})
+    out["evidence_scope"] = scope
+    return out
+
+
 def gate_g1_source(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     src = ctx.plan.source
+    cols = len(src.columns or [])
+    est = int(getattr(src, "row_count_estimate", 0) or 0)
+    scope = evidence_scope(
+        kind="source_connectivity",
+        columns=cols or None,
+        available_rows=est or None,
+        coverage="n/a",
+        note="Connectivity / parse — not a full-table data scan",
+    )
     if src.error:
-        return _block(GateId.G1_SOURCE, f"Source error: {src.error}", start)
+        return _block(
+            GateId.G1_SOURCE,
+            f"Source error: {src.error}",
+            start,
+            _with_scope({}, scope),
+        )
     if not src.connected and src.kind != "file":
-        return _block(GateId.G1_SOURCE, "Source not connected", start)
+        return _block(GateId.G1_SOURCE, "Source not connected", start, _with_scope({}, scope))
     if src.kind == "file" and not src.parseable:
-        return _block(GateId.G1_SOURCE, "File not parseable or corrupt", start)
+        return _block(
+            GateId.G1_SOURCE,
+            "File not parseable or corrupt",
+            start,
+            _with_scope({}, scope),
+        )
     if not src.columns:
-        return _block(GateId.G1_SOURCE, "No columns detected in source", start)
-    return _pass(GateId.G1_SOURCE, f"Source readable — {len(src.columns)} columns", start)
+        return _block(
+            GateId.G1_SOURCE,
+            "No columns detected in source",
+            start,
+            _with_scope({}, scope),
+        )
+    return _pass(
+        GateId.G1_SOURCE,
+        f"Source readable — {len(src.columns)} columns",
+        start,
+        _with_scope({"columns": cols, "row_count_estimate": est}, scope),
+    )
 
 
 def gate_g2_destination(ctx: PreflightContext) -> GateResult:
@@ -58,9 +118,19 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
         details["privilege_probe"] = probe
 
     if dest.error:
-        return _block(GateId.G2_DESTINATION, f"Destination error: {dest.error}", start, details)
+        return _block(
+            GateId.G2_DESTINATION,
+            f"Destination error: {dest.error}",
+            start,
+            _with_scope(details, evidence_scope(kind="destination_connectivity", coverage="n/a")),
+        )
     if not dest.connected:
-        return _block(GateId.G2_DESTINATION, "Destination not reachable", start, details)
+        return _block(
+            GateId.G2_DESTINATION,
+            "Destination not reachable",
+            start,
+            _with_scope(details, evidence_scope(kind="destination_connectivity", coverage="n/a")),
+        )
 
     status = str(probe.get("status") or "").strip()
     # Create-new cannot trust connectivity-only fallback — fail closed until the
@@ -74,7 +144,7 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
             f"CREATE ({detail}). Re-validate when grants are readable, or target an "
             "existing table.",
             start,
-            details,
+            _with_scope(details, evidence_scope(kind="destination_connectivity", coverage="n/a")),
         )
     if status == "unavailable" and dest.table_exists is None:
         detail = str(probe.get("detail") or "privilege catalog unavailable").strip()
@@ -83,20 +153,25 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
             "Destination table existence unknown and privilege catalog unavailable — "
             f"cannot prove CREATE or INSERT ({detail}). Re-check table/schema and grants.",
             start,
-            details,
+            _with_scope(details, evidence_scope(kind="destination_connectivity", coverage="n/a")),
         )
 
     if not dest.can_write:
         # Prefer probe.detail (engine-specific privilege) over generic SQL wording.
         if probe.get("detail") and probe.get("status") == "denied":
-            return _block(GateId.G2_DESTINATION, str(probe["detail"]), start, details)
+            return _block(
+                GateId.G2_DESTINATION,
+                str(probe["detail"]),
+                start,
+                _with_scope(details, evidence_scope(kind="destination_connectivity", coverage="n/a")),
+            )
         if dest.table_exists is False and not dest.can_create_table:
             return _block(
                 GateId.G2_DESTINATION,
                 "Insufficient privileges to CREATE the destination table "
                 "(connected, but schema CREATE / CREATE privilege denied)",
                 start,
-                details,
+                _with_scope(details, evidence_scope(kind="destination_connectivity", coverage="n/a")),
             )
         if dest.table_exists is None:
             return _block(
@@ -104,14 +179,14 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
                 "Destination table existence unknown — cannot prove CREATE or INSERT "
                 "privileges. Re-check table/schema name and credentials.",
                 start,
-                details,
+                _with_scope(details, evidence_scope(kind="destination_connectivity", coverage="n/a")),
             )
         return _block(
             GateId.G2_DESTINATION,
             "Insufficient write permissions "
             "(connected, but INSERT privilege denied on the destination table)",
             start,
-            details,
+            _with_scope(details, evidence_scope(kind="destination_connectivity", coverage="n/a")),
         )
 
     create_note = ""
@@ -133,7 +208,19 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
         msg = f"Destination writable via {method}{create_note}"
     else:
         msg = f"Destination reachable with write access{create_note}"
-    return _pass(GateId.G2_DESTINATION, msg, start, details)
+    return _pass(
+        GateId.G2_DESTINATION,
+        msg,
+        start,
+        _with_scope(
+            details,
+            evidence_scope(
+                kind="destination_connectivity",
+                coverage="n/a",
+                note="Privilege / connectivity probe — not a data scan",
+            ),
+        ),
+    )
 
 
 def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
@@ -147,7 +234,19 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
     dest_kind = (ctx.plan.destination.db_type or "").lower()
     schemaless = dest_kind in SCHEMALESS_DESTS
     if schemaless:
-        return _pass(GateId.G3_SCHEMA_CONTRACT, "Schemaless destination — no DDL type contract to validate", start)
+        return _pass(
+            GateId.G3_SCHEMA_CONTRACT,
+            "Schemaless destination — no DDL type contract to validate",
+            start,
+            _with_scope(
+                {"schemaless": True, "dest_kind": dest_kind},
+                evidence_scope(
+                    kind="schema_contract",
+                    coverage="n/a",
+                    note="Document / key-value store — no column type DDL contract",
+                ),
+            ),
+        )
 
     try:
         from services.type_system import (
@@ -269,28 +368,57 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             else:
                 issues.append(label)
 
+    sample_n = int(report.get("sampled_rows") or 0) if isinstance(report, dict) else 0
+    g3_scope = evidence_scope(
+        kind="schema_contract",
+        sample_rows=sample_n or None,
+        columns=len(ctx.plan.mappings),
+        coverage="sample" if sample_n else "full_schema",
+        note=(
+            f"{sample_n} preview rows · value-aware coercion"
+            if sample_n
+            else "Declared types only — no sample values"
+        ),
+    )
+
     if issues:
         # Sample-proven or strict declared write hazards always block Validate.
         return _block(
             GateId.G3_SCHEMA_CONTRACT,
             f"{len(issues)} type coercion issue(s)",
             start,
-            {
-                "issues": issues,
-                "issues_detail": issues_detail,
-                "warnings": warnings,
-                "rule_id": "g3_schema_contract.lossy_coercion",
-                "remediation_kind": "change_target_type",
-            },
+            _with_scope(
+                {
+                    "issues": issues,
+                    "issues_detail": issues_detail,
+                    "warnings": warnings,
+                    "rule_id": "g3_schema_contract.lossy_coercion",
+                    "remediation_kind": "change_target_type",
+                },
+                g3_scope,
+            ),
         )
     if warnings:
+        # Sentinel-null / wire-normalize risks are not "verified clean".
+        has_null_loss = any(
+            int(d.get("sentinel_nulls") or 0) > 0 for d in issues_detail
+        )
+        msg = (
+            f"Schema contract — {len(warnings)} coercion risk(s) on sample "
+            f"({'values may become NULL' if has_null_loss else 'review recommended'})"
+        )
         return _pass(
             GateId.G3_SCHEMA_CONTRACT,
-            f"Schema contract valid — {len(warnings)} coercion(s) verified against sampled values",
+            msg,
             start,
-            {"warnings": warnings, "issues_detail": issues_detail},
+            _with_scope({"warnings": warnings, "issues_detail": issues_detail}, g3_scope),
         )
-    return _pass(GateId.G3_SCHEMA_CONTRACT, "Schema contract valid", start)
+    return _pass(
+        GateId.G3_SCHEMA_CONTRACT,
+        "Schema contract valid",
+        start,
+        _with_scope({}, g3_scope),
+    )
 
 
 def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
@@ -300,6 +428,12 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
     # weak to keep, but values between the floor and the user threshold are
     # accepted by G4 so G5's data-integrity audit can apply the stricter check.
     confidence_floor = max(0.55, threshold - 0.3)
+    g4_scope = evidence_scope(
+        kind="mapping_confidence",
+        columns=len(ctx.plan.mappings),
+        coverage="full_schema",
+        note="All mapped columns · confidence classes (not a row scan)",
+    )
     mapped_targets = {m.target.lower() for m in ctx.plan.mappings}
     unmapped_required = [
         r for r in ctx.plan.required_targets if r.lower() not in mapped_targets
@@ -309,7 +443,7 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
             GateId.G4_MAPPING_CONFIDENCE,
             f"Required fields unmapped: {', '.join(unmapped_required)}",
             start,
-            {"unmapped": unmapped_required},
+            _with_scope({"unmapped": unmapped_required}, g4_scope),
         )
 
     low_confidence = [
@@ -323,7 +457,7 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
             GateId.G4_MAPPING_CONFIDENCE,
             f"{len(low_confidence)} mapping(s) below floor {confidence_floor}",
             start,
-            {"low_confidence": names},
+            _with_scope({"low_confidence": names}, g4_scope),
         )
 
     ambiguous = [
@@ -340,12 +474,13 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
             GateId.G4_MAPPING_CONFIDENCE,
             f"{len(ambiguous)} ambiguous mapping(s) require review",
             start,
-            {"ambiguous_mappings": names},
+            _with_scope({"ambiguous_mappings": names}, g4_scope),
         )
     return _pass(
         GateId.G4_MAPPING_CONFIDENCE,
         f"All {len(ctx.plan.mappings)} mappings meet confidence floor",
         start,
+        _with_scope({}, g4_scope),
     )
 
 
@@ -380,6 +515,18 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
     dry_meta = getattr(ctx, "_last_dry_run_meta", None)
     if isinstance(dry_meta, dict):
         details.update(dry_meta)
+
+    scanned = int(details.get("sample_rows_scanned") or 0)
+    available = int(details.get("sample_rows_available") or scanned or 0)
+    g5_scope = evidence_scope(
+        kind="transform_dry_run",
+        sample_rows=scanned or None,
+        available_rows=available or None,
+        columns=len(ctx.plan.mappings),
+        coverage="sample",
+        note="Preview sample only — not a full-table transform proof",
+    )
+    details = _with_scope(details, g5_scope)
 
     if not passed:
         details["issue_texts"] = [_issue_text(i) for i in errors[:20]]
@@ -418,12 +565,28 @@ def _is_drift_noise_issue(text: str) -> bool:
 
 def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
+
+    def _scope(
+        details: dict | None = None,
+        *,
+        coverage: str = "declared_ddl",
+        note: str = "DDL / identity checks",
+    ) -> dict[str, Any]:
+        return _with_scope(
+            details or {},
+            evidence_scope(kind="target_ddl", coverage=coverage, note=note),
+        )
+
     if not ctx.plan.destination.connected:
         return GateResult(
             gate_id=GateId.G6_TARGET_DDL,
             status=GateStatus.SKIP,
             message="Skipped — verify destination connectivity first (G2)",
-            details={"reason": ctx.plan.destination.error or "not_connected"},
+            details=_scope(
+                {"reason": ctx.plan.destination.error or "not_connected"},
+                coverage="n/a",
+                note="Skipped until destination connectivity is proven",
+            ),
             duration_ms=(time.perf_counter() - start) * 1000,
         )
 
@@ -494,7 +657,11 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                         GateId.G6_TARGET_DDL,
                         "Schemaless destination — uniqueness not required for this sync mode",
                         start,
-                        {"schemaless": True, "sync_mode": getattr(ctx.plan, "sync_mode", "")},
+                        _scope(
+                            {"schemaless": True, "sync_mode": getattr(ctx.plan, "sync_mode", "")},
+                            coverage="n/a",
+                            note="Schemaless · uniqueness not required for sync mode",
+                        ),
                     )
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
@@ -504,12 +671,16 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                     GateId.G6_TARGET_DDL,
                     f"UNIQUE constraint would fail on {pk_tgt} — {len(dupes)} duplicate group(s)",
                     start,
-                    {
-                        "sample_duplicates": dupes[:5],
-                        "primary_key": {"source": pk_src, "target": pk_tgt},
-                        "rule_id": "g6_target_ddl.unique",
-                        "remediation_kind": "fix_source_keys",
-                    },
+                    _scope(
+                        {
+                            "sample_duplicates": dupes[:5],
+                            "primary_key": {"source": pk_src, "target": pk_tgt},
+                            "rule_id": "g6_target_ddl.unique",
+                            "remediation_kind": "fix_source_keys",
+                        },
+                        coverage="sample",
+                        note="Sample uniqueness probe on identity key",
+                    ),
                 )
         else:
             # Key-addressed / upsert destinations must resolve an identity key.
@@ -525,12 +696,16 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                         "Identity key required — set Primary key on Map "
                         "(code/id/_id/iso) before Run to a key-addressed destination",
                         start,
-                        {
-                            "schemaless": True,
-                            "rule_id": "g6_target_ddl.missing_identity",
-                            "remediation_kind": "set_primary_key",
-                            "dest_kind": dest_kind,
-                        },
+                        _scope(
+                            {
+                                "schemaless": True,
+                                "rule_id": "g6_target_ddl.missing_identity",
+                                "remediation_kind": "set_primary_key",
+                                "dest_kind": dest_kind,
+                            },
+                            coverage="n/a",
+                            note="Identity key required for key-addressed destination",
+                        ),
                     )
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
@@ -538,11 +713,15 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             GateId.G6_TARGET_DDL,
             "Schemaless destination — no DDL contract (identity key checked)",
             start,
-            {
-                "schemaless": True,
-                "scrubbed_drift_issues": scrubbed,
-                "primary_key": {"source": pk_src, "target": pk_tgt},
-            },
+            _scope(
+                {
+                    "schemaless": True,
+                    "scrubbed_drift_issues": scrubbed,
+                    "primary_key": {"source": pk_src, "target": pk_tgt},
+                },
+                coverage="n/a",
+                note="Schemaless destination — no CREATE/ALTER contract",
+            ),
         )
 
     if ddl_issues:
@@ -552,12 +731,15 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             GateId.G6_TARGET_DDL,
             msg,
             start,
-            {
-                "issues": ddl_issues,
-                "rule_id": "g6_target_ddl.incompatible",
-                "remediation_kind": "fix_ddl",
-                "scrubbed_drift_issues": scrubbed,
-            },
+            _scope(
+                {
+                    "issues": ddl_issues,
+                    "rule_id": "g6_target_ddl.incompatible",
+                    "remediation_kind": "fix_ddl",
+                    "scrubbed_drift_issues": scrubbed,
+                },
+                note="Declared DDL compatibility issues",
+            ),
         )
 
     # ddl_compatible=False with only drift noise (or empty issues) is a host bug —
@@ -567,7 +749,10 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             GateId.G6_TARGET_DDL,
             "Target DDL compatible (ignored empty/drift-only incompatibility flag)",
             start,
-            {"scrubbed_drift_issues": scrubbed, "host_flag_ignored": True},
+            _scope(
+                {"scrubbed_drift_issues": scrubbed, "host_flag_ignored": True},
+                note="Drift-only host flag ignored",
+            ),
         )
 
     # Canonical identity key uniqueness probe for SQL destinations.
@@ -578,7 +763,10 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             GateId.G6_TARGET_DDL,
             "Target DDL compatible (uniqueness not required for this sync mode)",
             start,
-            {"sync_mode": getattr(ctx.plan, "sync_mode", ""), "scrubbed_drift_issues": scrubbed},
+            _scope(
+                {"sync_mode": getattr(ctx.plan, "sync_mode", ""), "scrubbed_drift_issues": scrubbed},
+                note="Uniqueness not required for this sync mode",
+            ),
         )
 
     source_cols = [c.name for c in ctx.plan.source.columns]
@@ -608,14 +796,23 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                 GateId.G6_TARGET_DDL,
                 f"UNIQUE constraint would fail on {pk_tgt} — {len(dupes)} duplicate group(s)",
                 start,
-                {
-                    "sample_duplicates": dupes[:5],
-                    "primary_key": {"source": pk_src, "target": pk_tgt},
-                    "rule_id": "g6_target_ddl.unique",
-                    "remediation_kind": "fix_source_keys",
-                },
+                _scope(
+                    {
+                        "sample_duplicates": dupes[:5],
+                        "primary_key": {"source": pk_src, "target": pk_tgt},
+                        "rule_id": "g6_target_ddl.unique",
+                        "remediation_kind": "fix_source_keys",
+                    },
+                    coverage="sample",
+                    note="Sample uniqueness probe on identity key",
+                ),
             )
-    return _pass(GateId.G6_TARGET_DDL, "Target DDL compatible", start)
+    return _pass(
+        GateId.G6_TARGET_DDL,
+        "Target DDL compatible",
+        start,
+        _scope({"scrubbed_drift_issues": scrubbed}),
+    )
 
 
 def _actual_disk_bytes() -> int:
@@ -633,14 +830,29 @@ def gate_g7_capacity(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     needed = ctx.plan.estimated_bytes
     available = ctx.plan.available_staging_bytes or _actual_disk_bytes()
+    g7_scope = evidence_scope(
+        kind="capacity",
+        coverage="estimated",
+        note=(
+            f"Need {needed:,} bytes · staging available {available:,}"
+            if available
+            else f"Need {needed:,} bytes · staging capacity unknown"
+        ),
+    )
     if available and needed > available:
         return _block(
             GateId.G7_CAPACITY,
             f"Insufficient staging capacity: need {needed}, have {available}",
             start,
+            _with_scope({"needed": needed, "available": available}, g7_scope),
         )
     ratio = f" ({available // max(needed, 1)}x headroom)" if available and needed else ""
-    return _pass(GateId.G7_CAPACITY, f"Capacity sufficient{ratio}", start)
+    return _pass(
+        GateId.G7_CAPACITY,
+        f"Capacity sufficient{ratio}",
+        start,
+        _with_scope({"needed": needed, "available": available}, g7_scope),
+    )
 
 
 def _dry_run_transform(value: str, transform: str | None) -> str | None:
@@ -734,6 +946,14 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
             gate_id=GateId.G8_RECONCILIATION,
             status=GateStatus.SKIP,
             message="No sample rows for dry-run reconciliation",
+            details=_with_scope(
+                {},
+                evidence_scope(
+                    kind="reconciliation",
+                    coverage="pending",
+                    note="No Validate sample rows — pre-write Gate-8 simulation skipped",
+                ),
+            ),
             duration_ms=(time.perf_counter() - start) * 1000,
         )
 
@@ -911,12 +1131,20 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
             GateId.G8_RECONCILIATION,
             f"Dry-run reconciliation passed — {source_count} row(s) (write-path sample)",
             start,
-            {
-                "source_rows": source_count,
-                "target_rows": len(mapped_rows),
-                "preview_only": True,
-                "note": "Pre-write write-path sample check — live Gate-8 checksum runs after load",
-            },
+            _with_scope(
+                {
+                    "source_rows": source_count,
+                    "target_rows": len(mapped_rows),
+                    "preview_only": True,
+                    "note": "Pre-write write-path sample check — live Gate-8 checksum runs after load",
+                },
+                evidence_scope(
+                    kind="pre_write_reconciliation",
+                    sample_rows=source_count,
+                    coverage="sample",
+                    note="Pre-write simulation — post-write checksum pending",
+                ),
+            ),
         )
 
     return _pass(
@@ -926,12 +1154,20 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
             f"transform(s) on {', '.join(nondeterministic[:5])} — PK uniqueness checked"
         ),
         start,
-        {
-            "source_rows": source_count,
-            "target_rows": len(mapped_rows),
-            "skipped_fingerprint_targets": nondeterministic[:12],
-            "preview_only": True,
-        },
+        _with_scope(
+            {
+                "source_rows": source_count,
+                "target_rows": len(mapped_rows),
+                "skipped_fingerprint_targets": nondeterministic[:12],
+                "preview_only": True,
+            },
+            evidence_scope(
+                kind="pre_write_reconciliation",
+                sample_rows=source_count,
+                coverage="sample",
+                note="Fingerprint skipped for non-deterministic transforms",
+            ),
+        ),
     )
 
 
@@ -947,6 +1183,22 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
             duration_ms=(time.perf_counter() - start) * 1000,
         )
     report = audit()
+    sample_rows = getattr(ctx, "sample_rows", None) or []
+    probe = report.get("source_uniqueness_probe") or {}
+    probe_ran = bool(probe.get("ran")) or bool(getattr(ctx, "source_duplicate_probe_ran", False))
+    g9_scope = evidence_scope(
+        kind="data_integrity",
+        sample_rows=len(sample_rows) or None,
+        columns=len(ctx.plan.mappings),
+        coverage="full_selected" if probe_ran else "sample",
+        note=(
+            f"Source uniqueness probe on identity key "
+            f"{probe.get('primary_key') or getattr(ctx, 'source_duplicate_probe_pk', '') or 'pk'} "
+            f"(GROUP BY / aggregate over selected transfer) · other integrity checks use Validate sample"
+            if probe_ran
+            else "Integrity checks on Validate sample — full-table uniqueness when source probe is unavailable"
+        ),
+    )
     encoding = next(
         (c for c in (report.get("checks") or []) if c.get("check") == "encoding_anomalies"),
         None,
@@ -958,12 +1210,16 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
             GateId.G9_DATA_INTEGRITY,
             _block_message("Data integrity failed", issues),
             start,
-            {
-                "issues": issues,
-                "issue_texts": [_issue_text(i) for i in issues],
-                "checks_failed": report.get("checks_failed", 0),
-                "encoding_issues": encoding_issues[:12],
-            },
+            _with_scope(
+                {
+                    "issues": issues,
+                    "issue_texts": [_issue_text(i) for i in issues],
+                    "checks_failed": report.get("checks_failed", 0),
+                    "encoding_issues": encoding_issues[:12],
+                    "source_uniqueness_probe": probe,
+                },
+                g9_scope,
+            ),
         )
     warnings = list(report.get("warnings") or [])
     if encoding_issues and not warnings:
@@ -972,11 +1228,15 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
         GateId.G9_DATA_INTEGRITY,
         report.get("summary", "Data integrity checks passed"),
         start,
-        {
-            "checks_passed": report.get("checks_passed", 0),
-            "warnings": warnings[:12],
-            "encoding_issues": encoding_issues[:12],
-        },
+        _with_scope(
+            {
+                "checks_passed": report.get("checks_passed", 0),
+                "warnings": warnings[:12],
+                "encoding_issues": encoding_issues[:12],
+                "source_uniqueness_probe": probe,
+            },
+            g9_scope,
+        ),
     )
 
 

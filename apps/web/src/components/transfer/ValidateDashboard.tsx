@@ -3,6 +3,8 @@ import { DtIcon } from "../DtIcon";
 import { Spinner } from "../LoadingState";
 import { Button } from "../ui/Button";
 import { explainPreflight, fetchRepairProposal, proposeRepairFromPreflight, type CellPreviewResult, type RepairMapping, type RepairProposal } from "../../lib/api";
+import { readSession } from "../../lib/session";
+import { SYNC_MODE_META } from "../../lib/transferConstants";
 import type {
   CoercionColumn,
   PreflightGate,
@@ -195,6 +197,8 @@ interface ValidateDashboardProps {
     reviewCount?: number;
     avgConfidence?: number;
     maxConfidence?: number;
+    /** Calibrated evidence-class counts from mapping proof rows. */
+    classCounts?: Record<string, number>;
   } | null;
   /** Trigger preflight from the dashboard (same as the rail CTA). */
   onRunPreflight?: () => void;
@@ -203,6 +207,11 @@ interface ValidateDashboardProps {
    * Re-runs Validate with compliance_acknowledged=true.
    */
   onAcknowledgeCompliance?: () => void;
+  /**
+   * Operator acknowledged schema drift under manual_review for this run.
+   * Re-runs Validate with schema_drift_acknowledged=true.
+   */
+  onAcknowledgeSchemaDrift?: () => void;
   /** Current Studio mappings for durable repair apply. */
   repairMappings?: RepairMapping[];
   /** After Approve & apply — merge updated mappings into Studio. */
@@ -429,6 +438,11 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
                       <code>{col.source_type}</code>
                       <DtIcon name="arrow-right" size={11} />
                       <code>{col.target_type}</code>
+                      {col.framing?.kind === "structured_serialization" && (
+                        <span className="df2-vd-coerce-frame" title="Shape-preserving structured serialization">
+                          Structured serialization
+                        </span>
+                      )}
                     </td>
                     <td className="df2-vd-coerce-wire">
                       {wireHint ? <code title={wireHint}>{wireHint}</code> : <span className="df2-vd-muted">—</span>}
@@ -452,6 +466,19 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
                   {isOpen && hasDetail && (
                     <tr className={`df2-vd-coerce-detail sev-${col.severity}`}>
                       <td colSpan={9}>
+                        {col.framing?.kind === "structured_serialization" && (
+                          <p className="df2-vd-coerce-fix is-info">
+                            <DtIcon name="layers" size={13} />
+                            {" "}
+                            {col.framing.label || "Structured-data serialization"}
+                            {" · "}
+                            Source {col.framing.source_shape || "object/array"}
+                            {" → "}
+                            Target {col.framing.target_shape || "JSON"}
+                            {col.framing.shape_preserved ? " · shape preserved" : ""}
+                            {col.framing.sample_round_trip ? " · sample wire verified" : ""}
+                          </p>
+                        )}
                         {col.suggested_fix && (
                           <p className="df2-vd-coerce-fix">
                             <DtIcon name="sparkle" size={13} /> {col.suggested_fix}
@@ -521,12 +548,26 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
   );
 }
 
-function Ring({ value, label, sub, tone }: { value: number; label: string; sub: string; tone: string }) {
+function Ring({
+  value,
+  label,
+  sub,
+  tone,
+  emptyLabel,
+}: {
+  value: number | null;
+  label: string;
+  sub: string;
+  tone: string;
+  /** When set, show this instead of a percentage (e.g. not profiled). */
+  emptyLabel?: string;
+}) {
   const r = 26;
   const c = 2 * Math.PI * r;
-  const pct = Math.max(0, Math.min(100, value));
+  const measured = value != null && Number.isFinite(value);
+  const pct = measured ? Math.max(0, Math.min(100, value)) : 0;
   return (
-    <div className={`df2-vd-ring tone-${tone}`}>
+    <div className={`df2-vd-ring tone-${tone}${measured ? "" : " is-empty"}`}>
       <div className="df2-vd-ring-svg" aria-hidden>
         <svg viewBox="0 0 64 64">
           <circle cx="32" cy="32" r={r} className="df2-vd-ring-track" />
@@ -539,7 +580,9 @@ function Ring({ value, label, sub, tone }: { value: number; label: string; sub: 
             transform="rotate(-90 32 32)"
           />
         </svg>
-        <span className="df2-vd-ring-val">{Math.round(value)}<small>%</small></span>
+        <span className="df2-vd-ring-val">
+          {measured ? <>{Math.round(value)}<small>%</small></> : (emptyLabel || "—")}
+        </span>
       </div>
       <div className="df2-vd-ring-copy">
         <strong>{label}</strong>
@@ -569,6 +612,7 @@ export function ValidateDashboard({
   mappingProofSummary = null,
   onRunPreflight,
   onAcknowledgeCompliance,
+  onAcknowledgeSchemaDrift,
   repairMappings = [],
   onRepairMappingsApplied,
   repairJobId = "",
@@ -586,6 +630,7 @@ export function ValidateDashboard({
   const [badDataOpen, setBadDataOpen] = useState(false);
   const [remediating, setRemediating] = useState(false);
   const [assistExpanded, setAssistExpanded] = useState(true);
+  const [revealCellPii, setRevealCellPii] = useState(false);
   const [copiedRunId, setCopiedRunId] = useState(false);
   const [remediationLog, setRemediationLog] = useState<
     Array<{ at: string; action: string; detail: string; outcome: string; steps?: string[] }>
@@ -748,7 +793,9 @@ export function ValidateDashboard({
     pendingVerifyRef.current = false;
     const dry = preflight.gates?.find((g) => /dry_run|integrity/i.test(g.id));
     const cleared = Boolean(preflight.passed || dry?.status === "pass");
-    const outcome = cleared ? "Verified OK — ready to Execute" : "Still blocked — remap columns on Map";
+    const outcome = cleared
+      ? "Preflight passed — Execute unlocked; Gate-8 post-write proof still pending"
+      : "Still blocked — remap columns on Map";
     const op = lastOpRef.current;
     const resultSteps: string[] = [];
     if (op?.steps?.length) {
@@ -887,7 +934,11 @@ export function ValidateDashboard({
   const heroTone = running ? "live" : preflight ? decisionTone : "idle";
 
   const semantic = proof?.semantic_mapping_score ?? 0;
-  const quality = proof?.quality_score ?? 0;
+  const qualityRaw = proof?.quality_score;
+  const qualityNotProfiled =
+    qualityRaw == null
+    || String(proof?.quality_grade || "").toLowerCase() === "not_profiled";
+  const quality = qualityNotProfiled ? null : Number(qualityRaw);
   const complianceRisk = proof?.compliance?.risk_score ?? 0;
   const qualityGrade = (proof?.quality_grade ?? "").toLowerCase();
   const confidenceBand = (proof?.confidence_band ?? "").toLowerCase();
@@ -899,6 +950,32 @@ export function ValidateDashboard({
   const dryGate = preflight?.gates?.find((g) => /dry_run|integrity/i.test(g.id));
   const sampleScanned = Number(dryGate?.details?.sample_rows_scanned ?? dryGate?.details?.sample_size ?? 0) || null;
   const engineMsTotal = (preflight?.gates ?? []).reduce((sum, g) => sum + (Number(g.duration_ms) || 0), 0);
+  const appendLikeSync = /append/i.test(syncMode || "");
+  const upsertLikeSync = /incremental|dedup|upsert|cdc|change_stream/i.test(syncMode || "")
+    && !appendLikeSync;
+  const syncMeta = syncMode ? SYNC_MODE_META[syncMode] : null;
+  const heroReadyLabel = running
+    ? "elapsed"
+    : decision === "approve"
+      ? "ready"
+      : decision === "block"
+        ? "blocked"
+        : decision === "review"
+          ? "review"
+          : "ready";
+  const complianceAck = proof?.compliance?.acknowledgment as
+    | { actor?: string; at?: string; reason?: string }
+    | undefined;
+  const schemaDriftAck = (() => {
+    const gate = preflight?.gates?.find((g) => g.id === "schema_drift");
+    const fromGate = gate?.details?.acknowledgment as
+      | { actor?: string; at?: string; reason?: string }
+      | undefined;
+    if (fromGate?.actor) return fromGate;
+    const top = (preflight as { schema_drift?: { acknowledgment?: { actor?: string; at?: string; reason?: string } } } | null)
+      ?.schema_drift?.acknowledgment;
+    return top?.actor ? top : undefined;
+  })();
 
   const executiveSummary = useMemo(
     () => buildExecutiveSummary(preflight, syncMode),
@@ -922,7 +999,14 @@ export function ValidateDashboard({
   const statusForGate = (
     meta: GateMeta,
     index: number,
-  ): { status: string; message: string; issues: string[]; durationMs?: number; privilegeProbe: PrivilegeProbeMeta | null } => {
+  ): {
+    status: string;
+    message: string;
+    issues: string[];
+    durationMs?: number;
+    privilegeProbe: PrivilegeProbeMeta | null;
+    evidenceScope: Record<string, unknown> | null;
+  } => {
     const gate = gateByKey.get(meta.key) ?? gateByKey.get(meta.key.replace(/^g\d+_/, ""));
     if (running) {
       return {
@@ -930,15 +1014,26 @@ export function ValidateDashboard({
         message: "Queued — engine returns all gate results when the pass finishes",
         issues: [],
         privilegeProbe: null,
+        evidenceScope: null,
       };
     }
     if (gate) {
       const revealed = index < revealCount;
       if (!revealed && revealCount < (preflight?.gates?.length ?? 0)) {
-        return { status: "pending", message: "Result ready — revealing…", issues: [], privilegeProbe: null };
+        return {
+          status: "pending",
+          message: "Result ready — revealing…",
+          issues: [],
+          privilegeProbe: null,
+          evidenceScope: null,
+        };
       }
       const privilegeProbe = privilegeProbeFromDetails(gate.details);
       const issues = gate.status === "block" ? issueTextsFromDetails(gate.details) : [];
+      const evidenceScope = (gate.details?.evidence_scope
+        && typeof gate.details.evidence_scope === "object")
+        ? (gate.details.evidence_scope as Record<string, unknown>)
+        : null;
       // On pass, still surface probe method/status as non-blocking issues for G2 honesty.
       if (gate.status === "pass" && privilegeProbe?.method && meta.key === "g2_destination") {
         const soft: string[] = [`Probe: ${privilegeProbe.method}`];
@@ -951,6 +1046,7 @@ export function ValidateDashboard({
           issues: soft,
           durationMs: gate.duration_ms,
           privilegeProbe,
+          evidenceScope,
         };
       }
       return {
@@ -959,9 +1055,16 @@ export function ValidateDashboard({
         issues,
         durationMs: gate.duration_ms,
         privilegeProbe,
+        evidenceScope,
       };
     }
-    return { status: "pending", message: "Awaiting validation run.", issues: [], privilegeProbe: null };
+    return {
+      status: "pending",
+      message: "Awaiting validation run.",
+      issues: [],
+      privilegeProbe: null,
+      evidenceScope: null,
+    };
   };
 
   const runStrip = async () => {
@@ -1141,7 +1244,7 @@ export function ValidateDashboard({
           </svg>
           <div className="df2-vd-hero-ring-label">
             <strong>{running ? formatElapsed(elapsedMs) : readiness}<small>{running ? "" : "%"}</small></strong>
-            <span>{running ? "elapsed" : "ready"}</span>
+            <span>{heroReadyLabel}</span>
           </div>
         </div>
 
@@ -1198,9 +1301,13 @@ export function ValidateDashboard({
 
           {!running && preflight && (qualityGrade || confidenceBand) && (
             <div className="df2-vd-proof-chips" aria-label="Proof grade">
-              {qualityGrade ? (
+              {qualityGrade && qualityGrade !== "not_profiled" ? (
                 <span className={`df2-vd-proof-chip grade-${qualityGrade}`} title="Overall proof quality grade from the engine">
                   Quality grade · {qualityGrade}
+                </span>
+              ) : qualityNotProfiled ? (
+                <span className="df2-vd-proof-chip grade-review" title="Sample quality was not calculated for this run">
+                  Data quality · not profiled
                 </span>
               ) : null}
               {confidenceBand ? (
@@ -1524,6 +1631,26 @@ export function ValidateDashboard({
                 {cellPreview.quarantine_count} will quarantine · {cellPreview.coerce_count} will coerce ·{" "}
                 {cellPreview.sample_rows_scanned} rows scanned
               </span>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  if (revealCellPii) {
+                    setRevealCellPii(false);
+                    return;
+                  }
+                  const role = (readSession()?.role || "").toLowerCase();
+                  if (role && !["admin", "owner", "editor", "operator"].includes(role)) {
+                    window.alert("Reveal requires editor/admin role for this workspace.");
+                    return;
+                  }
+                  if (window.confirm("Reveal unmasked cell preview values? Confirm only on a private screen.")) {
+                    setRevealCellPii(true);
+                  }
+                }}
+              >
+                {revealCellPii ? "Hide PII" : "Reveal PII"}
+              </Button>
             </div>
             <p className="df2-vd-cell-preview-hint">
               {coerceOnly ? (
@@ -1564,7 +1691,26 @@ export function ValidateDashboard({
                     {cell.message ? ` — ${cell.message}` : ""}
                     {cell.coerced != null ? ` → ${cell.coerced}` : ""}
                   </span>
-                  {cell.raw ? <code title={cell.raw}>{cell.raw.slice(0, 48)}</code> : null}
+                  {cell.raw ? (
+                    <code title={revealCellPii ? cell.raw : "Preview values are masked when they look like PII"}>
+                      {revealCellPii
+                        ? cell.raw.slice(0, 80)
+                        : (
+                          /email|phone|ssn|name|address|mobile/i.test(cell.source)
+                          || /@/.test(cell.raw)
+                            ? (
+                              /@/.test(cell.raw)
+                                ? (() => {
+                                  const [local, domain] = cell.raw.split("@");
+                                  if (!domain) return `${cell.raw.slice(0, 2)}***`;
+                                  return `${local.slice(0, 1)}${"*".repeat(Math.max(1, local.length - 1))}@${domain}`;
+                                })()
+                                : `${cell.raw.slice(0, 2)}***${cell.raw.slice(-2)}`
+                            )
+                            : cell.raw.slice(0, 48)
+                        )}
+                    </code>
+                  ) : null}
                 </li>
               ))}
             </ul>
@@ -1658,15 +1804,124 @@ export function ValidateDashboard({
               </strong>
             </div>
           </div>
+          {mappingProofSummary.classCounts
+            && Object.keys(mappingProofSummary.classCounts).length > 0 && (
+            <div className="df2-vd-map-proof-classes" aria-label="Calibrated confidence classes">
+              {Object.entries(mappingProofSummary.classCounts)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 5)
+                .map(([label, n]) => (
+                  <span key={label} className="df2-vd-proof-chip is-score" title="Evidence class from calibrated confidence">
+                    {label} · {n}
+                  </span>
+                ))}
+            </div>
+          )}
         </div>
       )}
 
       {!running && preflight && (
         <div className="df2-vd-metrics">
-          <Ring value={readiness} label="Readiness" sub="Overall route score" tone={heroTone} />
+          <Ring value={readiness} label="Readiness" sub="Share of gates that passed" tone={heroTone} />
           <Ring value={semantic * 100} label="Semantic mapping" sub="Column match confidence" tone="approve" />
-          <Ring value={quality * 100} label="Data quality" sub="Profiled quality grade" tone="approve" />
+          <Ring
+            value={quality == null ? null : quality * 100}
+            label="Data quality"
+            sub={qualityNotProfiled ? "Not profiled for this sample" : "Profiled quality grade"}
+            tone={qualityNotProfiled ? "review" : "approve"}
+            emptyLabel="n/a"
+          />
           <Ring value={(1 - complianceRisk) * 100} label="Compliance" sub={`Risk ${complianceRisk.toFixed(2)}`} tone={complianceRisk > 0.4 ? "review" : "approve"} />
+        </div>
+      )}
+
+      {!running && preflight && (
+        <div className="df2-vd-sync-contract" role="status">
+          <DtIcon name="layers" size={15} />
+          <div>
+            <strong>Sync contract · {syncMeta?.label || syncMode || "not set"}</strong>
+            <p>
+              {syncMeta?.detail
+                || "Open Destination → Advanced to choose overwrite, append, upsert, or CDC."}
+              {appendLikeSync
+                ? " Re-runs may duplicate destination rows — uniqueness is not enforced."
+                : ""}
+            </p>
+          </div>
+          {onOpenIdentitySettings && (
+            <Button size="sm" variant="secondary" onClick={() => onOpenIdentitySettings()}>
+              Change sync / identity
+            </Button>
+          )}
+        </div>
+      )}
+
+      {!running && preflight && appendLikeSync && (
+        <div className="df2-vd-append-warn" role="status">
+          <DtIcon name="alert" size={15} />
+          <div>
+            <strong>Append behavior</strong>
+            <p>
+              Existing destination rows will remain. Re-running this transfer may duplicate
+              records. Prefer Full overwrite, Incremental deduped (upsert), or set an identity
+              key if duplicates must not accumulate.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {!running && preflight && upsertLikeSync && (
+        <div className="df2-vd-sync-contract" role="status">
+          <DtIcon name="activity" size={15} />
+          <div>
+            <strong>Delivery · at-least-once upsert</strong>
+            <p>
+              Incremental / CDC defaults to at-least-once with destination identity upsert —
+              redelivery can rewrite the same key. Exactly-once is not claimed unless the route
+              proves idempotent keys and watermark handoff.
+            </p>
+          </div>
+          {onOpenIdentitySettings && (
+            <Button size="sm" variant="secondary" onClick={() => onOpenIdentitySettings()}>
+              Review identity key
+            </Button>
+          )}
+        </div>
+      )}
+
+      {!running && complianceAck?.actor && (
+        <div className="df2-vd-enterprise-trust" role="note">
+          <DtIcon name="shield" size={15} />
+          <div>
+            <strong>PII acknowledgment on file</strong>
+            {complianceAck.actor}
+            {complianceAck.at ? ` · ${complianceAck.at}` : ""}
+            {complianceAck.reason ? ` — ${complianceAck.reason}` : ""}
+          </div>
+        </div>
+      )}
+
+      {!running && schemaDriftAck?.actor && (
+        <div className="df2-vd-enterprise-trust" role="note">
+          <DtIcon name="shield" size={15} />
+          <div>
+            <strong>Schema drift acknowledgment on file</strong>
+            {schemaDriftAck.actor}
+            {schemaDriftAck.at ? ` · ${schemaDriftAck.at}` : ""}
+            {schemaDriftAck.reason ? ` — ${schemaDriftAck.reason}` : ""}
+          </div>
+        </div>
+      )}
+
+      {!running && preflight && (
+        <div className="df2-vd-enterprise-trust" role="note">
+          <DtIcon name="shield" size={15} />
+          <div>
+            <strong>Enterprise controls already in this build</strong>
+            Workspace JWT / API keys, OIDC·SAML·Azure AD SSO, viewer/editor/admin RBAC,
+            tenant isolation, and append-only audit events. Approvals (PII, schema drift)
+            re-validate with an explicit operator acknowledgment.
+          </div>
         </div>
       )}
 
@@ -2073,7 +2328,15 @@ export function ValidateDashboard({
         </div>
         <div className="df2-vd-rules-grid">
           {displayGates.map((meta, index) => {
-            const { status, message, issues, durationMs, privilegeProbe } = statusForGate(meta, index);
+            const { status, message, issues, durationMs, privilegeProbe, evidenceScope } = statusForGate(meta, index);
+            const scopeCoverage = evidenceScope?.coverage != null ? String(evidenceScope.coverage) : "";
+            const scopeSample = typeof evidenceScope?.sample_rows === "number"
+              ? evidenceScope.sample_rows
+              : null;
+            const scopeCols = typeof evidenceScope?.columns === "number"
+              ? evidenceScope.columns
+              : null;
+            const scopeNote = evidenceScope?.note != null ? String(evidenceScope.note) : "";
             return (
               <article key={`${meta.key}-${index}`} className={`df2-vd-rule status-${status}`}>
                 <div className="df2-vd-rule-top">
@@ -2088,6 +2351,27 @@ export function ValidateDashboard({
                 <strong className="df2-vd-rule-label">{meta.label}</strong>
                 <p className="df2-vd-rule-desc">{meta.rule}</p>
                 {status !== "pending" && message && <p className="df2-vd-rule-msg">{message}</p>}
+                {status !== "pending" && evidenceScope && (
+                  <p className="df2-vd-rule-scope" title={scopeNote || undefined}>
+                    <span className={`df2-vd-scope-chip cov-${scopeCoverage || "na"}`}>
+                      {scopeCoverage === "sample"
+                        ? "Sample"
+                        : scopeCoverage === "full_schema"
+                          ? "Full schema"
+                          : scopeCoverage === "full_selected"
+                            ? "Full selected"
+                            : scopeCoverage === "pending"
+                              ? "Pending"
+                              : "Scope"}
+                    </span>
+                    {scopeSample != null && (
+                      <span>{Number(scopeSample).toLocaleString()} row{Number(scopeSample) === 1 ? "" : "s"}</span>
+                    )}
+                    {scopeCols != null && (
+                      <span>{Number(scopeCols).toLocaleString()} col{Number(scopeCols) === 1 ? "" : "s"}</span>
+                    )}
+                  </p>
+                )}
                 {status !== "pending" && privilegeProbe && (privilegeProbe.method || privilegeProbe.status) && (
                   <div className={`df2-vd-priv-probe status-${privilegeProbe.status || "unknown"}`}>
                     {privilegeProbe.status && (
@@ -2348,6 +2632,33 @@ export function ValidateDashboard({
                           onClick={() => onReviewMappings()}
                         >
                           Review mappings
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                  {(
+                    b.details?.ack_required === true
+                    || b.details?.remediation_kind === "acknowledge_schema_drift"
+                    || /schema change detected|schema drift/i.test(b.message)
+                  ) && onAcknowledgeSchemaDrift && (
+                    <div className="df2-vd-blocker-actions df2-vd-fix-actions">
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        leadingIcon={<DtIcon name="shield" size={14} />}
+                        onClick={() => onAcknowledgeSchemaDrift()}
+                        disabled={running}
+                        title="Record that you reviewed schema drift and chose to keep existing mappings for this run"
+                      >
+                        Acknowledge drift for this run
+                      </Button>
+                      {onReviewMappings && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => onReviewMappings()}
+                        >
+                          Open Map to include columns
                         </Button>
                       )}
                     </div>

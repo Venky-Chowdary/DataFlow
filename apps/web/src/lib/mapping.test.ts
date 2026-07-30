@@ -316,4 +316,36 @@ describe("destination schema honesty", () => {
     assert.equal(editable[0].createNew, true);
     assert.ok(editable[0].confidence <= 0.93);
   });
+
+  it("caps create-new confidence in buildPreflightMappings before preflight", () => {
+    const fromEditable = buildPreflightMappings([], [
+      {
+        source: "id",
+        target: "id",
+        confidence: 0.99,
+        transform: "none",
+        approved: true,
+        requiresReview: false,
+        isPii: false,
+        createNew: true,
+        assignmentStrategy: "create_compatible_new",
+        inferredType: "INTEGER",
+      },
+    ]);
+    assert.equal(fromEditable[0].create_new, true);
+    assert.ok((fromEditable[0].confidence as number) <= 0.93);
+
+    const fromColumns = buildPreflightMappings([
+      {
+        column_name: "email",
+        confidence: 0.99,
+        inferred_type: "VARCHAR",
+        semantic_type: "email",
+        is_pii: true,
+        compliance: [],
+      },
+    ]);
+    assert.equal(fromColumns[0].create_new, true);
+    assert.ok((fromColumns[0].confidence as number) <= 0.93);
+  });
 });

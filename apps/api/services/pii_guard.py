@@ -48,13 +48,35 @@ def detect_pii(value: Any) -> dict[str, Any]:
 
 
 def mask(value: Any) -> str:
-    """Mask a sensitive value for safe logging."""
+    """Mask a sensitive value for safe logging and operator previews."""
     if value is None:
         return ""
     text = str(value)
+    # Prefer shape-preserving masks for common PII so operators still see type.
+    email_match = PII_PATTERNS["email"].fullmatch(text.strip())
+    if email_match is None and "@" in text:
+        email_match = PII_PATTERNS["email"].search(text)
+    if email_match is not None:
+        raw = email_match.group(0)
+        local, _, domain = raw.partition("@")
+        if local and domain:
+            return f"{local[0]}{'*' * max(1, len(local) - 1)}@{domain}"
     if len(text) <= 4:
         return "*" * len(text)
-    return text[:2] + "***" + text[-2:]
+    if len(text) <= 12:
+        return text[:2] + "*" * (len(text) - 4) + text[-2:]
+    # Longer tokens (IDs, nested paths): keep head/tail for correlation without full reveal.
+    return text[:6] + "…" + text[-4:]
+
+
+def mask_preview_value(value: Any, *, column: str = "", force: bool = False) -> str:
+    """Mask preview cells when the column is sensitive or the value looks like PII."""
+    if value is None:
+        return ""
+    text = str(value)
+    if force or is_sensitive_name(column) or detect_pii(text).get("has_pii"):
+        return mask(text)
+    return text
 
 
 def hash_token(value: Any, salt: str = "") -> str:

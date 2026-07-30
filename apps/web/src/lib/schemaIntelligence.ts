@@ -267,9 +267,10 @@ export function intelligenceScore(
   analysis?: EnhancedAnalysis | null,
   preflight?: PreflightResult | null,
   typeRisks?: TypeRisk[],
-): number {
+): number | null {
   if (preflight) return preflight.readiness_score;
-  if (!analysis) return 0;
+  // No measured analysis — never invent 0% as a quality score.
+  if (!analysis) return null;
   const penalty = (typeRisks?.filter((r) => r.severity === "block").length ?? 0) * 8
     + (typeRisks?.filter((r) => r.severity === "warn").length ?? 0) * 3;
   return Math.max(0, Math.min(100, Math.round(analysis.quality_score - penalty)));

@@ -40,10 +40,14 @@ def _semantic_mapping_score(
     return semantic_score, profile_notes[:10]
 
 
-def _quality_score(columns: list[str], sample_rows: list[dict[str, Any]], source_schemas: list[dict[str, Any]] | None = None) -> float:
-    """Return sample-quality score for the current dataset snapshot."""
+def _quality_score(
+    columns: list[str],
+    sample_rows: list[dict[str, Any]],
+    source_schemas: list[dict[str, Any]] | None = None,
+) -> float | None:
+    """Return sample-quality score, or None when quality was not profiled."""
     if not sample_rows:
-        return 0.0
+        return None
     from services.sample_quality import analyze_dataset_quality
 
     schema = {s["name"]: s.get("inferred_type", "VARCHAR") for s in (source_schemas or [])}
@@ -55,33 +59,44 @@ def _build_preview_reconciliation(
     source_records: list[dict[str, Any]],
     mappings: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Return a non-blocking preview reconciliation object before target rows exist."""
+    """Return a non-blocking pre-write simulation object before target rows exist.
+
+    Never claim post-write verification here — checksums and dest counts are pending.
+    """
+    sample_n = len(source_records)
+    base = {
+        "passed": True,
+        "preview": True,
+        "phase": "pre_write_simulation",
+        "post_write_pending": True,
+        "source_rows": sample_n,
+        "target_rows": 0,
+        "source_checksum": None,
+        "target_checksum": None,
+        "matched_key_count": 0,
+        "missing_key_count": 0,
+        "extra_key_count": 0,
+        "row_fidelity_score": None,
+        "message": (
+            "Pre-write reconciliation simulation only — post-write row-count and "
+            "checksum proof will be generated after transfer execution."
+        ),
+        "sample_compare": {"passed": True, "compared": 0, "mismatches": [], "skipped": True},
+    }
     if not source_records:
-        return {
-            "passed": True,
-            "preview": True,
-            "matched_key_count": 0,
-            "missing_key_count": 0,
-            "extra_key_count": 0,
-            "row_fidelity_score": 1.0,
-            "message": "Target reconciliation proof will be generated after transfer execution.",
-            "sample_compare": {"passed": True, "compared": 0, "mismatches": [], "skipped": True},
-        }
+        return base
 
     key_cols = [m.get("target") for m in mappings if m.get("target")]
     if not key_cols:
         key_cols = ["id"]
 
-    matched_key_count = min(len(source_records), len(key_cols))
     return {
-        "passed": True,
-        "preview": True,
-        "matched_key_count": matched_key_count,
-        "missing_key_count": 0,
-        "extra_key_count": 0,
-        "row_fidelity_score": 1.0,
-        "message": "Target reconciliation proof will be generated after transfer execution.",
-        "sample_compare": {"passed": True, "compared": 0, "mismatches": [], "skipped": True},
+        **base,
+        "matched_key_count": min(len(source_records), len(key_cols)),
+        "message": (
+            f"Pre-write simulation on {sample_n} sample row(s) — destination has not "
+            "been written yet. Post-write Gate-8 checksum proof is pending."
+        ),
     }
 
 
@@ -97,6 +112,8 @@ def build_preflight_proof_bundle(
     validation_mode: str = "strict",
     confidence_threshold: float = 0.85,
     compliance_acknowledged: bool = False,
+    acknowledgment_actor: str = "",
+    acknowledgment_reason: str = "",
 ) -> dict[str, Any]:
     """Assemble the unified proof bundle for a transfer preflight decision."""
     mappings = mappings or []
@@ -110,6 +127,15 @@ def build_preflight_proof_bundle(
     from services.compliance_guard import score_compliance_risk
     compliance = score_compliance_risk(columns, sample_rows)
     compliance["acknowledged"] = bool(compliance_acknowledged)
+    if compliance_acknowledged:
+        from datetime import datetime, timezone
+
+        compliance["review_status"] = "acknowledged"
+        compliance["acknowledgment"] = {
+            "actor": (acknowledgment_actor or "operator").strip() or "operator",
+            "at": datetime.now(timezone.utc).isoformat(),
+            "reason": (acknowledgment_reason or "Operator acknowledged PII governance for this transfer").strip(),
+        }
 
     from services.reconciliation import build_reconciliation_proof
     reconciliation = build_reconciliation_proof(
@@ -129,7 +155,8 @@ def build_preflight_proof_bundle(
         blockers.append("PII/compliance review required")
     elif compliance.get("requires_review") and compliance_acknowledged:
         compliance["review_status"] = "acknowledged"
-    if not reconciliation.get("passed"):
+    # Preview reconciliation must never block as a failed post-write proof.
+    if not reconciliation.get("preview") and not reconciliation.get("passed"):
         blockers.append("Row-level reconciliation proof failed")
 
     # Use the validation-mode aware confidence floor. The gate-level confidence
@@ -151,14 +178,31 @@ def build_preflight_proof_bundle(
         # schema/data failure. Keep decision=review so the UI can unlock after ack.
         if blockers == compliance_blockers and compliance_blockers:
             decision = "review"
+        elif not reconciliation.get("preview") and not reconciliation.get("passed"):
+            # Post-write reconciliation failure is a hard block.
+            decision = "block"
         else:
-            decision = "block" if (not reconciliation.get("passed") or min_confidence < effective_threshold) else "review"
+            # Low confidence / mixed review signals — surface as review, not silent approve.
+            # G4 remains the hard mapping-confidence authority at gate level.
+            decision = "review"
 
     confidence_band = "high" if min_confidence >= 0.9 else "medium" if min_confidence >= 0.75 else "low"
-    quality_grade = "excellent" if quality_score >= 0.9 else "good" if quality_score >= 0.7 else "review"
+    if quality_score is None:
+        quality_grade = "not_profiled"
+        quality_display = "not profiled"
+    else:
+        quality_grade = "excellent" if quality_score >= 0.9 else "good" if quality_score >= 0.7 else "review"
+        quality_display = f"{quality_score:.2f}"
+
+    recon_label = (
+        "pre-write simulation pending post-write proof"
+        if reconciliation.get("preview") or reconciliation.get("post_write_pending")
+        else ("passed" if reconciliation.get("passed") else "needs review")
+    )
     evidence_summary = (
-        f"Semantic mapping confidence {semantic_score:.2f} (min {min_confidence:.2f}); sample quality {quality_score:.2f}; "
-        f"compliance risk {compliance.get('risk_score', 0.0):.2f}; reconciliation {'passed' if reconciliation.get('passed') else 'needs review'}"
+        f"Semantic mapping confidence {semantic_score:.2f} (min {min_confidence:.2f}); "
+        f"sample quality {quality_display}; "
+        f"compliance risk {compliance.get('risk_score', 0.0):.2f}; reconciliation {recon_label}"
     )
 
     passed = decision == "approve"

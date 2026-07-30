@@ -11,12 +11,17 @@ from services.reconciliation import (
     read_target_sample,
     reconcile,
     sample_compare_rows,
+    stamp_post_write_phase,
     verify_target,
 )
 
 from .adapters import records_to_matrix, resolve_connector_config
 from .models import EndpointConfig
 
+
+def _finalize_reconcile(payload: dict[str, Any]) -> dict[str, Any]:
+    """Every post-write reconcile return path gets an explicit phase."""
+    return stamp_post_write_phase(payload)
 
 def _dest_types_from_mappings(mappings: list[dict]) -> dict[str, str]:
     return {
@@ -177,7 +182,7 @@ def run_reconciliation(
     expected_written = max(source_rows - dropped_rows - rows_skipped, 0)
 
     if endpoint.kind != "database":
-        return {
+        return _finalize_reconcile({
             "passed": True,
             "message": "File export — reconciliation skipped",
             "source_rows": source_rows,
@@ -185,7 +190,7 @@ def run_reconciliation(
             "rejected_rows": rejected_rows,
             "coerced_null_rows": coerced_null_rows,
             "rows_skipped": rows_skipped,
-        }
+        })
 
     db_type = endpoint.format.lower()
     cfg = resolve_connector_config(endpoint)
@@ -253,7 +258,7 @@ def run_reconciliation(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
         )
-        return report.to_dict()
+        return _finalize_reconcile(report.to_dict())
 
     # Request a real read-back; if the verifier is unavailable we will detect
     # the negative row count and surface a softer "writer only" result.
@@ -332,7 +337,7 @@ def run_reconciliation(
         except Exception:
             dest_only = False
         if strict_checksum and not dest_only:
-            return {
+            return _finalize_reconcile({
                 "passed": False,
                 "message": (
                     "Strict reconciliation requires an independent destination read-back; "
@@ -345,9 +350,9 @@ def run_reconciliation(
                 "rejected_rows": rejected_rows,
                 "coerced_null_rows": coerced_null_rows,
                 "rows_skipped": rows_skipped,
-            }
+            })
         if rows_written == expected_written:
-            return {
+            return _finalize_reconcile({
                 "passed": True,
                 "message": (
                     f"Transfer verified by writer: {rows_written:,} rows written"
@@ -362,7 +367,7 @@ def run_reconciliation(
                 "rejected_rows": rejected_rows,
                 "coerced_null_rows": coerced_null_rows,
                 "rows_skipped": rows_skipped,
-            }
+            })
         report = reconcile(
             source_rows=source_rows,
             target_rows=rows_written,
@@ -373,7 +378,7 @@ def run_reconciliation(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
         )
-        return report.to_dict()
+        return _finalize_reconcile(report.to_dict())
 
     # Data loss signal: the target table holds fewer rows than we just wrote.
     if target_rows < rows_written:
@@ -388,7 +393,7 @@ def run_reconciliation(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
         )
-        return report.to_dict()
+        return _finalize_reconcile(report.to_dict())
 
     # We have a verified read-back. Extra dest rows are legitimate for append /
     # upsert into a non-empty sink; overwrite/mirror/replace must not soft-pass
@@ -445,4 +450,4 @@ def run_reconciliation(
         coerced_null_rows=coerced_null_rows,
         rows_skipped=rows_skipped,
     )
-    return report.to_dict()
+    return _finalize_reconcile(report.to_dict())

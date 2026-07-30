@@ -157,9 +157,9 @@ def _build_suggestion(
     if sentinel_nulls:
         fix = (
             f"Column '{source}' → {target_type}: {sentinel_nulls} of {sampled} sampled "
-            f"value(s) are placeholder/empty text and will be stored as NULL. This is "
-            f"safe for a typed column; map to a text type if you need to keep the "
-            f"literal placeholder text."
+            f"non-empty value(s) cannot convert and will become NULL (potential data loss). "
+            f"Remap to a text/compatible type, quarantine unfit cells, or acknowledge "
+            f"coerce-to-NULL under a non-strict validation mode."
         )
         return fix, None, None
     return "", None, None
@@ -174,15 +174,22 @@ def analyze_coercion(
     dest_db_type: str = "",
     sample_limit: int = DEFAULT_SAMPLE_LIMIT,
     table_exists: bool | None = None,
+    validation_mode: str = "strict",
 ) -> dict[str, Any]:
     """Predict per-value write coercion for each mapping against sampled rows.
 
     Returns a JSON-serializable report (see module docstring). When there are no
     sample rows the report is empty and callers should fall back to the
     declared-type check.
+
+    Under ``strict`` / ``maximum``, non-null source values that coerce to NULL
+    (``sentinel_nulls``) are **block** — potential silent data loss. Balanced
+    modes keep them as ``warn`` so operators can proceed after reviewing.
     """
     dest_types = dest_types or {}
     rows = list(sample_rows or [])[:sample_limit]
+    mode = (validation_mode or "strict").strip().lower()
+    strict_null_loss = mode in {"strict", "maximum"}
     columns: list[dict[str, Any]] = []
     by_source: dict[str, dict[str, Any]] = {}
 
@@ -343,16 +350,25 @@ def analyze_coercion(
         # Only report columns that carry real coercion risk: a typed target with
         # values that fail or get placeholder-nulled, or where source disagrees
         # with the destination logical type (genuine coercion happening).
+        # Structural JSON/array pairs are always surfaced so Validate can label
+        # them as serialization (not a scary cast) when they round-trip cleanly.
         coercion_required = src_logical != tgt_logical
+        structural_pair = (
+            src_logical in _STRUCTURAL_LOGICALS and tgt_logical in _STRUCTURAL_LOGICALS
+        )
         if (
             failed == 0
             and sentinel_nulls == 0
             and wire_normalize == 0
             and not coercion_required
+            and not structural_pair
         ):
             continue
 
         if failed:
+            severity = "block"
+        elif sentinel_nulls and strict_null_loss:
+            # Non-null → NULL is potential data loss; never green-light under strict.
             severity = "block"
         elif sentinel_nulls or wire_normalize:
             severity = "warn"
@@ -389,6 +405,29 @@ def analyze_coercion(
                 or tgt_name.lower() in {k.lower() for k in dest_types}
             )
         )
+        structural_preserve = (
+            src_logical in _STRUCTURAL_LOGICALS
+            and tgt_logical in _STRUCTURAL_LOGICALS
+            and failed == 0
+            and sentinel_nulls == 0
+        )
+        framing = None
+        if structural_preserve:
+            framing = {
+                "kind": "structured_serialization",
+                "label": "Structured-data serialization",
+                "source_shape": src_logical,
+                "target_shape": tgt_logical,
+                "shape_preserved": True,
+                "elements_preserved": True,
+                "sample_round_trip": bool(sample_wire_form) or ok > 0,
+            }
+            if not fix:
+                fix = (
+                    f"Column '{src}' → {tgt_type}: structured {src_logical} serialized to "
+                    f"destination {tgt_logical} with shape preserved on the sample "
+                    f"({ok}/{len(rows)} OK). This is serialization, not a lossy cast."
+                )
         entry = {
             "source": src,
             "target": tgt_name,
@@ -413,6 +452,7 @@ def analyze_coercion(
             "suggested_transform": suggested_transform,
             "destination_exists": dest_col_exists,
             "table_exists": table_exists,
+            "framing": framing,
         }
         columns.append(entry)
         by_source[src] = entry

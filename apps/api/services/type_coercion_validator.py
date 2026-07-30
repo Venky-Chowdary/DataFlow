@@ -14,6 +14,7 @@ def validate_mapping_coercions(
     target_types: dict[str, str],
     schema_policy: str = "manual_review",
     confidence_floor: float = 0.85,
+    validation_mode: str = "strict",
 ) -> list[dict[str, Any]]:
     """Return structured coercion issues for each mapping pair.
 
@@ -22,11 +23,14 @@ def validate_mapping_coercions(
     confidence or whether the coercion is usually lossy. This prevents silent
     data loss from schema drift.
 
-    Lossy coercions always block — Validate must not green-light a write that will
-    fail or silently truncate at the warehouse. Confidence only affects non-lossy
-    logical-type changes under non-type_locked policies.
+    Under ``strict`` / ``maximum``, lossy coercions always block. Under
+    ``balanced`` / ``review``, declared lossy pairs warn (mirrors G3) so Map and
+    Validate agree — value-level sentinel NULL loss is still enforced by
+    ``coercion_probe`` during preflight.
     """
     type_locked = (schema_policy or "").lower() == "type_locked"
+    mode = (validation_mode or "strict").strip().lower()
+    balanced = mode in {"balanced", "review"}
     floor = max(0.0, min(1.0, float(confidence_floor)))
     issues: list[dict[str, Any]] = []
     for m in mappings:
@@ -39,8 +43,10 @@ def validate_mapping_coercions(
         if src_logical == tgt_logical:
             continue
         lossy = is_lossy_coercion(src_type, tgt_type)
-        if type_locked or lossy:
+        if type_locked:
             severity = "block"
+        elif lossy:
+            severity = "warn" if balanced else "block"
         else:
             severity = "block" if float(m.get("confidence", 0)) < floor else "warn"
         issues.append({
@@ -52,6 +58,7 @@ def validate_mapping_coercions(
             "target_logical": tgt_logical,
             "lossy": lossy,
             "severity": severity,
+            "validation_mode": mode,
             "message": f"{src} ({src_type}) → {tgt} ({tgt_type})",
             "suggested_fix": (
                 f"Remap '{src}' to a compatible {tgt_logical} column, or change the "

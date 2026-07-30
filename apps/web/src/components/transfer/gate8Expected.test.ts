@@ -1,8 +1,10 @@
 /**
- * Gate-8 hold-out accounting — run: npx --yes tsx --test apps/web/src/components/transfer/gate8Expected.test.ts
+ * Gate-8 hold-out accounting + pre-write honesty —
+ * run: npx --yes tsx --test apps/web/src/components/transfer/gate8Expected.test.ts
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { isGate8PreWriteSimulation, isGate8WriterAckOnly } from "./Gate8ProofCard";
 
 /** Mirror of Gate8ProofCard expected-dest math (quarantine hold-out). */
 function gate8ExpectedDest(sourceRows: number, rejectedRows: number, coercedNullRows: number) {
@@ -34,5 +36,71 @@ describe("Gate-8 quarantine hold-out delta", () => {
     assert.equal(g.heldOut, 0);
     assert.equal(g.expectedRows, 3);
     assert.equal(g.delta(3), 0);
+  });
+});
+
+describe("Gate-8 pre-write simulation honesty", () => {
+  it("treats preview reconciliation as pre-write, not verified", () => {
+    assert.equal(
+      isGate8PreWriteSimulation({
+        passed: true,
+        preview: true,
+        phase: "pre_write_simulation",
+        source_rows: 25,
+        target_rows: 0,
+        message: "Pre-write simulation only",
+      }),
+      true,
+    );
+  });
+
+  it("does not treat post-write proof with checksums as pre-write", () => {
+    assert.equal(
+      isGate8PreWriteSimulation({
+        passed: true,
+        source_rows: 100,
+        target_rows: 100,
+        source_checksum: "abc123",
+        target_checksum: "abc123",
+      }),
+      false,
+    );
+  });
+
+  it("treats writer-checksum-only fallback as pending, not verified", () => {
+    assert.equal(
+      isGate8PreWriteSimulation({
+        passed: false,
+        preview: true,
+        phase: "post_write_pending",
+        post_write_pending: true,
+        target_checksum: "writer-digest",
+        message: "Writer checksum captured — independent Gate-8 source/destination compare still pending",
+      }),
+      true,
+    );
+    // Defense: duplicated writer digest must not look verified.
+    assert.equal(
+      isGate8PreWriteSimulation({
+        passed: true,
+        source_checksum: "same",
+        target_checksum: "same",
+        message: "Writer checksum captured — full Gate-8 sample compare may still be loading",
+      }),
+      true,
+    );
+  });
+
+  it("treats writer-ack phase as not Verified", () => {
+    assert.equal(
+      isGate8WriterAckOnly({
+        passed: true,
+        phase: "post_write_writer_ack",
+        source_checksum: "abc",
+        target_checksum: "",
+        message: "Transfer verified by writer: 10 rows written (read-back verifier not available)",
+      }),
+      true,
+    );
   });
 });

@@ -700,7 +700,13 @@ export function buildPreflightMappings(
       return {
         source: safe.source,
         target: safe.target,
-        confidence: safe.confidence,
+        confidence: (
+          Boolean(safe.createNew || safe.assignmentStrategy === "create_compatible_new")
+            ? Math.min(safe.confidence, 0.93)
+            : safe.assignmentStrategy === "pending_dest_schema"
+              ? Math.min(safe.confidence, 0.55)
+              : safe.confidence
+        ),
         reason: safe.reason || "User reviewed",
         user_override: safe.approved && !enumBool,
         transform: uiTransformToEngine(safe.transform, safe.engineTransform),
@@ -726,14 +732,20 @@ export function buildPreflightMappings(
       };
     });
   }
+  // No editable map — treat identity as create-compatible new and cap confidence.
+  // Never emit uncapped ≥95% identity as if destination schema was proven.
   return columns.map((col) => {
     const target = normalizeMappingTarget(col.column_name, col);
     return {
       source: col.column_name,
       target,
-      confidence: boostIdentityConfidence(col.column_name, target, col.confidence),
+      confidence: boostIdentityConfidence(col.column_name, target, col.confidence, true),
       reason: col.semantic_type || col.inferred_type || "Semantic match",
       user_override: col.confidence >= 0.9,
+      create_new: true,
+      assignment_strategy: "create_compatible_new",
+      source_type: col.inferred_type || col.semantic_type,
+      target_type: col.inferred_type || col.semantic_type,
     };
   });
 }

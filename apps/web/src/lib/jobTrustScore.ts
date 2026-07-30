@@ -85,8 +85,11 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
     outcome = 78;
     outcomeNote = "Completed with quarantine — not full fidelity.";
   } else if (status === "completed" || status === "success") {
-    outcome = 100;
-    outcomeNote = "Terminal success.";
+    // Terminal success without Gate-8 is not a perfect completeness score.
+    outcome = recon ? 100 : 82;
+    outcomeNote = recon
+      ? "Terminal success."
+      : "Terminal success — Gate-8 reconcile not on this job yet.";
   }
   factors.push({ id: "completeness", label: "Completeness", score: outcome, weight: 0.25, note: outcomeNote });
 

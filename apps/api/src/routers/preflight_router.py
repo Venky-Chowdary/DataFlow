@@ -81,6 +81,11 @@ class PreflightRequest(BaseModel):
     dest_collection: str | None = None
     # Operator attested governance policy allows moving detected PII columns.
     compliance_acknowledged: bool = False
+    # Operator acknowledged schema drift under manual_review (keep mappings / ignore new cols).
+    schema_drift_acknowledged: bool = False
+    # Optional acknowledgment trail (who / why). Timestamp is stamped server-side.
+    acknowledgment_actor: str = ""
+    acknowledgment_reason: str = ""
 
 
 def _schema_default(db_type: str) -> str:
@@ -220,7 +225,58 @@ async def run_preflight(body: PreflightRequest):
         destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
         date_locale=body.date_locale,
         compliance_acknowledged=bool(body.compliance_acknowledged),
+        schema_drift_acknowledged=bool(body.schema_drift_acknowledged),
+        acknowledgment_actor=str(body.acknowledgment_actor or "").strip(),
+        acknowledgment_reason=str(body.acknowledgment_reason or "").strip(),
     )
+    if body.compliance_acknowledged or body.schema_drift_acknowledged:
+        actor = str(body.acknowledgment_actor or "").strip()
+        reason = str(body.acknowledgment_reason or "").strip()
+        if len(actor) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail="acknowledgment_actor is required when acknowledging compliance or schema drift",
+            )
+        if len(reason) < 8:
+            raise HTTPException(
+                status_code=400,
+                detail="acknowledgment_reason is required (at least 8 characters)",
+            )
+        try:
+            from services.audit_log import append_audit_event
+
+            if body.compliance_acknowledged:
+                append_audit_event(
+                    action="preflight.acknowledge_compliance",
+                    resource="preflight",
+                    actor=actor,
+                    details={
+                        "source_type": body.source_type,
+                        "dest_type": body.dest_type,
+                        "validation_mode": body.validation_mode,
+                        "reason": reason,
+                    },
+                )
+            if body.schema_drift_acknowledged:
+                append_audit_event(
+                    action="preflight.acknowledge_schema_drift",
+                    resource="preflight",
+                    actor=actor,
+                    details={
+                        "source_type": body.source_type,
+                        "dest_type": body.dest_type,
+                        "schema_policy": body.schema_policy,
+                        "validation_mode": body.validation_mode,
+                        "reason": reason,
+                    },
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail="Could not record acknowledgment audit event — acknowledgment not accepted",
+            ) from exc
     gated = apply_policy_gates(
         result,
         run_transfer_policy_gates(

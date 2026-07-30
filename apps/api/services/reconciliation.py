@@ -58,9 +58,65 @@ class ReconciliationReport:
     rows_skipped: int = 0
     # Bounded read-back sample (mismatches) for operator drill-down / export.
     sample_compare: dict[str, Any] | None = None
+    # Honest post-write phase: verified | writer_ack | failed | skipped | pending
+    phase: str = ""
+    post_write_pending: bool = False
+    preview: bool = False
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        return stamp_post_write_phase(asdict(self))
+
+
+def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
+    """Stamp explicit post-write phase so UIs never confuse writer-ack with Verified."""
+    out = dict(report or {})
+    if out.get("preview") is True or str(out.get("phase") or "").lower().startswith("pre_write"):
+        # Leave preflight simulation alone.
+        return out
+    if out.get("phase") and not str(out.get("phase")).startswith("post_write"):
+        # Unknown custom phase — still normalize pending/preview flags.
+        return out
+
+    passed = bool(out.get("passed"))
+    src = str(out.get("source_checksum") or "").strip()
+    tgt = str(out.get("target_checksum") or "").strip()
+    msg = str(out.get("message") or "").lower()
+
+    if "file export" in msg or ("skipped" in msg and "reconciliation skipped" in msg):
+        out["phase"] = "post_write_skipped"
+        out["post_write_pending"] = False
+        out["preview"] = False
+        return out
+
+    if not passed:
+        out["phase"] = "post_write_failed"
+        out["post_write_pending"] = False
+        out["preview"] = False
+        return out
+
+    independent_match = bool(src and tgt and src == tgt)
+    writer_only = (
+        not tgt
+        or "verified by writer" in msg
+        or "read-back verifier not available" in msg
+        or "read-back" in msg and "unavailable" in msg
+    )
+    if independent_match and not writer_only:
+        out["phase"] = "post_write_verified"
+        out["post_write_pending"] = False
+        out["preview"] = False
+        return out
+
+    if writer_only or (passed and src and not tgt):
+        out["phase"] = "post_write_writer_ack"
+        out["post_write_pending"] = False
+        out["preview"] = False
+        return out
+
+    out["phase"] = "post_write_pending"
+    out["post_write_pending"] = True
+    out["preview"] = False
+    return out
 
 
 def _get_case_insensitive(rec: dict[str, Any], key: str | None) -> Any:

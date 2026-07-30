@@ -64,10 +64,14 @@ class FilePreflightContext(PreflightContext):
         plan: TransferPlan,
         sample_rows: list[dict] | None = None,
         source_duplicate_findings: list[dict[str, Any]] | None = None,
+        source_duplicate_probe_ran: bool = False,
+        source_duplicate_probe_pk: str = "",
     ):
         super().__init__(plan=plan)
         self.sample_rows = sample_rows or []
         self.source_duplicate_findings = source_duplicate_findings or []
+        self.source_duplicate_probe_ran = bool(source_duplicate_probe_ran)
+        self.source_duplicate_probe_pk = str(source_duplicate_probe_pk or "")
 
     def run_dry_run(self, sample_size: int = 1000) -> tuple[bool, list[str]]:
         if not self.sample_rows:
@@ -158,6 +162,7 @@ class FilePreflightContext(PreflightContext):
                 dest_types=dest_types,
                 dest_db_type=self.plan.destination.db_type,
                 table_exists=getattr(self.plan.destination, "table_exists", None),
+                validation_mode=getattr(self.plan, "validation_mode", None) or "strict",
             )
         except Exception as exc:
             logger.warning(
@@ -232,6 +237,8 @@ class FilePreflightContext(PreflightContext):
             destination_pk_columns=getattr(self.plan, "destination_pk_columns", None)
             or None,
             source_duplicate_findings=self.source_duplicate_findings,
+            source_duplicate_probe_ran=self.source_duplicate_probe_ran,
+            source_duplicate_probe_pk=self.source_duplicate_probe_pk,
         )
 
 
@@ -616,6 +623,9 @@ def run_file_preflight(
     date_locale: str = "",
     cursor_fields: list[str] | None = None,
     compliance_acknowledged: bool = False,
+    schema_drift_acknowledged: bool = False,
+    acknowledgment_actor: str = "",
+    acknowledgment_reason: str = "",
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G8 + integrity)."""
 
@@ -812,6 +822,8 @@ def run_file_preflight(
     # Source-side duplicate-key probe: a small sample can miss duplicates in large
     # tables, so query the source directly when we have a resolved identity key.
     source_duplicate_findings: list[dict[str, Any]] = []
+    source_duplicate_probe_ran = False
+    source_duplicate_probe_pk = ""
     if (
         (source_connector_id or source_config)
         and source_table
@@ -828,16 +840,24 @@ def run_file_preflight(
                 contract_primary_key=contract_primary_key,
             )
             if source_pk:
+                source_duplicate_probe_pk = source_pk
                 source_duplicate_findings = probe_source_duplicate_keys(
                     source_connector_id=source_connector_id,
                     source_config=source_config,
                     source_table=source_table,
                     primary_key=source_pk,
                 )
+                source_duplicate_probe_ran = True
         except Exception as exc:
             logger.warning("Source duplicate-key probe skipped: %s", exc, exc_info=exc)
 
-    ctx = FilePreflightContext(plan, sample_rows, source_duplicate_findings=source_duplicate_findings)
+    ctx = FilePreflightContext(
+        plan,
+        sample_rows,
+        source_duplicate_findings=source_duplicate_findings,
+        source_duplicate_probe_ran=source_duplicate_probe_ran,
+        source_duplicate_probe_pk=source_duplicate_probe_pk,
+    )
     # Always collect every reachable gate on Validate. fail_fast=True hid G6 DDL
     # behind G5 integrity blocks and forced a multi-run fix loop. Transfer still
     # refuses to move rows when any blocker remains (passed=False).
@@ -867,6 +887,8 @@ def run_file_preflight(
         validation_mode=validation_mode,
         confidence_threshold=confidence_threshold,
         compliance_acknowledged=compliance_acknowledged,
+        acknowledgment_actor=acknowledgment_actor,
+        acknowledgment_reason=acknowledgment_reason,
     )
 
     from services.preflight_rules import enrich_blockers
@@ -1074,26 +1096,84 @@ def run_file_preflight(
             ]
             out["schema_drift"] = drift
         else:
-            # manual_review / type_locked review: continue with existing mappings.
-            out["gates"] = [
-                *out["gates"],
-                {
+            # manual_review / type_locked review: human must acknowledge before green.
+            # Silently passing hides new columns that will not transfer.
+            if schema_drift_acknowledged:
+                from datetime import datetime, timezone
+
+                ack = {
+                    "actor": (acknowledgment_actor or "operator").strip() or "operator",
+                    "at": datetime.now(timezone.utc).isoformat(),
+                    "reason": (
+                        acknowledgment_reason
+                        or "Operator acknowledged schema drift; existing mappings kept for this run"
+                    ).strip(),
+                }
+                out["gates"] = [
+                    *out["gates"],
+                    {
+                        "id": "schema_drift",
+                        "status": "pass",
+                        "message": (
+                            f"Schema change acknowledged — policy '{policy}' keeps "
+                            "existing mappings for this run (exception recorded)"
+                        ),
+                        "duration_ms": 0,
+                        "details": {
+                            "issues": list(drift.get("issues") or []),
+                            "severity": evolution.get("severity") or "warning",
+                            "schema_policy": policy,
+                            "schema_evolution": evolution,
+                            "acknowledged": True,
+                            "acknowledgment": ack,
+                            "rule_id": "schema_drift.acknowledged",
+                        },
+                    },
+                ]
+                out["schema_drift"] = {**drift, "acknowledged": True, "acknowledgment": ack}
+            else:
+                drift_msg = (
+                    f"Schema change detected — policy '{policy}' requires review "
+                    "before Execute (include new columns, ignore for this run, or "
+                    "update the contract)"
+                )
+                drift_gate = {
                     "id": "schema_drift",
-                    "status": "pass",
-                    "message": (
-                        f"Schema change detected — policy '{policy}' keeps existing "
-                        "mappings (approve on Map to include new columns)"
-                    ),
+                    "status": "block",
+                    "message": drift_msg,
                     "duration_ms": 0,
                     "details": {
                         "issues": list(drift.get("issues") or []),
                         "severity": evolution.get("severity") or "warning",
                         "schema_policy": policy,
                         "schema_evolution": evolution,
+                        "rule_id": "schema_drift.manual_review",
+                        "remediation_kind": "acknowledge_schema_drift",
+                        "ack_required": True,
                     },
-                },
-            ]
-            out["schema_drift"] = drift
+                }
+                out["gates"] = [*out["gates"], drift_gate]
+                drift_blocker = enrich_blockers(
+                    [
+                        {
+                            "id": "schema_drift",
+                            "message": drift_msg,
+                            "details": drift_gate["details"],
+                        }
+                    ],
+                    dest_kind=dest_kind,
+                    validation_mode=validation_mode,
+                )
+                out["blockers"] = [*out["blockers"], *drift_blocker]
+                out["passed"] = False
+                out["passed_count"] = sum(
+                    1 for g in out["gates"] if g.get("status") == "pass"
+                )
+                out["total_gates"] = len(out["gates"])
+                out["readiness_score"] = round(
+                    out["passed_count"] / max(out["total_gates"], 1) * 100, 1
+                )
+                out["schema_drift"] = drift
 
     return out
 

@@ -99,7 +99,16 @@ export function TransferResultDashboard({
   const showQuarantine = Boolean(result.job_id) && (!result.success || hasIntegrityLoss || rejected > 0 || issueFindings > 0);
   const sourceRows = result.reconciliation?.source_rows ?? rec;
   const targetRows = result.reconciliation?.target_rows ?? rec;
-  const passed = result.reconciliation?.passed ?? result.success;
+  // Never infer Gate-8 Passed from job success alone.
+  const reconPassed = result.reconciliation?.passed;
+  const reconcileLabel =
+    reconPassed === true
+      ? "Passed"
+      : reconPassed === false
+        ? "Failed"
+        : "Pending";
+  const reconcileTone =
+    reconPassed === true ? "ok" : reconPassed === false ? "danger" : undefined;
   const throughput = result.records_per_second ?? ds?.records_per_second;
   const checksum = fmt(ds?.checksum) || fmt(result.reconciliation?.target_checksum);
 
@@ -288,9 +297,9 @@ export function TransferResultDashboard({
           title="Rows kept with a cell forced to NULL (coerce_null policy only) — ISO→DATETIME normalize is not counted here"
         />
         <MetricCell
-          value={passed ? "Passed" : "Failed"}
+          value={reconcileLabel}
           label="Reconcile"
-          tone={passed ? "ok" : "danger"}
+          tone={reconcileTone}
         />
         <MetricCell
           value={throughput != null ? Math.round(Number(throughput)).toLocaleString() : "—"}
@@ -347,24 +356,29 @@ export function TransferResultDashboard({
         const writerChecksum = String(
           ds?.checksum || (ds as Record<string, unknown> | undefined)?.active_checksum || "",
         );
-        const hasGate8 = Boolean(result.reconciliation || writerChecksum);
-        if (!hasGate8) return null;
+        const serverReconcile = result.reconciliation as Gate8Reconciliation | undefined;
+        // Writer checksum alone is not Gate-8 — never invent matching source/target
+        // fingerprints that would render as Verified.
+        if (!serverReconcile && !writerChecksum) return null;
+        const report: Gate8Reconciliation = serverReconcile || {
+          passed: false,
+          preview: true,
+          phase: "post_write_pending",
+          post_write_pending: true,
+          message: result.success
+            ? "Writer checksum captured — independent Gate-8 source/destination compare still pending"
+            : result.error || "Transfer failed before Gate-8 reconcile",
+          // Surface writer digest as destination-side evidence only; do not clone it
+          // into source_checksum (that falsely looks like a match).
+          target_checksum: writerChecksum || undefined,
+          rejected_rows: rejected,
+          coerced_null_rows: coercedNull,
+          source_rows: rec,
+          target_rows: Number((ds as Record<string, unknown> | undefined)?.rows_written ?? rec) || rec,
+        };
         return (
           <Gate8ProofCard
-            report={
-              (result.reconciliation as Gate8Reconciliation | undefined) || {
-                passed: result.success,
-                message: result.success
-                  ? "Writer checksum captured — full Gate-8 sample compare may still be loading"
-                  : result.error || "Transfer failed before Gate-8 reconcile",
-                source_checksum: writerChecksum,
-                target_checksum: writerChecksum,
-                rejected_rows: rejected,
-                coerced_null_rows: coercedNull,
-                source_rows: rec,
-                target_rows: rec,
-              }
-            }
+            report={report}
             explanation={result.explanation}
             className="df2-result-gate8"
             onOpenValidate={onOpenValidate}
@@ -579,9 +593,13 @@ export function TransferResultDashboard({
                 <dd>
                   {hasIntegrityLoss
                     ? result.reconciliation?.message || "Completed, but not full fidelity — see fidelity note above."
-                    : passed
-                      ? "Source and destination row counts and checksums matched"
-                      : result.reconciliation?.message || "Pending verification"}
+                    : reconPassed === true
+                      ? (String(result.reconciliation?.phase || "").includes("writer_ack")
+                        ? "Writer acknowledged rows — independent source/destination checksum compare not available"
+                        : "Source and destination row counts and checksums matched")
+                      : reconPassed === false
+                        ? result.reconciliation?.message || "Reconciliation failed"
+                        : result.reconciliation?.message || "Gate-8 reconcile not captured for this job yet"}
                 </dd>
               </div>
               {droppedRows > 0 && (
@@ -625,9 +643,11 @@ export function TransferResultDashboard({
                         && result.reconciliation?.target_checksum
                         && result.reconciliation.source_checksum === result.reconciliation.target_checksum
                         ? "Yes — fingerprints equal"
-                        : result.reconciliation?.passed
-                          ? "Passed (see reconcile message)"
-                          : "Not matched"}
+                        : String(result.reconciliation?.phase || "").includes("writer_ack")
+                          ? "Writer ack only — no independent destination fingerprint"
+                          : result.reconciliation?.passed
+                            ? "Passed (see reconcile message)"
+                            : "Not matched"}
                     </dd>
                   </div>
                 </dl>

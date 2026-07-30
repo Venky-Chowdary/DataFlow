@@ -669,6 +669,8 @@ def run_integrity_audit(
     contract_primary_key: str | None = None,
     destination_pk_columns: list[str] | None = None,
     source_duplicate_findings: list[dict[str, Any]] | None = None,
+    source_duplicate_probe_ran: bool = False,
+    source_duplicate_probe_pk: str = "",
 ) -> dict[str, Any]:
     """
     Run all critical data integrity checks in one pass.
@@ -838,6 +840,12 @@ def run_integrity_audit(
         "checks": checks,
         "issues": all_issues[:30],
         "warnings": all_warnings[:20],
+        "source_uniqueness_probe": {
+            "ran": bool(source_duplicate_probe_ran),
+            "primary_key": str(source_duplicate_probe_pk or "") or None,
+            "finding_count": len(source_duplicate_findings or []),
+            "coverage": "full_selected" if source_duplicate_probe_ran else "sample",
+        },
         "summary": (
             f"{len(passed_checks)}/{len(checks)} integrity checks passed"
             if checks

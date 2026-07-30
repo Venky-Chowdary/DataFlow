@@ -82,8 +82,16 @@ export function SchemaIntelligenceRail({
           </div>
         </div>
         <div className="df2-intelligence-score">
-          <strong>{score > 0 ? `${score}%` : "—"}</strong>
-          <span>{preflight ? "readiness" : analysis ? "mapping quality" : "awaiting source"}</span>
+          <strong>{score != null && score > 0 ? `${score}%` : "—"}</strong>
+          <span>
+            {preflight
+              ? "readiness"
+              : analysis && score != null
+                ? "mapping quality"
+                : analysis
+                  ? "not profiled"
+                  : "awaiting source"}
+          </span>
         </div>
         {rowCount != null && rowCount > 0 && (
           <p className="df2-intelligence-meta">{rowCount.toLocaleString()} rows · {formatLabel}</p>

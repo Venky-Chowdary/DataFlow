@@ -5989,11 +5989,131 @@ th.df2-type-string .df2-type-badge {
   color: #0f766e;
 }
 
+.df2-vd-rule-scope {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: #475569;
+}
+
+.df2-vd-scope-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  background: #f1f5f9;
+  color: #334155;
+}
+
+.df2-vd-scope-chip.cov-sample { background: #fff7ed; color: #9a3412; }
+.df2-vd-scope-chip.cov-full_schema { background: #ecfdf5; color: #047857; }
+.df2-vd-scope-chip.cov-pending { background: #fef3c7; color: #92400e; }
+
+.df2-vd-coerce-frame {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.df2-vd-coerce-fix.is-info {
+  color: #1e3a8a;
+}
+
+.df2-vd-enterprise-trust {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.df2-vd-enterprise-trust strong {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 12px;
+  color: #0f172a;
+}
+
 /* Metric rings */
 .df2-vd-metrics {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 12px;
+}
+
+.df2-vd-append-warn {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  border: 1px solid #fcd34d;
+  border-radius: 12px;
+  background: #fffbeb;
+  color: #78350f;
+}
+
+.df2-vd-sync-contract {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  background: #f8fafc;
+  color: #334155;
+}
+
+.df2-vd-sync-contract strong {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 2px;
+  color: #0f172a;
+}
+
+.df2-vd-sync-contract p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  flex: 1;
+}
+
+.df2-vd-sync-contract .df2-btn {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.df2-vd-append-warn strong {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 2px;
+}
+
+.df2-vd-append-warn p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.df2-vd-ring.is-empty .df2-vd-ring-val {
+  font-size: 11px;
+  letter-spacing: 0.02em;
 }
 
 .df2-vd-map-proof-card {
@@ -6067,6 +6187,13 @@ th.df2-type-string .df2-type-badge {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.df2-vd-map-proof-classes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 4px 2px;
 }
 
 .df2-vd-chip.kind-mapping_proof .dt-nav-icon {

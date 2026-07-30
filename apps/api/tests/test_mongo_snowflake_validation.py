@@ -51,17 +51,34 @@ def test_probe_clean_numeric_text_to_number_does_not_block():
     assert report["has_blocking_failures"] is False
 
 
-def test_probe_placeholder_values_become_null_and_warn():
-    """Non-empty placeholders (N/A) coerce to NULL — surfaced as a warning."""
+def test_probe_placeholder_values_become_null_and_block_under_strict():
+    """Non-empty placeholders (N/A) coerce to NULL — block under strict (data loss)."""
     report = analyze_coercion(
         sample_rows=[{"score": "10"}, {"score": "N/A"}, {"score": "20"}],
         mappings=[{"source": "score", "target": "score"}],
         source_types={"score": "TEXT"},
         dest_types={"score": "NUMBER(38,0)"},
         dest_db_type="snowflake",
+        validation_mode="strict",
     )
     col = report["by_source"]["score"]
     assert col["failed"] == 0
+    assert col["sentinel_nulls"] == 1
+    assert col["severity"] == "block"
+    assert report["has_blocking_failures"] is True
+
+
+def test_probe_placeholder_values_warn_under_balanced():
+    """Balanced mode keeps sentinel-null as warn so operators can proceed after review."""
+    report = analyze_coercion(
+        sample_rows=[{"score": "10"}, {"score": "N/A"}, {"score": "20"}],
+        mappings=[{"source": "score", "target": "score"}],
+        source_types={"score": "TEXT"},
+        dest_types={"score": "NUMBER(38,0)"},
+        dest_db_type="snowflake",
+        validation_mode="balanced",
+    )
+    col = report["by_source"]["score"]
     assert col["sentinel_nulls"] == 1
     assert col["severity"] == "warn"
     assert report["has_blocking_failures"] is False
@@ -287,9 +304,9 @@ def test_real_mongo_messy_docs_to_typed_snowflake_validation():
         # tags has a bare scalar "single" but is now wrapped losslessly into
         # VARIANT → NOT a hard block (item 1 auto-wrap).
         assert report["by_source"]["tags"]["severity"] != "block"
-        # score has "N/A" placeholder → warn (nulled), NOT a hard block.
-        assert report["by_source"]["score"]["severity"] == "warn"
-        assert report["has_blocking_failures"] is False
+        # score has "N/A" placeholder → NULL under strict = block (potential data loss).
+        assert report["by_source"]["score"]["severity"] == "block"
+        assert report["has_blocking_failures"] is True
     finally:
         client["dataflow"][coll].drop()
         client.close()

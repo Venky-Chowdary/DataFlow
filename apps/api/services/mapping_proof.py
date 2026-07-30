@@ -401,8 +401,13 @@ def _schema_decision(mapping: dict, *, dest_mode: str, destination_db_type: str)
     return f"MATCH existing `{tgt}` ({carrier})"
 
 
-def _sample_preview(mapping: dict) -> list[str]:
-    """Up to 4 distinct sample values for overlap / fidelity UI — never invents data."""
+def _sample_preview_pair(mapping: dict) -> tuple[list[str], list[str]]:
+    """Return (masked, clear) sample previews — never invents data.
+
+    Masked values are the default operator-safe surface. Clear values are
+    returned for permission-gated Reveal PII in the UI; they are not shown
+    unless the operator confirms.
+    """
     raw: list[Any] = []
     for key in ("samples", "sample_values", "preview_values"):
         val = mapping.get(key)
@@ -415,19 +420,50 @@ def _sample_preview(mapping: dict) -> list[str]:
             raw.extend(val)
         elif isinstance(val, dict):
             raw.extend(list(val.keys())[:6])
-    out: list[str] = []
-    seen: set[str] = set()
+    col_name = str(mapping.get("source") or mapping.get("target") or "")
+    force_mask = bool(mapping.get("is_pii") or mapping.get("isPii"))
+    if not force_mask:
+        try:
+            from services.pii_guard import is_sensitive_name
+
+            force_mask = is_sensitive_name(col_name)
+        except Exception:
+            force_mask = False
+    try:
+        from services.pii_guard import mask_preview_value
+    except Exception:
+        mask_preview_value = None  # type: ignore[assignment]
+
+    masked: list[str] = []
+    clear: list[str] = []
+    seen_m: set[str] = set()
+    seen_c: set[str] = set()
     for v in raw:
         if v is None:
             continue
-        s = str(v).strip()
-        if not s or s in seen:
+        clear_s = str(v).strip()
+        if not clear_s:
             continue
-        seen.add(s)
-        out.append(s[:80])
-        if len(out) >= 4:
+        clear_s = clear_s[:80]
+        if mask_preview_value is not None:
+            masked_s = mask_preview_value(clear_s, column=col_name, force=force_mask)[:80]
+        else:
+            masked_s = clear_s
+        if clear_s not in seen_c and len(clear) < 4:
+            seen_c.add(clear_s)
+            clear.append(clear_s)
+        if masked_s not in seen_m and len(masked) < 4:
+            seen_m.add(masked_s)
+            masked.append(masked_s)
+        if len(masked) >= 4 and len(clear) >= 4:
             break
-    return out
+    return masked, clear
+
+
+def _sample_preview(mapping: dict) -> list[str]:
+    """Up to 4 distinct masked sample values for overlap / fidelity UI."""
+    masked, _ = _sample_preview_pair(mapping)
+    return masked
 
 
 def _evidence(mapping: dict) -> dict[str, Any]:
@@ -448,8 +484,15 @@ def _evidence(mapping: dict) -> dict[str, Any]:
         str(mapping.get("source_type") or ""),
         str(mapping.get("target_type") or mapping.get("source_type") or ""),
     )
-    preview = _sample_preview(mapping)
-    return {
+    preview, preview_clear = _sample_preview_pair(mapping)
+    classification = None
+    try:
+        from services.mapping_quality import classify_mapping_confidence
+
+        classification = classify_mapping_confidence(mapping, source_profile=profile)
+    except Exception:
+        classification = None
+    evidence: dict[str, Any] = {
         "strategy": strategy,
         "name_match": name_match,
         "type_aligned": type_aligned,
@@ -459,7 +502,18 @@ def _evidence(mapping: dict) -> dict[str, Any]:
         "quality_notes": _quality_notes_from_reasoning(str(mapping.get("reasoning") or "")),
         "create_new": bool(mapping.get("create_new") or strategy == "identity_passthrough"),
         "sample_preview": preview,
+        "sample_preview_clear": preview_clear,
+        "sample_preview_masked": True,
     }
+    if classification:
+        evidence["confidence_class"] = classification["confidence_class"]
+        evidence["confidence_class_label"] = classification["confidence_class_label"]
+        evidence["confidence_axes"] = classification["axes"]
+    elif mapping.get("confidence_class"):
+        evidence["confidence_class"] = mapping.get("confidence_class")
+        evidence["confidence_class_label"] = mapping.get("confidence_class_label")
+        evidence["confidence_axes"] = mapping.get("confidence_axes")
+    return evidence
 
 
 def confidence_breakdown(
@@ -642,6 +696,7 @@ def build_mapping_proof(
                 else "semantic"
             ),
             "sample_preview": evidence.get("sample_preview") or [],
+            "sample_preview_clear": evidence.get("sample_preview_clear") or [],
         })
 
     # Unique global risks by code+message
@@ -691,6 +746,23 @@ def build_mapping_proof(
                 })
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
+    sync_l = (effective_sync or "").strip().lower()
+    if (
+        ("append" in sync_l or sync_l in {"insert", "full_refresh", "full_refresh_append"})
+        and "upsert" not in sync_l
+        and "dedup" not in sync_l
+        and not any(r["code"] == "append_may_duplicate" for r in global_risks)
+    ):
+        global_risks.insert(0, {
+            "code": "append_may_duplicate",
+            "severity": "warn",
+            "message": (
+                "Append / insert sync keeps existing destination rows; re-runs may duplicate. "
+                "Prefer overwrite or incremental deduped (upsert) with an identity key when "
+                "duplicates must not accumulate."
+            ),
+        })
 
     avg_conf = round(sum(confidences) / len(confidences), 3) if confidences else 0.0
     max_conf = round(max(confidences), 3) if confidences else 0.0

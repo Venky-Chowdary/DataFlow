@@ -1,20 +1,11 @@
 import type { EditableMapping } from "./mapping";
+import { GATE_CATALOG } from "./preflightGates";
 import type { PreflightGate, PreflightResult } from "./types";
 
-const GATE_IDS = [
-  "g1_source",
-  "g2_destination",
-  "g3_schema_contract",
-  "g4_mapping_confidence",
-  "g5_dry_run",
-  "g9_data_integrity",
-  "g6_target_ddl",
-  "g7_capacity",
-  "g8_reconciliation",
-  "g9_sync_contract",
-  "g10_schema_policy",
-  "g11_validation_posture",
-] as const;
+/** Canonical local gate order — matches GATE_CATALOG (unique IDs). */
+const GATE_IDS = GATE_CATALOG
+  .map((g) => g.id)
+  .filter((id) => id !== "schema_drift") as string[];
 
 function applyTransform(value: unknown, transform?: string): unknown {
   if (value == null || value === "") return value;
@@ -68,35 +59,68 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
   const blockers: PreflightResult["blockers"] = [];
   const gates: PreflightGate[] = [];
 
-  const pass = (id: string, message: string) => {
-    gates.push({ id, status: "pass", message, duration_ms: 1 });
+  const pass = (id: string, message: string, scope?: Record<string, unknown>) => {
+    gates.push({
+      id,
+      status: "pass",
+      message,
+      duration_ms: 1,
+      details: scope ? { evidence_scope: scope } : undefined,
+    });
   };
-  const skip = (id: string, message: string) => {
-    gates.push({ id, status: "skip", message, duration_ms: 0 });
+  const skip = (id: string, message: string, scope?: Record<string, unknown>) => {
+    gates.push({
+      id,
+      status: "skip",
+      message,
+      duration_ms: 0,
+      details: scope ? { evidence_scope: scope } : undefined,
+    });
   };
-  const block = (id: string, message: string) => {
-    gates.push({ id, status: "block", message, duration_ms: 1 });
+  const block = (id: string, message: string, scope?: Record<string, unknown>) => {
+    gates.push({
+      id,
+      status: "block",
+      message,
+      duration_ms: 1,
+      details: scope ? { evidence_scope: scope } : undefined,
+    });
     blockers.push({ id, message });
   };
 
+  const rows = input.sampleRows ?? [];
+
   if (!input.columns.length || input.rowCount < 1) {
-    block("g1_source", "No readable rows in source file.");
+    block("g1_source", "No readable rows in source file.", {
+      kind: "source", coverage: "n/a", note: "No readable rows",
+    });
   } else {
-    pass("g1_source", `${input.rowCount.toLocaleString()} rows · ${input.columns.length} columns profiled locally.`);
+    pass("g1_source", `${input.rowCount.toLocaleString()} rows · ${input.columns.length} columns profiled locally.`, {
+      kind: "source", coverage: "sample", sample_rows: Math.min(rows.length || input.rowCount, 20),
+      note: "Browser-local file profile",
+    });
   }
 
   if (isFileExport) {
-    skip("g2_destination", "File export — no remote destination connection required.");
+    skip("g2_destination", "File export — no remote destination connection required.", {
+      kind: "destination_connectivity", coverage: "n/a", note: "File export — no remote destination",
+    });
   } else {
-    block("g2_destination", "Database destination requires API preflight.");
+    block("g2_destination", "Database destination requires API preflight.", {
+      kind: "destination_connectivity", coverage: "n/a", note: "Requires API",
+    });
   }
 
   const mappedSources = new Set(input.mappings.map((m) => m.source));
   const unmapped = input.columns.filter((c) => !mappedSources.has(c));
   if (unmapped.length > 0) {
-    block("g3_schema_contract", `${unmapped.length} source column(s) have no mapping.`);
+    block("g3_schema_contract", `${unmapped.length} source column(s) have no mapping.`, {
+      kind: "schema_contract", coverage: "full_schema", note: "Unmapped source columns",
+    });
   } else {
-    pass("g3_schema_contract", "All source columns mapped to destination fields.");
+    pass("g3_schema_contract", "All source columns mapped to destination fields.", {
+      kind: "schema_contract", coverage: "full_schema", columns: input.mappings.length,
+    });
   }
 
   const lowConfidence = input.mappings.filter((m) => m.confidence < threshold);
@@ -104,12 +128,14 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     block(
       "g4_mapping_confidence",
       `${lowConfidence.length} mapping(s) below ${(threshold * 100).toFixed(0)}% confidence — review in Map step.`,
+      { kind: "mapping_confidence", coverage: "full_schema", columns: input.mappings.length },
     );
   } else {
-    pass("g4_mapping_confidence", `${input.mappings.length} mappings meet confidence threshold.`);
+    pass("g4_mapping_confidence", `${input.mappings.length} mappings meet confidence threshold.`, {
+      kind: "mapping_confidence", coverage: "full_schema", columns: input.mappings.length,
+    });
   }
 
-  const rows = input.sampleRows ?? [];
   let transformOk = true;
   for (const m of input.mappings) {
     for (const row of rows.slice(0, 20)) {
@@ -123,30 +149,53 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     if (!transformOk) break;
   }
   if (!transformOk) {
-    block("g5_dry_run", "A transform failed on sample rows.");
+    block("g5_dry_run", "A transform failed on sample rows.", {
+      kind: "dry_run", coverage: "sample", sample_rows: Math.min(rows.length, 20),
+    });
   } else {
-    pass("g5_dry_run", `Dry-run transforms passed on ${Math.min(rows.length, 20)} sample row(s).`);
+    pass("g5_dry_run", `Dry-run transforms passed on ${Math.min(rows.length, 20)} sample row(s).`, {
+      kind: "dry_run", coverage: "sample", sample_rows: Math.min(rows.length, 20),
+    });
   }
-
-  pass("g9_data_integrity", "Sampled types and nulls within expected bounds.");
 
   if (isFileExport) {
-    skip("g6_target_ddl", "No DDL for file export.");
+    skip("g6_target_ddl", "No DDL for file export.", {
+      kind: "target_ddl", coverage: "n/a", note: "File export — no DDL",
+    });
   } else {
-    block("g6_target_ddl", "DDL validation requires API.");
+    block("g6_target_ddl", "DDL validation requires API.", {
+      kind: "target_ddl", coverage: "n/a", note: "Requires API",
+    });
   }
 
-  pass("g7_capacity", `${input.rowCount.toLocaleString()} rows within local export capacity.`);
+  pass("g7_capacity", `${input.rowCount.toLocaleString()} rows within local export capacity.`, {
+    kind: "capacity", coverage: "estimated", note: "Local export capacity estimate",
+  });
 
   if (isFileExport) {
-    skip("g8_reconciliation", "Reconciliation runs after API-backed transfer.");
+    skip("g8_reconciliation", "Reconciliation runs after API-backed transfer.", {
+      kind: "reconciliation", coverage: "pending", note: "Post-write Gate-8 requires API transfer",
+    });
   } else {
-    block("g8_reconciliation", "Reconciliation requires API.");
+    block("g8_reconciliation", "Reconciliation requires API.", {
+      kind: "reconciliation", coverage: "n/a", note: "Requires API",
+    });
   }
 
-  skip("g9_sync_contract", "Full refresh file export — sync contract not applicable.");
-  skip("g10_schema_policy", "Browser-only — schema policy gate skipped; requires API.");
-  skip("g11_validation_posture", "Browser-only — validation posture skipped; requires API.");
+  pass("g9_data_integrity", "Sampled types and nulls within expected bounds.", {
+    kind: "data_integrity", coverage: "sample", sample_rows: Math.min(rows.length, 20),
+    note: "Browser sample only — not a full-table uniqueness probe",
+  });
+
+  skip("g9_sync_contract", "Full refresh file export — sync contract not applicable.", {
+    kind: "sync_contract", coverage: "n/a",
+  });
+  skip("g10_schema_policy", "Browser-only — schema policy gate skipped; requires API.", {
+    kind: "schema_policy", coverage: "n/a",
+  });
+  skip("g11_validation_posture", "Browser-only — validation posture skipped; requires API.", {
+    kind: "validation_posture", coverage: "n/a",
+  });
 
   const passedCount = gates.filter((g) => g.status === "pass").length;
   const skippedCount = gates.filter((g) => g.status === "skip").length;
@@ -159,13 +208,8 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
 
   // Local export never runs remote DDL / destination probe / post-write reconcile —
   // grade as "review" so the UI cannot be read as production-governed proof.
-  const qualityGrade: "excellent" | "good" | "review" = isFileExport
-    ? "review"
-    : passed
-      ? avgConfidence >= 0.9
-        ? "good"
-        : "review"
-      : "review";
+  // Do not invent a numeric quality score — sample mapping confidence ≠ profiled quality.
+  const qualityGrade: "excellent" | "good" | "review" | "not_profiled" = "not_profiled";
   const confidenceBand: "high" | "medium" | "low" =
     avgConfidence >= 0.9 ? "high" : avgConfidence >= 0.75 ? "medium" : "low";
   // Cap readiness — skipped production gates must not look like a full API pass.
@@ -197,8 +241,7 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
         "Local browser validation — start the API for production gates (destination probe, DDL, reconcile).",
         ...localWarnings.slice(0, 2),
       ],
-      // Quality score reflects sample mapping confidence only — not destination honesty.
-      quality_score: Math.min(0.72, 0.45 + avgConfidence * 0.27),
+      quality_score: null,
       confidence_band: confidenceBand,
       quality_grade: qualityGrade,
       evidence_summary: passed
@@ -216,6 +259,8 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
       reconciliation: {
         passed: false,
         preview: true,
+        phase: "pre_write_simulation",
+        post_write_pending: true,
         message: "Not run — full reconciliation requires an API-backed transfer.",
       },
       transfer_decision: {

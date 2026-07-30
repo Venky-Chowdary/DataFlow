@@ -56,7 +56,9 @@ export function ValidateActionsRail({
   const proofReason = preflight?.proof_bundle?.transfer_decision?.reason || "No blocking issues detected";
   const executeDisabled = transferring || !passed || executeBlocked;
   const confidenceBand = preflight?.proof_bundle?.confidence_band?.toUpperCase() || "MEDIUM";
-  const qualityGrade = preflight?.proof_bundle?.quality_grade?.toUpperCase() || "GOOD";
+  const qualityGrade = preflight?.proof_bundle?.quality_grade
+    ? preflight.proof_bundle.quality_grade.toUpperCase().replace(/_/g, " ")
+    : "NOT PROFILED";
   const proofWarnings = preflight?.proof_bundle?.transfer_decision?.warnings || [];
   const executiveSummary = useMemo(() => buildExecutiveSummary(preflight), [preflight]);
   const displayBlockers = useMemo(

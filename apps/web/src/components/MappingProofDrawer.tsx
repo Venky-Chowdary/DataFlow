@@ -9,6 +9,7 @@ import { Dialog } from "./ui/Dialog";
 import { DtIcon } from "./DtIcon";
 import type { EditableMapping } from "../lib/mapping";
 import { typeBadgeClass } from "../lib/typeDisplay";
+import { readSession } from "../lib/session";
 
 export interface MappingProofEvidence {
   strategy?: string;
@@ -20,6 +21,15 @@ export interface MappingProofEvidence {
   quality_notes?: string[];
   create_new?: boolean;
   sample_preview?: string[];
+  sample_preview_masked?: boolean;
+  confidence_class?: string;
+  confidence_class_label?: string;
+  confidence_axes?: {
+    mapping?: number;
+    transform_safety?: number;
+    semantic?: number;
+    data_quality?: number;
+  };
   confidence_breakdown?: {
     strategy?: number;
     name?: number;
@@ -52,6 +62,8 @@ export interface MappingProofRow {
   assignment_strategy?: string;
   match_quality?: string;
   sample_preview?: string[];
+  /** Studio-memory clear samples for Reveal (never preferred over masked display). */
+  sample_preview_clear?: string[];
 }
 
 export interface MappingProof {
@@ -189,6 +201,10 @@ export function buildClientMappingProof(
       schema_decision: schema,
       assignment_strategy: destMode === "create_new" ? "identity_passthrough" : undefined,
       match_quality: nameMatch && typeAligned ? "exact_name" : nameMatch ? "name_only" : typeAligned ? "type_only" : "semantic",
+      sample_preview: m.sample
+        ? [maskPreviewSample(m.sample, m.source)]
+        : undefined,
+      sample_preview_clear: m.sample ? [m.sample] : undefined,
     };
   });
 
@@ -284,6 +300,9 @@ export function mergeMappingProof(
       reasoning: live.reason || row.reasoning,
       requires_review: live.requiresReview || schemaPending,
       risks: withoutTransformRisks,
+      sample_preview_clear: live.sample
+        ? [live.sample]
+        : row.sample_preview_clear,
     };
   });
   const cappedMax = createNew
@@ -361,8 +380,49 @@ function ConfidenceBars({ breakdown, total }: { breakdown?: MappingProofEvidence
   );
 }
 
-function PairCard({ r }: { r: MappingProofRow }) {
+function ConfidenceAxes({ axes }: { axes?: MappingProofEvidence["confidence_axes"] }) {
+  if (!axes) return null;
+  const parts = [
+    { key: "mapping", label: "Mapping", value: axes.mapping ?? 0 },
+    { key: "transform_safety", label: "Transform", value: axes.transform_safety ?? 0 },
+    { key: "semantic", label: "Semantic", value: axes.semantic ?? 0 },
+    { key: "data_quality", label: "Sample DQ", value: axes.data_quality ?? 0 },
+  ];
+  return (
+    <div className="df2-map-proof-axes" aria-label="Calibrated confidence axes">
+      {parts.map((p) => (
+        <span key={p.key} className="df2-map-proof-axis-chip">
+          {p.label} {pct(p.value)}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** Defense-in-depth PII mask for samples that arrived unmasked from older API responses. */
+function maskPreviewSample(value: string, column: string): string {
+  const text = String(value || "");
+  const col = column.toLowerCase();
+  const looksSensitive = /email|phone|ssn|passport|address|name|dob|birth|mobile/.test(col);
+  if (/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(text)) {
+    const [local, domain] = text.split("@");
+    return `${local[0]}${"*".repeat(Math.max(1, local.length - 1))}@${domain}`;
+  }
+  if (!looksSensitive) return text;
+  if (text.length <= 4) return "*".repeat(text.length);
+  if (text.length <= 12) return `${text.slice(0, 2)}${"*".repeat(text.length - 4)}${text.slice(-2)}`;
+  return `${text.slice(0, 6)}…${text.slice(-4)}`;
+}
+
+function PairCard({ r, revealPii }: { r: MappingProofRow; revealPii: boolean }) {
   const aligned = r.evidence?.name_match && r.evidence?.type_aligned;
+  const masked = (r.sample_preview?.length ? r.sample_preview : r.evidence?.sample_preview || [])
+    .map((s) => maskPreviewSample(s, r.source));
+  const clear = r.sample_preview_clear?.length
+    ? r.sample_preview_clear
+    : null;
+  const samples = revealPii && clear?.length ? clear : masked;
+  const canReveal = Boolean(clear?.length);
   return (
     <li className={`df2-map-proof-pair${aligned ? " is-aligned" : ""}${r.requires_review ? " is-review" : ""}`}>
       <div className="df2-map-proof-rail" aria-label={`${r.source} maps to ${r.target}`}>
@@ -390,6 +450,11 @@ function PairCard({ r }: { r: MappingProofRow }) {
           {fidelityLabel(r.transform_fidelity)} · {r.transform || "none"}
         </span>
         <span className="df2-badge df2-badge-muted df2-badge-xs">{matchQualityLabel(r.match_quality)}</span>
+        {r.evidence?.confidence_class_label && (
+          <span className="df2-badge df2-badge-muted df2-badge-xs" title="Calibrated evidence class">
+            {r.evidence.confidence_class_label}
+          </span>
+        )}
         {r.pii?.map((p) => (
           <span key={p} className="df2-badge df2-badge-run df2-badge-xs">{p}</span>
         ))}
@@ -403,15 +468,24 @@ function PairCard({ r }: { r: MappingProofRow }) {
       )}
       {r.reasoning && <p className="df2-map-proof-why">{r.reasoning}</p>}
 
-      {((r.sample_preview?.length ?? 0) > 0 || (r.evidence?.sample_preview?.length ?? 0) > 0) && (
-        <div className="df2-map-proof-samples" aria-label="Sample values from source">
-          <span className="df2-map-proof-samples-label">Sample values (source)</span>
-          {(r.sample_preview?.length ? r.sample_preview : r.evidence?.sample_preview || []).map((s) => (
-            <code key={s} className="df2-map-proof-sample" title={s}>{s}</code>
+      {samples.length > 0 && (
+        <div className="df2-map-proof-samples" aria-label="Sample values from source (masked when PII)">
+          <span className="df2-map-proof-samples-label">
+            Sample values (source
+            {revealPii && canReveal
+              ? " · revealed"
+              : r.evidence?.sample_preview_masked || r.pii?.length || canReveal
+                ? " · PII masked"
+                : ""}
+            )
+          </span>
+          {samples.map((s) => (
+            <code key={s} className="df2-map-proof-sample" title={revealPii ? s : undefined}>{s}</code>
           ))}
         </div>
       )}
 
+      <ConfidenceAxes axes={r.evidence?.confidence_axes} />
       <ConfidenceBars breakdown={r.evidence?.confidence_breakdown} total={r.confidence} />
 
       {r.evidence && (
@@ -472,6 +546,7 @@ export function MappingProofDrawer({
   const [expanded, setExpanded] = useState(false);
   const [filter, setFilter] = useState<"all" | "risks" | "review" | "pii">("all");
   const [query, setQuery] = useState("");
+  const [revealPii, setRevealPii] = useState(false);
 
   const rows = useMemo(() => {
     let list = proof.mappings ?? [];
@@ -625,11 +700,36 @@ export function MappingProofDrawer({
                 {label}
               </button>
             ))}
+            <button
+              type="button"
+              className={`df2-btn df2-btn-sm ${revealPii ? "df2-btn-primary" : "df2-btn-ghost"}`}
+              title={
+                revealPii
+                  ? "Hide clear PII samples"
+                  : "Reveal clear PII samples from Studio memory (audited by policy — confirm before sharing screens)"
+              }
+              onClick={() => {
+                if (revealPii) {
+                  setRevealPii(false);
+                  return;
+                }
+                const role = (readSession()?.role || "").toLowerCase();
+                if (role && !["admin", "owner", "editor", "operator"].includes(role)) {
+                  window.alert("Reveal requires editor/admin role for this workspace.");
+                  return;
+                }
+                if (window.confirm("Reveal unmasked sample values in this drawer? Confirm only on a private screen.")) {
+                  setRevealPii(true);
+                }
+              }}
+            >
+              {revealPii ? "Hide PII" : "Reveal PII"}
+            </button>
           </div>
         </div>
         <ul className="df2-map-proof-pairs">
           {rows.map((r) => (
-            <PairCard key={`${r.source}->${r.target}`} r={r} />
+            <PairCard key={`${r.source}->${r.target}`} r={r} revealPii={revealPii} />
           ))}
           {rows.length === 0 && (
             <li className="df2-drawer-empty-line">No pairs match this filter.</li>

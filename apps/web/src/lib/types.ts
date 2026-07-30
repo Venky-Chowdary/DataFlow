@@ -274,6 +274,9 @@ export interface JobProgress extends TransferJob {
   reconciliation?: {
     passed?: boolean;
     message?: string;
+    phase?: string;
+    preview?: boolean;
+    post_write_pending?: boolean;
     source_rows?: number;
     target_rows?: number;
     rejected_rows?: number;
@@ -400,9 +403,10 @@ export interface PreflightProofBundle {
   passed: boolean;
   semantic_mapping_score: number;
   semantic_notes: string[];
-  quality_score: number;
+  /** null when sample quality was not profiled — never treat as 0%. */
+  quality_score: number | null;
   confidence_band?: "high" | "medium" | "low";
-  quality_grade?: "excellent" | "good" | "review";
+  quality_grade?: "excellent" | "good" | "review" | "not_profiled";
   evidence_summary?: string;
   compliance: {
     risk_score: number;
@@ -411,11 +415,22 @@ export interface PreflightProofBundle {
     details?: Record<string, unknown>;
     acknowledged?: boolean;
     review_status?: string;
+    acknowledgment?: {
+      actor?: string;
+      at?: string;
+      reason?: string;
+    };
   };
   reconciliation: {
     passed: boolean;
     preview?: boolean;
-    row_fidelity_score?: number;
+    phase?: string;
+    post_write_pending?: boolean;
+    source_rows?: number;
+    target_rows?: number;
+    source_checksum?: string | null;
+    target_checksum?: string | null;
+    row_fidelity_score?: number | null;
     matched_key_count?: number;
     missing_key_count?: number;
     extra_key_count?: number;
@@ -467,6 +482,15 @@ export interface CoercionColumn {
   suggested_fix?: string;
   suggested_target_type?: string | null;
   suggested_transform?: string | null;
+  framing?: {
+    kind?: string;
+    label?: string;
+    source_shape?: string;
+    target_shape?: string;
+    shape_preserved?: boolean;
+    elements_preserved?: boolean;
+    sample_round_trip?: boolean;
+  } | null;
 }
 
 export interface CoercionReport {
@@ -627,6 +651,9 @@ export interface TransferResult {
   reconciliation?: {
     passed?: boolean;
     message?: string;
+    phase?: string;
+    preview?: boolean;
+    post_write_pending?: boolean;
     source_rows?: number;
     target_rows?: number;
     rejected_rows?: number;

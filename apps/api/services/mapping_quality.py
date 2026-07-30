@@ -16,6 +16,46 @@ BOOL_VALUES = {"true", "false", "yes", "no", "y", "n", "1", "0", "t", "f"}
 # Create-new identity is "ready to CREATE", not proven against an existing dest.
 IDENTITY_PASSTHROUGH_CONF_CAP = 0.93
 
+# Evidence-class anchors — calibrated bands so scores do not cluster on one formula.
+# Create-new stays capped; match-existing varies by evidence strength.
+CONFIDENCE_CLASS_ANCHORS: dict[str, float] = {
+    "exact_name_type": 0.99,
+    "safe_type_promotion": 0.97,
+    "structural_json": 0.91,
+    "semantic_inference": 0.78,
+    "custom_transform_sparse": 0.66,
+    "create_new_projected": IDENTITY_PASSTHROUGH_CONF_CAP,
+    "weak_or_conflicted": 0.55,
+}
+
+CONFIDENCE_CLASS_LABELS: dict[str, str] = {
+    "exact_name_type": "Exact name + compatible type",
+    "safe_type_promotion": "Deterministic type promotion",
+    "structural_json": "Structured data → JSON/VARIANT",
+    "semantic_inference": "Semantic name inference",
+    "custom_transform_sparse": "Custom transform · sparse sample",
+    "create_new_projected": "Projected CREATE · not dest-proven",
+    "weak_or_conflicted": "Weak or conflicted evidence",
+}
+
+_SAFE_PROMOTIONS = frozenset({
+    ("integer", "bigint"),
+    ("integer", "decimal"),
+    ("integer", "float"),
+    ("integer", "double"),
+    ("integer", "number"),
+    ("float", "double"),
+    ("float", "decimal"),
+    ("float", "number"),
+    ("date", "timestamp"),
+    ("boolean", "integer"),
+    ("string", "text"),
+    ("text", "string"),
+})
+
+_IDENTITY_TRANSFORMS = frozenset({"", "none", "identity", "cast", "auto", "passthrough"})
+_STRUCTURAL_LOGICALS = frozenset({"json", "array"})
+
 _TEMPORAL_NAME_TERMS = frozenset({"date", "time", "dt", "timestamp", "created", "updated"})
 _TEMPORAL_TYPE_TOKENS = (
     "DATE",
@@ -135,6 +175,140 @@ def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
         )
 
     return profile
+
+
+def _logical_type(type_str: str) -> str:
+    try:
+        from services.type_system import normalize_logical_type
+
+        return str(normalize_logical_type(type_str) or "string").lower()
+    except Exception:
+        t = str(type_str or "").upper()
+        if any(x in t for x in ("INT", "NUMBER", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE")):
+            return "integer" if "INT" in t or t == "NUMBER" else "decimal"
+        if any(x in t for x in ("JSON", "JSONB", "VARIANT", "ARRAY")):
+            return "json"
+        if any(x in t for x in ("DATE", "TIME", "TIMESTAMP")):
+            return "timestamp" if "TIME" in t else "date"
+        if "BOOL" in t:
+            return "boolean"
+        return "string"
+
+
+def classify_mapping_confidence(
+    mapping: dict,
+    *,
+    source_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return evidence class + calibrated axes (not a single opaque %).
+
+    Axes are independent signals so operators can see *why* the score is high
+    or low — mapping fit, transform safety, semantic classification, sample DQ.
+    """
+    profile = source_profile or {}
+    is_identity = bool(
+        mapping.get("assignment_strategy") == "identity_passthrough" or mapping.get("create_new")
+    )
+    src = str(mapping.get("source") or "")
+    tgt = str(mapping.get("target") or "")
+    src_l = src.lower()
+    tgt_l = tgt.lower()
+    src_logical = _logical_type(
+        str(mapping.get("source_type") or mapping.get("inferred_type") or "")
+    )
+    tgt_logical = _logical_type(
+        str(mapping.get("target_type") or mapping.get("dest_type") or mapping.get("source_type") or "")
+    )
+    transform = str(mapping.get("transform") or "").strip().lower()
+    has_custom_xf = bool(transform) and transform not in _IDENTITY_TRANSFORMS
+    samples = [str(x) for x in (profile.get("samples") or []) if str(x).strip()]
+    if not samples and mapping.get("samples"):
+        samples = [str(x) for x in mapping["samples"] if str(x).strip()]
+    sparse = len(samples) < 3
+    name_exact = src_l == tgt_l or src_l.replace("_", "") == tgt_l.replace("_", "")
+    type_same = src_logical == tgt_logical
+    safe_promo = (src_logical, tgt_logical) in _SAFE_PROMOTIONS
+    structural = src_logical in _STRUCTURAL_LOGICALS and tgt_logical in _STRUCTURAL_LOGICALS
+    pattern = float(profile.get("semantic_pattern_score") or 0.0)
+    null_rate = float(profile.get("null_rate") or 0.0)
+
+    if is_identity:
+        cls = "create_new_projected"
+    elif has_custom_xf and sparse:
+        cls = "custom_transform_sparse"
+    elif structural and not has_custom_xf:
+        cls = "structural_json"
+    elif name_exact and type_same and not has_custom_xf:
+        cls = "exact_name_type"
+    elif name_exact and (type_same or safe_promo) and not has_custom_xf:
+        cls = "safe_type_promotion"
+    elif name_exact and not type_same and not safe_promo and not structural:
+        # Exact name but incompatible types — do not look like 99%.
+        cls = "weak_or_conflicted"
+    elif not name_exact and pattern < 0.5:
+        cls = "semantic_inference"
+    elif not name_exact:
+        cls = "semantic_inference"
+    else:
+        cls = "safe_type_promotion" if safe_promo else "semantic_inference"
+
+    # Wrong-role demotion: numeric-looking name on text-heavy country/currency fields, etc.
+    if profile.get("likely_numeric") and any(
+        t in tgt_l for t in ("country", "currency", "status", "state", "city", "email")
+    ):
+        if cls in {"exact_name_type", "safe_type_promotion"}:
+            cls = "weak_or_conflicted"
+
+    anchor = CONFIDENCE_CLASS_ANCHORS[cls]
+    # Axes (0–1): independent of the single display percentage.
+    mapping_axis = 0.99 if name_exact and (type_same or safe_promo) else (
+        0.72 if name_exact else (0.55 if pattern >= 0.5 else 0.40)
+    )
+    transform_axis = (
+        0.95 if structural and not has_custom_xf
+        else 0.88 if not has_custom_xf
+        else (0.55 if sparse else 0.72)
+    )
+    semantic_axis = min(1.0, max(0.15, pattern if pattern > 0 else (0.85 if name_exact else 0.45)))
+    dq_axis = 0.5 if not samples else max(0.2, min(1.0, 1.0 - null_rate) * min(1.0, len(samples) / 8.0))
+
+    return {
+        "confidence_class": cls,
+        "confidence_class_label": CONFIDENCE_CLASS_LABELS[cls],
+        "anchor": anchor,
+        "axes": {
+            "mapping": round(mapping_axis, 3),
+            "transform_safety": round(transform_axis, 3),
+            "semantic": round(semantic_axis, 3),
+            "data_quality": round(dq_axis, 3),
+        },
+    }
+
+
+def apply_confidence_class(
+    confidence: float,
+    classification: dict[str, Any],
+) -> float:
+    """Blend raw confidence toward the evidence-class anchor (calibrated bands)."""
+    anchor = float(classification.get("anchor") or confidence)
+    cls = str(classification.get("confidence_class") or "")
+    conf = float(confidence)
+    if cls == "create_new_projected":
+        return round(min(conf, IDENTITY_PASSTHROUGH_CONF_CAP), 3)
+    if cls == "exact_name_type":
+        # Exact proven pairs should read near-certain, not 0.93.
+        return round(min(0.99, max(conf, 0.97, anchor - 0.02)), 3)
+    if cls == "safe_type_promotion":
+        return round(min(0.98, max(min(conf, 0.97), 0.94)), 3)
+    if cls == "structural_json":
+        return round(min(0.94, max(min(conf, 0.93), 0.88)), 3)
+    if cls == "semantic_inference":
+        return round(min(0.82, max(0.55, min(conf, anchor + 0.04))), 3)
+    if cls == "custom_transform_sparse":
+        return round(min(0.72, max(0.50, min(conf, anchor + 0.04))), 3)
+    if cls == "weak_or_conflicted":
+        return round(min(0.70, max(0.40, min(conf, anchor + 0.08))), 3)
+    return round(min(0.99, max(0.0, conf)), 3)
 
 
 def score_mapping_pair(
@@ -266,16 +440,25 @@ def refine_mappings_with_quality(
         delta, notes = score_mapping_pair(m, source_profile=profile)
         out = dict(m)
         conf = min(0.99, max(0.0, float(m.get("confidence", 0.0)) + delta))
-        is_identity = m.get("assignment_strategy") == "identity_passthrough" or m.get("create_new")
-        if is_identity:
-            conf = min(conf, IDENTITY_PASSTHROUGH_CONF_CAP)
+        classification = classify_mapping_confidence(out, source_profile=profile)
+        conf = apply_confidence_class(conf, classification)
         out["confidence"] = round(conf, 3)
+        out["confidence_class"] = classification["confidence_class"]
+        out["confidence_class_label"] = classification["confidence_class_label"]
+        out["confidence_axes"] = classification["axes"]
         if notes:
             reason = m.get("reasoning", "")
             tag = f"quality: {', '.join(notes[:2])}"
             if tag.lower() not in reason.lower():
                 out["reasoning"] = f"{reason} · {tag}".strip(" ·")
-        if delta < -0.05:
+        if delta < -0.05 or classification["confidence_class"] in {
+            "weak_or_conflicted",
+            "custom_transform_sparse",
+            "semantic_inference",
+        }:
+            if classification["confidence_class"] != "create_new_projected":
+                out["requires_review"] = True
+        if classification["confidence_class"] in {"weak_or_conflicted", "custom_transform_sparse"}:
             out["requires_review"] = True
         out["column_profile"] = {
             k: profile[k]

@@ -52,4 +52,21 @@ describe("computeJobTrustScore", () => {
     assert.equal(t.cursor_gap, true);
     assert.equal(t.next_action.code, "cursor_gap");
   });
+
+  it("caps completeness when Gate-8 reconcile is missing", () => {
+    const withRecon = computeJobTrustScore({
+      status: "completed",
+      records_processed: 1000,
+      rejected_rows: 0,
+      reconciliation: { passed: true },
+    });
+    const without = computeJobTrustScore({
+      status: "completed",
+      records_processed: 1000,
+      rejected_rows: 0,
+    });
+    assert.ok(without.score < withRecon.score);
+    const completeness = without.factors.find((f) => f.id === "completeness");
+    assert.ok(completeness && (completeness.score as number) <= 82);
+  });
 });

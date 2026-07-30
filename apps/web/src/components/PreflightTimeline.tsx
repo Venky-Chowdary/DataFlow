@@ -109,7 +109,9 @@ export function PreflightTimeline({
   const decisionReason = proof?.transfer_decision?.reason || "No blocking issues detected";
   const proofNotes = proof?.semantic_notes?.slice(0, 3) || [];
   const confidenceBand = proof?.confidence_band?.toUpperCase() || "MEDIUM";
-  const qualityGrade = proof?.quality_grade?.toUpperCase() || "GOOD";
+  const qualityGrade = proof?.quality_grade
+    ? proof.quality_grade.toUpperCase().replace(/_/g, " ")
+    : "NOT PROFILED";
   const evidenceSummary = proof?.evidence_summary || "Deterministic proof signals ready for operator review.";
 
   const blockerIssuePreview = (details?: Record<string, unknown>): string | null => {
@@ -118,6 +120,25 @@ export function PreflightTimeline({
     const firstIssue = rawIssues[0];
     return typeof firstIssue === "string" ? firstIssue : null;
   };
+
+  const headline = running
+    ? "Engine running G1–G8…"
+    : decision === "approve" && result.passed
+      ? "Ready to transfer"
+      : decision === "review"
+        ? "Review required — not production-approved"
+        : result.passed
+          ? "Checks cleared — review decision before execute"
+          : "Validation — action needed";
+  const subExtra = running
+    ? ""
+    : decision === "approve" && result.passed
+      ? " · you can execute the transfer"
+      : decision === "review"
+        ? " · local or incomplete evidence — treat as review"
+        : !result.passed
+          ? " · fix items below, then re-run"
+          : "";
 
   return (
     <div className={`df2-preflight ${stateClass}${compact ? " is-compact" : ""}${running ? " is-validating" : ""}`}>
@@ -150,13 +171,13 @@ export function PreflightTimeline({
         </div>
         <div>
           <h3 className="df2-preflight-title">
-            {running ? "Engine running G1–G8…" : result.passed ? "Ready to transfer" : "Validation — action needed"}
+            {headline}
           </h3>
           <p className="df2-preflight-sub">
             {running
               ? `Wall-clock ${formatElapsed(elapsedMs)} · real gates, not a fake step animation`
               : `${passCount} passed · ${blockCount} blocked · ${skipCount} skipped · ${result.total_gates} total`}
-            {result.passed ? " · you can execute the transfer" : !running ? " · fix items below, then re-run" : ""}
+            {subExtra}
           </p>
           {proof && (
             <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
@@ -180,7 +201,7 @@ export function PreflightTimeline({
                   Semantic {proof.semantic_mapping_score.toFixed(2)}
                 </span>
                 <span style={{ fontSize: 12, color: "#475569", fontWeight: 700 }}>
-                  Quality {proof.quality_score.toFixed(2)}
+                  Quality {proof.quality_score == null ? "n/a" : proof.quality_score.toFixed(2)}
                 </span>
                 <span style={{ fontSize: 12, color: "#475569", fontWeight: 700 }}>
                   Compliance {proof.compliance.risk_score.toFixed(2)}

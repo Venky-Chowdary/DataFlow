@@ -25,12 +25,34 @@ describe("runLocalPreflight file export honesty", () => {
     assert.equal(byId.g2_destination?.status, "skip");
     assert.equal(byId.g6_target_ddl?.status, "skip");
     assert.equal(byId.g8_reconciliation?.status, "skip");
-    assert.equal(pf.proof_bundle?.quality_grade, "review");
+    assert.equal(pf.proof_bundle?.quality_grade, "not_profiled");
+    assert.equal(pf.proof_bundle?.quality_score, null);
     assert.equal(pf.proof_bundle?.transfer_decision?.decision, "review");
     assert.equal(pf.proof_bundle?.reconciliation?.passed, false);
     assert.ok((pf.proof_bundle?.transfer_decision?.warnings?.length ?? 0) >= 1);
     assert.ok((pf.readiness_score ?? 100) <= 72);
     assert.ok((pf.proof_bundle?.compliance?.tags ?? []).includes("local_preflight"));
+    assert.ok(byId.g8_reconciliation?.details?.evidence_scope);
+    assert.equal(
+      (byId.g8_reconciliation?.details?.evidence_scope as { coverage?: string })?.coverage,
+      "pending",
+    );
+    const ids = pf.gates.map((g) => g.id);
+    assert.equal(new Set(ids).size, ids.length, "gate ids must be unique");
+    assert.ok(ids.indexOf("g6_target_ddl") < ids.indexOf("g9_data_integrity"));
+  });
+
+  it("does not invent approve decision when local gates pass", () => {
+    const pf = runLocalPreflight({
+      columns: ["id"],
+      rowCount: 2,
+      mappings: [
+        { source: "id", target: "id", confidence: 0.99, transform: "none", approved: true, requiresReview: false, isPii: false },
+      ],
+      destKind: "file_export",
+    });
+    assert.equal(pf.passed, true);
+    assert.equal(pf.proof_bundle?.transfer_decision?.decision, "review");
   });
 
   it("blocks database destinations that require API preflight", () => {

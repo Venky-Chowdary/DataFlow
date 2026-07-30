@@ -894,9 +894,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                             ? " is-ok"
                             : reconPassed === false || selected.status === "failed"
                               ? " is-bad"
-                              : isJobSuccess(liveJob.status)
-                                ? " is-ok"
-                                : ""
+                              : ""
                         }`}
                       >
                         <strong>
@@ -905,7 +903,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                             : reconPassed === false
                               ? "Failed"
                               : isJobSuccess(liveJob.status)
-                                ? "OK"
+                                ? "Pending"
                                 : selected.status === "failed"
                                   ? "Failed"
                                   : "—"}

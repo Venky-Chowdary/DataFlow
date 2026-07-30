@@ -7,6 +7,24 @@ def test_reconcile_pass():
     r = reconcile(source_rows=10, target_rows=10, source_checksum="abc", target_checksum="abc")
     assert r.passed
     assert "checksums match" in r.message
+    d = r.to_dict()
+    assert d["phase"] == "post_write_verified"
+    assert d["post_write_pending"] is False
+
+
+def test_stamp_writer_ack_phase():
+    from services.reconciliation import stamp_post_write_phase
+
+    stamped = stamp_post_write_phase({
+        "passed": True,
+        "message": "Transfer verified by writer: 10 rows written (read-back verifier not available)",
+        "source_rows": 10,
+        "target_rows": 10,
+        "source_checksum": "abc",
+        "target_checksum": "",
+    })
+    assert stamped["phase"] == "post_write_writer_ack"
+    assert stamped["post_write_pending"] is False
 
 
 def test_reconcile_row_mismatch():

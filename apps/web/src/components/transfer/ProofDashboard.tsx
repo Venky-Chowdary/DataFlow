@@ -16,10 +16,20 @@ export function ProofDashboard({ preflight, running = false }: ProofDashboardPro
   const proof = preflight?.proof_bundle;
   const decision = proof?.transfer_decision?.decision ?? (preflight?.passed ? "approve" : "review");
   const confidenceBand = (proof?.confidence_band ?? "medium").toUpperCase();
-  const qualityGrade = (proof?.quality_grade ?? "good").toUpperCase();
   const readiness = preflight?.readiness_score ?? 0;
   const semanticScore = proof?.semantic_mapping_score ?? 0;
-  const qualityScore = proof?.quality_score ?? 0;
+  const qualityScore = proof?.quality_score;
+  const qualityDisplay =
+    qualityScore == null || String(proof?.quality_grade || "").toLowerCase() === "not_profiled"
+      ? "n/a"
+      : qualityScore.toFixed(2);
+  const qualityGrade = (
+    proof?.quality_grade === "not_profiled"
+      ? "NOT PROFILED"
+      : proof?.quality_grade
+        ? String(proof.quality_grade).toUpperCase()
+        : "NOT PROFILED"
+  );
   const complianceRisk = proof?.compliance?.risk_score ?? 0;
   const statusTone = running
     ? "live"
@@ -73,7 +83,7 @@ export function ProofDashboard({ preflight, running = false }: ProofDashboardPro
         </div>
         <div className="df2-proof-dashboard-stat">
           <span>Quality</span>
-          <strong>{running ? "—" : qualityScore.toFixed(2)}</strong>
+          <strong>{running ? "—" : qualityDisplay}</strong>
         </div>
         <div className="df2-proof-dashboard-stat">
           <span>Gates</span>

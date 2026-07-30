@@ -400,6 +400,24 @@
   color: #94a3b8;
 }
 
+.df2-map-proof-axes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 4px;
+}
+
+.df2-map-proof-axis-chip {
+  display: inline-flex;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  color: #475569;
+}
+
 .df2-map-proof-sample {
   max-width: 100%;
   padding: 3px 7px;

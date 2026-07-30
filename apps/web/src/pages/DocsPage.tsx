@@ -620,7 +620,7 @@ export function DocsPage() {
               />
               <figcaption>
                 <strong>Job Theater · Proof</strong>
-                <span>Queue → preflight → extract → load → reconcile with 100% row fidelity on a live job.</span>
+                <span>Queue → preflight → extract → load → Gate-8 reconcile with measured row/checksum evidence on a live job (quarantine and writer-ack routes are labeled honestly).</span>
               </figcaption>
             </figure>
           </PageSection>

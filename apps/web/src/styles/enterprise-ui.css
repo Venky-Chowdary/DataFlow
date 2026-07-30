@@ -1305,6 +1305,15 @@
   color: #991b1b;
 }
 
+.df2-gate8-proof-badge.is-pending {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.df2-gate8-proof.is-pending {
+  border-color: #f59e0b;
+}
+
 .df2-gate8-proof-lede,
 .df2-gate8-proof-message {
   margin: 0 0 10px;
