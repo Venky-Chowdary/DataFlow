@@ -484,6 +484,7 @@ def detect_schema_drift(
     live_primary_key: list[str] | None = None,
     cursor_fields: list[str] | None = None,
     schema_policy: str = "manual_review",
+    table_exists: bool | None = None,
 ) -> dict[str, Any]:
     """Compare live schemas to stored contracts; attach schema_evolution plan."""
     source_schema = source_schema or {}
@@ -492,6 +493,7 @@ def detect_schema_drift(
     mappings = mappings or []
     dest_kind = normalize_dest_kind(destination_db_type)
     schemaless = dest_kind in SCHEMALESS_DESTS
+    create_new = table_exists is False
 
     live_source_fp = fingerprint_schema(source_columns, source_schema)
     live_target_fp = fingerprint_schema(target_columns, target_schema) if target_columns else ""
@@ -500,7 +502,9 @@ def detect_schema_drift(
         stored_source_fp, source_columns, source_schema
     )
     target_changed = bool(stored_target_fp and target_columns) and stored_target_fp != live_target_fp
-    if schemaless:
+    if schemaless or create_new:
+        # No live destination DDL contract — mapping-projected columns / empty types
+        # must not masquerade as "Destination schema changed".
         target_changed = False
 
     mapped_sources = {str(m.get("source")) for m in mappings if m.get("source")}
@@ -518,6 +522,10 @@ def detect_schema_drift(
         for c in target_columns
         if c.lower() not in mapped_targets and c.lower() not in system_targets
     ]
+    # Create-new: Studio may still hold a stale destSchemaMap from a prior table.
+    # Those are not live destination columns — do not treat as orphan drift.
+    if create_new:
+        orphan_targets = []
 
     type_mismatches: list[dict[str, str]] = []
     if not schemaless:
@@ -673,4 +681,6 @@ def detect_schema_drift(
         "mapping_coverage": round(len(mapped_sources) / max(len(source_columns), 1), 3),
         "classification": classification,
         "schema_evolution": evolution,
+        "table_exists": table_exists,
+        "create_new": create_new,
     }

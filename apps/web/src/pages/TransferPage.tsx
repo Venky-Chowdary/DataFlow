@@ -3246,7 +3246,9 @@ export function TransferPage({
             ? (targetCollection || undefined)
             : undefined,
           destination_column_types:
-            destKindMode === "database" && Object.keys(destSchemaMap).length
+            destKindMode === "database"
+            && destTableExists !== false
+            && Object.keys(destSchemaMap).length
               ? destSchemaMap
               : undefined,
           sample_rows: sampleRows,

@@ -1828,14 +1828,14 @@ export function ValidateDashboard({
       {!running && preflight && (
         <div className="df2-vd-sync-stack">
           <div className="df2-vd-sync-contract" role="status">
-            <DtIcon name="layers" size={14} />
+            <DtIcon name={appendLikeSync ? "alert" : "layers"} size={14} />
             <div>
               <strong>Sync · {syncMeta?.label || syncMode || "not set"}</strong>
               <p>
                 {syncMeta?.detail
                   || "Open Destination → Advanced to choose overwrite, append, upsert, or CDC."}
                 {appendLikeSync
-                  ? " Re-runs may duplicate rows — uniqueness not enforced."
+                  ? " Re-runs may duplicate rows — prefer overwrite or upsert if that is not intended."
                   : ""}
                 {upsertLikeSync
                   ? " Delivery is at-least-once upsert until exactly-once is proven."
@@ -1848,17 +1848,6 @@ export function ValidateDashboard({
               </Button>
             )}
           </div>
-          {appendLikeSync && (
-            <div className="df2-vd-append-warn" role="status">
-              <DtIcon name="alert" size={14} />
-              <div>
-                <strong>Append</strong>
-                <p>
-                  Existing rows remain; re-runs may duplicate. Prefer overwrite, upsert, or set an identity key.
-                </p>
-              </div>
-            </div>
-          )}
         </div>
       )}
 
@@ -1882,18 +1871,6 @@ export function ValidateDashboard({
             {schemaDriftAck.actor}
             {schemaDriftAck.at ? ` · ${schemaDriftAck.at}` : ""}
             {schemaDriftAck.reason ? ` — ${schemaDriftAck.reason}` : ""}
-          </div>
-        </div>
-      )}
-
-      {!running && preflight && (
-        <div className="df2-vd-enterprise-trust" role="note">
-          <DtIcon name="shield" size={15} />
-          <div>
-            <strong>Enterprise controls already in this build</strong>
-            Workspace JWT / API keys, OIDC·SAML·Azure AD SSO, viewer/editor/admin RBAC,
-            tenant isolation, and append-only audit events. Approvals (PII, schema drift)
-            re-validate with an explicit operator acknowledgment.
           </div>
         </div>
       )}

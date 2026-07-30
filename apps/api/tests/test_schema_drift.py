@@ -260,11 +260,112 @@ def test_snowflake_target_fingerprint_churn_is_breaking():
         mappings=[{"source": "id", "target": "id", "confidence": 1.0}],
         destination_db_type="snowflake",
         schema_policy="pause_on_change",
+        table_exists=True,
     )
     assert report["target_changed"] is True
     assert report["schema_evolution"]["should_pause"] is True
     assert report["severity"] == "breaking"
     assert any("Destination schema changed" in i for i in report["issues"])
+
+
+def test_create_new_ignores_stale_target_fingerprint_and_orphans():
+    """Projected CREATE must not block as 'Destination schema changed'."""
+    cols = ["a", "b", "c"]
+    schema = {c: "VARCHAR" for c in cols}
+    mappings = [{"source": c, "target": c, "confidence": 0.93} for c in cols]
+    stale_fp = fingerprint_schema(["old"], {"old": "TEXT"})
+    report = detect_schema_drift(
+        source_columns=cols,
+        source_schema=schema,
+        target_columns=["old", "x"],
+        target_schema={"old": "TEXT", "x": "INTEGER"},
+        stored_target_fp=stale_fp,
+        mappings=mappings,
+        destination_db_type="postgresql",
+        schema_policy="manual_review",
+        table_exists=False,
+    )
+    assert report["create_new"] is True
+    assert report["target_changed"] is False
+    assert report["orphan_targets"] == []
+    assert not any("Destination schema changed" in i for i in report["issues"])
+    assert report["schema_evolution"]["action"] == "continue"
+
+
+def test_create_new_preflight_passes_with_stale_dest_schema_map():
+    """Studio may still hold a prior table's column map while create-new is selected."""
+    from services.preflight_service import run_file_preflight
+
+    cols = [f"c{i}" for i in range(9)]
+    schema = {c: "VARCHAR" for c in cols}
+    mappings = [
+        {"source": c, "target": c, "confidence": 0.93, "transform": "none"} for c in cols
+    ]
+    sample = [{c: "x" for c in cols} for _ in range(3)]
+    stale = {"legacy_id": "INTEGER", "legacy_name": "TEXT"}
+    result = run_file_preflight(
+        columns=cols,
+        column_types=schema,
+        row_count=13,
+        mappings=mappings,
+        destination_connected=True,
+        source_connected=True,
+        source_kind="file",
+        sample_rows=sample,
+        destination_column_types=stale,
+        destination_table_exists=False,
+        destination_can_create=True,
+        destination_can_write=True,
+        destination_db_type="postgresql",
+        schema_policy="manual_review",
+        sync_mode="full_refresh_append",
+        estimated_bytes=1000,
+    )
+    assert result["passed"] is True, result.get("blockers")
+    assert not any(
+        g.get("id") == "schema_drift" and g.get("status") == "block"
+        for g in result["gates"]
+    )
+    assert not any(
+        "Destination schema changed" in str(i)
+        for i in ((result.get("schema_drift") or {}).get("issues") or [])
+    )
+
+
+def test_manual_review_still_blocks_real_source_drift():
+    from services.preflight_service import run_file_preflight
+    from services.schema_fingerprint import fingerprint_schema as fp
+
+    cols = ["id", "email", "new_col"]
+    schema = {"id": "INTEGER", "email": "VARCHAR", "new_col": "VARCHAR"}
+    mappings = [
+        {"source": "id", "target": "id", "confidence": 0.99, "transform": "none"},
+        {"source": "email", "target": "email", "confidence": 0.99, "transform": "none"},
+    ]
+    sample = [{"id": "1", "email": "a@b.com", "new_col": "x"}]
+    result = run_file_preflight(
+        columns=cols,
+        column_types=schema,
+        row_count=1,
+        mappings=mappings,
+        destination_connected=True,
+        source_connected=True,
+        source_kind="file",
+        sample_rows=sample,
+        destination_column_types={"id": "INTEGER", "email": "VARCHAR"},
+        destination_table_exists=True,
+        destination_can_create=True,
+        destination_can_write=True,
+        destination_db_type="postgresql",
+        schema_policy="manual_review",
+        sync_mode="full_refresh_append",
+        estimated_bytes=1000,
+        stored_source_fp=fp(["id", "email"], {"id": "INTEGER", "email": "VARCHAR"}),
+        previous_source_columns=["id", "email"],
+        previous_source_schema={"id": "INTEGER", "email": "VARCHAR"},
+    )
+    assert result["passed"] is False
+    assert any(b.get("id") == "schema_drift" for b in result["blockers"])
 
 def test_classify_no_change():
     schema = {

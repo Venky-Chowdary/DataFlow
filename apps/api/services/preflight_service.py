@@ -732,7 +732,13 @@ def run_file_preflight(
     dest_kind = normalize_dest_kind(destination_db_type, default="postgresql")
     schemaless = dest_kind in SCHEMALESS_DESTS
 
-    target_cols = list((destination_column_types or {}).keys())
+    # Create-new must not inherit a stale Studio destSchemaMap as "live" DDL.
+    # Orphan / fingerprint comparisons against projected mapping targets are noise.
+    drift_dest_types = dict(destination_column_types or {})
+    if dest_table_exists is False:
+        drift_dest_types = {}
+
+    target_cols = list(drift_dest_types.keys())
     ddl_compatible, ddl_issues = evaluate_ddl_compatibility(
         mappings=mappings,
         source_schema=column_types,
@@ -754,7 +760,7 @@ def run_file_preflight(
         source_columns=columns,
         source_schema=column_types,
         target_columns=target_cols or [m["target"] for m in mappings],
-        target_schema=destination_column_types or {},
+        target_schema=drift_dest_types,
         mappings=mappings,
         destination_db_type=destination_db_type,
         sample_rows=sample_rows,
@@ -766,6 +772,7 @@ def run_file_preflight(
         live_primary_key=destination_pk_columns,
         cursor_fields=cursor_fields,
         schema_policy=schema_policy,
+        table_exists=dest_table_exists,
     )
     # Do NOT fold drift into ddl_issues / ddl_compatible. G6 must mean real DDL
     # (missing columns, width, types). Drift is a separate contract gate below.
@@ -992,7 +999,18 @@ def run_file_preflight(
     # Airbyte rule: hard-breaking ALWAYS pauses (even under propagate_*).
     # Propagate auto-applies additive; manual_review keeps existing mappings.
     evolution = drift.get("schema_evolution") or {}
-    if drift.get("drift_detected") or evolution.get("action") not in (None, "continue"):
+    action = evolution.get("action")
+    # Informational notes (e.g. extra dest columns while evolution says continue)
+    # must not unlock a false manual_review BLOCK — only pause/review/propagate.
+    requires_drift_decision = bool(
+        evolution.get("should_pause")
+        or evolution.get("should_propagate")
+        or action not in (None, "continue")
+    )
+    if requires_drift_decision or (
+        drift.get("drift_detected")
+        and (drift.get("source_changed") or drift.get("target_changed") or drift.get("type_mismatches"))
+    ):
         policy = (schema_policy or "manual_review").strip().lower()
         if schemaless and not evolution.get("hard_breaking"):
             out.setdefault("warnings", []).append(
@@ -1173,6 +1191,30 @@ def run_file_preflight(
                     out["passed_count"] / max(out["total_gates"], 1) * 100, 1
                 )
                 out["schema_drift"] = drift
+    elif drift.get("issues"):
+        # Soft notes (extra destination columns, etc.) — pass with evidence, no Execute lock.
+        note = str(drift["issues"][0])
+        out["gates"] = [
+            *out["gates"],
+            {
+                "id": "schema_drift",
+                "status": "pass",
+                "message": f"Schema notes (non-blocking): {note}",
+                "duration_ms": 0,
+                "details": {
+                    "issues": list(drift.get("issues") or []),
+                    "severity": drift.get("severity") or "none",
+                    "schema_evolution": evolution,
+                    "rule_id": "schema_drift.informational",
+                },
+            },
+        ]
+        out["schema_drift"] = drift
+        out["passed_count"] = sum(1 for g in out["gates"] if g.get("status") == "pass")
+        out["total_gates"] = len(out["gates"])
+        out["readiness_score"] = round(
+            out["passed_count"] / max(out["total_gates"], 1) * 100, 1
+        )
 
     return out
 
