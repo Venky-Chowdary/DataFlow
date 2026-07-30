@@ -1343,6 +1343,27 @@ def sparse_present_bindings(
     return out
 
 
+def materialize_sparse_row_for_checksum(
+    present: dict[str, Any],
+    existing: dict[str, Any] | None,
+    target_cols: list[str],
+) -> tuple:
+    """Post-apply row image for checksum — absent CDC fields keep destination values.
+
+    Omit-from-SET never writes DF_MISSING; fingerprinting the sentinel would
+    falsely fail Gate-8 read-back against preserved destination cells.
+    """
+    out: list[Any] = []
+    for col in target_cols:
+        if col in present:
+            out.append(present[col])
+        elif existing is not None and col in existing:
+            out.append(existing[col])
+        else:
+            out.append(None)
+    return tuple(out)
+
+
 def assert_sparse_upsert_has_pk(
     present: dict[str, Any],
     conflict_columns: list[str],

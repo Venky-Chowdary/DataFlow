@@ -4143,10 +4143,6 @@
   overscroll-behavior: contain;
 }
 
-.df2-validate-step .df2-proof-dashboard-wrap {
-  flex: 0 0 auto;
-}
-
 .df2-validate-step .df2-preflight.is-compact {
   flex: 1 1 auto !important;
   min-height: 0 !important;
@@ -4154,47 +4150,6 @@
   flex-direction: column !important;
   overflow: visible !important;
 }
-
-/* Compact always-open proof dashboard (no disclosure) */
-.df2-proof-dashboard.df2-proof-dashboard-open {
-  padding: 12px 14px !important;
-  gap: 10px !important;
-  display: flex;
-  flex-direction: column;
-}
-
-.df2-proof-dashboard.df2-proof-dashboard-open .df2-proof-dashboard-head {
-  display: block !important;
-}
-
-.df2-proof-dashboard.df2-proof-dashboard-open .df2-proof-dashboard-kicker {
-  display: block !important;
-  margin: 0 0 2px !important;
-}
-
-.df2-proof-dashboard.df2-proof-dashboard-open .df2-proof-dashboard-title {
-  font-size: 14px !important;
-}
-
-.df2-proof-dashboard.df2-proof-dashboard-open .df2-proof-dashboard-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
-  gap: 8px !important;
-}
-
-.df2-proof-dashboard.df2-proof-dashboard-open .df2-proof-dashboard-stat {
-  padding: 8px 10px !important;
-}
-
-.df2-proof-dashboard.df2-proof-dashboard-open .df2-proof-dashboard-stat strong {
-  font-size: 15px !important;
-}
-
-.df2-proof-dashboard.df2-proof-dashboard-open .df2-proof-dashboard-summary {
-  margin: 0 !important;
-  font-size: 12px !important;
-}
-
-/* Legacy disclosure styles no longer used for proof */
 
 /* Compact validating stage */
 .df2-validate-stage {

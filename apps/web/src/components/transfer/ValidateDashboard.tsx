@@ -548,46 +548,24 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
   );
 }
 
-function Ring({
+function MetricChip({
   value,
   label,
-  sub,
   tone,
   emptyLabel,
 }: {
   value: number | null;
   label: string;
-  sub: string;
   tone: string;
-  /** When set, show this instead of a percentage (e.g. not profiled). */
   emptyLabel?: string;
 }) {
-  const r = 26;
-  const c = 2 * Math.PI * r;
   const measured = value != null && Number.isFinite(value);
-  const pct = measured ? Math.max(0, Math.min(100, value)) : 0;
   return (
-    <div className={`df2-vd-ring tone-${tone}${measured ? "" : " is-empty"}`}>
-      <div className="df2-vd-ring-svg" aria-hidden>
-        <svg viewBox="0 0 64 64">
-          <circle cx="32" cy="32" r={r} className="df2-vd-ring-track" />
-          <circle
-            cx="32"
-            cy="32"
-            r={r}
-            className="df2-vd-ring-fill"
-            strokeDasharray={`${(pct / 100) * c} ${c}`}
-            transform="rotate(-90 32 32)"
-          />
-        </svg>
-        <span className="df2-vd-ring-val">
-          {measured ? <>{Math.round(value)}<small>%</small></> : (emptyLabel || "—")}
-        </span>
-      </div>
-      <div className="df2-vd-ring-copy">
-        <strong>{label}</strong>
-        <span>{sub}</span>
-      </div>
+    <div className={`df2-vd-metric tone-${tone}${measured ? "" : " is-empty"}`}>
+      <span className="df2-vd-metric-label">{label}</span>
+      <span className="df2-vd-metric-val">
+        {measured ? `${Math.round(value)}%` : (emptyLabel || "—")}
+      </span>
     </div>
   );
 }
@@ -1240,15 +1218,15 @@ export function ValidateDashboard({
     <section className={`df2-vd df2-vd-${heroTone}`} aria-label="Validation dashboard">
       <header className="df2-vd-hero">
         <div className={`df2-vd-hero-ring tone-${heroTone}`} aria-hidden>
-          <svg viewBox="0 0 120 120">
-            <circle cx="60" cy="60" r="52" className="df2-vd-hero-track" />
+          <svg viewBox="0 0 72 72">
+            <circle cx="36" cy="36" r="30" className="df2-vd-hero-track" />
             <circle
-              cx="60"
-              cy="60"
-              r="52"
+              cx="36"
+              cy="36"
+              r="30"
               className="df2-vd-hero-fill"
-              strokeDasharray={`${((running ? Math.min(92, 18 + elapsedMs / 80) : readiness) / 100) * 326.7} 326.7`}
-              transform="rotate(-90 60 60)"
+              strokeDasharray={`${((running ? Math.min(92, 18 + elapsedMs / 80) : readiness) / 100) * 188.5} 188.5`}
+              transform="rotate(-90 36 36)"
             />
           </svg>
           <div className="df2-vd-hero-ring-label">
@@ -1830,70 +1808,56 @@ export function ValidateDashboard({
       )}
 
       {!running && preflight && (
-        <div className="df2-vd-metrics">
-          <Ring value={readiness} label="Readiness" sub="Share of gates that passed" tone={heroTone} />
-          <Ring value={semantic * 100} label="Semantic mapping" sub="Column match confidence" tone="approve" />
-          <Ring
+        <div className="df2-vd-metrics" aria-label="Proof metrics">
+          <MetricChip value={readiness} label="Readiness" tone={heroTone} />
+          <MetricChip value={semantic * 100} label="Semantic" tone="approve" />
+          <MetricChip
             value={quality == null ? null : quality * 100}
-            label="Data quality"
-            sub={qualityNotProfiled ? "Not profiled for this sample" : "Profiled quality grade"}
+            label="Quality"
             tone={qualityNotProfiled ? "review" : "approve"}
             emptyLabel="n/a"
           />
-          <Ring value={(1 - complianceRisk) * 100} label="Compliance" sub={`Risk ${complianceRisk.toFixed(2)}`} tone={complianceRisk > 0.4 ? "review" : "approve"} />
+          <MetricChip
+            value={(1 - complianceRisk) * 100}
+            label="Compliance"
+            tone={complianceRisk > 0.4 ? "review" : "approve"}
+          />
         </div>
       )}
 
       {!running && preflight && (
-        <div className="df2-vd-sync-contract" role="status">
-          <DtIcon name="layers" size={15} />
-          <div>
-            <strong>Sync contract · {syncMeta?.label || syncMode || "not set"}</strong>
-            <p>
-              {syncMeta?.detail
-                || "Open Destination → Advanced to choose overwrite, append, upsert, or CDC."}
-              {appendLikeSync
-                ? " Re-runs may duplicate destination rows — uniqueness is not enforced."
-                : ""}
-            </p>
+        <div className="df2-vd-sync-stack">
+          <div className="df2-vd-sync-contract" role="status">
+            <DtIcon name="layers" size={14} />
+            <div>
+              <strong>Sync · {syncMeta?.label || syncMode || "not set"}</strong>
+              <p>
+                {syncMeta?.detail
+                  || "Open Destination → Advanced to choose overwrite, append, upsert, or CDC."}
+                {appendLikeSync
+                  ? " Re-runs may duplicate rows — uniqueness not enforced."
+                  : ""}
+                {upsertLikeSync
+                  ? " Delivery is at-least-once upsert until exactly-once is proven."
+                  : ""}
+              </p>
+            </div>
+            {onOpenIdentitySettings && (
+              <Button size="sm" variant="secondary" onClick={() => onOpenIdentitySettings()}>
+                Sync / identity
+              </Button>
+            )}
           </div>
-          {onOpenIdentitySettings && (
-            <Button size="sm" variant="secondary" onClick={() => onOpenIdentitySettings()}>
-              Change sync / identity
-            </Button>
-          )}
-        </div>
-      )}
-
-      {!running && preflight && appendLikeSync && (
-        <div className="df2-vd-append-warn" role="status">
-          <DtIcon name="alert" size={15} />
-          <div>
-            <strong>Append behavior</strong>
-            <p>
-              Existing destination rows will remain. Re-running this transfer may duplicate
-              records. Prefer Full overwrite, Incremental deduped (upsert), or set an identity
-              key if duplicates must not accumulate.
-            </p>
-          </div>
-        </div>
-      )}
-
-      {!running && preflight && upsertLikeSync && (
-        <div className="df2-vd-sync-contract" role="status">
-          <DtIcon name="activity" size={15} />
-          <div>
-            <strong>Delivery · at-least-once upsert</strong>
-            <p>
-              Incremental / CDC defaults to at-least-once with destination identity upsert —
-              redelivery can rewrite the same key. Exactly-once is not claimed unless the route
-              proves idempotent keys and watermark handoff.
-            </p>
-          </div>
-          {onOpenIdentitySettings && (
-            <Button size="sm" variant="secondary" onClick={() => onOpenIdentitySettings()}>
-              Review identity key
-            </Button>
+          {appendLikeSync && (
+            <div className="df2-vd-append-warn" role="status">
+              <DtIcon name="alert" size={14} />
+              <div>
+                <strong>Append</strong>
+                <p>
+                  Existing rows remain; re-runs may duplicate. Prefer overwrite, upsert, or set an identity key.
+                </p>
+              </div>
+            </div>
           )}
         </div>
       )}

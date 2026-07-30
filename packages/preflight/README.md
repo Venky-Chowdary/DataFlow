@@ -8,13 +8,13 @@ additional policy gates (sync contract, schema policy, validation posture).
 |------|--------|
 | G1 | Source readable / parseable |
 | G2 | Destination reachable with write access |
-| G3 | Schema contract — no lossy type coercion |
+| G3 | Schema contract — no lossy type coercion (schemaless dests SKIP, not green PASS) |
 | G4 | Mapping confidence ≥ threshold; required fields mapped |
 | G5 | Dry-run transform on sample rows |
-| G6 | Target DDL compatible (no UNIQUE violations) |
-| G7 | Staging capacity sufficient (unknown capacity fails closed when bytes needed) |
+| G6 | Target DDL compatible (blocks when destination not connected) |
+| G7 | Staging capacity sufficient (unknown/missing byte estimate fails closed) |
 | G8 | Pre-write sample reconciliation (requires Validate samples; post-write checksum runs after Execute) |
-| G9 | Data integrity audit (precision, required nulls, duplicate keys) |
+| G9 | Data integrity audit (unproven / not-configured audit fails closed) |
 
 ```python
 from preflight import PreflightEngine, PreflightContext, TransferPlan

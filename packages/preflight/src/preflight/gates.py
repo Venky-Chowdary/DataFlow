@@ -234,11 +234,12 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
     dest_kind = (ctx.plan.destination.db_type or "").lower()
     schemaless = dest_kind in SCHEMALESS_DESTS
     if schemaless:
-        return _pass(
-            GateId.G3_SCHEMA_CONTRACT,
-            "Schemaless destination — no DDL type contract to validate",
-            start,
-            _with_scope(
+        # Honesty: no DDL type contract ≠ proven type safety. SKIP (not green PASS).
+        return GateResult(
+            gate_id=GateId.G3_SCHEMA_CONTRACT,
+            status=GateStatus.SKIP,
+            message="Schemaless destination — no DDL type contract to validate",
+            details=_with_scope(
                 {"schemaless": True, "dest_kind": dest_kind},
                 evidence_scope(
                     kind="schema_contract",
@@ -246,6 +247,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     note="Document / key-value store — no column type DDL contract",
                 ),
             ),
+            duration_ms=(time.perf_counter() - start) * 1000,
         )
 
     try:
@@ -578,16 +580,15 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
         )
 
     if not ctx.plan.destination.connected:
-        return GateResult(
-            gate_id=GateId.G6_TARGET_DDL,
-            status=GateStatus.SKIP,
-            message="Skipped — verify destination connectivity first (G2)",
-            details=_scope(
+        return _block(
+            GateId.G6_TARGET_DDL,
+            "Gate-6 cannot prove target DDL — destination not connected (complete G2 first)",
+            start,
+            _scope(
                 {"reason": ctx.plan.destination.error or "not_connected"},
-                coverage="n/a",
-                note="Skipped until destination connectivity is proven",
+                coverage="none",
+                note="Refuse Execute unlock without destination connectivity for DDL proof",
             ),
-            duration_ms=(time.perf_counter() - start) * 1000,
         )
 
     dest_kind = (ctx.plan.destination.db_type or "").lower()
@@ -854,10 +855,26 @@ def gate_g7_capacity(ctx: PreflightContext) -> GateResult:
             start,
             _with_scope({"needed": needed, "available": 0, "unknown": True}, g7_scope),
         )
+    rows_est = int(getattr(ctx.plan.source, "row_count_estimate", 0) or 0)
+    if needed <= 0 and rows_est > 0:
+        return _block(
+            GateId.G7_CAPACITY,
+            f"Staging byte estimate missing for non-empty source ({rows_est:,} rows)",
+            start,
+            _with_scope(
+                {"needed": 0, "available": available, "row_count_estimate": rows_est},
+                evidence_scope(
+                    kind="capacity",
+                    coverage="none",
+                    note="Host must supply estimated_bytes when source row_count_estimate > 0",
+                ),
+            ),
+        )
     ratio = f" ({available // max(needed, 1)}x headroom)" if available and needed else ""
+    empty_note = " · empty transfer" if needed <= 0 else ""
     return _pass(
         GateId.G7_CAPACITY,
-        f"Capacity sufficient{ratio}",
+        f"Capacity sufficient{ratio}{empty_note}",
         start,
         _with_scope({"needed": needed, "available": available}, g7_scope),
     )
@@ -1212,6 +1229,35 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
         )
     report = audit()
     sample_rows = getattr(ctx, "sample_rows", None) or []
+    checks_ran = int(report.get("checks_passed") or 0) + int(report.get("checks_failed") or 0)
+    summary = str(report.get("summary") or "")
+    unproven = bool(report.get("unproven")) or (
+        checks_ran == 0
+        and (
+            "not configured" in summary.lower()
+            or "no source sample" in summary.lower()
+        )
+    )
+    if unproven:
+        return _block(
+            GateId.G9_DATA_INTEGRITY,
+            "Gate-9 cannot prove data integrity — audit unproven "
+            f"({summary or 'no checks ran'})",
+            start,
+            _with_scope(
+                {
+                    "summary": summary,
+                    "checks_passed": report.get("checks_passed", 0),
+                    "checks_failed": report.get("checks_failed", 0),
+                    "unproven": True,
+                },
+                evidence_scope(
+                    kind="data_integrity",
+                    coverage="none",
+                    note="Integrity audit returned no checks — refuse Execute unlock",
+                ),
+            ),
+        )
     probe = report.get("source_uniqueness_probe") or {}
     probe_ran = bool(probe.get("ran")) or bool(getattr(ctx, "source_duplicate_probe_ran", False))
     g9_scope = evidence_scope(

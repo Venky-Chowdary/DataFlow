@@ -45,7 +45,21 @@ def _happy_plan() -> TransferPlan:
 
 
 def _happy_ctx(plan: TransferPlan | None = None) -> PreflightContext:
-    return PreflightContext(
+    """Happy path must inject a real integrity audit — default stub is fail-closed."""
+
+    class _Ctx(PreflightContext):
+        def run_integrity_audit(self, sample_size: int = 1000) -> dict:
+            return {
+                "blocks_transfer": False,
+                "checks_passed": 2,
+                "checks_failed": 0,
+                "issues": [],
+                "warnings": [],
+                "summary": "Data integrity checks passed",
+                "checks": [],
+            }
+
+    return _Ctx(
         plan=plan or _happy_plan(),
         sample_rows=[
             {"AMT": "1500", "PAY_DT": "20250101"},
@@ -184,3 +198,55 @@ def test_g2_passes_unavailable_probe_when_table_exists():
     g2 = next(g for g in result.gates if g.gate_id.value == "g2_destination")
     assert g2.status == GateStatus.PASS
     assert "unavailable" in g2.message.lower()
+
+
+def test_g3_schemaless_is_skip_not_pass():
+    """No DDL type contract must not look like proven type safety."""
+    from preflight.gates import gate_g3_schema_contract
+
+    plan = _happy_plan()
+    plan.destination.db_type = "mongodb"
+    plan.destination.target_columns = []
+    result = gate_g3_schema_contract(PreflightContext(plan=plan))
+    assert result.status == GateStatus.SKIP
+    assert "schemaless" in result.message.lower()
+
+
+def test_g6_blocks_when_destination_not_connected():
+    from preflight.gates import gate_g6_target_ddl
+
+    plan = _happy_plan()
+    plan.destination.connected = False
+    result = gate_g6_target_ddl(PreflightContext(plan=plan))
+    assert result.status == GateStatus.BLOCK
+    assert "not connected" in result.message.lower()
+
+
+def test_g7_blocks_when_bytes_missing_for_nonempty_source():
+    from preflight.gates import gate_g7_capacity
+
+    plan = _happy_plan()
+    plan.estimated_bytes = 0
+    plan.source.row_count_estimate = 5000
+    plan.available_staging_bytes = 10_000_000
+    result = gate_g7_capacity(PreflightContext(plan=plan))
+    assert result.status == GateStatus.BLOCK
+    assert "byte estimate" in result.message.lower() or "missing" in result.message.lower()
+
+
+def test_g9_blocks_unproven_stub_audit():
+    """Default context stub must fail-closed — never unlock Execute."""
+    from preflight.gates import gate_g9_data_integrity
+
+    result = gate_g9_data_integrity(
+        PreflightContext(plan=_happy_plan(), sample_rows=[{"AMT": "1"}])
+    )
+    assert result.status == GateStatus.BLOCK
+    assert "unproven" in result.message.lower() or "not configured" in result.message.lower()
+
+
+def test_g9_passes_when_audit_proves_checks():
+    from preflight.gates import gate_g9_data_integrity
+
+    result = gate_g9_data_integrity(_happy_ctx())
+    assert result.status == GateStatus.PASS

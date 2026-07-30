@@ -319,3 +319,104 @@ def test_iceberg_sparse_stale_lsn_preserves_row():
     merged = _merge_upsert_rows(existing, incoming, pk_cols=["id"])
     assert merged[0]["extra"] == "stay"
     assert merged[0]["note"] == "keep"
+
+
+def test_sqlite_sparse_upsert_omits_missing_column():
+    from connectors.sqlite_writer import _sqlite_apply_sparse_upsert
+
+    cur = MagicMock()
+    # Existing dest row — extra must be preserved in checksum image
+    cur.fetchone.return_value = ("1", "old-note", "keep-me")
+    cur.rowcount = 1
+    written, skipped, checksum_rows = _sqlite_apply_sparse_upsert(
+        cur,
+        table_name="t",
+        target_cols=["id", "note", "extra"],
+        conflict_columns=["id"],
+        sparse_rows=[("1", "only-note", DF_MISSING_SENTINEL)],
+    )
+    assert written == 1
+    assert skipped == 0
+    update_sql = cur.execute.call_args_list[-1].args[0]
+    assert "note" in update_sql.lower()
+    assert "extra" not in update_sql.lower()
+    bound = cur.execute.call_args_list[-1].args[1]
+    assert "only-note" in bound
+    assert DF_MISSING_SENTINEL not in bound
+    assert checksum_rows == [("1", "only-note", "keep-me")]
+
+
+def test_sqlite_sparse_stale_lsn_increments_skipped():
+    from connectors.sqlite_writer import _sqlite_apply_sparse_upsert
+    from connectors.writer_common import DF_LSN_COL
+
+    cur = MagicMock()
+    # Dest already at newer LSN
+    cur.fetchone.return_value = ("1", "keep", "x", "0/200")
+    cur.rowcount = 0
+    written, skipped, checksum_rows = _sqlite_apply_sparse_upsert(
+        cur,
+        table_name="t",
+        target_cols=["id", "note", "extra", DF_LSN_COL],
+        conflict_columns=["id"],
+        sparse_rows=[("1", "stale", DF_MISSING_SENTINEL, "0/50")],
+    )
+    assert written == 0
+    assert skipped == 1
+    assert checksum_rows == []
+    # Only the SELECT should have run — no UPDATE/INSERT for stale LSN
+    assert cur.execute.call_count == 1
+
+
+def test_sqlite_write_mapped_rows_sparse_roundtrip(tmp_path):
+    """End-to-end: sparse CDC upsert must leave absent dest columns untouched."""
+    import sqlite3
+
+    from connectors.sqlite_writer import write_mapped_rows
+
+    db = tmp_path / "sparse.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE t (id TEXT PRIMARY KEY, note TEXT, extra TEXT)")
+    conn.execute("INSERT INTO t VALUES ('1', 'old-note', 'keep-me')")
+    conn.commit()
+    conn.close()
+
+    result = write_mapped_rows(
+        host="",
+        port=0,
+        database=str(db),
+        username="",
+        password="",
+        schema="main",
+        connection_string="",
+        ssl=False,
+        headers=["id", "note", "extra"],
+        data_rows=[["1", "new-note", DF_MISSING_SENTINEL]],
+        mappings=[
+            {"source": "id", "target": "id", "transform": "none"},
+            {"source": "note", "target": "note", "transform": "none"},
+            {"source": "extra", "target": "extra", "transform": "none"},
+        ],
+        column_types={"id": "string", "note": "string", "extra": "string"},
+        table_name="t",
+        write_mode="upsert",
+        conflict_columns=["id"],
+        create_table=False,
+    )
+    assert result.ok, result.error
+    assert result.rows_written >= 1
+    assert DF_MISSING_SENTINEL not in (result.checksum or "")
+
+    conn = sqlite3.connect(db)
+    row = conn.execute("SELECT id, note, extra FROM t WHERE id='1'").fetchone()
+    from connectors.writer_common import row_checksum
+
+    readback = row_checksum(
+        [row],
+        ["id", "note", "extra"],
+        dest_db_type="sqlite",
+        dest_types={"id": "string", "note": "string", "extra": "string"},
+    )
+    conn.close()
+    assert row == ("1", "new-note", "keep-me")
+    assert result.checksum == readback

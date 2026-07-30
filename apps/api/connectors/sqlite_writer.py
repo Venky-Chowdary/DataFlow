@@ -25,6 +25,7 @@ from connectors.writer_common import (
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
+    split_dense_sparse_rows,
     transform_error_policy,
 )
 from connectors.writer_common import (
@@ -44,6 +45,11 @@ def sqlite_type(inferred: str) -> str:
 
 
 def _to_sqlite_value(value: Any, source_type: str) -> Any:
+    from services.value_serializer import is_missing_sentinel
+
+    # Sparse CDC: never coerce DF_MISSING → NULL (would wipe present destination cols).
+    if is_missing_sentinel(value):
+        return value
     if value is None:
         return None
     upper = source_type.upper()
@@ -96,6 +102,107 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
     if upper == "BOOLEAN":
         return 1 if value else 0
     return value
+
+
+def _sqlite_apply_sparse_upsert(
+    cur: Any,
+    table_name: str,
+    target_cols: list[str],
+    conflict_columns: list[str],
+    sparse_rows: list[tuple],
+) -> tuple[int, int, list[tuple]]:
+    """Per-row upsert omitting DF_MISSING — never SET col=NULL for absent CDC fields.
+
+    Returns ``(rows_written, rows_skipped, checksum_rows)`` where checksum_rows are
+    post-apply images (destination values preserved for omitted columns).
+    """
+    from connectors.writer_common import (
+        DF_LSN_COL,
+        assert_sparse_upsert_has_pk,
+        materialize_sparse_row_for_checksum,
+        sparse_present_bindings,
+    )
+    from services.cdc_effectively_once import should_apply_pk_row
+
+    conflict = [c for c in conflict_columns if c in target_cols]
+    if not conflict:
+        raise ValueError("sparse SQLite upsert requires conflict_columns")
+    table_q = quote_sql_identifier(table_name)
+    written = 0
+    skipped = 0
+    checksum_rows: list[tuple] = []
+    select_sql = ", ".join(quote_sql_identifier(c) for c in target_cols)
+    for row in sparse_rows:
+        present = sparse_present_bindings(row, target_cols)
+        assert_sparse_upsert_has_pk(present, conflict)
+        non_pk = {k: v for k, v in present.items() if k not in conflict}
+        pk_vals = [present[c] for c in conflict]
+        where_sql = " AND ".join(
+            f"{quote_sql_identifier(c)}=?" for c in conflict
+        )
+        cur.execute(
+            f"SELECT {select_sql} FROM {table_q} WHERE {where_sql}",  # nosec B608
+            pk_vals,
+        )
+        existing_tuple = cur.fetchone()
+        existing = (
+            dict(zip(target_cols, existing_tuple)) if existing_tuple is not None else None
+        )
+        if (
+            existing is not None
+            and DF_LSN_COL in present
+            and DF_LSN_COL in target_cols
+        ):
+            if not should_apply_pk_row(
+                existing_lsn=existing.get(DF_LSN_COL),
+                incoming_lsn=present[DF_LSN_COL],
+            ).applied:
+                skipped += 1
+                continue
+        if non_pk:
+            set_cols = list(non_pk.keys())
+            set_sql = ", ".join(
+                f"{quote_sql_identifier(c)}=?" for c in set_cols
+            )
+            cur.execute(
+                f"UPDATE {table_q} SET {set_sql} WHERE {where_sql}",  # nosec B608
+                [non_pk[c] for c in set_cols] + pk_vals,
+            )
+            if cur.rowcount and cur.rowcount > 0:
+                written += 1
+                checksum_rows.append(
+                    materialize_sparse_row_for_checksum(present, existing, target_cols)
+                )
+                continue
+        cols = list(present.keys())
+        col_sql = ", ".join(quote_sql_identifier(c) for c in cols)
+        ph = ", ".join("?" for _ in cols)
+        try:
+            cur.execute(
+                f"INSERT INTO {table_q} ({col_sql}) VALUES ({ph})",  # nosec B608
+                [present[c] for c in cols],
+            )
+            written += 1
+            checksum_rows.append(
+                materialize_sparse_row_for_checksum(present, existing, target_cols)
+            )
+        except Exception:
+            if not non_pk:
+                raise
+            set_cols = list(non_pk.keys())
+            set_sql = ", ".join(
+                f"{quote_sql_identifier(c)}=?" for c in set_cols
+            )
+            cur.execute(
+                f"UPDATE {table_q} SET {set_sql} WHERE {where_sql}",  # nosec B608
+                [non_pk[c] for c in set_cols] + pk_vals,
+            )
+            written += 1
+            # Re-read after race: prefer merged image from pre-insert existing.
+            checksum_rows.append(
+                materialize_sparse_row_for_checksum(present, existing, target_cols)
+            )
+    return written, skipped, checksum_rows
 
 
 def _sqlite_upsert_batch(
@@ -269,13 +376,25 @@ def write_mapped_rows(
             )
         )
 
+        rows_for_checksum: list[tuple] = []
+        sparse_rows: list[tuple] = []
+        conflict_cols = [c for c in (conflict_columns or []) if c in target_cols]
+        if write_mode == "upsert" and conflict_cols:
+            mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
+
         converted_rows = [
             tuple(_to_sqlite_value(v, logical_types[i]) for i, v in enumerate(row))
             for row in mapped_rows
         ]
+        sparse_converted = [
+            tuple(_to_sqlite_value(v, logical_types[i]) for i, v in enumerate(row))
+            for row in sparse_rows
+        ]
+        # Dense rows are fully written — include them in writer-ack checksum.
+        rows_for_checksum = list(converted_rows)
 
         rejected_rows = _rejected_row_count(
-            data_rows, mapped_rows, rejected_details, policy
+            data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
         )
         coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
         if transform_errors and policy == "fail":
@@ -293,8 +412,7 @@ def write_mapped_rows(
             )
 
         total = len(converted_rows)
-        chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE)
-        conflict_cols = [c for c in (conflict_columns or []) if c in target_cols]
+        chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE) if total else 0
         placeholders = ", ".join("?" for _ in target_cols)
         insert = f"INSERT INTO {table_quoted} ({', '.join(quote_sql_identifier(c) for c in target_cols)}) VALUES ({placeholders})"  # nosec B608
 
@@ -331,6 +449,22 @@ def write_mapped_rows(
                                     exc_info=exc,
                                 )
 
+            if sparse_converted and write_mode == "upsert" and conflict_cols:
+                with conn:
+                    cur = conn.cursor()
+                    sparse_written, sparse_skipped, sparse_checksum = (
+                        _sqlite_apply_sparse_upsert(
+                            cur,
+                            table_name,
+                            target_cols,
+                            conflict_cols,
+                            sparse_converted,
+                        )
+                    )
+                    written += sparse_written
+                    rows_skipped += sparse_skipped
+                    rows_for_checksum.extend(sparse_checksum)
+
             # Each chunk is a separate transaction so checkpoints are durable
             # and a failed chunk can be retried without writing partial data.
             for chunk_idx in range(chunks):
@@ -352,23 +486,24 @@ def write_mapped_rows(
                         written += len(batch)
 
                 if on_checkpoint:
-                    on_checkpoint(chunk_idx + 1, chunks, written)
+                    on_checkpoint(chunk_idx + 1, max(chunks, 1), written)
 
             return WriteResult(
                 ok=True,
                 rows_written=written,
                 table_name=table_name,
                 target_schema=schema or "main",
-                # Checksum must reflect the values as stored in SQLite so the read-back
-                # verifier can match them exactly (e.g. booleans become 0/1 integers).
+                # Checksum must reflect values as stored (sparse preserves dest cells).
                 checksum=row_checksum(
-                    converted_rows,
+                    rows_for_checksum,
                     target_cols,
                     dest_db_type="sqlite",
                     dest_types=dest_types,
                 ),
-                chunks_completed=chunks,
-                rejected_rows=max(rejected_rows, len(data_rows) - written),
+                chunks_completed=chunks or (1 if sparse_converted else 0),
+                rejected_rows=max(
+                    rejected_rows, len(data_rows) - written - rows_skipped
+                ),
                 rejected_details=rejected_details,
                 coerced_null_rows=coerced_null_rows,
                 rows_skipped=rows_skipped,

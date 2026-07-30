@@ -137,11 +137,12 @@ class PreflightContext:
 
     def run_integrity_audit(self, sample_size: int = 1000) -> dict[str, Any]:
         return {
-            "blocks_transfer": False,
+            "blocks_transfer": True,
             "checks_passed": 0,
             "checks_failed": 0,
-            "issues": [],
+            "issues": ["Integrity audit not configured"],
             "summary": "Integrity audit not configured",
+            "unproven": True,
         }
 
     def coercion_report(self) -> dict[str, Any]:

@@ -109,11 +109,12 @@ class RuntimePreflightContext(PreflightContext):
         headers, rows, column_types = self._load_sample()
         if not headers:
             return {
-                "blocks_transfer": False,
+                "blocks_transfer": True,
                 "checks_passed": 0,
                 "checks_failed": 0,
-                "issues": [],
+                "issues": ["No source sample available for integrity audit"],
                 "summary": "No source sample available for integrity audit",
+                "unproven": True,
             }
 
         mapping_dicts = [
