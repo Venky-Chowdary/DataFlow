@@ -25,6 +25,7 @@ import { PilotPage } from "./pages/PilotPage";
 import { TransferPage } from "./pages/TransferPage";
 import { ConnectorsPage } from "./pages/ConnectorsPage";
 import { SchedulesPage } from "./pages/SchedulesPage";
+import { TransformsPage } from "./pages/TransformsPage";
 import { JobsPage, type JobsStudioIntent } from "./pages/JobsPage";
 import { ContractsPage } from "./pages/ContractsPage";
 import { McpPage } from "./pages/McpPage";
@@ -52,6 +53,7 @@ const NAV: { id: Screen; label: string; icon: string; desc: string; group: "plat
   { id: "contracts", label: "Contracts", icon: "shield", desc: "Schema agreements and breakers", group: "platform" },
   { id: "jobs", label: "Jobs", icon: "jobs", desc: "Live progress and history", group: "ops" },
   { id: "schedules", label: "Pipelines", icon: "activity", desc: "Recurring syncs", group: "ops" },
+  { id: "transforms", label: "Transforms", icon: "layers", desc: "Post-load SQL models", group: "ops" },
   { id: "query", label: "Query", icon: "search", desc: "Ad-hoc SQL and export", group: "ops" },
   { id: "pilot", label: "Pilot", icon: "sparkle", desc: "Natural-language assistant", group: "ops" },
   { id: "settings", label: "Settings", icon: "settings", desc: "Security, team, SSO", group: "system" },
@@ -698,6 +700,13 @@ function AppShell({
                       searchFocus?.screen === "schedules" ? searchFocus.scheduleId : undefined
                     }
                   />
+                </PageErrorBoundary>
+                </div>
+              )}
+              {mountedScreens.has("transforms") && (
+                <div className={`df2-screen-keep ${showScreen("transforms")}`} hidden={screen !== "transforms"} aria-hidden={screen !== "transforms"}>
+                <PageErrorBoundary label="Transformations">
+                  <TransformsPage connectors={connectors} />
                 </PageErrorBoundary>
                 </div>
               )}

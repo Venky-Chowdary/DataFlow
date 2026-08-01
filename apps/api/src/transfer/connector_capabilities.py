@@ -406,7 +406,9 @@ _DRIVER_MODULE: dict[str, str | None] = {
     "oracle": "oracledb",
     "sftp": "paramiko",
     "email": None,
-    "iceberg": None,  # filesystem writer; pyarrow optional for parquet data files
+    # Filesystem CoW works without pyiceberg; catalog endpoints fail closed at
+    # write time via resolve_iceberg_write_path (not a silent local fallback).
+    "iceberg": None,
     "kafka": None,  # kafka-python checked at produce time with clear error
     "pgvector": "psycopg2",
     "qdrant": "requests",

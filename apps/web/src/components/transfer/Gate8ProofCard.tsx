@@ -1,37 +1,17 @@
 /** Gate-8 reconciliation proof — source vs destination rows + checksums. */
 
-export interface Gate8SampleMismatch {
-  row?: string | number;
-  source?: string;
-  target?: string;
-  source_value?: string;
-  target_value?: string;
-  column?: string;
-}
+import type { Gate8ReconciliationPayload } from "../../lib/types";
 
-export interface Gate8Reconciliation {
-  passed?: boolean;
-  message?: string;
-  preview?: boolean;
-  phase?: string;
-  post_write_pending?: boolean;
-  source_rows?: number;
-  target_rows?: number;
-  source_checksum?: string;
-  target_checksum?: string;
-  rejected_rows?: number;
-  coerced_null_rows?: number;
-  missing_key_count?: number;
-  extra_key_count?: number;
-  matched_key_count?: number;
-  row_fidelity_score?: number;
-  sample_compare?: {
-    passed?: boolean;
-    compared?: number;
-    skipped?: boolean;
-    mismatches?: Gate8SampleMismatch[];
-  };
-}
+/**
+ * The card renders the engine payload verbatim — one shape, defined in
+ * `lib/types.ts`. A second local copy is how honesty fields (identity,
+ * alignment, read-back error) silently fell off the card before.
+ */
+export type Gate8Reconciliation = Gate8ReconciliationPayload;
+export type Gate8Identity = NonNullable<Gate8ReconciliationPayload["identity"]>;
+export type Gate8SampleMismatch = NonNullable<
+  NonNullable<Gate8ReconciliationPayload["sample_compare"]>["mismatches"]
+>[number];
 
 interface Gate8ProofCardProps {
   report: Gate8Reconciliation;
@@ -140,6 +120,20 @@ export type Gate8StatusView = {
 };
 
 /** Shared operator label for Gate-8 — never call writer-ack / pre-write “Passed”. */
+/**
+ * True when the engine compared values but could not prove row identity
+ * (no primary key, or null/duplicate keys). Positional matches are not
+ * keyed fidelity proof and must never render as a clean pass.
+ */
+export function isGate8IdentityUnproven(report: Gate8Reconciliation): boolean {
+  const mode = String(report.verification_mode || "").toLowerCase();
+  if (mode === "unproven_identity" || mode === "positional_only") return true;
+  if (report.identity && report.identity.proven === false) return true;
+  const alignment = String(report.sample_compare?.alignment || "").toLowerCase();
+  if (alignment === "unproven_identity" || alignment === "positional_only") return true;
+  return Boolean(report.sample_compare?.identity_warning);
+}
+
 export function classifyGate8Status(
   report: Gate8Reconciliation | null | undefined,
 ): Gate8StatusView {
@@ -151,6 +145,11 @@ export function classifyGate8Status(
   }
   if (isGate8WriterAckOnly(report)) {
     return { label: "Writer ack", tone: "warn", fullPass: false };
+  }
+  // A positional / unproven-identity compare is not keyed fidelity proof —
+  // labelling it "Passed" is the false-proof the engine explicitly refuses.
+  if (isGate8IdentityUnproven(report)) {
+    return { label: "Unproven identity", tone: "warn", fullPass: false };
   }
   if (isGate8SampleVerified(report)) {
     return { label: "Sample verified", tone: "ok", fullPass: true };
@@ -187,19 +186,33 @@ export function Gate8ProofCard({
   const targetRows = Number(report.target_rows ?? 0);
   const rejectedRows = Number(report.rejected_rows ?? 0);
   const coercedNullRows = Number(report.coerced_null_rows ?? 0);
-  // Quarantine hold-outs are counted in source_rows but not written — delta vs
-  // expected (source − held_out), not raw source−dest (that falsely warns on pass).
+  const rowsSkipped = Number(report.rows_skipped ?? 0);
+  // Quarantine hold-outs + intentional LSN-guard skips are counted in
+  // source_rows but not written — delta vs expected, not raw source−dest.
   const heldOut = Math.max(rejectedRows - coercedNullRows, 0);
-  const expectedRows = Math.max(sourceRows - heldOut, 0);
+  const expectedRows = Math.max(sourceRows - heldOut - rowsSkipped, 0);
   const delta = targetRows - expectedRows;
   const mismatches = report.sample_compare?.mismatches ?? [];
+  const sampleSkipped = Boolean(report.sample_compare?.skipped);
+  const sampleError = String(report.sample_compare?.error || "").trim();
+  const alignment = String(report.sample_compare?.alignment || "").toLowerCase();
+  const identityWarning = String(
+    report.sample_compare?.identity_warning
+    || (report.identity?.proven === false ? report.identity?.reason : "")
+    || "",
+  ).trim();
+  const identityUnproven = isGate8IdentityUnproven(report);
+  const fidelity = report.row_fidelity_score;
   const missingKeys = Number(report.missing_key_count ?? 0);
   const extraKeys = Number(report.extra_key_count ?? 0);
   const hasFindings = !passed && !simulationOk && !writerAckOk
     || mismatches.length > 0
     || missingKeys > 0
     || extraKeys > 0
-    || heldOut > 0;
+    || heldOut > 0
+    || identityUnproven
+    || Boolean(sampleError)
+    || sampleSkipped;
 
   const toneClass = preWrite
     ? (simulationOk ? "is-pending" : "is-fail")
@@ -214,21 +227,27 @@ export function Gate8ProofCard({
       ? (writerAckOk
         ? "Writer acknowledged — independent read-back not available"
         : "Writer acknowledgment did not verify")
-      : sampleVerified
-        ? "Keyed sample read-back matched (reverse-ETL class proof)"
-        : (passed ? "Source and destination match" : "Reconciliation did not verify");
+      : identityUnproven && (passed || sampleVerified)
+        ? "Sample compared — identity not proven"
+        : sampleVerified
+          ? "Keyed sample read-back matched (reverse-ETL class proof)"
+          : (passed ? "Source and destination match" : "Reconciliation did not verify");
   const badge = preWrite
     ? (simulationOk ? "Pending" : "Failed")
     : writerAck
       ? (writerAckOk ? "Writer ack" : "Failed")
-      : sampleVerified
-        ? "Sample verified"
-        : (passed ? "Verified" : "Failed");
+      : identityUnproven && (passed || sampleVerified)
+        ? "Unproven identity"
+        : sampleVerified
+          ? "Sample verified"
+          : (passed ? "Verified" : "Failed");
   const badgeClass = preWrite
     ? (simulationOk ? "is-pending" : "is-bad")
     : writerAck
       ? (writerAckOk ? "is-pending" : "is-bad")
-      : (passed ? "is-ok" : "is-bad");
+      : identityUnproven && (passed || sampleVerified)
+        ? "is-pending"
+        : (passed ? "is-ok" : "is-bad");
 
   return (
     <section
@@ -266,6 +285,28 @@ export function Gate8ProofCard({
 
       {report.message && (
         <p className="df2-gate8-proof-message">{report.message}</p>
+      )}
+
+      {identityWarning && (
+        <p className="df2-gate8-proof-message is-warn" role="status">
+          Identity caveat: {identityWarning}
+          {alignment === "positional_only"
+            ? " Comparison is positional only — do not treat this as keyed fidelity proof."
+            : ""}
+        </p>
+      )}
+
+      {sampleError && (
+        <p className="df2-gate8-proof-message is-warn" role="alert">
+          Read-back failed: {sampleError}
+        </p>
+      )}
+
+      {sampleSkipped && !sampleError && (
+        <p className="df2-gate8-proof-message is-warn" role="status">
+          Value read-back was not performed — row counts/checksums alone do not prove
+          per-cell fidelity.
+        </p>
       )}
 
       {preWrite && (
@@ -313,6 +354,22 @@ export function Gate8ProofCard({
             <dd className={heldOut > 0 || coercedNullRows > 0 ? "is-warn" : "is-ok"}>
               {heldOut > 0 ? `${heldOut.toLocaleString()} held out` : "0 held out"}
               {coercedNullRows > 0 ? ` · ${coercedNullRows.toLocaleString()} coerced NULL` : ""}
+            </dd>
+          </div>
+        )}
+        {rowsSkipped > 0 && (
+          <div>
+            <dt>Skipped (LSN guard)</dt>
+            <dd className="is-ok" title="Intentional CDC redelivery skips — not a shortfall">
+              {rowsSkipped.toLocaleString()}
+            </dd>
+          </div>
+        )}
+        {fidelity != null && Number.isFinite(Number(fidelity)) && (
+          <div>
+            <dt>Row fidelity</dt>
+            <dd className={Number(fidelity) >= 0.95 ? "is-ok" : "is-warn"}>
+              {(Number(fidelity) * 100).toFixed(1)}%
             </dd>
           </div>
         )}

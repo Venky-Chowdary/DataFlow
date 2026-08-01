@@ -25,11 +25,11 @@ from connectors.sql_temporal import (
 from connectors.write_resilience import (
     build_write_batch_key,
     close_quietly,
-    ensure_postgres_write_ledger,
+    ensure_raw_write_ledger,
     is_connection_lost,
     is_public_proxy_host,
-    mark_postgres_chunk_committed,
-    postgres_chunk_committed,
+    mark_raw_chunk_committed,
+    raw_chunk_rows_written,
     reconnect_backoff_seconds,
     should_retry_connection_lost,
     write_chunk_size,
@@ -933,7 +933,7 @@ def write_mapped_rows(
     def _run_setup(cursor) -> None:
         nonlocal target_types
         if use_ledger:
-            ensure_postgres_write_ledger(cursor, schema)
+            ensure_raw_write_ledger(cursor, dialect="postgresql", schema=schema)
         if create_table:
             cursor.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
             if engine not in {"redshift", "amazon_redshift", "redshift_serverless"}:
@@ -1109,15 +1109,22 @@ def write_mapped_rows(
                 chunk_written = 0
                 while True:
                     try:
-                        if use_ledger and postgres_chunk_committed(
-                            cur,
-                            schema=schema,
-                            job_id=job_id,
-                            batch_key=write_batch_key,
-                            chunk_idx=chunk_idx,
-                        ):
-                            chunk_written = len(batch)
-                            break
+                        if use_ledger:
+                            already = raw_chunk_rows_written(
+                                cur,
+                                dialect="postgresql",
+                                schema=schema,
+                                job_id=job_id,
+                                batch_key=write_batch_key,
+                                chunk_idx=chunk_idx,
+                            )
+                            if already is not None:
+                                # Credit what the first attempt actually landed.
+                                # The chunk may have quarantined rows, so
+                                # len(batch) would over-report and make the
+                                # reconcile checksum disagree with the table.
+                                chunk_written = already
+                                break
                         if use_copy:
                             _copy_rows(cur, schema, table_name, target_cols, batch)
                         else:
@@ -1153,17 +1160,19 @@ def write_mapped_rows(
                                 rows_skipped += skipped
                             if write_batch:
                                 cur.executemany(insert, write_batch)
+                        landed = len(batch if use_copy else write_batch)
                         if use_ledger:
-                            mark_postgres_chunk_committed(
+                            mark_raw_chunk_committed(
                                 cur,
+                                dialect="postgresql",
                                 schema=schema,
                                 job_id=job_id,
                                 batch_key=write_batch_key,
                                 chunk_idx=chunk_idx,
-                                rows_written=len(write_batch if not use_copy else batch),
+                                rows_written=landed,
                             )
                         conn.commit()
-                        chunk_written = len(write_batch if not use_copy else batch)
+                        chunk_written = landed
                         break
                     except Exception as chunk_exc:
                         try:
@@ -1214,8 +1223,9 @@ def write_mapped_rows(
                                     transform_errors.append(str(row_exc)[:200])
                             if use_ledger and chunk_written:
                                 try:
-                                    mark_postgres_chunk_committed(
+                                    mark_raw_chunk_committed(
                                         cur,
+                                        dialect="postgresql",
                                         schema=schema,
                                         job_id=job_id,
                                         batch_key=write_batch_key,

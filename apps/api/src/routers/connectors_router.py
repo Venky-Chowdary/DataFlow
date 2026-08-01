@@ -600,7 +600,16 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
             )
 
         request = transfer_request_from_dict(payload)
-        mongo.update_job_status(job_id, "pending", message=f"Resume requested for job {job_id}")
+        # Resume is the one sanctioned exit from a terminal status, and it must
+        # also drop any stale cancel request or the resumed run would abort at
+        # its first checkpoint.
+        mongo.clear_job_cancel(job_id)
+        mongo.update_job_status(
+            job_id,
+            "pending",
+            message=f"Resume requested for job {job_id}",
+            allow_terminal_exit=True,
+        )
         background_tasks.add_task(run_transfer_async, job_id, request, resume=True)
         return {
             "success": True,
@@ -625,6 +634,11 @@ async def cancel_transfer_job(job_id: str, request: Request):
             raise HTTPException(status_code=404, detail="Job not found")
         if job.get("status") in ("completed", "completed_with_quarantine", "failed", "cancelled"):
             return {"success": True, "job_id": job_id, "status": job.get("status"), "message": "Job already terminal"}
+        # Durable intent flag first, status second. The flag is what the worker
+        # loop actually consults, and unlike `status` nothing in the progress
+        # path ever overwrites it — so a cancel cannot be lost to a race with
+        # the worker's next chunk update.
+        mongo.request_job_cancel(job_id)
         mongo.update_job_status(
             job_id, "cancelled",
             phase="cancelled",
@@ -707,6 +721,15 @@ async def get_job_quarantine(job_id: str, request: Request):
         "reason": dest_q.get("reason"),
         "error": ds.get("dest_quarantine_error") or dest_q.get("error"),
     }
+    # Control-plane JSONL durability is independent of the destination-table
+    # DLQ. When persist_rejected_rows fails the engine still lists the rows in
+    # memory, so a Replay button that looks healthy would find nothing to
+    # rewrite. Surface the flag next to dest_dlq so the UI can block that.
+    quarantine_durable = ds.get("quarantine_durable")
+    if quarantine_durable is None and rejected_rows:
+        # Older jobs wrote rejects without the flag — treat as unknown, not lost.
+        quarantine_durable = None
+    quarantine_dlq_error = ds.get("quarantine_dlq_error")
     # Live open-row count when we have a saved transfer request + SQL dest.
     payload = job.get("transfer_request")
     if payload and dest_dlq.get("table"):
@@ -729,6 +752,8 @@ async def get_job_quarantine(job_id: str, request: Request):
         "source": source,
         "quarantine": details,
         "dest_dlq": dest_dlq,
+        "quarantine_durable": quarantine_durable,
+        "quarantine_dlq_error": quarantine_dlq_error,
     }
 
 

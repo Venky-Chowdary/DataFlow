@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { classifyGate8Status, isGate8PreWriteSimulation, isGate8SampleVerified, isGate8WriterAckOnly } from "./Gate8ProofCard";
+import { classifyGate8Status, isGate8IdentityUnproven, isGate8PreWriteSimulation, isGate8SampleVerified, isGate8WriterAckOnly } from "./Gate8ProofCard";
 
 /** Mirror of Gate8ProofCard expected-dest math (quarantine hold-out). */
 function gate8ExpectedDest(sourceRows: number, rejectedRows: number, coercedNullRows: number) {
@@ -113,6 +113,73 @@ describe("Gate-8 pre-write simulation honesty", () => {
     assert.equal(view.label, "Writer ack");
     assert.equal(view.fullPass, false);
     assert.equal(view.tone, "warn");
+  });
+});
+
+describe("Gate-8 identity-proof honesty", () => {
+  it("flags a no-primary-key reconcile as unproven identity", () => {
+    assert.equal(
+      isGate8IdentityUnproven({
+        passed: false,
+        verification_mode: "unproven_identity",
+        identity: { column: null, proven: false, reason: "primary_key required" },
+        sample_compare: { passed: false, compared: 0, mismatches: [], alignment: "unproven_identity" },
+      }),
+      true,
+    );
+  });
+
+  it("flags duplicate/null keys as positional-only, never a clean pass", () => {
+    const report = {
+      passed: true,
+      verification_mode: "positional_only",
+      identity: { column: "id", proven: false, reason: "null or duplicate identity values" },
+      sample_compare: {
+        passed: true,
+        compared: 10,
+        mismatches: [],
+        alignment: "positional_only",
+        identity_warning: "weak or non-unique primary key — fidelity is sample/positional only",
+      },
+    };
+    assert.equal(isGate8IdentityUnproven(report), true);
+    const view = classifyGate8Status(report);
+    assert.equal(view.label, "Unproven identity");
+    assert.equal(view.fullPass, false);
+    assert.equal(view.tone, "warn");
+  });
+
+  it("does not flag a genuinely key-aligned reconcile", () => {
+    const report = {
+      passed: true,
+      verification_mode: "key_aligned",
+      identity: { column: "id", proven: true, provenance: "explicit" },
+      source_checksum: "abc",
+      target_checksum: "abc",
+      sample_compare: { passed: true, compared: 10, mismatches: [], alignment: "key_aligned" },
+    };
+    assert.equal(isGate8IdentityUnproven(report), false);
+    assert.equal(classifyGate8Status(report).fullPass, true);
+  });
+});
+
+describe("Gate-8 skipped-row accounting", () => {
+  /** Mirror of the card's expected-dest math including LSN-guard skips. */
+  function expectedDest(source: number, rejected: number, coerced: number, skipped: number) {
+    const heldOut = Math.max(rejected - coerced, 0);
+    return Math.max(source - heldOut - skipped, 0);
+  }
+
+  it("LSN-guard skips do not read as a shortfall", () => {
+    // 100 source, 10 intentionally skipped on CDC redelivery, 90 written.
+    assert.equal(expectedDest(100, 0, 0, 10), 90);
+    assert.equal(90 - expectedDest(100, 0, 0, 10), 0);
+    // Without rows_skipped the card showed a −10 warn delta on a clean pass.
+    assert.equal(90 - expectedDest(100, 0, 0, 0), -10);
+  });
+
+  it("combines quarantine hold-outs and skips", () => {
+    assert.equal(expectedDest(100, 5, 0, 10), 85);
   });
 });
 

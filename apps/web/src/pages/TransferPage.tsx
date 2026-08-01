@@ -3556,6 +3556,26 @@ export function TransferPage({
       });
       setRunStartupProgress(36);
       setRunStartupPhase(RUN_LAUNCH_STAGES[3]);
+      // A double-click / retry that hit an already-running equivalent transfer.
+      // Open the live job instead of starting a second writer against the same table.
+      if (
+        (data as { duplicate?: boolean }).duplicate
+        && (data as { existing_job_id?: string }).existing_job_id
+      ) {
+        const existingId = String((data as { existing_job_id: string }).existing_job_id);
+        const existingStatus = String(
+          (data as { existing_status?: string }).existing_status || "in progress",
+        );
+        setRunStartupProgress(40);
+        setActiveJobId(existingId);
+        setTransferring(false);
+        toast({
+          title: "Transfer already running",
+          message: `Opened the ${existingStatus} job instead of starting a second writer.`,
+          tone: "warning",
+        });
+        return;
+      }
       if (data.job_id && (data as { async?: boolean }).async) {
         setRunStartupProgress(40);
         setActiveJobId(data.job_id);

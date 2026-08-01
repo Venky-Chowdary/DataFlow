@@ -8,13 +8,25 @@ source/destination paths, and validation evidence.
 from __future__ import annotations
 
 import json
+import os
 import uuid
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any
 
 from services.value_serializer import json_default
 
-LINEAGE_EVENTS: list[dict[str, Any]] = []
+#: Retained lineage events. Bounded because the API and worker processes are
+#: long-lived: an unbounded list grew for the entire process lifetime, one entry
+#: per emitted event across every job, and was only ever cleared by an explicit
+#: test helper. A ring buffer keeps the recent-history use cases (tests, the
+#: lineage export endpoint, operator debugging) while making the footprint flat.
+MAX_LINEAGE_EVENTS = int(os.getenv("DATAFLOW_MAX_LINEAGE_EVENTS", "5000") or 5000)
+
+#: Deque subclass so existing ``LINEAGE_EVENTS.append`` / iteration / ``len`` /
+#: ``.clear()`` call sites keep working; indexing and slicing of a deque covers
+#: the read patterns in this module and its tests.
+LINEAGE_EVENTS: deque[dict[str, Any]] = deque(maxlen=MAX_LINEAGE_EVENTS)
 
 
 def _now() -> str:
@@ -28,7 +40,20 @@ def _emit(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         "timestamp": _now(),
         "payload": payload,
     }
+    # Oldest events fall off the left once the buffer is full.
     LINEAGE_EVENTS.append(event)
+    # Mirror onto the active OpenTelemetry span when tracing is on. The in-
+    # memory list stays the source of truth for tests and the lineage export;
+    # the span event is how the same signal shows up in an APM timeline.
+    try:
+        from services.tracing import add_span_event
+
+        attrs = {
+            k: v for k, v in (payload or {}).items() if not isinstance(v, (dict, list))
+        }
+        add_span_event(event_type, attrs)
+    except Exception:
+        pass
     return event
 
 

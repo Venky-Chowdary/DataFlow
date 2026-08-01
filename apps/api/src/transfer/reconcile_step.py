@@ -7,6 +7,7 @@ from typing import Any
 
 from connectors.writer_common import build_mapped_rows, resolve_target_columns
 from services.reconciliation import (
+    TargetSampleUnavailable,
     checksum_rows,
     read_target_sample,
     reconcile,
@@ -313,16 +314,35 @@ def run_reconciliation(
         # Compare EVERY mapped column. Truncating to 20 falsely treated columns
         # 21+ as NULL (Mongo→MySQL users with 24 fields: Gate-8 failed on
         # referral_invite_modal_dismissed with source 0 vs invented NULL).
-        target_sample = read_target_sample(
-            db_type,
-            cfg,
-            schema=schema,
-            table_name=table_name,
-            columns=target_cols or None,
-            limit=min(50, len(sample_records)),
-            sort_key=sort_key,
-            key_values=key_values or None,
-        )
+        try:
+            target_sample = read_target_sample(
+                db_type,
+                cfg,
+                schema=schema,
+                table_name=table_name,
+                columns=target_cols or None,
+                limit=min(50, len(sample_records)),
+                sort_key=sort_key,
+                key_values=key_values or None,
+            )
+        except TargetSampleUnavailable as exc:
+            # A failed read is not "no rows to compare". Skipping Gate-8 here
+            # used to report a clean reconcile while the destination was
+            # unreachable — the exact silent-pass the proof bar forbids.
+            return _finalize_reconcile({
+                "passed": False,
+                "message": (
+                    "Gate-8 sample compare unavailable: could not read destination "
+                    f"sample ({exc}). Refusing to treat a failed read as fidelity proof."
+                ),
+                "source_rows": source_rows,
+                "target_rows": target_rows,
+                "source_checksum": source_checksum,
+                "target_checksum": target_checksum,
+                "rejected_rows": rejected_rows,
+                "coerced_null_rows": coerced_null_rows,
+                "sample_compare": {"passed": False, "error": str(exc)},
+            })
         if target_sample:
             sample_compare = sample_compare_rows(
                 sample_records,
@@ -344,16 +364,32 @@ def run_reconciliation(
     if delete_pks and table_name and target_cols and strict_checksum:
         sort_key = _sort_key_for_columns(target_cols, mapping_dicts)
         if sort_key:
-            still_present = read_target_sample(
-                db_type,
-                cfg,
-                schema=schema,
-                table_name=table_name,
-                columns=[sort_key],
-                limit=len(delete_pks),
-                sort_key=sort_key,
-                key_values=delete_pks,
-            )
+            try:
+                still_present = read_target_sample(
+                    db_type,
+                    cfg,
+                    schema=schema,
+                    table_name=table_name,
+                    columns=[sort_key],
+                    limit=len(delete_pks),
+                    sort_key=sort_key,
+                    key_values=delete_pks,
+                )
+            except TargetSampleUnavailable as exc:
+                return _finalize_reconcile({
+                    "passed": False,
+                    "message": (
+                        "Gate-8 delete proof unavailable: could not read destination "
+                        f"keys ({exc}). Refusing to treat a failed read as proof that "
+                        "deleted PKs are absent."
+                    ),
+                    "source_rows": source_rows,
+                    "target_rows": target_rows,
+                    "source_checksum": source_checksum,
+                    "target_checksum": target_checksum,
+                    "rejected_rows": rejected_rows,
+                    "coerced_null_rows": coerced_null_rows,
+                })
             if still_present:
                 return _finalize_reconcile({
                     "passed": False,

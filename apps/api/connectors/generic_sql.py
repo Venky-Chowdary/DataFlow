@@ -34,6 +34,14 @@ from connectors.sql_temporal import (
     is_sql_data_error,
     logical_to_temporal_ddl,
 )
+from connectors.write_resilience import (
+    build_write_batch_key,
+    ensure_sqlalchemy_write_ledger,
+    mark_sqlalchemy_chunk_committed,
+    sqlalchemy_chunk_rows_written,
+)
+from services import reflection_cache
+from services.engine_pool import release_engine
 from services.type_system import (
     ddl_type,
     normalize_logical_type,
@@ -489,6 +497,26 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
 
 
 def _engine(cfg: dict[str, Any]) -> Any:
+    """Engine for ``cfg``, reused across calls.
+
+    An Engine owns a connection pool and is designed to be long-lived and
+    thread-safe. This used to build a new one on every read chunk, write chunk
+    and checksum re-read — roughly ``3N`` pools per N-chunk transfer, each used
+    for exactly one connection. :mod:`services.engine_pool` keeps one per
+    distinct connection target so the pool can actually pool, and so
+    SQLAlchemy's reflection cache stays warm between chunks.
+
+    Callers must pair this with ``release_engine`` rather than ``dispose()``:
+    disposing a shared engine would tear the pool out from under every other
+    chunk in flight.
+    """
+    from services.engine_pool import get_pooled_engine
+
+    return get_pooled_engine(cfg, _build_engine)
+
+
+def _build_engine(cfg: dict[str, Any]) -> Any:
+    """Construct a brand-new Engine. Called once per distinct target."""
     url = _build_url(cfg)
     # Fast, safe defaults for local and network databases.
     db_type = (cfg.get("type") or "").lower()
@@ -510,7 +538,9 @@ def _engine(cfg: dict[str, Any]) -> Any:
             if db_type == "duckdb" or "duckdb" in connection_string:
                 engine.dialect.supports_native_decimal = True
             return engine
-        engine = create_engine(url, pool_pre_ping=True, pool_recycle=600)
+        from services.engine_pool import pool_settings
+
+        engine = create_engine(url, pool_pre_ping=True, **pool_settings())
         # SQL Server: refuse silent VARCHAR truncation at the session level.
         if (
             db_type in {
@@ -1325,17 +1355,29 @@ def _reflect_table(
     columns: list[str] | None = None,
     include_pk: bool = False,
 ) -> sa.Table:
-    """Reflect or build a Table object for reading/writing."""
-    metadata = sa.MetaData()
-    # Quote identifiers for safety with reserved words and case-sensitive engines.
-    table_obj = sa.Table(
-        table,
-        metadata,
-        schema=schema,
-        quote=True,
-        quote_schema=True,
-        autoload_with=engine,
-    )
+    """Reflect or build a Table object for reading/writing.
+
+    The ``autoload_with`` reflection is the expensive half and is cached per
+    table, because a chunked read calls this once per chunk for a shape that
+    only changes when we ourselves run DDL. The column-subset projection below
+    is pure Python and is rebuilt per call, so callers still get their own
+    object to hold and the shared reflected table is never mutated.
+    """
+    from services.reflection_cache import get_or_load
+
+    def _reflect() -> sa.Table:
+        metadata = sa.MetaData()
+        # Quote identifiers for safety with reserved words and case-sensitive engines.
+        return sa.Table(
+            table,
+            metadata,
+            schema=schema,
+            quote=True,
+            quote_schema=True,
+            autoload_with=engine,
+        )
+
+    table_obj = get_or_load(engine, schema, table, "reflect", _reflect)
     if columns is None:
         return table_obj
 
@@ -1805,11 +1847,17 @@ def introspect_table_schema(
             "tables": [],
         }
     finally:
-        engine.dispose()
+        release_engine(engine)
 
 
 def drop_table(cfg: dict[str, Any], table: str, schema: str | None = None) -> bool:
-    """Drop a table using SQLAlchemy dialect-aware DDL with a raw fallback."""
+    """Drop a table using SQLAlchemy dialect-aware DDL with a raw fallback.
+
+    Raises on a failed drop rather than returning ``False``. A caller deciding
+    whether a ``full_refresh`` actually cleared the destination cannot tell a
+    swallowed permission error from "nothing to drop", and guessing wrong means
+    appending onto rows that were supposed to be gone.
+    """
     if not SQLALCHEMY_AVAILABLE:
         return False
     engine = _engine(cfg)
@@ -1820,15 +1868,26 @@ def drop_table(cfg: dict[str, Any], table: str, schema: str | None = None) -> bo
             conn.execute(sa.text(f"DROP TABLE IF EXISTS {qualified}"))
             conn.commit()
         return True
-    except Exception:
+    except Exception as primary_exc:
+        # Some dialects reject the raw IF EXISTS form; retry via dialect DDL
+        # before giving up, but surface the original error if that also fails.
         try:
             table_obj = sa.Table(table, sa.MetaData(), schema=schema)
             table_obj.drop(engine, checkfirst=True)
             return True
-        except Exception:
-            return False
+        except Exception as fallback_exc:
+            logger.error(
+                "Failed to drop table %s (primary: %s; dialect DDL fallback: %s)",
+                table,
+                primary_exc,
+                fallback_exc,
+            )
+            raise primary_exc
     finally:
-        engine.dispose()
+        # Whether the drop succeeded or not, any reflected shape for this table
+        # is no longer trustworthy.
+        reflection_cache.invalidate_table(engine, schema, table)
+        release_engine(engine)
 
 
 def delete_by_primary_keys(
@@ -1838,7 +1897,13 @@ def delete_by_primary_keys(
     keys: list[str],
     schema: str | None = None,
 ) -> int:
-    """Delete rows by primary key using a dialect-aware parameterized statement."""
+    """Delete rows by primary key using a dialect-aware parameterized statement.
+
+    Raises on driver failure. Returning ``0`` here made a failed DELETE
+    indistinguishable from "those keys were already absent", so CDC read the
+    failure as an idempotent success and advanced its cursor past tombstones
+    that were never applied.
+    """
     if not SQLALCHEMY_AVAILABLE or not keys:
         return 0
     engine = _engine(cfg)
@@ -1859,10 +1924,13 @@ def delete_by_primary_keys(
             result = conn.execute(sa.text(stmt), params)
             conn.commit()
             return result.rowcount or 0
-    except Exception:
-        return 0
+    except Exception as exc:
+        from connectors.table_manager import DestinationDeleteError
+
+        logger.error("Delete by primary key failed on %s: %s", table, exc, exc_info=exc)
+        raise DestinationDeleteError(table, exc) from exc
     finally:
-        engine.dispose()
+        release_engine(engine)
 
 
 def fetch_pk_lsn_map(
@@ -1903,7 +1971,7 @@ def fetch_pk_lsn_map(
                 existing[str(row[0])] = row[1]
         return existing
     finally:
-        engine.dispose()
+        release_engine(engine)
 
 
 def _read_table_raw(
@@ -2078,7 +2146,7 @@ def read_table_batch(
 
         return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     finally:
-        engine.dispose()
+        release_engine(engine)
 
 
 def read_table_cursor_batch(
@@ -2182,7 +2250,7 @@ def read_table_cursor_batch(
 
         return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=None)
     finally:
-        engine.dispose()
+        release_engine(engine)
 
 
 def _delete_by_keys(
@@ -3827,6 +3895,20 @@ def write_mapped_rows(
     engine = _engine(cfg)
     schema_name = _schema_name(cfg)
 
+    # Durable chunk ledger: without it, a transient failure after chunk k
+    # committed makes the outer retry re-run this write from chunk 0 and
+    # duplicate every already-landed row. Only meaningful when the caller
+    # supplies a job_id to scope the ledger to this attempt chain.
+    ledger_job_id = str(_kwargs.get("job_id") or "").strip()
+    ledger_batch_key = str(
+        _kwargs.get("write_batch_key") or ""
+    ).strip() or build_write_batch_key(
+        table_name=table_name,
+        file_batch_idx=_kwargs.get("file_batch_idx"),
+    )
+    ledger_chunks_skipped = 0
+    ledger_unavailable = False
+
     target_cols, logical_types = resolve_target_columns(
         mappings, column_types, preserve_case=True
     )
@@ -3995,13 +4077,22 @@ def write_mapped_rows(
                 # QuestDB's pg_catalog reflection is incomplete; use idempotent DDL.
                 table_exists = False
             else:
-                inspector = inspect(engine)
-                table_exists = inspector.has_table(table_name, schema=schema_name)
+                # Cached per table: a chunked load asks this once per chunk, and
+                # the answer only changes on DDL we run ourselves below — every
+                # such branch invalidates.
+                table_exists = reflection_cache.get_or_load(
+                    engine,
+                    schema_name,
+                    table_name,
+                    "has_table",
+                    lambda: inspect(engine).has_table(table_name, schema=schema_name),
+                )
 
             if write_mode == "replace" and table_exists:
                 conn.execute(sa.schema.DropTable(table_obj, if_exists=True))
                 conn.commit()
                 table_exists = False
+                reflection_cache.invalidate_table(engine, schema_name, table_name)
 
             if not table_exists and not create_table:
                 return WriteResult(
@@ -4062,6 +4153,10 @@ def write_mapped_rows(
                         conn.rollback()
                     else:
                         raise
+                finally:
+                    # The table now exists (or a concurrent writer created it).
+                    # Either way the cached "missing" answer is stale.
+                    reflection_cache.invalidate_table(engine, schema_name, table_name)
 
             if table_exists and backfill_new_fields:
                 add_missing_columns(
@@ -4083,6 +4178,9 @@ def write_mapped_rows(
                     target_column_types,
                     conflict_columns=conflict_columns,
                 )
+                # Drift backfill may have added or widened columns; anything
+                # reflected before this point describes the old shape.
+                reflection_cache.invalidate_table(engine, schema_name, table_name)
 
             if sparse_converted and write_mode == "upsert" and conflict_columns:
                 from connectors.writer_common import row_has_missing_sentinel
@@ -4105,6 +4203,16 @@ def write_mapped_rows(
 
             total = len(converted_rows)
             chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE) if total else 0
+            # The ledger is only needed when a replay could duplicate rows. An
+            # upsert keyed on conflict columns is already idempotent, so paying
+            # for a ledger round-trip per chunk there would be pure overhead.
+            ledger_table = None
+            if ledger_job_id and total and not (write_mode == "upsert" and conflict_columns):
+                ledger_table = ensure_sqlalchemy_write_ledger(conn, schema=schema_name)
+                if ledger_table is not None:
+                    conn.commit()
+                else:
+                    ledger_unavailable = True
             for chunk_idx in range(chunks):
                 start = chunk_idx * CHUNK_SIZE
                 batch = converted_rows[start : start + CHUNK_SIZE]
@@ -4112,6 +4220,26 @@ def write_mapped_rows(
                     break
 
                 try:
+                    already = (
+                        sqlalchemy_chunk_rows_written(
+                            conn,
+                            ledger_table,
+                            job_id=ledger_job_id,
+                            batch_key=ledger_batch_key,
+                            chunk_idx=chunk_idx,
+                        )
+                        if ledger_table is not None
+                        else None
+                    )
+                    if already is not None:
+                        # A previous attempt already committed this chunk. Replay
+                        # its recorded row count instead of re-inserting the rows.
+                        written += already
+                        ledger_chunks_skipped += 1
+                        chunks_completed = chunk_idx + 1
+                        if on_checkpoint:
+                            on_checkpoint(chunks_completed, chunks, written)
+                        continue
                     chunk_written = 0
                     if write_mode == "upsert" and conflict_columns:
                         chunk_written = _upsert_batch(
@@ -4131,6 +4259,15 @@ def write_mapped_rows(
                         chunk_written = max(
                             0, getattr(result, "rowcount", None) or 0
                         ) or len(batch)
+                    if ledger_table is not None:
+                        mark_sqlalchemy_chunk_committed(
+                            conn,
+                            ledger_table,
+                            job_id=ledger_job_id,
+                            batch_key=ledger_batch_key,
+                            chunk_idx=chunk_idx,
+                            rows_written=chunk_written,
+                        )
                     conn.commit()
                     written += chunk_written
                 except Exception as chunk_exc:
@@ -4195,6 +4332,31 @@ def write_mapped_rows(
                                     }
                                 )
                                 transform_errors.append(str(row_exc)[:200])
+                        if ledger_table is not None:
+                            # Row-by-row salvage already committed the good rows.
+                            # Record the surviving count so a retry skips them
+                            # instead of duplicating them, and so it does not
+                            # re-attempt the rows we know are unfit.
+                            try:
+                                mark_sqlalchemy_chunk_committed(
+                                    conn,
+                                    ledger_table,
+                                    job_id=ledger_job_id,
+                                    batch_key=ledger_batch_key,
+                                    chunk_idx=chunk_idx,
+                                    rows_written=chunk_written,
+                                )
+                                conn.commit()
+                            except Exception as ledger_exc:
+                                try:
+                                    conn.rollback()
+                                except Exception:
+                                    pass
+                                logger.warning(
+                                    "write ledger update failed for chunk %s: %s",
+                                    chunk_idx,
+                                    ledger_exc,
+                                )
                         written += chunk_written
                     elif policy == "fail" or not is_sql_data_error(chunk_exc):
                         raise
@@ -4204,6 +4366,17 @@ def write_mapped_rows(
                 chunks_completed = chunk_idx + 1
                 if on_checkpoint:
                     on_checkpoint(chunks_completed, chunks, written)
+
+        if ledger_chunks_skipped:
+            transform_errors.append(
+                f"Skipped {ledger_chunks_skipped} chunk(s) already committed by a "
+                "previous attempt (write ledger prevented duplicate rows)"
+            )
+        elif ledger_unavailable:
+            transform_errors.append(
+                "Could not create the write ledger on this destination; a retry "
+                "after an interrupted write may duplicate rows"
+            )
 
         return WriteResult(
             ok=True,
@@ -4252,4 +4425,4 @@ def write_mapped_rows(
             warnings=transform_errors,
         )
     finally:
-        engine.dispose()
+        release_engine(engine)

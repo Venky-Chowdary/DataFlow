@@ -15,6 +15,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from services.engine_pool import release_engine
+
 SOFT_DELETE_COLUMN = "_deleted"
 _KEY_SEP = "\x1f"
 
@@ -288,7 +290,7 @@ def apply_inferred_soft_deletes(
             )
 
     finally:
-        engine.dispose()
+        release_engine(engine)
 
     return {
         "soft_deleted": deactivated_total,

@@ -27,6 +27,7 @@ try:
     from services.checkpoint_service import Checkpoint, CheckpointService
     from services.error_handling import RetryBudget, with_retry
     from services.parallel_chunks import OrderedChunkRunner
+    from services.replay_safety import classify_replay_safety
     from services.resilience import adaptive_chunk_size
     from services.row_filter import apply_row_filter
     from services.transform_engine import infer_date_locale, set_active_date_locale
@@ -34,6 +35,7 @@ except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.checkpoint_service import Checkpoint, CheckpointService
     from src.services.error_handling import RetryBudget, with_retry
     from src.services.parallel_chunks import OrderedChunkRunner
+    from src.services.replay_safety import classify_replay_safety
     from src.services.resilience import adaptive_chunk_size
     from src.services.row_filter import apply_row_filter
     from src.services.transform_engine import infer_date_locale, set_active_date_locale
@@ -804,6 +806,25 @@ def stream_file_to_database(
     checkpoint.conflict_columns = pk_target_cols or []
     checkpoint.chunk_total = chunks
     retry = retry_budget or RetryBudget()
+    # File loads are the classic duplicate case: an insert-mode CSV replayed after
+    # an ambiguous failure appends the batch a second time. Object-store writes
+    # replace the whole object per call, so they are idempotent by construction.
+    replay_safety = (
+        classify_replay_safety(
+            dest_type=dest_type,
+            write_mode="replace",
+            conflict_columns=["__object__"],
+            job_id=job_id,
+        )
+        if object_store
+        else classify_replay_safety(
+            dest_type=dest_type,
+            write_mode=write_mode,
+            conflict_columns=pk_target_cols or None,
+            job_id=job_id,
+            has_primary_key=bool(pk_target_cols),
+        )
+    )
 
     written = checkpoint.rows_processed or 0
     chunk_idx = checkpoint.chunk_index or 0
@@ -949,6 +970,7 @@ def stream_file_to_database(
                 exponential_base=retry.exponential_base,
                 jitter=retry.jitter,
             ),
+            replay_safety=replay_safety,
         )
         return {
             "batch_written": batch_written,

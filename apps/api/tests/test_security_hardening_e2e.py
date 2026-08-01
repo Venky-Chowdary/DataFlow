@@ -377,7 +377,7 @@ def test_mysql_writer_insert_sql_never_embeds_injection_payload() -> None:
             return None
 
     with patch.object(mw, "_open_mysql", return_value=_Conn()), patch.object(
-        mw, "ensure_mysql_write_ledger", lambda *_a, **_k: None
+        mw, "ensure_raw_write_ledger", lambda *_a, **_k: None
     ), patch.object(mw, "write_chunk_size", return_value=100):
         result = mw.write_mapped_rows(
             host="127.0.0.1",

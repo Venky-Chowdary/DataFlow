@@ -73,6 +73,13 @@ export const PAGE_META: Record<Screen | "login", PageMeta> = {
     keywords: "scheduled data sync, recurring ETL, pipeline scheduler, cron data transfer",
     robots: "noindex",
   },
+  transforms: {
+    title: "Transformations",
+    description:
+      "Post-load SQL models that run at the destination after a transfer lands — views, tables, incremental rollups, and data tests.",
+    keywords: "dbt alternative, post-load SQL, data transformation, warehouse models, data tests",
+    robots: "noindex",
+  },
   jobs: {
     title: "Job Theater",
     description:

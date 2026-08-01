@@ -5394,6 +5394,14 @@
   color: #475569;
 }
 
+.df2-quarantine-next-copy p.df2-quarantine-durable-warn {
+  color: #9a3412;
+  background: #fff7ed;
+  border: 1px solid #fdba74;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
 .df2-quarantine-next-actions {
   display: flex;
   flex-wrap: wrap;
@@ -9798,5 +9806,651 @@
 @media (min-width: 1680px) {
   .df2-app .df2-table-wrap {
     max-height: min(720px, 68vh);
+  }
+}
+
+/* ============================================================================
+   Phase timing + post-load transformations on the transfer result dashboard.
+   Sized to sit beside .df2-result-cdc-strip so the result page keeps one
+   card rhythm; tokens only, no new colour literals.
+   ========================================================================== */
+
+.df2-result-phases,
+.df2-result-transforms,
+.df2-result-reuse,
+.df2-result-replay {
+  border: 1px solid var(--df-border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin: 12px 0;
+  background: var(--df-surface-muted);
+}
+
+.df2-result-phases > header,
+.df2-result-transforms > header,
+.df2-result-reuse > header,
+.df2-result-replay > header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.df2-result-phases > header strong,
+.df2-result-transforms > header strong,
+.df2-result-reuse > header strong,
+.df2-result-replay > header strong {
+  font-size: 13px;
+}
+
+.df2-result-phases > header span,
+.df2-result-transforms > header span,
+.df2-result-reuse > header span,
+.df2-result-replay > header span {
+  font-size: 11px;
+  color: var(--df-text-secondary);
+}
+
+.df2-result-replay > p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--df-text-secondary);
+  line-height: 1.45;
+}
+
+.df2-result-replay > footer {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--df-text-secondary);
+}
+
+.df2-result-replay--ok {
+  border-color: color-mix(in srgb, var(--df-success, #16a34a) 45%, var(--df-border));
+}
+
+.df2-result-replay--warn {
+  border-color: color-mix(in srgb, var(--df-warning, #d97706) 55%, var(--df-border));
+}
+
+.df2-result-reuse-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.df2-result-reuse-head,
+.df2-result-reuse-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--df-text-secondary);
+}
+
+.df2-result-reuse-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--df-surface-2, rgba(127, 127, 127, 0.15));
+  overflow: hidden;
+  margin: 4px 0;
+}
+
+.df2-result-reuse-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--df-accent, #3b82f6);
+  border-radius: inherit;
+}
+
+.df2-result-reuse-trace {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.df2-result-trace-id {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--df-surface-2, rgba(127, 127, 127, 0.12));
+  color: var(--df-text-secondary);
+}
+
+/* -- phase bars ----------------------------------------------------------- */
+
+.df2-result-phase-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.df2-result-phase {
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.df2-result-phase.is-dominant {
+  border-color: var(--df-brand-ring, var(--df-brand));
+}
+
+.df2-result-phase-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.df2-result-phase-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--df-text-primary);
+}
+
+.df2-result-phase-time {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--df-text-primary);
+}
+
+.df2-result-phase-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--df-surface-muted);
+  overflow: hidden;
+  margin: 6px 0 4px;
+}
+
+.df2-result-phase-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--df-steel-400, var(--df-text-tertiary));
+  transition: width var(--df-duration-md, 200ms) var(--df-ease-out, ease-out);
+}
+
+.df2-result-phase.is-dominant .df2-result-phase-bar > span {
+  background: var(--df-brand);
+}
+
+.df2-result-phase-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--df-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-result-phase-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 9px;
+  font-size: 11px;
+  color: var(--df-text-tertiary);
+}
+
+.df2-result-phase-note {
+  color: var(--df-text-secondary);
+}
+
+/* -- transformations ------------------------------------------------------ */
+
+.df2-result-transforms.is-warn {
+  border-color: var(--df-warning-border);
+  background: var(--df-warning-bg);
+}
+
+.df2-result-transforms.is-danger {
+  border-color: var(--df-danger-border);
+  background: var(--df-danger-bg);
+}
+
+.df2-result-transform-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.df2-result-transform {
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.df2-result-transform.is-danger {
+  border-color: var(--df-danger-border);
+}
+
+.df2-result-transform.is-warn {
+  border-color: var(--df-warning-border);
+}
+
+.df2-result-transform-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: var(--df-text-primary);
+}
+
+.df2-result-transform-head:hover {
+  background: var(--df-surface-muted);
+}
+
+.df2-result-transform-name {
+  font-size: 12px;
+  font-weight: 600;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.df2-result-transform-mat,
+.df2-result-transform-rows,
+.df2-result-transform-time {
+  font-size: 11px;
+  color: var(--df-text-secondary);
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+
+.df2-result-transform-mat {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--df-surface-muted);
+  border: 1px solid var(--df-border);
+}
+
+.df2-result-transform-error {
+  margin: 0;
+  padding: 6px 10px 8px;
+  font-size: 11px;
+  color: var(--df-danger);
+}
+
+.df2-result-transform-tests {
+  list-style: none;
+  margin: 0;
+  padding: 0 10px 8px;
+  display: grid;
+  gap: 4px;
+}
+
+.df2-result-transform-tests li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--df-text-secondary);
+}
+
+.df2-result-transform-tests li.is-danger {
+  color: var(--df-danger);
+}
+
+.df2-result-transform-sev {
+  margin-left: auto;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+
+.df2-result-transform-detail {
+  border-top: 1px solid var(--df-border);
+  padding: 8px 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.df2-result-transform-detail p {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  font-size: 11px;
+}
+
+.df2-result-transform-detail p > span {
+  color: var(--df-text-tertiary);
+  flex: 0 0 62px;
+}
+
+.df2-result-transform-detail code {
+  font-size: 11px;
+  color: var(--df-text-primary);
+  word-break: break-all;
+}
+
+.df2-result-transform-sql {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--df-navy-900, #0f172a);
+  color: #e2e8f0;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-x: auto;
+  max-height: 220px;
+}
+
+.df2-result-transform-foot {
+  margin: 9px 0 0;
+  font-size: 11px;
+  color: var(--df-text-secondary);
+}
+
+@media (max-width: 720px) {
+  .df2-result-transform-head {
+    flex-wrap: wrap;
+  }
+
+  .df2-result-transform-name {
+    flex: 1 1 100%;
+  }
+}
+
+/* ============================================================================
+   Transformations page — project list, model editor, plan preview.
+   ========================================================================== */
+
+.df2-xform-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--df-space-3, 12px);
+}
+
+.df2-xform-card {
+  border: 1px solid var(--df-border);
+  border-radius: 12px;
+  background: var(--df-surface);
+  padding: 14px 16px;
+}
+
+.df2-xform-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.df2-xform-card-head h3 {
+  margin: 0 0 2px;
+  font-size: 15px;
+}
+
+.df2-xform-card-head p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--df-text-secondary);
+}
+
+.df2-xform-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.df2-xform-card-models {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.df2-xform-card-models li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: var(--df-surface-muted);
+  border: 1px solid var(--df-border);
+  font-size: 11px;
+}
+
+.df2-xform-card-models code {
+  font-size: 11px;
+}
+
+.df2-xform-refs {
+  color: var(--df-text-tertiary);
+}
+
+.df2-xform-layers {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--df-text-tertiary);
+}
+
+.df2-xform-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+}
+
+.df2-xform-form .df2-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--df-text-secondary);
+}
+
+.df2-xform-form .df2-field-wide {
+  grid-column: 1 / -1;
+}
+
+.df2-xform-form .df2-field input,
+.df2-xform-form .df2-field select,
+.df2-xform-model input,
+.df2-xform-model select,
+.df2-xform-model textarea {
+  border: 1px solid var(--df-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  background: var(--df-surface);
+  color: var(--df-text-primary);
+}
+
+.df2-xform-model textarea {
+  font-family: var(--df-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  resize: vertical;
+  min-height: 110px;
+}
+
+.df2-xform-toggles {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 13px;
+}
+
+.df2-xform-toggles label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.df2-xform-models {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
+}
+
+.df2-xform-models > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.df2-xform-model {
+  border: 1px solid var(--df-border);
+  border-radius: 10px;
+  padding: 10px;
+  background: var(--df-surface-muted);
+  display: grid;
+  gap: 8px;
+}
+
+.df2-xform-model > header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.df2-xform-model-name {
+  flex: 1 1 140px;
+  font-weight: 600;
+}
+
+.df2-xform-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--df-text-tertiary);
+}
+
+.df2-xform-hint code {
+  font-size: 11px;
+  color: var(--df-text-secondary);
+}
+
+.df2-xform-preview {
+  grid-column: 1 / -1;
+  border: 1px solid var(--df-border);
+  border-radius: 10px;
+  padding: 12px;
+  background: var(--df-surface);
+  display: grid;
+  gap: 10px;
+}
+
+.df2-xform-preview > header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.df2-xform-preview > header span {
+  font-size: 11px;
+  color: var(--df-text-secondary);
+}
+
+.df2-xform-preview-layers {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.df2-xform-preview-layers li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--df-surface-muted);
+}
+
+.df2-xform-preview article {
+  border: 1px solid var(--df-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.df2-xform-preview article.is-danger {
+  border-color: var(--df-danger-border);
+  background: var(--df-danger-bg);
+}
+
+.df2-xform-preview article header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  margin-bottom: 6px;
+}
+
+.df2-xform-preview pre {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--df-navy-900, #0f172a);
+  color: #e2e8f0;
+  font-size: 11px;
+  overflow-x: auto;
+}
+
+.df2-xform-preview-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--df-danger);
+}
+
+.df2-xform-run-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.df2-xform-run-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--df-surface-muted);
+}
+
+.df2-xform-run-list li.is-failed {
+  background: var(--df-danger-bg);
+  color: var(--df-danger);
+}
+
+.df2-xform-run-list li em {
+  flex: 1 1 100%;
+  font-style: normal;
+  font-size: 11px;
+}
+
+@media (max-width: 720px) {
+  .df2-xform-form {
+    grid-template-columns: 1fr;
   }
 }

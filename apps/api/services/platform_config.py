@@ -121,6 +121,11 @@ def docs_enabled() -> bool:
     return os.getenv("DATAFLOW_ENABLE_DOCS", "1").lower() not in ("0", "false", "off", "no")
 
 
+def tracing_enabled() -> bool:
+    """Opt-in OpenTelemetry. Off by default so a lean install is unchanged."""
+    return os.getenv("DATAFLOW_ENABLE_TRACING", "0").lower() in ("1", "true", "yes")
+
+
 def _mongo_is_localhost(uri: str) -> bool:
     lower = uri.lower()
     return (

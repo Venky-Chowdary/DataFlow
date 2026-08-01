@@ -17,10 +17,18 @@ import sys
 
 
 def main() -> int:
-    logging.basicConfig(
-        level=os.getenv("DATAFLOW_LOG_LEVEL", "INFO"),
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-    )
+    # Same structured configuration as the API process, so a job that starts in
+    # the API and executes in the worker fleet produces one correlatable log
+    # stream instead of two differently-shaped ones.
+    try:
+        from services.logging_config import configure_logging
+
+        configure_logging()
+    except Exception:  # pragma: no cover - never let logging stop the worker
+        logging.basicConfig(
+            level=os.getenv("DATAFLOW_LOG_LEVEL", "INFO"),
+            format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        )
     log = logging.getLogger("dataflow.worker")
 
     # Ensure fleet mode is on for worker processes.

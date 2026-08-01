@@ -2433,7 +2433,20 @@ export function ValidateDashboard({
           </div>
           {mismatches.length === 0 ? (
             <p className="df2-vd-diff-clean">
-              <DtIcon name="check" size={13} /> Every sampled value matched exactly — no drift between source and destination.
+              <DtIcon name="check" size={13} />{" "}
+              {sampleCompare.alignment === "key_aligned"
+                ? "Every keyed sample value matched — no drift between source and destination."
+                : sampleCompare.alignment === "positional_only"
+                  || sampleCompare.alignment === "unproven_identity"
+                  || sampleCompare.identity_warning
+                  ? `Sample values matched positionally — identity not proven${
+                    sampleCompare.identity_warning
+                      ? ` (${sampleCompare.identity_warning})`
+                      : ""
+                  }.`
+                  : sampleCompare.error
+                    ? `Read-back reported an error: ${sampleCompare.error}`
+                    : "Every sampled value matched — confirm a primary key is present before treating this as keyed fidelity proof."}
             </p>
           ) : (
             <div className="df2-vd-diff-table-wrap">

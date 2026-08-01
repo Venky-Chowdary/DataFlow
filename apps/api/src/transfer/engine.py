@@ -8,7 +8,7 @@ import resource
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
@@ -22,6 +22,7 @@ if str(_api_root) not in sys.path:
 try:
     from services import lineage_telemetry as lineage
     from services.error_handling import (
+        FullRefreshDropFailed,
         RetryBudget,
         TransferCancelled,
         classify_error,
@@ -59,6 +60,7 @@ except (
 ):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services import lineage_telemetry as lineage
     from src.services.error_handling import (
+        FullRefreshDropFailed,
         RetryBudget,
         TransferCancelled,
         classify_error,
@@ -726,6 +728,59 @@ def _checkpoint_has_progress(checkpoint: Any) -> bool:
     )
 
 
+def _apply_post_load_transforms(request: Any, dest_summary: dict[str, Any]) -> None:
+    """Run configured transformation models and fold the result into the summary.
+
+    Called from all three completion paths (buffered, DB-to-DB streaming, file
+    streaming). They are near-identical blocks, and a post-load step wired into
+    only one of them would run after a CSV load but not after a Postgres
+    stream — worse than not running at all, because the operator cannot tell
+    which happened.
+
+    Never raises. The rows are already at the destination by this point, so a
+    transformation failure must be reported inside the summary rather than
+    turning a successful load into a failed job.
+    """
+    try:
+        from services.post_load_transform import run_post_load_transforms
+
+        destination = getattr(request, "destination", None)
+        if destination is None:
+            return
+        landed = str(
+            getattr(destination, "table", "")
+            or getattr(destination, "collection", "")
+            or ""
+        )
+        outcome = run_post_load_transforms(
+            destination=destination,
+            landed_table=landed,
+            workspace_id=str(getattr(request, "workspace_id", "") or ""),
+        )
+        # Surface anything the operator needs to act on. A clean "nothing
+        # configured" skip is omitted so the job summary stays dense; a
+        # mismatch, load failure, or partial run always lands in the summary
+        # so it cannot be mistaken for "nothing was configured".
+        if (
+            outcome.get("ran")
+            or outcome.get("status") in {"failed", "partial"}
+            or (
+                outcome.get("status") == "skipped"
+                and outcome.get("message")
+                and "No transformation project" not in str(outcome.get("message"))
+            )
+        ):
+            dest_summary["transformations"] = outcome
+    except Exception as exc:
+        logger.warning("Post-load transformations skipped: %s", exc, exc_info=exc)
+        dest_summary["transformations"] = {
+            "ran": False,
+            "status": "failed",
+            "projects": [],
+            "message": f"Post-load transformations could not start: {exc}",
+        }
+
+
 def _persist_job_quarantine(
     job_id: str, dest_summary: dict[str, Any], request: Any = None
 ) -> None:
@@ -778,6 +833,7 @@ def _persist_job_quarantine(
 _CDC_JOB_FIELDS = (
     "cdc_lag_seconds",
     "replication_lag_bytes",
+    "cdc_confirmed_flush_lsn",
     "cdc_heartbeat_at",
     "cdc_last_ddl_at",
     "cdc_plugin",
@@ -1010,23 +1066,45 @@ def _cdc_fields_from_summary(dest_summary: dict[str, Any] | None) -> dict[str, A
 
 
 def _drop_destination_table(destination: EndpointConfig) -> bool:
-    """Drop the destination object for full-refresh overwrite sync modes."""
+    """Drop the destination object for full-refresh overwrite sync modes.
+
+    Raises :class:`FullRefreshDropFailed` when a drop was attempted and failed.
+    Swallowing it is the difference between an overwrite and an append: the old
+    rows survive, the new rows land on top, and the job reports success with a
+    doubled destination. A ``full_refresh`` that cannot clear the destination
+    must fail loudly instead of quietly changing its own semantics.
+
+    Returns ``False`` only when the driver has no drop support, which is a
+    genuine "nothing to do" and not an error.
+    """
     if destination.kind != "database":
         return False
+
+    from connectors.table_manager import TableDropError, drop_table
+
+    from .adapters import resolve_connector_config, resolve_dest_table
+    from .connector_capabilities import resolve_driver_type
+
     try:
-        from connectors.table_manager import drop_table
-
-        from .adapters import resolve_connector_config, resolve_dest_table
-        from .connector_capabilities import resolve_driver_type
-
         db_type = resolve_driver_type(destination.format)
         cfg = resolve_connector_config(destination)
         table_name = resolve_dest_table(db_type, destination)
         schema = cfg.get("schema")
-        return drop_table(db_type, cfg, table_name, schema)
     except Exception as exc:
-        logger.warning("Drop destination table failed: %s", exc, exc_info=exc)
-        return False
+        # Could not even work out what to drop. Treated as fatal for the same
+        # reason: proceeding would append onto an uncleared table.
+        raise FullRefreshDropFailed(
+            "unknown", f"could not resolve destination for drop: {exc}"
+        ) from exc
+
+    try:
+        return drop_table(db_type, cfg, table_name, schema)
+    except TableDropError as exc:
+        logger.error("full_refresh drop failed for %s: %s", table_name, exc)
+        raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
+    except Exception as exc:
+        logger.error("full_refresh drop failed for %s: %s", table_name, exc, exc_info=exc)
+        raise FullRefreshDropFailed(table_name, str(exc)) from exc
 
 
 def _schema_for_endpoint(destination: EndpointConfig) -> str | None:
@@ -1339,6 +1417,32 @@ def _record_schema_and_lineage(
         )
 
 
+#: Placeholder holder id used while claiming a slot before the job document
+#: exists. Claim-then-create is deliberate: creating the job first would leave a
+#: window where a duplicate submit sees no claim and starts a second writer.
+_PENDING_CLAIM_ID = "__pending__"
+
+
+class DuplicateTransferSubmission(Exception):
+    """An equivalent transfer is already running.
+
+    Carries the in-flight job so the caller can point the operator at it instead
+    of reporting a bare conflict. Raised rather than returning the existing id so
+    no caller can accidentally treat a deduplicated submit as a fresh run.
+    """
+
+    def __init__(self, claim: Any) -> None:
+        self.claim = claim
+        self.existing_job_id = getattr(claim, "existing_job_id", "") or ""
+        self.existing_status = getattr(claim, "existing_status", "") or ""
+        super().__init__(
+            "An equivalent transfer is already "
+            f"{self.existing_status or 'in progress'}"
+            + (f" (job {self.existing_job_id})" if self.existing_job_id else "")
+            + ". Wait for it to finish or cancel it before starting another run."
+        )
+
+
 class UniversalTransferEngine:
     """
     Orchestrates universal data movement:
@@ -1381,27 +1485,96 @@ class UniversalTransferEngine:
     def execute_tracked(
         self, request: TransferRequest, job_id: str, resume: bool = False
     ) -> TransferResult:
-        """Timed wrapper around the core transfer engine."""
+        """Timed wrapper around the core transfer engine.
+
+        Also the OpenTelemetry root span for the transfer. Every phase span
+        opened inside the stream nests under this one, and the resulting
+        ``trace_id`` is folded into ``destination_summary`` so the UI can
+        deep-link an operator from a job card into their APM.
+        """
         self._resolve_saved_connectors(request)
         locale_token = set_active_date_locale(request.date_locale)
         try:
-            start = time.monotonic()
-            start_mem = self._peak_memory_bytes()
-            result = self._execute_tracked_core(request, job_id, resume=resume)
-            elapsed = time.monotonic() - start
-            result.elapsed_seconds = round(elapsed, 3)
-            result.records_per_second = (
-                round(result.records_transferred / elapsed, 3) if elapsed > 0 else 0.0
+            from services.tracing import (
+                current_trace_id,
+                get_correlation_id,
+                set_span_attribute,
+                set_span_error,
+                start_span,
             )
-            result.peak_memory_bytes = max(self._peak_memory_bytes() - start_mem, 0)
-            # Surface SLA metrics in the destination summary for the UI / API consumers.
-            result.destination_summary["elapsed_seconds"] = result.elapsed_seconds
-            result.destination_summary["records_per_second"] = result.records_per_second
-            result.destination_summary["peak_memory_bytes"] = result.peak_memory_bytes
-            self._notify_job_status(request, result)
-            return result
+        except Exception:
+            start_span = None  # type: ignore[assignment]
+
+        src = getattr(request, "source", None)
+        dst = getattr(request, "destination", None)
+        span_attrs = {
+            "dataflow.job_id": job_id,
+            "dataflow.resume": bool(resume),
+            "dataflow.source.type": str(getattr(src, "type", "") or getattr(src, "kind", "") or ""),
+            "dataflow.destination.type": str(
+                getattr(dst, "type", "") or getattr(dst, "kind", "") or ""
+            ),
+            "dataflow.sync_mode": str(getattr(request, "sync_mode", "") or ""),
+        }
+        span_cm = (
+            start_span("transfer.execute", attributes=span_attrs, kind="internal")
+            if start_span is not None
+            else nullcontext()
+        )
+
+        # Bind the job id for the whole transfer so every log line emitted by the
+        # engine, the connectors, and reconciliation identifies its job. Those
+        # modules have no notion of a job, which is why "what happened to job X?"
+        # was previously unanswerable from logs alone.
+        try:
+            from services.logging_config import job_log_context
+
+            log_cm: Any = job_log_context(job_id)
+        except Exception:
+            log_cm = nullcontext()
+
+        try:
+            with log_cm, span_cm as span:
+                start = time.monotonic()
+                start_mem = self._peak_memory_bytes()
+                try:
+                    result = self._execute_tracked_core(request, job_id, resume=resume)
+                except BaseException as exc:
+                    if start_span is not None:
+                        set_span_error(span, exc)
+                    raise
+                elapsed = time.monotonic() - start
+                result.elapsed_seconds = round(elapsed, 3)
+                result.records_per_second = (
+                    round(result.records_transferred / elapsed, 3) if elapsed > 0 else 0.0
+                )
+                result.peak_memory_bytes = max(self._peak_memory_bytes() - start_mem, 0)
+                # Surface SLA metrics in the destination summary for the UI / API consumers.
+                result.destination_summary["elapsed_seconds"] = result.elapsed_seconds
+                result.destination_summary["records_per_second"] = result.records_per_second
+                result.destination_summary["peak_memory_bytes"] = result.peak_memory_bytes
+                if start_span is not None:
+                    set_span_attribute(span, "dataflow.records_transferred", result.records_transferred)
+                    set_span_attribute(span, "dataflow.elapsed_seconds", result.elapsed_seconds)
+                    set_span_attribute(
+                        span,
+                        "dataflow.rejected_rows",
+                        int(result.destination_summary.get("rejected_rows") or 0),
+                    )
+                    trace_id = current_trace_id()
+                    correlation = get_correlation_id()
+                    if trace_id:
+                        result.destination_summary["trace_id"] = trace_id
+                    if correlation:
+                        result.destination_summary["correlation_id"] = correlation
+                self._notify_job_status(request, result)
+                return result
         finally:
             reset_active_date_locale(locale_token)
+            # The run is over however it ended, so the slot must be freed here.
+            # Releasing only on success would leave a failed job's claim in place
+            # and block the operator's retry until the TTL expired.
+            self._release_idempotency(job_id)
 
     def _notify_job_status(
         self, request: TransferRequest, result: TransferResult
@@ -1895,7 +2068,13 @@ class UniversalTransferEngine:
             def _check_cancelled() -> None:
                 try:
                     job = mongo.get_job(job_id)
-                    if job and job.get("status") == "cancelled":
+                    # Honour the durable cancel flag as well as the status. The
+                    # status field is rewritten by this very loop on every
+                    # chunk, so a cancel that landed mid-chunk could be
+                    # overwritten before it was ever read.
+                    if job and (
+                        job.get("cancel_requested") or job.get("status") == "cancelled"
+                    ):
                         raise TransferCancelled("Transfer cancelled by user")
                 except TransferCancelled:
                     raise
@@ -2293,6 +2472,7 @@ class UniversalTransferEngine:
             if load_history_report:
                 dest_summary["load_history_report"] = load_history_report
             _persist_job_quarantine(job_id, dest_summary, request)
+            _apply_post_load_transforms(request, dest_summary)
             mongo.update_job_status(
                 job_id,
                 terminal_status,
@@ -2654,7 +2834,13 @@ class UniversalTransferEngine:
             def _check_cancelled() -> None:
                 try:
                     job = mongo.get_job(job_id)
-                    if job and job.get("status") == "cancelled":
+                    # Honour the durable cancel flag as well as the status. The
+                    # status field is rewritten by this very loop on every
+                    # chunk, so a cancel that landed mid-chunk could be
+                    # overwritten before it was ever read.
+                    if job and (
+                        job.get("cancel_requested") or job.get("status") == "cancelled"
+                    ):
                         raise TransferCancelled("Transfer cancelled by user")
                 except TransferCancelled:
                     raise
@@ -2900,6 +3086,7 @@ class UniversalTransferEngine:
                 mappings=mappings,
             )
             _persist_job_quarantine(job_id, dest_summary, request)
+            _apply_post_load_transforms(request, dest_summary)
             mongo.update_job_status(
                 job_id,
                 terminal_status,
@@ -3226,7 +3413,13 @@ class UniversalTransferEngine:
             def _check_cancelled() -> None:
                 try:
                     job = mongo.get_job(job_id)
-                    if job and job.get("status") == "cancelled":
+                    # Honour the durable cancel flag as well as the status. The
+                    # status field is rewritten by this very loop on every
+                    # chunk, so a cancel that landed mid-chunk could be
+                    # overwritten before it was ever read.
+                    if job and (
+                        job.get("cancel_requested") or job.get("status") == "cancelled"
+                    ):
                         raise TransferCancelled("Transfer cancelled by user")
                 except TransferCancelled:
                     raise
@@ -3396,6 +3589,7 @@ class UniversalTransferEngine:
                 mappings=mappings,
             )
             _persist_job_quarantine(job_id, dest_summary, request)
+            _apply_post_load_transforms(request, dest_summary)
             mongo.update_job_status(
                 job_id,
                 terminal_status,
@@ -3540,7 +3734,125 @@ class UniversalTransferEngine:
         proof = _mapping_proof_for_request(request)
         if proof:
             job_doc["mapping_proof"] = proof
-        return mongo.create_transfer_job(job_doc)
+
+        # Claim the right to run this transfer before the job exists, so a
+        # double submit is told about the in-flight job instead of starting a
+        # second writer against the same destination table.
+        claim = self._claim_idempotency(request, job_doc)
+        if claim is not None and claim.duplicate:
+            raise DuplicateTransferSubmission(claim)
+
+        try:
+            job_id = mongo.create_transfer_job(job_doc)
+        except Exception:
+            # Creating the job failed after we reserved the slot. Free it so the
+            # next submit is not blocked by a claim that points at nothing.
+            if claim is not None:
+                try:
+                    release = getattr(mongo, "release_job_idempotency", None)
+                    if callable(release):
+                        release(claim.key, _PENDING_CLAIM_ID)
+                except Exception as release_exc:
+                    logger.debug(
+                        "idempotency release after create failure skipped: %s",
+                        release_exc,
+                    )
+            raise
+        if claim is not None:
+            # The claim was inserted with a placeholder id because the real one
+            # only exists after the job document is written. Point it at the
+            # job now so a later release, or a duplicate check, names the right
+            # run rather than the placeholder.
+            self._bind_idempotency_claim(claim.key, job_id)
+        return job_id
+
+    def _idempotency_key(self, request: TransferRequest) -> str:
+        """Full claim key for a request, or '' when the guard is disabled."""
+        if os.getenv("DATAFLOW_JOB_IDEMPOTENCY", "1").strip().lower() in {
+            "0",
+            "false",
+            "off",
+        }:
+            return ""
+        from services.job_idempotency import (
+            claim_key,
+            normalize_client_key,
+            request_fingerprint,
+        )
+
+        explicit = normalize_client_key(getattr(request, "idempotency_key", ""))
+        return claim_key(
+            workspace_id=request.workspace_id or "",
+            key=explicit or request_fingerprint(request),
+        )
+
+    def _claim_idempotency(
+        self, request: TransferRequest, job_doc: dict[str, Any]
+    ) -> Any | None:
+        """Reserve this transfer's slot. Returns the claim, or None if unavailable."""
+        from services.job_idempotency import JobClaim
+
+        key = self._idempotency_key(request)
+        if not key:
+            return None
+        mongo = get_mongodb_service()
+        claimer = getattr(mongo, "claim_job_idempotency", None)
+        if not callable(claimer):
+            return None
+        try:
+            acquired, existing_id, existing_status = claimer(
+                key=key, job_id=_PENDING_CLAIM_ID
+            )
+        except Exception as exc:
+            # The guard is a safety net, not a gate. If it cannot be consulted,
+            # run the transfer rather than refusing all work.
+            logger.warning("idempotency claim unavailable: %s", exc)
+            return None
+        job_doc["idempotency_key"] = key
+        return JobClaim(
+            key=key,
+            job_id="",
+            acquired=acquired,
+            existing_job_id=existing_id,
+            existing_status=existing_status,
+        )
+
+    def _bind_idempotency_claim(self, key: str, job_id: str) -> None:
+        """Replace the placeholder holder id with the real job id.
+
+        Done as an in-place update, never as release-then-reclaim. The latter
+        opens a window where a concurrent submit can take the freed key and
+        start a second writer before this run reclaims it.
+        """
+        if not key or not job_id:
+            return
+        mongo = get_mongodb_service()
+        try:
+            binder = getattr(mongo, "bind_job_idempotency", None)
+            if callable(binder):
+                binder(key, _PENDING_CLAIM_ID, job_id)
+        except Exception as exc:
+            logger.debug("idempotency claim bind skipped: %s", exc)
+
+    def _release_idempotency(self, job_id: str) -> None:
+        """Free the claim so the same transfer can be run again later.
+
+        Called on every terminal path. A claim that outlived its job would block
+        legitimate re-runs until the TTL expired.
+        """
+        if not job_id:
+            return
+        mongo = get_mongodb_service()
+        try:
+            job = mongo.get_job(job_id) or {}
+            key = str(job.get("idempotency_key") or "")
+            if not key:
+                return
+            release = getattr(mongo, "release_job_idempotency", None)
+            if callable(release):
+                release(key, job_id)
+        except Exception as exc:
+            logger.debug("idempotency release skipped for %s: %s", job_id, exc)
 
     def _read_source(
         self, request: TransferRequest

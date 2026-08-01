@@ -122,6 +122,10 @@ class TransferRequest:
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian),
     # 'MDY' (US), or '' to infer from env DATAFLOW_DATE_ORDER / fail closed.
     date_locale: str = ""
+    # Client-supplied idempotency key. When set it replaces the derived request
+    # fingerprint, letting a caller make its own HTTP retries safe. When empty,
+    # the fingerprint still guards against accidental double submission.
+    idempotency_key: str = ""
 
     @property
     def operation(self) -> str:
@@ -192,6 +196,7 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "require_signed_contract": request.require_signed_contract,
         "triggered_by": request.triggered_by,
         "date_locale": request.date_locale,
+        "idempotency_key": request.idempotency_key,
         "requires_file_reupload": request.source.kind == "file" and bool(request.source_content),
     }
 
@@ -224,6 +229,7 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         require_signed_contract=bool(data.get("require_signed_contract", False)),
         triggered_by=(data.get("triggered_by") or "").strip(),
         date_locale=(data.get("date_locale") or "").strip().upper(),
+        idempotency_key=(data.get("idempotency_key") or "").strip(),
     )
 
 

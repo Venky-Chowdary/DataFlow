@@ -909,8 +909,15 @@ export function JobTheaterView({
           </article>
         )}
         {job.replication_lag_bytes != null && Number.isFinite(Number(job.replication_lag_bytes)) && (
-          <article className="df2-theater-v3-metric">
-            <DtIcon name="database" size={16} />
+          <article
+            className="df2-theater-v3-metric"
+            title={
+              Number(job.replication_lag_bytes) >= 64 * 1_048_576
+                ? "Slot is retaining a large volume of WAL. Idle slots now release WAL on heartbeat; if this keeps growing, check confirmed_flush_lsn and whether the consumer is stuck."
+                : "Bytes between the slot's confirmed position and the current WAL tip."
+            }
+          >
+            <DtIcon name={Number(job.replication_lag_bytes) >= 64 * 1_048_576 ? "alert" : "database"} size={16} />
             <div>
               <strong>
                 {Number(job.replication_lag_bytes) >= 1_048_576
@@ -919,7 +926,20 @@ export function JobTheaterView({
                     ? `${(Number(job.replication_lag_bytes) / 1024).toFixed(1)} KB`
                     : `${Number(job.replication_lag_bytes)} B`}
               </strong>
-              <span>WAL / binlog lag</span>
+              <span>
+                {Number(job.replication_lag_bytes) >= 64 * 1_048_576
+                  ? "WAL retained (high)"
+                  : "WAL / binlog lag"}
+              </span>
+            </div>
+          </article>
+        )}
+        {job.cdc_confirmed_flush_lsn && (
+          <article className="df2-theater-v3-metric" title="Slot confirmed_flush_lsn — WAL older than this can be recycled">
+            <DtIcon name="database" size={16} />
+            <div>
+              <strong className="df2-mono">{String(job.cdc_confirmed_flush_lsn)}</strong>
+              <span>Confirmed flush LSN</span>
             </div>
           </article>
         )}

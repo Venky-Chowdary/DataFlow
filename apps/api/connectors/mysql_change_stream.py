@@ -81,7 +81,10 @@ class MySqlChangeStreamCdc:
             if len(self.tables) > 1
             else f"mysql:{self.database}:{self.table}"
         )
-        self._column_names_cache: list[str] | None = None
+        # Per-table ordinal → name map. A single shared list keyed on tables[0]
+        # remapped every captured table's positional UNKNOWN_COLn keys into
+        # the wrong columns, so deletes removed the wrong destination rows.
+        self._column_names_cache: dict[str, list[str]] = {}
         self.source_key = connection_fingerprint(
             {**cfg, "type": "mysql"},
             connector_id=str(cfg.get("connector_id") or ""),
@@ -411,6 +414,25 @@ class MySqlChangeStreamCdc:
                 except Exception as exc:
                     _logger.debug("Error closing MySQL lock connection: %s", exc)
 
+    def _binlog_file_pos_on(self, cur) -> str | None:
+        """Return ``file:pos`` from the open cursor for snapshot row stamps.
+
+        Must stay in the same LSN family as streaming events (which stamp from
+        ``stream.log_file`` / ``stream.log_pos``). GTID is captured separately
+        for the peek filter and must not become the row stamp.
+        """
+        from connectors.writer_common import _format_file_pos_lsn
+
+        for sql in ("SHOW MASTER STATUS", "SHOW BINARY LOG STATUS"):
+            try:
+                cur.execute(sql)
+                row = cur.fetchone()
+                if row and row[0] is not None and row[1] is not None:
+                    return _format_file_pos_lsn(str(row[0]), row[1])
+            except Exception as exc:
+                _logger.debug("CDC binlog status query failed: %s", exc)
+        return None
+
     def _current_gtid_executed(self, cur) -> str | None:
         try:
             cur.execute("SELECT @@GLOBAL.gtid_executed")
@@ -563,7 +585,7 @@ class MySqlChangeStreamCdc:
             # Keep positional remap aligned with rebuilt history.
             cols = list((rebuilt.get("columns") or {}).keys())
             if cols:
-                self._column_names_cache = cols
+                self._column_names_cache[self.table] = cols
         else:
             live = self._fetch_live_schema()
             if live.get("columns"):
@@ -575,7 +597,7 @@ class MySqlChangeStreamCdc:
                     schema_snapshot=live,
                 )
                 self.decode_schema = live
-                self._column_names_cache = list(live["columns"].keys())
+                self._column_names_cache[self.table] = list(live["columns"].keys())
         self.last_ddl_at = last_ddl_at(self.source_key, self.table)
         self._schema_ready = True
         return self.decode_schema
@@ -594,7 +616,10 @@ class MySqlChangeStreamCdc:
             schema_snapshot=live,
         )
         self.decode_schema = live
-        self._column_names_cache = list(live["columns"].keys())
+        # Only invalidate the table whose schema we just refreshed. Wiping the
+        # whole cache would force every sibling table back through an ordinal
+        # lookup against tables[0]'s columns.
+        self._column_names_cache[self.table] = list(live["columns"].keys())
         self.last_ddl_at = str(entry.get("recorded_at") or "") or self.last_ddl_at
         _logger.info(
             "Recorded MySQL CDC schema change for %s.%s v%s",
@@ -615,16 +640,20 @@ class MySqlChangeStreamCdc:
                 return True
         return False
 
-    def _ordered_columns(self) -> list[str]:
-        """Ordered column names from information_schema.
+    def _ordered_columns(self, table: str | None = None) -> list[str]:
+        """Ordered column names from information_schema for one captured table.
 
         MySQL 8.0+/9.x only embed column names in the binlog when
         ``binlog_row_metadata=FULL``; with the default MINIMAL the reader yields
         positional ``UNKNOWN_COL0..N`` keys. Resolving names by ordinal here keeps
-        CDC correct regardless of the server's metadata setting.
+        CDC correct regardless of the server's metadata setting — but the lookup
+        **must** be per-table. A shared cache keyed on ``tables[0]`` remapped
+        every sibling table's positional keys into the wrong columns.
         """
-        if self._column_names_cache is not None:
-            return self._column_names_cache
+        tbl = table or self.table
+        cached = self._column_names_cache.get(tbl)
+        if cached is not None:
+            return cached
         cols: list[str] = []
         try:
             conn = self._conn()
@@ -634,21 +663,23 @@ class MySqlChangeStreamCdc:
                         "SELECT COLUMN_NAME FROM information_schema.columns "
                         "WHERE table_schema = %s AND table_name = %s "
                         "ORDER BY ORDINAL_POSITION",
-                        (self.database, self.table),
+                        (self.database, tbl),
                     )
                     cols = [str(r[0]) for r in cur.fetchall()]
             finally:
                 conn.close()
         except Exception:
             cols = []
-        self._column_names_cache = cols
+        self._column_names_cache[tbl] = cols
         return cols
 
-    def _remap_positional(self, row: dict[str, Any]) -> dict[str, Any]:
+    def _remap_positional(
+        self, row: dict[str, Any], *, table: str | None = None
+    ) -> dict[str, Any]:
         """Map positional ``UNKNOWN_COL{n}`` keys back to real column names."""
         if not any(isinstance(k, str) and k.startswith("UNKNOWN_COL") for k in row):
             return row
-        names = self._ordered_columns()
+        names = self._ordered_columns(table)
         if not names:
             return row
         remapped: dict[str, Any] = {}
@@ -664,14 +695,24 @@ class MySqlChangeStreamCdc:
                 remapped[key] = value
         return remapped
 
-    def _row_to_record(self, row: dict[str, Any]) -> dict[str, str]:
-        row = self._remap_positional(row)
+    def _row_to_record(
+        self, row: dict[str, Any], *, table: str | None = None
+    ) -> dict[str, str]:
+        row = self._remap_positional(row, table=table)
         return {k: _serialize(v) for k, v in row.items()}
 
-    def _pk_value(self, row: dict[str, Any], *, table: str | None = None) -> str:
-        row = self._remap_positional(row)
+    def _pk_columns_for(self, table: str | None = None) -> list[str]:
+        from services.cdc_snapshot_window import _pk_columns
+
         pk = self.primary_keys.get(table or self.table, self.primary_key)
-        return _serialize(row.get(pk))
+        return _pk_columns(pk)
+
+    def _pk_value(self, row: dict[str, Any], *, table: str | None = None) -> str:
+        from services.cdc_snapshot_window import _pk_value as composite_pk_value
+
+        row = self._remap_positional(row, table=table)
+        key = composite_pk_value(row, self._pk_columns_for(table))
+        return "" if key is None else key
 
     def _table_allowed(self, table: str) -> bool:
         wanted = {t.lower() for t in self.tables}
@@ -692,15 +733,25 @@ class MySqlChangeStreamCdc:
             quote_sql_identifier,
             require_safe_identifier,
         )
-        from services.cdc_incremental_snapshot import update_signal
-        from services.cdc_snapshot_window import _PK_SEP, _pk_columns, _pk_value
+        from services.cdc_incremental_snapshot import (
+            snapshot_records_from_rows,
+            update_signal,
+        )
+        from services.cdc_snapshot_window import (
+            _pk_columns,
+            _pk_value,
+            keyset_successor_predicate,
+        )
 
         pk_cols = _pk_columns(sig.primary_key or self.primary_key)
         pk_quoted = [
             quote_sql_identifier(require_safe_identifier(c, preserve_case=True))
             for c in pk_cols
         ]
-        table = quote_sql_identifier(require_safe_identifier(self.table, preserve_case=True))
+        # Read the table the signal names. In shared multi-table mode `self.table`
+        # is pinned to tables[0], so trusting it here backfilled the wrong table.
+        sig_table = (getattr(sig, "table", "") or "").strip() or self.table
+        table = quote_sql_identifier(require_safe_identifier(sig_table, preserve_case=True))
         db = quote_sql_identifier(require_safe_identifier(self.database, preserve_case=True)) if self.database else ""
         qualified = f"{db}.{table}" if db else table
         limit = int(sig.chunk_size or self.batch_size)
@@ -709,40 +760,21 @@ class MySqlChangeStreamCdc:
         conn = self._conn()
         gtid_low = ""
         gtid_high = ""
+        binlog_low = ""
+        binlog_high = ""
         try:
             with conn.cursor() as cur:
+                # Capture both watermarks. GTID brackets the peek filter
+                # (DBZ-3577); binlog file:pos stamps `_df_lsn` so streaming
+                # events stay in the same LSN family and can update the row.
                 gtid_low = self._current_gtid_executed(cur) or ""
-                if last_pk and len(pk_cols) == 1:
-                    cur.execute(
-                        f"SELECT * FROM {qualified} WHERE {pk_quoted[0]} > %s "  # nosec B608
-                        f"ORDER BY {order_sql} LIMIT %s",
-                        (last_pk, limit),
-                    )
-                elif last_pk and len(pk_cols) > 1:
-                    parts = last_pk.split(_PK_SEP)
-                    if len(parts) != len(pk_cols):
-                        raise ValueError(
-                            f"composite last_pk arity mismatch: expected {len(pk_cols)} "
-                            f"parts, got {len(parts)}"
-                        )
-                    # Lexicographic successor: (a > a0) OR (a = a0 AND b > b0) OR …
-                    clauses: list[str] = []
-                    params: list[Any] = []
-                    for i in range(len(pk_cols)):
-                        eq = " AND ".join(
-                            f"{pk_quoted[j]} = %s" for j in range(i)
-                        )
-                        gt = f"{pk_quoted[i]} > %s"
-                        clause = f"({gt})" if not eq else f"({eq} AND {gt})"
-                        clauses.append(clause)
-                        params.extend(parts[:i])
-                        params.append(parts[i])
-                    where = " OR ".join(clauses)
-                    params.append(limit)
+                binlog_low = self._binlog_file_pos_on(cur) or ""
+                if last_pk:
+                    where, params = keyset_successor_predicate(pk_quoted, last_pk)
                     cur.execute(
                         f"SELECT * FROM {qualified} WHERE {where} "  # nosec B608
                         f"ORDER BY {order_sql} LIMIT %s",
-                        tuple(params),
+                        (*params, limit),
                     )
                 else:
                     cur.execute(
@@ -752,26 +784,39 @@ class MySqlChangeStreamCdc:
                 cols = [d[0] for d in (cur.description or [])]
                 rows = cur.fetchall() or []
                 gtid_high = self._current_gtid_executed(cur) or ""
+                binlog_high = self._binlog_file_pos_on(cur) or ""
             conn.commit()
         finally:
             conn.close()
-        records = [
-            {cols[i]: "" if row[i] is None else str(row[i]) for i in range(len(cols))}
-            for row in rows
-        ]
+        records = snapshot_records_from_rows(cols, rows)
         if records:
             new_last = _pk_value(records[-1], pk_cols)
         else:
             new_last = last_pk
         done = len(records) < limit
         # Mutate claimed signal so runner resume_token can surface watermarks.
+        # Only persist non-empty captures. update_signal writes every provided
+        # field, so an empty string from a transient SHOW MASTER STATUS failure
+        # would wipe a previously good binlog watermark and fall the row stamp
+        # back to GTID — freezing every later streaming update to that PK.
+        persist: dict[str, str] = {}
         try:
-            sig.gtid_low = gtid_low
-            sig.gtid_high = gtid_high
+            if gtid_low:
+                sig.gtid_low = gtid_low
+                persist["gtid_low"] = gtid_low
+            if gtid_high:
+                sig.gtid_high = gtid_high
+                persist["gtid_high"] = gtid_high
+            if binlog_low:
+                sig.lsn_low = binlog_low
+                persist["lsn_low"] = binlog_low
+            if binlog_high:
+                sig.lsn_high = binlog_high
+                persist["lsn_high"] = binlog_high
         except Exception:
             pass
-        if gtid_low or gtid_high:
-            update_signal(sig.id, gtid_low=gtid_low, gtid_high=gtid_high)
+        if persist:
+            update_signal(sig.id, **persist)
         return records, str(new_last) if new_last is not None else last_pk, done
 
     def _peek_stream_events_during_chunk(self, sig: Any) -> list[dict[str, Any]]:
@@ -784,9 +829,10 @@ class MySqlChangeStreamCdc:
         events: list[dict[str, Any]] = []
         try:
             from pymysqlreplication import BinLogStreamReader
-            from pymysqlreplication.event import GtidEvent
+            from pymysqlreplication.event import GtidEvent, RotateEvent
             from pymysqlreplication.row_event import (
                 DeleteRowsEvent,
+                TableMapEvent,
                 UpdateRowsEvent,
                 WriteRowsEvent,
             )
@@ -801,10 +847,26 @@ class MySqlChangeStreamCdc:
 
         # Same key the SnapshotWindow buffers under — composite aware.
         peek_pk_cols = _pk_columns(sig.primary_key or self.primary_key)
+        # A peek during an incremental snapshot of table T must only decode T.
+        # Remapping sibling tables through T's ordinals would invent collisions
+        # against the wrong PKs and suppress legitimate snapshot rows.
+        peek_table = self._canonical_table(str(getattr(sig, "table", "") or self.table))
 
+        # TableMapEvent is mandatory: pymysqlreplication filters at the packet
+        # level, so omitting it leaves table_map empty and every RowsEvent is
+        # silently dropped (_processed=False). That made every peek return []
+        # and let stale snapshot READs overwrite mid-window UPDATEs (DBZ-3577).
+        # RotateEvent keeps the decoder alive across a binlog rotation mid-peek.
         kwargs = self._binlog_kwargs(
             blocking=False,
-            only_events=[GtidEvent, WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent],
+            only_events=[
+                GtidEvent,
+                RotateEvent,
+                TableMapEvent,
+                WriteRowsEvent,
+                UpdateRowsEvent,
+                DeleteRowsEvent,
+            ],
         )
         # Distinct server_id so peek does not collide with the durable poll session.
         kwargs["server_id"] = int(kwargs.get("server_id") or 10_000) + 7
@@ -825,7 +887,8 @@ class MySqlChangeStreamCdc:
                     continue
                 if getattr(binlog_event, "schema", "") != self.database:
                     continue
-                if not self._table_allowed(getattr(binlog_event, "table", "") or ""):
+                event_table = getattr(binlog_event, "table", "") or ""
+                if self._canonical_table(event_table) != peek_table:
                     continue
                 # Stale vs chunk start: GTID already in low watermark.
                 if (
@@ -844,7 +907,7 @@ class MySqlChangeStreamCdc:
                         events.append(
                             {
                                 "op": "c",
-                                "row": self._row_to_record(values),
+                                "row": self._row_to_record(values, table=peek_table),
                                 "gtid": current_gtid,
                             }
                         )
@@ -855,7 +918,7 @@ class MySqlChangeStreamCdc:
                         events.append(
                             {
                                 "op": "u",
-                                "row": self._row_to_record(after),
+                                "row": self._row_to_record(after, table=peek_table),
                                 "gtid": current_gtid,
                             }
                         )
@@ -867,7 +930,7 @@ class MySqlChangeStreamCdc:
                         # composite key. A single-column pk here never collides,
                         # so a row deleted mid-chunk would still be emitted as a
                         # snapshot READ and land at the destination.
-                        record = self._row_to_record(values)
+                        record = self._row_to_record(values, table=peek_table)
                         pk = _pk_value(record, peek_pk_cols)
                         if pk:
                             events.append(
@@ -1046,8 +1109,12 @@ class MySqlChangeStreamCdc:
                             if isinstance(row, dict) and "values" in row
                             else row
                         )
-                        rec = self._row_to_record(values)
-                        buf.insert(tbl, rec, lsn=str(stream.log_pos or ""))
+                        rec = self._row_to_record(values, table=tbl)
+                        # Explicit PK is required so the net-effect coalescer
+                        # cannot guess from the first non-empty column and
+                        # collapse two distinct rows that share that value.
+                        pk = self._pk_value(values, table=tbl)
+                        buf.insert(tbl, rec, pk=pk or None, lsn=str(stream.log_pos or ""))
                         event_count += 1
                 elif isinstance(binlog_event, UpdateRowsEvent):
                     for row in getattr(binlog_event, "rows", []):
@@ -1056,7 +1123,9 @@ class MySqlChangeStreamCdc:
                             if isinstance(row, dict)
                             else getattr(row, "after_values", {})
                         )
-                        buf.update(tbl, self._row_to_record(after), lsn=str(stream.log_pos or ""))
+                        rec = self._row_to_record(after, table=tbl)
+                        pk = self._pk_value(after, table=tbl)
+                        buf.update(tbl, rec, pk=pk or None, lsn=str(stream.log_pos or ""))
                         event_count += 1
                 elif isinstance(binlog_event, DeleteRowsEvent):
                     for row in getattr(binlog_event, "rows", []):

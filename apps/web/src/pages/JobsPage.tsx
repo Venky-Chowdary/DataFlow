@@ -26,6 +26,16 @@ import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "../components/transfer/CdcIncrementalSnapshotPanel";
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
 import { LoadHistoryPanel } from "../components/transfer/LoadHistoryPanel";
+import { ConnectionReuseCard } from "../components/transfer/ConnectionReuseCard";
+import { PhaseProfileCard } from "../components/transfer/PhaseProfileCard";
+import { ReplaySafetyCard } from "../components/transfer/ReplaySafetyCard";
+import { TransformationsCard } from "../components/transfer/TransformationsCard";
+import type {
+  ConnectionReuseReport,
+  PhaseProfileReport,
+  ReplaySafetyReport,
+  TransformationsReport,
+} from "../lib/types";
 import { inferTransferFailureHint } from "../lib/transferFailure";
 import { buildJobTimeline, JobTimeline } from "../components/ui/JobTimeline";
 import { readJobEventLog } from "../lib/jobEventLog";
@@ -1036,13 +1046,24 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                 {
                                   id: "writer",
                                   title: "Writer & throughput",
-                                  description: "RPS, chunk progress, destination summary, load history",
+                                  description: "RPS, phase timing, destination summary, load history",
                                   icon: "speed",
-                                  meta: writerRps != null
-                                    ? `${Math.round(writerRps).toLocaleString()} r/s`
-                                    : loadHistory
-                                      ? "Load history"
-                                      : undefined,
+                                  meta: (() => {
+                                    const phase =
+                                      destSummary.phase_profile &&
+                                      typeof destSummary.phase_profile === "object"
+                                        ? (destSummary.phase_profile as PhaseProfileReport)
+                                            .dominant_phase
+                                        : "";
+                                    if (writerRps != null && phase) {
+                                      return `${Math.round(writerRps).toLocaleString()} r/s · ${phase}`;
+                                    }
+                                    if (writerRps != null) {
+                                      return `${Math.round(writerRps).toLocaleString()} r/s`;
+                                    }
+                                    if (phase) return `bottleneck: ${phase}`;
+                                    return loadHistory ? "Load history" : undefined;
+                                  })(),
                                   disabled: !hasWriterEvidence,
                                   onOpen: () => setEvidenceDrawer("writer"),
                                 },
@@ -1623,6 +1644,38 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               <div><dt>Writer checksum</dt><dd className="df2-mono">{String(destSummary.checksum)}</dd></div>
             )}
           </dl>
+          <PhaseProfileCard
+            profile={
+              destSummary.phase_profile && typeof destSummary.phase_profile === "object"
+                ? (destSummary.phase_profile as PhaseProfileReport)
+                : null
+            }
+          />
+          <ReplaySafetyCard
+            report={
+              destSummary.replay_safety && typeof destSummary.replay_safety === "object"
+                ? (destSummary.replay_safety as ReplaySafetyReport)
+                : null
+            }
+          />
+          <ConnectionReuseCard
+            report={
+              destSummary.connection_reuse && typeof destSummary.connection_reuse === "object"
+                ? (destSummary.connection_reuse as ConnectionReuseReport)
+                : null
+            }
+            traceId={typeof destSummary.trace_id === "string" ? destSummary.trace_id : null}
+            correlationId={
+              typeof destSummary.correlation_id === "string" ? destSummary.correlation_id : null
+            }
+          />
+          <TransformationsCard
+            report={
+              destSummary.transformations && typeof destSummary.transformations === "object"
+                ? (destSummary.transformations as TransformationsReport)
+                : null
+            }
+          />
           {Object.keys(destSummary).length > 0 && (
             <details className="df2-jobs-writer-raw">
               <summary>Raw destination summary</summary>
@@ -1926,6 +1979,11 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
             rejectedRows={liveJob.rejected_rows}
             coercedNullRows={liveJob.coerced_null_rows}
             initialDetails={Array.isArray(liveJob.rejected_details) ? liveJob.rejected_details : undefined}
+            truncatedDetails={
+              liveJob.rejected_details_truncated
+              ?? (liveJob.destination_summary as { rejected_details_truncated?: number } | undefined)
+                ?.rejected_details_truncated
+            }
             autoLoad
             initiallyOpen
             repairMappings={jobRepairMappings}

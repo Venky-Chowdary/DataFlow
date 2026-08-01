@@ -66,13 +66,37 @@ class PhaseProfile:
         """Time a block and attribute it to ``phase``.
 
         Records the elapsed time even when the block raises, so a failed
-        transfer still shows where it spent its time before dying.
+        transfer still shows where it spent its time before dying. When
+        OpenTelemetry is enabled the same block becomes a child span of the
+        transfer root, named after the phase — that is how an APM view and
+        the job's phase_profile card stay in lockstep.
         """
         start = time.perf_counter()
         try:
-            yield
-        finally:
-            self.add(phase, time.perf_counter() - start, rows=rows)
+            from services.tracing import set_span_attribute, start_span
+        except Exception:
+            start_span = None  # type: ignore[assignment]
+
+        span_cm = (
+            start_span(
+                f"transfer.phase.{phase}",
+                attributes={
+                    "dataflow.phase": phase,
+                    "dataflow.phase_label": _PHASE_LABELS.get(phase, phase),
+                },
+            )
+            if start_span is not None
+            else _null_cm()
+        )
+        with span_cm as span:
+            try:
+                yield
+            finally:
+                elapsed = time.perf_counter() - start
+                self.add(phase, elapsed, rows=rows)
+                if start_span is not None:
+                    set_span_attribute(span, "dataflow.phase_seconds", round(elapsed, 4))
+                    set_span_attribute(span, "dataflow.phase_rows", max(0, rows))
 
     @property
     def elapsed_seconds(self) -> float:
@@ -121,6 +145,12 @@ class PhaseProfile:
             for p in snap["phases"]
         ]
         return " · ".join(parts)
+
+
+def _null_cm():
+    from contextlib import nullcontext
+
+    return nullcontext()
 
 
 class NullPhaseProfile(PhaseProfile):

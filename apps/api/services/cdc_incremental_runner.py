@@ -30,6 +30,36 @@ RowFetcher = Callable[[SnapshotSignal], tuple[list[dict[str, Any]], Optional[str
 StreamDuringChunk = Callable[[SnapshotSignal], list[dict[str, Any]]]
 
 
+def _snapshot_low_watermark(sig: SnapshotSignal) -> dict[str, str]:
+    """Resume-token fields that let ``extract_cdc_lsn`` stamp a snapshot chunk.
+
+    Returns the log position captured immediately *before* the chunk SELECT (the
+    DDD-3 low watermark), in whichever form the source engine reports it. An
+    empty dict means this reader supplies no position, in which case the chunk
+    stays unstamped and the destination guard degrades to plain upsert.
+
+    MySQL preference order is deliberate: binlog ``file:pos`` first, GTID
+    second. Streaming events stamp ``_df_lsn`` from ``file:pos``. A snapshot
+    chunk stamped with ``gtid:…`` is a different LSN family, so
+    ``compare_lsn`` returns 0 and every later change to that PK is discarded
+    forever. GTID remains on the signal for the peek filter (DBZ-3577); it
+    just must not become the row stamp.
+    """
+    lsn_low = str(getattr(sig, "lsn_low", "") or "").strip()
+    if lsn_low:
+        # A MySQL file:pos string stored in lsn_low — expand so extract_cdc_lsn
+        # formats it the same way streaming tokens do.
+        if ":" in lsn_low and not lsn_low.lower().startswith("gtid:"):
+            file_name, _, pos = lsn_low.rpartition(":")
+            if file_name and pos.isdigit():
+                return {"file": file_name, "pos": pos}
+        return {"lsn": lsn_low}
+    gtid_low = str(getattr(sig, "gtid_low", "") or "").strip()
+    if gtid_low:
+        return {"gtid": gtid_low}
+    return {}
+
+
 def interleave_incremental_snapshot(
     source_key: str,
     *,
@@ -99,18 +129,38 @@ def interleave_incremental_snapshot(
             if gtid_low or gtid_high:
                 window_meta["gtid_low"] = gtid_low
                 window_meta["gtid_high"] = gtid_high
+            resume_token: dict[str, Any] = {
+                "incremental_snapshot": True,
+                "signal_id": sig.id,
+                "table": table,
+                "last_pk": last_pk or sig.last_pk,
+                "rows_snapshotted": sig.rows_snapshotted + len(rows),
+                "snapshot_window": window_meta,
+            }
+            watermark = _snapshot_low_watermark(sig)
+            if watermark:
+                # Stamp the chunk with the log position observed *before* the
+                # chunk SELECT ran. Without it these rows land with a NULL
+                # `_df_lsn`, and every monotonic MERGE guard treats NULL as
+                # "accept anything" — so an arbitrarily stale redelivered event
+                # could overwrite a freshly snapshotted row. The low watermark is
+                # the correct stamp: events older than it lose (they are already
+                # reflected in the read), events newer than it win.
+                resume_token.update(watermark)
             yield ChangeBatch(
                 inserts=inserts,
                 deletes=deletes,
-                resume_token={
-                    "incremental_snapshot": True,
-                    "signal_id": sig.id,
-                    "table": table,
-                    "last_pk": last_pk or sig.last_pk,
-                    "rows_snapshotted": sig.rows_snapshotted + len(rows),
-                    "snapshot_window": window_meta,
-                },
+                # Tag the owning table. Untagged batches fell through the shared
+                # multi-table demux's final `return tables[0]`, so snapshot rows
+                # for table B were written into table A with no error.
+                table=table,
+                resume_token=resume_token,
             )
+        # Record progress whenever the chunk actually read rows, even if the
+        # snapshot window emitted nothing (every row superseded by a stream
+        # delete, say). Gating this on `inserts or deletes` left `last_pk`
+        # unchanged, so the signal re-read the same range on every poll forever.
+        if rows:
             mark_chunk(sig.id, last_pk=last_pk or "", rows=len(rows))
         if done or not rows:
             complete_signal(sig.id)

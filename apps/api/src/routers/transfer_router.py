@@ -583,10 +583,11 @@ async def execute_transfer_json(
     background_tasks: BackgroundTasks,
     request: Request = None,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+    idempotency_key: str = Header(default="", alias="Idempotency-Key"),
 ):
     """JSON transfer execute for SDK/GitOps — Form upload remains on POST /transfer/run."""
     from ..transfer.background import run_transfer_async
-    from ..transfer.engine import get_transfer_engine
+    from ..transfer.engine import DuplicateTransferSubmission, get_transfer_engine
     from ..transfer.models import EndpointConfig, TransferRequest
 
     workspace_id = _resolve_write_workspace(request, workspace_id)
@@ -620,6 +621,7 @@ async def execute_transfer_json(
         require_signed_contract=bool(body.require_signed_contract),
         date_locale=body.date_locale,
         triggered_by=_actor_email(request),
+        idempotency_key=idempotency_key,
     )
     from services.batch_progress import effective_backfill_new_fields
 
@@ -656,6 +658,18 @@ async def execute_transfer_json(
     engine = get_transfer_engine()
     try:
         job_id = engine._create_pending_job(request_obj)
+    except DuplicateTransferSubmission as exc:
+        # A conflict, not a server error. Answer with 409 and the in-flight job
+        # so the caller can follow it instead of starting a second writer.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "duplicate_transfer",
+                "message": str(exc),
+                "existing_job_id": exc.existing_job_id,
+                "existing_status": exc.existing_status,
+            },
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -789,13 +803,14 @@ async def run_universal_transfer(
     date_locale: str = Form(""),
     request: Request = None,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+    idempotency_key: str = Header(default="", alias="Idempotency-Key"),
 ):
     """
     Execute universal transfer: file/db → db/file/warehouse.
     Auto-creates tables, collections, and typed schemas.
     """
     from ..transfer.background import run_transfer_async
-    from ..transfer.engine import get_transfer_engine
+    from ..transfer.engine import DuplicateTransferSubmission, get_transfer_engine
     from ..transfer.models import EndpointConfig, TransferRequest
 
     workspace_id = _resolve_write_workspace(request, workspace_id)
@@ -904,6 +919,7 @@ async def run_universal_transfer(
         write_via_staging=write_via_staging.lower() in ("true", "1", "yes"),
         date_locale=date_locale,
         triggered_by=_actor_email(request),
+        idempotency_key=idempotency_key,
     )
     # Explicit form fields win over stored plan policies (plan used to force
     # validation_mode=strict and re-block encoding after Studio quarantine).
@@ -997,6 +1013,16 @@ async def run_universal_transfer(
     engine = get_transfer_engine()
     try:
         job_id = engine._create_pending_job(request_obj)
+    except DuplicateTransferSubmission as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "duplicate_transfer",
+                "message": str(exc),
+                "existing_job_id": exc.existing_job_id,
+                "existing_status": exc.existing_status,
+            },
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

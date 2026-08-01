@@ -15,6 +15,10 @@ import { JobTrustScoreCard } from "./JobTrustScoreCard";
 import { CdcCursorGapPanel } from "./CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./CdcRetentionPanel";
 import { MappingProofDrawer, type MappingProof } from "../MappingProofDrawer";
+import { ConnectionReuseCard } from "./ConnectionReuseCard";
+import { PhaseProfileCard } from "./PhaseProfileCard";
+import { ReplaySafetyCard } from "./ReplaySafetyCard";
+import { TransformationsCard } from "./TransformationsCard";
 import { hashForScreen } from "../../lib/appNavigation";
 
 function asMappingProof(raw: unknown): MappingProof | null {
@@ -439,6 +443,18 @@ export function TransferResultDashboard({
         </section>
       )}
 
+      <TransformationsCard report={ds?.transformations} />
+
+      <PhaseProfileCard profile={ds?.phase_profile} />
+
+      <ReplaySafetyCard report={ds?.replay_safety} />
+
+      <ConnectionReuseCard
+        report={ds?.connection_reuse}
+        traceId={ds?.trace_id}
+        correlationId={ds?.correlation_id}
+      />
+
       {(result.cdc_plugin || result.cdc_delivery || result.cdc_row_filter || result.cdc_shared_reader || result.snapshot_mode || result.watermark || result.cdc_lease_holder || result.source_ha_role) && (
         <section className="df2-result-cdc-strip" aria-label="CDC run summary">
           <header>
@@ -665,8 +681,12 @@ export function TransferResultDashboard({
               {ds?.warnings && ds.warnings.length > 0 && (
                 <div className="df2-result-warnings-block">
                   <p className="df2-result-warnings-note">
-                    Showing {ds.warnings.length} sample writer message{ds.warnings.length === 1 ? "" : "s"}
-                    {" "}(display capped — not the full row count).
+                    Showing {ds.warnings.length} distinct writer message
+                    {ds.warnings.length === 1 ? "" : "s"}
+                    {ds.warnings_suppressed && ds.warnings_suppressed > 0
+                      ? ` · ${ds.warnings_suppressed.toLocaleString()} more suppressed`
+                      : " · display capped"}
+                    .
                   </p>
                   <ul className="df2-result-warnings">
                     {ds.warnings.map((w) => <li key={w}>{w}</li>)}
@@ -695,6 +715,7 @@ export function TransferResultDashboard({
               rejectedRows={rejected || issueFindings}
               coercedNullRows={coercedNull}
               initialDetails={result.destination_summary?.rejected_details}
+              truncatedDetails={result.destination_summary?.rejected_details_truncated}
               autoLoad
               initiallyOpen
               repairMappings={repairMappings}

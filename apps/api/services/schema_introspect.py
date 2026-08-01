@@ -8,6 +8,7 @@ import logging
 import re
 from typing import Any
 
+from services.engine_pool import release_engine
 from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
@@ -2705,7 +2706,7 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
     finally:
         try:
-            engine.dispose()
+            release_engine(engine)
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
@@ -2910,7 +2911,7 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
     finally:
         try:
-            engine.dispose()
+            release_engine(engine)
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 

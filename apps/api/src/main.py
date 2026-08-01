@@ -9,7 +9,7 @@ import logging
 import os
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,6 +34,7 @@ from .routers.automation_router import router as automation_router
 from .routers.catalog_router import router as catalog_router
 from .routers.connectors_router import router as connectors_router
 from .routers.contracts_router import router as contracts_router
+from .routers.transforms_router import router as transforms_router
 from .routers.copilot_router import router as copilot_router
 from .routers.mcp_router import router as mcp_router
 from .routers.ops_router import router as ops_router
@@ -43,6 +44,7 @@ from .routers.repair_router import router as repair_router
 from .routers.saved_connectors_router import router as saved_connectors_router
 from .routers.schedules_router import router as schedules_router
 from .routers.training_agent_router import router as training_agent_router
+from .transfer.engine import DuplicateTransferSubmission
 from .routers.transfer_router import router as transfer_router
 from .routers.usage_router import router as usage_router
 from .routers.workspace_router import router as workspace_router
@@ -61,6 +63,14 @@ async def lifespan(app: FastAPI):
     """
     apply_railway_defaults()
     enforce_production_config()
+    # Configure logging before anything else can emit a line, so no startup
+    # message escapes with Uvicorn's default handler and no correlation fields.
+    try:
+        from services.logging_config import configure_logging
+
+        configure_logging()
+    except Exception as le:  # pragma: no cover - logging must never block boot
+        print(f"[!] Logging bootstrap warning: {le}")
     os.environ.setdefault("DATAFLOW_VECTOR_STORE_DIR", str(vector_store_dir()))
     try:
         from services.integrations_store import apply_integrations_to_env
@@ -174,6 +184,16 @@ async def lifespan(app: FastAPI):
     warm_task = asyncio.create_task(_warm_up())
     app.state.warm_task = warm_task
 
+    # Opt-in OpenTelemetry. Off by default; when enabled, every transfer root
+    # span and phase span is exported. Failure here must never block boot.
+    try:
+        from services.tracing import ensure_provider, tracing_enabled
+
+        if tracing_enabled():
+            ensure_provider()
+    except Exception as te:
+        print(f"[!] Tracing bootstrap warning: {te}")
+
     yield
 
     warm = getattr(app.state, "warm_task", None)
@@ -190,6 +210,12 @@ async def lifespan(app: FastAPI):
             await task
         except asyncio.CancelledError:
             pass
+    try:
+        from services.tracing import shutdown_tracing
+
+        shutdown_tracing()
+    except Exception:
+        pass
     print("[*] DataTransfer.space API shutting down…")
 
 
@@ -230,11 +256,14 @@ _ALLOW_HEADERS = [
     "authorization",
     "content-type",
     "origin",
+    "traceparent",
+    "tracestate",
     "x-correlation-id",
     "x-requested-with",
     "x-workspace-id",
 ]
 _ALLOW_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
+_EXPOSE_HEADERS = ["X-Correlation-ID", "X-Process-Time", "X-Trace-Id"]
 
 app.add_middleware(
     CORSMiddleware,
@@ -243,6 +272,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=_ALLOW_METHODS,
     allow_headers=_ALLOW_HEADERS,
+    expose_headers=_EXPOSE_HEADERS,
 )
 
 
@@ -251,8 +281,45 @@ async def add_timing_header(request: Request, call_next):
     start_time = time.time()
     correlation_id = request.headers.get("X-Correlation-ID") or str(uuid.uuid4())
     request.state.correlation_id = correlation_id
+    # Bridge the inbound correlation id (and any W3C traceparent) into the
+    # transfer root span so an API call and the job it starts share one
+    # operator-visible identity. No-ops when tracing is off.
     try:
-        response = await call_next(request)
+        from services.tracing import (
+            current_trace_id,
+            set_correlation_id,
+            set_traceparent,
+            start_span,
+        )
+
+        set_correlation_id(correlation_id)
+        set_traceparent(request.headers.get("traceparent"))
+    except Exception:
+        start_span = None  # type: ignore[assignment]
+        current_trace_id = lambda: ""  # noqa: E731
+
+    span_cm = (
+        start_span(
+            f"HTTP {request.method} {request.url.path}",
+            attributes={
+                "http.method": request.method,
+                "http.route": request.url.path,
+                "dataflow.correlation_id": correlation_id,
+            },
+            kind="server",
+        )
+        if start_span is not None
+        else nullcontext()
+    )
+
+    trace_id = ""
+    try:
+        with span_cm:
+            response = await call_next(request)
+            try:
+                trace_id = current_trace_id() or ""
+            except Exception:
+                trace_id = ""
     except BaseException as exc:
         # Catch unhandled endpoint and TaskGroup exceptions here so the outer
         # Starlette/anyio task group does not surface an ExceptionGroup and
@@ -273,6 +340,8 @@ async def add_timing_header(request: Request, call_next):
     process_time = time.time() - start_time
     response.headers["X-Process-Time"] = f"{process_time:.4f}s"
     response.headers["X-Correlation-ID"] = correlation_id
+    if trace_id:
+        response.headers["X-Trace-Id"] = trace_id
     # Baseline security headers for the enterprise API.  HSTS is intentionally
     # omitted here so TLS termination (Cloudflare, AWS ALB, etc.) can add it.
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -320,6 +389,7 @@ app.include_router(auth_router)
 app.include_router(audit_router, prefix="/api/v1")
 app.include_router(workspace_router, prefix="/api/v1")
 app.include_router(contracts_router, prefix="/api/v1")
+app.include_router(transforms_router, prefix="/api/v1")
 app.include_router(query_router, prefix="/api/v1")
 app.include_router(usage_router, prefix="/api/v1")
 app.include_router(ops_router, prefix="/api/v1")
@@ -396,6 +466,34 @@ async def prometheus_metrics():
 @app.get("/api/v1")
 async def api_info():
     return {"version": "1.0.0", "status": "ok"}
+
+
+@app.exception_handler(DuplicateTransferSubmission)
+async def duplicate_transfer_handler(
+    request: Request, exc: DuplicateTransferSubmission
+):
+    """Report a double-submit as a conflict that names the run already in flight.
+
+    Registered centrally so every submit path — Transfer Studio, the Pilot, the
+    schedule runner, retries — answers the same way instead of each route
+    inventing its own handling.
+    """
+    logger.info(
+        "Duplicate transfer submission on %s deduplicated to job %s (%s)",
+        request.url.path,
+        exc.existing_job_id or "unknown",
+        exc.existing_status or "in progress",
+    )
+    return JSONResponse(
+        status_code=409,
+        content={
+            "error": "duplicate_transfer",
+            "detail": str(exc),
+            "existing_job_id": exc.existing_job_id,
+            "existing_status": exc.existing_status,
+            "job_id": exc.existing_job_id,
+        },
+    )
 
 
 @app.exception_handler(Exception)

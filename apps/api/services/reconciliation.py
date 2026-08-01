@@ -17,7 +17,7 @@ from datetime import datetime as _datetime
 from datetime import time as _time
 from datetime import timezone
 from decimal import Decimal, InvalidOperation, Overflow
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from services.transform_engine import (
     _DATE_LIKE_RE,
@@ -1431,9 +1431,20 @@ def verify_s3_object(
     target_columns: list[str] | None = None,
     limit: int = 0,
 ) -> tuple[int, str]:
-    """Reconcile an S3 object by downloading and parsing its contents."""
+    """Reconcile an S3 object by downloading and parsing its contents.
+
+    Multi-chunk writers emit ``part-*`` keys under a stem prefix; aggregate
+    those parts when present so Gate-8 does not fall through to writer-ack
+    while most rows live only in part objects.
+    """
     try:
         from connectors.aws_common import boto3_client
+        from connectors.object_store_common import (
+            normalize_object_base_key,
+            object_parts_prefix,
+            object_store_read_keys,
+        )
+        from connectors.s3_reader import list_objects
 
         cfg = {
             "host": host,
@@ -1445,11 +1456,20 @@ def verify_s3_object(
             "database": bucket,
         }
         client = boto3_client("s3", cfg)
-        obj = client.get_object(Bucket=bucket, Key=key)
-        body = obj["Body"].read()
-        rows, headers = _rows_from_object_bytes(body, key, target_columns)
+        base = normalize_object_base_key(key)
+        parts_prefix = object_parts_prefix(base)
+        listed = list_objects(cfg, bucket, parts_prefix) if parts_prefix else []
+        read_keys = object_store_read_keys(base, listed)
+        all_rows: list[dict[str, Any]] = []
+        headers: list[str] = []
+        for obj_key in read_keys:
+            body = client.get_object(Bucket=bucket, Key=obj_key)["Body"].read()
+            rows, hdrs = _rows_from_object_bytes(body, obj_key, target_columns)
+            if not headers:
+                headers = list(hdrs or [])
+            all_rows.extend(rows)
         columns = headers or target_columns or []
-        return len(rows), canonical_checksum_from_iter(rows, columns, limit=limit)
+        return len(all_rows), canonical_checksum_from_iter(all_rows, columns, limit=limit)
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
@@ -1517,6 +1537,12 @@ def verify_gcs_blob(
     """Reconcile a GCS blob by downloading and parsing its contents."""
     try:
         from connectors.gcs_common import gcs_client
+        from connectors.gcs_reader import list_objects
+        from connectors.object_store_common import (
+            normalize_object_base_key,
+            object_parts_prefix,
+            object_store_read_keys,
+        )
 
         cfg = {
             "host": host,
@@ -1524,11 +1550,21 @@ def verify_gcs_blob(
             "connection_string": connection_string,
         }
         client = gcs_client(cfg)
-        blob = client.bucket(bucket).blob(key)
-        body = blob.download_as_bytes()
-        rows, headers = _rows_from_object_bytes(body, key, target_columns)
+        base = normalize_object_base_key(key)
+        parts_prefix = object_parts_prefix(base)
+        listed = list_objects(cfg, bucket, parts_prefix) if parts_prefix else []
+        read_keys = object_store_read_keys(base, listed)
+        bucket_obj = client.bucket(bucket)
+        all_rows: list[dict[str, Any]] = []
+        headers: list[str] = []
+        for obj_key in read_keys:
+            body = bucket_obj.blob(obj_key).download_as_bytes()
+            rows, hdrs = _rows_from_object_bytes(body, obj_key, target_columns)
+            if not headers:
+                headers = list(hdrs or [])
+            all_rows.extend(rows)
         columns = headers or target_columns or []
-        return len(rows), canonical_checksum_from_iter(rows, columns, limit=limit)
+        return len(all_rows), canonical_checksum_from_iter(all_rows, columns, limit=limit)
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
@@ -1551,6 +1587,12 @@ def verify_adls_blob(
     """Independent Azure Blob / ADLS Gen2 read-back (parity with S3/GCS Gate-8)."""
     try:
         from connectors.adls_common import blob_service_client
+        from connectors.adls_reader import list_objects
+        from connectors.object_store_common import (
+            normalize_object_base_key,
+            object_parts_prefix,
+            object_store_read_keys,
+        )
 
         cfg = {
             "host": host,
@@ -1562,12 +1604,21 @@ def verify_adls_blob(
             "database": container,
         }
         client = blob_service_client(cfg)
-        blob = client.get_blob_client(container, key)
-        body = blob.download_blob().readall()
-        rows, headers = _rows_from_object_bytes(body, key, target_columns)
+        base = normalize_object_base_key(key)
+        parts_prefix = object_parts_prefix(base)
+        listed = list_objects(cfg, container, parts_prefix) if parts_prefix else []
+        read_keys = object_store_read_keys(base, listed)
+        all_rows: list[dict[str, Any]] = []
+        headers: list[str] = []
+        for obj_key in read_keys:
+            body = client.get_blob_client(container, obj_key).download_blob().readall()
+            rows, hdrs = _rows_from_object_bytes(body, obj_key, target_columns)
+            if not headers:
+                headers = list(hdrs or [])
+            all_rows.extend(rows)
         columns = headers or target_columns or []
-        return len(rows), canonical_checksum_from_iter(
-            rows,
+        return len(all_rows), canonical_checksum_from_iter(
+            all_rows,
             columns,
             limit=limit,
             dest_db_type="adls",
@@ -3603,7 +3654,9 @@ def build_reconciliation_proof(
         "missing_key_count": missing_key_count,
         "extra_key_count": extra_key_count,
         "row_fidelity_score": row_fidelity_score,
-        "sample_compare": sample_compare,
+        # Stamp alignment on every branch so the UI can distinguish keyed proof
+        # from positional comparison without inferring it from absence.
+        "sample_compare": {**sample_compare, "alignment": "key_aligned"},
         "identity": {"column": key_col, "proven": True, "provenance": key_provenance},
         "verification_mode": "key_aligned",
     }
@@ -3809,6 +3862,63 @@ def sample_compare_rows(
     }
 
 
+class TargetSampleUnavailable(RuntimeError):
+    """Destination sample could not be read — distinct from an empty table.
+
+    Callers that treat ``[]`` as "nothing is there" (CDC delete proof, Gate-8
+    fidelity) must catch this and fail the gate. Swallowing the error as an
+    empty list is what made a missing SELECT grant report delete proof as
+    passed while the rows were still live.
+    """
+
+
+def _object_store_target_sample(
+    *,
+    table_name: str,
+    list_keys: Callable[[str], list[str]],
+    fetch_bytes: Callable[[str], bytes],
+    cols: list[str],
+    limit: int,
+    sort_key: str,
+    keys: Iterable[Any] | None,
+) -> list[dict[str, Any]]:
+    """Gate-8 sample read shared by S3, GCS and ADLS destinations.
+
+    Object stores have no WHERE clause, so the sample is assembled by reading
+    the part objects (or the single legacy object) and filtering in memory.
+    Reading every part matters: a multi-chunk write keeps most rows outside the
+    base key, and sampling only the base key would compare against a fraction
+    of the data while reporting a clean Gate-8.
+    """
+    from connectors.object_store_common import (
+        normalize_object_base_key,
+        object_parts_prefix,
+        object_store_read_keys,
+    )
+
+    base = normalize_object_base_key(table_name)
+    listed = list_keys(object_parts_prefix(base))
+    read_keys = object_store_read_keys(base, listed)
+    lim = max(1, int(limit or 50))
+    wanted = {str(k) for k in keys} if keys else set()
+    projection = None if cols == ["*"] else cols
+
+    rows: list[dict[str, Any]] = []
+    for obj_key in read_keys:
+        part_rows, _headers = _rows_from_object_bytes(
+            fetch_bytes(obj_key), obj_key, projection
+        )
+        if wanted and sort_key:
+            # Key-targeted sample: keep only the rows Gate-8 asked about, but
+            # keep scanning parts because a key can live in any part.
+            rows.extend(r for r in part_rows if str(r.get(sort_key)) in wanted)
+        else:
+            rows.extend(part_rows)
+        if len(rows) >= lim and not wanted:
+            break
+    return rows[:lim]
+
+
 def read_target_sample(
     db_type: str,
     dest: dict[str, Any],
@@ -3825,6 +3935,10 @@ def read_target_sample(
     When ``key_values`` is provided with ``sort_key``, prefer a keyed ``IN (...)``
     read so append/upsert Gate-8 can prove fidelity against pre-existing rows
     (ORDER BY … LIMIT alone often misses the batch keys in a large table).
+
+    Returns an empty list only when the destination is genuinely empty (or the
+    keyed ``IN`` matched nothing). Read failures raise
+    :class:`TargetSampleUnavailable` — never ``[]``.
     """
     from connectors.sql_identifiers import (
         quote_column_list,
@@ -3853,7 +3967,11 @@ def read_target_sample(
         return bool(dest.get("ssl", default))
 
     try:
-        if db_type == "postgresql":
+        if db_type in ("postgresql", "redshift"):
+            # Redshift speaks the Postgres wire protocol; local CI and many
+            # managed endpoints use the PG driver. Checksum verify already
+            # treated them as one family — sample compare must too, or Gate-8
+            # fails closed with "no sample reader" after a successful write.
             from connectors.postgresql_conn import get_connection
 
             col_sql = (
@@ -3911,8 +4029,13 @@ def read_target_sample(
                     last_exc = exc
                     continue
             if last_exc:
-                return []
-            return []
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {last_exc}"
+                ) from last_exc
+            raise TargetSampleUnavailable(
+                f"Could not read destination sample from {db_type!r}.{table_name!r}: "
+                "postgresql connection failed for both SSL modes"
+            )
 
         if db_type == "mysql":
             from connectors.mysql_conn import get_connection
@@ -4103,7 +4226,10 @@ def read_target_sample(
 
             path = dest.get("connection_string") or dest.get("database", "")
             if not path:
-                return []
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
+                    "duckdb path missing (connection_string/database)"
+                )
             duckdb_col_sql = (
                 "*"
                 if cols == ["*"]
@@ -4123,8 +4249,12 @@ def read_target_sample(
                 engine = get_sqlalchemy_engine(
                     {"type": "duckdb", "connection_string": path}
                 )
-            except Exception:
-                return []
+            except TargetSampleUnavailable:
+                raise
+            except Exception as exc:
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+                ) from exc
             with engine.connect() as conn:
                 if keys and sort_key:
                     key_col = quote_sql_identifier(
@@ -4154,8 +4284,12 @@ def read_target_sample(
                             for row in rows
                         ]
                     return [dict(row) for row in rows]
-                except Exception:
-                    return []
+                except TargetSampleUnavailable:
+                    raise
+                except Exception as exc:
+                    raise TargetSampleUnavailable(
+                        f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+                    ) from exc
 
         if db_type == "mongodb":
             from connectors.mongodb_common import (
@@ -4210,8 +4344,12 @@ def read_target_sample(
                 if sort_key:
                     cursor = cursor.sort(sort_key, 1)
                 return list(cursor.limit(int(limit)))
-            except Exception:
-                return []
+            except TargetSampleUnavailable:
+                raise
+            except Exception as exc:
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+                ) from exc
 
         if db_type == "sqlite" or (
             db_type == "generic_sql"
@@ -4233,7 +4371,10 @@ def read_target_sample(
                 dest.get("host") or "",
             )
             if not path:
-                return []
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
+                    "sqlite path missing"
+                )
             sqlite_col_sql = (
                 "*"
                 if cols == ["*"]
@@ -4264,8 +4405,12 @@ def read_target_sample(
                 rows = cur.fetchall()
                 names = _row_names(cur.description)
                 return [dict(zip(names, row)) for row in rows]
-            except Exception:
-                return []
+            except TargetSampleUnavailable:
+                raise
+            except Exception as exc:
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+                ) from exc
             finally:
                 conn.close()
 
@@ -4343,8 +4488,12 @@ def read_target_sample(
                         for row in rows_out
                     ]
                 return rows_out[:limit]
-            except Exception:
-                return []
+            except TargetSampleUnavailable:
+                raise
+            except Exception as exc:
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+                ) from exc
 
         if db_type in {"elasticsearch", "opensearch", "elastic"}:
             from connectors.elasticsearch_reader import read_index_batch
@@ -4390,8 +4539,12 @@ def read_target_sample(
                         for row in rows_out
                     ]
                 return rows_out[:limit]
-            except Exception:
-                return []
+            except TargetSampleUnavailable:
+                raise
+            except Exception as exc:
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+                ) from exc
 
         if db_type == "snowflake":
             from connectors.snowflake_conn import (
@@ -4473,8 +4626,12 @@ def read_target_sample(
                     rows = cur.fetchall()
                 conn.close()
                 return [dict(zip(names, row)) for row in rows]
-            except Exception:
-                return []
+            except TargetSampleUnavailable:
+                raise
+            except Exception as exc:
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+                ) from exc
 
         if db_type == "bigquery":
             from connectors.bigquery_conn import get_client, _is_local_endpoint
@@ -4561,8 +4718,12 @@ def read_target_sample(
                     {k: v for k, v in dict(row.items()).items() if k in (cols if cols != ["*"] else dict(row.items()).keys())}
                     for row in res
                 ]
-            except Exception:
-                return []
+            except TargetSampleUnavailable:
+                raise
+            except Exception as exc:
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+                ) from exc
 
         if db_type in {
             "adls",
@@ -4571,31 +4732,96 @@ def read_target_sample(
             "azure_data_lake_storage",
         }:
             from connectors.adls_common import blob_service_client
+            from connectors.adls_reader import list_objects
 
             container = (dest.get("database") or schema or "").strip()
             if not container or not table_name:
-                return []
-            client = blob_service_client(
-                {
-                    "host": dest.get("host", ""),
-                    "port": int(dest.get("port") or 0),
-                    "username": dest.get("username", ""),
-                    "password": dest.get("password", ""),
-                    "connection_string": dest.get("connection_string", ""),
-                    "service_account": dest.get("service_account", ""),
-                    "database": container,
-                }
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
+                    "ADLS container or blob path missing"
+                )
+            cfg_adls = {
+                "host": dest.get("host", ""),
+                "port": int(dest.get("port") or 0),
+                "username": dest.get("username", ""),
+                "password": dest.get("password", ""),
+                "connection_string": dest.get("connection_string", ""),
+                "service_account": dest.get("service_account", ""),
+                "database": container,
+            }
+            client = blob_service_client(cfg_adls)
+            return _object_store_target_sample(
+                table_name=table_name,
+                list_keys=lambda prefix: list_objects(cfg_adls, container, prefix),
+                fetch_bytes=lambda k: (
+                    client.get_blob_client(container, k).download_blob().readall()
+                ),
+                cols=cols,
+                limit=limit,
+                sort_key=sort_key,
+                keys=keys,
             )
-            body = client.get_blob_client(container, table_name).download_blob().readall()
-            rows, _headers = _rows_from_object_bytes(
-                body, table_name, None if cols == ["*"] else cols
+
+        if db_type in {"s3", "minio", "s3_compatible", "aws_s3"}:
+            from connectors.aws_common import boto3_client
+            from connectors.s3_reader import list_objects
+
+            bucket = (dest.get("database") or schema or "").strip()
+            if not bucket or not table_name:
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
+                    "S3 bucket or object key missing"
+                )
+            cfg_s3 = {
+                "host": dest.get("host", ""),
+                "port": int(dest.get("port") or 0),
+                "username": dest.get("username", ""),
+                "password": dest.get("password", ""),
+                "connection_string": dest.get("connection_string", ""),
+                "ssl": bool(dest.get("ssl", False)),
+                "database": bucket,
+                "endpoint_url": dest.get("endpoint_url", "") or "",
+                "path_style": bool(dest.get("path_style", False)),
+                "region": dest.get("region", "") or "",
+            }
+            client = boto3_client("s3", cfg_s3)
+            return _object_store_target_sample(
+                table_name=table_name,
+                list_keys=lambda prefix: list_objects(cfg_s3, bucket, prefix),
+                fetch_bytes=lambda k: client.get_object(Bucket=bucket, Key=k)["Body"].read(),
+                cols=cols,
+                limit=limit,
+                sort_key=sort_key,
+                keys=keys,
             )
-            lim = max(1, int(limit or 50))
-            if keys and sort_key:
-                widened = set(keys)
-                out = [r for r in rows if r.get(sort_key) in widened]
-                return out[:lim]
-            return rows[:lim]
+
+        if db_type in {"gcs", "google_cloud_storage"}:
+            from connectors.gcs_common import gcs_client
+            from connectors.gcs_reader import list_objects
+
+            bucket = (dest.get("database") or schema or "").strip()
+            if not bucket or not table_name:
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
+                    "GCS bucket or object key missing"
+                )
+            cfg_gcs = {
+                "host": dest.get("host", ""),
+                "port": int(dest.get("port") or 0),
+                "connection_string": dest.get("connection_string", ""),
+                "service_account": dest.get("service_account", ""),
+                "password": dest.get("password", ""),
+            }
+            bucket_obj = gcs_client(cfg_gcs).bucket(bucket)
+            return _object_store_target_sample(
+                table_name=table_name,
+                list_keys=lambda prefix: list_objects(cfg_gcs, bucket, prefix),
+                fetch_bytes=lambda k: bucket_obj.blob(k).download_as_bytes(),
+                cols=cols,
+                limit=limit,
+                sort_key=sort_key,
+                keys=keys,
+            )
 
         if db_type in {
             "databricks",
@@ -4876,7 +5102,10 @@ def read_target_sample(
                 dest.get("api_key") or dest.get("password") or dest.get("username") or ""
             )
             if not index_url or not key:
-                return []
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
+                    "pinecone index URL or API key missing"
+                )
             session = _requests_session()
             hdrs = _headers(key)
             ns = (table_name or dest.get("schema") or "").strip()
@@ -4893,7 +5122,10 @@ def read_target_sample(
                 timeout=30,
             )
             if fetch.status_code not in {200, 201}:
-                return []
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
+                    f"pinecone fetch HTTP {fetch.status_code}"
+                )
             vectors = (fetch.json() or {}).get("vectors") or {}
             out_rows = []
             for vid, payload in vectors.items():
@@ -5251,7 +5483,10 @@ def read_target_sample(
                 table=table_name,
             )
             if not cfg.host or not cfg.path:
-                return []
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
+                    "sftp host or path missing"
+                )
             transport, sftp = connect_sftp(cfg)
             try:
                 with sftp.file(cfg.path, "rb") as fh:
@@ -5281,6 +5516,13 @@ def read_target_sample(
                     break
             return out_rows
 
-    except Exception:
-        return []
-    return []
+    except TargetSampleUnavailable:
+        raise
+    except Exception as exc:
+        raise TargetSampleUnavailable(
+            f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+        ) from exc
+    raise TargetSampleUnavailable(
+        f"No sample reader is wired for destination type {db_type!r} "
+        f"(table {table_name!r}); refusing to treat as empty"
+    )

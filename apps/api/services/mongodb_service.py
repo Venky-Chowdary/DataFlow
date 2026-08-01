@@ -8,15 +8,53 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from pymongo import MongoClient
 
+#: Statuses a job never leaves on its own. Progress writes that arrive after a
+#: job reaches one of these are stale by definition and must be dropped, not
+#: applied — otherwise a late write resurrects a cancelled or failed job.
+TERMINAL_JOB_STATUSES = frozenset(
+    {"completed", "completed_with_quarantine", "failed", "cancelled"}
+)
+
+
+logger = logging.getLogger(__name__)
+
 
 def _job_name_key(name: str) -> str:
     """Canonical uniqueness key for job display names (case-insensitive)."""
     return (name or "").strip().casefold()
+
+
+def _is_duplicate_key(exc: BaseException) -> bool:
+    """Whether an insert failed because the key was already taken.
+
+    Matched by type first so the check does not depend on driver message
+    wording, with a text fallback for wrapped or mocked errors.
+    """
+    try:
+        from pymongo.errors import DuplicateKeyError
+
+        if isinstance(exc, DuplicateKeyError):
+            return True
+    except Exception:
+        pass
+    if getattr(exc, "code", None) == 11000:
+        return True
+    return "duplicate key" in str(exc).lower() or "e11000" in str(exc).lower()
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Treat a naive timestamp as UTC so comparisons never raise.
+
+    MongoDB returns naive datetimes by default; comparing one against an aware
+    ``now()`` raises, which would turn a claim check into a request failure.
+    """
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 def _as_object_id(job_id: str):
@@ -346,6 +384,26 @@ class MongoDBService:
             prev_doc = None
         previous_status = (prev_doc or {}).get("status")
 
+        # Terminal statuses are final. A worker's next per-chunk progress write
+        # used to happily reset `status` from "cancelled" back to "running",
+        # so a cancel that landed between the worker's status read and its
+        # status write was erased — the UI flipped back to Running and the
+        # operator had to race the loop. `allow_terminal_exit=True` is the one
+        # documented way out, used by resume.
+        allow_terminal_exit = bool(kwargs.pop("allow_terminal_exit", False))
+        if (
+            previous_status in TERMINAL_JOB_STATUSES
+            and status not in TERMINAL_JOB_STATUSES
+            and not allow_terminal_exit
+        ):
+            logging.getLogger(__name__).info(
+                "Ignoring %s update for job %s: already terminal (%s)",
+                status,
+                job_id,
+                previous_status,
+            )
+            return False
+
         try:
             from services.job_trust import attach_trust_to_updates
 
@@ -454,6 +512,230 @@ class MongoDBService:
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return ok
+
+    def request_job_cancel(self, job_id: str) -> bool:
+        """Record a durable cancellation request for a running job.
+
+        Separate from ``status`` on purpose. ``status`` is rewritten by the
+        worker on every chunk, so expressing cancellation only as
+        ``status="cancelled"`` meant a cancel landing between the worker's read
+        and its write was silently overwritten. Nothing on the progress path
+        touches ``cancel_requested``, so once set it stays set until an explicit
+        resume clears it, and the worker is guaranteed to observe it at its next
+        checkpoint.
+        """
+        try:
+            db = self.get_database()
+        except ConnectionError:
+            return False
+        oid = _as_object_id(job_id)
+        if not oid:
+            return False
+        result = db["transfer_jobs"].update_one(
+            {"_id": oid},
+            {
+                "$set": {
+                    "cancel_requested": True,
+                    "cancel_requested_at": datetime.now(timezone.utc),
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            },
+        )
+        return result.matched_count > 0
+
+    def clear_job_cancel(self, job_id: str) -> bool:
+        """Clear a cancellation request so a resumed job can run again."""
+        try:
+            db = self.get_database()
+        except ConnectionError:
+            return False
+        oid = _as_object_id(job_id)
+        if not oid:
+            return False
+        result = db["transfer_jobs"].update_one(
+            {"_id": oid},
+            {
+                "$unset": {"cancel_requested": "", "cancel_requested_at": ""},
+                "$set": {"updated_at": datetime.now(timezone.utc)},
+            },
+        )
+        return result.matched_count > 0
+
+    def is_cancel_requested(self, job_id: str) -> bool:
+        """Whether an operator has asked this job to stop.
+
+        Checks the durable flag *and* the status, so a cancel written by an
+        older build (status-only) is still honoured.
+        """
+        try:
+            db = self.get_database()
+        except ConnectionError:
+            return False
+        oid = _as_object_id(job_id)
+        if not oid:
+            return False
+        doc = db["transfer_jobs"].find_one(
+            {"_id": oid}, {"cancel_requested": 1, "status": 1}
+        )
+        if not doc:
+            return False
+        return bool(doc.get("cancel_requested")) or doc.get("status") == "cancelled"
+
+    def claim_job_idempotency(
+        self,
+        *,
+        key: str,
+        job_id: str,
+        ttl_seconds: int | None = None,
+    ) -> tuple[bool, str, str]:
+        """Try to claim the exclusive right to run one transfer.
+
+        Returns ``(acquired, existing_job_id, existing_status)``.
+
+        The claim is an ``insert_one`` keyed on ``_id``, so the storage engine
+        decides the winner. A read-then-write check would leave a window where
+        two callers both see "no claim" and both proceed, which is exactly the
+        double-submit case this exists to prevent.
+
+        A claim whose job already finished is not a conflict — re-running the
+        same transfer later is normal — so it is taken over rather than
+        rejected.
+        """
+        from services.job_idempotency import claim_expiry
+
+        if not key or not job_id:
+            return True, "", ""
+        try:
+            db = self.get_database()
+        except ConnectionError:
+            # Without a shared store there is nothing to coordinate through.
+            # Allow the run rather than blocking all transfers on Mongo.
+            return True, "", ""
+
+        claims = db["job_claims"]
+        self._ensure_claim_indexes(claims)
+        now = datetime.now(timezone.utc)
+        doc = {
+            "_id": key,
+            "job_id": job_id,
+            "claimed_at": now,
+            "expires_at": claim_expiry(ttl_seconds),
+        }
+        try:
+            claims.insert_one(doc)
+            return True, "", ""
+        except Exception as exc:
+            if not _is_duplicate_key(exc):
+                # A claim store problem must not block data movement; log it and
+                # let the transfer proceed rather than failing closed on infra.
+                logger.warning("idempotency claim failed for %s: %s", key, exc)
+                return True, "", ""
+
+        existing = claims.find_one({"_id": key}) or {}
+        holder_id = str(existing.get("job_id") or "")
+        holder_status = self._job_status(holder_id) if holder_id else ""
+        expires_at = existing.get("expires_at")
+
+        stale = (
+            not holder_id
+            or holder_status in TERMINAL_JOB_STATUSES
+            or (isinstance(expires_at, datetime) and _as_utc(expires_at) <= now)
+        )
+        if stale:
+            # Take over: either the previous run finished, or it died without
+            # releasing and its claim has aged out.
+            result = claims.update_one(
+                {"_id": key, "job_id": existing.get("job_id")},
+                {"$set": {**doc, "superseded_job_id": holder_id}},
+            )
+            if result.matched_count:
+                return True, "", ""
+            # Lost a race to another taker; fall through and report the winner.
+            existing = claims.find_one({"_id": key}) or {}
+            holder_id = str(existing.get("job_id") or "")
+            holder_status = self._job_status(holder_id) if holder_id else ""
+
+        return False, holder_id, holder_status
+
+    def bind_job_idempotency(
+        self, key: str, from_job_id: str, to_job_id: str
+    ) -> bool:
+        """Atomically replace the holder id on an existing claim.
+
+        Used after the job document is created so the claim that was reserved
+        with a placeholder id points at the real job, without releasing the
+        slot in between.
+        """
+        if not key or not from_job_id or not to_job_id:
+            return False
+        try:
+            db = self.get_database()
+        except ConnectionError:
+            return False
+        try:
+            result = db["job_claims"].update_one(
+                {"_id": key, "job_id": from_job_id},
+                {
+                    "$set": {
+                        "job_id": to_job_id,
+                        "updated_at": datetime.now(timezone.utc),
+                    }
+                },
+            )
+            return result.matched_count > 0
+        except Exception as exc:
+            logger.warning("idempotency bind failed for %s: %s", key, exc)
+            return False
+
+    def release_job_idempotency(self, key: str, job_id: str = "") -> bool:
+        """Release a claim once its job reaches a terminal state.
+
+        Scoped to ``job_id`` when supplied so a late release from a superseded
+        run cannot free the claim held by the job that took over from it.
+        """
+        if not key:
+            return False
+        try:
+            db = self.get_database()
+        except ConnectionError:
+            return False
+        query: dict[str, Any] = {"_id": key}
+        if job_id:
+            query["job_id"] = job_id
+        try:
+            return db["job_claims"].delete_one(query).deleted_count > 0
+        except Exception as exc:
+            logger.warning("idempotency release failed for %s: %s", key, exc)
+            return False
+
+    def _ensure_claim_indexes(self, claims: Any) -> None:
+        """Add the TTL index that reclaims abandoned claims.
+
+        Attempted once per process. A missing TTL index only means expired
+        claims linger until the explicit staleness check above notices them, so
+        failure here is logged rather than raised.
+        """
+        if getattr(self, "_claim_indexes_ready", False):
+            return
+        try:
+            claims.create_index("expires_at", expireAfterSeconds=0)
+            claims.create_index("job_id")
+        except Exception as exc:
+            logger.debug("job_claims index setup skipped: %s", exc)
+        self._claim_indexes_ready = True
+
+    def _job_status(self, job_id: str) -> str:
+        """Current status of a job, or '' when it cannot be read."""
+        oid = _as_object_id(job_id)
+        if not oid:
+            return ""
+        try:
+            doc = self.get_database()["transfer_jobs"].find_one(
+                {"_id": oid}, {"status": 1}
+            )
+        except Exception:
+            return ""
+        return str((doc or {}).get("status") or "")
 
     def update_job_fields(self, job_id: str, fields: dict) -> bool:
         """Patch job metadata without changing status (e.g. rename)."""
@@ -593,6 +875,8 @@ class MemoryMongoDBService:
     def __init__(self):
         self._connectors: dict[str, dict] = {}
         self._jobs: dict[str, dict] = {}
+        self._claims: dict[str, dict] = {}
+        self._claim_lock = threading.Lock()
         self.client: Any = None
         self.connection_string = "memory://"
         self.db_name = "datatransfer"
@@ -615,6 +899,72 @@ class MemoryMongoDBService:
         from bson import ObjectId
 
         return str(ObjectId())
+
+    def claim_job_idempotency(
+        self,
+        *,
+        key: str,
+        job_id: str,
+        ttl_seconds: int | None = None,
+    ) -> tuple[bool, str, str]:
+        """In-process mirror of the Mongo claim.
+
+        Held under a lock so two threads submitting the same transfer race the
+        same way they would against the database, which is what makes the
+        single-process test for this defect meaningful.
+        """
+        from services.job_idempotency import claim_expiry
+
+        if not key or not job_id:
+            return True, "", ""
+        now = datetime.now(timezone.utc)
+        with self._claim_lock:
+            existing = self._claims.get(key)
+            if existing:
+                holder_id = str(existing.get("job_id") or "")
+                holder_status = str(
+                    (self._jobs.get(holder_id) or {}).get("status") or ""
+                )
+                expires_at = existing.get("expires_at")
+                stale = (
+                    not holder_id
+                    or holder_status in TERMINAL_JOB_STATUSES
+                    or (isinstance(expires_at, datetime) and _as_utc(expires_at) <= now)
+                )
+                if not stale:
+                    return False, holder_id, holder_status
+            self._claims[key] = {
+                "job_id": job_id,
+                "claimed_at": now,
+                "expires_at": claim_expiry(ttl_seconds),
+            }
+            return True, "", ""
+
+    def bind_job_idempotency(
+        self, key: str, from_job_id: str, to_job_id: str
+    ) -> bool:
+        if not key or not from_job_id or not to_job_id:
+            return False
+        with self._claim_lock:
+            existing = self._claims.get(key)
+            if not existing:
+                return False
+            if str(existing.get("job_id") or "") != from_job_id:
+                return False
+            existing["job_id"] = to_job_id
+            return True
+
+    def release_job_idempotency(self, key: str, job_id: str = "") -> bool:
+        if not key:
+            return False
+        with self._claim_lock:
+            existing = self._claims.get(key)
+            if not existing:
+                return False
+            if job_id and str(existing.get("job_id") or "") != job_id:
+                return False
+            del self._claims[key]
+            return True
 
     def save_connector(self, connector_data: dict) -> str:
         oid = self._new_id()

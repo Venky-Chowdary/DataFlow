@@ -14,6 +14,8 @@ from __future__ import annotations
 import logging
 import os
 import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from connectors.writer_common import CHUNK_SIZE
@@ -283,103 +285,309 @@ def apply_mssql_session_guards(conn: Any) -> None:
         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
-def ensure_postgres_write_ledger(cur: Any, schema: str = "public") -> None:
-    """Create the durable chunk ledger used to skip already-committed inserts."""
-    from psycopg2 import sql
+@dataclass(frozen=True)
+class _RawLedgerSpec:
+    """Per-dialect SQL for the chunk ledger on writers that use a raw cursor.
 
-    cur.execute(
-        sql.SQL(
-            "CREATE TABLE IF NOT EXISTS {}.{} ("
+    Postgres, MySQL and SQLite each drive a DBAPI cursor directly rather than
+    SQLAlchemy, so they cannot share ``sqlalchemy_ledger_table``. Describing the
+    three differences that actually exist — column types, parameter marker, and
+    the insert-ignore spelling — keeps one implementation instead of three
+    copies that drift. The 'rows_written returns the recorded count' rule is the
+    kind of correctness detail that only survives in a single implementation.
+    """
+
+    quote_char: str
+    placeholder: str
+    columns: str
+    create_suffix: str
+    insert_prefix: str
+    insert_conflict: str
+
+
+_RAW_LEDGER_SPECS: dict[str, _RawLedgerSpec] = {
+    "postgresql": _RawLedgerSpec(
+        quote_char='"',
+        placeholder="%s",
+        columns=(
             " job_id TEXT NOT NULL,"
             " batch_key TEXT NOT NULL,"
             " chunk_idx INTEGER NOT NULL,"
             " rows_written INTEGER NOT NULL DEFAULT 0,"
             " written_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
-            " PRIMARY KEY (job_id, batch_key, chunk_idx)"
-            ")"
-        ).format(sql.Identifier(schema), sql.Identifier(LEDGER_TABLE))
-    )
+        ),
+        create_suffix="",
+        insert_prefix="INSERT INTO",
+        insert_conflict=" ON CONFLICT DO NOTHING",
+    ),
+    "mysql": _RawLedgerSpec(
+        quote_char="`",
+        placeholder="%s",
+        columns=(
+            " job_id VARCHAR(128) NOT NULL,"
+            " batch_key VARCHAR(255) NOT NULL,"
+            " chunk_idx INT NOT NULL,"
+            " rows_written INT NOT NULL DEFAULT 0,"
+            " written_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        ),
+        create_suffix=" ENGINE=InnoDB",
+        insert_prefix="INSERT IGNORE INTO",
+        insert_conflict="",
+    ),
+    "sqlite": _RawLedgerSpec(
+        quote_char='"',
+        placeholder="?",
+        columns=(
+            " job_id TEXT NOT NULL,"
+            " batch_key TEXT NOT NULL,"
+            " chunk_idx INTEGER NOT NULL,"
+            " rows_written INTEGER NOT NULL DEFAULT 0,"
+            " written_at TEXT NOT NULL DEFAULT (datetime('now')),"
+        ),
+        create_suffix="",
+        insert_prefix="INSERT OR IGNORE INTO",
+        insert_conflict="",
+    ),
+}
 
 
-def postgres_chunk_committed(
-    cur: Any,
-    *,
-    schema: str,
-    job_id: str,
-    batch_key: str,
-    chunk_idx: int,
-) -> bool:
-    from psycopg2 import sql
-
-    cur.execute(
-        sql.SQL(
-            "SELECT 1 FROM {}.{} WHERE job_id = %s AND batch_key = %s AND chunk_idx = %s"
-        ).format(sql.Identifier(schema), sql.Identifier(LEDGER_TABLE)),
-        (job_id, batch_key, chunk_idx),
-    )
-    return cur.fetchone() is not None
+def _raw_ledger_spec(dialect: str) -> _RawLedgerSpec:
+    spec = _RAW_LEDGER_SPECS.get((dialect or "").strip().lower())
+    if spec is None:
+        raise ValueError(f"No raw chunk ledger defined for dialect '{dialect}'")
+    return spec
 
 
-def mark_postgres_chunk_committed(
-    cur: Any,
-    *,
-    schema: str,
-    job_id: str,
-    batch_key: str,
-    chunk_idx: int,
-    rows_written: int,
+def _raw_ledger_ref(spec: _RawLedgerSpec, schema: str | None) -> str:
+    """Fully-qualified, quoted ledger table reference."""
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    table = quote_sql_identifier(LEDGER_TABLE, spec.quote_char)
+    if schema:
+        return f"{quote_sql_identifier(schema, spec.quote_char)}.{table}"
+    return table
+
+
+def ensure_raw_write_ledger(
+    cur: Any, *, dialect: str, schema: str | None = None
 ) -> None:
-    from psycopg2 import sql
-
+    """Create the durable chunk ledger used to skip already-committed inserts."""
+    spec = _raw_ledger_spec(dialect)
+    ref = _raw_ledger_ref(spec, schema)
     cur.execute(
-        sql.SQL(
-            "INSERT INTO {}.{} (job_id, batch_key, chunk_idx, rows_written) "
-            "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING"
-        ).format(sql.Identifier(schema), sql.Identifier(LEDGER_TABLE)),
-        (job_id, batch_key, chunk_idx, rows_written),
-    )
-
-
-def ensure_mysql_write_ledger(cur: Any) -> None:
-    cur.execute(
-        f"CREATE TABLE IF NOT EXISTS `{LEDGER_TABLE}` ("
-        " job_id VARCHAR(128) NOT NULL,"
-        " batch_key VARCHAR(255) NOT NULL,"
-        " chunk_idx INT NOT NULL,"
-        " rows_written INT NOT NULL DEFAULT 0,"
-        " written_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        f"CREATE TABLE IF NOT EXISTS {ref} ("  # nosec: B608 — identifiers are quoted, dialect SQL is a constant
+        f"{spec.columns}"
         " PRIMARY KEY (job_id, batch_key, chunk_idx)"
-        ") ENGINE=InnoDB"
+        f"){spec.create_suffix}"
     )
 
 
-def mysql_chunk_committed(
+def raw_chunk_rows_written(
     cur: Any,
+    *,
+    dialect: str,
+    job_id: str,
+    batch_key: str,
+    chunk_idx: int,
+    schema: str | None = None,
+) -> int | None:
+    """Rows this chunk committed in an earlier attempt, or ``None`` if it never did.
+
+    Returning the recorded count rather than a boolean is what keeps a skipping
+    retry honest. A chunk that quarantined some of its rows committed fewer rows
+    than it held, so crediting ``len(batch)`` on replay would over-report the
+    transfer and make reconcile disagree with the destination. Replaying the
+    stored count reproduces exactly what the first attempt achieved.
+    """
+    spec = _raw_ledger_spec(dialect)
+    ref = _raw_ledger_ref(spec, schema)
+    ph = spec.placeholder
+    cur.execute(
+        f"SELECT rows_written FROM {ref} "  # nosec: B608 — identifiers are quoted, dialect SQL is a constant
+        f"WHERE job_id = {ph} AND batch_key = {ph} AND chunk_idx = {ph}",
+        (job_id, batch_key, chunk_idx),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    try:
+        return max(0, int(row[0] or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def mark_raw_chunk_committed(
+    cur: Any,
+    *,
+    dialect: str,
+    job_id: str,
+    batch_key: str,
+    chunk_idx: int,
+    rows_written: int,
+    schema: str | None = None,
+) -> None:
+    """Record a committed chunk inside the same transaction as its data write."""
+    spec = _raw_ledger_spec(dialect)
+    ref = _raw_ledger_ref(spec, schema)
+    ph = spec.placeholder
+    cur.execute(
+        f"{spec.insert_prefix} {ref} "  # nosec: B608 — identifiers are quoted, dialect SQL is a constant
+        f"(job_id, batch_key, chunk_idx, rows_written) "
+        f"VALUES ({ph}, {ph}, {ph}, {ph}){spec.insert_conflict}",
+        (job_id, batch_key, chunk_idx, int(rows_written)),
+    )
+
+
+def sqlalchemy_ledger_table(metadata: Any, schema: str | None = None) -> Any:
+    """Build the dialect-portable ``Table`` object for the chunk ledger.
+
+    The Postgres and MySQL ledgers are hand-written DDL because those writers use
+    raw DBAPI cursors. Every other SQL destination goes through SQLAlchemy, so
+    modelling the ledger as a Core ``Table`` gets correct DDL, quoting, and type
+    mapping for Snowflake, BigQuery, SQL Server, Oracle, DuckDB, Databricks and
+    Synapse from one definition instead of seven dialect branches.
+
+    ``VARCHAR`` lengths are explicit because Oracle and SQL Server reject
+    unbounded ``VARCHAR`` in a primary key, and the composite key is what makes
+    the "was this chunk already committed?" lookup exact.
+    """
+    import sqlalchemy as sa
+
+    return sa.Table(
+        LEDGER_TABLE,
+        metadata,
+        sa.Column("job_id", sa.String(128), primary_key=True, nullable=False),
+        sa.Column("batch_key", sa.String(255), primary_key=True, nullable=False),
+        sa.Column("chunk_idx", sa.Integer, primary_key=True, nullable=False),
+        sa.Column("rows_written", sa.Integer, nullable=False, default=0),
+        sa.Column(
+            "written_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            default=lambda: datetime.now(timezone.utc),
+        ),
+        schema=schema or None,
+        keep_existing=True,
+    )
+
+
+def ensure_sqlalchemy_write_ledger(
+    conn: Any,
+    *,
+    schema: str | None = None,
+) -> Any | None:
+    """Create the chunk ledger for a SQLAlchemy destination if it is absent.
+
+    Returns the ``Table`` object, or ``None`` when the ledger cannot be created.
+    A ``None`` return is not fatal — the caller degrades to unguarded writes —
+    but it *is* reported so the operator learns that retries on this destination
+    may duplicate rows rather than discovering it from a row count later.
+    """
+    import sqlalchemy as sa
+
+    try:
+        metadata = sa.MetaData()
+        table = sqlalchemy_ledger_table(metadata, schema)
+        table.create(bind=conn, checkfirst=True)
+        return table
+    except Exception as exc:
+        logger.warning(
+            "Could not create write ledger%s: %s. Chunk retries on this "
+            "destination cannot be de-duplicated.",
+            f" in schema {schema}" if schema else "",
+            exc,
+        )
+        return None
+
+
+def sqlalchemy_chunk_rows_written(
+    conn: Any,
+    table: Any,
     *,
     job_id: str,
     batch_key: str,
     chunk_idx: int,
-) -> bool:
-    cur.execute(
-        f"SELECT 1 FROM `{LEDGER_TABLE}` WHERE job_id = %s AND batch_key = %s AND chunk_idx = %s",  # nosec: B608 — LEDGER_TABLE is a module constant
-        (job_id, batch_key, chunk_idx),
+) -> int | None:
+    """Rows this chunk committed in an earlier attempt, or ``None`` if it never did.
+
+    Returning the recorded count rather than a boolean is what keeps the retry
+    honest. A chunk that quarantined some rows committed fewer rows than it held,
+    so a skipping retry that assumed "whole batch landed" would inflate the
+    reported total and make reconcile disagree with the destination. Replaying
+    the stored count reproduces exactly what the first attempt achieved.
+    """
+    import sqlalchemy as sa
+
+    stmt = sa.select(table.c.rows_written).where(
+        sa.and_(
+            table.c.job_id == job_id,
+            table.c.batch_key == batch_key,
+            table.c.chunk_idx == chunk_idx,
+        )
     )
-    return cur.fetchone() is not None
+    row = conn.execute(stmt).first()
+    if row is None:
+        return None
+    try:
+        return max(0, int(row[0] or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
-def mark_mysql_chunk_committed(
-    cur: Any,
+def mark_sqlalchemy_chunk_committed(
+    conn: Any,
+    table: Any,
     *,
     job_id: str,
     batch_key: str,
     chunk_idx: int,
     rows_written: int,
 ) -> None:
-    cur.execute(
-        f"INSERT IGNORE INTO `{LEDGER_TABLE}` (job_id, batch_key, chunk_idx, rows_written) "
-        "VALUES (%s, %s, %s, %s)",
-        (job_id, batch_key, chunk_idx, rows_written),
+    """Record a committed chunk.
+
+    Must be executed inside the same transaction as the chunk's data write, so
+    the ledger row and the rows it vouches for commit or roll back together. A
+    ledger entry written in a separate transaction could survive a rolled-back
+    data write and cause the retry to skip a chunk that never landed — losing
+    rows, which is worse than duplicating them.
+
+    An insert conflict means a concurrent attempt already claimed the chunk;
+    that is the idempotent outcome we want, so it is swallowed deliberately.
+    """
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+
+    try:
+        conn.execute(
+            table.insert().values(
+                job_id=job_id,
+                batch_key=batch_key,
+                chunk_idx=chunk_idx,
+                rows_written=int(rows_written),
+                written_at=_dt.now(_tz.utc),
+            )
+        )
+    except Exception as exc:
+        if _is_duplicate_key_error(exc):
+            return
+        raise
+
+
+def _is_duplicate_key_error(exc: BaseException) -> bool:
+    """Whether an exception is a primary-key / unique violation."""
+    text = str(exc).lower()
+    signals = (
+        "duplicate key",
+        "unique constraint",
+        "uniqueness constraint",
+        "already exists",
+        "duplicate entry",
+        "integrityerror",
+        "unique index",
+        "violation of primary key",
+        "sqlstate[23",
     )
+    return any(s in text for s in signals) or type(exc).__name__ == "IntegrityError"
 
 
 def build_write_batch_key(
@@ -457,6 +665,44 @@ def cleanup_write_ledger(
                 conn.commit()
             finally:
                 close_quietly(conn)
+        else:
+            _cleanup_sqlalchemy_ledger(dest_type=dest, cfg=cfg, job_id=job_id)
     except Exception as exc:
         # Ledger cleanup must never fail a successful transfer.
         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+
+
+def _cleanup_sqlalchemy_ledger(
+    *,
+    dest_type: str,
+    cfg: dict[str, Any],
+    job_id: str,
+) -> None:
+    """Drop this job's ledger rows on a SQLAlchemy destination.
+
+    Skipped when the destination never had a ledger, so we do not open a
+    connection just to look for a table that cannot exist.
+    """
+    from services.replay_safety import destination_has_chunk_ledger
+
+    if not destination_has_chunk_ledger(dest_type):
+        return
+
+    import sqlalchemy as sa
+
+    from connectors.generic_sql import _engine, _schema_name
+    from services.engine_pool import release_engine
+
+    engine = None
+    try:
+        engine = _engine({**cfg, "type": dest_type})
+        schema = _schema_name({**cfg, "type": dest_type})
+        table = sqlalchemy_ledger_table(sa.MetaData(), schema)
+        with engine.connect() as conn:
+            if not sa.inspect(conn).has_table(LEDGER_TABLE, schema=schema or None):
+                return
+            conn.execute(table.delete().where(table.c.job_id == job_id))
+            conn.commit()
+    finally:
+        if engine is not None:
+            release_engine(engine)

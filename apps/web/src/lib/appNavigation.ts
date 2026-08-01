@@ -8,6 +8,7 @@ const SCREENS: Screen[] = [
   "connectors",
   "contracts",
   "schedules",
+  "transforms",
   "jobs",
   "mcp",
   "settings",

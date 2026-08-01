@@ -1974,6 +1974,8 @@ export async function runUniversalTransfer(options: {
   priorityDirection?: "asc" | "desc";
   limit?: number;
   dateLocale?: string;
+  /** Client-supplied key; when omitted a fresh UUID is sent so HTTP retries converge. */
+  idempotencyKey?: string;
 }) {
   const formData = new FormData();
   if (options.file) formData.append("file", options.file);
@@ -2030,8 +2032,24 @@ export async function runUniversalTransfer(options: {
   }
   if (options.planId) formData.append("plan_id", options.planId);
   formData.append("date_locale", options.dateLocale || "");
-  const res = await apiFetch(`${API_BASE}/transfer/run`, { method: "POST", body: formData, timeoutMs: LONG_REQUEST_TIMEOUT_MS });
+  // A fresh key per click still lets the server fingerprint catch a double-submit
+  // of the same intent; the header itself makes HTTP-level retries of this call
+  // converge on one job instead of starting a second writer.
+  const idempotencyKey =
+    options.idempotencyKey?.trim() ||
+    (typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `df-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
+  const res = await apiFetch(`${API_BASE}/transfer/run`, {
+    method: "POST",
+    body: formData,
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+    headers: { "Idempotency-Key": idempotencyKey },
+  });
   const data = await res.json();
+  if (res.status === 409) {
+    return parseDuplicateTransfer(data);
+  }
   if (!res.ok) {
     const detail = data.detail;
     const errMsg = typeof detail === "string"
@@ -2040,6 +2058,39 @@ export async function runUniversalTransfer(options: {
     return { success: false, error: errMsg };
   }
   return { success: true, async: data.async === true, ...data };
+}
+
+/** Shape of a 409 from the transfer engine when an equivalent run is already live. */
+export type DuplicateTransferResponse = {
+  success: false;
+  error: "duplicate_transfer";
+  duplicate: true;
+  existing_job_id: string;
+  existing_status: string;
+  message: string;
+};
+
+function parseDuplicateTransfer(data: Record<string, unknown>): DuplicateTransferResponse {
+  const detail = (data.detail && typeof data.detail === "object"
+    ? data.detail
+    : data) as Record<string, unknown>;
+  const existing =
+    String(detail.existing_job_id || data.existing_job_id || data.job_id || "").trim();
+  const status = String(detail.existing_status || data.existing_status || "in progress").trim();
+  const message = String(
+    detail.message ||
+      (typeof data.detail === "string" ? data.detail : "") ||
+      data.error ||
+      "An equivalent transfer is already running.",
+  );
+  return {
+    success: false,
+    error: "duplicate_transfer",
+    duplicate: true,
+    existing_job_id: existing,
+    existing_status: status,
+    message,
+  };
 }
 
 /** JSON transfer execute (SDK / GitOps) — Form upload remains on runUniversalTransfer. */
@@ -2053,10 +2104,19 @@ export async function executeTransferJson(payload: {
   skipPreflight?: boolean;
   asyncMode?: boolean;
   planId?: string;
+  idempotencyKey?: string;
 }) {
+  const idempotencyKey =
+    payload.idempotencyKey?.trim() ||
+    (typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `df-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
   const res = await apiFetch(`${API_BASE}/transfer/execute`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": idempotencyKey,
+    },
     body: JSON.stringify({
       source: payload.source,
       destination: payload.destination,
@@ -2071,6 +2131,9 @@ export async function executeTransferJson(payload: {
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
   const data = await res.json();
+  if (res.status === 409) {
+    return parseDuplicateTransfer(data);
+  }
   if (!res.ok) {
     const detail = data.detail;
     const errMsg = typeof detail === "string"
@@ -2483,6 +2546,13 @@ export interface QuarantineInfo {
     error?: string | null;
     supported?: boolean | null;
   };
+  /**
+   * Whether the control-plane JSONL DLQ was durably written. ``false`` means
+   * the rows are listed in memory only — Replay would find nothing to rewrite.
+   * ``null``/omitted means an older job that pre-dates the flag.
+   */
+  quarantine_durable?: boolean | null;
+  quarantine_dlq_error?: string | null;
 }
 
 export async function fetchJobQuarantine(jobId: string): Promise<QuarantineInfo> {
@@ -3182,5 +3252,170 @@ export async function cancelJobCdcSnapshot(
     { method: "POST" },
   );
   if (!res.ok) throw new Error(await parseApiError(res, "Could not cancel CDC snapshot"));
+  return res.json();
+}
+
+// --------------------------------------------------------------------------
+// Post-load SQL transformations (dbt-class models run at the destination).
+// --------------------------------------------------------------------------
+
+export interface TransformDataTest {
+  test_type: "unique" | "not_null" | "accepted_values" | "relationships" | "positive";
+  column?: string;
+  severity?: "error" | "warn";
+  values?: string[];
+  to_model?: string;
+  to_column?: string;
+}
+
+export interface TransformModelDef {
+  name: string;
+  sql: string;
+  materialization: "view" | "table" | "incremental" | "ephemeral";
+  description?: string;
+  unique_key?: string;
+  incremental_strategy?: "merge" | "append" | "delete_insert";
+  tests?: TransformDataTest[];
+  tags?: string[];
+  enabled?: boolean;
+  /** Server-derived: models this one depends on via ref(). */
+  refs?: string[];
+  sources?: string[];
+}
+
+/** Layered execution plan. Models in one layer have no interdependency. */
+export interface TransformPlan {
+  layers?: string[][];
+  order?: string[];
+  model_count?: number;
+  layer_count?: number;
+  max_parallelism?: number;
+  unresolved_refs?: Record<string, string[]>;
+  /** Present instead of the plan when the stored models cannot be resolved. */
+  error?: string;
+}
+
+export interface TransformProject {
+  id: string;
+  name: string;
+  destination_connector_id: string;
+  schema: string;
+  models: TransformModelDef[];
+  enabled: boolean;
+  run_after_transfer: boolean;
+  trigger_tables: string[];
+  description: string;
+  workspace_id?: string;
+  created_at?: string;
+  updated_at?: string;
+  version?: number;
+  plan?: TransformPlan;
+}
+
+export interface TransformCompiledModel {
+  name: string;
+  materialization: string;
+  relation: string;
+  strategy: string;
+  refs: string[];
+  sources: string[];
+  statements: string[];
+  error?: string;
+  tests: { test_type: string; column: string; severity: string; sql: string }[];
+}
+
+export interface TransformPlanPreview {
+  plan: TransformPlan;
+  models: TransformCompiledModel[];
+  dialect: string;
+}
+
+export async function fetchTransformProjects(): Promise<TransformProject[]> {
+  const res = await apiFetch(`${API_BASE}/transforms/`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to load transformation projects"));
+  return res.json();
+}
+
+export async function fetchTransformProject(projectId: string): Promise<TransformProject> {
+  const res = await apiFetch(`${API_BASE}/transforms/${encodeURIComponent(projectId)}`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Transformation project not found"));
+  return res.json();
+}
+
+export async function createTransformProject(
+  body: Partial<TransformProject>,
+): Promise<TransformProject> {
+  const res = await apiFetch(`${API_BASE}/transforms/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not save transformation project"));
+  return res.json();
+}
+
+export async function updateTransformProject(
+  projectId: string,
+  body: Partial<TransformProject>,
+): Promise<TransformProject> {
+  const res = await apiFetch(`${API_BASE}/transforms/${encodeURIComponent(projectId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not update transformation project"));
+  return res.json();
+}
+
+export async function deleteTransformProject(projectId: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/transforms/${encodeURIComponent(projectId)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not delete transformation project"));
+}
+
+/**
+ * Compile models and resolve the DAG without touching a warehouse.
+ *
+ * This is what makes the editor safe to use: a dependency cycle or an
+ * unsupported materialization comes back as a 422 while the operator is still
+ * writing, not halfway through a run against production.
+ */
+export async function previewTransformPlan(body: {
+  models: Partial<TransformModelDef>[];
+  dialect?: string;
+  schema?: string;
+}): Promise<TransformPlanPreview> {
+  const res = await apiFetch(`${API_BASE}/transforms/plan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not compile the models"));
+  return res.json();
+}
+
+export interface TransformRunResult {
+  status: "success" | "partial" | "failed" | "skipped";
+  seconds: number;
+  plan: TransformPlan;
+  error: string;
+  warnings: string[];
+  models: import("./types").TransformModelResult[];
+  model_count: number;
+  failed_model_count: number;
+  failed_test_count: number;
+}
+
+export async function runTransformProject(
+  projectId: string,
+  opts: { dryRun?: boolean } = {},
+): Promise<TransformRunResult> {
+  const query = opts.dryRun ? "?dry_run=true" : "";
+  const res = await apiFetch(
+    `${API_BASE}/transforms/${encodeURIComponent(projectId)}/run${query}`,
+    { method: "POST", timeoutMs: 300_000 },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Transformation run failed"));
   return res.json();
 }

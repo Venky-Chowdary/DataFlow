@@ -4,7 +4,15 @@ function resolveApiBase(): string {
     typeof window !== "undefined"
       ? (window as { DATAFLOW_API_BASE?: string }).DATAFLOW_API_BASE
       : undefined;
-  const raw = fromWindow || import.meta.env.VITE_API_BASE || "/api/v1";
+  // `import.meta.env` is a Vite inject. Under node:test there is no Vite
+  // transform, so reading `.env` throws. Fall back cleanly instead of
+  // crashing every pure helper that happens to import this module.
+  const viteEnv =
+    typeof import.meta !== "undefined" &&
+    (import.meta as { env?: { VITE_API_BASE?: string } }).env
+      ? (import.meta as { env?: { VITE_API_BASE?: string } }).env!.VITE_API_BASE
+      : undefined;
+  const raw = fromWindow || viteEnv || "/api/v1";
   // Strip quotes/whitespace (Railway paste / "white" blank env values).
   let trimmed = String(raw).trim().replace(/^['"]|['"]$/g, "").replace(/\/+$/, "");
   if (!trimmed) return "/api/v1";
@@ -23,7 +31,7 @@ export function describeApiBase(): string {
   return API_BASE;
 }
 
-export type Screen = "landing" | "dashboard" | "pilot" | "transfer" | "query" | "connectors" | "schedules" | "jobs" | "contracts" | "mcp" | "settings" | "docs" | "benchmarks";
+export type Screen = "landing" | "dashboard" | "pilot" | "transfer" | "query" | "connectors" | "schedules" | "transforms" | "jobs" | "contracts" | "mcp" | "settings" | "docs" | "benchmarks";
 
 export interface DataContract {
   id: string;
@@ -153,6 +161,8 @@ export interface TransferJob {
   failed_at_phase?: string;
   rejected_rows?: number;
   coerced_null_rows?: number;
+  /** Quarantine evidence dropped past the sample cap (exact count still in rejected_rows). */
+  rejected_details_truncated?: number;
   chunk_current?: number;
   chunk_total?: number;
   checkpoint?: TransferCheckpoint;
@@ -169,6 +179,8 @@ export interface TransferJob {
   /** SQL Server CDC TVF row_filter_option actually used (all / all update old / net). */
   cdc_row_filter?: string | null;
   replication_lag_bytes?: number | null;
+  /** Slot confirmed_flush_lsn — the position holding WAL retention. */
+  cdc_confirmed_flush_lsn?: string | null;
   cdc_heartbeat_at?: string | null;
   cdc_last_ddl_at?: string | null;
   /** Durable CDC resume cursor (slot/LSN, GTID, change-stream token). */
@@ -257,6 +269,59 @@ export interface JobNotificationResult {
   body?: string;
 }
 
+/**
+ * Gate-8 reconcile payload as the engine emits it
+ * (`services/reconciliation.py` → `src/transfer/reconcile_step.py`).
+ *
+ * Every honesty qualifier the engine produces belongs here: dropping
+ * `verification_mode` / `identity` / `alignment` at the type boundary is what
+ * let a positional-only comparison render as an exact match.
+ */
+export interface Gate8ReconciliationPayload {
+  passed?: boolean;
+  message?: string;
+  phase?: string;
+  preview?: boolean;
+  post_write_pending?: boolean;
+  /** key_aligned | positional_only | unproven_identity */
+  verification_mode?: string;
+  identity?: {
+    column?: string | null;
+    proven?: boolean;
+    reason?: string;
+    provenance?: string;
+  };
+  source_rows?: number;
+  target_rows?: number;
+  rejected_rows?: number;
+  coerced_null_rows?: number;
+  /** Intentional LSN-guard / redelivery skips — not a shortfall. */
+  rows_skipped?: number;
+  source_checksum?: string;
+  target_checksum?: string;
+  missing_key_count?: number;
+  extra_key_count?: number;
+  matched_key_count?: number;
+  row_fidelity_score?: number;
+  sample_compare?: {
+    passed?: boolean;
+    compared?: number;
+    skipped?: boolean;
+    /** Set when the destination read-back itself failed. */
+    error?: string;
+    alignment?: string;
+    identity_warning?: string;
+    mismatches?: {
+      row?: string | number;
+      source?: string;
+      target?: string;
+      source_value?: string;
+      target_value?: string;
+      column?: string;
+    }[];
+  };
+}
+
 export interface JobProgress extends TransferJob {
   progress_pct: number;
   phase?: string;
@@ -271,36 +336,7 @@ export interface JobProgress extends TransferJob {
   load_history_report?: LoadHistoryReport;
   preflight?: PreflightResult;
   /** Gate-8 reconcile payload persisted on the job at terminal status. */
-  reconciliation?: {
-    passed?: boolean;
-    message?: string;
-    phase?: string;
-    preview?: boolean;
-    post_write_pending?: boolean;
-    source_rows?: number;
-    target_rows?: number;
-    rejected_rows?: number;
-    coerced_null_rows?: number;
-    source_checksum?: string;
-    target_checksum?: string;
-    missing_key_count?: number;
-    extra_key_count?: number;
-    matched_key_count?: number;
-    row_fidelity_score?: number;
-    sample_compare?: {
-      passed?: boolean;
-      compared?: number;
-      skipped?: boolean;
-      mismatches?: {
-        row?: string | number;
-        source?: string;
-        target?: string;
-        source_value?: string;
-        target_value?: string;
-        column?: string;
-      }[];
-    };
-  };
+  reconciliation?: Gate8ReconciliationPayload;
   /** Plain-language pipeline explanation from the engine. */
   explanation?: string;
   /** Persisted per-mapping evidence (confidence, fidelity, risks) for Theater/Jobs. */
@@ -430,8 +466,14 @@ export interface PreflightProofBundle {
     preview?: boolean;
     phase?: string;
     post_write_pending?: boolean;
+    /** key_aligned | positional_only | unproven_identity */
+    verification_mode?: string;
+    identity?: { column?: string | null; proven?: boolean; reason?: string };
     source_rows?: number;
     target_rows?: number;
+    rejected_rows?: number;
+    coerced_null_rows?: number;
+    rows_skipped?: number;
     source_checksum?: string | null;
     target_checksum?: string | null;
     row_fidelity_score?: number | null;
@@ -444,6 +486,9 @@ export interface PreflightProofBundle {
       compared: number;
       mismatches: { row: string; source: string; target: string; source_value: string; target_value: string }[];
       skipped?: boolean;
+      error?: string;
+      alignment?: string;
+      identity_warning?: string;
     };
   };
   transfer_decision: {
@@ -505,6 +550,113 @@ export interface CoercionReport {
   has_blocking_failures: boolean;
   columns: CoercionColumn[];
   by_source?: Record<string, CoercionColumn>;
+}
+
+/** Wall-clock time the engine spent in one phase of a transfer. */
+export interface PhaseTiming {
+  phase: string;
+  label: string;
+  seconds: number;
+  calls: number;
+  rows: number;
+  /** Fraction of total busy time, 0–1. */
+  share_of_busy: number;
+  rows_per_second: number;
+}
+
+/**
+ * Per-phase timing breakdown emitted by the transfer engine.
+ *
+ * `busy_seconds` sums each phase's own time, so it exceeds `elapsed_seconds`
+ * when phases overlap across worker threads. `overlap_factor` is that ratio —
+ * roughly 1.0 means serial, higher means real concurrency.
+ */
+export interface PhaseProfileReport {
+  phases: PhaseTiming[];
+  busy_seconds: number;
+  elapsed_seconds: number;
+  dominant_phase: string;
+  overlap_factor: number;
+}
+
+/**
+ * Per-run connection and metadata reuse. Proves the engine reused pools and
+ * schema lookups across chunks instead of rebuilding them per batch — the
+ * defect that used to cost a TCP+TLS+auth round-trip on every chunk.
+ */
+export interface ReuseCounters {
+  hits: number;
+  misses: number;
+  reuse_ratio: number;
+  connections_saved?: number;
+  metadata_queries_saved?: number;
+  live?: number;
+  evictions?: number;
+  invalidations?: number;
+}
+
+export interface ConnectionReuseReport {
+  engine_pool?: ReuseCounters;
+  schema_cache?: ReuseCounters;
+}
+
+/**
+ * Whether an interrupted write can be retried in place without duplicating rows.
+ * Surfaced so the operator can tell "resume is automatic" from "resume needs a
+ * decision" without reading engine logs.
+ */
+export interface ReplaySafetyReport {
+  safe: boolean;
+  mechanism: "idempotent_upsert" | "chunk_ledger" | "keyed_document" | "none" | string;
+  reason: string;
+  destination?: string;
+  write_mode?: string;
+  duplicate_risk?: boolean;
+  evidence?: string[];
+}
+
+/** One data test evaluated against a materialized transformation model. */
+export interface TransformTestResult {
+  model: string;
+  test_type: string;
+  column: string;
+  severity: "error" | "warn";
+  passed: boolean;
+  failing_rows: number;
+  message: string;
+  sql?: string;
+}
+
+/** One model built by a post-load transformation project. */
+export interface TransformModelResult {
+  name: string;
+  materialization: string;
+  status: "success" | "failed" | "skipped";
+  relation: string;
+  strategy: string;
+  rows_affected: number;
+  seconds: number;
+  sql: string;
+  error: string;
+  tests: TransformTestResult[];
+}
+
+/** Post-load transformation outcome attached to a finished transfer. */
+export interface TransformationsReport {
+  ran: boolean;
+  status: "success" | "partial" | "failed" | "skipped";
+  message: string;
+  projects: {
+    project_id: string;
+    project_name: string;
+    status: string;
+    message?: string;
+    seconds?: number;
+    failed_model_count?: number;
+    failed_test_count?: number;
+    warnings?: string[];
+    models: TransformModelResult[];
+  }[];
 }
 
 /** Last-N load comparison for the same source→destination route. */
@@ -633,7 +785,11 @@ export interface TransferResult {
     rejected_rows?: number;
     coerced_null_rows?: number;
     rejected_details?: RejectedDetail[];
+    /** How many quarantine details were dropped past the sample cap. */
+    rejected_details_truncated?: number;
     warnings?: string[];
+    /** How many distinct warnings were suppressed past the display sample. */
+    warnings_suppressed?: number;
     error_policy?: string;
     /** Pre-ingestion staging table when write_via_staging was used. */
     staging_table?: string;
@@ -648,42 +804,22 @@ export interface TransferResult {
     batches?: number;
     records_per_second?: number;
     load_history_report?: LoadHistoryReport;
+    phase_profile?: PhaseProfileReport;
+    transformations?: TransformationsReport;
+    connection_reuse?: ConnectionReuseReport;
+    /** Whether an interrupted write could have been retried without duplicating rows. */
+    replay_safety?: ReplaySafetyReport;
+    /** OpenTelemetry trace id when DATAFLOW_ENABLE_TRACING=1. */
+    trace_id?: string;
+    /** Inbound X-Correlation-ID bridged into the transfer root span. */
+    correlation_id?: string;
   };
   records_per_second?: number;
   ddl_executed?: string[];
   operation?: string;
   error?: string;
   error_details?: Record<string, unknown>;
-  reconciliation?: {
-    passed?: boolean;
-    message?: string;
-    phase?: string;
-    preview?: boolean;
-    post_write_pending?: boolean;
-    source_rows?: number;
-    target_rows?: number;
-    rejected_rows?: number;
-    coerced_null_rows?: number;
-    source_checksum?: string;
-    target_checksum?: string;
-    missing_key_count?: number;
-    extra_key_count?: number;
-    matched_key_count?: number;
-    row_fidelity_score?: number;
-    sample_compare?: {
-      passed?: boolean;
-      compared?: number;
-      skipped?: boolean;
-      mismatches?: {
-        row?: string | number;
-        source?: string;
-        target?: string;
-        source_value?: string;
-        target_value?: string;
-        column?: string;
-      }[];
-    };
-  };
+  reconciliation?: Gate8ReconciliationPayload;
   explanation?: string;
   mapping_proof?: Record<string, unknown>;
   job_id?: string;

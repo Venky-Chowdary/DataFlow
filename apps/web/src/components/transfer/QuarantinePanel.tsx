@@ -32,6 +32,13 @@ export interface QuarantinePanelProps {
    * when the API returns empty.
    */
   initialDetails?: QuarantineRow[];
+  /**
+   * How many quarantine detail records the engine dropped past its sample cap.
+   * The exact row count still lives in ``rejectedRows``; this only bounds the
+   * per-finding evidence so a heavily-quarantining job cannot blow the
+   * checkpoint document past MongoDB's 16 MB limit.
+   */
+  truncatedDetails?: number;
   /** Closed-loop: preflight findings → Validate (Strip / remapping). */
   onOpenValidate?: () => void;
   /** Closed-loop: after successful write-time replay. */
@@ -113,6 +120,7 @@ export function QuarantinePanel({
   initiallyOpen = false,
   autoLoad = false,
   initialDetails,
+  truncatedDetails = 0,
   onOpenValidate,
   onReplayComplete,
   repairMappings = [],
@@ -147,6 +155,8 @@ export function QuarantinePanel({
     };
   } | null>(null);
   const [destDlq, setDestDlq] = useState<import("../../lib/api").QuarantineInfo["dest_dlq"]>(undefined);
+  const [quarantineDurable, setQuarantineDurable] = useState<boolean | null | undefined>(undefined);
+  const [quarantineDlqError, setQuarantineDlqError] = useState<string | null | undefined>(undefined);
 
   const transformOverrides = useMemo(() => buildTransformOverrides(rows), [rows]);
   const hasStripSuggestion = Object.values(transformOverrides).some(
@@ -164,6 +174,8 @@ export function QuarantinePanel({
       setRowCount(data.rejected_rows ?? rejectedRows ?? next.length);
       setSource(apiRows.length ? (data.source || "write") : (initialDetails?.length ? "job" : data.source || "none"));
       setDestDlq(data.dest_dlq);
+      setQuarantineDurable(data.quarantine_durable);
+      setQuarantineDlqError(data.quarantine_dlq_error ?? null);
       setOpen(true);
       setLoaded(true);
     } catch (e) {
@@ -318,7 +330,11 @@ export function QuarantinePanel({
   const displayFindings = loaded ? issueCount : (rejectedRows ?? 0) || issueCount;
   const isWriteSource = source === "write" || source === "job";
   const isPreflight = source === "preflight";
-  const canReplay = isWriteSource && rows.length > 0;
+  // Replay needs a durable control-plane record of the rejected rows. When
+  // persist_rejected_rows failed the engine still lists them in memory, but
+  // a Replay click would rewrite nothing — block the button and say why.
+  const durableLost = quarantineDurable === false;
+  const canReplay = isWriteSource && rows.length > 0 && !durableLost;
 
   return (
     <div className="df2-quarantine-panel">
@@ -340,6 +356,15 @@ export function QuarantinePanel({
             {coercedNullRows != null && coercedNullRows > 0 && (
               <span className="df2-quarantine-explainer-count">
                 <strong>{coercedNullRows.toLocaleString()}</strong> coerced to NULL
+              </span>
+            )}
+            {truncatedDetails > 0 && (
+              <span
+                className="df2-quarantine-explainer-count"
+                title="Evidence is capped so a heavily-quarantining job cannot break checkpoint resume. The row count above is still exact."
+              >
+                <strong>{truncatedDetails.toLocaleString()}</strong> more finding
+                {truncatedDetails === 1 ? "" : "s"} not shown (sample capped)
               </span>
             )}
             {source !== "none" && loaded && (
@@ -376,6 +401,14 @@ export function QuarantinePanel({
             <p>
               Caught in Validate before write. Open Validate → apply <em>Strip controls</em> or fix
               mappings, then re-run. Replay is for write-time rejects only.
+            </p>
+          ) : durableLost ? (
+            <p className="df2-quarantine-durable-warn" role="alert">
+              Quarantine findings are listed here but were <strong>not durably written</strong> to
+              the control-plane DLQ
+              {quarantineDlqError ? <> ({quarantineDlqError})</> : null}. Replay is disabled because
+              it would rewrite nothing — export the CSV now, fix the DLQ store, and re-run the
+              transfer so rejects are persisted.
             </p>
           ) : canReplay ? (
             <p>

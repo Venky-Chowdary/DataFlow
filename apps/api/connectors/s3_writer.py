@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from connectors.aws_common import boto3_client, is_local_endpoint, resolve_region
+from connectors.object_store_common import (
+    purge_object_store_parts,
+    resolve_object_write_layout,
+)
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
     apply_write_quarantine_matrix,
@@ -96,6 +100,9 @@ def write_mapped_rows(
 ) -> WriteResult:
     del backfill_new_fields
     policy = transform_error_policy(error_policy)
+    sync_mode = str(_kwargs.pop("sync_mode", "") or "")
+    file_batch_idx = int(_kwargs.pop("file_batch_idx", 0) or 0)
+    total_chunks = int(_kwargs.pop("total_chunks", 1) or 1)
     bucket = database
     if not bucket:
         return WriteResult(
@@ -107,9 +114,21 @@ def write_mapped_rows(
             chunks_completed=0,
             error="S3 bucket is required (set the Database field).",
         )
-    key = table_name or schema or "exports/dataflow_export.json"
-    if not key.endswith((".json", ".jsonl", ".csv")):
-        key = f"{key.rstrip('/')}/export.json"
+    try:
+        layout = resolve_object_write_layout(
+            table_name=table_name,
+            schema=schema,
+            sync_mode=sync_mode,
+            file_batch_idx=file_batch_idx,
+            total_chunks=total_chunks,
+            job_id=str(_kwargs.pop("job_id", "") or ""),
+        )
+    except ValueError as exc:
+        return WriteResult(
+            ok=False, rows_written=0, table_name=table_name, target_schema=bucket,
+            checksum="", chunks_completed=0, error=str(exc),
+        )
+    key = layout.write_key
 
     cfg = {
         "host": host,
@@ -186,6 +205,17 @@ def write_mapped_rows(
                 raise RuntimeError(
                     f"S3 bucket {bucket!r} is missing or inaccessible and create_table is disabled"
                 ) from exc
+        # Full-refresh overwrite: clear stale parts once on the first chunk so a
+        # smaller re-run cannot leave orphaned parts (Redis/Iceberg clear-once).
+        if layout.should_purge:
+            from connectors.s3_reader import list_objects
+
+            purge_object_store_parts(
+                list_keys=lambda prefix: list_objects(cfg, bucket, prefix),
+                delete_key=lambda k: client.delete_object(Bucket=bucket, Key=k),
+                parts_prefix=layout.purge_prefix,
+                legacy_base_key=layout.purge_legacy_key,
+            )
         client.put_object(Bucket=bucket, Key=key, Body=body, ContentType=content_type)
         checksum = row_checksum(mapped_rows, target_cols, dest_db_type="s3")
         if on_checkpoint:

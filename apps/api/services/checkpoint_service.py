@@ -10,11 +10,19 @@ re-read from `cursor_after` (or `offset`) instead of starting over.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+#: Hard cap on quarantine evidence carried inside a checkpoint document.
+#: The checkpoint is rewritten on every chunk and lives inside the job record,
+#: so this list is the one field that can push the document past MongoDB's
+#: 16 MB limit and break resume entirely. 500 rows is far more than an operator
+#: reads, and the exact count still lives in ``rejected_rows``.
+MAX_REJECTED_DETAILS = int(os.getenv("DATAFLOW_MAX_REJECTED_DETAILS", "500") or 500)
 
 
 def _now() -> str:
@@ -57,7 +65,32 @@ class Checkpoint:
     # Metadata
     updated_at: str = field(default_factory=_now)
     rejected_rows: int = 0
+    #: Bounded sample of quarantined rows. ``rejected_rows`` remains the exact
+    #: count; this list is evidence for the operator, not the ledger.
     rejected_details: list[dict[str, Any]] = field(default_factory=list)
+    #: How many rejection details were dropped once the sample cap was reached,
+    #: so the UI can say "showing N of M" instead of implying the list is whole.
+    rejected_details_truncated: int = 0
+
+    def add_rejected_details(self, details: list[dict[str, Any]] | None) -> None:
+        """Append rejection evidence, keeping the checkpoint document bounded.
+
+        The checkpoint is persisted in full on *every* chunk. An uncapped list
+        grew with the number of quarantined rows until the document crossed
+        MongoDB's 16 MB limit, at which point every subsequent checkpoint save
+        failed and the job silently lost its ability to resume — the failure
+        mode was worst exactly when the operator most needed the evidence.
+        """
+        if not details:
+            return
+        room = MAX_REJECTED_DETAILS - len(self.rejected_details)
+        if room > 0:
+            self.rejected_details.extend(details[:room])
+            overflow = len(details) - room
+        else:
+            overflow = len(details)
+        if overflow > 0:
+            self.rejected_details_truncated += overflow
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -90,6 +123,7 @@ class Checkpoint:
             "updated_at": self.updated_at,
             "rejected_rows": self.rejected_rows,
             "rejected_details": self.rejected_details,
+            "rejected_details_truncated": self.rejected_details_truncated,
         }
 
     @classmethod

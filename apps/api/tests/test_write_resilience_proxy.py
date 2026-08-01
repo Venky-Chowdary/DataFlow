@@ -75,7 +75,7 @@ def test_postgres_writer_reconnects_and_skips_ledged_chunk(monkeypatch):
     """After an ambiguous commit, ledger skip prevents duplicate insert on retry."""
     from connectors import postgresql_writer as pgw
 
-    ledger: set[tuple[str, str, int]] = set()
+    ledger: dict[tuple[str, str, int], int] = {}
     write_calls = {"n": 0}
     commit_calls = {"n": 0}
 
@@ -115,20 +115,20 @@ def test_postgres_writer_reconnects_and_skips_ledged_chunk(monkeypatch):
             return None
 
     monkeypatch.setattr(pgw, "_open_pg", lambda **_k: FakeConn())
-    monkeypatch.setattr(pgw, "ensure_postgres_write_ledger", lambda *_a, **_k: None)
+    monkeypatch.setattr(pgw, "ensure_raw_write_ledger", lambda *_a, **_k: None)
     monkeypatch.setattr(pgw, "write_chunk_size", lambda *_a, **_k: 10)
     monkeypatch.setattr(pgw, "is_public_proxy_host", lambda *_a, **_k: True)
     monkeypatch.setattr(pgw.time, "sleep", lambda *_a, **_k: None)
 
-    def fake_committed(_cur, *, schema, job_id, batch_key, chunk_idx):  # noqa: ARG001
-        return (job_id, batch_key, chunk_idx) in ledger
+    def fake_rows_written(_cur, *, dialect, schema, job_id, batch_key, chunk_idx):  # noqa: ARG001
+        return ledger.get((job_id, batch_key, chunk_idx))
 
-    def fake_mark(_cur, *, schema, job_id, batch_key, chunk_idx, rows_written):  # noqa: ARG001
+    def fake_mark(_cur, *, dialect, schema, job_id, batch_key, chunk_idx, rows_written):  # noqa: ARG001
         # Simulate server-side commit of ledger+rows even when client sees a drop.
-        ledger.add((job_id, batch_key, chunk_idx))
+        ledger[(job_id, batch_key, chunk_idx)] = rows_written
 
-    monkeypatch.setattr(pgw, "postgres_chunk_committed", fake_committed)
-    monkeypatch.setattr(pgw, "mark_postgres_chunk_committed", fake_mark)
+    monkeypatch.setattr(pgw, "raw_chunk_rows_written", fake_rows_written)
+    monkeypatch.setattr(pgw, "mark_raw_chunk_committed", fake_mark)
 
     result = pgw.write_mapped_rows(
         host="caboose.proxy.rlwy.net",

@@ -21,6 +21,26 @@ class TransferCancelled(Exception):
     """Raised when a user cancels a running transfer job."""
 
 
+class FullRefreshDropFailed(Exception):
+    """A ``full_refresh`` could not clear the destination before loading.
+
+    Deliberately non-retriable and fatal. Continuing would silently convert an
+    overwrite into an append: the previous rows survive, the new rows land on
+    top, and the job reports success against a destination that now holds two
+    generations of data. Failing the job keeps the destination in a state the
+    operator can reason about.
+    """
+
+    def __init__(self, table_name: str, reason: str) -> None:
+        self.table_name = table_name
+        self.reason = reason
+        super().__init__(
+            f"full_refresh could not clear destination table '{table_name}': {reason}. "
+            "Refusing to append onto rows that should have been replaced. "
+            "Grant DROP/DELETE on the destination, or switch the sync mode to append."
+        )
+
+
 # Retriable exceptions are transient: network, rate limit, lock, timeout, etc.
 RETRIABLE_EXCEPTIONS: set[str] = {
     "connectionerror",
@@ -478,6 +498,45 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
     # Type-aware match when str(exc) is empty (decimal.Overflow).
     if isinstance(error, Exception) and type(error).__name__ == "Overflow":
         text = f"decimal.overflow {text}"
+    if isinstance(error, FullRefreshDropFailed):
+        return {
+            "code": "full_refresh_drop_failed",
+            "category": "destination",
+            "title": "Could not clear the destination for full refresh",
+            "message": raw,
+            "fix": (
+                f"Grant DROP (or DELETE) on destination table '{error.table_name}', "
+                "confirm no competing lock is holding it, then re-run. "
+                "DataFlow refused to append onto rows that should have been replaced — "
+                "continuing would have silently doubled the destination."
+            ),
+            "raw": raw,
+            "retriable": False,
+            "confidence": "high",
+            "table": error.table_name,
+        }
+
+    if isinstance(error, AmbiguousWriteOutcome):
+        return {
+            "code": "ambiguous_write_outcome",
+            "category": "destination",
+            "title": "Write interrupted with an unknown outcome",
+            "message": raw,
+            "fix": (
+                "Resume this job to continue from the last committed chunk. "
+                "DataFlow stopped instead of re-sending the batch because this "
+                "destination cannot deduplicate a replay, and retrying could "
+                "have written a second copy of those rows. To make retries "
+                "automatic, switch the sync mode to upsert with a primary key."
+            ),
+            "raw": raw,
+            "retriable": False,
+            "confidence": "high",
+            "replay_safety": (
+                error.safety.to_dict() if hasattr(error.safety, "to_dict") else {}
+            ),
+        }
+
     try:
         from services.cdc_lease import CdcLeaseConflict
 
@@ -662,6 +721,28 @@ def classify_error(error: Exception | str) -> dict[str, Any]:
     retriable = False
     evidence: list[str] = []
 
+    # A full_refresh that could not clear the destination must never be retried
+    # by the generic write wrapper: attempt two would append onto the rows
+    # attempt one failed to remove. Fail the job and let the operator fix the
+    # grant or change the sync mode.
+    if isinstance(error, FullRefreshDropFailed):
+        return {
+            "retriable": False,
+            "evidence": ["full_refresh_drop_failed"],
+            "message": text,
+            "class": exc_name,
+            "table": error.table_name,
+        }
+
+    # Already refused a replay once; an outer wrapper must not undo that call.
+    if isinstance(error, AmbiguousWriteOutcome):
+        return {
+            "retriable": False,
+            "evidence": ["ambiguous_write_outcome"],
+            "message": text,
+            "class": exc_name,
+        }
+
     # Structured CDC lease conflict — never auto-retry into a live holder.
     try:
         from services.cdc_lease import CdcLeaseConflict
@@ -711,13 +792,44 @@ def classify_error(error: Exception | str) -> dict[str, Any]:
     }
 
 
+class AmbiguousWriteOutcome(Exception):
+    """A write failed in a way that may have partially landed, and cannot be replayed.
+
+    Raised instead of retrying when the destination has no way to deduplicate a
+    replayed batch. Failing here is deliberate: the job resumes from the durable
+    chunk checkpoint, which restarts at a known boundary, rather than re-sending
+    a batch that may already be in the destination.
+    """
+
+    def __init__(self, cause: BaseException, safety: Any) -> None:
+        self.cause = cause
+        self.safety = safety
+        reason = getattr(safety, "reason", "") or ""
+        super().__init__(
+            f"Write failed with an unknown outcome and cannot be safely retried: "
+            f"{cause}. {reason} Resume the job to continue from the last "
+            f"committed chunk."
+        )
+
+
 def with_retry(
     fn: Callable[[], Any],
     *,
     budget: RetryBudget | None = None,
     on_transient: Callable[[Exception, float], None] | None = None,
+    replay_safety: Any | None = None,
+    on_replay_blocked: Callable[[Exception, Any], None] | None = None,
 ) -> Any:
-    """Run a function with bounded retry and backoff.  Returns the result or raises the last error."""
+    """Run a function with bounded retry and backoff.
+
+    ``replay_safety`` is a ``services.replay_safety.ReplaySafety`` verdict for a
+    destination write. When it reports that a replay could duplicate rows, an
+    ambiguous failure stops the retry loop instead of re-sending the batch. A
+    failed job that resumes cleanly is recoverable; a job that reports success
+    with duplicated rows is not.
+
+    Reads and other side-effect-free work pass no verdict and retry as before.
+    """
     budget = budget or RetryBudget()
     last_error: Exception | None = None
     while budget.has_budget():
@@ -728,6 +840,15 @@ def with_retry(
             classification = classify_error(exc)
             if not classification["retriable"]:
                 raise
+            if replay_safety is not None and not replay_safety.allows_retry(exc):
+                if on_replay_blocked:
+                    try:
+                        on_replay_blocked(exc, replay_safety)
+                    except Exception as hook_exc:  # noqa: BLE001
+                        logging.getLogger(__name__).warning(
+                            "replay-blocked hook failed: %s", hook_exc
+                        )
+                raise AmbiguousWriteOutcome(exc, replay_safety) from exc
             delay = budget.next_delay()
             if on_transient:
                 on_transient(exc, delay)

@@ -86,10 +86,38 @@ def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> co
 
     _logger.info("Scheduling transfer job %s", job_id)
 
+    # Capture the inbound request's OTel context so the transfer root span
+    # nests under the HTTP span that scheduled it. ThreadPoolExecutor does
+    # not propagate contextvars / OTel context on its own.
+    try:
+        from services.tracing import capture_context
+
+        parent_ctx = capture_context()
+    except Exception:
+        parent_ctx = None
+
     def _leased_fn(*a: Any, **kw: Any) -> Any:
         stop_event = threading.Event()
         interval = max(5, ttl_seconds // 2)
         fence = _lease_store.get_fence(job_id)
+        detach_token = None
+        try:
+            from services.tracing import attach_context, detach_context
+
+            detach_token = attach_context(parent_ctx)
+        except Exception:
+            detach_token = None
+
+        # Bind the job id on the worker thread. Contextvars do not cross a
+        # ThreadPoolExecutor boundary, so without this the lease/heartbeat logs
+        # for this job would be anonymous even though the engine's are not.
+        log_token = None
+        try:
+            from services.logging_config import reset_job_id, set_job_id
+
+            log_token = set_job_id(job_id)
+        except Exception:
+            log_token = None
 
         def _mark_lease_lost() -> None:
             """Cooperative cancel so the transfer aborts on next checkpoint poll."""
@@ -127,6 +155,20 @@ def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> co
             stop_event.set()
             beat_thread.join(timeout=interval * 2)
             _lease_store.release(job_id)
+            if detach_token is not None:
+                try:
+                    from services.tracing import detach_context
+
+                    detach_context(detach_token)
+                except Exception:
+                    pass
+            if log_token is not None:
+                try:
+                    from services.logging_config import reset_job_id
+
+                    reset_job_id(log_token)
+                except Exception:
+                    pass
 
     return executor.submit(_leased_fn, *args, **kwargs)
 

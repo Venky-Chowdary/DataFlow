@@ -115,6 +115,30 @@ def decode_pg_resume_token(
     return slot, lsn, phase
 
 
+def _lsn_at_or_before(candidate: str, watermark: str) -> bool:
+    """Whether ``candidate`` is no newer than ``watermark``.
+
+    Used as the DDD-3 low-watermark test during an incremental snapshot chunk:
+    a WAL event at or before the position captured before the chunk SELECT is
+    already reflected in the rows that were read, so it must not be replayed
+    over them as a "stream wins" override.
+
+    :func:`compare_lsn` returns ``0`` for both equal stamps *and* cross-family
+    incomparable pairs. Cross-family must **not** be treated as stale — drop
+    only when the families match and ``candidate <= watermark``.
+    """
+    if not candidate or not watermark:
+        return False
+    from connectors.writer_common import compare_lsn, lsn_family
+
+    if lsn_family(candidate) != lsn_family(watermark):
+        return False
+    # Inclusive: an event *at* the low watermark is already reflected in the
+    # chunk SELECT (the watermark was captured immediately before it), so it
+    # must not replay over the snapshotted rows either.
+    return compare_lsn(candidate, watermark) <= 0
+
+
 def _parse_value(raw: str) -> str:
     """Strip PostgreSQL test_decoding quotes and null markers."""
     if raw == "null" or raw == "None":
@@ -484,11 +508,31 @@ class PostgreSqlChangeStreamCdc:
         return max(0.0, (datetime.now(timezone.utc) - anchor).total_seconds())
 
     def heartbeat(self) -> None:
-        """Record poll heartbeat and emit WAL so idle slots can advance (Debezium-class).
+        """Keep the lease alive and release WAL an idle slot no longer needs.
 
-        Rate-limited: under many concurrent CDC jobs, emitting on every poll
-        balloons WAL/slot retention. Only emit when idle (no pending ack) and
-        the prior heartbeat is older than ``DATAFLOW_CDC_HEARTBEAT_SEC``.
+        A replication slot pins every WAL segment from ``confirmed_flush_lsn``
+        onward. When the captured tables are quiet but the rest of the database
+        is busy, that position never moves on its own and retention grows until
+        the primary runs out of disk — the classic way a CDC pipeline takes down
+        the database it is reading.
+
+        Emitting a WAL message here (the previous behaviour) made this *worse*:
+        the message is itself decoded through the slot, so each heartbeat pushed
+        more WAL behind a position that was never advanced. The fix is to advance
+        the slot directly, which is what actually frees the segments.
+
+        Advancing is only safe if nothing undecoded would be skipped, because
+        ``pg_replication_slot_advance`` discards rather than decodes. The check
+        that makes it safe:
+
+        1. Capture ``target = pg_current_wal_lsn()`` *first*.
+        2. Peek the slot for changes up to that target.
+        3. Advance only if the peek came back empty, which proves there is
+           nothing in ``(confirmed_flush_lsn, target]`` to lose. Anything
+           committed after the target is beyond it and is untouched.
+
+        Capturing the target before peeking is what removes the race: a
+        concurrent commit lands past the target, so it cannot be skipped.
         """
         now = datetime.now(timezone.utc)
         interval = float(os.getenv("DATAFLOW_CDC_HEARTBEAT_SEC", "10"))
@@ -497,23 +541,107 @@ class PostgreSqlChangeStreamCdc:
             if age < max(1.0, interval):
                 return
         self._last_heartbeat_at = now
-        if self._pending_ack_lsn:
-            return
         if self._lease.acquired:
             try:
                 self._lease.renew()
             except Exception as exc:
                 _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+        if self._pending_ack_lsn:
+            # Applied-but-unacked work exists; ack() owns the slot position.
+            return
+        if os.getenv("DATAFLOW_CDC_IDLE_SLOT_ADVANCE", "1").strip().lower() in {
+            "0",
+            "false",
+            "off",
+        }:
+            return
+        if self.phase == "snapshot":
+            # The initial dump hands off to streaming at the LSN captured inside
+            # its REPEATABLE READ transaction. The slot has to retain WAL from
+            # that point, and an idle dump has nothing to release anyway.
+            return
+        if self._incremental_snapshot_open():
+            # An open snapshot window needs its bracketing events retained so
+            # stale-event filtering still works. Releasing WAL now would drop
+            # the events the window is comparing against.
+            return
+        self._advance_idle_slot()
+
+    def _incremental_snapshot_open(self) -> bool:
+        """Whether an incremental snapshot is mid-flight for this source."""
+        try:
+            from services.cdc_incremental_snapshot import list_signals
+
+            return any(
+                str(getattr(sig, "status", "")) in {"pending", "in_progress"}
+                for sig in list_signals(self.source_key)
+            )
+        except Exception as exc:
+            # Unable to tell — assume a snapshot may be open and keep the WAL.
+            _logger.debug("incremental snapshot state unknown: %s", exc)
+            return True
+
+    def _advance_idle_slot(self) -> None:
+        """Move ``confirmed_flush_lsn`` forward when the slot has nothing pending."""
+        from connectors.writer_common import compare_lsn
+
+        current = ""
+        peek_fn = (
+            "pg_logical_slot_peek_binary_changes"
+            if self.output_plugin == "pgoutput"
+            else "pg_logical_slot_peek_changes"
+        )
         try:
             with self._conn() as conn:
                 with conn.cursor() as cur:
+                    cur.execute("SELECT pg_current_wal_lsn()::text")
+                    row = cur.fetchone()
+                    target = str(row[0]) if row and row[0] else ""
+                    if not target:
+                        return
+
+                    if self.output_plugin == "pgoutput":
+                        cur.execute(
+                            f"SELECT 1 FROM {peek_fn}("  # nosec: B608 — peek_fn is one of two literals above
+                            "%s, %s::pg_lsn, 1, 'proto_version', '1', "
+                            "'publication_names', %s) LIMIT 1",
+                            (self.slot_name, target, self.publication_name),
+                        )
+                    else:
+                        cur.execute(
+                            f"SELECT 1 FROM {peek_fn}(%s, %s::pg_lsn, 1) LIMIT 1",  # nosec: B608 — peek_fn is one of two literals above
+                            (self.slot_name, target),
+                        )
+                    if cur.fetchone() is not None:
+                        # Real changes are waiting. The normal poll will decode
+                        # and apply them; advancing here would discard them.
+                        return
+
                     cur.execute(
-                        "SELECT pg_logical_emit_message(true, %s, %s)",
-                        ("dataflow.heartbeat", self.slot_name or "dataflow"),
+                        "SELECT confirmed_flush_lsn::text FROM pg_replication_slots "
+                        "WHERE slot_name = %s",
+                        (self.slot_name,),
+                    )
+                    row = cur.fetchone()
+                    current = str(row[0]) if row and row[0] else ""
+                    if current and compare_lsn(current, target) >= 0:
+                        return
+
+                    cur.execute(
+                        "SELECT pg_replication_slot_advance(%s, %s::pg_lsn)",
+                        (self.slot_name, target),
                     )
                 conn.commit()
+            self.consistent_point_lsn = target
+            _logger.info(
+                "Released WAL on idle slot %s: confirmed_flush_lsn %s -> %s",
+                self.slot_name,
+                current or "unknown",
+                target,
+            )
         except Exception as exc:
-            _logger.debug("Postgres CDC heartbeat emit skipped: %s", exc)
+            # Losing a retention optimisation is acceptable; failing the poll is not.
+            _logger.debug("Postgres CDC idle slot advance skipped: %s", exc)
 
     def _poll_signal_table(self) -> None:
         """Debezium-compatible signal table → incremental snapshot enqueue."""
@@ -724,11 +852,24 @@ class PostgreSqlChangeStreamCdc:
             ack_barrier=True,
         )
 
+    def _pk_columns_for(self, table: str | None = None) -> list[str]:
+        from services.cdc_snapshot_window import _pk_columns
+
+        pk = self.primary_keys.get(table or self.table, self.primary_key)
+        return _pk_columns(pk)
+
     def _pk_value(self, record: dict[str, str], *, table: str | None = None) -> str:
+        """Composite-aware PK string shared with the snapshot-window key space.
+
+        Treating ``order_id,line_id`` as one literal column name made every
+        delete evaluate empty and every upsert fall through to plain INSERT.
+        """
         if not record:
             return ""
-        pk_col = self.primary_keys.get(table or self.table, self.primary_key)
-        return str(record.get(pk_col, "") or "")
+        from services.cdc_snapshot_window import _pk_value as composite_pk_value
+
+        key = composite_pk_value(record, self._pk_columns_for(table))
+        return "" if key is None else key
 
     def _qualified_table(self, table: str | None = None) -> str:
         from connectors.sql_identifiers import quote_table_ref
@@ -844,34 +985,90 @@ class PostgreSqlChangeStreamCdc:
             require_safe_identifier,
         )
 
-        pk = quote_sql_identifier(
-            require_safe_identifier(sig.primary_key or self.primary_key, preserve_case=True)
+        from services.cdc_incremental_snapshot import snapshot_records_from_rows
+        from services.cdc_snapshot_window import (
+            _pk_columns,
+            _pk_value,
+            keyset_successor_predicate,
         )
-        qualified = self._qualified_table()
+
+        pk_cols = _pk_columns(sig.primary_key or self.primary_key)
+        pk_quoted = [
+            quote_sql_identifier(require_safe_identifier(c, preserve_case=True))
+            for c in pk_cols
+        ]
+        order_sql = ", ".join(pk_quoted)
+        # Snapshot chunks must read the table the signal names, not whichever
+        # table this reader happens to be bound to. In shared multi-table mode
+        # `self.table` is pinned to tables[0], so honouring it here meant a
+        # signal for table B read rows from table A and was then marked
+        # complete — table B was never backfilled and no error was raised.
+        qualified = self._qualified_table(getattr(sig, "table", "") or self.table)
         limit = int(sig.chunk_size or self.batch_size)
         last_pk = sig.last_pk or ""
+        lsn_low = ""
+        lsn_high = ""
         with self._conn() as conn:
             with conn.cursor() as cur:
+                # DDD-3 watermarks bracketing the chunk SELECT. Without these the
+                # stream-wins step had no way to tell whether a peeked WAL event
+                # predated the read, so an event *older* than the chunk could
+                # overwrite the fresher snapshot value.
+                lsn_low = self._current_wal_lsn(cur)
                 if last_pk:
+                    where, params = keyset_successor_predicate(pk_quoted, last_pk)
                     cur.execute(
-                        f"SELECT * FROM {qualified} WHERE {pk} > %s ORDER BY {pk} LIMIT %s",  # nosec B608
-                        (last_pk, limit),
+                        f"SELECT * FROM {qualified} WHERE {where} "  # nosec B608
+                        f"ORDER BY {order_sql} LIMIT %s",
+                        (*params, limit),
                     )
                 else:
                     cur.execute(
-                        f"SELECT * FROM {qualified} ORDER BY {pk} LIMIT %s",  # nosec B608
+                        f"SELECT * FROM {qualified} ORDER BY {order_sql} LIMIT %s",  # nosec B608
                         (limit,),
                     )
                 cols = [d[0] for d in (cur.description or [])]
                 rows = cur.fetchall() or []
+                lsn_high = self._current_wal_lsn(cur)
             conn.commit()
-        records = [
-            {cols[i]: "" if row[i] is None else str(row[i]) for i in range(len(cols))}
-            for row in rows
-        ]
-        new_last = records[-1].get(sig.primary_key or self.primary_key) if records else last_pk
+        # Publish the watermarks on the signal so the shared runner can stamp
+        # `_df_lsn` and the peek step can discard pre-chunk events.
+        # Only persist non-empty captures — update_signal writes every provided
+        # field, so an empty string from a transient pg_current_wal_lsn failure
+        # would wipe a previously good low watermark (MySQL GTID/binlog parity).
+        try:
+            from services.cdc_incremental_snapshot import update_signal
+
+            persist: dict[str, str] = {}
+            if lsn_low:
+                sig.lsn_low = lsn_low
+                persist["lsn_low"] = lsn_low
+            if lsn_high:
+                sig.lsn_high = lsn_high
+                persist["lsn_high"] = lsn_high
+            if persist:
+                update_signal(sig.id, **persist)
+        except Exception as exc:
+            # Watermarks are an optimisation for stale-event rejection; losing
+            # them degrades to plain upsert rather than corrupting the chunk.
+            _logger.warning("Could not persist snapshot WAL watermarks: %s", exc)
+        records = snapshot_records_from_rows(cols, rows)
+        new_last = _pk_value(records[-1], pk_cols) if records else last_pk
         done = len(records) < limit
-        return records, str(new_last) if new_last is not None else last_pk, done
+        return records, new_last if new_last is not None else last_pk, done
+
+    @staticmethod
+    def _current_wal_lsn(cur: Any) -> str:
+        """Current WAL insert position, or empty string if unavailable."""
+        try:
+            cur.execute("SELECT pg_current_wal_lsn()::text")
+            row = cur.fetchone()
+            return str(row[0]) if row and row[0] else ""
+        except Exception as exc:
+            # Standbys raise "recovery is in progress" — degrade to empty LSN,
+            # never NameError on an unbound ``logger`` alias.
+            _logger.debug("pg_current_wal_lsn unavailable: %s", exc)
+            return ""
 
     def _peek_stream_events_during_chunk(self, sig: Any) -> list[dict[str, Any]]:
         """Peek WAL (no ack) for DDD-3 stream-wins during an incremental snapshot chunk."""
@@ -913,28 +1110,55 @@ class PostgreSqlChangeStreamCdc:
         except Exception:
             return []
 
-        pk_col = sig.primary_key or self.primary_key
+        from services.cdc_snapshot_window import _pk_columns, _pk_row_dict
+
+        pk_cols = _pk_columns(sig.primary_key or self.primary_keys.get(
+            (getattr(sig, "table", "") or "").strip() or self.table, self.primary_key
+        ))
+        # DDD-3 low watermark: an event at or before the position captured just
+        # before the chunk SELECT is already reflected in the rows we read, so
+        # letting it win would replace a fresh value with a stale one.
+        lsn_low = str(getattr(sig, "lsn_low", "") or "")
+        # The signal names the table being snapshotted; in shared multi-table
+        # mode `self.table` is pinned to tables[0] and would decode the wrong one.
+        sig_table = (getattr(sig, "table", "") or "").strip() or self.table
+
+        def _is_stale(location: Any) -> bool:
+            return bool(lsn_low) and _lsn_at_or_before(str(location or ""), lsn_low)
+
         if self.output_plugin == "pgoutput":
             from connectors.pgoutput_decoder import PgOutputDecoder, changes_for_table
 
             if self._pgoutput_decoder is None:
                 self._pgoutput_decoder = PgOutputDecoder()
             decoder = self._pgoutput_decoder
-            for _location, payload in rows:
-                for change in changes_for_table(
-                    decoder, payload, schema=self.schema, table=self.table
-                ):
+            for location, payload in rows:
+                # Always decode: pgoutput is a stateful stream and skipping a
+                # payload would desynchronise the relation cache. Filter after.
+                decoded = list(
+                    changes_for_table(decoder, payload, schema=self.schema, table=sig_table)
+                )
+                if _is_stale(location):
+                    continue
+                for change in decoded:
                     if change.op == "insert" and change.new_tuple:
                         events.append({"op": "c", "row": dict(change.new_tuple)})
                     elif change.op == "update" and change.new_tuple:
                         events.append({"op": "u", "row": dict(change.new_tuple)})
                     elif change.op == "delete" and change.old_tuple:
-                        pk = self._pk_value(change.old_tuple)
+                        # Must key off sig_table's PK columns. Defaulting to
+                        # tables[0] made mid-chunk deletes miss the snapshot
+                        # window and re-insert tombstoned rows.
+                        pk = self._pk_value(change.old_tuple, table=sig_table)
                         if pk:
-                            events.append({"op": "d", "pk": pk, "row": {pk_col: pk}})
+                            events.append(
+                                {"op": "d", "pk": pk, "row": _pk_row_dict(pk_cols, pk)}
+                            )
             return events
 
-        for _location, line in rows:
+        for location, line in rows:
+            if _is_stale(location):
+                continue
             text = (
                 line.decode("utf-8", errors="replace")
                 if isinstance(line, (bytes, memoryview))
@@ -943,7 +1167,7 @@ class PostgreSqlChangeStreamCdc:
             upper = text.upper().strip()
             if upper.startswith(("BEGIN", "COMMIT", "ROLLBACK", "ABORT")):
                 continue
-            parsed = _parse_change_line(text, self.schema, self.table)
+            parsed = _parse_change_line(text, self.schema, sig_table)
             if parsed is None:
                 continue
             op, old_key, new_tuple = parsed
@@ -952,9 +1176,11 @@ class PostgreSqlChangeStreamCdc:
             elif op == "update" and new_tuple:
                 events.append({"op": "u", "row": dict(new_tuple)})
             elif op == "delete" and old_key:
-                pk = self._pk_value(old_key)
+                pk = self._pk_value(old_key, table=sig_table)
                 if pk:
-                    events.append({"op": "d", "pk": pk, "row": {pk_col: pk}})
+                    events.append(
+                        {"op": "d", "pk": pk, "row": _pk_row_dict(pk_cols, pk)}
+                    )
         return events
 
     def poll(self) -> Iterator[ChangeBatch]:

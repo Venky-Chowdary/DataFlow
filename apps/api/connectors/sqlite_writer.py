@@ -15,6 +15,11 @@ from services.type_system import ddl_type
 from services.value_serializer import json_default
 
 from connectors.sqlite_common import sqlite_file_path
+from connectors.write_resilience import (
+    ensure_raw_write_ledger,
+    mark_raw_chunk_committed,
+    raw_chunk_rows_written,
+)
 from connectors.writer_common import (
     CHUNK_SIZE,
     _coerced_null_row_count,
@@ -489,11 +494,33 @@ def write_mapped_rows(
         placeholders = ", ".join("?" for _ in target_cols)
         insert = f"INSERT INTO {table_quoted} ({', '.join(quote_sql_identifier(c) for c in target_cols)}) VALUES ({placeholders})"  # nosec B608
 
+        # Insert-mode writes are the only ones a retry can duplicate; upserts
+        # converge on their conflict key. The ledger needs a job id to tell an
+        # interrupted attempt apart from a fresh one.
+        ledger_job_id = str(_kwargs.get("job_id") or "")
+        ledger_batch_key = str(_kwargs.get("write_batch_key") or "")
+        use_ledger = bool(
+            ledger_job_id
+            and ledger_batch_key
+            and not (write_mode == "upsert" and conflict_cols)
+        )
+        ledger_chunks_skipped = 0
+
         conn = sqlite3.connect(path, timeout=8)
         try:
             # Schema setup in its own transaction.
             with conn:
                 cur = conn.cursor()
+                if use_ledger:
+                    try:
+                        ensure_raw_write_ledger(cur, dialect="sqlite")
+                    except sqlite3.Error as exc:
+                        logger.warning(
+                            "SQLite write ledger unavailable, retries of this "
+                            "insert cannot be de-duplicated: %s",
+                            exc,
+                        )
+                        use_ledger = False
                 if create_table:
                     col_defs = ", ".join(
                         f"{quote_sql_identifier(c)} {t}"
@@ -548,7 +575,24 @@ def write_mapped_rows(
 
                 with conn:
                     cur = conn.cursor()
-                    if write_mode == "upsert" and conflict_cols:
+                    already = (
+                        raw_chunk_rows_written(
+                            cur,
+                            dialect="sqlite",
+                            job_id=ledger_job_id,
+                            batch_key=ledger_batch_key,
+                            chunk_idx=chunk_idx,
+                        )
+                        if use_ledger
+                        else None
+                    )
+                    if already is not None:
+                        # A previous attempt already committed this chunk.
+                        # Credit the recorded count, not len(batch), so a chunk
+                        # that quarantined rows is not over-reported on replay.
+                        written += already
+                        ledger_chunks_skipped += 1
+                    elif write_mode == "upsert" and conflict_cols:
                         chunk_written, chunk_skipped = _sqlite_upsert_batch(
                             cur, table_name, target_cols, batch, conflict_cols, schema=schema or None
                         )
@@ -557,9 +601,26 @@ def write_mapped_rows(
                     else:
                         cur.executemany(insert, batch)
                         written += len(batch)
+                        if use_ledger:
+                            # Same transaction as the rows it vouches for, so
+                            # the ledger entry cannot outlive a rolled-back write.
+                            mark_raw_chunk_committed(
+                                cur,
+                                dialect="sqlite",
+                                job_id=ledger_job_id,
+                                batch_key=ledger_batch_key,
+                                chunk_idx=chunk_idx,
+                                rows_written=len(batch),
+                            )
 
                 if on_checkpoint:
                     on_checkpoint(chunk_idx + 1, max(chunks, 1), written)
+
+            if ledger_chunks_skipped:
+                transform_errors.append(
+                    f"Skipped {ledger_chunks_skipped} chunk(s) already committed by a "
+                    "previous attempt (write ledger prevented duplicate rows)"
+                )
 
             return WriteResult(
                 ok=True,

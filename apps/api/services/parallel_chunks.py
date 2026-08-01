@@ -30,6 +30,15 @@ DEFAULT_WORKERS = int(os.getenv("DATAFLOW_PARALLEL_WORKERS", "1"))
 DEFAULT_PREFETCH = int(os.getenv("DATAFLOW_PARALLEL_QUEUE", str(max(DEFAULT_WORKERS * 2, 4))))
 
 
+class ChunkAborted(Exception):
+    """A queued chunk was dropped before it began because the run was aborted.
+
+    Distinct from a chunk *failure*: nothing was written, so the caller can stop
+    cleanly at the last committed offset rather than treating it as an error to
+    retry.
+    """
+
+
 class ChunkDispatcher:
     """Dispatch chunks to a thread pool and receive results in index order.
 
@@ -55,6 +64,7 @@ class ChunkDispatcher:
         self._buffer: dict[int, R] = {}
         self._next_yield: int | None = None
         self._closed = False
+        self._aborted = threading.Event()
 
     def __enter__(self) -> "ChunkDispatcher":
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers)
@@ -63,6 +73,37 @@ class ChunkDispatcher:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+    def abort(self) -> None:
+        """Stop queued chunks from being written.
+
+        ``Future.cancel()`` alone is not enough: it is a no-op once a future has
+        started, and ``shutdown(wait=True)`` then blocks until every started
+        chunk finishes. With up to ``max_inflight`` chunks in flight, a
+        cancellation therefore still committed a batch of chunks *past* the
+        persisted checkpoint, and a later resume rewrote that region — duplicate
+        rows in insert mode.
+
+        Setting this flag makes every not-yet-started chunk raise
+        :class:`ChunkAborted` instead of writing. A chunk already mid-write
+        cannot be stopped from here and is allowed to finish so it commits
+        atomically rather than half-applied.
+        """
+        self._aborted.set()
+
+    @property
+    def aborted(self) -> bool:
+        return self._aborted.is_set()
+
+    def _guarded(self, process: Callable[[int, T], R]) -> Callable[[int, T], R]:
+        """Wrap ``process`` so an aborted run refuses to write queued chunks."""
+
+        def _run(idx: int, item: T) -> R:
+            if self._aborted.is_set():
+                raise ChunkAborted(f"chunk {idx} dropped before write (run aborted)")
+            return process(idx, item)
+
+        return _run
 
     def close(self) -> None:
         if self._closed:
@@ -92,7 +133,7 @@ class ChunkDispatcher:
         if self._executor is None:
             raise RuntimeError("Use ChunkDispatcher as a context manager (with ...)")
         self._wait_for_room()
-        future = self._executor.submit(process, idx, item)
+        future = self._executor.submit(self._guarded(process), idx, item)
         self._pending[future] = idx
         if self._next_yield is None:
             self._next_yield = idx

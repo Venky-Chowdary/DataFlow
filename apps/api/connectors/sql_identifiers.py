@@ -68,7 +68,16 @@ def require_safe_identifier(
 
 
 def quote_sql_identifier(name: str, quote_char: str = '"') -> str:
-    """Quote a SQL identifier and escape embedded quote characters."""
+    """Quote a SQL identifier and escape embedded quote characters.
+
+    T-SQL brackets are asymmetric: passing ``"["`` used to emit ``[col[``,
+    which is not valid SQL anywhere. Only the closing bracket needs doubling.
+    ``quote_table_ref`` already handled this for table names; column quoting
+    did not, so the two disagreed for SQL Server.
+    """
+    if quote_char == "[":
+        escaped = str(name).replace("]", "]]")
+        return f"[{escaped}]"
     escaped = str(name).replace(quote_char, quote_char + quote_char)
     return f"{quote_char}{escaped}{quote_char}"
 

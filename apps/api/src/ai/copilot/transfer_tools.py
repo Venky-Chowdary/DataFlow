@@ -47,7 +47,8 @@ from .schema_tools import (
 _LOG = logging.getLogger(__name__)
 
 # Engine tokens, not prose. The old stub returned labels like "Incremental CDC"
-# that no engine call accepts.
+# that no engine call accepts. Every token here resolves to a canonical mode in
+# ``services.sync_cursor``, which :func:`normalize_sync_mode` enforces.
 SYNC_MODES = (
     "full_refresh_append",
     "full_refresh_overwrite",
@@ -56,30 +57,75 @@ SYNC_MODES = (
     "cdc_incremental",
 )
 
-# Only these words authorise destroying rows that are already there.
-_OVERWRITE_WORDS = ("overwrite", "replace", "truncate", "full refresh", "wipe")
-_UPSERT_WORDS = ("upsert", "merge", "dedupe", "deduplicate")
-_APPEND_WORDS = ("append", "add to", "insert into")
+# Only these words authorise destroying rows that are already there. Matching is
+# whole-word (see :func:`sync_mode_from_phrase`), not substring: plain
+# ``in`` matching let a table named ``replacements`` select overwrite and wipe a
+# destination the operator never asked to clear.
+_OVERWRITE_PHRASES = (
+    "overwrite",
+    "replace",
+    "truncate",
+    "wipe",
+    "full refresh",
+    "full_refresh_overwrite",
+)
+_UPSERT_PHRASES = ("upsert", "merge", "dedupe", "deduplicate", "incremental upsert", "incremental_upsert")
+_APPEND_PHRASES = ("append", "add to", "insert into", "full refresh append", "full_refresh_append")
 
 _MAX_PREVIEW_MAPPINGS = 40
 
 
-def normalize_sync_mode(spoken: str, *, default: str = "full_refresh_append") -> str:
-    """Map an operator phrase to an engine sync-mode token."""
+def sync_mode_from_phrase(spoken: str, *, default: str = "full_refresh_append") -> str:
+    """Map a natural-language operator phrase to a sync-mode token.
+
+    Returns a raw candidate that is then canonicalised by
+    ``services.sync_cursor.normalize_sync_mode``. Phrase matching uses
+    whole-phrase / word-boundary checks so a table named ``replacements``
+    cannot authorise a destructive overwrite.
+    """
     text = (spoken or "").strip().lower()
     if not text:
         return default
     if text in SYNC_MODES:
         return text
-    if any(w in text for w in _OVERWRITE_WORDS):
-        return "full_refresh_overwrite"
-    if any(w in text for w in _UPSERT_WORDS):
-        return "incremental_upsert"
-    if "cdc" in text or "change data capture" in text:
+    # Exact phrase first, then token-boundary contains for multi-word phrases.
+    for phrase in _OVERWRITE_PHRASES:
+        if text == phrase or f" {phrase} " in f" {text} ":
+            return "full_refresh_overwrite"
+    for phrase in _UPSERT_PHRASES:
+        if text == phrase or f" {phrase} " in f" {text} ":
+            return "incremental_upsert"
+    if text == "cdc" or "change data capture" in text or text.startswith("cdc "):
         return "cdc_incremental"
-    if any(w in text for w in _APPEND_WORDS):
-        return "full_refresh_append"
+    for phrase in _APPEND_PHRASES:
+        if text == phrase or f" {phrase} " in f" {text} ":
+            return "full_refresh_append"
     return default
+
+
+def normalize_sync_mode(spoken: str, *, default: str = "full_refresh_append") -> str:
+    """Pilot-facing wrapper: phrase → sync-mode token, engine-validated.
+
+    The Pilot keeps emitting its historical spellings because every engine path
+    already aliases them onto canonical modes. What changed is that the result
+    is now *checked* against the one canonical table in ``services.sync_cursor``
+    before it is returned, so a phrase can no longer resolve to a token the
+    engine would quietly ignore and degrade to full-read + insert.
+    """
+    from services.sync_cursor import CANONICAL_SYNC_MODES
+    from services.sync_cursor import normalize_sync_mode as _canonical
+
+    candidate = sync_mode_from_phrase(spoken, default=default)
+    if _canonical(candidate, default=default) not in CANONICAL_SYNC_MODES:
+        _LOG.warning(
+            "Pilot phrase %r produced sync_mode %r, which no engine mode "
+            "accepts; falling back to the non-destructive default %r.",
+            spoken,
+            candidate,
+            default,
+        )
+        return default
+    return candidate
 
 
 def _column_samples(rows: list[dict[str, Any]], columns: list[str]) -> dict[str, list[str]]:
