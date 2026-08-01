@@ -1192,6 +1192,11 @@ def build_mapped_rows_with_details(
             tgt,
         ))
 
+    # Resolve once per call, not once per cell. This import sat inside the
+    # innermost loop, so a 20-column table paid an import-system lookup per cell
+    # — billions of them on a large transfer.
+    from services.value_serializer import DF_MISSING_SENTINEL, is_missing_sentinel
+
     mapped: list[tuple] = []
     for row_number, raw in enumerate(data_rows, start=1):
         out = [None] * len(sanitized_target_cols)
@@ -1199,8 +1204,6 @@ def build_mapped_rows_with_details(
         for source_idx, target_idx, transform, src_name, tgt_name in mapping_infos:
             val = raw[source_idx] if source_idx is not None and source_idx < len(raw) else None
             # Preserve sparse-CDC missing before transforms (omit-from-SET, never NULL wipe).
-            from services.value_serializer import DF_MISSING_SENTINEL, is_missing_sentinel
-
             if is_missing_sentinel(val):
                 if target_idx >= 0:
                     out[target_idx] = DF_MISSING_SENTINEL

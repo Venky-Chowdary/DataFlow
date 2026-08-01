@@ -9,9 +9,12 @@ re-read from `cursor_after` (or `offset`) instead of starting over.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
@@ -101,6 +104,17 @@ class CheckpointService:
 
     def __init__(self, mongo=None) -> None:
         self.mongo = mongo
+        #: Number of checkpoint writes the store rejected or could not reach.
+        self.failed_saves = 0
+
+    @property
+    def degraded(self) -> bool:
+        """True once a checkpoint write has failed.
+
+        While degraded the transfer keeps running but is no longer resumable,
+        so callers must surface this rather than reporting healthy progress.
+        """
+        return self.failed_saves > 0
 
     def _mongo(self):
         if self.mongo is None:
@@ -112,14 +126,34 @@ class CheckpointService:
         return self.mongo
 
     def save(self, checkpoint: Checkpoint) -> bool:
-        """Persist the checkpoint without overwriting the job status."""
+        """Persist the checkpoint without overwriting the job status.
+
+        ``update_job_status`` returns ``False`` rather than raising when the job
+        store is unreachable, and every caller discards that bool. A Mongo
+        outage therefore left the transfer running and reporting healthy
+        progress while resume was quietly impossible. Log it loudly and record
+        it so the run can report degraded durability.
+        """
         mongo = self._mongo()
-        return mongo.update_job_status(
+        ok = mongo.update_job_status(
             checkpoint.job_id,
             checkpoint.status,
             checkpoint=checkpoint.to_dict(),
             updated_at=datetime.now(timezone.utc),
         )
+        if not ok:
+            self.failed_saves += 1
+            if self.failed_saves == 1:
+                logger.warning(
+                    "Checkpoint write failed for job %s (chunk %s, %s rows). The "
+                    "transfer continues, but it can no longer be resumed from "
+                    "this point — the job store rejected or could not accept the "
+                    "checkpoint.",
+                    checkpoint.job_id,
+                    getattr(checkpoint, "chunk_index", "?"),
+                    getattr(checkpoint, "rows_processed", "?"),
+                )
+        return ok
 
     def load(self, job_id: str) -> Checkpoint | None:
         """Load the most recent checkpoint for a job."""

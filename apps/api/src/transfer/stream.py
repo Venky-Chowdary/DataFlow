@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import sys
+import threading
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable
@@ -33,10 +34,13 @@ from services.resilience import (  # noqa: E402, F401
 
 from .adapters import (
     _introspect_table_schema,
+    _introspect_table_schema_rich,
     resolve_connector_config,
     resolve_dest_table,
 )
 from .connector_capabilities import resolve_driver_type
+
+logger = logging.getLogger(__name__)
 
 try:
     from services.checkpoint_service import Checkpoint, CheckpointService
@@ -948,6 +952,7 @@ def stream_database_transfer(
     incremental = requires_incremental(effective_sync)
     cursor_source_col = contract.cursor_field if contract else ""
     pk_target_cols: list[str] = []
+    pk_source_cols: list[str] = []
     cursor_pk_source = ""
     if contract and contract.primary_key:
         pk_source_cols = contract.primary_key_columns()
@@ -1101,6 +1106,14 @@ def stream_database_transfer(
 
     # Schemaless sources — absorb sparse attrs discovered mid-transfer so they
     # are never silently dropped from destination writes (Dynamo/Mongo/ES/Redis).
+    #
+    # This runs on chunk-writer threads, and it rebinds state the reader thread
+    # and sibling chunks read (columns, mappings, column_types, schema,
+    # target_cols). Two pages that each discover a new attribute used to
+    # interleave their read-modify-write and lose one of the attributes — a
+    # silent column drop, which is exactly what this function exists to prevent.
+    _schema_absorb_lock = threading.Lock()
+
     def _absorb_schemaless_discovered_attrs(batch) -> None:
         nonlocal columns, mappings, column_types, schema, backfill_new_fields, target_cols
         from connectors.header_union import (
@@ -1111,37 +1124,38 @@ def stream_database_transfer(
         if src_type not in SCHEMALESS_SOURCE_TYPES or not batch or not getattr(batch, "headers", None):
             return
 
-        known = set(columns)
-        new_headers = [h for h in batch.headers if h and h not in known]
-        if not new_headers and set(batch.headers).issubset(known):
-            return
-        columns = union_attribute_keys(columns, batch.headers)
-        mapped_sources = {str(m.get("source") or "") for m in mappings}
-        meta = getattr(batch, "meta", None) or {}
-        native_types = meta.get("native_types") if isinstance(meta, dict) else {}
-        if not isinstance(native_types, dict):
-            native_types = {}
-        for h in new_headers:
-            lt = str(native_types.get(h) or schema.get(h) or "VARCHAR")
-            schema[h] = lt
-            column_types[h] = ddl_carrier_type(lt)
-            if h not in mapped_sources:
-                mappings.append({
-                    "source": h,
-                    "target": h,
-                    "confidence": 0.9,
-                    # Force ADD COLUMN on SQL dests when attrs appear after CREATE.
-                    "create_new": True,
-                    "assignment_strategy": "create_compatible_new",
-                })
-                mapped_sources.add(h)
-                ddl_log.append(
-                    f"{dest_type.upper()} COLUMN {h} {ddl_type(dest_type, schema.get(h, 'string'))} "
-                    f"(discovered mid-transfer from {src_type} — no silent drop)"
-                )
-        if new_headers:
-            backfill_new_fields = True
-            target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
+        with _schema_absorb_lock:
+            known = set(columns)
+            new_headers = [h for h in batch.headers if h and h not in known]
+            if not new_headers and set(batch.headers).issubset(known):
+                return
+            columns = union_attribute_keys(columns, batch.headers)
+            mapped_sources = {str(m.get("source") or "") for m in mappings}
+            meta = getattr(batch, "meta", None) or {}
+            native_types = meta.get("native_types") if isinstance(meta, dict) else {}
+            if not isinstance(native_types, dict):
+                native_types = {}
+            for h in new_headers:
+                lt = str(native_types.get(h) or schema.get(h) or "VARCHAR")
+                schema[h] = lt
+                column_types[h] = ddl_carrier_type(lt)
+                if h not in mapped_sources:
+                    mappings.append({
+                        "source": h,
+                        "target": h,
+                        "confidence": 0.9,
+                        # Force ADD COLUMN on SQL dests when attrs appear after CREATE.
+                        "create_new": True,
+                        "assignment_strategy": "create_compatible_new",
+                    })
+                    mapped_sources.add(h)
+                    ddl_log.append(
+                        f"{dest_type.upper()} COLUMN {h} {ddl_type(dest_type, schema.get(h, 'string'))} "
+                        f"(discovered mid-transfer from {src_type} — no silent drop)"
+                    )
+            if new_headers:
+                backfill_new_fields = True
+                target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
 
     if not schema:
         if src_type in ("s3", "gcs", "adls"):
@@ -1237,15 +1251,65 @@ def stream_database_transfer(
     # Threaded to every writer so the streaming path matches the buffered path.
     stream_error_policy = transform_error_policy_for_validation_mode(validation_mode)
     warning_samples: list[str] = []
+    _checkpoint_degraded = {"reported": False}
     ddb_total = probe.total_rows if src_type == "dynamodb" else None
     running_cursor = checkpoint.cursor_value if checkpoint.cursor_value is not None else watermark
     es_search_after = checkpoint.es_search_after or (ddb_cursor if src_type == "elasticsearch" else None)
     redis_scan_state = checkpoint.redis_scan_state or (ddb_cursor if src_type == "redis" else None)
     # Preserve probe continuation tokens when checkpoint has none (fresh job).
     probe_continuation = ddb_cursor
-    keyset_col = checkpoint.cursor_column or (columns[0] if columns and not incremental else "")
+    # Keyset (seek) pagination seeks with a strict ``>`` on the bookmark column.
+    # That is only lossless when the bookmark orders rows uniquely: if a page
+    # boundary lands inside a run of equal values, every remaining tied row is
+    # skipped and nothing reports it. The old default bookmarked ``columns[0]``,
+    # so any table whose first column was a status/name/date silently dropped
+    # rows on the most common routes.
+    #
+    # Bookmark a primary key when we have one; otherwise carry a PK tie-break so
+    # the reader can seek on the ``(value, pk)`` tuple it already supports. With
+    # neither, fall back to OFFSET — quadratic and slow, but it cannot skip rows.
+    keyset_pk_cols = [c for c in pk_source_cols if c and c in columns]
+    if not keyset_pk_cols and src_type in ("postgresql", "redshift", "mysql", "snowflake"):
+        # Most transfers never declare a stream contract, so requiring a
+        # contract PK would drop every one of them onto OFFSET. The source
+        # catalog already knows the real key — ask it, so the common case keeps
+        # seek reads and gets uniqueness from the database rather than a guess.
+        try:
+            _, _, _src_keys = _introspect_table_schema_rich(
+                src_type, src_cfg, table, columns
+            )
+            keyset_pk_cols = [
+                c for c in (_src_keys.get("primary_key_columns") or []) if c in columns
+            ]
+        except Exception as exc:
+            logger.debug("source primary-key introspection failed: %s", exc, exc_info=exc)
+    keyset_col = checkpoint.cursor_column or (
+        keyset_pk_cols[0]
+        if keyset_pk_cols
+        else (columns[0] if columns and not incremental else "")
+    )
+    keyset_tiebreak = next((c for c in keyset_pk_cols if c != keyset_col), "")
+    keyset_unique = len(keyset_pk_cols) == 1 and keyset_col == keyset_pk_cols[0]
     keyset_after = checkpoint.cursor_value
-    use_keyset = bool(keyset_col) and src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb")
+    use_keyset = (
+        bool(keyset_col)
+        and (keyset_unique or bool(keyset_tiebreak))
+        and src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb")
+    )
+    if keyset_col and not use_keyset and src_type in (
+        "postgresql",
+        "redshift",
+        "mysql",
+        "snowflake",
+        "mongodb",
+    ):
+        logger.info(
+            "Keyset pagination disabled for %s.%s — no unique bookmark (declare a "
+            "primary_key on the stream contract to re-enable seek reads). Falling "
+            "back to OFFSET pagination.",
+            src_type,
+            table,
+        )
     ddb_cursor = checkpoint.dynamodb_cursor or (probe_continuation if src_type == "dynamodb" else None)
     kafka_cursor = checkpoint.kafka_cursor or (probe_continuation if src_type == "kafka" else None)
 
@@ -1328,7 +1392,19 @@ def stream_database_transfer(
             return batch
         elif use_keyset:
             if keyset_col in columns and last_batch is not None and last_batch.rows:
-                keyset_after = last_batch.rows[-1][last_batch.headers.index(keyset_col)]
+                # Advance on the max of the page, not the last row, and carry the
+                # PK so the bookmark is the same composite the reader seeks on.
+                # Taking row[-1] assumed the page was already sorted by the
+                # bookmark; max_cursor_value does not need that assumption.
+                keyset_after = (
+                    max_cursor_value(
+                        last_batch.rows,
+                        last_batch.headers,
+                        keyset_col,
+                        keyset_tiebreak or None,
+                    )
+                    or keyset_after
+                )
             batch, extra = _unwrap_read(
                 _read_batch(
                     src_type,
@@ -1342,6 +1418,7 @@ def stream_database_transfer(
                     cursor_after=keyset_after,
                     cursor_type=column_types.get(keyset_col, "VARCHAR"),
                     known_total_rows=total_rows,
+                    cursor_primary_key=keyset_tiebreak or None,
                 )
             )
             if src_type == "elasticsearch":
@@ -1649,7 +1726,15 @@ def stream_database_transfer(
         checkpoint.phase = "writing"
         checkpoint.chunk_total = chunks
         checkpoint.status = "running"
-        checkpoint_service.save(checkpoint)
+        # A rejected checkpoint write is not fatal, but it does mean resume is
+        # gone. Report it once instead of showing healthy progress.
+        if not checkpoint_service.save(checkpoint) and not _checkpoint_degraded["reported"]:
+            _checkpoint_degraded["reported"] = True
+            warning_samples.append(
+                "Checkpoint persistence is failing — the transfer is still "
+                "writing, but it cannot be resumed if it stops. Check that the "
+                "job store is reachable."
+            )
         if src_type == "kafka" and kafka_cursor and src_cfg:
             try:
                 from connectors.kafka_reader import commit_kafka_offsets

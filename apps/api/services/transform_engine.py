@@ -147,6 +147,28 @@ NULL_SENTINELS = frozenset({
     # NOTE: __df_missing__ is NOT a null — writers must omit the field (sparse CDC).
 })
 
+# Transform-classification sets used by the per-cell coercion path. These are
+# module-level because that path runs once per cell: rebuilding three frozensets
+# inside it cost a set construction per cell, which is billions of avoidable
+# allocations on a wide, large table.
+
+#: Identity / text transforms where an empty string is a real value, not a null.
+_KEEP_EMPTY_TRANSFORMS = frozenset({
+    "none", "identity", "passthrough", "string", "varchar", "text",
+    "upper", "lower", "trim", "trim_id",
+    "strip_controls", "normalize_unicode",
+})
+
+#: NaN / ±Infinity are not SQL null for JSON/vector — the typed parsers reject
+#: them rather than inventing JSON null or an empty embedding.
+_NONFINITE_TOKENS = frozenset({"nan", "infinity", "+infinity", "-infinity"})
+
+#: Transforms that parse into a concrete type, so null sentinels mean null.
+_TYPED_TRANSFORMS = frozenset({
+    "decimal", "integer", "boolean", "date", "datetime", "time",
+    "json", "uuid", "binary", "vector",
+})
+
 # Per-request date locale for ambiguous MDY/DMY parsing.  The engine and
 # preflight service set this via :func:`set_active_date_locale` so every
 # coerce / dry-run / preview path resolves dates with the operator-chosen
@@ -1009,12 +1031,7 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         return None, "intentional omit — mapping should not project"
 
     # Identity / text transforms: empty string is a real value.
-    _KEEP_EMPTY = frozenset({
-        "none", "identity", "passthrough", "string", "varchar", "text",
-        "upper", "lower", "trim", "trim_id",
-        "strip_controls", "normalize_unicode",
-    })
-    if text == "" and transform_l in _KEEP_EMPTY:
+    if text == "" and transform_l in _KEEP_EMPTY_TRANSFORMS:
         return "", None
     if text == "":
         return None, None
@@ -1022,14 +1039,10 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
     # Null/missing sentinels for typed transforms are treated as None.
     # Exception: NaN / ±Infinity are NOT SQL null for JSON/vector — reject as
     # non-finite (never invent JSON null / empty embedding).
-    _NONFINITE = frozenset({"nan", "infinity", "+infinity", "-infinity"})
-    if transform_l in {
-        "decimal", "integer", "boolean", "date", "datetime", "time",
-        "json", "uuid", "binary", "vector",
-    }:
+    if transform_l in _TYPED_TRANSFORMS:
         low = text.lower()
         if low in NULL_SENTINELS:
-            if transform_l in {"json", "vector"} and low in _NONFINITE:
+            if transform_l in {"json", "vector"} and low in _NONFINITE_TOKENS:
                 pass  # fall through to typed parsers that reject non-finite
             else:
                 return None, None

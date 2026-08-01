@@ -425,10 +425,19 @@ def canonical_checksum_from_iter(
 ) -> str:
     """Streaming variant of canonical_checksum with optional sample limit.
 
-    Reads rows lazily, collects fingerprints, and hashes them after sorting.
-    A limit of 0 means process all rows.
+    Reads rows lazily and hashes fingerprints in sorted order. A limit of 0
+    means process all rows.
+
+    Accumulation goes through :class:`FingerprintAccumulator`, which spills
+    sorted chunks to disk past a threshold. It used to append every
+    ``(row_key, fingerprint)`` pair to a plain list, which made the strict
+    reconcile — the default validation mode, and the one that passes
+    ``limit=0`` — allocate roughly 250 bytes per destination row. That is about
+    5 GB at 20M rows, and the OOM landed in the *verification* step after the
+    data had already been written. The digest is unchanged: with no spill the
+    accumulator sorts and hashes exactly as before.
     """
-    fingerprints: list[tuple[str, str]] = []
+    acc = FingerprintAccumulator()
     for i, (row_key, fp) in enumerate(
         _iter_fingerprints(
             rows,
@@ -440,8 +449,8 @@ def canonical_checksum_from_iter(
     ):
         if limit and i >= limit:
             break
-        fingerprints.append((row_key, fp))
-    return _hash_fingerprints(fingerprints)
+        acc.add(row_key, fp)
+    return acc.digest()
 
 
 def checksum_rows(
