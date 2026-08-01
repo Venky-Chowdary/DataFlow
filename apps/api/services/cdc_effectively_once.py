@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from connectors.writer_common import DF_LSN_COL, compare_lsn
+from connectors.writer_common import DF_LSN_COL, compare_lsn, lsn_family
 
 # Public posture for Theater / mapping proof / docs.
 DELIVERY_DEFAULT = "at-least-once"
@@ -76,6 +76,14 @@ def should_apply_pk_row(
             incoming_lsn=str(incoming_lsn),
         )
     if cmp == 0:
+        # Cross-family incomparable stamps also return 0 — refuse invent overwrite.
+        if lsn_family(incoming_lsn) != lsn_family(existing_lsn):
+            return EffectivelyOnceResult(
+                applied=False,
+                reason="incomparable_lsn_family",
+                prior_lsn=str(existing_lsn),
+                incoming_lsn=str(incoming_lsn),
+            )
         return EffectivelyOnceResult(
             applied=False,
             reason="equal_lsn_skipped",
@@ -120,10 +128,24 @@ def should_apply_pk_delete(
             incoming_lsn=str(incoming_lsn),
         )
     cmp = compare_lsn(incoming_lsn, existing_lsn)
-    if cmp >= 0:
+    if cmp > 0:
         return EffectivelyOnceResult(
             applied=True,
-            reason="delete_lsn_ok" if cmp > 0 else "equal_lsn_delete",
+            reason="delete_lsn_ok",
+            prior_lsn=str(existing_lsn),
+            incoming_lsn=str(incoming_lsn),
+        )
+    if cmp == 0:
+        if lsn_family(incoming_lsn) != lsn_family(existing_lsn):
+            return EffectivelyOnceResult(
+                applied=False,
+                reason="incomparable_lsn_family",
+                prior_lsn=str(existing_lsn),
+                incoming_lsn=str(incoming_lsn),
+            )
+        return EffectivelyOnceResult(
+            applied=True,
+            reason="equal_lsn_delete",
             prior_lsn=str(existing_lsn),
             incoming_lsn=str(incoming_lsn),
         )
@@ -247,7 +269,8 @@ def classify_sink_delivery(
     dest = (dest_type or "").strip().lower()
     caps = get_connector_capability(dest)
     mode = (write_mode or "insert").strip().lower()
-    # SQL Server/Oracle MERGE is the upsert path; treat supports_merge as upsert-capable.
+    # SQL Server/Oracle MERGE (NULL-safe ON) is the upsert path when wired;
+    # treat supports_merge as upsert-capable. Still at-least-once until proven.
     upsert_capable = bool(caps.get("supports_upsert") or caps.get("supports_merge"))
     upsert_mode = mode in {"upsert", "merge"}
     caps_lsn = caps.get("supports_lsn_guard")

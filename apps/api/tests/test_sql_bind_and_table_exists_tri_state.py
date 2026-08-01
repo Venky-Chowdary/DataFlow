@@ -18,7 +18,8 @@ def test_sql_bind_bool_json_parity_mysql_postgres():
     assert _to_mysql_value("", "JSON") is None
     assert normalize_sql_bind_value("", "JSONB", engine="postgresql") is None
     assert _to_sa_value("", "json") is None
-    assert normalize_sql_bind_value('{"a":1}', "JSONB", engine="postgresql") == {"a": 1}
+    # JSONB binds as text: psycopg2 cannot adapt a native dict (wave 88).
+    assert normalize_sql_bind_value('{"a":1}', "JSONB", engine="postgresql") == '{"a":1}'
     assert _to_mysql_value({"a": 1}, "JSON") == '{"a":1}'
 
 

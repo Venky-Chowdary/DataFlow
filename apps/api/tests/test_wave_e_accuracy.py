@@ -14,7 +14,10 @@ if str(_API_ROOT) not in sys.path:
 
 
 def test_precision_collapse_helper():
-    from services.type_system import is_precision_collapse_coercion
+    from services.type_system import (
+        is_precision_collapse_coercion,
+        is_timezone_polarity_loss,
+    )
 
     assert is_precision_collapse_coercion("FLOAT", "DECIMAL(12,4)") is True
     assert is_precision_collapse_coercion("float", "integer") is True
@@ -22,6 +25,10 @@ def test_precision_collapse_helper():
     assert is_precision_collapse_coercion("TIMESTAMPTZ", "DATE") is True
     assert is_precision_collapse_coercion("VARCHAR", "INTEGER") is False
     assert is_precision_collapse_coercion("INTEGER", "DECIMAL") is False
+    assert is_timezone_polarity_loss("TIMESTAMPTZ", "TIMESTAMP_NTZ") is True
+    assert is_precision_collapse_coercion("TIMESTAMPTZ", "TIMESTAMP WITHOUT TIME ZONE") is True
+    assert is_timezone_polarity_loss("TIMESTAMP_NTZ", "TIMESTAMPTZ") is False
+    assert is_timezone_polarity_loss("TIMESTAMP", "TIMESTAMP_NTZ") is False
 
 
 def test_schema_drift_float_to_decimal_not_soft_passed():
@@ -35,6 +42,8 @@ def test_schema_drift_float_to_decimal_not_soft_passed():
         mappings=[{"source": "amt", "target": "amt", "confidence": 0.99}],
         destination_db_type="postgresql",
         sample_rows=[{"amt": "1.5"}, {"amt": "2.25"}],
+        # Live DDL contract only applies when the destination relation exists.
+        table_exists=True,
     )
     assert report["severity"] == "breaking"
     assert any(m.get("reason") == "precision_collapse" for m in report["type_mismatches"])

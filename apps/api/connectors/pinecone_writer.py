@@ -356,4 +356,15 @@ def write_mapped_rows(
         rejected_details=rejected,
         rejected_rows=len(rejected),
         warnings=[r.get("reason") or "" for r in rejected[:10] if r.get("reason")],
+        meta=_pinecone_gate8_meta(vectors),
     )
+
+
+def _pinecone_gate8_meta(vectors: list[dict[str, Any]]) -> dict[str, Any]:
+    from connectors.writer_common import vector_gate8_meta
+
+    rows = []
+    for v in vectors:
+        meta = dict(v.get("metadata") or {}) if isinstance(v.get("metadata"), dict) else {}
+        rows.append({"id": v.get("id"), **meta})
+    return vector_gate8_meta(rows)

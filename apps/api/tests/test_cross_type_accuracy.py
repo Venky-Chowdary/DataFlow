@@ -176,8 +176,10 @@ def test_lossy_coercion_detection():
         ("JSON", "TEXT", False),
         ("BINARY", "TEXT", False),
         ("TEXT", "BINARY", False),
-        ("UUID", "VARCHAR", False),
         # narrowing or semantically incompatible conversions are lossy
+        # UUID→VARCHAR keeps the value but drops the UUID domain constraint;
+        # wave 77 surfaces that collapse rather than reporting silent green.
+        ("UUID", "VARCHAR", True),
         ("VARCHAR", "UUID", True),
         ("INTEGER", "UUID", True),
         ("DECIMAL", "UUID", True),
@@ -368,9 +370,11 @@ def test_csv_to_snowflake_lossy_coercions_flagged():
         ("14:30", "time", "14:30:00", False),
         ("02:30:45 PM", "time", "14:30:45", False),
         ("not-a-time", "time", None, True),
-        # binary values
+        # binary values — base64 and hex carriers are accepted as-is, but
+        # arbitrary text is refused rather than silently UTF-8→base64 encoded,
+        # which would write bytes the operator never supplied.
         ("SGVsbG8=", "binary", "SGVsbG8=", False),
-        ("hello", "binary", "aGVsbG8=", False),
+        ("hello", "binary", None, True),
         # semantic transforms
         ("+1-555-0199", "phone", "+1-555-0199", False),
         ("Test@Example.COM", "email", "test@example.com", False),

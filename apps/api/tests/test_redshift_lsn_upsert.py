@@ -46,9 +46,16 @@ class _Cursor:
         self.existing_lsn = existing_lsn
         self.deleted = 0
         self.last_was_select = False
+        self.merge_attempts = 0
 
     def execute(self, query: object, params: object = None) -> None:
         q = str(query).upper()
+        # Unit mock has no real table shape — force MERGE → delete+insert fallback.
+        if "MERGE INTO" in q or (
+            "CREATE TEMP TABLE" in q and "AS SELECT" in q
+        ):
+            self.merge_attempts += 1
+            raise RuntimeError("unit mock: Redshift MERGE path unavailable")
         self.last_was_select = "SELECT" in q and "DELETE" not in q
         if "DELETE" in q:
             self.deleted += 1
@@ -57,6 +64,9 @@ class _Cursor:
         if self.existing_lsn is None:
             return None
         return (self.existing_lsn,)
+
+    def executemany(self, query: object, params: object = None) -> None:
+        return None
 
 
 def test_redshift_upsert_skips_stale_lsn():

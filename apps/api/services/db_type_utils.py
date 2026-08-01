@@ -18,6 +18,24 @@ _DB_TYPE_ALIASES = {
 
 SCHEMALESS_DESTS = {"mongodb", "dynamodb", "redis"}
 
+# Object stores / file sinks have no CREATE TABLE contract — "table_exists"
+# probes are N/A. Do not fail-closed Validate on sticky None for these kinds.
+NO_RELATIONAL_DDL_DESTS = frozenset({
+    "s3",
+    "gcs",
+    "adls",
+    "minio",
+    "azure_blob",
+    "azure_data_lake",
+    "file",
+    "file_export",
+    "csv",
+    "json",
+    "parquet",
+    "avro",
+    "orc",
+})
+
 
 def normalize_dest_kind(dest_db_type: str | None, default: str = "") -> str:
     """Normalize a destination database type string to a canonical driver name."""

@@ -494,4 +494,17 @@ def write_mapped_rows(
         rejected_details=rejected,
         rejected_rows=len(rejected),
         warnings=[r.get("reason") or "" for r in rejected[:10] if r.get("reason")],
+        meta=_milvus_gate8_meta(entities),
     )
+
+
+def _milvus_gate8_meta(entities: list[dict[str, Any]]) -> dict[str, Any]:
+    from connectors.writer_common import vector_gate8_meta
+
+    # Drop opaque embedding floats from Gate-8 sample (identity + metadata only).
+    rows = []
+    for ent in entities:
+        if not isinstance(ent, dict):
+            continue
+        rows.append({k: v for k, v in ent.items() if k != "vector"})
+    return vector_gate8_meta(rows)

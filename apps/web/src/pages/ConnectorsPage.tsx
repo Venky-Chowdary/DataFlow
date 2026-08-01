@@ -155,8 +155,12 @@ export function ConnectorsPage({
         tone: result.success ? "success" : "error",
       });
       await onRefresh?.();
-    } catch {
-      toast({ title: "Test failed", tone: "error" });
+    } catch (e) {
+      toast({
+        title: "Test failed",
+        message: e instanceof Error && e.message ? e.message : "Could not reach the connector probe.",
+        tone: "error",
+      });
     }
     setTestingId(null);
   };
@@ -166,18 +170,33 @@ export function ConnectorsPage({
     setTestingAll(true);
     let passed = 0;
     let failed = 0;
+    const failures: string[] = [];
     for (const c of connectors) {
       try {
         const result = await testSavedConnector(c.id);
-        if (result.success) passed += 1;
-        else failed += 1;
-      } catch {
+        if (result.success) {
+          passed += 1;
+        } else {
+          failed += 1;
+          if (failures.length < 3) {
+            failures.push(`${c.name}: ${result.message || "failed"}`);
+          }
+        }
+      } catch (e) {
         failed += 1;
+        if (failures.length < 3) {
+          const detail = e instanceof Error && e.message ? e.message : "probe error";
+          failures.push(`${c.name}: ${detail}`);
+        }
       }
     }
     toast({
       title: "Connection tests finished",
-      message: `${passed} passed · ${failed} failed · ${connectors.length} total`,
+      message: [
+        `${passed} passed · ${failed} failed · ${connectors.length} total`,
+        ...failures,
+        failures.length < failed ? `…and ${failed - failures.length} more` : "",
+      ].filter(Boolean).join("\n"),
       tone: failed > 0 ? "warning" : "success",
     });
     await onRefresh?.();

@@ -9,6 +9,7 @@ import { LiveEventLog } from "../ui/LiveEventLog";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./NotificationDeliveryStrip";
 import { QuarantinePanel } from "./QuarantinePanel";
+import type { RepairMapping } from "../../lib/api";
 import { Gate8ProofCard, classifyGate8Status, type Gate8Reconciliation } from "./Gate8ProofCard";
 import { JobTrustScoreCard } from "./JobTrustScoreCard";
 import { CdcCursorGapPanel } from "./CdcCursorGapPanel";
@@ -38,6 +39,10 @@ interface TransferResultDashboardProps {
   onOpenValidate?: () => void;
   /** Resume from durable checkpoint (same API as Jobs). */
   onResume?: () => void;
+  /** Open child job after quarantine replay (Theater / Jobs). */
+  onOpenChildJob?: (jobId: string) => void;
+  /** Map / Validate repair mappings for quarantine propose/apply. */
+  repairMappings?: RepairMapping[];
 }
 
 function fmt(value: string | number | undefined): string | null {
@@ -79,6 +84,8 @@ export function TransferResultDashboard({
   onSchedule,
   onOpenValidate,
   onResume,
+  onOpenChildJob,
+  repairMappings = [],
 }: TransferResultDashboardProps) {
   const { setActiveData } = useActiveData();
   const [proofOpen, setProofOpen] = useState(false);
@@ -690,7 +697,11 @@ export function TransferResultDashboard({
               initialDetails={result.destination_summary?.rejected_details}
               autoLoad
               initiallyOpen
+              repairMappings={repairMappings}
               onOpenValidate={onOpenValidate}
+              onReplayComplete={(childJobId) => {
+                onOpenChildJob?.(childJobId);
+              }}
             />
           </div>
         )}

@@ -92,6 +92,13 @@ class QueryExecuteRequest(BaseModel):
     database: str = Field("", description="Database/namespace")
     collection: str = Field("", description="Collection or table name")
     limit: int = Field(1000, ge=1, le=_MAX_ROWS)
+    params: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Named bind parameters for :name placeholders. Filter values must be "
+            "bound, never interpolated, so types survive and injection is impossible."
+        ),
+    )
 
 
 class QueryExportRequest(QueryExecuteRequest):
@@ -345,7 +352,7 @@ def _run_mongodb_query(connector, body):
     query_filter = {}
     if body.query.strip():
         try:
-            parsed = json.loads(body.query)
+            parsed = _parse_mongodb_json(body.query)
             if isinstance(parsed, dict):
                 query_filter = parsed
             elif isinstance(parsed, list):
@@ -359,6 +366,27 @@ def _run_mongodb_query(connector, body):
     cursor = coll.find(query_filter).limit(body.limit)
     rows = list(cursor)
     return _normalize_rows(rows)
+
+
+def _parse_mongodb_json(raw: str) -> Any:
+    """Parse a Mongo filter/pipeline, honouring Extended JSON type wrappers.
+
+    Plain ``json.loads`` turns ``{"$date": "..."}`` into a dict, so a date
+    predicate silently matches nothing against a real BSON Date. ``json_util``
+    reconstructs the typed values ($date, $oid, $regex) the server expects.
+    """
+    try:
+        from bson import json_util
+
+        return json_util.loads(raw)
+    except ImportError:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid MongoDB query: {exc}"
+        ) from exc
 
 
 def _normalize_rows(rows: list[dict]) -> tuple[list[dict], list[str], dict[str, str], bool]:
@@ -386,6 +414,17 @@ def _build_mongodb_connection_string(connector) -> str:
         password=connector.password or "",
         database=connector.database or "test",
     )
+
+
+def _to_pyformat(sql: str, params: dict[str, Any]) -> str:
+    """Rewrite ``:name`` placeholders to ``%(name)s`` for pyformat drivers."""
+    if not params:
+        return sql
+    names = sorted(params.keys(), key=len, reverse=True)
+    pattern = re.compile(
+        r"(?<![:\w]):(" + "|".join(re.escape(n) for n in names) + r")\b"
+    )
+    return pattern.sub(lambda m: f"%({m.group(1)})s", sql)
 
 
 def _run_sql_query(connector, body):
@@ -432,7 +471,7 @@ def _run_sql_query(connector, body):
         from sqlalchemy import text
 
         with engine.connect() as conn:
-            result = conn.execute(text(clean_query))
+            result = conn.execute(text(clean_query), dict(body.params or {}))
             columns = list(result.keys())
             rows = []
             for i, row in enumerate(result):
@@ -495,8 +534,15 @@ def _run_snowflake_query(connector, body):
         if append_limit:
             clean_query = f"{clean_query} LIMIT {body.limit}"
 
+        params = dict(body.params or {})
+        if params:
+            # snowflake-connector-python defaults to pyformat, so :name has to be
+            # rewritten. Only names we were actually given are substituted, which
+            # leaves ``::`` casts and time literals untouched.
+            clean_query = _to_pyformat(clean_query, params)
+
         with conn.cursor() as cur:
-            cur.execute(clean_query)
+            cur.execute(clean_query, params or None)
             description = cur.description or []
             columns = [desc[0] for desc in description]
             rows = []

@@ -37,6 +37,23 @@ SPILL_THRESHOLD = int(os.getenv("DATAFLOW_FINGERPRINT_SPILL_THRESHOLD", "1000000
 # the date regex for them.
 _NUMERIC_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 _DATE_LIKE_CHARS = frozenset("-:/T ")
+# RFC 4122 UUID wire — engines differ on case (PG lower, some drivers upper).
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+_NULL_SENTINEL = "\x00NULL\x00"
+
+
+def destination_empty_string_is_null(engine: str | None) -> bool:
+    """True when the write destination collapses '' → NULL (Oracle VARCHAR2).
+
+    Fivetran HVR Compare applies **write-location** rules for cross-engine
+    ambiguity — Oracle treats zero-length VARCHAR2 as NULL; Postgres/MySQL do not.
+    """
+    eng = (engine or "").strip().lower()
+    if not eng:
+        return False
+    return eng in {"oracle", "oracledb", "oracle_autonomous"} or eng.startswith("oracle")
 
 
 @dataclass
@@ -101,6 +118,26 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         or "read-back verifier not available" in msg
         or "read-back" in msg and "unavailable" in msg
     )
+    sample = out.get("sample_compare") if isinstance(out.get("sample_compare"), dict) else {}
+    sample_ok = bool(sample.get("passed")) and int(sample.get("compared") or 0) > 0
+    # Reverse-ETL / Kafka: keyed sample read-back is real proof when full-table
+    # checksum is unavailable (Hightouch/Census-class row sync status).
+    if (
+        passed
+        and sample_ok
+        and (
+            "sample-verified" in msg
+            or "sample verified" in msg
+            or "key-aligned" in msg
+            or writer_only
+            or not tgt
+        )
+    ):
+        out["phase"] = "post_write_sample_verified"
+        out["post_write_pending"] = False
+        out["preview"] = False
+        return out
+
     if independent_match and not writer_only:
         out["phase"] = "post_write_verified"
         out["post_write_pending"] = False
@@ -149,9 +186,10 @@ def _fingerprint_cell(
                 if str(k).lower() == column.lower():
                     ddl = str(v or "")
                     break
-    if eng and ddl:
+    if eng:
         try:
             # Defined later in this module; resolved at call time.
+            # Pass engine even without DDL so Oracle ''↔NULL write rules apply.
             return fingerprint_for_reconcile(value, ddl_type=ddl, engine=eng)
         except Exception:
             pass
@@ -766,69 +804,364 @@ def verify_pgvector_table(
         return -1, ""
 
 
-def verify_snowflake_table(
+def verify_pinecone_namespace(
     *,
-    host: str,
-    database: str,
-    username: str,
-    password: str,
-    schema: str,
-    connection_string: str,
-    warehouse: str,
-    table_name: str,
+    host: str = "",
+    connection_string: str = "",
+    username: str = "",
+    password: str = "",
+    api_key: str = "",
+    namespace: str = "",
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
 ) -> tuple[int, str]:
+    """Independent Pinecone stats + metadata fetch for Gate-8 (embeddings opaque)."""
     try:
-        from connectors.snowflake_conn import (
-            get_connection,
-            normalize_account,
-            resolve_or_fold_snowflake_table,
-            snowflake_qualified_table,
-        )
+        from connectors.pinecone_writer import _headers, _index_url, _requests_session
 
-        conn = get_connection(
-            account=normalize_account(host),
-            username=username,
-            password=password,
-            database=database,
-            schema=schema,
-            warehouse=warehouse,
-            connection_string=connection_string,
+        index_url = _index_url(host, connection_string)
+        key = api_key or password or username or ""
+        if not index_url or not key:
+            return -1, ""
+        session = _requests_session()
+        hdrs = _headers(key)
+        ns = (namespace or "").strip()
+        stats = session.post(
+            f"{index_url}/describe_index_stats",
+            data=json.dumps({}),
+            headers=hdrs,
+            timeout=30,
         )
-        from connectors.sql_identifiers import (
-            quote_sql_identifier,
-            require_safe_identifier,
-        )
+        if stats.status_code not in {200, 201}:
+            return -1, ""
+        body = stats.json() if stats.content else {}
+        namespaces = body.get("namespaces") or {}
+        if ns:
+            count = int((namespaces.get(ns) or {}).get("vector_count") or 0)
+        else:
+            count = int(body.get("totalVectorCount") or body.get("total_vector_count") or 0)
+            if not count and isinstance(namespaces, dict):
+                count = sum(int((v or {}).get("vector_count") or 0) for v in namespaces.values())
 
-        with conn.cursor() as cur:
-            if warehouse:
-                try:
-                    wh = require_safe_identifier(warehouse, preserve_case=True)
-                    cur.execute(f"USE WAREHOUSE {quote_sql_identifier(wh)}")
-                except Exception as exc:
-                    logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-            resolved = resolve_or_fold_snowflake_table(
-                cur, schema or "PUBLIC", table_name
+        dict_rows: list[dict[str, Any]] = []
+        # limit=0 means "full batch" for Gate-8 — still cap fetch for API safety.
+        id_cap = int(limit) if limit and int(limit) > 0 else 500
+        ids = [str(x) for x in (written_ids or []) if x is not None][:id_cap]
+        if ids:
+            params = [("ids", i) for i in ids]
+            if ns:
+                params.append(("namespace", ns))
+            # requests supports list of tuples for repeated ids=
+            fetch = session.get(
+                f"{index_url}/vectors/fetch",
+                params=params,
+                headers=hdrs,
+                timeout=30,
             )
-            qualified_name = snowflake_qualified_table(schema or "PUBLIC", resolved)
-            cur.execute(f"SELECT COUNT(*) FROM {qualified_name}")  # nosec B608
-            count = int(cur.fetchone()[0])
-            cur.execute(f"SELECT * FROM {qualified_name}")  # nosec B608
-            names = [d[0] for d in cur.description] if cur.description else []
-            columns = names or target_columns or []
-            checksum = canonical_checksum_from_iter(
-                _iter_fetchmany(cur),
-                columns,
-                limit=limit,
-                dest_db_type="snowflake",
-                dest_types=dest_types,
-            )
-        conn.close()
-        return count, checksum
+            if fetch.status_code in {200, 201}:
+                vectors = (fetch.json() or {}).get("vectors") or {}
+                for vid, payload in vectors.items():
+                    meta = payload.get("metadata") if isinstance(payload, dict) else {}
+                    if not isinstance(meta, dict):
+                        meta = {}
+                    dict_rows.append({"id": vid, **meta})
+        columns = target_columns or (
+            sorted({k for r in dict_rows for k in r}) if dict_rows else ["id"]
+        )
+        return count, canonical_checksum_from_iter(
+            dict_rows,
+            columns,
+            limit=limit,
+            dest_db_type="pinecone",
+            dest_types=dest_types,
+        )
     except Exception as exc:
-        logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
+        logger.warning("Pinecone reconciliation read-back failed: %s", exc, exc_info=exc)
+        return -1, ""
+
+
+def verify_qdrant_collection(
+    *,
+    host: str = "",
+    port: int = 6333,
+    username: str = "",
+    password: str = "",
+    connection_string: str = "",
+    ssl: bool = False,
+    collection: str,
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+) -> tuple[int, str]:
+    """Independent Qdrant collection count + payload scroll/retrieve for Gate-8."""
+    try:
+        from connectors.qdrant_writer import _base_url, _headers, _requests_session
+
+        api_key = password or username or ""
+        base_url = connection_string.rstrip("/") if connection_string else _base_url(host, port, ssl)
+        session = _requests_session()
+        hdrs = _headers(api_key)
+        info = session.get(f"{base_url}/collections/{collection}", headers=hdrs, timeout=15)
+        if info.status_code != 200:
+            return -1, ""
+        body = info.json() or {}
+        result = body.get("result") or body
+        count = int(
+            (result.get("points_count") if isinstance(result, dict) else None)
+            or (result.get("indexed_vectors_count") if isinstance(result, dict) else None)
+            or 0
+        )
+        id_cap = int(limit) if limit and int(limit) > 0 else 500
+        ids = [str(x) for x in (written_ids or []) if x is not None][:id_cap]
+        dict_rows: list[dict[str, Any]] = []
+        if ids:
+            retrieve = session.post(
+                f"{base_url}/collections/{collection}/points",
+                data=json.dumps({
+                    "ids": ids,
+                    "with_payload": True,
+                    "with_vector": False,
+                }),
+                headers=hdrs,
+                timeout=30,
+            )
+            if retrieve.status_code in {200, 201}:
+                points = (retrieve.json() or {}).get("result") or []
+                for pt in points:
+                    if not isinstance(pt, dict):
+                        continue
+                    payload = pt.get("payload") if isinstance(pt.get("payload"), dict) else {}
+                    dict_rows.append({"id": pt.get("id"), **payload})
+        if not dict_rows:
+            scroll = session.post(
+                f"{base_url}/collections/{collection}/points/scroll",
+                data=json.dumps({
+                    "limit": max(1, id_cap if ids else int(limit or 100) or 100),
+                    "with_payload": True,
+                    "with_vector": False,
+                }),
+                headers=hdrs,
+                timeout=30,
+            )
+            if scroll.status_code in {200, 201}:
+                points = ((scroll.json() or {}).get("result") or {}).get("points") or []
+                for pt in points:
+                    if not isinstance(pt, dict):
+                        continue
+                    payload = pt.get("payload") if isinstance(pt.get("payload"), dict) else {}
+                    dict_rows.append({"id": pt.get("id"), **payload})
+        columns = target_columns or (
+            sorted({k for r in dict_rows for k in r}) if dict_rows else ["id"]
+        )
+        return count, canonical_checksum_from_iter(
+            dict_rows,
+            columns,
+            limit=limit,
+            dest_db_type="qdrant",
+            dest_types=dest_types,
+        )
+    except Exception as exc:
+        logger.warning("Qdrant reconciliation read-back failed: %s", exc, exc_info=exc)
+        return -1, ""
+
+
+def verify_weaviate_class(
+    *,
+    host: str = "",
+    port: int = 8080,
+    username: str = "",
+    password: str = "",
+    connection_string: str = "",
+    ssl: bool = False,
+    api_key: str = "",
+    class_name: str,
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+) -> tuple[int, str]:
+    """Independent Weaviate aggregate + object list for Gate-8."""
+    try:
+        from connectors.weaviate_writer import (
+            _base_url,
+            _class_name,
+            _headers,
+            _requests_session,
+        )
+
+        key = api_key or password or username or ""
+        base_url = _base_url(host, port, ssl, connection_string)
+        cls = _class_name(class_name)
+        session = _requests_session()
+        hdrs = _headers(key)
+        id_cap = int(limit) if limit and int(limit) > 0 else 500
+        ids = [str(x) for x in (written_ids or []) if x is not None][:id_cap]
+        dict_rows: list[dict[str, Any]] = []
+        if ids:
+            for oid in ids:
+                resp = session.get(
+                    f"{base_url}/v1/objects/{cls}/{oid}",
+                    headers=hdrs,
+                    timeout=15,
+                )
+                if resp.status_code not in {200, 201}:
+                    # Older Weaviate: /v1/objects/{uuid}
+                    resp = session.get(
+                        f"{base_url}/v1/objects/{oid}",
+                        headers=hdrs,
+                        timeout=15,
+                    )
+                if resp.status_code not in {200, 201}:
+                    continue
+                obj = resp.json() or {}
+                if not isinstance(obj, dict):
+                    continue
+                props = obj.get("properties") if isinstance(obj.get("properties"), dict) else {}
+                dict_rows.append({"id": obj.get("id") or oid, **props})
+        if not dict_rows:
+            agg = session.get(
+                f"{base_url}/v1/objects",
+                params={"class": cls, "limit": max(1, int(limit or 100) or 100)},
+                headers=hdrs,
+                timeout=30,
+            )
+            if agg.status_code not in {200, 201}:
+                return -1, ""
+            body = agg.json() or {}
+            objects = body.get("objects") or []
+            count = int(body.get("totalResults") or len(objects))
+            for obj in objects:
+                if not isinstance(obj, dict):
+                    continue
+                props = obj.get("properties") if isinstance(obj.get("properties"), dict) else {}
+                dict_rows.append({"id": obj.get("id"), **props})
+        else:
+            count = len(dict_rows)
+            # Prefer class cardinality when list endpoint works.
+            try:
+                agg = session.get(
+                    f"{base_url}/v1/objects",
+                    params={"class": cls, "limit": 1},
+                    headers=hdrs,
+                    timeout=15,
+                )
+                if agg.status_code in {200, 201}:
+                    count = int((agg.json() or {}).get("totalResults") or count)
+            except Exception:
+                pass
+        columns = target_columns or (
+            sorted({k for r in dict_rows for k in r}) if dict_rows else ["id"]
+        )
+        return count, canonical_checksum_from_iter(
+            dict_rows,
+            columns,
+            limit=limit,
+            dest_db_type="weaviate",
+            dest_types=dest_types,
+        )
+    except Exception as exc:
+        logger.warning("Weaviate reconciliation read-back failed: %s", exc, exc_info=exc)
+        return -1, ""
+
+
+def verify_milvus_collection(
+    *,
+    host: str = "",
+    port: int = 19530,
+    username: str = "",
+    password: str = "",
+    connection_string: str = "",
+    ssl: bool = False,
+    api_key: str = "",
+    database: str = "",
+    collection: str,
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+) -> tuple[int, str]:
+    """Independent Milvus get_collection_stats + query for Gate-8."""
+    try:
+        from connectors.milvus_writer import (
+            _auth_token,
+            _base_url,
+            _collection_name,
+            _headers,
+            _ok_response,
+            _requests_session,
+        )
+
+        coll = _collection_name(collection)
+        db_name = (database or "").strip()
+        if db_name.lower() in {"", "test_db", "default", "public"}:
+            db_name = ""
+        token = _auth_token(api_key=api_key, username=username, password=password)
+        base_url = _base_url(host, port, ssl, connection_string)
+        session = _requests_session()
+        hdrs = _headers(token)
+        stats_payload: dict[str, Any] = {"collectionName": coll}
+        if db_name:
+            stats_payload["dbName"] = db_name
+        stats = session.post(
+            f"{base_url}/v2/vectordb/collections/get_stats",
+            data=json.dumps(stats_payload),
+            headers=hdrs,
+            timeout=30,
+        )
+        body = stats.json() if stats.content else {}
+        if not _ok_response(body if isinstance(body, dict) else {}, stats.status_code):
+            return -1, ""
+        data = body.get("data") if isinstance(body, dict) else {}
+        count = int(
+            (data or {}).get("rowCount")
+            or (data or {}).get("row_count")
+            or (data or {}).get("row_num")
+            or 0
+        )
+        id_cap = int(limit) if limit and int(limit) > 0 else 500
+        ids = [str(x) for x in (written_ids or []) if x is not None][:id_cap]
+        query_payload: dict[str, Any] = {
+            "collectionName": coll,
+            "outputFields": ["id", "content", "source_id", "chunk_index"],
+            "limit": max(1, id_cap if ids else int(limit or 100) or 100),
+        }
+        if ids:
+            # Prefer keyed filter when writer stamped identities.
+            quoted = ", ".join(json.dumps(i) for i in ids)
+            query_payload["filter"] = f"id in [{quoted}]"
+        else:
+            query_payload["filter"] = ""
+        if db_name:
+            query_payload["dbName"] = db_name
+        query = session.post(
+            f"{base_url}/v2/vectordb/entities/query",
+            data=json.dumps(query_payload),
+            headers=hdrs,
+            timeout=30,
+        )
+        qbody = query.json() if query.content else {}
+        dict_rows: list[dict[str, Any]] = []
+        if _ok_response(qbody if isinstance(qbody, dict) else {}, query.status_code):
+            rows = qbody.get("data") if isinstance(qbody, dict) else []
+            if isinstance(rows, list):
+                for row in rows:
+                    if isinstance(row, dict):
+                        dict_rows.append({k: v for k, v in row.items() if k != "vector"})
+        columns = target_columns or (
+            sorted({k for r in dict_rows for k in r}) if dict_rows else ["id"]
+        )
+        return count, canonical_checksum_from_iter(
+            dict_rows,
+            columns,
+            limit=limit,
+            dest_db_type="milvus",
+            dest_types=dest_types,
+        )
+    except Exception as exc:
+        logger.warning("Milvus reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
 
 
@@ -932,6 +1265,61 @@ def verify_sqlserver_table(
         return count, checksum
     except Exception as exc:
         logger.warning("SQL Server reconciliation read-back failed: %s", exc, exc_info=exc)
+        return -1, ""
+
+
+def verify_oracle_table(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    connection_string: str,
+    schema: str = "",
+    table_name: str,
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Independent Oracle read-back for Gate-8 (write-location ''≡NULL fingerprints)."""
+    try:
+        import sqlalchemy as sa
+
+        from connectors.generic_sql import get_sqlalchemy_engine
+        from connectors.sql_identifiers import quote_table_ref
+
+        cfg: dict[str, Any] = {
+            "type": "oracle",
+            "host": host or "",
+            "port": int(port or 1521),
+            "database": database or "",
+            "username": username or "",
+            "password": password or "",
+            "connection_string": connection_string or "",
+            "schema": schema or "",
+        }
+        engine = get_sqlalchemy_engine(cfg)
+        sch = (schema or username or "").strip() or None
+        table_ref = quote_table_ref(table_name, schema=sch, dialect="oracle")
+        with engine.connect() as conn:
+            count = int(
+                conn.execute(sa.text(f"SELECT COUNT(*) FROM {table_ref}")).scalar()  # nosec B608
+                or 0
+            )
+            result = conn.execute(sa.text(f"SELECT * FROM {table_ref}"))  # nosec B608
+            names = list(result.keys())
+            columns = names or target_columns or []
+            checksum = canonical_checksum_from_iter(
+                (tuple(row) for row in result),
+                columns,
+                limit=limit,
+                dest_db_type="oracle",
+                dest_types=dest_types,
+            )
+        return count, checksum
+    except Exception as exc:
+        logger.warning("Oracle reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
 
 
@@ -1058,6 +1446,55 @@ def verify_s3_object(
         return -1, ""
 
 
+def verify_sftp_object(
+    *,
+    host: str = "",
+    port: int = 22,
+    username: str = "",
+    password: str = "",
+    connection_string: str = "",
+    database: str = "",
+    table_name: str = "",
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Independent SFTP download + parse for Gate-8 (parity with S3/GCS/ADLS)."""
+    try:
+        from connectors.sftp_common import connect_sftp, parse_sftp_config
+
+        cfg = parse_sftp_config(
+            connection_string=connection_string,
+            host=host,
+            port=port,
+            username=username,
+            password=password,
+            database=database,
+            table=table_name,
+        )
+        if not cfg.host or not cfg.path:
+            return -1, ""
+        transport, sftp = connect_sftp(cfg)
+        try:
+            with sftp.file(cfg.path, "rb") as fh:
+                body = fh.read()
+        finally:
+            sftp.close()
+            transport.close()
+        rows, headers = _rows_from_object_bytes(body, cfg.path, target_columns)
+        columns = headers or target_columns or []
+        return len(rows), canonical_checksum_from_iter(
+            rows,
+            columns,
+            limit=limit,
+            dest_db_type="sftp",
+            dest_types=dest_types,
+        )
+    except Exception as exc:
+        logger.warning("SFTP reconciliation read-back failed: %s", exc, exc_info=exc)
+        return -1, ""
+
+
 def verify_gcs_blob(
     *,
     bucket: str,
@@ -1085,6 +1522,520 @@ def verify_gcs_blob(
         return len(rows), canonical_checksum_from_iter(rows, columns, limit=limit)
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
+        return -1, ""
+
+
+def verify_adls_blob(
+    *,
+    container: str,
+    key: str,
+    host: str = "",
+    port: int = 0,
+    username: str = "",
+    password: str = "",
+    connection_string: str = "",
+    service_account: str = "",
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Independent Azure Blob / ADLS Gen2 read-back (parity with S3/GCS Gate-8)."""
+    try:
+        from connectors.adls_common import blob_service_client
+
+        cfg = {
+            "host": host,
+            "port": port,
+            "username": username,
+            "password": password,
+            "connection_string": connection_string,
+            "service_account": service_account,
+            "database": container,
+        }
+        client = blob_service_client(cfg)
+        blob = client.get_blob_client(container, key)
+        body = blob.download_blob().readall()
+        rows, headers = _rows_from_object_bytes(body, key, target_columns)
+        columns = headers or target_columns or []
+        return len(rows), canonical_checksum_from_iter(
+            rows,
+            columns,
+            limit=limit,
+            dest_db_type="adls",
+            dest_types=dest_types,
+        )
+    except Exception as exc:
+        logger.warning("ADLS reconciliation read-back failed: %s", exc, exc_info=exc)
+        return -1, ""
+
+
+def verify_hubspot_object(
+    *,
+    host: str = "",
+    username: str = "",
+    password: str = "",
+    connection_string: str = "",
+    object_name: str,
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Independent HubSpot CRM read-back for Gate-8 (reverse-ETL honesty)."""
+    try:
+        from connectors.hubspot import read_object
+
+        cfg = {
+            "host": host,
+            "username": username,
+            "password": password,
+            "connection_string": connection_string,
+            "table": object_name,
+            "database": object_name,
+        }
+        batch = read_object(
+            cfg=cfg,
+            object=object_name,
+            limit=max(int(limit or 500), 1),
+        )
+        headers = list(batch.headers or target_columns or [])
+        rows = list(batch.rows or [])
+        # Convert matrix rows to dicts when ReadBatch stores tuples.
+        dict_rows: list[Any] = []
+        for row in rows:
+            if isinstance(row, dict):
+                dict_rows.append(row)
+            elif headers:
+                dict_rows.append(
+                    {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}
+                )
+            else:
+                dict_rows.append(row)
+        columns = headers or target_columns or (
+            sorted({k for r in dict_rows if isinstance(r, dict) for k in r}) if dict_rows else []
+        )
+        return len(dict_rows), canonical_checksum_from_iter(
+            dict_rows,
+            columns,
+            limit=limit,
+            dest_db_type="hubspot",
+            dest_types=dest_types,
+        )
+    except Exception as exc:
+        logger.warning("HubSpot reconciliation read-back failed: %s", exc, exc_info=exc)
+        return -1, ""
+
+
+def verify_salesforce_object(
+    *,
+    host: str = "",
+    username: str = "",
+    password: str = "",
+    connection_string: str = "",
+    api_key: str = "",
+    object_name: str,
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Independent Salesforce SOQL read-back for Gate-8 reverse-ETL."""
+    try:
+        from connectors.salesforce import read_object
+
+        cfg = {
+            "host": host,
+            "username": username,
+            "password": password,
+            "connection_string": connection_string,
+            "api_key": api_key,
+            "table": object_name,
+            "database": object_name,
+        }
+        batch = read_object(
+            cfg=cfg,
+            object=object_name,
+            limit=max(int(limit or 500), 1),
+        )
+        headers = list(batch.headers or target_columns or [])
+        dict_rows: list[Any] = []
+        for row in batch.rows or []:
+            if isinstance(row, dict):
+                # Strip Salesforce attributes envelope when present.
+                d = {k: v for k, v in row.items() if k != "attributes"}
+                dict_rows.append(d)
+            elif headers:
+                dict_rows.append(
+                    {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}
+                )
+        columns = headers or target_columns or (
+            sorted({k for r in dict_rows if isinstance(r, dict) for k in r}) if dict_rows else []
+        )
+        return len(dict_rows), canonical_checksum_from_iter(
+            dict_rows,
+            columns,
+            limit=limit,
+            dest_db_type="salesforce",
+            dest_types=dest_types,
+        )
+    except Exception as exc:
+        logger.warning("Salesforce reconciliation read-back failed: %s", exc, exc_info=exc)
+        return -1, ""
+
+
+def verify_airtable_table(
+    *,
+    host: str = "",
+    username: str = "",
+    password: str = "",
+    connection_string: str = "",
+    api_key: str = "",
+    base_id: str,
+    table_name: str,
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Independent Airtable read-back — flatten fields for Gate-8 fingerprints."""
+    try:
+        from connectors.airtable import read_object
+        from connectors.saas_typed_schema import flatten_airtable_record
+
+        cfg = {
+            "host": host,
+            "username": username,
+            "password": password,
+            "connection_string": connection_string or base_id,
+            "api_key": api_key,
+            "database": base_id,
+            "table": table_name,
+            "type": "airtable",
+        }
+        batch = read_object(
+            cfg=cfg,
+            object=table_name,
+            limit=max(int(limit or 500), 1),
+        )
+        dict_rows: list[Any] = []
+        for row in batch.rows or []:
+            if isinstance(row, dict):
+                flat, _schema = flatten_airtable_record(row)
+                dict_rows.append(flat)
+            elif batch.headers:
+                headers = list(batch.headers)
+                dict_rows.append(
+                    {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}
+                )
+        columns = target_columns or (
+            sorted({k for r in dict_rows if isinstance(r, dict) for k in r}) if dict_rows else []
+        )
+        return len(dict_rows), canonical_checksum_from_iter(
+            dict_rows,
+            columns,
+            limit=limit,
+            dest_db_type="airtable",
+            dest_types=dest_types,
+        )
+    except Exception as exc:
+        logger.warning("Airtable reconciliation read-back failed: %s", exc, exc_info=exc)
+        return -1, ""
+
+
+def _verify_saas_read_object(
+    *,
+    driver: str,
+    read_object: Any,
+    cfg: dict[str, Any],
+    object_name: str,
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+    row_transform: Any = None,
+) -> tuple[int, str]:
+    """Shared CRM/commerce Gate-8 path: call connector read_object → checksum."""
+    try:
+        batch = read_object(
+            cfg=cfg,
+            object=object_name,
+            limit=max(int(limit or 500), 1),
+        )
+        headers = list(batch.headers or target_columns or [])
+        dict_rows: list[Any] = []
+        for row in batch.rows or []:
+            if isinstance(row, dict):
+                d = row_transform(row) if row_transform else dict(row)
+                dict_rows.append(d)
+            elif headers:
+                dict_rows.append(
+                    {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}
+                )
+        columns = headers or target_columns or (
+            sorted({k for r in dict_rows if isinstance(r, dict) for k in r}) if dict_rows else []
+        )
+        return len(dict_rows), canonical_checksum_from_iter(
+            dict_rows,
+            columns,
+            limit=limit,
+            dest_db_type=driver,
+            dest_types=dest_types,
+        )
+    except Exception as exc:
+        logger.warning("%s reconciliation read-back failed: %s", driver, exc, exc_info=exc)
+        return -1, ""
+
+
+def verify_stripe_object(
+    *,
+    host: str = "",
+    username: str = "",
+    password: str = "",
+    connection_string: str = "",
+    api_key: str = "",
+    object_name: str,
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Independent Stripe API read-back for Gate-8 reverse-ETL."""
+    from connectors.stripe import read_object
+
+    return _verify_saas_read_object(
+        driver="stripe",
+        read_object=read_object,
+        cfg={
+            "host": host,
+            "username": username,
+            "password": password,
+            "connection_string": connection_string,
+            "api_key": api_key,
+            "table": object_name,
+            "database": object_name,
+            "type": "stripe",
+        },
+        object_name=object_name or "customers",
+        target_columns=target_columns,
+        limit=limit,
+        dest_types=dest_types,
+    )
+
+
+def verify_shopify_object(
+    *,
+    host: str = "",
+    username: str = "",
+    password: str = "",
+    connection_string: str = "",
+    api_key: str = "",
+    object_name: str,
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Independent Shopify Admin REST read-back for Gate-8 reverse-ETL."""
+    from connectors.shopify import read_object
+
+    return _verify_saas_read_object(
+        driver="shopify",
+        read_object=read_object,
+        cfg={
+            "host": host,
+            "username": username,
+            "password": password,
+            "connection_string": connection_string,
+            "api_key": api_key,
+            "table": object_name,
+            "database": object_name,
+            "shop": host,
+            "type": "shopify",
+        },
+        object_name=object_name or "customers",
+        target_columns=target_columns,
+        limit=limit,
+        dest_types=dest_types,
+    )
+
+
+def verify_zendesk_object(
+    *,
+    host: str = "",
+    username: str = "",
+    password: str = "",
+    connection_string: str = "",
+    api_key: str = "",
+    object_name: str,
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Independent Zendesk Support API read-back for Gate-8 reverse-ETL."""
+    from connectors.zendesk import read_object
+
+    return _verify_saas_read_object(
+        driver="zendesk",
+        read_object=read_object,
+        cfg={
+            "host": host,
+            "username": username,
+            "password": password,
+            "connection_string": connection_string,
+            "api_key": api_key,
+            "table": object_name,
+            "database": object_name,
+            "type": "zendesk",
+        },
+        object_name=object_name or "tickets",
+        target_columns=target_columns,
+        limit=limit,
+        dest_types=dest_types,
+    )
+
+
+def verify_notion_object(
+    *,
+    host: str = "",
+    username: str = "",
+    password: str = "",
+    connection_string: str = "",
+    api_key: str = "",
+    object_name: str,
+    database_id: str = "",
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Independent Notion database/page read-back for Gate-8 reverse-ETL."""
+    from connectors.notion import read_object
+
+    return _verify_saas_read_object(
+        driver="notion",
+        read_object=read_object,
+        cfg={
+            "host": host,
+            "username": username,
+            "password": password,
+            "connection_string": connection_string,
+            "api_key": api_key,
+            "table": object_name,
+            "database": database_id or object_name,
+            "type": "notion",
+        },
+        object_name=object_name or database_id or "",
+        target_columns=target_columns,
+        limit=limit,
+        dest_types=dest_types,
+    )
+
+
+def verify_kafka_topic(
+    *,
+    host: str = "",
+    port: int = 0,
+    username: str = "",
+    password: str = "",
+    connection_string: str = "",
+    topic: str,
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+    schema_registry_url: str = "",
+) -> tuple[int, str]:
+    """Bounded Kafka consume for Gate-8 — sample proof, not topic cardinality."""
+    try:
+        from connectors.kafka_reader import read_topic_batch
+
+        cfg = {
+            "host": host,
+            "port": port,
+            "username": username,
+            "password": password,
+            "connection_string": connection_string,
+            "database": topic,
+            "table": topic,
+            "group_id": f"dataflow-gate8-verify-{abs(hash(topic)) % 10_000_000}",
+            "auto_offset_reset": "earliest",
+            "schema_registry_url": schema_registry_url,
+        }
+        batch, _cursor = read_topic_batch(
+            cfg=cfg,
+            topic=topic,
+            columns=target_columns,
+            limit=max(int(limit or 500), 1),
+        )
+        headers = list(batch.headers or target_columns or [])
+        rows = list(batch.rows or [])
+        dict_rows: list[Any] = []
+        for row in rows:
+            if isinstance(row, dict):
+                dict_rows.append(row)
+            elif headers:
+                dict_rows.append(
+                    {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}
+                )
+        columns = headers or target_columns or []
+        return len(dict_rows), canonical_checksum_from_iter(
+            dict_rows,
+            columns,
+            limit=limit,
+            dest_db_type="kafka",
+            dest_types=dest_types,
+        )
+    except Exception as exc:
+        logger.warning("Kafka reconciliation read-back failed: %s", exc, exc_info=exc)
+        return -1, ""
+
+
+def verify_databricks_table(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    connection_string: str,
+    schema: str = "",
+    table_name: str,
+    http_path: str = "",
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Independent Databricks SQL warehouse read-back for Gate-8."""
+    try:
+        import sqlalchemy as sa
+
+        from connectors.generic_sql import get_sqlalchemy_engine
+        from connectors.sql_identifiers import quote_table_ref
+
+        cfg: dict[str, Any] = {
+            "type": "databricks",
+            "host": host or "",
+            "port": int(port or 443),
+            "database": database or "",
+            "username": username or "",
+            "password": password or "",
+            "connection_string": connection_string or "",
+            "schema": schema or "",
+            "http_path": http_path or "",
+        }
+        engine = get_sqlalchemy_engine(cfg)
+        sch = (schema or database or "").strip() or None
+        table_ref = quote_table_ref(table_name, schema=sch, dialect="ansi")
+        with engine.connect() as conn:
+            count = int(
+                conn.execute(sa.text(f"SELECT COUNT(*) FROM {table_ref}")).scalar()  # nosec B608
+                or 0
+            )
+            result = conn.execute(sa.text(f"SELECT * FROM {table_ref}"))  # nosec B608
+            names = list(result.keys())
+            columns = names or target_columns or []
+            checksum = canonical_checksum_from_iter(
+                (tuple(row) for row in result),
+                columns,
+                limit=limit,
+                dest_db_type="databricks",
+                dest_types=dest_types,
+            )
+        return count, checksum
+    except Exception as exc:
+        logger.warning("Databricks reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
 
 
@@ -1162,6 +2113,142 @@ def verify_duckdb_table(
         return int(count), checksum
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
+        return -1, ""
+
+
+def verify_clickhouse_table(
+    *,
+    host: str = "",
+    port: int = 9000,
+    database: str = "",
+    username: str = "",
+    password: str = "",
+    connection_string: str = "",
+    schema: str = "",
+    ssl: bool = False,
+    table_name: str,
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Independent ClickHouse read-back with ``SELECT … FINAL`` (Airbyte-class).
+
+    ReplacingMergeTree upsert is lazy — Gate-8 without FINAL would fingerprint
+    duplicate keys and false-fail checksum reconcile.
+    """
+    try:
+        import sqlalchemy as sa
+
+        from connectors.generic_sql import (
+            clickhouse_final_table_sql,
+            get_sqlalchemy_engine,
+        )
+        from connectors.sql_identifiers import quote_table_ref
+
+        cfg: dict[str, Any] = {
+            "type": "clickhouse",
+            "host": host or "",
+            "port": int(port or 9000),
+            "database": database or "",
+            "username": username or "",
+            "password": password or "",
+            "connection_string": connection_string or "",
+            "schema": schema or "",
+            "ssl": bool(ssl),
+        }
+        engine = get_sqlalchemy_engine(cfg)
+        table_ref = quote_table_ref(
+            table_name,
+            schema=schema or None,
+            dialect="clickhouse",
+        )
+        from_sql = clickhouse_final_table_sql(table_ref)
+        with engine.connect() as conn:
+            count = int(
+                conn.execute(
+                    sa.text(f"SELECT count() FROM {from_sql}")  # nosec B608
+                ).scalar()
+                or 0
+            )
+            result = conn.execute(sa.text(f"SELECT * FROM {from_sql}"))  # nosec B608
+            names = list(result.keys())
+            columns = names or target_columns or []
+            checksum = canonical_checksum_from_iter(
+                (tuple(row) for row in result),
+                columns,
+                limit=limit,
+                dest_db_type="clickhouse",
+                dest_types=dest_types,
+            )
+        return count, checksum
+    except Exception as exc:
+        logger.warning("ClickHouse reconciliation read-back failed: %s", exc, exc_info=exc)
+        return -1, ""
+
+
+def verify_generic_sql_table(
+    *,
+    dest: dict[str, Any],
+    schema: str = "",
+    table_name: str,
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+    engine_hint: str = "",
+) -> tuple[int, str]:
+    """Independent SQLAlchemy read-back for catalog ``generic_sql`` engines.
+
+    Covers Teradata / HANA / Vertica / Informix / Trino / Firebird / Netezza and
+    other SQLAlchemy-backed SKUs that share ``get_sqlalchemy_engine``. Returns
+    ``(-1, "")`` only when the engine cannot connect or the table is missing —
+    never invent a checksum from writer rowcounts (Gate-8 honesty).
+    """
+    try:
+        import sqlalchemy as sa
+
+        from connectors.generic_sql import get_sqlalchemy_engine
+        from connectors.sql_identifiers import quote_table_ref
+
+        hint = (
+            (engine_hint or dest.get("type") or dest.get("engine") or "generic_sql")
+            .strip()
+            .lower()
+        )
+        cfg = dict(dest)
+        cfg["type"] = hint if hint and hint != "generic_sql" else (
+            str(dest.get("type") or "generic_sql")
+        )
+        engine = get_sqlalchemy_engine(cfg)
+        dialect = (
+            getattr(getattr(engine, "dialect", None), "name", None) or hint or "ansi"
+        ).lower()
+        sch = (schema or dest.get("schema") or "").strip() or None
+        table_ref = quote_table_ref(table_name, schema=sch, dialect=dialect)
+        with engine.connect() as conn:
+            count = int(
+                conn.execute(
+                    sa.text(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
+                ).scalar()
+                or 0
+            )
+            result = conn.execute(sa.text(f"SELECT * FROM {table_ref}"))  # nosec B608
+            names = list(result.keys())
+            columns = names or target_columns or []
+            checksum = canonical_checksum_from_iter(
+                (tuple(row) for row in result),
+                columns,
+                limit=limit,
+                dest_db_type=hint or dialect,
+                dest_types=dest_types,
+            )
+        return count, checksum
+    except Exception as exc:
+        logger.warning(
+            "generic_sql reconciliation read-back failed (%s): %s",
+            engine_hint or dest.get("type"),
+            exc,
+            exc_info=exc,
+        )
         return -1, ""
 
 
@@ -1321,6 +2408,143 @@ def verify_redis_prefix(
         checksum = canonical_checksum_from_iter(_row_iter(), columns, limit=limit)
         return len(keys), checksum
     except Exception as exc:
+        logger.warning("Redis reconciliation read-back failed: %s", exc, exc_info=exc)
+        return -1, ""
+
+
+def verify_elasticsearch_index(
+    *,
+    host: str = "",
+    port: int = 9200,
+    username: str = "",
+    password: str = "",
+    connection_string: str = "",
+    ssl: bool = False,
+    api_key: str = "",
+    index: str,
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Independent Elasticsearch search read-back for Gate-8."""
+    try:
+        from connectors.elasticsearch_reader import read_index_batch
+
+        cfg = {
+            "host": host,
+            "port": port,
+            "username": username,
+            "password": password,
+            "connection_string": connection_string,
+            "ssl": ssl,
+            "api_key": api_key,
+        }
+        batch, _ = read_index_batch(
+            cfg=cfg,
+            index=index,
+            columns=target_columns,
+            limit=max(int(limit or 500), 1),
+        )
+        headers = list(batch.headers or target_columns or [])
+        dict_rows: list[Any] = []
+        for row in batch.rows or []:
+            if isinstance(row, dict):
+                dict_rows.append(row)
+            elif headers:
+                dict_rows.append(
+                    {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}
+                )
+        columns = headers or target_columns or (
+            sorted({k for r in dict_rows if isinstance(r, dict) for k in r}) if dict_rows else []
+        )
+        # Prefer index cardinality when available (batch may be LIMIT-capped).
+        count = len(dict_rows)
+        try:
+            from connectors.elasticsearch_reader import _client
+
+            es = _client(cfg)
+            try:
+                count = int(es.count(index=index).get("count", count))
+            finally:
+                es.close()
+        except Exception:
+            pass
+        return count, canonical_checksum_from_iter(
+            dict_rows,
+            columns,
+            limit=limit,
+            dest_db_type="elasticsearch",
+            dest_types=dest_types,
+        )
+    except Exception as exc:
+        logger.warning("Elasticsearch reconciliation read-back failed: %s", exc, exc_info=exc)
+        return -1, ""
+
+
+def verify_snowflake_table(
+    *,
+    host: str,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    connection_string: str,
+    warehouse: str,
+    table_name: str,
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    try:
+        from connectors.snowflake_conn import (
+            get_connection,
+            normalize_account,
+            resolve_or_fold_snowflake_table,
+            snowflake_qualified_table,
+        )
+
+        conn = get_connection(
+            account=normalize_account(host),
+            username=username,
+            password=password,
+            database=database,
+            schema=schema,
+            warehouse=warehouse,
+            connection_string=connection_string,
+        )
+        from connectors.sql_identifiers import (
+            quote_sql_identifier,
+            require_safe_identifier,
+        )
+
+        with conn.cursor() as cur:
+            if warehouse:
+                try:
+                    wh = require_safe_identifier(warehouse, preserve_case=True)
+                    cur.execute(f"USE WAREHOUSE {quote_sql_identifier(wh)}")
+                except Exception as exc:
+                    logging.getLogger(__name__).warning(
+                        "Exception suppressed: %s", exc, exc_info=exc
+                    )
+            resolved = resolve_or_fold_snowflake_table(
+                cur, schema or "PUBLIC", table_name
+            )
+            qualified_name = snowflake_qualified_table(schema or "PUBLIC", resolved)
+            cur.execute(f"SELECT COUNT(*) FROM {qualified_name}")  # nosec B608
+            count = int(cur.fetchone()[0])
+            cur.execute(f"SELECT * FROM {qualified_name}")  # nosec B608
+            names = [d[0] for d in cur.description] if cur.description else []
+            columns = names or target_columns or []
+            checksum = canonical_checksum_from_iter(
+                _iter_fetchmany(cur),
+                columns,
+                limit=limit,
+                dest_db_type="snowflake",
+                dest_types=dest_types,
+            )
+        conn.close()
+        return count, checksum
+    except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
 
@@ -1390,7 +2614,19 @@ def verify_target(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
 ) -> tuple[int, str]:
+    """Independent destination read-back for Gate-8.
+
+    ``written_ids`` (from writer meta) enables keyed fetch for vector / SaaS
+    destinations where full-table scan is unavailable — Fivetran HVR Compare
+    class: prove the batch we wrote, not an opaque index count alone.
+    """
+    # Prefer explicit arg; allow dest cfg stash from reconcile_step.
+    ids = written_ids
+    if ids is None and isinstance(dest.get("written_ids"), list):
+        ids = [str(x) for x in dest["written_ids"] if x is not None]
+
     if db_type == "iceberg":
         count, chk = verify_iceberg_table(
             connection_string=dest.get("connection_string", ""),
@@ -1446,7 +2682,9 @@ def verify_target(
             limit=limit,
         )
     elif db_type == "generic_sql":
-        # Route local file engines by URL/path; otherwise no independent verifier.
+        # Route local file engines / Oracle / ClickHouse by URL or dest.type.
+        # Catalog maps clickhouse→generic_sql driver; endpoint.format stays in type.
+        engine_hint = str(dest.get("type") or dest.get("engine") or "").lower()
         conn = (dest.get("connection_string") or dest.get("database") or "").lower()
         if "sqlite" in conn or conn.endswith(".db") or conn.endswith(".sqlite"):
             count, chk = verify_sqlite_table(
@@ -1465,8 +2703,62 @@ def verify_target(
                 target_columns=target_columns,
                 limit=limit,
             )
+        elif conn.startswith("oracle") or engine_hint.startswith("oracle"):
+            count, chk = verify_oracle_table(
+                host=dest.get("host", ""),
+                port=int(dest.get("port") or 1521),
+                database=dest.get("database", ""),
+                username=dest.get("username", ""),
+                password=dest.get("password", ""),
+                connection_string=dest.get("connection_string", ""),
+                schema=schema or dest.get("schema") or "",
+                table_name=table_name,
+                target_columns=target_columns,
+                limit=limit,
+                dest_types=dest_types,
+            )
+        elif "clickhouse" in engine_hint or "clickhouse" in conn:
+            count, chk = verify_clickhouse_table(
+                host=dest.get("host", ""),
+                port=int(dest.get("port") or 9000),
+                database=dest.get("database", ""),
+                username=dest.get("username", ""),
+                password=dest.get("password", ""),
+                connection_string=dest.get("connection_string", ""),
+                schema=schema or dest.get("schema") or "",
+                ssl=bool(dest.get("ssl", False)),
+                table_name=table_name,
+                target_columns=target_columns,
+                limit=limit,
+                dest_types=dest_types,
+            )
         else:
-            count, chk = -1, ""
+            # Teradata / HANA / Vertica / Informix / Trino / Firebird / …
+            # — independent SQLAlchemy read-back (never invent from writer counts).
+            count, chk = verify_generic_sql_table(
+                dest=dest,
+                schema=schema or dest.get("schema") or "",
+                table_name=table_name,
+                target_columns=target_columns,
+                limit=limit,
+                dest_types=dest_types,
+                engine_hint=engine_hint,
+            )
+    elif db_type == "clickhouse":
+        count, chk = verify_clickhouse_table(
+            host=dest.get("host", ""),
+            port=int(dest.get("port") or 9000),
+            database=dest.get("database", ""),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            connection_string=dest.get("connection_string", ""),
+            schema=schema or dest.get("schema") or "",
+            ssl=bool(dest.get("ssl", False)),
+            table_name=table_name,
+            target_columns=target_columns,
+            limit=limit,
+            dest_types=dest_types,
+        )
     elif db_type == "pgvector":
         # pgvector tables store an opaque embedding; reconstruct source rows from
         # the JSON metadata and source_id for an honest checksum reconciliation.
@@ -1514,6 +2806,20 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
         )
+    elif db_type in {"elasticsearch", "opensearch", "elastic"}:
+        count, chk = verify_elasticsearch_index(
+            host=dest.get("host", ""),
+            port=int(dest.get("port") or 9200),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            connection_string=dest.get("connection_string", ""),
+            ssl=bool(dest.get("ssl", False)),
+            api_key=str(dest.get("api_key") or dest.get("service_account") or ""),
+            index=table_name,
+            target_columns=target_columns,
+            limit=limit,
+            dest_types=dest_types,
+        )
     elif db_type == "snowflake":
         count, chk = verify_snowflake_table(
             host=dest.get("host", ""),
@@ -1556,6 +2862,27 @@ def verify_target(
             limit=limit,
             dest_types=dest_types,
         )
+    elif db_type in {
+        "oracle",
+        "oracledb",
+        "oracle_db",
+        "oracle_autonomous",
+        "oracle_autonomous_warehouse",
+        "amazon_rds_oracle",
+    }:
+        count, chk = verify_oracle_table(
+            host=dest.get("host", ""),
+            port=int(dest.get("port") or 1521),
+            database=dest.get("database", ""),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            connection_string=dest.get("connection_string", ""),
+            schema=schema or dest.get("schema") or "",
+            table_name=table_name,
+            target_columns=target_columns,
+            limit=limit,
+            dest_types=dest_types,
+        )
     elif db_type == "bigquery":
         count, chk = verify_bigquery_table(
             project_id=dest.get("database", ""),
@@ -1589,6 +2916,249 @@ def verify_target(
             connection_string=dest.get("connection_string", ""),
             target_columns=target_columns,
             limit=limit,
+        )
+    elif db_type in {
+        "adls",
+        "azure_blob_storage",
+        "azure_data_lake",
+        "azure_data_lake_storage",
+    }:
+        count, chk = verify_adls_blob(
+            container=dest.get("database", "") or schema or "",
+            key=table_name,
+            host=dest.get("host", ""),
+            port=int(dest.get("port") or 0),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            connection_string=dest.get("connection_string", ""),
+            service_account=dest.get("service_account", ""),
+            target_columns=target_columns,
+            limit=limit,
+            dest_types=dest_types,
+        )
+    elif db_type == "sftp":
+        count, chk = verify_sftp_object(
+            host=dest.get("host", ""),
+            port=int(dest.get("port") or 22),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            connection_string=dest.get("connection_string", ""),
+            database=dest.get("database", "") or schema or "",
+            table_name=table_name,
+            target_columns=target_columns,
+            limit=limit,
+            dest_types=dest_types,
+        )
+    elif db_type in {
+        "databricks",
+        "databricks_sql",
+        "delta",
+        "delta_lake",
+        "unity_catalog",
+        "spark",
+    }:
+        count, chk = verify_databricks_table(
+            host=dest.get("host", ""),
+            port=int(dest.get("port") or 443),
+            database=dest.get("database", ""),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            connection_string=dest.get("connection_string", ""),
+            schema=schema or dest.get("schema") or "",
+            table_name=table_name,
+            http_path=str(dest.get("http_path") or dest.get("warehouse") or ""),
+            target_columns=target_columns,
+            limit=limit,
+            dest_types=dest_types,
+        )
+    elif db_type == "hubspot":
+        count, chk = verify_hubspot_object(
+            host=dest.get("host", ""),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            connection_string=dest.get("connection_string", ""),
+            object_name=table_name or dest.get("table") or "contacts",
+            target_columns=target_columns,
+            limit=limit,
+            dest_types=dest_types,
+        )
+    elif db_type == "salesforce":
+        count, chk = verify_salesforce_object(
+            host=dest.get("host", ""),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            connection_string=dest.get("connection_string", ""),
+            api_key=str(dest.get("api_key") or ""),
+            object_name=table_name or dest.get("table") or "Account",
+            target_columns=target_columns,
+            limit=limit,
+            dest_types=dest_types,
+        )
+    elif db_type == "airtable":
+        count, chk = verify_airtable_table(
+            host=dest.get("host", ""),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            connection_string=dest.get("connection_string", ""),
+            api_key=str(dest.get("api_key") or ""),
+            base_id=str(dest.get("database") or schema or ""),
+            table_name=table_name or dest.get("table") or "",
+            target_columns=target_columns,
+            limit=limit,
+            dest_types=dest_types,
+        )
+    elif db_type == "stripe":
+        count, chk = verify_stripe_object(
+            host=dest.get("host", ""),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            connection_string=dest.get("connection_string", ""),
+            api_key=str(dest.get("api_key") or ""),
+            object_name=table_name or dest.get("table") or "customers",
+            target_columns=target_columns,
+            limit=limit,
+            dest_types=dest_types,
+        )
+    elif db_type == "shopify":
+        count, chk = verify_shopify_object(
+            host=dest.get("host", ""),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            connection_string=dest.get("connection_string", ""),
+            api_key=str(dest.get("api_key") or ""),
+            object_name=table_name or dest.get("table") or "customers",
+            target_columns=target_columns,
+            limit=limit,
+            dest_types=dest_types,
+        )
+    elif db_type == "zendesk":
+        count, chk = verify_zendesk_object(
+            host=dest.get("host", ""),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            connection_string=dest.get("connection_string", ""),
+            api_key=str(dest.get("api_key") or ""),
+            object_name=table_name or dest.get("table") or "tickets",
+            target_columns=target_columns,
+            limit=limit,
+            dest_types=dest_types,
+        )
+    elif db_type == "notion":
+        count, chk = verify_notion_object(
+            host=dest.get("host", ""),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            connection_string=dest.get("connection_string", ""),
+            api_key=str(dest.get("api_key") or ""),
+            object_name=table_name or dest.get("table") or "",
+            database_id=str(dest.get("database") or schema or ""),
+            target_columns=target_columns,
+            limit=limit,
+            dest_types=dest_types,
+        )
+    elif db_type == "kafka":
+        count, chk = verify_kafka_topic(
+            host=dest.get("host", ""),
+            port=int(dest.get("port") or 9092),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            connection_string=dest.get("connection_string", ""),
+            topic=table_name or dest.get("table") or dest.get("database") or "",
+            target_columns=target_columns,
+            limit=limit,
+            dest_types=dest_types,
+            schema_registry_url=str(
+                dest.get("schema_registry_url") or dest.get("registry_url") or ""
+            ),
+        )
+    elif db_type == "pinecone":
+        count, chk = verify_pinecone_namespace(
+            host=dest.get("host", ""),
+            connection_string=dest.get("connection_string", ""),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            api_key=str(dest.get("api_key") or ""),
+            namespace=table_name or dest.get("schema") or "",
+            target_columns=target_columns,
+            limit=limit,
+            dest_types=dest_types,
+            written_ids=ids,
+        )
+    elif db_type == "qdrant":
+        count, chk = verify_qdrant_collection(
+            host=dest.get("host", ""),
+            port=int(dest.get("port") or 6333),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            connection_string=dest.get("connection_string", ""),
+            ssl=bool(dest.get("ssl", False)),
+            collection=table_name or dest.get("database") or "dataflow_vectors",
+            target_columns=target_columns,
+            limit=limit,
+            dest_types=dest_types,
+            written_ids=ids,
+        )
+    elif db_type == "weaviate":
+        count, chk = verify_weaviate_class(
+            host=dest.get("host", ""),
+            port=int(dest.get("port") or 8080),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            connection_string=dest.get("connection_string", ""),
+            ssl=bool(dest.get("ssl", False)),
+            api_key=str(dest.get("api_key") or ""),
+            class_name=table_name or dest.get("database") or "DataflowChunk",
+            target_columns=target_columns,
+            limit=limit,
+            dest_types=dest_types,
+            written_ids=ids,
+        )
+    elif db_type == "milvus":
+        count, chk = verify_milvus_collection(
+            host=dest.get("host", ""),
+            port=int(dest.get("port") or 19530),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            connection_string=dest.get("connection_string", ""),
+            ssl=bool(dest.get("ssl", False)),
+            api_key=str(dest.get("api_key") or ""),
+            database=dest.get("database", "") or schema or "",
+            collection=table_name or "dataflow_chunks",
+            target_columns=target_columns,
+            limit=limit,
+            dest_types=dest_types,
+            written_ids=ids,
+        )
+    elif db_type in {
+        "teradata",
+        "teradata_vantage",
+        "vertica",
+        "hana",
+        "sap_hana",
+        "sap_bw_4hana",
+        "informix",
+        "firebird",
+        "netezza",
+        "trino",
+        "presto",
+        "athena",
+        "amazon_athena",
+        "hive",
+        "impala",
+        "sybase",
+        "sybase_ase",
+        "sap_ase",
+        "sap_iq",
+    }:
+        # Catalog id may arrive before resolve_driver_type → generic_sql.
+        count, chk = verify_generic_sql_table(
+            dest=dest,
+            schema=schema or dest.get("schema") or "",
+            table_name=table_name,
+            target_columns=target_columns,
+            limit=limit,
+            dest_types=dest_types,
+            engine_hint=db_type,
         )
     else:
         count, chk = -1, ""
@@ -1640,18 +3210,32 @@ def fingerprint_for_reconcile(
             wire = normalize_sql_bind_value(wire, ddl_type, engine=engine)
         except Exception:
             pass
-    return normalize_cell(wire)
+    return normalize_cell(wire, ddl_type=ddl_type, engine=engine)
 
 
-def normalize_cell(value: Any) -> str:
+def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
+    """Canonical cell text for Gate-8 checksums.
+
+    CHAR/NCHAR blank-pad is a storage artifact (Oracle/SQL Server/MySQL) — rtrim
+    spaces so faithful CHAR→VARCHAR migrations do not false-fail (wmk/Airbyte
+    class). VARCHAR/TEXT preserve trailing spaces when ``ddl_type`` is known so
+    intentional trailing whitespace is not silently equated away.
+
+    When ``engine`` is Oracle, zero-length strings fingerprint as NULL (Oracle
+    VARCHAR2 semantics / HVR write-location compare rules). Postgres/MySQL keep
+    NULL and ``""`` distinct.
+    """
     if value is None:
         # Distinct from empty string — SQL/Dynamo NULL must not checksum as "".
-        return "\x00NULL\x00"
+        return _NULL_SENTINEL
     if isinstance(value, str) and value.strip().lower() in {
         "__df_sql_null__",
         "__df_ddb_null__",
     }:
-        return "\x00NULL\x00"
+        return _NULL_SENTINEL
+    # Oracle write-location: '' is stored/read as NULL — equate before other paths.
+    if destination_empty_string_is_null(engine) and isinstance(value, str) and value == "":
+        return _NULL_SENTINEL
     if isinstance(value, bool):
         return "1" if value else "0"
     if isinstance(value, _datetime):
@@ -1686,7 +3270,64 @@ def normalize_cell(value: Any) -> str:
         return base64.b64encode(value).decode("ascii")
     if isinstance(value, (dict, list, tuple, set, frozenset)):
         return json.dumps(value, sort_keys=True, default=json_default)
-    text = str(value).strip()
+    raw_text = str(value)
+    if ddl_type:
+        try:
+            from services.type_system import (
+                fold_diacritics,
+                fold_kana,
+                fold_variation_selectors,
+                fold_width_forms,
+                is_accent_insensitive_collation,
+                is_case_insensitive_collation,
+                is_fixed_width_char_carrier,
+                is_kana_insensitive_collation,
+                is_variation_insensitive_collation,
+                is_width_insensitive_collation,
+                normalize_logical_type,
+            )
+
+            if is_fixed_width_char_carrier(ddl_type):
+                # Blank-pad only — do not strip leading spaces (rare but significant).
+                text = raw_text.rstrip(" ")
+            elif normalize_logical_type(ddl_type) in {"string", "text"}:
+                # VARCHAR/TEXT: preserve trailing spaces (significant payload).
+                text = raw_text
+            else:
+                text = raw_text.strip()
+            # Collation equality must match the destination engine (CI/AI/WI/KI/VSS).
+            if is_width_insensitive_collation(ddl_type):
+                text = fold_width_forms(text)
+            if is_kana_insensitive_collation(ddl_type):
+                text = fold_kana(text)
+            if is_variation_insensitive_collation(ddl_type):
+                text = fold_variation_selectors(text)
+            if is_accent_insensitive_collation(ddl_type):
+                text = fold_diacritics(text)
+            if is_case_insensitive_collation(ddl_type):
+                text = text.casefold()
+            # UUID / UNIQUEIDENTIFIER / CHAR(36) UUID carriers — canonicalize
+            # braces / 32-hex / case so source wire and dest read-back match
+            # (Fivetran HVR compare class: destination storage rules win).
+            try:
+                from services.type_system import normalize_logical_type
+
+                if normalize_logical_type(ddl_type) == "uuid" or re.search(
+                    r"\b(?:uuid|uniqueidentifier|guid)\b", ddl_type, re.I
+                ):
+                    try:
+                        from connectors.sql_bind import coerce_uuid_wire
+
+                        text = coerce_uuid_wire(text) or text
+                    except ValueError:
+                        if _UUID_RE.match(text):
+                            text = text.lower()
+            except Exception:
+                pass
+        except Exception:
+            text = raw_text.strip()
+    else:
+        text = raw_text.strip()
     # Boolean and empty fast paths.
     if not text:
         return ""
@@ -2314,6 +3955,130 @@ def read_target_sample(
             conn.close()
             return [dict(zip(names, row)) for row in rows]
 
+        if db_type in {"sqlserver", "mssql", "azure_sql"}:
+            import pymssql
+
+            lim = max(1, int(limit or 50))
+            if cols == ["*"]:
+                ss_col_sql = "*"
+            else:
+                ss_col_sql = ", ".join(
+                    f"[{require_safe_identifier(c, preserve_case=True).replace(']', ']]')}]"
+                    for c in cols
+                )
+            sch = (schema or dest.get("schema") or "dbo").strip() or "dbo"
+            table_ref = quote_table_ref(table_name, schema=sch, dialect="sqlserver")
+            ss_order = (
+                f"[{require_safe_identifier(sort_key, preserve_case=True).replace(']', ']]')}]"
+                if sort_key
+                else "1"
+            )
+            conn = pymssql.connect(
+                server=dest.get("host") or "127.0.0.1",
+                port=int(dest.get("port") or 1433),
+                user=dest.get("username") or "sa",
+                password=dest.get("password") or "",
+                database=dest.get("database") or "master",
+                login_timeout=10,
+                timeout=30,
+            )
+            cur = conn.cursor()
+            try:
+                if keys and sort_key:
+                    key_col = (
+                        f"[{require_safe_identifier(sort_key, preserve_case=True).replace(']', ']]')}]"
+                    )
+                    placeholders = ",".join(["%s"] * len(keys))
+                    cur.execute(
+                        f"SELECT TOP ({lim}) {ss_col_sql} FROM {table_ref} "  # nosec B608
+                        f"WHERE {key_col} IN ({placeholders}) "
+                        f"ORDER BY {ss_order}",
+                        tuple(keys),
+                    )
+                else:
+                    cur.execute(
+                        f"SELECT TOP ({lim}) {ss_col_sql} FROM {table_ref} "  # nosec B608
+                        f"ORDER BY {ss_order}"
+                    )
+                names = _row_names(cur.description)
+                rows = cur.fetchall()
+            finally:
+                cur.close()
+                conn.close()
+            return [dict(zip(names, row)) for row in rows]
+
+        if db_type in {
+            "oracle",
+            "oracledb",
+            "oracle_db",
+            "oracle_autonomous",
+            "oracle_autonomous_warehouse",
+            "amazon_rds_oracle",
+        } or (
+            db_type == "generic_sql"
+            and (dest.get("connection_string") or "").lower().startswith("oracle")
+        ):
+            import sqlalchemy as sa
+
+            from connectors.generic_sql import get_sqlalchemy_engine
+
+            lim = max(1, int(limit or 50))
+            ora_col_sql = (
+                "*"
+                if cols == ["*"]
+                else quote_column_list(
+                    [require_safe_identifier(c, preserve_case=True) for c in cols]
+                )
+            )
+            sch = (schema or dest.get("schema") or dest.get("username") or "").strip() or None
+            table_ref = quote_table_ref(table_name, schema=sch, dialect="oracle")
+            ora_order = (
+                quote_sql_identifier(
+                    require_safe_identifier(sort_key, preserve_case=True)
+                )
+                if sort_key
+                else "1"
+            )
+            engine = get_sqlalchemy_engine(
+                {
+                    "type": "oracle",
+                    "host": dest.get("host", ""),
+                    "port": int(dest.get("port") or 1521),
+                    "database": dest.get("database", ""),
+                    "username": dest.get("username", ""),
+                    "password": dest.get("password", ""),
+                    "connection_string": dest.get("connection_string", ""),
+                    "schema": schema or dest.get("schema") or "",
+                }
+            )
+            with engine.connect() as conn:
+                if keys and sort_key:
+                    key_col = quote_sql_identifier(
+                        require_safe_identifier(sort_key, preserve_case=True)
+                    )
+                    params: dict[str, Any] = {f"k{i}": k for i, k in enumerate(keys)}
+                    params["lim"] = lim
+                    placeholders = ",".join(f":k{i}" for i in range(len(keys)))
+                    sql = (
+                        f"SELECT {ora_col_sql} FROM {table_ref} "  # nosec B608
+                        f"WHERE {key_col} IN ({placeholders}) "
+                        f"ORDER BY {ora_order} FETCH FIRST :lim ROWS ONLY"
+                    )
+                else:
+                    params = {"lim": lim}
+                    sql = (
+                        f"SELECT {ora_col_sql} FROM {table_ref} "  # nosec B608
+                        f"ORDER BY {ora_order} FETCH FIRST :lim ROWS ONLY"
+                    )
+                result = conn.execute(sa.text(sql), params)
+                names = (
+                    list(cols)
+                    if cols and cols != ["*"]
+                    else list(result.keys())
+                )
+                rows = result.fetchall()
+                return [dict(zip(names, tuple(row))) for row in rows]
+
         if db_type == "duckdb" or (
             db_type == "generic_sql"
             and (
@@ -2572,6 +4337,53 @@ def read_target_sample(
             except Exception:
                 return []
 
+        if db_type in {"elasticsearch", "opensearch", "elastic"}:
+            from connectors.elasticsearch_reader import read_index_batch
+
+            cfg = {
+                "host": dest.get("host", ""),
+                "port": int(dest.get("port") or 9200),
+                "username": dest.get("username", ""),
+                "password": dest.get("password", ""),
+                "connection_string": dest.get("connection_string", ""),
+                "ssl": bool(dest.get("ssl", False)),
+                "api_key": str(dest.get("api_key") or dest.get("service_account") or ""),
+            }
+            try:
+                batch, _ = read_index_batch(
+                    cfg=cfg,
+                    index=table_name,
+                    columns=None if cols == ["*"] else cols,
+                    limit=max(1, int(limit or 50)),
+                )
+                headers = list(batch.headers or [])
+                rows_out: list[dict[str, Any]] = []
+                for row in batch.rows or []:
+                    if isinstance(row, dict):
+                        payload = row
+                    elif headers:
+                        payload = {
+                            headers[i]: row[i] if i < len(row) else None
+                            for i in range(len(headers))
+                        }
+                    else:
+                        continue
+                    if keys and sort_key:
+                        sk = str(payload.get(sort_key, ""))
+                        if sk not in {str(k) for k in keys}:
+                            continue
+                    rows_out.append(payload)
+                    if len(rows_out) >= limit:
+                        break
+                if columns and columns != ["*"]:
+                    rows_out = [
+                        {k: v for k, v in row.items() if k in columns}
+                        for row in rows_out
+                    ]
+                return rows_out[:limit]
+            except Exception:
+                return []
+
         if db_type == "snowflake":
             from connectors.snowflake_conn import (
                 get_connection,
@@ -2742,6 +4554,723 @@ def read_target_sample(
                 ]
             except Exception:
                 return []
+
+        if db_type in {
+            "adls",
+            "azure_blob_storage",
+            "azure_data_lake",
+            "azure_data_lake_storage",
+        }:
+            from connectors.adls_common import blob_service_client
+
+            container = (dest.get("database") or schema or "").strip()
+            if not container or not table_name:
+                return []
+            client = blob_service_client(
+                {
+                    "host": dest.get("host", ""),
+                    "port": int(dest.get("port") or 0),
+                    "username": dest.get("username", ""),
+                    "password": dest.get("password", ""),
+                    "connection_string": dest.get("connection_string", ""),
+                    "service_account": dest.get("service_account", ""),
+                    "database": container,
+                }
+            )
+            body = client.get_blob_client(container, table_name).download_blob().readall()
+            rows, _headers = _rows_from_object_bytes(
+                body, table_name, None if cols == ["*"] else cols
+            )
+            lim = max(1, int(limit or 50))
+            if keys and sort_key:
+                widened = set(keys)
+                out = [r for r in rows if r.get(sort_key) in widened]
+                return out[:lim]
+            return rows[:lim]
+
+        if db_type in {
+            "databricks",
+            "databricks_sql",
+            "delta",
+            "delta_lake",
+            "unity_catalog",
+            "spark",
+        }:
+            import sqlalchemy as sa
+
+            from connectors.generic_sql import get_sqlalchemy_engine
+
+            lim = max(1, int(limit or 50))
+            db_col_sql = (
+                "*"
+                if cols == ["*"]
+                else quote_column_list(
+                    [require_safe_identifier(c, preserve_case=True) for c in cols]
+                )
+            )
+            sch = (schema or dest.get("schema") or dest.get("database") or "").strip() or None
+            table_ref = quote_table_ref(table_name, schema=sch, dialect="ansi")
+            db_order = (
+                quote_sql_identifier(
+                    require_safe_identifier(sort_key, preserve_case=True)
+                )
+                if sort_key
+                else "1"
+            )
+            engine = get_sqlalchemy_engine(
+                {
+                    "type": "databricks",
+                    "host": dest.get("host", ""),
+                    "port": int(dest.get("port") or 443),
+                    "database": dest.get("database", ""),
+                    "username": dest.get("username", ""),
+                    "password": dest.get("password", ""),
+                    "connection_string": dest.get("connection_string", ""),
+                    "schema": schema or dest.get("schema") or "",
+                    "http_path": str(dest.get("http_path") or dest.get("warehouse") or ""),
+                }
+            )
+            with engine.connect() as conn:
+                if keys and sort_key:
+                    key_col = quote_sql_identifier(
+                        require_safe_identifier(sort_key, preserve_case=True)
+                    )
+                    params = {f"k{i}": k for i, k in enumerate(keys)}
+                    params["lim"] = lim
+                    placeholders = ",".join(f":k{i}" for i in range(len(keys)))
+                    sql = (
+                        f"SELECT {db_col_sql} FROM {table_ref} "  # nosec B608
+                        f"WHERE {key_col} IN ({placeholders}) "
+                        f"ORDER BY {db_order} LIMIT :lim"
+                    )
+                else:
+                    params = {"lim": lim}
+                    sql = (
+                        f"SELECT {db_col_sql} FROM {table_ref} "  # nosec B608
+                        f"ORDER BY {db_order} LIMIT :lim"
+                    )
+                result = conn.execute(sa.text(sql), params)
+                names = list(cols) if cols and cols != ["*"] else list(result.keys())
+                return [dict(zip(names, tuple(row))) for row in result.fetchall()]
+
+        if db_type == "hubspot":
+            from connectors.hubspot import read_object
+
+            batch = read_object(
+                cfg={
+                    "host": dest.get("host", ""),
+                    "username": dest.get("username", ""),
+                    "password": dest.get("password", ""),
+                    "connection_string": dest.get("connection_string", ""),
+                    "table": table_name,
+                    "database": table_name,
+                },
+                object=table_name or "contacts",
+                limit=max(1, int(limit or 50)) * 5 if keys else max(1, int(limit or 50)),
+            )
+            headers = list(batch.headers or (cols if cols != ["*"] else []) or [])
+            out_rows: list[dict[str, Any]] = []
+            for row in batch.rows or []:
+                if isinstance(row, dict):
+                    d = dict(row)
+                elif headers:
+                    d = {
+                        headers[i]: row[i] if i < len(row) else None
+                        for i in range(len(headers))
+                    }
+                else:
+                    continue
+                if keys and sort_key and d.get(sort_key) not in set(keys):
+                    continue
+                if cols and cols != ["*"]:
+                    d = {k: d.get(k) for k in cols}
+                out_rows.append(d)
+                if len(out_rows) >= int(limit or 50):
+                    break
+            return out_rows
+
+        if db_type == "salesforce":
+            from connectors.salesforce import read_object
+
+            batch = read_object(
+                cfg={
+                    "host": dest.get("host", ""),
+                    "username": dest.get("username", ""),
+                    "password": dest.get("password", ""),
+                    "connection_string": dest.get("connection_string", ""),
+                    "api_key": dest.get("api_key", ""),
+                    "table": table_name,
+                    "database": table_name,
+                },
+                object=table_name or "Account",
+                limit=max(1, int(limit or 50)) * 5 if keys else max(1, int(limit or 50)),
+            )
+            headers = list(batch.headers or [])
+            out_rows = []
+            for row in batch.rows or []:
+                if isinstance(row, dict):
+                    d = {k: v for k, v in row.items() if k != "attributes"}
+                elif headers:
+                    d = {
+                        headers[i]: row[i] if i < len(row) else None
+                        for i in range(len(headers))
+                    }
+                else:
+                    continue
+                if keys and sort_key and d.get(sort_key) not in set(keys):
+                    continue
+                if cols and cols != ["*"]:
+                    d = {k: d.get(k) for k in cols}
+                out_rows.append(d)
+                if len(out_rows) >= int(limit or 50):
+                    break
+            return out_rows
+
+        if db_type == "airtable":
+            from connectors.airtable import read_object
+            from connectors.saas_typed_schema import flatten_airtable_record
+
+            batch = read_object(
+                cfg={
+                    "host": dest.get("host", ""),
+                    "username": dest.get("username", ""),
+                    "password": dest.get("password", ""),
+                    "connection_string": dest.get("connection_string", ""),
+                    "api_key": dest.get("api_key", ""),
+                    "database": dest.get("database") or schema or "",
+                    "table": table_name,
+                    "type": "airtable",
+                },
+                object=table_name,
+                limit=max(1, int(limit or 50)) * 5 if keys else max(1, int(limit or 50)),
+            )
+            out_rows = []
+            for row in batch.rows or []:
+                if isinstance(row, dict):
+                    d, _ = flatten_airtable_record(row)
+                elif batch.headers:
+                    headers = list(batch.headers)
+                    d = {
+                        headers[i]: row[i] if i < len(row) else None
+                        for i in range(len(headers))
+                    }
+                else:
+                    continue
+                if keys and sort_key and d.get(sort_key) not in set(keys):
+                    continue
+                if cols and cols != ["*"]:
+                    d = {k: d.get(k) for k in cols}
+                out_rows.append(d)
+                if len(out_rows) >= int(limit or 50):
+                    break
+            return out_rows
+
+        if db_type in {"stripe", "shopify", "zendesk", "notion"}:
+            if db_type == "stripe":
+                from connectors.stripe import read_object as _saas_read
+            elif db_type == "shopify":
+                from connectors.shopify import read_object as _saas_read
+            elif db_type == "zendesk":
+                from connectors.zendesk import read_object as _saas_read
+            else:
+                from connectors.notion import read_object as _saas_read
+
+            batch = _saas_read(
+                cfg={
+                    "host": dest.get("host", ""),
+                    "username": dest.get("username", ""),
+                    "password": dest.get("password", ""),
+                    "connection_string": dest.get("connection_string", ""),
+                    "api_key": dest.get("api_key", ""),
+                    "table": table_name,
+                    "database": dest.get("database") or schema or table_name,
+                    "shop": dest.get("host", ""),
+                    "type": db_type,
+                },
+                object=table_name
+                or (
+                    "customers"
+                    if db_type in {"stripe", "shopify"}
+                    else ("tickets" if db_type == "zendesk" else "")
+                ),
+                limit=max(1, int(limit or 50)) * 5 if keys else max(1, int(limit or 50)),
+            )
+            headers = list(batch.headers or [])
+            out_rows = []
+            for row in batch.rows or []:
+                if isinstance(row, dict):
+                    d = dict(row)
+                elif headers:
+                    d = {
+                        headers[i]: row[i] if i < len(row) else None
+                        for i in range(len(headers))
+                    }
+                else:
+                    continue
+                if keys and sort_key and d.get(sort_key) not in set(keys):
+                    continue
+                if cols and cols != ["*"]:
+                    d = {k: d.get(k) for k in cols}
+                out_rows.append(d)
+                if len(out_rows) >= int(limit or 50):
+                    break
+            return out_rows
+
+        if db_type == "kafka":
+            from connectors.kafka_reader import read_topic_batch
+
+            batch, _ = read_topic_batch(
+                cfg={
+                    "host": dest.get("host", ""),
+                    "port": int(dest.get("port") or 9092),
+                    "username": dest.get("username", ""),
+                    "password": dest.get("password", ""),
+                    "connection_string": dest.get("connection_string", ""),
+                    "database": table_name,
+                    "table": table_name,
+                    "group_id": f"dataflow-gate8-sample-{abs(hash(table_name)) % 10_000_000}",
+                    "auto_offset_reset": "earliest",
+                    "schema_registry_url": str(
+                        dest.get("schema_registry_url") or dest.get("registry_url") or ""
+                    ),
+                },
+                topic=table_name,
+                columns=None if cols == ["*"] else cols,
+                limit=max(1, int(limit or 50)) * 5 if keys else max(1, int(limit or 50)),
+            )
+            headers = list(batch.headers or [])
+            out_rows = []
+            for row in batch.rows or []:
+                if isinstance(row, dict):
+                    d = dict(row)
+                elif headers:
+                    d = {
+                        headers[i]: row[i] if i < len(row) else None
+                        for i in range(len(headers))
+                    }
+                else:
+                    continue
+                if keys and sort_key and d.get(sort_key) not in set(keys):
+                    continue
+                if cols and cols != ["*"]:
+                    d = {k: d.get(k) for k in cols}
+                out_rows.append(d)
+                if len(out_rows) >= int(limit or 50):
+                    break
+            return out_rows
+
+        if db_type == "pinecone":
+            from connectors.pinecone_writer import _headers, _index_url, _requests_session
+
+            index_url = _index_url(dest.get("host", ""), dest.get("connection_string", ""))
+            key = str(
+                dest.get("api_key") or dest.get("password") or dest.get("username") or ""
+            )
+            if not index_url or not key:
+                return []
+            session = _requests_session()
+            hdrs = _headers(key)
+            ns = (table_name or dest.get("schema") or "").strip()
+            ids = [str(k) for k in keys] if keys else []
+            if not ids:
+                return []
+            params = [("ids", i) for i in ids[: max(1, int(limit or 50))]]
+            if ns:
+                params.append(("namespace", ns))
+            fetch = session.get(
+                f"{index_url}/vectors/fetch",
+                params=params,
+                headers=hdrs,
+                timeout=30,
+            )
+            if fetch.status_code not in {200, 201}:
+                return []
+            vectors = (fetch.json() or {}).get("vectors") or {}
+            out_rows = []
+            for vid, payload in vectors.items():
+                meta = payload.get("metadata") if isinstance(payload, dict) else {}
+                if not isinstance(meta, dict):
+                    meta = {}
+                row = {"id": vid, **meta}
+                if cols and cols != ["*"]:
+                    row = {k: row.get(k) for k in cols}
+                out_rows.append(row)
+                if len(out_rows) >= int(limit or 50):
+                    break
+            return out_rows
+
+        if db_type == "qdrant":
+            from connectors.qdrant_writer import _base_url, _headers, _requests_session
+
+            api_key = dest.get("password") or dest.get("username") or ""
+            base_url = (
+                dest.get("connection_string", "").rstrip("/")
+                if dest.get("connection_string")
+                else _base_url(
+                    dest.get("host", ""),
+                    int(dest.get("port") or 6333),
+                    bool(dest.get("ssl", False)),
+                )
+            )
+            collection = table_name or dest.get("database") or "dataflow_vectors"
+            session = _requests_session()
+            hdrs = _headers(str(api_key))
+            out_rows: list[dict[str, Any]] = []
+            if keys:
+                retrieve = session.post(
+                    f"{base_url}/collections/{collection}/points",
+                    data=json.dumps({
+                        "ids": [str(k) for k in keys[: max(1, int(limit or 50))]],
+                        "with_payload": True,
+                        "with_vector": False,
+                    }),
+                    headers=hdrs,
+                    timeout=30,
+                )
+                points = (
+                    (retrieve.json() or {}).get("result") or []
+                    if retrieve.status_code in {200, 201}
+                    else []
+                )
+            else:
+                scroll = session.post(
+                    f"{base_url}/collections/{collection}/points/scroll",
+                    data=json.dumps({
+                        "limit": max(1, int(limit or 50)),
+                        "with_payload": True,
+                        "with_vector": False,
+                    }),
+                    headers=hdrs,
+                    timeout=30,
+                )
+                points = (
+                    ((scroll.json() or {}).get("result") or {}).get("points") or []
+                    if scroll.status_code in {200, 201}
+                    else []
+                )
+            for pt in points:
+                if not isinstance(pt, dict):
+                    continue
+                payload = pt.get("payload") if isinstance(pt.get("payload"), dict) else {}
+                row = {"id": pt.get("id"), **payload}
+                if cols and cols != ["*"]:
+                    row = {k: row.get(k) for k in cols}
+                out_rows.append(row)
+                if len(out_rows) >= int(limit or 50):
+                    break
+            return out_rows
+
+        if db_type == "weaviate":
+            from connectors.weaviate_writer import (
+                _base_url,
+                _class_name,
+                _headers,
+                _requests_session,
+            )
+
+            key = str(
+                dest.get("api_key") or dest.get("password") or dest.get("username") or ""
+            )
+            base_url = _base_url(
+                dest.get("host", ""),
+                int(dest.get("port") or 8080),
+                bool(dest.get("ssl", False)),
+                dest.get("connection_string", ""),
+            )
+            cls = _class_name(table_name or dest.get("database") or "DataflowChunk")
+            session = _requests_session()
+            hdrs = _headers(key)
+            out_rows = []
+            if keys:
+                for oid in keys[: max(1, int(limit or 50))]:
+                    resp = session.get(
+                        f"{base_url}/v1/objects/{cls}/{oid}",
+                        headers=hdrs,
+                        timeout=15,
+                    )
+                    if resp.status_code not in {200, 201}:
+                        resp = session.get(
+                            f"{base_url}/v1/objects/{oid}",
+                            headers=hdrs,
+                            timeout=15,
+                        )
+                    if resp.status_code not in {200, 201}:
+                        continue
+                    obj = resp.json() or {}
+                    if not isinstance(obj, dict):
+                        continue
+                    props = (
+                        obj.get("properties")
+                        if isinstance(obj.get("properties"), dict)
+                        else {}
+                    )
+                    row = {"id": obj.get("id") or oid, **props}
+                    if cols and cols != ["*"]:
+                        row = {k: row.get(k) for k in cols}
+                    out_rows.append(row)
+            else:
+                agg = session.get(
+                    f"{base_url}/v1/objects",
+                    params={"class": cls, "limit": max(1, int(limit or 50))},
+                    headers=hdrs,
+                    timeout=30,
+                )
+                if agg.status_code in {200, 201}:
+                    for obj in (agg.json() or {}).get("objects") or []:
+                        if not isinstance(obj, dict):
+                            continue
+                        props = (
+                            obj.get("properties")
+                            if isinstance(obj.get("properties"), dict)
+                            else {}
+                        )
+                        row = {"id": obj.get("id"), **props}
+                        if cols and cols != ["*"]:
+                            row = {k: row.get(k) for k in cols}
+                        out_rows.append(row)
+                        if len(out_rows) >= int(limit or 50):
+                            break
+            return out_rows
+
+        if db_type == "milvus":
+            from connectors.milvus_writer import (
+                _auth_token,
+                _base_url,
+                _collection_name,
+                _headers,
+                _ok_response,
+                _requests_session,
+            )
+
+            coll = _collection_name(table_name or "dataflow_chunks")
+            db_name = (dest.get("database") or schema or "").strip()
+            if db_name.lower() in {"", "test_db", "default", "public"}:
+                db_name = ""
+            token = _auth_token(
+                api_key=str(dest.get("api_key") or ""),
+                username=dest.get("username", ""),
+                password=dest.get("password", ""),
+            )
+            base_url = _base_url(
+                dest.get("host", ""),
+                int(dest.get("port") or 19530),
+                bool(dest.get("ssl", False)),
+                dest.get("connection_string", ""),
+            )
+            session = _requests_session()
+            hdrs = _headers(token)
+            query_payload: dict[str, Any] = {
+                "collectionName": coll,
+                "outputFields": ["id", "content", "source_id", "chunk_index"],
+                "limit": max(1, int(limit or 50)),
+            }
+            if keys:
+                quoted = ", ".join(json.dumps(str(k)) for k in keys[: max(1, int(limit or 50))])
+                query_payload["filter"] = f"id in [{quoted}]"
+            else:
+                query_payload["filter"] = ""
+            if db_name:
+                query_payload["dbName"] = db_name
+            query = session.post(
+                f"{base_url}/v2/vectordb/entities/query",
+                data=json.dumps(query_payload),
+                headers=hdrs,
+                timeout=30,
+            )
+            qbody = query.json() if query.content else {}
+            out_rows = []
+            if _ok_response(qbody if isinstance(qbody, dict) else {}, query.status_code):
+                for row in (qbody.get("data") if isinstance(qbody, dict) else []) or []:
+                    if not isinstance(row, dict):
+                        continue
+                    d = {k: v for k, v in row.items() if k != "vector"}
+                    if cols and cols != ["*"]:
+                        d = {k: d.get(k) for k in cols}
+                    out_rows.append(d)
+                    if len(out_rows) >= int(limit or 50):
+                        break
+            return out_rows
+
+        _engine_hint = str(dest.get("type") or dest.get("engine") or "").lower()
+        _conn_hint = str(dest.get("connection_string") or dest.get("database") or "").lower()
+        if db_type == "clickhouse" or (
+            db_type == "generic_sql"
+            and ("clickhouse" in _engine_hint or "clickhouse" in _conn_hint)
+        ):
+            import sqlalchemy as sa
+
+            from connectors.generic_sql import (
+                clickhouse_final_table_sql,
+                get_sqlalchemy_engine,
+            )
+            from connectors.sql_identifiers import (
+                quote_sql_identifier,
+                quote_table_ref,
+                require_safe_identifier,
+            )
+
+            engine = get_sqlalchemy_engine(
+                {
+                    "type": "clickhouse",
+                    "host": dest.get("host", ""),
+                    "port": int(dest.get("port") or 9000),
+                    "database": dest.get("database", ""),
+                    "username": dest.get("username", ""),
+                    "password": dest.get("password", ""),
+                    "connection_string": dest.get("connection_string", ""),
+                    "schema": schema or dest.get("schema") or "",
+                    "ssl": bool(dest.get("ssl", False)),
+                }
+            )
+            table_ref = quote_table_ref(
+                table_name,
+                schema=schema or dest.get("schema") or None,
+                dialect="clickhouse",
+            )
+            from_sql = clickhouse_final_table_sql(table_ref)
+            col_sql = (
+                "*"
+                if cols == ["*"]
+                else ", ".join(
+                    quote_sql_identifier(
+                        require_safe_identifier(c, preserve_case=True), "`"
+                    )
+                    for c in cols
+                )
+            )
+            with engine.connect() as conn:
+                if keys and sort_key:
+                    key_col = quote_sql_identifier(
+                        require_safe_identifier(sort_key, preserve_case=True), "`"
+                    )
+                    placeholders = ", ".join(f":k{i}" for i in range(len(keys)))
+                    params = {f"k{i}": k for i, k in enumerate(keys)}
+                    result = conn.execute(
+                        sa.text(
+                            f"SELECT {col_sql} FROM {from_sql} "  # nosec B608
+                            f"WHERE {key_col} IN ({placeholders}) "
+                            f"LIMIT {int(limit or 50)}"
+                        ),
+                        params,
+                    )
+                else:
+                    result = conn.execute(
+                        sa.text(
+                            f"SELECT {col_sql} FROM {from_sql} "  # nosec B608
+                            f"LIMIT {int(limit or 50)}"
+                        )
+                    )
+                names = list(result.keys()) if result.keys() else (
+                    list(cols) if cols != ["*"] else []
+                )
+                return [dict(zip(names, row)) for row in result.fetchall()]
+
+        if db_type == "pgvector":
+            from connectors.postgresql_conn import get_connection
+            from connectors.sql_identifiers import (
+                quote_sql_identifier,
+                quote_table_ref,
+                require_safe_identifier,
+            )
+
+            table_ref = quote_table_ref(
+                table_name, schema or "public", dialect="postgresql"
+            )
+            conn = get_connection(
+                host=dest.get("host", ""),
+                port=dest.get("port", 5432),
+                database=dest.get("database", ""),
+                username=dest.get("username", ""),
+                password=dest.get("password", ""),
+                connection_string=dest.get("connection_string", ""),
+                ssl=bool(dest.get("ssl", False)),
+            )
+            try:
+                with conn.cursor() as cur:
+                    if keys and sort_key:
+                        key_col = quote_sql_identifier(
+                            require_safe_identifier(sort_key, preserve_case=True)
+                        )
+                        placeholders = ",".join(["%s"] * len(keys))
+                        cur.execute(
+                            f"SELECT id, content, source_id, chunk_index, metadata "  # nosec B608
+                            f"FROM {table_ref} WHERE {key_col} IN ({placeholders}) LIMIT %s",
+                            (*keys, int(limit or 50)),
+                        )
+                    else:
+                        cur.execute(
+                            f"SELECT id, content, source_id, chunk_index, metadata "  # nosec B608
+                            f"FROM {table_ref} LIMIT %s",
+                            (int(limit or 50),),
+                        )
+                    names = [d[0] for d in cur.description] if cur.description else []
+                    out_rows = []
+                    for raw in cur.fetchall():
+                        rec = dict(zip(names, raw))
+                        meta = rec.get("metadata") or {}
+                        if isinstance(meta, str):
+                            try:
+                                meta = json.loads(meta)
+                            except Exception:
+                                meta = {}
+                        if not isinstance(meta, dict):
+                            meta = {}
+                        row = {
+                            "id": rec.get("id"),
+                            "content": rec.get("content"),
+                            "source_id": rec.get("source_id"),
+                            "chunk_index": rec.get("chunk_index"),
+                            **meta,
+                        }
+                        if cols and cols != ["*"]:
+                            row = {k: row.get(k) for k in cols}
+                        out_rows.append(row)
+                    return out_rows
+            finally:
+                conn.close()
+
+        if db_type == "sftp":
+            from connectors.sftp_common import connect_sftp, parse_sftp_config
+
+            cfg = parse_sftp_config(
+                connection_string=dest.get("connection_string", ""),
+                host=dest.get("host", ""),
+                port=int(dest.get("port") or 22),
+                username=dest.get("username", ""),
+                password=dest.get("password", ""),
+                database=dest.get("database", "") or schema or "",
+                table=table_name,
+            )
+            if not cfg.host or not cfg.path:
+                return []
+            transport, sftp = connect_sftp(cfg)
+            try:
+                with sftp.file(cfg.path, "rb") as fh:
+                    body = fh.read()
+            finally:
+                sftp.close()
+                transport.close()
+            rows, headers = _rows_from_object_bytes(
+                body, cfg.path, None if cols == ["*"] else cols
+            )
+            out_rows: list[dict[str, Any]] = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    if headers:
+                        row = {
+                            headers[i]: row[i] if i < len(row) else None
+                            for i in range(len(headers))
+                        }
+                    else:
+                        continue
+                if keys and sort_key and row.get(sort_key) not in set(keys):
+                    continue
+                if cols and cols != ["*"]:
+                    row = {k: row.get(k) for k in cols}
+                out_rows.append(row)
+                if len(out_rows) >= int(limit or 50):
+                    break
+            return out_rows
 
     except Exception:
         return []

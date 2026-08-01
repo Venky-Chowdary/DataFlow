@@ -7343,6 +7343,44 @@
   color: var(--df-danger, #dc2626);
 }
 
+/* Connector probe result — full remediation, not a capitalized status pill. */
+.df2-conn-probe {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  background: var(--df-bg-subtle, #f8fafc);
+}
+.df2-conn-probe.is-ok {
+  border-color: rgba(5, 150, 105, 0.28);
+  background: #ecfdf5;
+}
+.df2-conn-probe.is-fail {
+  border-color: rgba(220, 38, 38, 0.28);
+  background: #fef2f2;
+}
+.df2-conn-probe-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.df2-conn-probe-msg {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--df-text-primary, #0f172a);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.df2-conn-probe-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--df-text-secondary, #475569);
+}
+
 /* Validate + Map step enterprise polish */
 .df2-validate-dashboard-host,
 .df2-validate-step {

@@ -22,6 +22,8 @@ def test_bigquery_merge_sql_includes_composite_pk_and_lsn_guard():
     assert "USING `proj.ds.orders_stg` S" in sql
     assert "T.`id` = S.`id`" in sql
     assert "T.`tenant` = S.`tenant`" in sql
+    assert "(T.`id` IS NULL AND S.`id` IS NULL)" in sql
+    assert "(T.`tenant` IS NULL AND S.`tenant` IS NULL)" in sql
     # Family-aware guard (PG hex + file:pos + text fallback).
     assert "REGEXP_CONTAINS" in sql
     assert "SAFE_CAST" in sql

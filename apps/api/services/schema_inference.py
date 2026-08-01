@@ -339,6 +339,67 @@ def is_interval_wire(value: Any) -> bool:
     return _looks_like_interval(text)
 
 
+def interval_wire_family(value: Any) -> str | None:
+    """Return ``ym`` / ``ds`` when the wire payload is family-specific, else None.
+
+    Used by write quarantine so YEAR-MONTH values never bind into DAY-SECOND DDL
+    (and vice versa) — ANSI/Oracle/Snowflake family polarity.
+    """
+    if value is None:
+        return None
+    try:
+        from datetime import timedelta
+
+        if isinstance(value, timedelta):
+            return "ds"
+    except Exception:
+        pass
+    text = str(value).strip()
+    if not text:
+        return None
+    upper = text.upper()
+    # ISO-8601: P1Y2M (ym) vs P1DT2H / PT15M (ds). Mixed Y/M + T… is rare; prefer ds
+    # when a time designator is present, else ym when only Y/M, else ds on D/W.
+    if _ISO_INTERVAL_RE.match(text):
+        has_ym = bool(re.search(r"\d+Y|\d+M", upper.split("T", 1)[0]))
+        has_ds = "T" in upper or bool(re.search(r"\d+[DWS]", upper))
+        if has_ym and not has_ds:
+            return "ym"
+        if has_ds and not has_ym:
+            return "ds"
+        if has_ym and has_ds:
+            # Mixed calendar+time — not a pure YM bind target.
+            return "ds"
+        return None
+    if re.search(r"\b(?:year|years|month|months)\b", text, re.I) and not re.search(
+        r"\b(?:day|days|hour|hours|minute|minutes|second|seconds)\b", text, re.I
+    ):
+        return "ym"
+    if re.search(
+        r"\b(?:day|days|hour|hours|minute|minutes|second|seconds)\b", text, re.I
+    ):
+        return "ds"
+    # Oracle / SQL literal shapes: '1-2' (YM) vs '1 02:03:04' (DS).
+    if re.fullmatch(r"[+-]?\d+-\d{1,2}", text):
+        return "ym"
+    if re.fullmatch(r"[+-]?\d+\s+\d{1,2}:\d{2}:\d{2}(?:\.\d+)?", text):
+        return "ds"
+    if _looks_like_interval(text):
+        return None
+    return None
+
+
+def geography_wire_srid(value: Any) -> int | None:
+    """Extract SRID from EWKT (``SRID=4326;POINT(...)``) when present."""
+    if value is None or isinstance(value, (bytes, bytearray, memoryview, dict)):
+        return None
+    text = str(value).strip()
+    m = re.match(r"^\s*SRID\s*=\s*(\d+)\s*;", text, re.I)
+    if m:
+        return int(m.group(1))
+    return None
+
+
 def _classify_jsonish(value: str, *, field_name: str | None = None) -> str | None:
     """Classify JSON / array / GeoJSON / VECTOR candidates. None → not JSON-shaped."""
     s = value.strip()

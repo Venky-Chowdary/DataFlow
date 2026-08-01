@@ -8,13 +8,58 @@ Algorithm (incremental snapshot chunk while WAL streams):
    buffered snapshot row (stream wins — newer than the SELECT).
 4. ``close_window(window_id)`` — emit remaining buffered rows, then clear.
 
+Composite primary keys are supported (``primary_key=["a","b"]``) — Debezium
+chunk SELECT uses multi-column order; the window key is a stable join of
+column values so stream collisions still win per logical row.
+
 Delivery remains at-least-once; destinations must upsert with LSN/PK guards.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
+
+# Unit separator — unlikely in PK string values; stable for composite keys.
+_PK_SEP = "\x1f"
+
+
+def _pk_columns(primary_key: str | Sequence[str]) -> list[str]:
+    if isinstance(primary_key, (list, tuple)):
+        cols = [str(c).strip() for c in primary_key if str(c).strip()]
+        if not cols:
+            raise ValueError("primary_key list must contain at least one column")
+        return cols
+    col = str(primary_key or "").strip()
+    if not col:
+        raise ValueError("primary_key is required")
+    return [col]
+
+
+def _row_get(row: dict[str, Any], col: str) -> Any:
+    if col in row and row[col] is not None:
+        return row[col]
+    lower = {str(k).lower(): v for k, v in row.items()}
+    return lower.get(col.lower())
+
+
+def _pk_value(row: dict[str, Any], primary_key: str | Sequence[str]) -> str | None:
+    cols = _pk_columns(primary_key)
+    parts: list[str] = []
+    for col in cols:
+        val = _row_get(row, col)
+        if val is None:
+            return None
+        parts.append(str(val))
+    return _PK_SEP.join(parts) if len(parts) > 1 else parts[0]
+
+
+def _pk_row_dict(primary_key: str | Sequence[str], key: str) -> dict[str, Any]:
+    cols = _pk_columns(primary_key)
+    if len(cols) == 1:
+        return {cols[0]: key}
+    parts = key.split(_PK_SEP)
+    return {cols[i]: (parts[i] if i < len(parts) else None) for i in range(len(cols))}
 
 
 @dataclass
@@ -28,7 +73,7 @@ class WindowRow:
 @dataclass
 class SnapshotWindow:
     window_id: str
-    primary_key: str = "id"
+    primary_key: str | list[str] = "id"
     open: bool = False
     buffer: dict[str, WindowRow] = field(default_factory=dict)
     stream_overrides: int = 0
@@ -49,7 +94,10 @@ class SnapshotWindow:
         # Encode deletes as tombstone rows with __deleted for callers that need them
         out = list(rows)
         for pk in deletes:
-            out.append({self.primary_key: pk, "__deleted": True, "__op": "d"})
+            tomb = _pk_row_dict(self.primary_key, pk)
+            tomb["__deleted"] = True
+            tomb["__op"] = "d"
+            out.append(tomb)
         return out
 
     def add_snapshot_rows(self, rows: Iterable[dict[str, Any]]) -> None:
@@ -84,18 +132,25 @@ class SnapshotWindow:
             self.stream_overrides += 1
         op_l = (op or "u").lower()
         if op_l in {"d", "delete"}:
+            tomb = _pk_row_dict(self.primary_key, key)
+            tomb["__deleted"] = True
+            tomb["__op"] = "d"
             self.buffer[key] = WindowRow(
                 pk=key,
-                row={self.primary_key: key, "__deleted": True, "__op": "d"},
+                row=tomb,
                 op="d",
                 source="stream",
             )
             return
         payload = dict(row or {})
-        if self.primary_key not in payload:
-            payload[self.primary_key] = key
+        # Ensure all PK columns are present for composite keys.
+        for col, val in _pk_row_dict(self.primary_key, key).items():
+            if col not in payload:
+                payload[col] = val
         payload["__op"] = "u" if op_l in {"u", "update"} else "c"
-        self.buffer[key] = WindowRow(pk=key, row=payload, op=op_l[0] if op_l else "u", source="stream")
+        self.buffer[key] = WindowRow(
+            pk=key, row=payload, op=op_l[0] if op_l else "u", source="stream"
+        )
 
     def stats(self) -> dict[str, Any]:
         return {
@@ -108,19 +163,10 @@ class SnapshotWindow:
         }
 
 
-def _pk_value(row: dict[str, Any], primary_key: str) -> str | None:
-    if primary_key in row and row[primary_key] is not None:
-        return str(row[primary_key])
-    # Case-insensitive fallback
-    lower = {str(k).lower(): v for k, v in row.items()}
-    val = lower.get(primary_key.lower())
-    return str(val) if val is not None else None
-
-
 def merge_snapshot_chunk_with_stream(
     *,
     window_id: str,
-    primary_key: str,
+    primary_key: str | list[str],
     snapshot_rows: list[dict[str, Any]],
     stream_events: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:

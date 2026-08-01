@@ -203,15 +203,21 @@ _CURRENCY_RE = re.compile(
 def _format_datetime(dt: datetime) -> str:
     """Canonical datetime wire form.
 
-    - Naive values are treated as UTC and emitted with ``Z``.
+    - Naive values stay naive — no ``Z``, no offset.
     - UTC-aware values use ``Z`` (same instant, canonical form).
     - Non-UTC aware values keep their original offset (instant + offset fidelity).
       Destination NTZ writers (MySQL DATETIME, Snowflake TIMESTAMP_NTZ) normalize
       at bind time — never erase offset on the shared transform wire.
+
+    Naive used to be stamped with ``Z``. That is the "UTC invent" the write
+    quarantine in ``writer_common`` exists to prevent, so the two rules fought
+    each other: a Postgres ``TIMESTAMP WITHOUT TIME ZONE`` picked up a zone it
+    never had, and the MySQL ``DATETIME`` writer then quarantined every row for
+    being timezone-aware. Postgres→MySQL moved zero rows as a result. A value
+    with no zone carries no zone downstream; only a real offset survives.
     """
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return dt.strftime("%Y-%m-%dT%H:%M:%S")
     offset = dt.utcoffset()
     if offset is not None and offset.total_seconds() == 0:
         return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -635,11 +641,16 @@ def _parse_json(value: Any) -> str | None:
         return None
     if isinstance(value, str):
         try:
+            # JSONDecodeError subclasses ValueError — catch it first so bare
+            # scalars wrap as JSON string literals (Mongo mixed fields → VARIANT).
             parsed = json.loads(value, parse_constant=_json_reject_nonfinite)
-        except ValueError:
-            raise
-        except (json.JSONDecodeError, TypeError):
+        except json.JSONDecodeError:
             parsed = value  # wrap the raw scalar as a JSON string literal
+        except ValueError:
+            # Non-finite NaN/Infinity via parse_constant — refuse silent null.
+            raise
+        except TypeError:
+            parsed = value
     elif isinstance(value, (dict, list, tuple, set, frozenset)):
         parsed = value
     else:
@@ -757,6 +768,12 @@ def _strip_format_controls(text: str) -> str:
 
 
 def _parse_binary(value: str) -> str | None:
+    """Normalize binary wire to base64 text for the transform pipeline.
+
+    Accepts already-base64 payloads and common hex carriers (Postgres ``\\x…``,
+    ``0x…``). Refuse silent UTF-8→base64 invent — that mutates operator data
+    (Airbyte historically did this; destinations then write wrong bytes).
+    """
     text = value.strip()
     if not text:
         return None
@@ -764,8 +781,19 @@ def _parse_binary(value: str) -> str | None:
         base64.b64decode(text, validate=True)
         return text
     except Exception:
-        return base64.b64encode(text.encode("utf-8")).decode("ascii")
-
+        pass
+    hex_body: str | None = None
+    if text.lower().startswith("\\x"):
+        hex_body = text[2:]
+    elif text.lower().startswith("0x"):
+        hex_body = text[2:]
+    if hex_body is not None:
+        try:
+            raw = bytes.fromhex(hex_body)
+        except ValueError:
+            return None
+        return base64.b64encode(raw).decode("ascii")
+    return None
 
 def infer_transform(source_col: str, target_col: str, inferred_type: str) -> str:
     return infer_transform_for_mapping(source_col, target_col, inferred_type, None)
@@ -807,11 +835,17 @@ def infer_transform_for_mapping(
     source_type: str,
     target_type: str | None = None,
     source_samples: list[str] | None = None,
+    destination_db_type: str = "",
 ) -> str:
-    """Pick transform from source/target logical types, column semantics, and samples."""
+    """Pick transform from source/target logical types, column semantics, and samples.
+
+    ``destination_db_type`` disambiguates carriers whose name understates what
+    they hold — MongoDB's BSON ``date`` is a full millisecond instant, not a
+    calendar day, so a datetime source must not be truncated into it.
+    """
     from services.type_system import normalize_logical_type
 
-    from services.type_system import parse_numeric_precision_scale
+    from services.type_system import parse_numeric_precision_scale, temporal_carrier_holds_time
 
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type) if target_type else None
@@ -854,6 +888,11 @@ def infer_transform_for_mapping(
         if tgt == "datetime":
             return "datetime"
         if tgt == "date":
+            # Narrowing a datetime into a date-only column drops the time of day.
+            # Only do it when the destination genuinely cannot hold a time;
+            # document stores map both logical types onto one instant carrier.
+            if src == "datetime" and temporal_carrier_holds_time(destination_db_type):
+                return "datetime"
             return "date"
         if tgt == "time":
             return "time"

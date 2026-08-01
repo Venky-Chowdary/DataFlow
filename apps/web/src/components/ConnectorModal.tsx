@@ -395,8 +395,8 @@ export function ConnectorModal({
       onSaved();
       onClose();
     } catch (e) {
-      toast({ title: "Save failed", message: "Could not save connector settings.", tone: "error" });
-      console.error(e);
+      const detail = e instanceof Error && e.message ? e.message : "Could not save connector settings.";
+      toast({ title: "Save failed", message: detail, tone: "error" });
     }
     setSaving(false);
   };
@@ -627,24 +627,34 @@ export function ConnectorModal({
                 </p>
               )}
               {testResult && (
-                <span
-                  className={`df2-badge ${testResult.success ? "df2-badge-live" : "df2-badge-error"}`}
-                  style={{ marginTop: 8 }}
+                <div
+                  className={`df2-conn-probe ${testResult.success ? "is-ok" : "is-fail"}`}
+                  role={testResult.success ? "status" : "alert"}
                 >
-                  {testResult.message}
-                </span>
-              )}
-              {testResult?.success && testResult.source_ha && (
-                <span
-                  className="df2-badge df2-badge-live"
-                  style={{ marginTop: 8, marginLeft: 8 }}
-                  title={String(testResult.source_ha.message || "")}
-                >
-                  HA: {String(testResult.source_ha.role || "—")}
-                  {testResult.source_ha.topology && testResult.source_ha.topology !== "none"
-                    ? ` · ${String(testResult.source_ha.topology)}`
-                    : ""}
-                </span>
+                  <div className="df2-conn-probe-head">
+                    <span className={`df2-badge ${testResult.success ? "df2-badge-live" : "df2-badge-error"}`}>
+                      {testResult.success ? "Connected" : "Not connected"}
+                    </span>
+                    {testResult.success && testResult.source_ha && (
+                      <span
+                        className="df2-badge df2-badge-live"
+                        title={String(testResult.source_ha.message || "")}
+                      >
+                        HA: {String(testResult.source_ha.role || "—")}
+                        {testResult.source_ha.topology && testResult.source_ha.topology !== "none"
+                          ? ` · ${String(testResult.source_ha.topology)}`
+                          : ""}
+                      </span>
+                    )}
+                  </div>
+                  <p className="df2-conn-probe-msg">{testResult.message}</p>
+                  {!testResult.success && /ssl|tls|certificate/i.test(testResult.message) && (
+                    <p className="df2-conn-probe-hint">
+                      Look for the <strong>SSL / TLS</strong> toggle in the fields above — local
+                      emulators and plaintext Docker ports usually need it off.
+                    </p>
+                  )}
+                </div>
               )}
             </>
           )}

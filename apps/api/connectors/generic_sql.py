@@ -92,9 +92,17 @@ from connectors.writer_common import (
     assert_sparse_upsert_has_pk,
     build_mapped_rows_with_details,
     compare_lsn,
+    quarantine_currency_markers_into_numeric,
+    quarantine_unfit_binaries,
+    quarantine_unfit_bitstrings,
+    quarantine_unfit_booleans,
     quarantine_unfit_decimals,
+    quarantine_unfit_enum_set,
+    quarantine_unfit_integers,
     quarantine_unfit_specialty_types,
     quarantine_unfit_strings,
+    quarantine_unfit_temporals,
+    quarantine_unfit_years,
     quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
@@ -776,8 +784,25 @@ def _logical_type_from_sa(col_type: Any) -> str:
         return "integer"
     if "bool" in repr_ or "bit" in repr_:
         return "boolean"
-    if "datetimeoffset" in repr_:
+    if "datetimeoffset" in repr_ or "timestamptz" in repr_ or "with time zone" in repr_:
         return "timestamptz"
+    if "without time zone" in repr_ or "timestamp_ntz" in repr_:
+        return "timestamp_ntz"
+    # ClickHouse DateTime64 / IPv4 / Tuple — preserve carriers (not bare string).
+    if any(
+        tok in repr_
+        for tok in ("datetime64", "ipv4", "ipv6", "tuple(", "array(", "map(")
+    ) or (
+        "clickhouse" in module
+        and any(tok in repr_ for tok in ("datetime", "date", "uuid", "decimal"))
+    ):
+        from services.schema_introspect import _ch_to_logical
+
+        try:
+            original = str(col_type)
+        except (TypeError, ValueError):
+            original = repr_
+        return _ch_to_logical(original)
     if "datetime" in repr_ or "timestamp" in repr_:
         return "datetime"
     if "date" in repr_:
@@ -1022,6 +1047,75 @@ def _to_sa_value(
     if is_missing_sentinel(value):
         return value
 
+    # Specialty carriers (INET, PG_LSN, geometric, OID, snapshots, …) must use
+    # the shared sql_bind SSOT before LOGICAL_* collapse invents string/int/geo.
+    # Airbyte maps these to string; we validate + canonicalize then bind.
+    eng = (db_type or dialect_name or "").strip().lower()
+    raw_carrier = (logical or "").strip()
+    if raw_carrier:
+        from connectors.sql_bind import normalize_sql_bind_value
+        from connectors.sql_temporal import sql_base_type
+        from services.type_system import parse_enum_or_set_ordered_members
+
+        # MySQL ENUM/SET domains — coerce ordinals/bitmasks before INTEGER collapse.
+        if parse_enum_or_set_ordered_members(raw_carrier) is not None:
+            return normalize_sql_bind_value(value, raw_carrier, engine=eng)
+
+        base = sql_base_type(raw_carrier)
+        specialty = {
+            "INET",
+            "CIDR",
+            "MACADDR",
+            "MACADDR8",
+            "POINT",
+            "LINE",
+            "LSEG",
+            "BOX",
+            "PATH",
+            "POLYGON",
+            "CIRCLE",
+            "PG_LSN",
+            "LSN",
+            "OID",
+            "TID",
+            "CTID",
+            "XID",
+            "XID8",
+            "CID",
+            "HSTORE",
+            "XML",
+            "XMLTYPE",
+            "CITEXT",
+            "LTREE",
+            "TSVECTOR",
+            "TSQUERY",
+            "TXID_SNAPSHOT",
+            "PG_SNAPSHOT",
+            "UUID",
+            "UNIQUEIDENTIFIER",
+            "GUID",
+            "ROWVERSION",
+            "HIERARCHYID",
+            "FLOAT",
+            "FLOAT4",
+            "FLOAT8",
+            "REAL",
+            "DOUBLE",
+            "DOUBLE PRECISION",
+            "BINARY_FLOAT",
+            "BINARY_DOUBLE",
+            "SQL_VARIANT",
+            "ROWID",
+            "UROWID",
+        }
+        if (
+            base in specialty
+            or "MULTIRANGE" in base
+            or (base.endswith("RANGE") and base != "RANGE")
+            or base == "RANGE"
+        ):
+            return normalize_sql_bind_value(value, raw_carrier, engine=eng)
+
     from services.type_system import (
         LOGICAL_ARRAY,
         LOGICAL_BINARY,
@@ -1029,10 +1123,20 @@ def _to_sa_value(
         LOGICAL_DECIMAL,
         LOGICAL_INTEGER,
         LOGICAL_JSON,
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
         normalize_logical_type,
     )
 
     t = normalize_logical_type(logical)
+    # Oracle write-location: '' → NULL for string carriers (VARCHAR2 semantics).
+    if (
+        isinstance(value, str)
+        and value == ""
+        and t in {LOGICAL_STRING, LOGICAL_TEXT, ""}
+        and (eng in {"oracle", "oracledb", "oracle_autonomous"} or eng.startswith("oracle"))
+    ):
+        return None
 
     if t in (LOGICAL_JSON, LOGICAL_ARRAY):
         from connectors.sql_bind import coerce_json_wire
@@ -1064,21 +1168,17 @@ def _to_sa_value(
         return coerce_boolean_wire(value, as_int=as_int)
 
     if t == LOGICAL_BINARY:
+        from connectors.sql_bind import coerce_binary_wire
+
         if isinstance(value, bytes):
             if _is_string_type(sa_type):
-                try:
-                    return base64.b64encode(value).decode("ascii")
-                except (binascii.Error, ValueError):
-                    return value.decode("utf-8", errors="replace")
+                return base64.b64encode(value).decode("ascii")
             return value
         if isinstance(value, str):
             if _is_string_type(sa_type):
                 return value
-            try:
-                return base64.b64decode(value, validate=True)
-            except (binascii.Error, ValueError):
-                return value.encode("utf-8")
-        return value
+            return coerce_binary_wire(value)
+        return coerce_binary_wire(value)
 
     # Temporal: same parse/coerce path as MySQL/Postgres writers (ISO-Z → bind).
     ddl_type = logical_to_temporal_ddl(t) or logical_to_temporal_ddl(logical)
@@ -1121,12 +1221,13 @@ def _to_sa_value(
 
         # DATETIME2 (SQL Server) / QuestDB are naive wall clocks; DATETIMEOFFSET /
         # TIMESTAMPTZ carriers must keep aware UTC (never strip offset silently).
-        raw_lower = (logical or "").lower()
+        raw_lower = f"{logical or ''} {ddl_type or ''}".lower()
         is_tz_aware = (
             "timestamptz" in raw_lower
             or "datetimeoffset" in raw_lower
             or "timestamp_tz" in raw_lower
             or "timestamp with time zone" in raw_lower
+            or "with local time zone" in raw_lower
         )
         use_naive = not is_tz_aware and (
             db_type in {"questdb", "sqlserver", "mssql"} or dialect_name == "mssql"
@@ -1299,12 +1400,27 @@ def _build_table_for_write(
         constraints.append(sa.UniqueConstraint(*conflict_cols, quote=True))
 
     if dialect_name == "clickhouse" and ch_engines is not None:
+        # Airbyte-class: upsert identity is ORDER BY on ReplacingMergeTree, not
+        # a SQL PRIMARY KEY. Plain MergeTree + delete+insert is the wrong algorithm.
+        if conflict_cols:
+            order_by = tuple(sa.column(c) for c in conflict_cols)
+            replacing = getattr(ch_engines, "ReplacingMergeTree", None)
+            if replacing is not None:
+                if DF_LSN_COL in columns:
+                    # Higher ``_df_lsn`` wins on background merge (at-least-once CDC).
+                    ch_engine = replacing(DF_LSN_COL, order_by=order_by)
+                else:
+                    ch_engine = replacing(order_by=order_by)
+            else:
+                ch_engine = ch_engines.MergeTree(order_by=order_by)
+        else:
+            ch_engine = ch_engines.MergeTree(order_by=sa.text("tuple()"))
         return sa.Table(
             table_name,
             metadata,
             *cols,
             *constraints,
-            ch_engines.MergeTree(order_by=sa.text("tuple()")),
+            ch_engine,
             schema=schema,
             quote=True,
             quote_schema=True,
@@ -1523,8 +1639,10 @@ def introspect_table_schema(
             # Try information_schema.columns before falling back to raw value sampling.
             try:
                 with engine.connect() as conn:
+                    from services.schema_introspect import _ch_to_logical
                     from services.type_system import normalize_logical_type
 
+                    dialect_key = _dialect_key(cfg)
                     params: dict = {"table": table}
                     if schema is None:
                         sql = sa.text(
@@ -1543,10 +1661,36 @@ def introspect_table_schema(
                         )
                     rows = conn.execute(sql, params).fetchall()
                     if rows:
+
+                        def _dtype_to_inferred(data_type: Any) -> str:
+                            text = str(data_type or "").strip()
+                            if dialect_key == "clickhouse" or text.upper().startswith(
+                                (
+                                    "DATETIME64",
+                                    "DATETIME(",
+                                    "IPV4",
+                                    "IPV6",
+                                    "TUPLE(",
+                                    "ARRAY(",
+                                    "MAP(",
+                                )
+                            ):
+                                return _ch_to_logical(text)
+                            # Prefer physical dtype tokens over stripped logical names.
+                            from services.type_system import ddl_carrier_type
+
+                            carrier = ddl_carrier_type(text)
+                            if carrier and carrier.upper() not in {
+                                "VARCHAR",
+                                "STRING",
+                            }:
+                                return carrier
+                            return normalize_logical_type(text)
+
                         result = [
                             {
                                 "name": name,
-                                "inferred_type": normalize_logical_type(data_type),
+                                "inferred_type": _dtype_to_inferred(data_type),
                                 "nullable": str(nullable).upper() != "NO",
                             }
                             for name, data_type, nullable in rows
@@ -2177,6 +2321,1071 @@ def _generic_apply_sparse_upsert(
     )
 
 
+def _mssql_bracket(ident: str) -> str:
+    """Bracket-quote a SQL Server identifier (escape ``]``)."""
+    return "[" + str(ident).replace("]", "]]") + "]"
+
+
+def _mssql_qualified_table(table_obj: sa.Table) -> str:
+    parts = []
+    if table_obj.schema:
+        parts.append(_mssql_bracket(table_obj.schema))
+    parts.append(_mssql_bracket(table_obj.name))
+    return ".".join(parts)
+
+
+def _mssql_merge_upsert(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+    target_cols: list[str],
+    update_cols: list[str],
+) -> int:
+    """Native T-SQL MERGE with HOLDLOCK + NULL-safe ON; staging temp table.
+
+    Matches Airbyte/Fivetran-class SQL Server upsert: stage → MERGE → drop.
+    Caller must fall back to delete+insert when this raises.
+    """
+    from connectors.writer_common import null_safe_merge_on
+
+    if not rows:
+        return 0
+    stage = f"#df_mrg_{abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000}"
+    target = _mssql_qualified_table(table_obj)
+    col_sql = ", ".join(_mssql_bracket(c) for c in target_cols)
+    # Clone column shapes from target — never invent VARCHAR widths.
+    conn.execute(
+        sa.text(f"SELECT TOP 0 {col_sql} INTO {stage} FROM {target}")  # nosec B608
+    )
+    try:
+        placeholders = ", ".join(f":{c}" for c in target_cols)
+        insert_sql = sa.text(
+            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        )
+        for row in rows:
+            params = {c: row.get(c) for c in target_cols}
+            conn.execute(insert_sql, params)
+
+        on_sql = null_safe_merge_on(
+            conflict_cols,
+            left_alias=_mssql_bracket("t"),
+            right_alias=_mssql_bracket("s"),
+            quote_column=_mssql_bracket,
+        )
+        insert_cols = ", ".join(_mssql_bracket(c) for c in target_cols)
+        insert_vals = ", ".join(
+            f"{_mssql_bracket('s')}.{_mssql_bracket(c)}" for c in target_cols
+        )
+        if update_cols:
+            set_sql = ", ".join(
+                f"{_mssql_bracket('t')}.{_mssql_bracket(c)} = "
+                f"{_mssql_bracket('s')}.{_mssql_bracket(c)}"
+                for c in update_cols
+            )
+            merge_sql = (
+                f"MERGE {target} WITH (HOLDLOCK) AS {_mssql_bracket('t')} "
+                f"USING {stage} AS {_mssql_bracket('s')} "
+                f"ON {on_sql} "
+                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
+                f"WHEN NOT MATCHED BY TARGET THEN "
+                f"INSERT ({insert_cols}) VALUES ({insert_vals});"
+            )
+        else:
+            # Conflict-key-only rows: insert missing; leave matched alone.
+            merge_sql = (
+                f"MERGE {target} WITH (HOLDLOCK) AS {_mssql_bracket('t')} "
+                f"USING {stage} AS {_mssql_bracket('s')} "
+                f"ON {on_sql} "
+                f"WHEN NOT MATCHED BY TARGET THEN "
+                f"INSERT ({insert_cols}) VALUES ({insert_vals});"
+            )
+        conn.execute(sa.text(merge_sql))  # nosec B608
+        return len(rows)
+    finally:
+        with contextlib.suppress(Exception):
+            conn.execute(sa.text(f"DROP TABLE {stage}"))  # nosec B608
+
+
+def _oracle_quote(ident: str) -> str:
+    """Double-quote an Oracle identifier (escape embedded quotes)."""
+    return '"' + str(ident).replace('"', '""') + '"'
+
+
+def _oracle_qualified_table(table_obj: sa.Table) -> str:
+    parts = []
+    if table_obj.schema:
+        parts.append(_oracle_quote(table_obj.schema))
+    parts.append(_oracle_quote(table_obj.name))
+    return ".".join(parts)
+
+
+def _oracle_merge_upsert(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+    target_cols: list[str],
+    update_cols: list[str],
+) -> int:
+    """Native Oracle MERGE with NULL-safe ON via session staging table.
+
+    Stage → MERGE INTO … WHEN MATCHED / WHEN NOT MATCHED (Oracle has no
+    ``BY TARGET`` keyword). Prefer PRIVATE TEMPORARY TABLE (18c+); fall back to
+    a session GLOBAL TEMPORARY TABLE. Caller falls back to delete+insert on error.
+    Still at-least-once — not exactly-once.
+    """
+    from connectors.writer_common import null_safe_merge_on
+
+    if not rows:
+        return 0
+    suffix = abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000
+    # Private temp tables require the ORA$PTT_ prefix (Oracle default).
+    ptt = f"ORA$PTT_DF_MRG_{suffix}"
+    gtt = f"DF_MRG_{suffix}"
+    target = _oracle_qualified_table(table_obj)
+    col_sql = ", ".join(_oracle_quote(c) for c in target_cols)
+    stage_ref = ""
+    created: str | None = None
+    try:
+        try:
+            stage_ref = _oracle_quote(ptt)
+            conn.execute(
+                sa.text(
+                    f"CREATE PRIVATE TEMPORARY TABLE {stage_ref} "
+                    f"ON COMMIT PRESERVE DEFINITION AS "
+                    f"SELECT {col_sql} FROM {target} WHERE 1=0"  # nosec B608
+                )
+            )
+            created = "ptt"
+        except (sa.exc.SQLAlchemyError, OSError, ValueError):
+            # Older Oracle / privilege gap — try session GTT (definition may persist).
+            with contextlib.suppress(Exception):
+                conn.rollback()
+            stage_ref = _oracle_quote(gtt)
+            conn.execute(
+                sa.text(
+                    f"CREATE GLOBAL TEMPORARY TABLE {stage_ref} "
+                    f"ON COMMIT PRESERVE ROWS AS "
+                    f"SELECT {col_sql} FROM {target} WHERE 1=0"  # nosec B608
+                )
+            )
+            created = "gtt"
+
+        placeholders = ", ".join(f":{c}" for c in target_cols)
+        insert_sql = sa.text(
+            f"INSERT INTO {stage_ref} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        )
+        for row in rows:
+            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
+
+        on_sql = null_safe_merge_on(
+            conflict_cols,
+            left_alias="t",
+            right_alias="s",
+            quote_column=_oracle_quote,
+        )
+        insert_cols = ", ".join(_oracle_quote(c) for c in target_cols)
+        insert_vals = ", ".join(f"s.{_oracle_quote(c)}" for c in target_cols)
+        if update_cols:
+            set_sql = ", ".join(
+                f"t.{_oracle_quote(c)} = s.{_oracle_quote(c)}" for c in update_cols
+            )
+            merge_sql = (
+                f"MERGE INTO {target} t "
+                f"USING {stage_ref} s "
+                f"ON ({on_sql}) "
+                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        else:
+            merge_sql = (
+                f"MERGE INTO {target} t "
+                f"USING {stage_ref} s "
+                f"ON ({on_sql}) "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        conn.execute(sa.text(merge_sql))  # nosec B608
+        return len(rows)
+    finally:
+        if created == "gtt" and stage_ref:
+            # PTT drops with session/definition; GTT definition may linger.
+            with contextlib.suppress(Exception):
+                conn.execute(sa.text(f"TRUNCATE TABLE {stage_ref}"))
+            with contextlib.suppress(Exception):
+                conn.execute(sa.text(f"DROP TABLE {stage_ref}"))
+
+
+def _duckdb_quote(ident: str) -> str:
+    return '"' + str(ident).replace('"', '""') + '"'
+
+
+def _duckdb_qualified_table(table_obj: sa.Table) -> str:
+    parts = []
+    if table_obj.schema:
+        parts.append(_duckdb_quote(table_obj.schema))
+    parts.append(_duckdb_quote(table_obj.name))
+    return ".".join(parts)
+
+
+def _duckdb_merge_upsert(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+    target_cols: list[str],
+    update_cols: list[str],
+) -> int:
+    """Native DuckDB MERGE INTO with NULL-safe ON (no PK required).
+
+    DuckDB supports MERGE without a unique index — preferred over delete+insert
+    for concurrent readers. Still at-least-once. Caller falls back on error.
+    """
+    from connectors.writer_common import null_safe_merge_on
+
+    if not rows:
+        return 0
+    suffix = abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000
+    stage = f"df_mrg_{suffix}"
+    stage_q = _duckdb_quote(stage)
+    target = _duckdb_qualified_table(table_obj)
+    col_sql = ", ".join(_duckdb_quote(c) for c in target_cols)
+    conn.execute(
+        sa.text(
+            f"CREATE TEMP TABLE {stage_q} AS "
+            f"SELECT {col_sql} FROM {target} WHERE 1=0"  # nosec B608
+        )
+    )
+    try:
+        placeholders = ", ".join(f":{c}" for c in target_cols)
+        insert_sql = sa.text(
+            f"INSERT INTO {stage_q} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        )
+        for row in rows:
+            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
+
+        on_sql = null_safe_merge_on(
+            conflict_cols,
+            left_alias="t",
+            right_alias="s",
+            quote_column=_duckdb_quote,
+        )
+        insert_cols = ", ".join(_duckdb_quote(c) for c in target_cols)
+        insert_vals = ", ".join(f"s.{_duckdb_quote(c)}" for c in target_cols)
+        if update_cols:
+            set_sql = ", ".join(
+                f"{_duckdb_quote(c)} = s.{_duckdb_quote(c)}" for c in update_cols
+            )
+            # DuckDB UPDATE SET uses bare column names on the target side.
+            merge_sql = (
+                f"MERGE INTO {target} t "
+                f"USING {stage_q} s "
+                f"ON ({on_sql}) "
+                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        else:
+            merge_sql = (
+                f"MERGE INTO {target} t "
+                f"USING {stage_q} s "
+                f"ON ({on_sql}) "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        conn.execute(sa.text(merge_sql))  # nosec B608
+        return len(rows)
+    finally:
+        with contextlib.suppress(Exception):
+            conn.execute(sa.text(f"DROP TABLE IF EXISTS {stage_q}"))
+
+
+def _clickhouse_replacing_upsert(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+    target_cols: list[str],
+    update_cols: list[str],
+) -> int:
+    """Airbyte-class ClickHouse upsert: INSERT only into ReplacingMergeTree.
+
+    Dedup is **engine-level and lazy** (background merge / ``SELECT … FINAL``).
+    Never DELETE+INSERT — ClickHouse mutations race merges and are not
+    Fivetran/Airbyte-class upsert semantics. Still at-least-once.
+    """
+    del conflict_cols, update_cols  # identity is table ORDER BY / version col
+    if not rows:
+        return 0
+    result = conn.execute(table_obj.insert(), rows)
+    return max(0, getattr(result, "rowcount", None) or 0) or len(rows)
+
+
+def clickhouse_final_table_sql(table_ref: str) -> str:
+    """``FROM <table> FINAL`` — Gate-8 must collapse ReplacingMergeTree duplicates.
+
+    Airbyte ClickHouse destination docs: without FINAL (or OPTIMIZE), queries
+    may see duplicate keys after at-least-once INSERT upserts.
+    """
+    ref = (table_ref or "").strip()
+    if not ref:
+        raise ValueError("clickhouse table ref required for FINAL select")
+    # Idempotent if caller already appended FINAL.
+    if re.search(r"\bFINAL\b", ref, flags=re.IGNORECASE):
+        return ref
+    return f"{ref} FINAL"
+
+
+def _db2_quote(ident: str) -> str:
+    return '"' + str(ident).replace('"', '""') + '"'
+
+
+def _db2_qualified_table(table_obj: sa.Table) -> str:
+    parts = []
+    if table_obj.schema:
+        parts.append(_db2_quote(table_obj.schema))
+    parts.append(_db2_quote(table_obj.name))
+    return ".".join(parts)
+
+
+def _db2_merge_upsert(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+    target_cols: list[str],
+    update_cols: list[str],
+) -> int:
+    """Native DB2 ``MERGE INTO`` with NULL-safe ON via session temp stage.
+
+    Matches IBM / Fivetran-class LUW upsert: DECLARE GLOBAL TEMPORARY TABLE →
+    INSERT stage → MERGE. Falls back to delete+insert when DECLARE/MERGE fails.
+    Still at-least-once — not exactly-once.
+    """
+    from connectors.writer_common import null_safe_merge_on
+
+    if not rows:
+        return 0
+    suffix = abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000
+    # SESSION. prefix is required for DGTT identity on LUW.
+    stage = f"SESSION.DF_MRG_{suffix}"
+    target = _db2_qualified_table(table_obj)
+    col_sql = ", ".join(_db2_quote(c) for c in target_cols)
+    try:
+        conn.execute(
+            sa.text(
+                f"DECLARE GLOBAL TEMPORARY TABLE {stage} AS "
+                f"(SELECT {col_sql} FROM {target} WHERE 1=0) "
+                f"WITH REPLACE ON COMMIT PRESERVE ROWS NOT LOGGED"  # nosec B608
+            )
+        )
+    except (sa.exc.SQLAlchemyError, OSError, ValueError):
+        # Some DB2 z/OS / privilege profiles reject DGTT — let caller fall back.
+        raise
+
+    try:
+        placeholders = ", ".join(f":{c}" for c in target_cols)
+        insert_sql = sa.text(
+            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        )
+        for row in rows:
+            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
+
+        on_sql = null_safe_merge_on(
+            conflict_cols,
+            left_alias="t",
+            right_alias="s",
+            quote_column=_db2_quote,
+        )
+        insert_cols = ", ".join(_db2_quote(c) for c in target_cols)
+        insert_vals = ", ".join(f"s.{_db2_quote(c)}" for c in target_cols)
+        if update_cols:
+            set_sql = ", ".join(
+                f"t.{_db2_quote(c)} = s.{_db2_quote(c)}" for c in update_cols
+            )
+            merge_sql = (
+                f"MERGE INTO {target} AS t "
+                f"USING {stage} AS s "
+                f"ON ({on_sql}) "
+                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        else:
+            merge_sql = (
+                f"MERGE INTO {target} AS t "
+                f"USING {stage} AS s "
+                f"ON ({on_sql}) "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        conn.execute(sa.text(merge_sql))  # nosec B608
+        return len(rows)
+    finally:
+        with contextlib.suppress(Exception):
+            conn.execute(sa.text(f"DROP TABLE {stage}"))  # nosec B608
+
+
+def _teradata_quote(ident: str) -> str:
+    return '"' + str(ident).replace('"', '""') + '"'
+
+
+def _teradata_qualified_table(table_obj: sa.Table) -> str:
+    parts = []
+    if table_obj.schema:
+        parts.append(_teradata_quote(table_obj.schema))
+    parts.append(_teradata_quote(table_obj.name))
+    return ".".join(parts)
+
+
+def _teradata_merge_on(conflict_cols: list[str]) -> str:
+    """Teradata MERGE ON must be PI equality — cannot equate explicitly with NULL.
+
+    Docs: match_condition cannot equate with NULL and must hash to a single AMP
+    on the primary index. Do **not** use null_safe OR-IS-NULL form here.
+    """
+    return " AND ".join(
+        f"t.{_teradata_quote(c)} = s.{_teradata_quote(c)}" for c in conflict_cols
+    )
+
+
+def _teradata_merge_upsert(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+    target_cols: list[str],
+    update_cols: list[str],
+) -> int:
+    """Native Teradata ``MERGE INTO`` via VOLATILE stage (Fivetran/Vantage class).
+
+    ON uses PI equality only (Teradata forbids NULL equate in MERGE ON).
+    Conflict/PI columns are never UPDATEd. Still at-least-once.
+    """
+    if not rows:
+        return 0
+    # Never attempt to UPDATE primary-index columns (Teradata rejects it).
+    safe_update = [c for c in update_cols if c not in conflict_cols]
+    suffix = abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000
+    stage = _teradata_quote(f"DF_MRG_{suffix}")
+    target = _teradata_qualified_table(table_obj)
+    col_sql = ", ".join(_teradata_quote(c) for c in target_cols)
+    pi_sql = ", ".join(_teradata_quote(c) for c in conflict_cols)
+    conn.execute(
+        sa.text(
+            f"CREATE MULTISET VOLATILE TABLE {stage} AS "
+            f"(SELECT {col_sql} FROM {target} WHERE 1=0) "
+            f"WITH DATA PRIMARY INDEX ({pi_sql}) "
+            f"ON COMMIT PRESERVE ROWS"  # nosec B608
+        )
+    )
+    try:
+        placeholders = ", ".join(f":{c}" for c in target_cols)
+        insert_sql = sa.text(
+            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        )
+        for row in rows:
+            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
+
+        on_sql = _teradata_merge_on(conflict_cols)
+        insert_cols = ", ".join(_teradata_quote(c) for c in target_cols)
+        insert_vals = ", ".join(f"s.{_teradata_quote(c)}" for c in target_cols)
+        if safe_update:
+            set_sql = ", ".join(
+                f"{_teradata_quote(c)} = s.{_teradata_quote(c)}" for c in safe_update
+            )
+            merge_sql = (
+                f"MERGE INTO {target} AS t "
+                f"USING {stage} AS s "
+                f"ON {on_sql} "
+                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        else:
+            merge_sql = (
+                f"MERGE INTO {target} AS t "
+                f"USING {stage} AS s "
+                f"ON {on_sql} "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        conn.execute(sa.text(merge_sql))  # nosec B608
+        return len(rows)
+    finally:
+        with contextlib.suppress(Exception):
+            conn.execute(sa.text(f"DROP TABLE {stage}"))  # nosec B608
+
+
+def _trino_quote(ident: str) -> str:
+    return '"' + str(ident).replace('"', '""') + '"'
+
+
+def _trino_qualified_table(table_obj: sa.Table) -> str:
+    parts: list[str] = []
+    if table_obj.schema:
+        # Trino may embed catalog.schema in Table.schema (e.g. "hive.default").
+        for part in str(table_obj.schema).split("."):
+            if part:
+                parts.append(_trino_quote(part))
+    parts.append(_trino_quote(table_obj.name))
+    return ".".join(parts)
+
+
+def _trino_merge_upsert(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+    target_cols: list[str],
+    update_cols: list[str],
+    *,
+    chunk_size: int = 50,
+) -> int:
+    """Native Trino/Presto/Athena ``MERGE INTO`` with NULL-safe ON (Iceberg MoR).
+
+    Stages via ``VALUES`` chunks — Trino connector MERGE and Athena engine v3
+    Iceberg ``MERGE INTO`` (AWS Big Data Blog / Athena MERGE docs). Falls back
+    to delete+insert for Trino/Presto; Athena callers must use append-only
+    fallback (see ``_upsert_batch``). Still at-least-once.
+    """
+    from connectors.writer_common import null_safe_merge_on
+
+    if not rows:
+        return 0
+    target = _trino_qualified_table(table_obj)
+    on_sql = null_safe_merge_on(
+        conflict_cols,
+        left_alias="t",
+        right_alias="s",
+        quote_column=_trino_quote,
+    )
+    insert_cols = ", ".join(_trino_quote(c) for c in target_cols)
+    insert_vals = ", ".join(f"s.{_trino_quote(c)}" for c in target_cols)
+    set_sql = ""
+    if update_cols:
+        set_sql = ", ".join(
+            f"{_trino_quote(c)} = s.{_trino_quote(c)}" for c in update_cols
+        )
+    alias_list = ", ".join(_trino_quote(c) for c in target_cols)
+    written = 0
+    size = max(1, int(chunk_size))
+    for i in range(0, len(rows), size):
+        chunk = rows[i : i + size]
+        value_rows: list[str] = []
+        params: dict[str, Any] = {}
+        for ridx, row in enumerate(chunk):
+            placeholders = []
+            for col in target_cols:
+                key = f"r{ridx}_{col}"
+                params[key] = row.get(col)
+                placeholders.append(f":{key}")
+            value_rows.append(f"({', '.join(placeholders)})")
+        values_sql = ", ".join(value_rows)
+        if set_sql:
+            merge_sql = (
+                f"MERGE INTO {target} t "
+                f"USING (VALUES {values_sql}) AS s ({alias_list}) "
+                f"ON ({on_sql}) "
+                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        else:
+            merge_sql = (
+                f"MERGE INTO {target} t "
+                f"USING (VALUES {values_sql}) AS s ({alias_list}) "
+                f"ON ({on_sql}) "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        conn.execute(sa.text(merge_sql), params)  # nosec B608
+        written += len(chunk)
+    return written
+
+
+def _hana_quote(ident: str) -> str:
+    return '"' + str(ident).replace('"', '""') + '"'
+
+
+def _hana_qualified_table(table_obj: sa.Table) -> str:
+    parts = []
+    if table_obj.schema:
+        parts.append(_hana_quote(table_obj.schema))
+    parts.append(_hana_quote(table_obj.name))
+    return ".".join(parts)
+
+
+def _hana_merge_upsert(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+    target_cols: list[str],
+    update_cols: list[str],
+) -> int:
+    """Native SAP HANA ``MERGE INTO`` with NULL-safe ON via local temp stage.
+
+    HANA also offers ``UPSERT … WITH PRIMARY KEY`` for single-row PK paths;
+    MERGE is the composite-key / CDC-class algorithm (Airbyte/Fivetran HANA
+    destinations). Still at-least-once.
+    """
+    from connectors.writer_common import null_safe_merge_on
+
+    if not rows:
+        return 0
+    suffix = abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000
+    # HANA local temporary tables are session-scoped and named with #.
+    stage = f"#DF_MRG_{suffix}"
+    target = _hana_qualified_table(table_obj)
+    col_sql = ", ".join(_hana_quote(c) for c in target_cols)
+    conn.execute(
+        sa.text(
+            f"CREATE LOCAL TEMPORARY COLUMN TABLE {stage} AS "
+            f"(SELECT {col_sql} FROM {target} WHERE 1=0)"  # nosec B608
+        )
+    )
+    try:
+        placeholders = ", ".join(f":{c}" for c in target_cols)
+        insert_sql = sa.text(
+            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        )
+        for row in rows:
+            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
+
+        on_sql = null_safe_merge_on(
+            conflict_cols,
+            left_alias="t",
+            right_alias="s",
+            quote_column=_hana_quote,
+        )
+        insert_cols = ", ".join(_hana_quote(c) for c in target_cols)
+        insert_vals = ", ".join(f"s.{_hana_quote(c)}" for c in target_cols)
+        if update_cols:
+            set_sql = ", ".join(
+                f"t.{_hana_quote(c)} = s.{_hana_quote(c)}" for c in update_cols
+            )
+            merge_sql = (
+                f"MERGE INTO {target} AS t "
+                f"USING {stage} AS s "
+                f"ON ({on_sql}) "
+                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        else:
+            merge_sql = (
+                f"MERGE INTO {target} AS t "
+                f"USING {stage} AS s "
+                f"ON ({on_sql}) "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        conn.execute(sa.text(merge_sql))  # nosec B608
+        return len(rows)
+    finally:
+        with contextlib.suppress(Exception):
+            conn.execute(sa.text(f"DROP TABLE {stage}"))  # nosec B608
+
+
+def _vertica_quote(ident: str) -> str:
+    return '"' + str(ident).replace('"', '""') + '"'
+
+
+def _vertica_qualified_table(table_obj: sa.Table) -> str:
+    parts = []
+    if table_obj.schema:
+        parts.append(_vertica_quote(table_obj.schema))
+    parts.append(_vertica_quote(table_obj.name))
+    return ".".join(parts)
+
+
+def _vertica_merge_upsert(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+    target_cols: list[str],
+    update_cols: list[str],
+) -> int:
+    """Native Vertica ``MERGE INTO`` with NULL-safe ON via local temp stage.
+
+    Vertica docs: one MERGE upserts matched + unmatched in a single transaction
+    (Fivetran Vertica / enterprise warehouse pattern). Still at-least-once.
+    """
+    from connectors.writer_common import null_safe_merge_on
+
+    if not rows:
+        return 0
+    suffix = abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000
+    stage = _vertica_quote(f"df_mrg_{suffix}")
+    target = _vertica_qualified_table(table_obj)
+    col_sql = ", ".join(_vertica_quote(c) for c in target_cols)
+    conn.execute(
+        sa.text(
+            f"CREATE LOCAL TEMPORARY TABLE {stage} ON COMMIT PRESERVE ROWS AS "
+            f"SELECT {col_sql} FROM {target} WHERE FALSE"  # nosec B608
+        )
+    )
+    try:
+        placeholders = ", ".join(f":{c}" for c in target_cols)
+        insert_sql = sa.text(
+            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        )
+        for row in rows:
+            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
+
+        on_sql = null_safe_merge_on(
+            conflict_cols,
+            left_alias="t",
+            right_alias="s",
+            quote_column=_vertica_quote,
+        )
+        insert_cols = ", ".join(_vertica_quote(c) for c in target_cols)
+        insert_vals = ", ".join(f"s.{_vertica_quote(c)}" for c in target_cols)
+        if update_cols:
+            set_sql = ", ".join(
+                f"{_vertica_quote(c)} = s.{_vertica_quote(c)}" for c in update_cols
+            )
+            merge_sql = (
+                f"MERGE INTO {target} AS t "
+                f"USING {stage} AS s "
+                f"ON ({on_sql}) "
+                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        else:
+            merge_sql = (
+                f"MERGE INTO {target} AS t "
+                f"USING {stage} AS s "
+                f"ON ({on_sql}) "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        conn.execute(sa.text(merge_sql))  # nosec B608
+        return len(rows)
+    finally:
+        with contextlib.suppress(Exception):
+            conn.execute(sa.text(f"DROP TABLE {stage}"))  # nosec B608
+
+
+def _netezza_quote(ident: str) -> str:
+    return '"' + str(ident).replace('"', '""') + '"'
+
+
+def _netezza_qualified_table(table_obj: sa.Table) -> str:
+    parts = []
+    if table_obj.schema:
+        parts.append(_netezza_quote(table_obj.schema))
+    parts.append(_netezza_quote(table_obj.name))
+    return ".".join(parts)
+
+
+def _netezza_merge_upsert(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+    target_cols: list[str],
+    update_cols: list[str],
+) -> int:
+    """Native Netezza / IBM NPS ``MERGE INTO`` with NULL-safe ON (7.2.1+).
+
+    Stages via ``CREATE TEMP TABLE … AS SELECT … LIMIT 0`` then MERGE —
+    IBM Performance Server / Fivetran Netezza class. Still at-least-once.
+    """
+    from connectors.writer_common import null_safe_merge_on
+
+    if not rows:
+        return 0
+    suffix = abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000
+    stage = _netezza_quote(f"df_mrg_{suffix}")
+    target = _netezza_qualified_table(table_obj)
+    col_sql = ", ".join(_netezza_quote(c) for c in target_cols)
+    conn.execute(
+        sa.text(
+            f"CREATE TEMP TABLE {stage} AS "
+            f"SELECT {col_sql} FROM {target} LIMIT 0"  # nosec B608
+        )
+    )
+    try:
+        placeholders = ", ".join(f":{c}" for c in target_cols)
+        insert_sql = sa.text(
+            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        )
+        for row in rows:
+            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
+
+        on_sql = null_safe_merge_on(
+            conflict_cols,
+            left_alias="t",
+            right_alias="s",
+            quote_column=_netezza_quote,
+        )
+        insert_cols = ", ".join(_netezza_quote(c) for c in target_cols)
+        insert_vals = ", ".join(f"s.{_netezza_quote(c)}" for c in target_cols)
+        if update_cols:
+            set_sql = ", ".join(
+                f"{_netezza_quote(c)} = s.{_netezza_quote(c)}" for c in update_cols
+            )
+            merge_sql = (
+                f"MERGE INTO {target} AS t "
+                f"USING {stage} AS s "
+                f"ON ({on_sql}) "
+                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        else:
+            merge_sql = (
+                f"MERGE INTO {target} AS t "
+                f"USING {stage} AS s "
+                f"ON ({on_sql}) "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        conn.execute(sa.text(merge_sql))  # nosec B608
+        return len(rows)
+    finally:
+        with contextlib.suppress(Exception):
+            conn.execute(sa.text(f"DROP TABLE {stage}"))  # nosec B608
+
+
+def _informix_quote(ident: str) -> str:
+    return '"' + str(ident).replace('"', '""') + '"'
+
+
+def _informix_qualified_table(table_obj: sa.Table) -> str:
+    parts = []
+    if table_obj.schema:
+        parts.append(_informix_quote(table_obj.schema))
+    parts.append(_informix_quote(table_obj.name))
+    return ".".join(parts)
+
+
+def _informix_merge_upsert(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+    target_cols: list[str],
+    update_cols: list[str],
+) -> int:
+    """Native Informix ``MERGE INTO`` with NULL-safe ON via TEMP stage.
+
+    IBM/HCL docs: TEMP ``WITH NO LOG`` + MERGE join (Fivetran Informix class).
+    Still at-least-once — not exactly-once.
+    """
+    from connectors.writer_common import null_safe_merge_on
+
+    if not rows:
+        return 0
+    suffix = abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000
+    stage = _informix_quote(f"df_mrg_{suffix}")
+    target = _informix_qualified_table(table_obj)
+    col_sql = ", ".join(_informix_quote(c) for c in target_cols)
+    conn.execute(
+        sa.text(
+            f"CREATE TEMP TABLE {stage} AS "
+            f"SELECT {col_sql} FROM {target} WHERE 1=0 "
+            f"WITH NO LOG"  # nosec B608
+        )
+    )
+    try:
+        placeholders = ", ".join(f":{c}" for c in target_cols)
+        insert_sql = sa.text(
+            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        )
+        for row in rows:
+            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
+
+        on_sql = null_safe_merge_on(
+            conflict_cols,
+            left_alias="t",
+            right_alias="s",
+            quote_column=_informix_quote,
+        )
+        insert_cols = ", ".join(_informix_quote(c) for c in target_cols)
+        insert_vals = ", ".join(f"s.{_informix_quote(c)}" for c in target_cols)
+        if update_cols:
+            set_sql = ", ".join(
+                f"t.{_informix_quote(c)} = s.{_informix_quote(c)}" for c in update_cols
+            )
+            merge_sql = (
+                f"MERGE INTO {target} AS t "
+                f"USING {stage} AS s "
+                f"ON ({on_sql}) "
+                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        else:
+            merge_sql = (
+                f"MERGE INTO {target} AS t "
+                f"USING {stage} AS s "
+                f"ON ({on_sql}) "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        conn.execute(sa.text(merge_sql))  # nosec B608
+        return len(rows)
+    finally:
+        with contextlib.suppress(Exception):
+            conn.execute(sa.text(f"DROP TABLE {stage}"))  # nosec B608
+
+
+def _firebird_quote(ident: str) -> str:
+    return '"' + str(ident).replace('"', '""') + '"'
+
+
+def _firebird_qualified_table(table_obj: sa.Table) -> str:
+    parts = []
+    if table_obj.schema:
+        parts.append(_firebird_quote(table_obj.schema))
+    parts.append(_firebird_quote(table_obj.name))
+    return ".".join(parts)
+
+
+def _firebird_merge_upsert(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+    target_cols: list[str],
+    update_cols: list[str],
+) -> int:
+    """Native Firebird ``MERGE INTO`` with NULL-safe ON via ``RDB$DATABASE``.
+
+    Firebird 2.1+ MERGE; staging each row from ``RDB$DATABASE`` avoids inventing
+    GTT DDL without typed columns (Firebird Language Reference). Still
+    at-least-once.
+    """
+    from connectors.writer_common import null_safe_merge_on
+
+    if not rows:
+        return 0
+    target = _firebird_qualified_table(table_obj)
+    on_sql = null_safe_merge_on(
+        conflict_cols,
+        left_alias="t",
+        right_alias="s",
+        quote_column=_firebird_quote,
+    )
+    insert_cols = ", ".join(_firebird_quote(c) for c in target_cols)
+    insert_vals = ", ".join(f"s.{_firebird_quote(c)}" for c in target_cols)
+    set_sql = ""
+    if update_cols:
+        set_sql = ", ".join(
+            f"t.{_firebird_quote(c)} = s.{_firebird_quote(c)}" for c in update_cols
+        )
+    select_list = ", ".join(f":{c} AS {_firebird_quote(c)}" for c in target_cols)
+    for row in rows:
+        params = {c: row.get(c) for c in target_cols}
+        if set_sql:
+            merge_sql = (
+                f"MERGE INTO {target} AS t "
+                f"USING (SELECT {select_list} FROM RDB$DATABASE) AS s "
+                f"ON ({on_sql}) "
+                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        else:
+            merge_sql = (
+                f"MERGE INTO {target} AS t "
+                f"USING (SELECT {select_list} FROM RDB$DATABASE) AS s "
+                f"ON ({on_sql}) "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        conn.execute(sa.text(merge_sql), params)  # nosec B608
+    return len(rows)
+
+
+def _sybase_bracket(ident: str) -> str:
+    return "[" + str(ident).replace("]", "]]") + "]"
+
+
+def _sybase_qualified_table(table_obj: sa.Table) -> str:
+    parts = []
+    if table_obj.schema:
+        parts.append(_sybase_bracket(table_obj.schema))
+    parts.append(_sybase_bracket(table_obj.name))
+    return ".".join(parts)
+
+
+def _sybase_merge_upsert(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+    target_cols: list[str],
+    update_cols: list[str],
+) -> int:
+    """Native SAP ASE / Sybase ``MERGE`` (15.7+) with NULL-safe ON.
+
+    Stages via ``SELECT … INTO #temp WHERE 1=0`` then MERGE — SAP Infocenter
+    ASE MERGE class (same family as SQL Server, without HOLDLOCK). Still
+    at-least-once.
+    """
+    from connectors.writer_common import null_safe_merge_on
+
+    if not rows:
+        return 0
+    stage = f"#df_mrg_{abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000}"
+    target = _sybase_qualified_table(table_obj)
+    col_sql = ", ".join(_sybase_bracket(c) for c in target_cols)
+    conn.execute(
+        sa.text(
+            f"SELECT {col_sql} INTO {stage} FROM {target} WHERE 1=0"  # nosec B608
+        )
+    )
+    try:
+        placeholders = ", ".join(f":{c}" for c in target_cols)
+        insert_sql = sa.text(
+            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        )
+        for row in rows:
+            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
+
+        on_sql = null_safe_merge_on(
+            conflict_cols,
+            left_alias="t",
+            right_alias="s",
+            quote_column=_sybase_bracket,
+        )
+        insert_cols = ", ".join(_sybase_bracket(c) for c in target_cols)
+        insert_vals = ", ".join(f"s.{_sybase_bracket(c)}" for c in target_cols)
+        if update_cols:
+            set_sql = ", ".join(
+                f"t.{_sybase_bracket(c)} = s.{_sybase_bracket(c)}" for c in update_cols
+            )
+            merge_sql = (
+                f"MERGE INTO {target} AS t "
+                f"USING {stage} AS s "
+                f"ON ({on_sql}) "
+                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        else:
+            merge_sql = (
+                f"MERGE INTO {target} AS t "
+                f"USING {stage} AS s "
+                f"ON ({on_sql}) "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        conn.execute(sa.text(merge_sql))  # nosec B608
+        return len(rows)
+    finally:
+        with contextlib.suppress(Exception):
+            conn.execute(sa.text(f"DROP TABLE {stage}"))  # nosec B608
+
+
 def _upsert_batch(
     conn: Any,
     table_obj: sa.Table,
@@ -2190,6 +3399,33 @@ def _upsert_batch(
     Deduplicates the batch on the conflict key, then:
       * PostgreSQL, SQLite, MySQL/MariaDB: native ``ON CONFLICT`` /
         ``ON DUPLICATE KEY`` upsert.
+      * SQL Server (mssql): native ``MERGE … WITH (HOLDLOCK)`` + NULL-safe ON;
+        falls back to delete+insert if MERGE fails (missing unique key, etc.).
+      * Oracle: native ``MERGE INTO`` + NULL-safe ON via private/global temp
+        stage; falls back to delete+insert if MERGE fails.
+      * DuckDB: native ``MERGE INTO`` + NULL-safe ON (no unique index required);
+        falls back to delete+insert if MERGE fails.
+      * ClickHouse: ``INSERT`` into ``ReplacingMergeTree`` (engine-level lazy
+        dedupe — Airbyte class). Never delete+insert.
+      * DB2 (``ibm_db_sa``): native ``MERGE INTO`` + NULL-safe ON via DGTT;
+        falls back to delete+insert if MERGE fails.
+      * Teradata (``teradatasql``): native ``MERGE INTO`` via VOLATILE stage;
+        PI equality ON only (engine forbids NULL equate); never UPDATE PI cols.
+      * Trino/Presto/Athena/Hive/Impala: native ``MERGE INTO`` + NULL-safe ON
+        via VALUES chunks (Hive ACID / Impala Iceberg / Athena MoR). Query
+        engines fall back to append-only INSERT — never invent delete+insert.
+      * SAP HANA (``hana``): native ``MERGE INTO`` + NULL-safe ON via local
+        temporary column table; falls back to delete+insert if MERGE fails.
+      * Vertica: native ``MERGE INTO`` + NULL-safe ON via local temp stage;
+        falls back to delete+insert if MERGE fails.
+      * Netezza / IBM NPS (``nzpsql``, 7.2.1+): native ``MERGE INTO`` +
+        NULL-safe ON via TEMP stage; falls back to delete+insert if MERGE fails.
+      * Informix: native ``MERGE INTO`` + NULL-safe ON via TEMP ``WITH NO LOG``;
+        falls back to delete+insert if MERGE fails.
+      * Firebird: native ``MERGE INTO`` + NULL-safe ON via ``RDB$DATABASE``
+        row stage; falls back to delete+insert if MERGE fails.
+      * Sybase ASE / SAP ASE (15.7+): native ``MERGE`` + NULL-safe ON via
+        ``#temp`` stage; falls back to delete+insert if MERGE fails.
       * Everyone else: chunked DELETE by equality keys followed by INSERT.
 
     Returns the number of destination rows actually written in this batch.
@@ -2321,6 +3557,144 @@ def _upsert_batch(
                     stmt = stmt.prefix_with("IGNORE")
                 conn.execute(stmt)
                 return len(rows)
+
+            if dialect_name == "mssql":
+                # Rows already LSN-filtered above when ``_df_lsn`` is present.
+                return _mssql_merge_upsert(
+                    conn,
+                    table_obj,
+                    rows,
+                    conflict_cols,
+                    target_cols,
+                    update_cols,
+                )
+
+            if dialect_name == "oracle":
+                return _oracle_merge_upsert(
+                    conn,
+                    table_obj,
+                    rows,
+                    conflict_cols,
+                    target_cols,
+                    update_cols,
+                )
+
+            if dialect_name == "duckdb":
+                return _duckdb_merge_upsert(
+                    conn,
+                    table_obj,
+                    rows,
+                    conflict_cols,
+                    target_cols,
+                    update_cols,
+                )
+
+            if dialect_name == "clickhouse" or str(dialect_name).startswith("clickhouse"):
+                return _clickhouse_replacing_upsert(
+                    conn,
+                    table_obj,
+                    rows,
+                    conflict_cols,
+                    target_cols,
+                    update_cols,
+                )
+
+            if dialect_name in {"ibm_db_sa", "db2"}:
+                return _db2_merge_upsert(
+                    conn,
+                    table_obj,
+                    rows,
+                    conflict_cols,
+                    target_cols,
+                    update_cols,
+                )
+
+            if dialect_name in {"teradatasql", "teradata"}:
+                return _teradata_merge_upsert(
+                    conn,
+                    table_obj,
+                    rows,
+                    conflict_cols,
+                    target_cols,
+                    update_cols,
+                )
+
+            if dialect_name in {
+                "trino",
+                "presto",
+                "awsathena",
+                "athena",
+                "hive",
+                "impala",
+            }:
+                return _trino_merge_upsert(
+                    conn,
+                    table_obj,
+                    rows,
+                    conflict_cols,
+                    target_cols,
+                    update_cols,
+                )
+
+            if dialect_name in {"hana", "sap_hana"}:
+                return _hana_merge_upsert(
+                    conn,
+                    table_obj,
+                    rows,
+                    conflict_cols,
+                    target_cols,
+                    update_cols,
+                )
+
+            if dialect_name in {"vertica", "vertica_python"}:
+                return _vertica_merge_upsert(
+                    conn,
+                    table_obj,
+                    rows,
+                    conflict_cols,
+                    target_cols,
+                    update_cols,
+                )
+
+            if dialect_name in {"netezza", "nzpsql", "nzpy"}:
+                return _netezza_merge_upsert(
+                    conn,
+                    table_obj,
+                    rows,
+                    conflict_cols,
+                    target_cols,
+                    update_cols,
+                )
+
+            if dialect_name in {"informix", "ifx"}:
+                return _informix_merge_upsert(
+                    conn,
+                    table_obj,
+                    rows,
+                    conflict_cols,
+                    target_cols,
+                    update_cols,
+                )
+
+            if dialect_name in {"firebird", "firebird2", "fdb"}:
+                return _firebird_merge_upsert(
+                    conn,
+                    table_obj,
+                    rows,
+                    conflict_cols,
+                    target_cols,
+                    update_cols,
+                )
+
+            if dialect_name in {"sybase", "ase", "sap_ase", "sybase_ase"}:
+                return _sybase_merge_upsert(
+                    conn,
+                    table_obj,
+                    rows,
+                    conflict_cols,
+                    target_cols,
+                    update_cols,
+                )
         except (sa.exc.SQLAlchemyError, OSError, ValueError):
             # Native upsert can fail if the table lacks the required unique
             # index/constraint.  Roll back the aborted transaction so the
@@ -2356,6 +3730,39 @@ def _upsert_batch(
                 continue
             filtered.append(row)
         apply_rows = filtered
+
+    # ClickHouse must never DELETE+INSERT even if native path failed — mutations
+    # race ReplacingMergeTree merges (Airbyte destination AGENTS.md). Dedup is
+    # therefore deferred to the table engine: DataFlow creates ReplacingMergeTree,
+    # but an operator-owned plain MergeTree keeps every duplicate. Say so rather
+    # than let the run look like a clean upsert.
+    if dialect_name == "clickhouse" or str(dialect_name).startswith("clickhouse"):
+        if apply_rows:
+            logger.warning(
+                "ClickHouse upsert into %s fell back to plain INSERT — dedup relies "
+                "on a ReplacingMergeTree engine with ORDER BY %s. On a plain "
+                "MergeTree this is at-least-once and keeps duplicate keys.",
+                getattr(table_obj, "name", "table"),
+                ", ".join(conflict_cols) or "<key>",
+            )
+            result = conn.execute(table_obj.insert(), apply_rows)
+            return max(0, getattr(result, "rowcount", None) or 0) or len(apply_rows)
+        return 0
+
+    # Athena / Hive / Impala: MERGE is ACID/Iceberg-only. DELETE+INSERT invents
+    # a non-transactional upsert on HDFS and fails on many table formats —
+    # append-only INSERT preserves at-least-once honesty (duplicates possible).
+    if (
+        dialect_name in {"awsathena", "athena", "hive", "impala"}
+        or str(dialect_name).startswith("athena")
+        or str(dialect_name).startswith("hive")
+        or str(dialect_name).startswith("impala")
+    ):
+        if apply_rows:
+            result = conn.execute(table_obj.insert(), apply_rows)
+            return max(0, getattr(result, "rowcount", None) or 0) or len(apply_rows)
+        return 0
+
     if apply_rows:
         _delete_by_keys(conn, table_obj, apply_rows, conflict_cols)
         result = conn.execute(table_obj.insert(), apply_rows)
@@ -2420,12 +3827,26 @@ def write_mapped_rows(
     engine = _engine(cfg)
     schema_name = _schema_name(cfg)
 
-    target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(
+        mappings, column_types, preserve_case=True
+    )
+    from services.type_system import is_generated_always_column
+
+    # Omit GENERATED ALWAYS from INSERT projection; keep mappings parallel.
+    keep_idx = [
+        i for i, typ in enumerate(logical_types) if not is_generated_always_column(typ)
+    ]
+    if len(keep_idx) < len(logical_types):
+        target_cols = [target_cols[i] for i in keep_idx]
+        logical_types = [logical_types[i] for i in keep_idx]
+        mappings = [mappings[i] for i in keep_idx if i < len(mappings)]
     dest_db = (cfg.get("type") or "").lower()
     target_column_types = {}
     for i, col in enumerate(target_cols):
-        explicit = mappings[i].get("target_type")
-        source_type = column_types.get(mappings[i]["source"]) or "string"
+        explicit = mappings[i].get("target_type") if i < len(mappings) else None
+        source_type = (
+            column_types.get(mappings[i]["source"]) if i < len(mappings) else None
+        ) or (logical_types[i] if i < len(logical_types) else "string")
         # Map source logical types to destination-native DDL so default
         # identity mappings create the right physical column. DuckDB DECIMAL
         # sources keep their (p,s) DDL when present — never silently collapse
@@ -2472,30 +3893,30 @@ def write_mapped_rows(
         dest_types=target_column_types,
         preserve_case=True,
     )
-    # Fail-closed DECIMAL/NUMERIC/NUMBER(p,s) fit across SQLAlchemy destinations.
-    mapped_rows = quarantine_unfit_decimals(
+    _tgt_types_pre = [str(target_column_types.get(c, "") or "") for c in target_cols]
+    # Engine-honest dialect labels (Databricks/Delta via generic_sql share this path).
+    _engine_label = {
+        "databricks": "Databricks",
+        "duckdb": "DuckDB",
+        "clickhouse": "ClickHouse",
+        "trino": "Trino",
+        "presto": "Presto",
+        "athena": "Athena",
+        "synapse": "Synapse",
+        "motherduck": "MotherDuck",
+    }.get(dest_db, dest_db.title() if dest_db else "SQL")
+    from connectors.writer_common import apply_write_quarantine_matrix
+
+    mapped_rows = apply_write_quarantine_matrix(
         mapped_rows,
         target_cols,
-        [str(target_column_types.get(c, "") or "") for c in target_cols],
+        _tgt_types_pre,
         rejected_details,
         policy,
-        dialect_label="DECIMAL",
+        dialect_label=_engine_label,
+        mappings=mappings,
     )
-    mapped_rows = quarantine_unfit_specialty_types(
-        mapped_rows,
-        target_cols,
-        [str(target_column_types.get(c, "") or "") for c in target_cols],
-        rejected_details,
-        policy,
-    )
-    mapped_rows = quarantine_unfit_strings(
-        mapped_rows,
-        target_cols,
-        [str(target_column_types.get(c, "") or "") for c in target_cols],
-        rejected_details,
-        policy,
-        dialect_label="VARCHAR",
-    )
+    _tgt_types = _tgt_types_pre
     sparse_rows: list[tuple] = []
     rows_for_checksum: list[tuple] = list(mapped_rows)
     if write_mode == "upsert" and conflict_columns:
@@ -2598,6 +4019,18 @@ def write_mapped_rows(
 
             if create_table and not table_exists:
                 try:
+                    # Wave 63: PostgreSQL create-new closed ENUM → CREATE TYPE +
+                    # column typed as df_enum_* (same SSOT as postgresql_writer).
+                    if dest_db in {"postgresql", "postgres", "cockroachdb", "yugabytedb"}:
+                        from services.type_system import collect_pg_enum_prerequisites
+
+                        for stmt in collect_pg_enum_prerequisites(logical_types):
+                            try:
+                                conn.execute(sa.text(stmt))
+                            except Exception as enum_exc:
+                                err_e = str(enum_exc).lower()
+                                if "already exists" not in err_e and "duplicate" not in err_e:
+                                    raise
                     if db_type == "questdb":
                         # QuestDB supports TIMESTAMP but not the PG "WITHOUT TIME ZONE" clause.
                         ddl = str(

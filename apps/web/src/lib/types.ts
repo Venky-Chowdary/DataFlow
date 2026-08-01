@@ -483,6 +483,8 @@ export interface CoercionColumn {
   wire_examples?: { row: number; value: string; wire_form?: string | null; reason?: string }[];
   sample_wire_form?: string | null;
   severity: "ok" | "warn" | "block";
+  /** Declared type path collapses fidelity even when preview samples coerce. */
+  fidelity_collapse?: boolean;
   suggested_fix?: string;
   suggested_target_type?: string | null;
   suggested_transform?: string | null;

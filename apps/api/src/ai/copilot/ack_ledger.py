@@ -166,7 +166,7 @@ class PilotAckLedger:
                 return None, "Approval not found or expired. Ask Pilot to create the connector again."
             if doc.get("consumed_at"):
                 prior = doc.get("result")
-                if isinstance(prior, dict) and prior.get("connector_id"):
+                if isinstance(prior, dict) and prior:
                     return {"_idempotent": True, **prior}, ""
                 return None, "This approval was already used."
             if float(doc.get("expires_at") or 0) <= _now():
@@ -199,8 +199,10 @@ class PilotAckLedger:
             if not doc:
                 return None, "Approval not found or expired. Ask Pilot to create the connector again."
             if doc.get("consumed_at"):
+                # Any stamped result means the mutation already happened. Replaying
+                # the same ack must return that result, never run the action twice.
                 prior = doc.get("result")
-                if isinstance(prior, dict) and prior.get("connector_id"):
+                if isinstance(prior, dict) and prior:
                     return {"_idempotent": True, **prior}, ""
                 return None, "This approval was already used."
             if float(doc.get("expires_at") or 0) <= now:

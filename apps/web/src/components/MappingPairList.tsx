@@ -2,6 +2,7 @@ import { ConnectorIcon } from "../app/brand-icons";
 import { DtIcon } from "./DtIcon";
 import type { IndexedMapping } from "../lib/columnWorkbench";
 import { mappingTier } from "../lib/columnWorkbench";
+import { fidelityChipLabel, fidelityRiskForMapping } from "../lib/schemaIntelligence";
 
 interface MappingPairListProps {
   items: IndexedMapping[];
@@ -71,13 +72,39 @@ export function MappingPairList({
       <ul className="df2-mapping-pairs-list">
         {items.map(({ mapping, index }) => {
           const tier = mappingTier(mapping, confidenceThreshold);
+          // Prefer the engine's stamped verdict over client-side heuristics so
+          // Map, the proof drawer, and Pilot all show the same risk chip.
+          const engineVerdict = (mapping.fidelity || "").toLowerCase();
+          const engineRisk =
+            engineVerdict === "lossy_cast" || engineVerdict === "mutate" || engineVerdict === "cast"
+              ? {
+                  label: engineVerdict === "lossy_cast" ? "lossy" : engineVerdict === "mutate" ? "mutate" : "cast",
+                  detail: mapping.fidelityReason || `${mapping.inferredType || "?"} → ${mapping.destType || "?"}`,
+                  severity: engineVerdict === "lossy_cast" ? "block" as const : "warn" as const,
+                }
+              : null;
+          const heuristic = engineRisk
+            ? null
+            : fidelityRiskForMapping(mapping, { destConnector: destType });
+          const fidelityLabel = engineRisk
+            ? engineRisk.label
+            : heuristic
+              ? fidelityChipLabel(heuristic)
+              : null;
+          const fidelityDetail = engineRisk?.detail || heuristic?.detail || "";
+          const fidelitySeverity = engineRisk?.severity || heuristic?.severity || "warn";
+          const hasFidelity = Boolean(fidelityLabel);
+          const pairTitle = [
+            `${mapping.source} → ${mapping.target} (${(mapping.confidence * 100).toFixed(0)}%)`,
+            fidelityLabel ? `${fidelityLabel}: ${fidelityDetail}` : "",
+          ].filter(Boolean).join(" · ");
           return (
             <li key={`${mapping.source}-${index}`}>
               <button
                 type="button"
-                className={`df2-mapping-pair df2-mapping-pair-${tier}`}
+                className={`df2-mapping-pair df2-mapping-pair-${tier}${hasFidelity ? " has-fidelity-risk" : ""}`}
                 onClick={() => onSelectSource?.(mapping.source)}
-                title={`${mapping.source} → ${mapping.target} (${(mapping.confidence * 100).toFixed(0)}%)`}
+                title={pairTitle}
               >
                 <span className="df2-mapping-pair-source">{mapping.source}</span>
                 <span className="df2-mapping-pair-arrow" aria-hidden>→</span>
@@ -85,10 +112,18 @@ export function MappingPairList({
                 <span className={`df2-mapping-pair-conf df2-mapping-pair-conf-${tier}`}>
                   {(mapping.confidence * 100).toFixed(0)}%
                 </span>
+                {fidelityLabel && (
+                  <span
+                    className={`df2-badge df2-badge-xs ${fidelitySeverity === "block" ? "df2-badge-run" : "df2-badge-warn"}`}
+                    title={fidelityDetail}
+                  >
+                    {fidelityLabel}
+                  </span>
+                )}
                 {mapping.isPii && (
                   <span className="df2-badge df2-badge-run df2-badge-xs">PII</span>
                 )}
-                {mapping.requiresReview && !mapping.approved && (
+                {mapping.requiresReview && !mapping.approved && !hasFidelity && (
                   <span className="df2-badge df2-badge-run df2-badge-xs">review</span>
                 )}
               </button>

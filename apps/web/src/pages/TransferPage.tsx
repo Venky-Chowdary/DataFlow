@@ -5631,9 +5631,21 @@ export function TransferPage({
             sourceType={sourceKind === "file" ? "file" : sourceConnector?.type || sourceKind}
             destType={destKindMode === "file_export" ? exportFormat : destType}
             mappingProof={mappingProof}
+            repairMappings={columnMappings.map((m) => ({
+              source: m.source,
+              destination: m.target || m.source,
+              destination_type: m.destType,
+              target_type: m.destType,
+              transform: m.transform || undefined,
+            }))}
             onNewTransfer={resetTransferStudio}
             onSchedule={() => void handleScheduleRoute()}
             onOpenValidate={() => setStep(STEP_VALIDATE)}
+            onOpenChildJob={(childId) => {
+              setActiveJobId(childId);
+              setTransferring(true);
+              setResult(null);
+            }}
             onResume={
               result.job_id && !result.success
                 ? () => {

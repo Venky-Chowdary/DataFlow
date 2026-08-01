@@ -16,6 +16,7 @@ from connectors.writer_common import (
 )
 from connectors.writer_common import (
     _rejected_row_count,
+    apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
     resolve_target_columns,
     row_checksum,
@@ -87,6 +88,11 @@ def write_mapped_rows(
         dest_types=dest_types,
         error_policy=policy,
         preserve_case=True,
+    )
+    tgt_types = [str(dest_types.get(c, "") or "") for c in target_cols]
+    mapped_rows = apply_write_quarantine_matrix(
+        mapped_rows, target_cols, tgt_types, rejected_details, policy, dialect_label="ADLS",
+        mappings=mappings,
     )
     if errors and policy == "fail":
         return WriteResult(

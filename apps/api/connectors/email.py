@@ -20,7 +20,9 @@ from services.value_serializer import cell_to_string, json_default
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
     _rejected_row_count,
+    apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
+    gate8_writer_meta,
     resolve_target_columns,
     row_checksum,
     to_json_value,
@@ -269,6 +271,20 @@ def write_mapped_rows(
             rejected_rows=len(rejected_details),
         )
 
+    # Typed carriers still apply — refuse silent invent into the attachment
+    # (parity with S3/SFTP). SMTP has no independent Gate-8 read-back; stamp
+    # reconcile_sample so sample-verified honesty can still fire.
+    tgt_types = [str(dest_types.get(c, "") or "") for c in target_cols]
+    mapped_rows = apply_write_quarantine_matrix(
+        mapped_rows,
+        target_cols,
+        tgt_types,
+        rejected_details,
+        policy,
+        dialect_label="Email",
+        mappings=mappings,
+    )
+
     rejected_rows = max(
         _rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
         len(data_rows) - len(mapped_rows),
@@ -340,6 +356,7 @@ def write_mapped_rows(
             warnings=transform_errors[:10],
             rejected_rows=rejected_rows,
             rejected_details=rejected_details,
+            meta=gate8_writer_meta(records, target_cols),
         )
     except Exception as exc:
         return WriteResult(

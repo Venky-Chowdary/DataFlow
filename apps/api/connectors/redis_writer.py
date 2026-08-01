@@ -18,6 +18,7 @@ from connectors.redis_reader import _redis_client
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
     build_mapped_rows_with_details,
+    gate8_writer_meta,
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
@@ -28,6 +29,38 @@ from connectors.writer_common import (
 @dataclass
 class WriteResult(_WriteResult):
     driver: str = "redis-py"
+
+
+def _normalize_redis_typed_doc(
+    doc: dict[str, Any],
+    target_cols: list[str],
+    logical_types: list[str],
+) -> dict[str, Any]:
+    """Fail-closed UUID/BINARY/BOOL normalize before JSON SET.
+
+    Invalid base64 / UUID raise so the writer quarantines — never invent bytes.
+    """
+    import base64
+
+    from connectors.sql_bind import (
+        coerce_binary_wire,
+        coerce_boolean_wire,
+        coerce_uuid_wire,
+    )
+
+    out = dict(doc)
+    for col, typ in zip(target_cols, logical_types):
+        if col not in out or out[col] is None:
+            continue
+        upper = (typ or "").upper()
+        if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
+            out[col] = coerce_uuid_wire(out[col])
+        elif upper in {"BINARY", "BLOB", "BYTEA", "VARBINARY"}:
+            raw = coerce_binary_wire(out[col])
+            out[col] = base64.b64encode(raw).decode("ascii") if raw is not None else None
+        elif upper in {"BOOLEAN", "BOOL"}:
+            out[col] = bool(coerce_boolean_wire(out[col], as_int=False))
+    return out
 
 
 # Thin aliases — tests/engine may import these names from the writer module.
@@ -143,6 +176,47 @@ def write_mapped_rows(
         seen_keys: dict[str, int] = {}
         for i, row in enumerate(mapped_rows):
             doc = dict(zip(target_cols, row))
+            try:
+                doc = _normalize_redis_typed_doc(doc, target_cols, logical_types)
+            except (ValueError, TypeError) as cell_exc:
+                msg = format_exception_message(cell_exc)
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=prefix,
+                        target_schema=f"db{database or 0}",
+                        checksum="",
+                        chunks_completed=0,
+                        error=msg,
+                        warnings=errors[:10],
+                        rejected_rows=len({d["row"] for d in rejected_details}) + 1,
+                        rejected_details=rejected_details[:100]
+                        + [
+                            {
+                                "row": i + 1,
+                                "column": "",
+                                "target": "",
+                                "value": "",
+                                "reason": msg,
+                                "policy": "write_fail",
+                                "chars": [],
+                            }
+                        ],
+                    )
+                rejected_details.append(
+                    {
+                        "row": i + 1,
+                        "column": "",
+                        "target": "",
+                        "value": "",
+                        "reason": msg,
+                        "policy": "write_quarantine",
+                        "chars": [],
+                    }
+                )
+                errors.append(msg)
+                continue
             key_id, id_col = _resolve_redis_key_id(doc, target_cols, conflict, row_index=i)
             if key_id is None:
                 msg = (
@@ -267,6 +341,7 @@ def write_mapped_rows(
             warnings=errors[:10],
             rejected_rows=len({d["row"] for d in rejected_details}),
             rejected_details=rejected_details[:100],
+            meta=gate8_writer_meta(mapped_rows, target_cols),
         )
     except Exception as exc:
         return WriteResult(

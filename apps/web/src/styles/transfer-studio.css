@@ -5843,6 +5843,11 @@ th.df2-type-string .df2-type-badge {
 .df2-vd-scope-chip.cov-full_schema { background: #ecfdf5; color: #047857; }
 .df2-vd-scope-chip.cov-pending { background: #fef3c7; color: #92400e; }
 
+.df2-vd-coerce-frame.is-collapse {
+  color: var(--df2-danger, #b91c1c);
+  background: color-mix(in srgb, var(--df2-danger, #b91c1c) 12%, transparent);
+  border-color: color-mix(in srgb, var(--df2-danger, #b91c1c) 35%, transparent);
+}
 .df2-vd-coerce-frame {
   display: inline-block;
   margin-left: 6px;

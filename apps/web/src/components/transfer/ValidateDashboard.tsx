@@ -23,6 +23,7 @@ import {
   buildDisplayBlockers,
   buildExecutiveSummary,
   findDuplicateKeyRoot,
+  isDeclaredFidelityCollapse,
   partitionCoercionColumns,
   partitionExplainIssues,
 } from "../../lib/validateIssueGrouping";
@@ -342,14 +343,16 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
         <span>
           {otherActionable.length > 0
             ? `${otherActionable.length} column${otherActionable.length === 1 ? "" : "s"} need review`
-            : `${clean.length} column${clean.length === 1 ? "" : "s"} convert cleanly on the sample`}
+            : `${clean.length} column${clean.length === 1 ? "" : "s"} convert cleanly on the sample (declared types align)`}
           {isoNormalize.length > 0
             ? ` · ${isoNormalize.length} timestamp normalize (informational)`
             : ""}
           {clean.length > 0 && otherActionable.length > 0
-            ? ` · ${clean.length} convert cleanly`
+            ? ` · ${clean.length} sample-clean`
             : ""}
-          {otherActionable.length > 0 ? " — expand a row for offending values / wire form." : "."}
+          {otherActionable.length > 0
+            ? " — expand a row for offending values, wire form, or declared fidelity collapse."
+            : "."}
         </span>
         {clean.length > 0 && (
           <button
@@ -441,6 +444,16 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
                       {col.framing?.kind === "structured_serialization" && (
                         <span className="df2-vd-coerce-frame" title="Shape-preserving structured serialization">
                           Structured serialization
+                        </span>
+                      )}
+                      {isDeclaredFidelityCollapse(col) && (
+                        <span
+                          className="df2-vd-coerce-frame is-collapse"
+                          title={col.framing?.label || col.suggested_fix || "Declared type path collapses fidelity"}
+                        >
+                          {col.failed === 0 && (col.ok ?? 0) > 0
+                            ? "Sample coerces · declared collapse"
+                            : "Fidelity collapse"}
                         </span>
                       )}
                     </td>

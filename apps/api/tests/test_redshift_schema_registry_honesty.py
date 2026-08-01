@@ -43,15 +43,16 @@ def test_redshift_ddl_json_is_super_not_varchar_max():
     assert "VARCHAR(max)" not in ddl_type("redshift", "TEXT").lower()
 
 
-def test_redshift_capability_honest_no_merge_no_varchar_max():
+def test_redshift_capability_honest_merge_with_fallback():
     caps = CAPABILITY_REGISTRY["redshift"]
     assert caps["supports_upsert"] is True
-    assert caps["supports_merge"] is False
+    assert caps["supports_merge"] is True
     issues = " ".join(caps.get("common_issues") or [])
     assert "VARCHAR(65535)" in issues
     assert "VARCHAR(max)" not in issues
-    assert "ON CONFLICT" in issues or "delete+insert" in issues.lower()
-
+    assert "MERGE" in issues
+    assert "at-least-once" in issues.lower() or "delete+insert" in issues.lower()
+    assert "exactly-once" not in issues.lower() or "not exactly-once" in issues.lower()
 
 def test_redshift_never_uses_on_conflict():
     assert uses_pg_on_conflict_upsert("postgresql") is True

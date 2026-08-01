@@ -791,7 +791,12 @@ class QuarantineReplayRequest(BaseModel):
 
 
 def _quarantine_details_to_records(details: list[dict], transform_overrides: Optional[dict] = None) -> tuple[list[dict], list[str]]:
-    """Group rejected_details by row index into source-shaped records for rewrite."""
+    """Group rejected_details by row index into records for rewrite.
+
+    Values may be source-shaped (transform quarantine) or target-shaped
+    (write-matrix quarantine). Callers canonicalize to source keys before
+    ``write_destination_database``.
+    """
     by_row: dict[int, dict] = {}
     order: list[int] = []
     for detail in details:
@@ -802,7 +807,10 @@ def _quarantine_details_to_records(details: list[dict], transform_overrides: Opt
         if row_num not in by_row:
             by_row[row_num] = {}
             order.append(row_num)
-        base = detail.get("values") if isinstance(detail.get("values"), dict) else {}
+        # Prefer explicit source_values when dual-stamped (Wave 32).
+        base = detail.get("source_values") if isinstance(detail.get("source_values"), dict) else None
+        if not base:
+            base = detail.get("values") if isinstance(detail.get("values"), dict) else {}
         if base:
             for k, v in base.items():
                 by_row[row_num].setdefault(str(k), "" if v is None else str(v))
@@ -819,6 +827,99 @@ def _quarantine_details_to_records(details: list[dict], transform_overrides: Opt
                 columns.append(k)
     _ = transform_overrides  # applied to mappings by caller
     return records, columns
+
+
+def _canonicalize_quarantine_records_to_source(
+    records: list[dict],
+    mappings: list[dict],
+) -> tuple[list[dict], list[str]]:
+    """Project quarantine values onto source column names for rewrite.
+
+    Write quarantine stamps target keys; transform quarantine stamps source
+    keys. Mapping rewrite always reads source → target, so target-only scraps
+    would otherwise insert NULL for every mapped field.
+    """
+    pairs: list[tuple[str, str]] = []
+    for m in mappings or []:
+        src = str(m.get("source") or m.get("source_column") or "").strip()
+        tgt = str(m.get("target") or m.get("target_column") or "").strip() or src
+        if src:
+            pairs.append((src, tgt))
+    if not pairs:
+        cols: list[str] = []
+        seen: set[str] = set()
+        for rec in records:
+            for k in rec:
+                if k not in seen:
+                    seen.add(k)
+                    cols.append(k)
+        return records, cols
+
+    out: list[dict] = []
+    for rec in records:
+        shaped: dict[str, str] = {}
+        for src, tgt in pairs:
+            if src in rec:
+                shaped[src] = "" if rec[src] is None else str(rec[src])
+            elif tgt in rec:
+                shaped[src] = "" if rec[tgt] is None else str(rec[tgt])
+            else:
+                # Keep absence visible to refuse-incomplete (key missing).
+                continue
+        # Preserve unmapped extras (operator edits) under their original keys.
+        for k, v in rec.items():
+            if k not in shaped and all(k != t for _, t in pairs):
+                shaped[str(k)] = "" if v is None else str(v)
+        out.append(shaped)
+    columns: list[str] = []
+    seen_c: set[str] = set()
+    for rec in out:
+        for k in rec:
+            if k not in seen_c:
+                seen_c.add(k)
+                columns.append(k)
+    # Ensure mapped source columns appear in column order even when sparse.
+    for src, _tgt in pairs:
+        if src not in seen_c:
+            columns.append(src)
+            seen_c.add(src)
+    return out, columns
+
+
+def _refuse_incomplete_quarantine_replay(
+    records: list[dict],
+    mappings: list[dict],
+) -> None:
+    """Fail-closed when quarantine scraps cannot reconstruct a mapped row.
+
+    Transform quarantine stamps full source-shaped ``values``; write matrix
+    holdouts stamp target-shaped ``values`` (``append_write_quarantine_detail``).
+    Accept either shape so target-keyed scraps are not false-refused — then
+    canonicalize to source before rewrite. Single-column scraps would insert
+    NULL/empty for other mapped fields — refuse rather than silent data loss.
+    """
+    pairs: list[tuple[str, str]] = []
+    for m in mappings or []:
+        src = str(m.get("source") or m.get("source_column") or "").strip()
+        tgt = str(m.get("target") or m.get("target_column") or "").strip() or src
+        if src:
+            pairs.append((src, tgt))
+    if len(pairs) < 2:
+        return
+    min_required = max(2, (len(pairs) + 1) // 2)
+    for i, rec in enumerate(records):
+        # Empty-string cells are valid (Oracle '' / intentional blank) — key must exist.
+        present = sum(1 for src, tgt in pairs if src in rec or tgt in rec)
+        if present < min_required:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Quarantine row {i + 1} is incomplete for replay "
+                    f"({present}/{len(pairs)} mapped columns). "
+                    "Re-run the parent transfer so quarantine stamps full "
+                    "``values``, then edit and replay."
+                ),
+            )
 
 
 @router.post("/jobs/{job_id}/quarantine/replay")
@@ -865,14 +966,69 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
 
+    _refuse_incomplete_quarantine_replay(records, mappings)
+    records, columns = _canonicalize_quarantine_records_to_source(records, mappings)
+
     schema = dict(transfer_req.column_types or {})
     for c in columns:
         schema.setdefault(c, "string")
 
+    dest = transfer_req.destination
+    if dest.kind == "file_export":
+        raise HTTPException(status_code=400, detail="Quarantine replay is not supported for file_export destinations")
+
+    # Prefer stream-contract / identity PK — never hardcode only id/_id
+    # (Mongo→SQL users use `_id`→`id`, but many routes use user_id / code).
+    conflict_columns: list[str] = []
+    try:
+        from services.primary_key import resolve_primary_key_target
+        from services.sync_cursor import map_source_to_target, resolve_sync_contract
+
+        contract = resolve_sync_contract(transfer_req.stream_contracts)
+        if contract and contract.primary_key:
+            conflict_columns = [
+                map_source_to_target(col, mappings)
+                for col in contract.primary_key_columns()
+            ]
+        if not conflict_columns:
+            pk_tgt = resolve_primary_key_target(
+                mappings,
+                (dest.format or "").lower(),
+                validation_mode=transfer_req.validation_mode or "balanced",
+            )
+            if pk_tgt:
+                conflict_columns = [pk_tgt]
+        if not conflict_columns:
+            conflict_columns = [
+                m.get("target") or m.get("target_column") or m.get("source")
+                for m in mappings
+                if (m.get("source") or "").lower() in {"id", "_id"}
+                or (m.get("target") or "").lower() in {"id", "_id"}
+            ]
+        conflict_columns = [c for c in conflict_columns if c]
+    except Exception as exc:
+        logger.warning("quarantine replay PK resolve failed: %s", exc, exc_info=exc)
+        conflict_columns = []
+
+    write_mode = "upsert" if conflict_columns else "insert"
+    if write_mode == "insert":
+        # Refuse silent insert replay — partial loads + insert duplicates rows.
+        # Operator must set primary key on Map / stream contract first.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Quarantine replay needs a primary key (stream contract or "
+                "id/_id mapping) so rows upsert instead of duplicating. "
+                "Set primary_key on Map, then replay."
+            ),
+        )
+
     engine = get_transfer_engine()
-    # Child job: append-only rewrite of remediations (never full-refresh overwrite).
+    # Child job: upsert remediations (never full-refresh overwrite).
+    # sync_mode must match write_mode so Gate-8 allow_extra / sample proof
+    # treats this as keyed upsert — not soft append.
     child_payload = dict(payload)
-    child_payload["sync_mode"] = "full_refresh_append"
+    child_payload["sync_mode"] = "incremental_deduped"
     child_payload["skip_preflight"] = True
     child_req = transfer_request_from_dict(child_payload)
     child_job_id = engine._create_pending_job(child_req)
@@ -886,56 +1042,6 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     )
 
     try:
-        dest = transfer_req.destination
-        if dest.kind == "file_export":
-            raise HTTPException(status_code=400, detail="Quarantine replay is not supported for file_export destinations")
-
-        # Prefer stream-contract / identity PK — never hardcode only id/_id
-        # (Mongo→SQL users use `_id`→`id`, but many routes use user_id / code).
-        conflict_columns: list[str] = []
-        try:
-            from services.primary_key import resolve_primary_key_target
-            from services.sync_cursor import map_source_to_target, resolve_sync_contract
-
-            contract = resolve_sync_contract(transfer_req.stream_contracts)
-            if contract and contract.primary_key:
-                conflict_columns = [
-                    map_source_to_target(col, mappings)
-                    for col in contract.primary_key_columns()
-                ]
-            if not conflict_columns:
-                pk_tgt = resolve_primary_key_target(
-                    mappings,
-                    (dest.format or "").lower(),
-                    validation_mode=transfer_req.validation_mode or "balanced",
-                )
-                if pk_tgt:
-                    conflict_columns = [pk_tgt]
-            if not conflict_columns:
-                conflict_columns = [
-                    m.get("target") or m.get("target_column") or m.get("source")
-                    for m in mappings
-                    if (m.get("source") or "").lower() in {"id", "_id"}
-                    or (m.get("target") or "").lower() in {"id", "_id"}
-                ]
-            conflict_columns = [c for c in conflict_columns if c]
-        except Exception as exc:
-            logger.warning("quarantine replay PK resolve failed: %s", exc, exc_info=exc)
-            conflict_columns = []
-
-        write_mode = "upsert" if conflict_columns else "insert"
-        if write_mode == "insert":
-            # Refuse silent insert replay — partial loads + insert duplicates rows.
-            # Operator must set primary key on Map / stream contract first.
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Quarantine replay needs a primary key (stream contract or "
-                    "id/_id mapping) so rows upsert instead of duplicating. "
-                    "Set primary_key on Map, then replay."
-                ),
-            )
-
         rows_written, ddl_log, dest_summary = write_destination_database(
             dest,
             records,
@@ -948,9 +1054,50 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             conflict_columns=conflict_columns or None,
         )
         rejected = int(dest_summary.get("rejected_rows") or 0)
-        status = "completed_with_quarantine" if rejected > 0 else "completed"
+        # Gate-8 on the child job — Airbyte-class post-write integrity (count +
+        # checksum / keyed sample). Upsert into a live table may have extras;
+        # sync_mode + reconcile_sample make allow_extra + sample proof honest.
+        dest_summary = dict(dest_summary or {})
+        dest_summary["sync_mode"] = "incremental_deduped"
+        dest_summary["source_row_count"] = len(records)
+        dest_summary["reconcile_sample"] = records[:50]
+        recon: dict[str, Any] = {}
+        try:
+            from ..transfer.reconcile_step import run_reconciliation
+
+            recon = run_reconciliation(
+                endpoint=dest,
+                records=records,
+                columns=columns,
+                rows_written=rows_written,
+                writer_checksum=str(
+                    dest_summary.get("checksum")
+                    or dest_summary.get("active_checksum")
+                    or ""
+                ),
+                dest_summary=dest_summary,
+                mappings=mappings,
+                source_schema=schema,
+                validation_mode=transfer_req.validation_mode or "balanced",
+            )
+        except Exception as exc:
+            logger.warning(
+                "quarantine replay Gate-8 failed closed: %s", exc, exc_info=exc
+            )
+            recon = {
+                "passed": False,
+                "message": f"Gate-8 reconciliation error: {exc}",
+                "phase": "post_write_failed",
+            }
+
+        if rejected > 0:
+            status = "completed_with_quarantine"
+        elif not recon.get("passed", True):
+            status = "failed"
+        else:
+            status = "completed"
         promote_meta: dict[str, Any] = {}
-        if rejected == 0:
+        if rejected == 0 and recon.get("passed", True):
             try:
                 from services.dest_quarantine import mark_dlq_promoted
 
@@ -965,17 +1112,24 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
                 )
             except Exception as exc:
                 promote_meta = {"error": str(exc)[:300]}
+        phase = "completed" if status != "failed" else "failed"
         mongo.update_job_status(
             child_job_id,
             status,
-            phase="completed",
-            message=f"Quarantine replay wrote {rows_written} row(s)",
+            phase=phase,
+            message=(
+                recon.get("message")
+                if status == "failed"
+                else f"Quarantine replay wrote {rows_written} row(s)"
+            ),
             records_processed=rows_written,
-            progress_pct=100,
+            progress_pct=100 if status != "failed" else 99,
             rejected_rows=rejected,
             rejected_details=dest_summary.get("rejected_details") or [],
             destination_summary={**dest_summary, "dest_dlq_promoted": promote_meta},
+            reconciliation=recon,
             ddl_log=ddl_log,
+            error=recon.get("message") if status == "failed" else None,
         )
         try:
             from services.audit_log import append_audit_event
@@ -987,14 +1141,18 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
                 rows=rows_written,
                 child_job_id=child_job_id,
                 workspace_id=str(job.get("workspace_id") or ""),
-                details={"rejected": rejected, "status": status},
+                details={
+                    "rejected": rejected,
+                    "status": status,
+                    "gate8_passed": bool(recon.get("passed")),
+                },
             )
             actor = getattr(getattr(request, "state", None), "user", None)
             append_audit_event(
                 action="quarantine.replay",
                 resource=f"job:{job_id}",
                 actor=str(actor or "system"),
-                level="info",
+                level="info" if status != "failed" else "error",
                 correlation_id=child_job_id,
                 details={
                     "parent_job_id": job_id,
@@ -1002,12 +1160,14 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
                     "rows_written": rows_written,
                     "rejected": rejected,
                     "status": status,
+                    "gate8_passed": bool(recon.get("passed")),
+                    "gate8_phase": recon.get("phase"),
                 },
             )
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return {
-            "success": True,
+            "success": status != "failed",
             "job_id": child_job_id,
             "parent_job_id": job_id,
             "rows_written": rows_written,
@@ -1016,6 +1176,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             "status": status,
             "destination_summary": dest_summary,
             "dest_dlq_promoted": promote_meta,
+            "reconciliation": recon,
         }
     except HTTPException:
         mongo.update_job_status(child_job_id, "failed", phase="failed", message="Quarantine replay failed")

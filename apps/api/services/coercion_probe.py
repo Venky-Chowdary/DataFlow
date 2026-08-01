@@ -37,11 +37,17 @@ from typing import Any
 
 from services.transform_engine import apply_transform
 from services.transform_resolver import resolve_transform
-from services.type_system import ddl_type, normalize_logical_type
+from services.type_system import (
+    ddl_type,
+    is_nested_document_collapse,
+    is_nested_shape_collapse,
+    is_precision_collapse_coercion,
+    normalize_logical_type,
+)
 from services.value_serializer import cell_to_string
 
 _TEXTUAL_LOGICALS = {"string", "text"}
-_STRUCTURAL_LOGICALS = {"json", "array"}
+_STRUCTURAL_LOGICALS = {"json", "array", "struct", "map"}
 SAMPLE_FAILURE_LIMIT = 5
 # Must match preflight_service sample cap so G3/G5/G6 see the same rows.
 DEFAULT_SAMPLE_LIMIT = 500
@@ -278,6 +284,31 @@ def analyze_coercion(
             "snowflake",
             "bigquery",
         }
+        # UUID / binary destination wire — same fail-closed path as writers
+        # (Airbyte base64 binary + RFC 4122 UUID; never invent).
+        _uuid_binary_dests = {
+            "mysql",
+            "mariadb",
+            "postgresql",
+            "postgres",
+            "generic_sql",
+            "sqlserver",
+            "mssql",
+            "duckdb",
+            "snowflake",
+            "bigquery",
+            "redshift",
+            "oracle",
+            "oracledb",
+            "mongodb",
+            "dynamodb",
+            "elasticsearch",
+            "opensearch",
+            "redis",
+            "iceberg",
+        }
+        use_uuid_wire = tgt_logical == "uuid" and dest_l in _uuid_binary_dests
+        use_binary_wire = tgt_logical == "binary" and dest_l in _uuid_binary_dests
 
         for idx, row in enumerate(rows):
             cell = cell_to_string(row.get(src))
@@ -323,17 +354,30 @@ def analyze_coercion(
                                 "wire_form": wire.get("wire_value"),
                                 "reason": wire.get("reason") or "Will normalize for destination",
                             })
-                if use_json_wire or use_bool_wire:
+                if use_json_wire or use_bool_wire or use_uuid_wire or use_binary_wire:
                     try:
                         from connectors.sql_bind import normalize_sql_bind_value
 
+                        bind_type = tgt_type or (
+                            "JSON"
+                            if use_json_wire
+                            else (
+                                "BOOLEAN"
+                                if use_bool_wire
+                                else ("UUID" if use_uuid_wire else "BYTEA")
+                            )
+                        )
                         bound = normalize_sql_bind_value(
                             converted,
-                            tgt_type or ("JSON" if use_json_wire else "BOOLEAN"),
+                            bind_type,
                             engine=dest_l or "mysql",
                         )
                         if sample_wire_form is None and bound is not None:
-                            sample_wire_form = str(bound)[:120]
+                            sample_wire_form = (
+                                bound.hex()[:120]
+                                if isinstance(bound, (bytes, bytearray))
+                                else str(bound)[:120]
+                            )
                     except Exception as wire_exc:
                         wire_failures += 1
                         failed += 1
@@ -388,6 +432,21 @@ def analyze_coercion(
             dest_db_type=dest_db_type,
             structural=structural,
         )
+        # Head-sample coerce-ok must not hide IEEE/time/TZ fidelity collapse
+        # or nested STRUCT/MAP/ARRAY element contracts (G3 already blocks these).
+        fidelity_collapse = bool(
+            is_precision_collapse_coercion(src_type, tgt_type)
+            or is_nested_shape_collapse(src_type, tgt_type)
+        )
+        if severity != "block" and fidelity_collapse:
+            severity = "block"
+            if not fix:
+                fix = (
+                    f"Column '{src}' → {tgt_type}: declared mapping collapses fidelity "
+                    f"({src_type} → {tgt_type}) even when preview samples coerce. "
+                    f"Widen the destination type, add an explicit transform, or accept "
+                    f"lossy remapping under a non-strict policy after review."
+                )
         if wire_normalize and not fix:
             example = wire_examples[0] if wire_examples else {}
             fix = (
@@ -413,21 +472,73 @@ def analyze_coercion(
         )
         framing = None
         if structural_preserve:
+            nested_to_doc = is_nested_document_collapse(src_type, tgt_type)
+            nested_shape_loss = is_nested_shape_collapse(src_type, tgt_type)
+            shape_ok = (
+                not nested_to_doc
+                and not nested_shape_loss
+                and src_logical == tgt_logical
+            )
             framing = {
-                "kind": "structured_serialization",
-                "label": "Structured-data serialization",
+                "kind": (
+                    "nested_document_serialization"
+                    if nested_to_doc
+                    else (
+                        "nested_shape_collapse"
+                        if nested_shape_loss
+                        else "structured_serialization"
+                    )
+                ),
+                "label": (
+                    "Nested→document serialization (field DDL not preserved)"
+                    if nested_to_doc
+                    else (
+                        "Nested shape collapse (field/element contract lost)"
+                        if nested_shape_loss
+                        else "Structured-data serialization"
+                    )
+                ),
                 "source_shape": src_logical,
                 "target_shape": tgt_logical,
-                "shape_preserved": True,
-                "elements_preserved": True,
+                "shape_preserved": shape_ok,
+                "elements_preserved": shape_ok,
                 "sample_round_trip": bool(sample_wire_form) or ok > 0,
             }
             if not fix:
-                fix = (
-                    f"Column '{src}' → {tgt_type}: structured {src_logical} serialized to "
-                    f"destination {tgt_logical} with shape preserved on the sample "
-                    f"({ok}/{len(rows)} OK). This is serialization, not a lossy cast."
-                )
+                if nested_to_doc:
+                    fix = (
+                        f"Column '{src}' → {tgt_type}: fielded {src_logical} serialized to "
+                        f"opaque {tgt_logical} — values may round-trip as JSON, but nested "
+                        f"field DDL is not preserved. Prefer native STRUCT/OBJECT on the "
+                        f"destination, or set struct_policy=store_as_json intentionally."
+                    )
+                elif nested_shape_loss:
+                    fix = (
+                        f"Column '{src}' → {tgt_type}: nested field/element contract collapses "
+                        f"({src_type} → {tgt_type}) even when preview samples coerce. "
+                        f"Align STRUCT/MAP/ARRAY element types or widen the destination."
+                    )
+                else:
+                    fix = (
+                        f"Column '{src}' → {tgt_type}: structured {src_logical} serialized to "
+                        f"destination {tgt_logical} with shape preserved on the sample "
+                        f"({ok}/{len(rows)} OK). This is serialization, not a lossy cast."
+                    )
+        # Surface declared-collapse framing so Validate never reads as "clean wire"
+        # when samples coerce but IEEE/width/TZ contracts still collapse.
+        if fidelity_collapse and framing is None:
+            framing = {
+                "kind": "fidelity_collapse",
+                "label": (
+                    "Sample coerces — declared type path collapses fidelity "
+                    "(not soft-passed)"
+                ),
+                "source_shape": src_logical,
+                "target_shape": tgt_logical,
+                "shape_preserved": False,
+                "elements_preserved": False,
+                "sample_round_trip": failed == 0 and ok > 0,
+            }
         entry = {
             "source": src,
             "target": tgt_name,
@@ -447,6 +558,7 @@ def analyze_coercion(
             "wire_examples": wire_examples,
             "sample_wire_form": sample_wire_form,
             "severity": severity,
+            "fidelity_collapse": fidelity_collapse,
             "suggested_fix": fix,
             "suggested_target_type": suggested_type,
             "suggested_transform": suggested_transform,

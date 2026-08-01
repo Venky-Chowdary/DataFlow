@@ -51,7 +51,8 @@ def test_nested_ddl_databricks_duckdb_clickhouse():
     from services.type_system import ddl_type, normalize_logical_type
 
     assert normalize_logical_type("ARRAY<INTEGER>") == "array"
-    assert normalize_logical_type("STRUCT<lat:FLOAT, lon:FLOAT>") == "json"
+    assert normalize_logical_type("STRUCT<lat:FLOAT, lon:FLOAT>") == "struct"
+    assert normalize_logical_type("MAP<STRING, INTEGER>") == "map"
 
     assert ddl_type("databricks", "ARRAY<INTEGER>") == "ARRAY<BIGINT>"
     assert "STRUCT<" in ddl_type("databricks", "STRUCT<lat:FLOAT, lon:FLOAT>")
@@ -60,9 +61,74 @@ def test_nested_ddl_databricks_duckdb_clickhouse():
     # Bare array on lakehouse must not collapse to STRING.
     assert ddl_type("databricks", "array") == "ARRAY<STRING>"
     assert ddl_type("clickhouse", "array") == "Array(String)"
-    # PG still uses JSONB for bare arrays (no invent STRUCT).
+    # PG still uses JSONB for nested carriers (no invent STRUCT).
     assert ddl_type("postgresql", "ARRAY<INTEGER>") in {"JSONB", "JSON"}
+    assert ddl_type("postgresql", "STRUCT<lat:FLOAT, lon:FLOAT>") in {"JSONB", "JSON"}
+    # Snowflake structured OBJECT/ARRAY — not opaque VARIANT when fields declared.
+    sf = ddl_type("snowflake", "STRUCT<lat:FLOAT, lon:FLOAT>")
+    assert sf.startswith("OBJECT("), sf
+    assert "ARRAY(" in ddl_type("snowflake", "ARRAY<INTEGER>")
 
+
+def test_nested_document_collapse_helpers():
+    from services.type_system import (
+        decimal_params_would_narrow,
+        is_nested_document_collapse,
+        is_nested_shape_collapse,
+        is_lossy_coercion,
+        is_precision_collapse_coercion,
+    )
+
+    assert is_nested_document_collapse("STRUCT<a:INT>", "JSONB") is True
+    assert is_nested_document_collapse("STRUCT<a:INT>", "STRUCT<a:INT>") is False
+    assert is_nested_shape_collapse(
+        "STRUCT<a:INT, b:TEXT>", "STRUCT<a:INT>"
+    ) is True  # missing b
+    assert is_lossy_coercion("STRUCT<a:INT>", "VARIANT") is True
+    assert is_lossy_coercion("STRUCT<a:INT>", "STRUCT<a:INT>") is False
+    assert is_nested_shape_collapse("ARRAY<FLOAT>", "ARRAY<INTEGER>") is True
+    assert is_nested_shape_collapse("ARRAY<INTEGER>", "ARRAY<DECIMAL>") is False
+    assert is_lossy_coercion("ARRAY<FLOAT>", "ARRAY<INTEGER>") is True
+    assert decimal_params_would_narrow("DECIMAL(38,10)", "DECIMAL(12,2)") is True
+    assert is_precision_collapse_coercion("DECIMAL(38,10)", "DECIMAL(12,2)") is True
+    assert decimal_params_would_narrow("DECIMAL(12,2)", "DECIMAL(38,10)") is False
+
+
+def test_varchar_and_unsigned_fidelity_helpers():
+    from services.type_system import (
+        binary_width_would_narrow,
+        enum_set_domain_would_reject,
+        is_precision_collapse_coercion,
+        string_width_would_narrow,
+        unsigned_integer_would_overflow,
+    )
+
+    assert string_width_would_narrow("VARCHAR(255)", "VARCHAR(50)") is True
+    assert string_width_would_narrow("TEXT", "VARCHAR(10)") is True
+    assert string_width_would_narrow("VARCHAR(50)", "VARCHAR(255)") is False
+    assert string_width_would_narrow("VARCHAR(50)", "TEXT") is False
+    assert is_precision_collapse_coercion("VARCHAR(255)", "VARCHAR(50)") is True
+
+    assert unsigned_integer_would_overflow("INT UNSIGNED", "INTEGER") is True
+    assert unsigned_integer_would_overflow("INT UNSIGNED", "BIGINT") is False
+    assert unsigned_integer_would_overflow("BIGINT UNSIGNED", "BIGINT") is True
+    assert unsigned_integer_would_overflow("INT UNSIGNED", "DECIMAL(20,0)") is False
+    assert is_precision_collapse_coercion("INT UNSIGNED", "INTEGER") is True
+
+    assert binary_width_would_narrow("VARBINARY(64)", "VARBINARY(16)") is True
+    assert binary_width_would_narrow("VARBINARY(16)", "VARBINARY(64)") is False
+    assert binary_width_would_narrow("BYTEA", "VARBINARY(16)") is True
+    assert is_precision_collapse_coercion("VARBINARY(64)", "VARBINARY(16)") is True
+
+    assert enum_set_domain_would_reject(
+        "ENUM('a','b','c')", "ENUM('a','b')"
+    ) is True
+    assert enum_set_domain_would_reject(
+        "ENUM('a','b')", "ENUM('a','b','c')"
+    ) is False
+    assert is_precision_collapse_coercion(
+        "ENUM('a','b','c')", "ENUM('a','b')"
+    ) is True
 
 def test_iceberg_load_fail_closed_on_missing_file(tmp_path: Path):
     from connectors.iceberg_writer import _load_existing_rows

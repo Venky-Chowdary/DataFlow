@@ -255,9 +255,97 @@ def profile_dataset(
     }
 
 
-def merge_profiler_schema(existing: dict[str, str], profiled: dict[str, str]) -> dict[str, str]:
-    """Prefer statistical inference over naive typeof when confident."""
+# Types a naive header scan emits when it does not really know. Only these may
+# be replaced by statistical inference.
+_WEAK_DECLARED_TYPES = frozenset({
+    "", "VARCHAR", "TEXT", "STRING", "CHAR", "UNKNOWN", "OBJECT", "ANY",
+})
+
+
+def _is_weak_declared(declared: str) -> bool:
+    """True when the declared type is a placeholder rather than real evidence."""
+    t = (declared or "").strip().upper()
+    if "(" in t:
+        # Parameterised types (DECIMAL(12,2), VARCHAR(50)) carry real precision.
+        return False
+    return t in _WEAK_DECLARED_TYPES
+
+
+def source_types_are_authoritative(source_kind: str, source_format: str = "") -> bool:
+    """True when the source declared its own types and inference must defer.
+
+    A relational or warehouse source hands us real DDL. A CSV hands us a header
+    row, and a document store hands us types that were themselves inferred from
+    sampled documents — in both of those cases inference is the better evidence,
+    not the worse one. Callers used to decide this ad hoc, which is why the same
+    Postgres table produced ``DECIMAL(12,2)`` through one route and a re-inferred
+    bare ``DECIMAL`` through another.
+
+    ``source_format`` is overloaded across the codebase: ``csv``/``parquet`` for
+    uploads, ``postgresql``/``mongodb`` for connectors. Both are resolved through
+    the capability registry's ``requires_schema`` flag rather than a second
+    hand-maintained list.
+    """
+    kind = (source_kind or "").strip().lower()
+    if not kind or kind in {"file", "file_export", "upload", "object_store"}:
+        return False
+    fmt = (source_format or "").strip().lower()
+    if not fmt:
+        return True
+    try:
+        from services.connector_capability_registry import is_schemaless
+
+        return not is_schemaless(fmt)
+    except Exception:
+        # Unknown engine: prefer inference over a type we cannot vouch for.
+        return False
+
+
+def merge_profiler_schema(
+    existing: dict[str, str],
+    profiled: dict[str, str],
+    *,
+    authoritative_existing: bool = False,
+) -> dict[str, str]:
+    """Combine declared column types with statistical inference from samples.
+
+    Statistical inference exists for sources that declare nothing useful — a
+    CSV header scan calls every column VARCHAR. It must not outrank a type the
+    source actually declared. Overwriting unconditionally meant an introspected
+    ``DECIMAL(12,2)`` was re-inferred as bare ``DECIMAL`` and then created as
+    ``DECIMAL(38,15)`` downstream, a ``DOUBLE PRECISION`` became ``DECIMAL``
+    (different rounding semantics), and ``JSONB`` degraded to ``VARCHAR``.
+
+    Precedence:
+
+    * ``authoritative_existing`` (database introspection): the declared type
+      always wins; inference only fills columns that declared nothing.
+    * Otherwise (files): inference wins, except that a parameterised declared
+      type keeps its precision when inference agrees on the same logical family
+      but drops the parameters.
+    """
+    from services.type_system import normalize_logical_type
+
     merged = dict(existing)
     for col, inferred in profiled.items():
+        declared = str(existing.get(col) or "").strip()
+        if not inferred:
+            continue
+        if authoritative_existing:
+            # The source declared this column. Even a bare TEXT is a fact here
+            # (Postgres TEXT is unbounded), not the placeholder a header scan
+            # would emit, so inference only fills genuine gaps.
+            if declared:
+                continue
+            merged[col] = inferred
+            continue
+        if "(" in declared and "(" not in str(inferred):
+            try:
+                same_family = normalize_logical_type(declared) == normalize_logical_type(inferred)
+            except Exception:
+                same_family = False
+            if same_family:
+                # Keep DECIMAL(12,2) rather than widening to a bare DECIMAL.
+                continue
         merged[col] = inferred
     return merged

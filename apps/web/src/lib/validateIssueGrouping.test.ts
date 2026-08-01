@@ -9,6 +9,7 @@ import {
   buildExecutiveSummary,
   findDuplicateKeyRoot,
   groupIsoNormalizeIssues,
+  isDeclaredFidelityCollapse,
   isIsoNormalizeCoercion,
   partitionCoercionColumns,
   partitionExplainIssues,
@@ -187,6 +188,32 @@ describe("ISO normalize grouping", () => {
     assert.equal(otherActionable.length, 1);
     assert.equal(clean.length, 1);
     assert.ok(isIsoNormalizeCoercion(isoNormalize[0]));
+  });
+
+  it("keeps declared fidelity collapse out of convert-cleanly bucket", () => {
+    const collapse = {
+      source: "amt",
+      target: "amt",
+      source_type: "DECIMAL(20,6)",
+      target_type: "FLOAT",
+      sampled: 10,
+      ok: 10,
+      nulls: 0,
+      sentinel_nulls: 0,
+      failed: 0,
+      sample_failures: [],
+      severity: "ok" as const, // stale client payload — still must not look clean
+      fidelity_collapse: true,
+      framing: {
+        kind: "fidelity_collapse",
+        label: "Sample coerces — declared type path collapses fidelity",
+        sample_round_trip: true,
+      },
+    };
+    const { otherActionable, clean } = partitionCoercionColumns([collapse]);
+    assert.equal(clean.length, 0);
+    assert.equal(otherActionable.length, 1);
+    assert.ok(isDeclaredFidelityCollapse(otherActionable[0]));
   });
 });
 

@@ -56,7 +56,9 @@ export function SchemaIntelligenceRail({
 }: SchemaIntelligenceRailProps) {
   const columns = analysis?.columns.map((c) => c.column_name) ?? columnMappings.map((m) => m.source);
   const nestedFields = detectNestedDocumentFields(columns, sampleRows);
-  const typeRisks = detectTypeRisks(columnMappings, analysis, transferPlan);
+  const typeRisks = detectTypeRisks(columnMappings, analysis, transferPlan, {
+    destConnector: destType,
+  });
   const score = intelligenceScore(analysis, preflight, typeRisks);
   const colSummary = summarizeColumns(analysis);
   const blockers = typeRisks.filter((r) => r.severity === "block");

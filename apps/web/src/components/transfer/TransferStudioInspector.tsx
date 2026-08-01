@@ -9,6 +9,8 @@ interface TransferStudioInspectorProps {
   columnMappings: EditableMapping[];
   preflight?: PreflightResult | null;
   result?: TransferResult | null;
+  /** Destination connector id — enables SaaS width/scale fidelity chips. */
+  destType?: string;
   onGoToMapping?: () => void;
 }
 
@@ -48,9 +50,12 @@ export function TransferStudioInspector({
   columnMappings,
   preflight,
   result,
+  destType,
   onGoToMapping,
 }: TransferStudioInspectorProps) {
-  const typeRisks = detectTypeRisks(columnMappings, analysis, null);
+  const typeRisks = detectTypeRisks(columnMappings, analysis, null, {
+    destConnector: destType,
+  });
   const blockers = typeRisks.filter((r) => r.severity === "block");
   const warnings = typeRisks.filter((r) => r.severity === "warn");
 

@@ -487,7 +487,82 @@ export interface CopilotPendingAction {
   risk?: string;
   kind?: string;
   run_id?: string;
+  /** True when confirming destroys rows that already exist at the destination. */
+  destructive?: boolean;
   payload?: Record<string, unknown>;
+}
+
+/** One preflight gate result as the engine reports it. */
+export interface PilotGate {
+  id: string;
+  status: string;
+  message?: string;
+}
+
+/** A column whose carrier changes on write, with the fidelity verdict. */
+export interface PilotTypeConversion {
+  source_column?: string;
+  target_column?: string;
+  from_type?: string;
+  to_type?: string;
+  transform?: string;
+  fidelity?: string;
+  confidence?: number;
+}
+
+/**
+ * The transfer plan behind a `start_transfer` approval. Every field is produced
+ * by the engine (live introspection, the real mapping pipeline, the real gate
+ * suite) — nothing here is advisory, so the UI can present it as fact.
+ */
+export interface PilotTransferPlan {
+  source?: {
+    connector_name?: string;
+    table?: string;
+    type?: string;
+    column_count?: number;
+  };
+  destination?: {
+    connector_name?: string;
+    table?: string;
+    type?: string;
+    column_count?: number;
+    table_exists?: boolean;
+  };
+  sync_mode?: string;
+  schema_policy?: string;
+  validation_mode?: string;
+  mapped_count?: number;
+  unmapped_source_columns?: string[];
+  type_conversions?: PilotTypeConversion[];
+  lossy_conversions?: PilotTypeConversion[];
+  mapping_proof?: { dest_mode?: string; identity_score?: number; risks?: string[] };
+  quality_issues?: string[];
+  coercion_issues?: string[];
+  preflight?: {
+    run_id?: string;
+    passed?: boolean;
+    readiness_score?: number;
+    passed_count?: number;
+    total_gates?: number;
+    gates?: PilotGate[];
+    blockers?: { id?: string; message?: string }[];
+    warnings?: string[];
+  };
+  safe_to_start?: boolean;
+}
+
+/** Redacted summary the operator reads before approving a transfer. */
+export interface PilotTransferPreview {
+  source?: string;
+  destination?: string;
+  sync_mode?: string;
+  mapped_columns?: number;
+  unmapped_source_columns?: string[];
+  lossy_conversions?: number;
+  destination_table_exists?: boolean;
+  preflight_run_id?: string;
+  readiness_score?: number;
 }
 
 export interface CopilotChatResponse {
@@ -509,6 +584,8 @@ export interface CopilotChatResponse {
     last_result_id?: string;
   };
   tools_used?: { name: string; success: boolean; summary: string }[];
+  /** RAG citations for knowledge answers. */
+  sources?: { title?: string; source?: string; url?: string; snippet?: string }[];
 }
 
 export interface PilotToolRegistry {
@@ -612,7 +689,11 @@ export async function copilotChat(
   return res.json();
 }
 
-/** Confirm a Pilot mutation ack (create_connector). Secrets stay server-side. */
+/**
+ * Confirm a staged Pilot mutation. Credentials and the full mapping stay in the
+ * server-side ack ledger — the browser only ever holds the `ack_id`, and
+ * replaying one returns the original outcome rather than running twice.
+ */
 export async function confirmCopilotAction(payload: {
   ack_id: string;
   actor?: string;
@@ -621,9 +702,17 @@ export async function confirmCopilotAction(payload: {
   ok: boolean;
   idempotent?: boolean;
   kind?: string;
+  /** create_connector */
   connector_id?: string;
   name?: string;
   type?: string;
+  /** start_transfer */
+  job_id?: string;
+  status?: string;
+  source?: string;
+  destination?: string;
+  sync_mode?: string;
+  preflight_run_id?: string;
 }> {
   const res = await apiFetch(`${API_BASE}/copilot/confirm`, {
     method: "POST",
@@ -1158,8 +1247,14 @@ export async function deleteConnector(id: string): Promise<void> {
 
 export async function testSavedConnector(id: string): Promise<{ success: boolean; message: string }> {
   const res = await apiFetch(`${API_BASE}/connectors/saved/${id}/test`, { method: "POST" });
-  if (!res.ok) throw new Error("Connection test failed");
-  return res.json();
+  if (!res.ok) {
+    throw new Error(await parseApiError(res, "Connection test failed"));
+  }
+  const data = await res.json();
+  return {
+    success: Boolean(data?.success),
+    message: String(data?.message || (data?.success ? "Connected" : "Connection failed")),
+  };
 }
 
 export async function fetchSchedules(): Promise<PipelineSchedule[]> {
@@ -1315,7 +1410,20 @@ export async function testConnection(payload: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  return res.json();
+  // Probe failures return HTTP 200 with success:false + a humanized message.
+  // Auth / router errors return non-2xx — surface those instead of an empty badge.
+  if (!res.ok) {
+    return {
+      success: false,
+      message: await parseApiError(res, "Connection test failed"),
+    };
+  }
+  const data = await res.json();
+  return {
+    success: Boolean(data?.success),
+    message: String(data?.message || (data?.success ? "Connected" : "Connection failed")),
+    source_ha: data?.source_ha && typeof data.source_ha === "object" ? data.source_ha : undefined,
+  };
 }
 
 export async function saveConnector(payload: {
@@ -1678,6 +1786,8 @@ export async function mapTransferColumns(payload: {
   schema_policy?: string;
   /** null/omit = unknown; true = confirmed; false = will CREATE. */
   destination_table_exists?: boolean | null;
+  /** "database"/"warehouse"/… — when set, declared DDL types outrank sample inference. */
+  source_kind?: string;
 }): Promise<{
   mappings: Array<{
     source: string;
@@ -1686,6 +1796,12 @@ export async function mapTransferColumns(payload: {
     reasoning?: string;
     requires_review?: boolean;
     score_gap?: number;
+    source_type?: string;
+    target_type?: string;
+    transform?: string;
+    fidelity?: string;
+    fidelity_reason?: string;
+    type_narrowing?: boolean;
   }>;
   validation: { passed: boolean; issues: string[] };
   destination_aware: boolean;
@@ -1693,7 +1809,9 @@ export async function mapTransferColumns(payload: {
   llm?: { llm_used?: boolean; llm_provider?: string; strategy?: string };
   plan_summary?: Record<string, unknown>;
   mapping_proof?: Record<string, unknown>;
+  quality_issues?: string[];
   coercion_issues?: Array<Record<string, unknown>>;
+  integrity?: Record<string, unknown>;
 }> {
   const res = await apiFetch(`${API_BASE}/transfer/map`, {
     method: "POST",
@@ -2479,6 +2597,13 @@ export interface QuarantineReplayResult {
     promoted_at?: string;
     error?: string;
     skipped?: boolean;
+  };
+  reconciliation?: {
+    passed?: boolean;
+    phase?: string;
+    message?: string;
+    source_rows?: number;
+    target_rows?: number;
   };
 }
 

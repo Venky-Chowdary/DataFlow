@@ -29,19 +29,33 @@ def _signals_coll():
     return mongo_collection(_MONGO_COLL)
 
 
+def _normalize_signal_primary_key(raw: Any) -> str | list[str]:
+    """Preserve composite PK lists (Debezium multi-column chunk order)."""
+    if isinstance(raw, (list, tuple)):
+        cols = [str(c).strip() for c in raw if str(c).strip()]
+        if not cols:
+            return "id"
+        return cols if len(cols) > 1 else cols[0]
+    text = str(raw or "id").strip() or "id"
+    return text
+
+
 @dataclass
 class SnapshotSignal:
     id: str
     source_key: str
     table: str
     status: str = "pending"  # pending | running | completed | failed | cancelled
-    primary_key: str = "id"
+    primary_key: str | list[str] = "id"
     chunk_size: int = 1000
     last_pk: str = ""
     rows_snapshotted: int = 0
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     error: str = ""
+    # MySQL read-only incremental snapshot watermarks (DBZ-3577).
+    gtid_low: str = ""
+    gtid_high: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -53,13 +67,15 @@ class SnapshotSignal:
             source_key=str(d.get("source_key") or ""),
             table=str(d.get("table") or ""),
             status=str(d.get("status") or "pending"),
-            primary_key=str(d.get("primary_key") or "id"),
+            primary_key=_normalize_signal_primary_key(d.get("primary_key") or "id"),
             chunk_size=int(d.get("chunk_size") or 1000),
             last_pk=str(d.get("last_pk") or ""),
             rows_snapshotted=int(d.get("rows_snapshotted") or 0),
             created_at=float(d.get("created_at") or time.time()),
             updated_at=float(d.get("updated_at") or time.time()),
             error=str(d.get("error") or ""),
+            gtid_low=str(d.get("gtid_low") or ""),
+            gtid_high=str(d.get("gtid_high") or ""),
         )
 
 
@@ -172,7 +188,7 @@ def request_incremental_snapshot(
     source_key: str,
     table: str,
     *,
-    primary_key: str = "id",
+    primary_key: str | list[str] = "id",
     chunk_size: int = 1000,
 ) -> SnapshotSignal:
     """Enqueue an incremental snapshot for ``table`` on ``source_key``."""
@@ -180,7 +196,7 @@ def request_incremental_snapshot(
         id=f"snap_{uuid.uuid4().hex[:12]}",
         source_key=source_key,
         table=table,
-        primary_key=primary_key,
+        primary_key=_normalize_signal_primary_key(primary_key),
         chunk_size=max(1, min(int(chunk_size), 50_000)),
     )
     return _upsert_signal(sig)

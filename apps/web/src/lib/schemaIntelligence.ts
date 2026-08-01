@@ -1,5 +1,13 @@
 import type { EditableMapping } from "./mapping";
 import type { ColumnAnalysis, EnhancedAnalysis, PreflightResult, TransferPlan } from "./types";
+import {
+  decimalWouldCollapse,
+  effectiveDestCarrier,
+  parseDecimalPrecisionScale,
+  parseStringCarrierWidth,
+  sampleExceedsStringWidth,
+  stringWidthWouldNarrow,
+} from "./typeCarrierFidelity";
 
 export interface TypeRisk {
   id: string;
@@ -138,21 +146,59 @@ export function buildCompetitiveAdvantages(ctx: {
   return advantages.slice(0, 5);
 }
 
+export type FidelityRiskOptions = {
+  /** Destination connector id (stripe, shopify, hubspot, …) for SaaS width defaults. */
+  destConnector?: string | null;
+};
+
+/** Short badge label for Map pair chips. */
+export function fidelityChipLabel(risk: TypeRisk): string {
+  if (risk.id.startsWith("width-") || risk.id.startsWith("sample-width-")) return "width";
+  if (risk.id.startsWith("scale-")) return "scale";
+  if (risk.id.startsWith("enum-bool-")) return "type";
+  return "fidelity";
+}
+
+/** Pair-row fidelity chip — same rules as detectTypeRisks, keyed by source. */
+export function fidelityRiskForMapping(
+  mapping: EditableMapping,
+  opts?: FidelityRiskOptions,
+): TypeRisk | null {
+  const risks = detectTypeRisks([mapping], null, null, opts);
+  const fidelity = risks.find(
+    (r) =>
+      r.id.startsWith("lossy-") ||
+      r.id.startsWith("width-") ||
+      r.id.startsWith("scale-") ||
+      r.id.startsWith("sample-width-") ||
+      r.id.startsWith("enum-bool-") ||
+      (r.severity === "block" && /precision|lossy|timezone|datetime|ieee|float|width|scale/i.test(r.title)),
+  );
+  return fidelity ?? risks.find((r) => r.severity === "block") ?? null;
+}
+
 export function detectTypeRisks(
   mappings: EditableMapping[],
   analysis?: EnhancedAnalysis | null,
   transferPlan?: TransferPlan | null,
+  opts?: FidelityRiskOptions,
 ): TypeRisk[] {
   const risks: TypeRisk[] = [];
   const bySource = new Map(analysis?.columns.map((c) => [c.column_name, c]) ?? []);
+  const destConnector = opts?.destConnector ?? null;
 
   for (const m of mappings) {
     const col = bySource.get(m.source);
-    const srcType = (m.inferredType ?? col?.inferred_type ?? col?.semantic_type ?? "string").toLowerCase();
-    const planMap = transferPlan?.type_mappings.find(
+    const srcTypeRaw = m.inferredType ?? col?.inferred_type ?? col?.semantic_type ?? "string";
+    const srcType = srcTypeRaw.toLowerCase();
+    const planMap = transferPlan?.type_mappings?.find(
       (t) => t.column === m.source || t.column === m.target,
     );
-    const destType = planMap?.dest_type?.toLowerCase() ?? "";
+    // Prefer live Map destType (operator/pipeline stamp) over transfer-plan snapshot.
+    // SaaS catalog fills width when stamped type is bare string/varchar.
+    const stampedDest = m.destType || planMap?.dest_type || "";
+    const destCarrier = effectiveDestCarrier(stampedDest, destConnector, m.target);
+    const destType = destCarrier.toLowerCase();
 
     if (m.isPii && m.transform !== "hash_pii") {
       risks.push({
@@ -204,29 +250,82 @@ export function detectTypeRisks(
         /\b(float|double|real|float64)\b/.test(src) &&
         /\b(decimal|numeric|number|bignumeric)\b/.test(dest) &&
         !/\b(float|double|real|float64)\b/.test(dest);
+      const decimalToFloat =
+        /\b(decimal|numeric|number|bignumeric)\b/.test(src) &&
+        /\b(float|double|real|float64)\b/.test(dest);
       const decimalToInt =
-        /\b(decimal|numeric|number|float|double)\b/.test(src) && /\b(int|bigint|smallint)\b/.test(dest);
+        /\b(decimal|numeric|number|float|double)\b/.test(src) &&
+        /\b(int|integer|bigint|smallint|tinyint)\b/.test(dest);
       const datetimeToDate =
         /\b(timestamp|datetime|timestamptz)\b/.test(src) && /\bdate\b/.test(dest) && !/time/.test(dest);
       const stringToNumber =
         /\b(string|text|varchar|char)\b/.test(src) &&
-        /\b(int|bigint|decimal|numeric|number|float|double)\b/.test(dest);
-      if (floatToDecimal || decimalToInt || datetimeToDate || stringToNumber) {
+        /\b(int|integer|bigint|decimal|numeric|number|float|double)\b/.test(dest);
+      const tzToNtz =
+        /\b(timestamptz|timestamp with time zone|timestamp_tz|timestamp_ltz)\b/.test(src) &&
+        /\b(timestamp_ntz|datetime|timestamp without time zone)\b/.test(dest);
+      if (floatToDecimal || decimalToFloat || decimalToInt || datetimeToDate || stringToNumber || tzToNtz) {
         risks.push({
           id: `lossy-${m.source}`,
           column: m.source,
           severity: "block",
           title: floatToDecimal
             ? "IEEE float → fixed-point may lose precision"
-            : datetimeToDate
-              ? "Datetime → date drops time-of-day"
-              : "Possible precision loss",
+            : decimalToFloat
+              ? "Fixed-point → IEEE float may lose magnitude/scale"
+              : datetimeToDate
+                ? "Datetime → date drops time-of-day"
+                : tzToNtz
+                  ? "Timestamptz → NTZ drops timezone polarity"
+                  : "Possible precision loss",
           detail: floatToDecimal
-            ? `${srcType} → ${destType}: keep FLOAT/DOUBLE on the destination, or accept rounding risk and approve on Validate.`
-            : `${srcType} → ${destType} may truncate, drop time, or reject values. Open Validate before Execute.`,
+            ? `${srcTypeRaw} → ${destCarrier}: keep FLOAT/DOUBLE on the destination, or accept rounding risk and approve on Validate.`
+            : decimalToFloat
+              ? `${srcTypeRaw} → ${destCarrier}: keep DECIMAL/NUMERIC on the destination — IEEE cannot prove exact scale.`
+              : `${srcTypeRaw} → ${destCarrier} may truncate, drop time, or reject values. Open Validate before Execute.`,
           suggestedTransform: decimalToInt || stringToNumber ? "cast_number" : undefined,
         });
       }
+    }
+
+    // Width / scale attributes (HVR class) — SaaS VARCHAR(n) and DECIMAL(p,s).
+    if (stringWidthWouldNarrow(srcTypeRaw, destCarrier)) {
+      const srcW = parseStringCarrierWidth(srcTypeRaw);
+      const tgtW = parseStringCarrierWidth(destCarrier);
+      risks.push({
+        id: `width-${m.source}`,
+        column: m.source,
+        severity: "block",
+        title: "String width narrows — truncate risk",
+        detail:
+          srcW != null && tgtW != null
+            ? `${srcTypeRaw} → ${destCarrier}: source capacity ${srcW} exceeds destination ${tgtW}. Widen the dest field, remap, or expect quarantine on Validate/write.`
+            : `${srcTypeRaw} → ${destCarrier}: unbounded/TEXT source into bounded VARCHAR — overflow rows quarantine (no silent truncate).`,
+      });
+    } else if (sampleExceedsStringWidth(m.sample, destCarrier)) {
+      const tgtW = parseStringCarrierWidth(destCarrier);
+      risks.push({
+        id: `sample-width-${m.source}`,
+        column: m.source,
+        severity: "block",
+        title: "Sample exceeds destination width",
+        detail: `Sample length ${[...String(m.sample || "")].length} > ${destCarrier}${tgtW != null ? ` (${tgtW})` : ""}. Fix source value or widen destination before Execute.`,
+      });
+    }
+
+    if (decimalWouldCollapse(srcTypeRaw, destCarrier)) {
+      const srcPs = parseDecimalPrecisionScale(srcTypeRaw);
+      const tgtPs = parseDecimalPrecisionScale(destCarrier);
+      risks.push({
+        id: `scale-${m.source}`,
+        column: m.source,
+        severity: "block",
+        title: "Decimal precision/scale collapses",
+        detail:
+          srcPs && tgtPs
+            ? `${srcTypeRaw} → ${destCarrier}: source needs ${srcPs.precision - srcPs.scale} integer digits / scale ${srcPs.scale}; dest allows ${tgtPs.precision - tgtPs.scale} / ${tgtPs.scale}. Expect quarantine or rounding loss.`
+            : `${srcTypeRaw} → ${destCarrier}: destination DECIMAL cannot hold source precision/scale.`,
+      });
     }
 
     const mappingDest = (m.destType || destType || "").toLowerCase();

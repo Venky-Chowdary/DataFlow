@@ -521,6 +521,32 @@ def _mapping_proof_for_request(request: TransferRequest) -> dict[str, Any]:
     )
 
 
+def _source_nullability_probe(source: EndpointConfig) -> dict[str, bool]:
+    """Real NOT NULL facts for a database source.
+
+    G3 enforces the destination's NOT NULL contract, and a source column with
+    unknown nullability is assumed nullable. That is right for files, but for
+    an introspected database it made every NOT NULL destination column look
+    unsafe — copying a table onto an identical table with a PRIMARY KEY blocked
+    as a "type coercion issue". Returning {} keeps the old assume-nullable
+    behaviour whenever the probe cannot speak.
+    """
+    if source.kind != "database":
+        return {}
+    try:
+        from .endpoint_intelligence import introspect_endpoint
+
+        source.extra = {**(source.extra or {}), "introspect_purpose": "source"}
+        info = introspect_endpoint(source)
+        return {
+            str(k): bool(v)
+            for k, v in dict(info.get("schema_nullability") or {}).items()
+        }
+    except Exception as exc:
+        logger.debug("source nullability probe failed: %s", exc, exc_info=exc)
+        return {}
+
+
 def _destination_schema_probe(
     destination: EndpointConfig,
     sync_mode: str = "",
@@ -547,6 +573,10 @@ def _destination_schema_probe(
         }
         info = introspect_endpoint(destination)
         schema = dict(info.get("schema") or {})
+        nullability = {
+            str(k): bool(v)
+            for k, v in dict(info.get("schema_nullability") or {}).items()
+        }
         if "table_exists" in info:
             raw = info.get("table_exists")
             # Preserve explicit None (unknown) — bool(None) is False and would
@@ -556,8 +586,36 @@ def _destination_schema_probe(
             exists = True
         else:
             exists = None
+        # Stamp probe SSOT for Map/Validate CTAs. Sticky None is an error;
+        # create-new (exists=False) messages are informational, not failures.
+        probe_err = str(info.get("sample_error") or info.get("error") or "").strip()
+        probe_msg = str(info.get("message") or "").strip()
+        extra = dict(destination.extra or {})
+        if exists is None:
+            detail = probe_err or probe_msg or (
+                "Destination schema unknown — existence not proven (fail-closed)"
+            )
+            extra["schema_probe_error"] = detail[:500]
+            extra["schema_probe_message"] = detail[:500]
+        elif probe_err:
+            extra["schema_probe_error"] = probe_err[:500]
+            extra["schema_probe_message"] = (probe_msg or probe_err)[:500]
+        else:
+            extra.pop("schema_probe_error", None)
+            if str(extra.get("schema_probe_message") or "").startswith(
+                "Destination schema unknown"
+            ):
+                extra.pop("schema_probe_message", None)
+            if probe_msg and exists is False:
+                extra["schema_probe_message"] = probe_msg[:500]
+        # Overwrite recreates the table — do not type or NOT NULL against the
+        # stale shape. Append/upsert keep live nullability for G3 contracts.
         if is_overwrite_sync(sync_mode):
+            extra["schema_nullability"] = {}
+            destination.extra = extra
             return {}, exists
+        extra["schema_nullability"] = nullability
+        destination.extra = extra
         return schema, exists
     except Exception as exc:
         logger.warning(
@@ -566,6 +624,12 @@ def _destination_schema_probe(
             exc,
             exc_info=exc,
         )
+        destination.extra = {
+            **(destination.extra or {}),
+            "schema_probe_error": str(exc)[:500],
+            "schema_probe_message": str(exc)[:500],
+            "schema_nullability": {},
+        }
         return {}, None
 
 
@@ -1059,6 +1123,8 @@ def _auto_map(
                         ]
                         for c in columns
                     }
+                    from services.data_profiler import source_types_are_authoritative
+
                     result = run_mapping_pipeline(
                         source_columns=columns,
                         target_columns=[],
@@ -1074,6 +1140,10 @@ def _auto_map(
                         schema_policy=request.schema_policy,
                         destination_db_type=(request.destination.format or "").lower(),
                         destination_table_exists=dest_exists,
+                        source_types_authoritative=source_types_are_authoritative(
+                            request.source.kind or "",
+                            request.source.format or "",
+                        ),
                     )
                     auto = result.get("mappings")
                     if (
@@ -1141,6 +1211,8 @@ def _auto_map(
                         ]
                         for c in columns
                     }
+                    from services.data_profiler import source_types_are_authoritative
+
                     result = run_mapping_pipeline(
                         source_columns=columns,
                         target_columns=target_columns,
@@ -1154,6 +1226,10 @@ def _auto_map(
                         validation_mode=request.validation_mode,
                         use_llm=False,
                         schema_policy=request.schema_policy,
+                        source_types_authoritative=source_types_are_authoritative(
+                            request.source.kind or "",
+                            request.source.format or "",
+                        ),
                     )
                     auto = result.get("mappings")
                     if (
@@ -1655,7 +1731,10 @@ class UniversalTransferEngine:
                 progress_pct=15,
                 message="Validating mapping and schema…",
             )
-            if not request.skip_preflight and request.destination.kind == "database":
+            # Preflight for every destination kind (database, file_export, object
+            # store). Skipping Validate for file sinks was an honesty hole —
+            # PRODUCTION_SKU and Studio Execute must prove mapping gates first.
+            if not request.skip_preflight:
                 dest_ok, dest_msg = probe_destination(request.destination)
                 pf = run_file_preflight(
                     columns=columns,
@@ -1672,6 +1751,10 @@ class UniversalTransferEngine:
                         request.validation_mode
                     ),
                     destination_column_types=dest_schema_types,
+                    column_nullability=_source_nullability_probe(request.source),
+                    destination_column_nullability=(
+                        (request.destination.extra or {}).get("schema_nullability") or {}
+                    ),
                     destination_table_exists=dest_table_exists_flag,
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
@@ -2443,6 +2526,10 @@ class UniversalTransferEngine:
                         request.validation_mode
                     ),
                     destination_column_types=dest_schema_types,
+                    column_nullability=_source_nullability_probe(request.source),
+                    destination_column_nullability=(
+                        (request.destination.extra or {}).get("schema_nullability") or {}
+                    ),
                     destination_table_exists=dest_table_exists_flag,
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
@@ -3011,6 +3098,10 @@ class UniversalTransferEngine:
                         request.validation_mode
                     ),
                     destination_column_types=dest_schema_types,
+                    column_nullability=_source_nullability_probe(request.source),
+                    destination_column_nullability=(
+                        (request.destination.extra or {}).get("schema_nullability") or {}
+                    ),
                     destination_table_exists=dest_table_exists_flag,
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),

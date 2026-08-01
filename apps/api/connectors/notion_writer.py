@@ -21,13 +21,136 @@ from connectors.saas_common import (
 )
 from connectors.writer_common import (
     WriteResult,
+    apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
+    gate8_writer_meta,
+    resolve_mapping_dest_types,
     resolve_target_columns,
     transform_error_policy,
 )
 
 DEFAULT_HOST = "api.notion.com"
 NOTION_VERSION = "2022-06-28"
+# Notion request-limits: text.content ≤ 2000 chars per rich_text element;
+# arrays ≤ 100 elements → 200_000 chars total before we must quarantine.
+_NOTION_RICH_TEXT_CHUNK = 2000
+_NOTION_RICH_TEXT_MAX_CHUNKS = 100
+_NOTION_RICH_TEXT_TOTAL = _NOTION_RICH_TEXT_CHUNK * _NOTION_RICH_TEXT_MAX_CHUNKS
+
+
+def _notion_option_names(prop: dict[str, Any]) -> list[str]:
+    """Ordered select/status/multi_select option *names* from Notion schema.
+
+    Notion page writes reference options by ``name`` (or id). Census/Hightouch
+    class reverse-ETL must quarantine unknown names — never invent a new option
+    unless the integration has schema write access (we refuse invent).
+    """
+    if not isinstance(prop, dict):
+        return []
+    typ = str(prop.get("type") or "").strip().lower()
+    cfg = prop.get(typ) if isinstance(prop.get(typ), dict) else {}
+    raw = (cfg or {}).get("options") or []
+    if not isinstance(raw, list):
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name or name in seen:
+            continue
+        # Notion forbids commas in select option names.
+        if "," in name:
+            continue
+        seen.add(name)
+        names.append(name)
+        if len(names) >= 256:
+            break
+    return names
+
+
+def notion_property_to_carrier(
+    notion_type: str,
+    *,
+    option_names: list[str] | None = None,
+) -> str:
+    """Map Notion property type → quarantine carrier (official request limits)."""
+    from services.type_system import (
+        format_enum_domain_carrier,
+        format_set_domain_carrier,
+    )
+
+    t = (notion_type or "").strip().lower()
+    if t in {"title", "rich_text"}:
+        return f"VARCHAR({_NOTION_RICH_TEXT_TOTAL})"
+    if t == "number":
+        # Notion number properties are IEEE doubles — quarantine non-numeric;
+        # DECIMAL→FLOAT collapse is surfaced at Map/Validate (Gate 3).
+        return "FLOAT"
+    if t == "checkbox":
+        return "BOOLEAN"
+    if t == "date":
+        # Notion date may include time — TIMESTAMPTZ preserves the instant.
+        return "TIMESTAMPTZ"
+    if t == "url":
+        return "VARCHAR(2000)"
+    if t == "email":
+        return "VARCHAR(200)"
+    if t == "phone_number":
+        return "VARCHAR(200)"
+    if t in {"select", "status"}:
+        if option_names:
+            return format_enum_domain_carrier(option_names)
+        return "VARCHAR(100)"
+    if t == "multi_select":
+        if option_names:
+            return format_set_domain_carrier(option_names)
+        return "VARCHAR(10000)"
+    if t == "relation":
+        return "VARCHAR(4000)"
+    return "VARCHAR"
+
+
+def resolve_notion_dest_types(
+    target_cols: list[str],
+    mappings: list[dict],
+    column_types: dict[str, str],
+    *,
+    logical_types: list[str] | None = None,
+    properties: dict[str, str] | None = None,
+    property_options: dict[str, list[str]] | None = None,
+) -> dict[str, str]:
+    """Prefer live Notion database property types; else Map/source carriers."""
+    opts = property_options or {}
+    live = {
+        name: notion_property_to_carrier(
+            typ, option_names=opts.get(str(name).lower()) or opts.get(name)
+        )
+        for name, typ in (properties or {}).items()
+        if name and typ
+    }
+    return resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        live_types=live,
+        default="VARCHAR",
+    )
+
+
+def _rich_text_chunks(text: str) -> list[dict[str, Any]]:
+    """Split into ≤2000-char rich_text elements (Notion request-limits)."""
+    if not text:
+        return []
+    chunks: list[dict[str, Any]] = []
+    for i in range(0, len(text), _NOTION_RICH_TEXT_CHUNK):
+        if len(chunks) >= _NOTION_RICH_TEXT_MAX_CHUNKS:
+            break
+        piece = text[i : i + _NOTION_RICH_TEXT_CHUNK]
+        chunks.append({"type": "text", "text": {"content": piece}})
+    return chunks
 
 
 def _database_id(table_or_db: str) -> str:
@@ -57,8 +180,10 @@ def _page_id(raw: str) -> str:
     return raw
 
 
-def _fetch_database_properties(database_id: str, access_token: str) -> dict[str, str]:
-    """Return {property_name_lower: notion_type} for a database."""
+def _fetch_database_properties(
+    database_id: str, access_token: str
+) -> tuple[dict[str, str], dict[str, list[str]]]:
+    """Return ``({name_lower: type}, {name_lower: option_names})`` for a database."""
     url = f"https://{DEFAULT_HOST}/v1/databases/{database_id}"
     resp = request(
         method="GET",
@@ -70,7 +195,18 @@ def _fetch_database_properties(database_id: str, access_token: str) -> dict[str,
     resp.raise_for_status()
     body = resp.json()
     props = body.get("properties", {})
-    return {k.lower(): v.get("type", "") for k, v in props.items()}
+    types: dict[str, str] = {}
+    options: dict[str, list[str]] = {}
+    if isinstance(props, dict):
+        for k, v in props.items():
+            if not isinstance(v, dict):
+                continue
+            key = str(k).lower()
+            types[key] = str(v.get("type") or "")
+            names = _notion_option_names(v)
+            if names:
+                options[key] = names
+    return types, options
 
 
 def _title_property(properties: dict[str, str]) -> str | None:
@@ -93,9 +229,10 @@ def _as_property_value(
         text = str(value)
 
     if notion_type == "title":
-        return {"title": [{"text": {"content": text}}]}
+        chunks = _rich_text_chunks(text) or [{"type": "text", "text": {"content": ""}}]
+        return {"title": chunks}
     if notion_type == "rich_text":
-        return {"rich_text": [{"text": {"content": text}}]}
+        return {"rich_text": _rich_text_chunks(text)}
     if notion_type == "number":
         if text == "":
             return {"number": None}
@@ -117,7 +254,14 @@ def _as_property_value(
     if notion_type == "status":
         return {"status": {"name": text} if text else None}
     if notion_type == "multi_select":
-        names = [{"name": v.strip()} for v in text.split(",") if v.strip()]
+        # Accept CSV or semicolon (warehouse SET / HubSpot-class multi-select).
+        import re as _re
+
+        names = [
+            {"name": v.strip()}
+            for v in _re.split(r"[,;]", text)
+            if v.strip()
+        ]
         return {"multi_select": names}
     if notion_type == "date":
         if text:
@@ -187,7 +331,7 @@ def write_mapped_rows(
         )
 
     try:
-        properties = _fetch_database_properties(database_id, access_token)
+        properties, property_options = _fetch_database_properties(database_id, access_token)
     except Exception as exc:
         return WriteResult(
             ok=False,
@@ -201,8 +345,18 @@ def write_mapped_rows(
         )
 
     title_name = _title_property(properties)
-    target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(
+        mappings, column_types, preserve_case=True
+    )
     policy = transform_error_policy(error_policy)
+    dest_types = resolve_notion_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        properties=properties,
+        property_options=property_options,
+    )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
@@ -210,8 +364,18 @@ def write_mapped_rows(
         target_cols=target_cols,
         column_types=column_types,
         error_policy=policy,
-        dest_types={c: "string" for c in target_cols},
+        dest_types=dest_types,
         preserve_case=True,
+    )
+    tgt_types = [str(dest_types.get(c, "VARCHAR") or "VARCHAR") for c in target_cols]
+    mapped_rows = apply_write_quarantine_matrix(
+        mapped_rows,
+        target_cols,
+        tgt_types,
+        rejected_details,
+        policy,
+        dialect_label="Notion",
+        mappings=mappings,
     )
     if transform_errors and policy == "fail":
         return WriteResult(
@@ -232,6 +396,7 @@ def write_mapped_rows(
     written = 0
     chunks = 0
     digest = hashlib.sha256()
+    written_ids: list[str] = []
     all_rejected = list(rejected_details)
     warnings: list[str] = []
 
@@ -337,6 +502,7 @@ def write_mapped_rows(
             if rec_id:
                 written += 1
                 digest.update(str(rec_id).encode())
+                written_ids.append(str(rec_id))
         except Exception as exc:
             if is_auth_error(exc):
                 return WriteResult(
@@ -396,4 +562,5 @@ def write_mapped_rows(
         rejected_rows=len(all_rejected),
         warnings=warnings[:20],
         driver="notion",
+        meta=gate8_writer_meta(mapped_rows, target_cols, written_ids),
     )

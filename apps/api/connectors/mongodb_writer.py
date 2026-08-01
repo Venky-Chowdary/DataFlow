@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
 import hashlib
 import json
 import logging
@@ -22,6 +20,7 @@ from connectors.writer_common import (
     _rejected_row_count,
     build_mapped_rows_with_details,
     compare_lsn,
+    gate8_writer_meta,
     lsn_is_newer,
     resolve_target_columns,
     row_checksum,
@@ -219,6 +218,23 @@ def write_mapped_rows(
                 warnings=transform_errors,
             )
 
+        tgt_types = [
+            str(dest_types.get(c, logical_types[i] if i < len(logical_types) else "VARCHAR") or "VARCHAR")
+            for i, c in enumerate(target_cols)
+        ]
+        from connectors.writer_common import apply_write_quarantine_matrix
+
+        mapped_rows = apply_write_quarantine_matrix(
+            mapped_rows,
+            target_cols,
+            tgt_types,
+            rejected_details,
+            policy,
+            dialect_label="MongoDB",
+            mappings=mappings,
+        )
+        rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
+
         from datetime import date as _date
         from datetime import datetime as _datetime
         from datetime import time as _time
@@ -290,7 +306,7 @@ def write_mapped_rows(
                 if text in {"false", "f", "no", "n", "0"}:
                     return False
                 return value
-            if upper == "DATE":
+            if upper == "DATE" and transform != "datetime":
                 from connectors.sql_temporal import coerce_sql_temporal
 
                 coerced = coerce_sql_temporal(value, "DATE")
@@ -299,7 +315,10 @@ def write_mapped_rows(
                 if isinstance(coerced, _date):
                     return _datetime.combine(coerced, _time.min)
                 return value
-            if upper in {
+            # A "DATE" carrier with a datetime transform is Mongo's single BSON
+            # date, which stores a full instant. Narrowing it truncated every
+            # timestamp to midnight even though the carrier could hold the time.
+            if upper in {"DATE"} or upper in {
                 "DATETIME", "TIMESTAMP", "TIMESTAMP_TZ", "TIMESTAMPTZ",
                 "TIMESTAMP_LTZ", "TIMESTAMP_NTZ",
             }:
@@ -313,15 +332,14 @@ def write_mapped_rows(
                         return coerced.replace(tzinfo=_tz.utc)
                     return coerced
                 return value
-            if upper in {"BINARY", "BYTEA", "BLOB"}:
+            if upper in {"BINARY", "BYTEA", "BLOB", "VARBINARY"}:
+                from connectors.sql_bind import coerce_binary_wire
+                from bson.binary import Binary as _Bin
+
                 if isinstance(value, bytes):
-                    return Binary(value)
-                if isinstance(value, str):
-                    try:
-                        return Binary(base64.b64decode(value, validate=True))
-                    except (binascii.Error, ValueError):
-                        return Binary(value.encode("utf-8"))
-                return value
+                    return _Bin(value)
+                # Fail-closed — never UTF-8-invent bytes.
+                return _Bin(coerce_binary_wire(value))
             if upper in {"JSON", "OBJECT", "ARRAY", "VARIANT"}:
                 if isinstance(value, (dict, list)):
                     return value
@@ -331,20 +349,83 @@ def write_mapped_rows(
                     except (json.JSONDecodeError, TypeError):
                         return value
                 return value
-            if upper == "UUID":
-                return str(value)
+            if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
+                from connectors.sql_bind import coerce_uuid_wire
+
+                return coerce_uuid_wire(value)
+            if upper in {"OBJECTID", "OBJECT_ID"}:
+                from bson.objectid import ObjectId as _Oid
+
+                if isinstance(value, _Oid):
+                    return value
+                text = str(value).strip()
+                if len(text) == 24 and _Oid.is_valid(text):
+                    return _Oid(text)
+                raise ValueError(
+                    f"cannot coerce {value!r} to MongoDB ObjectId "
+                    "(expect 24-char hex)"
+                )
             if upper == "TIME":
                 return str(value)
             return value
 
+        # BSON coercion is fail-closed (ObjectId hex, non-integral ints, binary
+        # wire). Letting a ValueError escape aborted the whole write with
+        # rows_written=0, so one bad cell lost every good row. Hold the row out
+        # and record why instead — quarantine, never silent drop, never abort.
+        from connectors.writer_common import append_write_quarantine_detail
+        from services.value_serializer import cell_to_string as _cell_to_string
+
         typed_rows: list[tuple] = []
-        for row in mapped_rows:
-            typed_rows.append(
-                tuple(
-                    _to_bson(v, t, transform_by_col.get(target_cols[i], ""))
-                    for i, (v, t) in enumerate(zip(row, logical_types))
-                )
+        for row_idx, row in enumerate(mapped_rows):
+            cells: list[Any] = []
+            hold_out = False
+            for i, (v, t) in enumerate(zip(row, logical_types)):
+                col = target_cols[i] if i < len(target_cols) else f"col_{i}"
+                try:
+                    cells.append(_to_bson(v, t, transform_by_col.get(col, "")))
+                except (ValueError, TypeError, InvalidOperation) as exc:
+                    append_write_quarantine_detail(
+                        rejected_details,
+                        {
+                            "row": row_idx + 1,
+                            "column": col,
+                            "target": col,
+                            "value": _cell_to_string(v)[:120],
+                            "reason": f"BSON coercion rejected the value — {exc}",
+                            "policy": "coerce_null" if policy == "coerce_null" else "write_quarantine",
+                            "chars": [],
+                        },
+                        mapped_row=list(row),
+                        target_cols=target_cols,
+                    )
+                    if policy == "coerce_null":
+                        cells.append(None)
+                        continue
+                    hold_out = True
+                    break
+            if hold_out:
+                continue
+            typed_rows.append(tuple(cells))
+
+        if rejected_details and policy == "fail":
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=collection_name,
+                target_schema=db_name,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    "BSON coercion rejected "
+                    f"{len(rejected_details)} value(s); no rows written under fail policy"
+                ),
+                rejected_rows=_rejected_row_count(
+                    data_rows, typed_rows, rejected_details, policy
+                ),
+                rejected_details=rejected_details,
             )
+        rejected_rows = _rejected_row_count(data_rows, typed_rows, rejected_details, policy)
 
         total = len(typed_rows)
         # MongoDB writes are split into smaller server-friendly batches.
@@ -544,6 +625,7 @@ def write_mapped_rows(
             rejected_details=rejected_details,
             coerced_null_rows=coerced_null_rows,
             warnings=transform_errors,
+            meta=gate8_writer_meta(mapped_rows, target_cols),
         )
     except (pymongo.errors.PyMongoError, ValueError, TypeError, KeyError, OSError) as exc:
         return WriteResult(

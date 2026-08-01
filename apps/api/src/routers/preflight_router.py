@@ -218,6 +218,7 @@ async def run_preflight(body: PreflightRequest):
         estimated_bytes=body.estimated_bytes,
         confidence_threshold=confidence_threshold_for_mode(body.validation_mode),
         destination_column_types=dest_column_types,
+        destination_column_nullability=dest_meta.get("column_nullability") or {},
         destination_table_exists=dest_meta.get("table_exists"),
         destination_can_create=dest_meta.get("can_create_table"),
         destination_can_write=dest_meta.get("can_write"),
@@ -231,6 +232,7 @@ async def run_preflight(body: PreflightRequest):
         backfill_new_fields=body.backfill_new_fields,
         contract_primary_key=contract_pk,
         destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
+        destination_unique_keys=dest_meta.get("unique_keys") or [],
         date_locale=body.date_locale,
         compliance_acknowledged=bool(body.compliance_acknowledged),
         schema_drift_acknowledged=bool(body.schema_drift_acknowledged),
@@ -285,6 +287,14 @@ async def run_preflight(body: PreflightRequest):
                 status_code=500,
                 detail="Could not record acknowledgment audit event — acknowledgment not accepted",
             ) from exc
+    # Advisory catalog honesty from destination introspect (warn-only).
+    for w in dest_meta.get("warnings") or dest_meta.get("schema_warnings") or []:
+        note = str(w).strip()
+        if not note:
+            continue
+        bucket = result.setdefault("warnings", [])
+        if note not in bucket:
+            bucket.append(note)
     gated = apply_policy_gates(
         result,
         run_transfer_policy_gates(

@@ -142,6 +142,58 @@ def _fakesnow_db_path() -> str:
     return path
 
 
+def _is_fakesnow_catalog_error(exc: BaseException) -> bool:
+    """DuckDB catalog written by a different duckdb/fakesnow version, or corrupt file.
+
+    Field-id deserialize failures and "not a valid DuckDB database" both block
+    local Snowflake emulator routes until the on-disk store is rebuilt.
+    """
+    msg = str(exc).lower()
+    return (
+        "serialization error" in msg
+        or "failed to deserialize" in msg
+        or "field id" in msg
+        or "not a valid duckdb" in msg
+        or "not a valid database" in msg
+    )
+
+
+def _reset_fakesnow_catalog(db_path: str) -> None:
+    """Drop incompatible/corrupt fakesnow DuckDB files so the emulator can recreate them."""
+    from pathlib import Path
+
+    root = Path(db_path)
+    if not root.exists():
+        return
+    removed = 0
+    for pattern in ("*.db", "*.db.wal", "*.duckdb", "*.duckdb.wal"):
+        for path in root.glob(pattern):
+            try:
+                path.unlink()
+                removed += 1
+            except OSError as exc:
+                logger.warning("Could not remove fakesnow catalog file %s: %s", path, exc)
+    if removed:
+        logger.warning(
+            "Reset fakesnow catalog at %s (%d file(s)) after DuckDB version/corruption error",
+            db_path,
+            removed,
+        )
+
+
+def _fakesnow_rollback_product_patch() -> None:
+    global _fakesnow_refcount, _fakesnow_patch_cm
+    with _fakesnow_lock:
+        _fakesnow_refcount -= 1
+        if _fakesnow_refcount <= 0 and _fakesnow_patch_cm is not None:
+            try:
+                _fakesnow_patch_cm.__exit__(*sys.exc_info())
+            except Exception as exc:
+                logger.debug("fakesnow patch exit during rollback: %s", exc)
+            _fakesnow_patch_cm = None
+            _fakesnow_refcount = 0
+
+
 def get_connection(
     *,
     account: str,
@@ -184,59 +236,67 @@ def get_connection(
 
         global _fakesnow_refcount, _fakesnow_patch_cm
 
-        product_managed = False
-        with _fakesnow_lock:
-            already_patched = isinstance(snowflake.connector.connect, unittest.mock.MagicMock)
-            connect_mod = getattr(snowflake.connector.connect, "__module__", "") or ""
-            if not already_patched and connect_mod.startswith("fakesnow"):
-                already_patched = True
-            if _fakesnow_refcount > 0:
-                # Product already owns the active patch; just share it.
-                _fakesnow_refcount += 1
-                product_managed = True
-            elif not already_patched:
-                # No existing patch — install one and own it.
-                try:
-                    _fakesnow_patch_cm = fakesnow.patch(
-                        db_path=_fakesnow_db_path(),
-                        nop_regexes=[r"^USE WAREHOUSE"],
-                    )
-                    _fakesnow_patch_cm.__enter__()
-                    _fakesnow_refcount = 1
+        db_path = _fakesnow_db_path()
+        catalog_retry_done = False
+
+        while True:
+            product_managed = False
+            with _fakesnow_lock:
+                already_patched = isinstance(snowflake.connector.connect, unittest.mock.MagicMock)
+                connect_mod = getattr(snowflake.connector.connect, "__module__", "") or ""
+                if not already_patched and connect_mod.startswith("fakesnow"):
+                    already_patched = True
+                if _fakesnow_refcount > 0:
+                    # Product already owns the active patch; just share it.
+                    _fakesnow_refcount += 1
                     product_managed = True
-                except (AssertionError, RuntimeError) as exc:
-                    # Nested fakesnow.patch() raises when a test already patched.
-                    if "already patched" not in str(exc).lower():
-                        raise
+                elif not already_patched:
+                    # No existing patch — install one and own it.
+                    try:
+                        _fakesnow_patch_cm = fakesnow.patch(
+                            db_path=db_path,
+                            nop_regexes=[r"^USE WAREHOUSE"],
+                        )
+                        _fakesnow_patch_cm.__enter__()
+                        _fakesnow_refcount = 1
+                        product_managed = True
+                    except (AssertionError, RuntimeError) as exc:
+                        # Nested fakesnow.patch() raises when a test already patched.
+                        if "already patched" not in str(exc).lower():
+                            raise
+                        product_managed = False
+                else:
+                    # A test/framework already patched the connector; use it but do
+                    # not manage its lifecycle.
                     product_managed = False
-            else:
-                # A test/framework already patched the connector; use it but do
-                # not manage its lifecycle.
-                product_managed = False
 
-        try:
-            conn = snowflake.connector.connect(**kwargs)
-        except Exception:
-            # If we installed a patch for this connect attempt, roll it back so a
-            # failed local connection cannot leak the patch into later tests.
-            if product_managed:
-                with _fakesnow_lock:
-                    _fakesnow_refcount -= 1
-                    if _fakesnow_refcount <= 0 and _fakesnow_patch_cm is not None:
-                        _fakesnow_patch_cm.__exit__(*sys.exc_info())
-                        _fakesnow_patch_cm = None
-                        _fakesnow_refcount = 0
-            raise
-        orig_close = conn.close
-
-        def _close() -> None:
             try:
-                orig_close()
-            finally:
+                conn = snowflake.connector.connect(**kwargs)
+            except Exception as exc:
+                # If we installed a patch for this connect attempt, roll it back so a
+                # failed local connection cannot leak the patch into later tests.
                 if product_managed:
-                    _fakesnow_exit_patch()
+                    _fakesnow_rollback_product_patch()
+                if (
+                    product_managed
+                    and not catalog_retry_done
+                    and _is_fakesnow_catalog_error(exc)
+                ):
+                    catalog_retry_done = True
+                    _reset_fakesnow_catalog(db_path)
+                    continue
+                raise
 
-        conn.close = _close  # type: ignore[assignment]
-        return conn
+            orig_close = conn.close
+
+            def _close() -> None:
+                try:
+                    orig_close()
+                finally:
+                    if product_managed:
+                        _fakesnow_exit_patch()
+
+            conn.close = _close  # type: ignore[assignment]
+            return conn
 
     return snowflake.connector.connect(**kwargs)

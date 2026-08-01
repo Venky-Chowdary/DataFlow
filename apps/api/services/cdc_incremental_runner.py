@@ -78,9 +78,27 @@ def interleave_incremental_snapshot(
             logger.warning("Incremental snapshot chunk failed for %s.%s: %s", source_key, table, exc)
             update_signal(sig.id, status="failed", error=str(exc)[:500])
             return
+        from services.cdc_snapshot_window import _pk_value
+
         inserts = [r for r in emitted if not r.get("__deleted")]
-        deletes = [str(r.get(sig.primary_key or "id")) for r in emitted if r.get("__deleted")]
+        deletes: list[str] = []
+        for r in emitted:
+            if not r.get("__deleted"):
+                continue
+            key = _pk_value(r, sig.primary_key or "id")
+            if key:
+                deletes.append(key)
         if inserts or deletes:
+            window_meta: dict[str, Any] = {
+                "window_id": window_id,
+                "stream_overrides": stats.get("stream_overrides", 0),
+                "snapshot_rows": stats.get("snapshot_rows", 0),
+            }
+            gtid_low = str(getattr(sig, "gtid_low", "") or "")
+            gtid_high = str(getattr(sig, "gtid_high", "") or "")
+            if gtid_low or gtid_high:
+                window_meta["gtid_low"] = gtid_low
+                window_meta["gtid_high"] = gtid_high
             yield ChangeBatch(
                 inserts=inserts,
                 deletes=deletes,
@@ -90,11 +108,7 @@ def interleave_incremental_snapshot(
                     "table": table,
                     "last_pk": last_pk or sig.last_pk,
                     "rows_snapshotted": sig.rows_snapshotted + len(rows),
-                    "snapshot_window": {
-                        "window_id": window_id,
-                        "stream_overrides": stats.get("stream_overrides", 0),
-                        "snapshot_rows": stats.get("snapshot_rows", 0),
-                    },
+                    "snapshot_window": window_meta,
                 },
             )
             mark_chunk(sig.id, last_pk=last_pk or "", rows=len(rows))

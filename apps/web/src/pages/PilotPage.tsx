@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
+import { PilotConfirmCard } from "../components/pilot/PilotConfirmCard";
 import {
-  confirmCopilotAction,
   copilotChat,
   CopilotAction,
   CopilotChatMessage,
@@ -15,6 +15,11 @@ import {
 } from "../lib/api";
 import { AUTOMATION_CATEGORIES, AUTOMATION_IDEAS } from "../lib/automationIdeas";
 import { useActiveData } from "../lib/DataContext";
+import {
+  confirmPilotPending,
+  isDestructiveTransfer,
+  transferOverwriteMessage,
+} from "../lib/pilotConfirm";
 import { useStudioActions } from "../lib/StudioActionsContext";
 import { API_BASE, Screen } from "../lib/types";
 import { useToast } from "../components/Toast";
@@ -44,7 +49,7 @@ function extractResultIdFromTools(
   for (let i = tools.length - 1; i >= 0; i -= 1) {
     const t = tools[i];
     if (!t.success) continue;
-    if (!["sample_connector_object", "run_query", "filter_result", "analyze_result"].includes(t.name)) {
+    if (!["sample_connector_object", "run_query", "filter_result", "analyze_result", "aggregate_data"].includes(t.name)) {
       continue;
     }
     const m = /\b(pr_[a-f0-9]+)\b/i.exec(t.summary || "");
@@ -80,6 +85,8 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
   const [input, setInput] = useState("");
   const [category, setCategory] = useState("all");
   const [loading, setLoading] = useState(false);
+  /** Which pending action is currently being confirmed — drives the Confirm button spinner. */
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [pilotOnline, setPilotOnline] = useState<boolean | null>(null);
   const [prompts, setPrompts] = useState<string[]>([]);
   const [modelCapabilities, setModelCapabilities] = useState<ModelCapabilities | null>(null);
@@ -135,9 +142,21 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
     });
   };
 
+  const clearPending = (msgIndex: number, actionId: string) => {
+    updateSession(activeId, {
+      messages: session.messages.map((m, i) =>
+        i === msgIndex
+          ? { ...m, pending_actions: (m.pending_actions || []).filter((p) => p.id !== actionId) }
+          : m,
+      ),
+    });
+  };
+
   const confirmPending = async (msgIndex: number, action: CopilotPendingAction) => {
+    if (confirmingId) return;
+    setConfirmingId(action.id);
     try {
-      if (action.type === "studio" || action.kind) {
+      if (action.type === "studio" || (action.kind && action.type !== "start_transfer" && action.type !== "create_connector")) {
         onNavigate("transfer");
         dispatchStudioAction({
           kind: (action.kind || String(action.payload?.kind || "")) as string,
@@ -156,57 +175,55 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
           tone: "success",
         });
       } else if (action.type === "create_connector") {
-        const p = action.payload || {};
-        const ackId = String(p.ack_id || "");
-        if (!ackId) {
-          throw new Error(
-            "This approval is missing a server ack_id (credentials are not stored in the browser). Ask Pilot to create the connector again.",
-          );
-        }
-        const preview = (p.preview && typeof p.preview === "object"
-          ? (p.preview as Record<string, unknown>)
-          : {}) as Record<string, unknown>;
-        const res = await confirmCopilotAction({
-          ack_id: ackId,
-          actor: "pilot-ui",
-          reason: "operator confirmed create_connector",
-        });
-        const name = String(res.name || preview.name || "Connector");
+        const res = await confirmPilotPending(action);
+        if (res.kind !== "create_connector") throw new Error("Unexpected confirm result");
         window.dispatchEvent(new CustomEvent("df2:connectors-changed"));
         onNavigate("connectors");
         toast({
           title: res.idempotent ? "Connector already saved" : "Connector saved",
-          message: `“${name}” (${res.type || preview.type || "connector"}) is ready in Connectors.`,
+          message: `“${res.name}” (${res.type}) is ready in Connectors.`,
           tone: "success",
         });
+      } else if (action.type === "start_transfer") {
+        // Overwrite is the one action that deletes destination rows. Ask once
+        // more with the enterprise ConfirmDialog so a misclick cannot wipe a table.
+        if (isDestructiveTransfer(action)) {
+          const ok = await confirm({
+            title: "Overwrite the destination?",
+            message: transferOverwriteMessage(action),
+            confirmLabel: "Overwrite & run",
+            tone: "danger",
+          });
+          if (!ok) return;
+        }
+        const res = await confirmPilotPending(action);
+        if (res.kind !== "start_transfer") throw new Error("Unexpected confirm result");
+        toast({
+          title: res.idempotent ? "Transfer already running" : "Transfer started",
+          message: `${res.source} → ${res.destination}`,
+          tone: "success",
+        });
+        // Hand the operator to Jobs so they can watch the theater — that is the
+        // next correct action after Confirm, not sitting on a dead chat button.
+        onNavigate("jobs");
       } else {
         toast({ title: "Unknown action", message: action.type, tone: "error" });
         return;
       }
-      updateSession(activeId, {
-        messages: session.messages.map((m, i) =>
-          i === msgIndex
-            ? { ...m, pending_actions: (m.pending_actions || []).filter((p) => p.id !== action.id) }
-            : m,
-        ),
-      });
+      clearPending(msgIndex, action.id);
     } catch (error) {
       toast({
         title: "Action failed",
         message: error instanceof Error ? error.message : String(error),
         tone: "error",
       });
+    } finally {
+      setConfirmingId(null);
     }
   };
 
   const dismissPending = (msgIndex: number, actionId: string) => {
-    updateSession(activeId, {
-      messages: session.messages.map((m, i) =>
-        i === msgIndex
-          ? { ...m, pending_actions: (m.pending_actions || []).filter((p) => p.id !== actionId) }
-          : m,
-      ),
-    });
+    clearPending(msgIndex, actionId);
   };
 
   const updateSession = (id: string, patch: Partial<PilotSession>) => {
@@ -278,7 +295,12 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
         ],
       });
 
-      applySafeActions(res.suggested_actions);
+      // Never auto-navigate away while a Confirm card is waiting — that is the
+      // exact bug that threw operators to Connectors/Studio and away from the
+      // approval they were supposed to press for create_connector / start_transfer.
+      if (!(res.pending_actions && res.pending_actions.length > 0)) {
+        applySafeActions(res.suggested_actions);
+      }
       if (res.suggested_prompts?.length) setPrompts(res.suggested_prompts);
     } catch (error) {
       setPilotOnline(false);
@@ -558,23 +580,13 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                   {msg.pending_actions && msg.pending_actions.length > 0 && (
                     <div className="df2-pilot-pending">
                       {msg.pending_actions.map((pa) => (
-                        <div key={pa.id} className="df2-pilot-pending-row">
-                          <span className="df2-pilot-pending-label">{pa.label || pa.type}</span>
-                          <button
-                            type="button"
-                            className="df2-btn df2-btn-primary df2-btn-sm"
-                            onClick={() => confirmPending(i, pa)}
-                          >
-                            Confirm
-                          </button>
-                          <button
-                            type="button"
-                            className="df2-btn df2-btn-ghost df2-btn-sm"
-                            onClick={() => dismissPending(i, pa.id)}
-                          >
-                            Cancel
-                          </button>
-                        </div>
+                        <PilotConfirmCard
+                          key={pa.id}
+                          action={pa}
+                          busy={confirmingId === pa.id}
+                          onConfirm={() => confirmPending(i, pa)}
+                          onCancel={() => dismissPending(i, pa.id)}
+                        />
                       ))}
                     </div>
                   )}

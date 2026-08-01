@@ -11,6 +11,8 @@ import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from decimal import Decimal
+from typing import Any
 
 from services.value_serializer import json_default
 from ..knowledge.copilot_knowledge import DATA_PILOT_PERSONA, SUGGESTED_PROMPTS
@@ -89,6 +91,10 @@ def _tool_summary(tr: ToolResult) -> str:
         rid = o.get("result_id") or ""
         base = f"{o.get('row_count', 0)} query rows"
         return f"{base} · {rid}" if rid else base
+    if tr.name == "aggregate_data":
+        if o.get("group_by"):
+            return f"{o.get('group_count', 0)} groups by {o.get('group_by')}"
+        return f"{o.get('metric')} = {o.get('value')}"
     if tr.name == "analyze_result":
         return f"profiled {o.get('result_id') or 'result'}"
     if tr.name == "filter_result":
@@ -100,6 +106,248 @@ def _tool_summary(tr: ToolResult) -> str:
     if tr.name == "map_connector_schemas":
         return f"{o.get('mapping_count', 0)} mappings"
     return "ok"
+
+
+_METRIC_LABEL = {
+    "count": "row count",
+    "count_distinct": "distinct values",
+    "sum": "total",
+    "avg": "average",
+    "min": "minimum",
+    "max": "maximum",
+}
+
+
+def _fmt_metric_value(value: Any) -> str:
+    """Group digits for readability without altering the value's precision."""
+    if value is None:
+        return "∅"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, Decimal)):
+        # Decimal keeps the driver's exact scale — never round money here.
+        return f"{value:,}"
+    if isinstance(value, float):
+        if value.is_integer():
+            return f"{int(value):,}"
+        return f"{value:,.4f}".rstrip("0").rstrip(".")
+    return str(value)
+
+
+_GATE_ICON = {"pass": "✓", "block": "✗", "warn": "!", "skip": "–"}
+
+
+def _render_transfer(tool: str, o: dict[str, Any]) -> str:
+    """Show the plan an operator has to sign off on: route, casts, gates.
+
+    Lossy casts and blocking gates lead, because those are the two things that
+    make a transfer the wrong thing to run. A clean plan says so in one line
+    rather than burying it in a wall of every mapped column.
+    """
+    plan = o.get("plan") if tool == "start_transfer" and isinstance(o.get("plan"), dict) else o
+    src = plan.get("source") or {}
+    dst = plan.get("destination") or {}
+    pf = plan.get("preflight") or {}
+    route = (
+        f"**{src.get('connector_name')}**.`{src.get('table')}` → "
+        f"**{dst.get('connector_name')}**.`{dst.get('table')}`"
+    )
+    lines = [f"{route} — sync `{plan.get('sync_mode')}`"]
+
+    dest_note = (
+        "destination table exists"
+        if dst.get("table_exists")
+        else "destination table will be created"
+    )
+    lines.append(
+        f"• Mapped **{plan.get('mapped_count')}** of {src.get('column_count')} source "
+        f"columns ({dest_note})."
+    )
+
+    unmapped = plan.get("unmapped_source_columns") or []
+    if unmapped:
+        lines.append(
+            f"• **{len(unmapped)} source column(s) have no destination**: "
+            + ", ".join(f"`{c}`" for c in unmapped[:8])
+            + ("…" if len(unmapped) > 8 else "")
+        )
+
+    lossy = plan.get("lossy_conversions") or []
+    if lossy:
+        lines.append(f"• **{len(lossy)} lossy cast(s)** — data changes shape on write:")
+        for c in lossy[:5]:
+            lines.append(
+                f"  – `{c.get('source_column')}` {c.get('from_type')} → "
+                f"{c.get('to_type')} on `{c.get('target_column')}`"
+            )
+    else:
+        conversions = plan.get("type_conversions") or []
+        if conversions:
+            lines.append(
+                f"• {len(conversions)} type conversion(s), none lossy — "
+                "every value round-trips."
+            )
+
+    gates = pf.get("gates") or []
+    if gates:
+        summary = " ".join(
+            f"{_GATE_ICON.get(str(g.get('status')).lower(), '?')}{g.get('id')}" for g in gates
+        )
+        lines.append(
+            f"• Preflight **{pf.get('passed_count')}/{pf.get('total_gates')}** "
+            f"({pf.get('readiness_score')}%): {summary}"
+        )
+    for blocker in (pf.get("blockers") or [])[:4]:
+        lines.append(f"  – **BLOCK {blocker.get('id')}**: {blocker.get('message')}")
+    if pf.get("run_id"):
+        lines.append(f"• Preflight run `{pf.get('run_id')}`")
+
+    if tool == "start_transfer" and o.get("requires_confirm"):
+        if o.get("destructive"):
+            lines.append(
+                "\n**This overwrites the destination table.** "
+                "Confirm below to run it; nothing moves until you do."
+            )
+        else:
+            lines.append("\nConfirm below to run it — nothing moves until you do.")
+    return "\n".join(lines)
+
+
+def _render_aggregate(o: dict[str, Any]) -> str:
+    """Report an exact aggregate: the number first, then the SQL that produced it."""
+    metric = str(o.get("metric") or "count")
+    label = _METRIC_LABEL.get(metric, metric)
+    table = o.get("table")
+    column = o.get("column")
+    group_by = o.get("group_by")
+    rows = list(o.get("rows") or [])
+    cols = list(o.get("columns") or [])
+    alias = str(o.get("metric_alias") or "")
+    where = (
+        f"**{o.get('connector_name')}**.`{table}`" if o.get("connector_name") else f"`{table}`"
+    )
+    measure = f"{label} of `{column}`" if column else label
+    filters = str(o.get("filters") or "")
+    scope = f" where {filters}" if filters else ""
+
+    lines: list[str] = []
+    if not group_by:
+        value = _fmt_metric_value(o.get("value"))
+        if metric == "count":
+            lines.append(f"{where} has **{value} rows**{scope}.")
+        else:
+            lines.append(f"{measure.capitalize()} in {where}{scope}: **{value}**.")
+    else:
+        groups = int(o.get("group_count") or len(rows))
+        head = (
+            f"{measure.capitalize()} in {where}{scope} grouped by `{group_by}` — "
+            f"**{groups} group{'s' if groups != 1 else ''}**"
+        )
+        if o.get("truncated"):
+            head += f" (top {len(rows)} shown)"
+        lines.append(head)
+        # Result columns come back as the generated aliases; some engines fold
+        # case (Snowflake upper-cases), so match them case-insensitively.
+        dim_key = cols[0] if cols else str(group_by)
+        val_key = next((c for c in cols if c.lower() == alias.lower()), "")
+        if not val_key:
+            val_key = cols[-1] if len(cols) > 1 else alias
+        lines.append(f"| `{dim_key}` | `{val_key}` |")
+        lines.append("| --- | ---: |")
+        for row in rows[:15]:
+            dim = row.get(dim_key)
+            dim_s = "∅ (null)" if dim is None else str(dim)
+            if len(dim_s) > 48:
+                dim_s = dim_s[:45] + "…"
+            lines.append(
+                f"| {dim_s.replace('|', chr(92) + '|')} | "
+                f"{_fmt_metric_value(row.get(val_key))} |"
+            )
+        if len(rows) > 15:
+            lines.append(f"_Showing 15 of {len(rows)} groups._")
+
+    lines.append("Exact server-side aggregate over the whole table — not a sample.")
+    query = str(o.get("query") or "")
+    if query:
+        fence = "json" if str(o.get("type") or "").lower() == "mongodb" else "sql"
+        lines.append(f"```{fence}\n{query[:400]}{'…' if len(query) > 400 else ''}\n```")
+    if o.get("result_id"):
+        lines.append(f"Result ref `{o['result_id']}` — ask to filter or profile it.")
+    return "\n".join(lines)
+
+
+def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
+    """Honest fallback when no tool matched — never pretend the question was answered.
+
+    The previous capability blurb made every unmapped prompt look like the pilot
+    had understood and was offering a tour. Operators reading "I can help with…"
+    after asking for an export or a transfer start thought the pilot ignored them.
+    """
+    lower = (message or "").strip().lower()
+    connectors = ctx.get("connectors") or ctx.get("saved_connectors") or []
+    conn_names = [
+        str(c.get("name") or "").strip()
+        for c in connectors
+        if isinstance(c, dict) and c.get("name")
+    ][:4]
+
+    suggestions: list[str] = []
+    if any(w in lower for w in ("export", "download", "csv", "parquet", "excel")):
+        suggestions.append(
+            'I can\'t export files yet — sample the table and use **Query** to pull '
+            'larger result sets: "sample orders on Local Postgres".'
+        )
+    if any(w in lower for w in ("transfer", "sync", "move", "migrate", "copy", "replicate")):
+        suggestions.append(
+            'I can plan a route or open Transfer Studio, but I can\'t start a sync '
+            'myself yet. Try: "plan transfer from Postgres to Snowflake" or '
+            '"open transfer studio".'
+        )
+    if any(w in lower for w in ("delete", "drop", "remove", "destroy")):
+        suggestions.append(
+            "I only run read-only actions and confirmed connector creates — "
+            "deletes have to be done in the UI so they can't be triggered by a prompt."
+        )
+    if any(w in lower for w in ("schedule", "pipeline", "cron", "every hour", "daily")):
+        suggestions.append(
+            'I can list and trigger existing pipelines: "show my pipelines" or '
+            '"run schedule <name> now". Creating a new schedule still needs the UI.'
+        )
+    if any(w in lower for w in ("fix", "repair", "heal", "remediate", "quarantine")):
+        suggestions.append(
+            'For a failed run, paste the job id or say "fix bad data" and I\'ll open '
+            "the remediation path for that transfer."
+        )
+    if not suggestions and any(
+        w in lower for w in ("count", "sum", "average", "avg", "total", "how many", "top ")
+    ):
+        suggestions.append(
+            'For live totals name the table and connector: '
+            '"count of orders by status on Local Postgres" or '
+            '"average price in products on Local Postgres".'
+        )
+    if not suggestions:
+        on_conn = f" on {conn_names[0]}" if conn_names else ""
+        suggestions.append(
+            "I can count / sum / average live tables, sample and profile rows, "
+            "introspect schemas, map columns, list jobs and pipelines, and open "
+            "the right screen."
+        )
+        suggestions.append(
+            f'Try: "how many rows in airports{on_conn}", '
+            f'"schema of airports{on_conn}", '
+            '"show my jobs", or "what can you do?".'
+        )
+
+    quoted = (message or "").strip()
+    if len(quoted) > 120:
+        quoted = quoted[:117] + "…"
+    head = (
+        f'I\'m not sure how to do “{quoted}” yet.'
+        if quoted
+        else "I didn't catch a specific action in that message."
+    )
+    return head + "\n\n" + "\n".join(f"• {s}" for s in suggestions[:3])
 
 
 def _score_response(resp: CopilotResponse | None) -> float:
@@ -198,9 +446,11 @@ class DataPilotAgent:
         }:
             return CopilotResponse(
                 answer=(
-                    "I'm **Data Pilot** — your AI agent for all things data. "
-                    "Ask me about any dataset, PII, transfer jobs, or say "
-                    "\"move logistics data to MongoDB\" and I'll help you do it."
+                    "I'm **Data Pilot** — ask me anything about your workspace. "
+                    "I can count and aggregate live tables, sample and profile "
+                    "rows, inspect schemas, triage jobs, and open the right screen. "
+                    'Try: "how many rows in airports on Local Postgres" or '
+                    '"count of orders by status".'
                 ),
                 intent="greeting",
                 confidence=1.0,
@@ -413,11 +663,22 @@ class DataPilotAgent:
             return
 
         if risk == "mutate" or out.get("requires_confirm"):
+            # The ack id comes first: it is the only part that is unique per
+            # staged mutation, so two transfers proposed in one turn stay
+            # separately approvable instead of collapsing onto one row.
+            marker = (
+                out.get("ack_id")
+                or out.get("kind")
+                or out.get("schedule_id")
+                or out.get("id")
+                or len(turn.pending_actions)
+            )
             turn.pending_actions.append({
-                "id": f"{tr.name}:{out.get('kind') or out.get('schedule_id') or out.get('id') or len(turn.pending_actions)}",
+                "id": f"{tr.name}:{marker}",
                 "type": out.get("action") or tr.name,
                 "label": out.get("label") or "Confirm this change",
                 "risk": "mutate",
+                "destructive": bool(out.get("destructive")),
                 "payload": out,
             })
 
@@ -494,6 +755,83 @@ class DataPilotAgent:
 
         return None
 
+    @staticmethod
+    def _session_id(data_context: dict | None) -> str:
+        return str((data_context or {}).get("pilot_session_id") or "").strip()
+
+    def _plan_with_memory(
+        self,
+        message: str,
+        data_context: dict | None,
+    ) -> list[tuple[str, dict]]:
+        """Resolve this turn against session working memory, then plan tools.
+
+        Order matters: a bare reply answers an open question first, an elliptical
+        turn edits the last query second, and only then do we parse from scratch —
+        otherwise "and by region?" is parsed as a brand-new request and matches
+        nothing, which is what made the pilot look amnesiac.
+        """
+        from .followup import (
+            inherit_focus_slots,
+            resolve_followup,
+            resolve_pending_answer,
+        )
+        from .working_memory import get_working_memory
+
+        session_id = self._session_id(data_context)
+        if not session_id:
+            return infer_tools_from_message(message)
+
+        memory = get_working_memory()
+        focus = memory.get_focus(session_id)
+
+        pending = memory.get_pending(session_id)
+        if pending:
+            answered = resolve_pending_answer(message, pending)
+            if answered:
+                memory.clear_pending(session_id)
+                return [answered]
+
+        planned = infer_tools_from_message(message)
+        if not planned:
+            edit = resolve_followup(message, focus)
+            if edit is not None and not edit.missing:
+                return [("aggregate_data", edit.as_tool_args())]
+            if edit is not None:
+                # Known subject, missing measure — let the tool ask against the
+                # real schema rather than answering the wrong question.
+                return [("aggregate_data", edit.as_tool_args())]
+        return inherit_focus_slots(planned, focus)
+
+    def _commit_memory(
+        self,
+        planned: list[tuple[str, dict]],
+        turn: PilotTurn,
+        data_context: dict | None,
+    ) -> None:
+        """Persist the resolved subject, or the question we just asked."""
+        session_id = self._session_id(data_context)
+        if not session_id:
+            return
+        from .followup import clarification_slot, focus_from_tool_output
+        from .working_memory import get_working_memory
+
+        memory = get_working_memory()
+        args_by_tool = {name: args for name, args in planned}
+
+        for tr in turn.tool_results:
+            if tr.success:
+                update = focus_from_tool_output(tr.name, tr.output or {})
+                if update:
+                    memory.update_focus(session_id, **update)
+                    memory.clear_pending(session_id)
+            else:
+                slot = clarification_slot(tr.name, args_by_tool.get(tr.name, {}), tr.error)
+                if slot:
+                    memory.remember_pending(session_id, slot)
+                    if not turn.needs_clarification:
+                        turn.needs_clarification = slot.question
+
     def _with_result_context(self, name: str, args: dict | None, data_context: dict | None) -> dict:
         """Inject session / last_result_id so follow-ups hit the real stored rows."""
         out = dict(args or {})
@@ -502,6 +840,7 @@ class DataPilotAgent:
         last_result_id = str(ctx.get("last_result_id") or "").strip()
         if session_id and name in (
             "sample_connector_object",
+            "aggregate_data",
             "run_query",
             "analyze_result",
             "filter_result",
@@ -523,12 +862,13 @@ class DataPilotAgent:
         if not openai.is_available():
             return None
 
-        planned = infer_tools_from_message(message)
+        planned = self._plan_with_memory(message, data_context)
         turn = PilotTurn()
         for name, args in planned:
             tr = self.tools.execute(name, self._with_result_context(name, args, data_context))
             turn.tool_results.append(tr)
             self._append_tool_actions(turn, tr)
+        self._commit_memory(planned, turn, data_context)
 
         tool_context = format_tool_results_for_llm(turn.tool_results)
         history_text = "\n".join(
@@ -575,12 +915,13 @@ Respond as Data Pilot in natural language. Ground your answer in tool results an
         if not ollama.is_available():
             return None
 
-        planned = infer_tools_from_message(message)
+        planned = self._plan_with_memory(message, data_context)
         turn = PilotTurn()
         for name, args in planned:
             tr = self.tools.execute(name, self._with_result_context(name, args, data_context))
             turn.tool_results.append(tr)
             self._append_tool_actions(turn, tr)
+        self._commit_memory(planned, turn, data_context)
 
         tool_context = format_tool_results_for_llm(turn.tool_results)
         history_text = "\n".join(
@@ -625,11 +966,12 @@ Respond as Data Pilot — grounded in tool results."""
         intent = self._detect_intent(message)
         turn = PilotTurn()
 
-        # Always try relevant tools locally
-        for name, args in infer_tools_from_message(message):
+        planned = self._plan_with_memory(message, data_context)
+        for name, args in planned:
             tr = self.tools.execute(name, self._with_result_context(name, args, data_context))
             turn.tool_results.append(tr)
             self._append_tool_actions(turn, tr)
+        self._commit_memory(planned, turn, data_context)
 
         # Ground answers in active session IDs when the user asks about failure/status
         # without pasting an ID (Jobs / Validate feed these into data_context).
@@ -664,6 +1006,7 @@ Respond as Data Pilot — grounded in tool results."""
                 "list_connector_objects",
                 "introspect_connector_schema",
                 "sample_connector_object",
+                "aggregate_data",
                 "run_query",
                 "analyze_result",
                 "filter_result",
@@ -673,6 +1016,12 @@ Respond as Data Pilot — grounded in tool results."""
             )
             for tr in turn.tool_results
         )
+        # A successful workspace tool already answered the question. Never append
+        # a fixture-dataset profile beside it — that made "4 rows" look like it
+        # was about some unrelated uploaded CSV.
+        grounded = any(tr.success for tr in turn.tool_results)
+        has_session_data = bool(data_context and data_context.get("columns"))
+        wants_analysis = self.analyst.wants_data_analysis(message, intent)
         insight = None
         if (
             not list_only
@@ -680,15 +1029,21 @@ Respond as Data Pilot — grounded in tool results."""
             and not has_connector
             and not described
             and not live_schema
-            and not (navigated and not self.analyst.wants_data_analysis(message, intent))
+            and not grounded
+            and (has_session_data or wants_analysis)
+            and not (navigated and not wants_analysis)
         ):
-            insight = self.analyst.analyze_context(data_context, self.analyst.extract_dataset_hint(message))
-            if not insight and self.analyst.wants_data_analysis(message, intent):
-                hint = self.analyst.extract_dataset_hint(message)
-                if hint:
-                    analyze_tr = self.tools.execute("analyze_dataset", {"dataset_name": hint})
-                    if analyze_tr.success:
-                        turn.tool_results.append(analyze_tr)
+            # Only profile a fixture/upload when the user actually asked about
+            # data, or the UI handed us a session schema. resolve_dataset(None)
+            # otherwise silently profiles the first uploaded file for every
+            # unmapped prompt ("export orders to csv" → random CSV analysis).
+            hint = self.analyst.extract_dataset_hint(message) if wants_analysis else None
+            if has_session_data or hint:
+                insight = self.analyst.analyze_context(data_context, hint)
+            if not insight and wants_analysis and hint:
+                analyze_tr = self.tools.execute("analyze_dataset", {"dataset_name": hint})
+                if analyze_tr.success:
+                    turn.tool_results.append(analyze_tr)
 
         # Compose from tool results + analyst
         answer = self._compose_local_answer(message, intent, turn, insight, ctx)
@@ -868,14 +1223,20 @@ Respond as Data Pilot — grounded in tool results."""
                     f"Proposed Studio remediation: **{tr.output.get('label')}**. "
                     "Confirm to apply it in Transfer Studio (Validate step)."
                 )
+            elif tr.name in ("plan_transfer", "start_transfer") and tr.success:
+                parts.append(_render_transfer(tr.name, tr.output or {}))
+            elif tr.name == "start_transfer" and not tr.success and isinstance(tr.output, dict):
+                # A blocked transfer still owes the operator the gate evidence.
+                parts.append(f"{tr.error}\n\n{_render_transfer('plan_transfer', tr.output)}")
             elif tr.name == "plan_transfer_route" and tr.success:
                 o = tr.output or {}
-                parts.append(
-                    f"**Route plan** ({o.get('route_type')}): {o.get('source')} → {o.get('destination')}\n"
-                    f"• Sync: **{o.get('recommended_sync')}**\n"
-                    f"• Schema policy: {o.get('schema_policy')}\n"
-                    f"• Gates: {', '.join(o.get('required_gates') or [])}"
-                )
+                if not o.get("generic"):
+                    parts.append(_render_transfer("plan_transfer", o))
+                else:
+                    parts.append(
+                        f"**Standard gate sequence**: {', '.join(o.get('required_gates') or [])}\n"
+                        f"{o.get('note') or ''}\n{o.get('next') or ''}"
+                    )
             elif tr.name == "explain_mapping_assurance" and tr.success:
                 o = tr.output or {}
                 parts.append(
@@ -992,6 +1353,8 @@ Respond as Data Pilot — grounded in tool results."""
                     )
                 lines.append("Open **Query** for larger results or exports.")
                 parts.append("\n".join(lines))
+            elif tr.name == "aggregate_data" and tr.success:
+                parts.append(_render_aggregate(tr.output or {}))
             elif tr.name == "analyze_result" and tr.success:
                 o = tr.output or {}
                 analysis = o.get("analysis") or {}
@@ -1175,12 +1538,18 @@ Respond as Data Pilot — grounded in tool results."""
             elif tr.name == "describe_pilot" and tr.success:
                 o = tr.output or {}
                 lines = [
-                    "I'm **Data Pilot** — I help with routes, schema risk, "
-                    "mappings, jobs, and fixes inside DataFlow. I answer from your workspace first.",
+                    "I'm **Data Pilot** — I help with analytics, routes, schema "
+                    "risk, mappings, jobs, and fixes inside DataFlow. I answer from "
+                    "your workspace first; I never invent warehouse facts.",
                     "**I can:**",
                 ]
-                for item in (o.get("can") or [])[:6]:
+                for item in (o.get("can") or [])[:8]:
                     lines.append(f"• {item}")
+                cannot = o.get("cannot_yet") or []
+                if cannot:
+                    lines.append("**Not yet from chat:**")
+                    for item in cannot[:3]:
+                        lines.append(f"• {item}")
                 ds = o.get("datasets") or []
                 if ds:
                     lines.append(
@@ -1249,30 +1618,7 @@ Respond as Data Pilot — grounded in tool results."""
                 parts.append(clarify[0])
 
         if not parts:
-            datasets = ctx.get("datasets", [])
-            connectors = ctx.get("connectors") or ctx.get("saved_connectors") or []
-            if datasets:
-                names = ", ".join(d["name"] for d in datasets[:4])
-                parts.append(
-                    f"I can help with any question about your data. Available datasets: **{names}**.\n\n"
-                    "Try: \"Analyze logistics data\", \"Show my jobs\", \"What PII is in HR?\", "
-                    "or \"Take me to transfer\"."
-                )
-            elif connectors:
-                names = ", ".join(
-                    str(c.get("name") or c) for c in connectors[:4] if c
-                )
-                parts.append(
-                    "I can look up live schemas and jobs on your saved connectors"
-                    + (f" ({names})" if names else "")
-                    + '. Try: "schema of airports on Local Postgres" or "show my pipelines".'
-                )
-            else:
-                parts.append(
-                    "I can help with connectors, jobs, pipelines, and live schemas. "
-                    "Save a connector in **Connectors**, or upload a file in **New Transfer** "
-                    "and I'll profile columns, PII, and quality."
-                )
+            parts.append(_unmapped_intent_reply(message, ctx))
 
         return "\n\n".join(parts)
 
@@ -1392,12 +1738,16 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
         for d in datasets[:2]:
             label = d["name"].replace("sample_", "").replace("_", " ")
             prompts.append(f"Tell me everything about {label}")
-        prompts.extend(SUGGESTED_PROMPTS[:4] if SUGGESTED_PROMPTS else [
-            "What data do I have?",
+        prompts.extend([
+            "How many rows in airports on Local Postgres?",
+            "Count of orders by status on Local Postgres",
             "Show my recent jobs",
-            "Move logistics CSV to MongoDB",
-            "Take me to connectors",
+            "What can you do?",
         ])
+        # Keep a couple of curated domain prompts after the proven ones.
+        for extra in (SUGGESTED_PROMPTS or [])[:2]:
+            if extra not in prompts:
+                prompts.append(extra)
         return prompts
 
 

@@ -54,7 +54,25 @@ _SAFE_PROMOTIONS = frozenset({
 })
 
 _IDENTITY_TRANSFORMS = frozenset({"", "none", "identity", "cast", "auto", "passthrough"})
-_STRUCTURAL_LOGICALS = frozenset({"json", "array"})
+
+
+def _is_passthrough_transform(transform: str, src_logical: str, tgt_logical: str) -> bool:
+    """True when the transform does not change the value.
+
+    ``generate_transforms`` labels every mapping with its logical type, so an
+    untouched INTEGER→INTEGER column arrives carrying ``transform="integer"``.
+    Read literally that looks like a custom transform, which pushed exact
+    name+type matches into ``semantic_inference`` and stamped
+    ``requires_review`` on them — making ``exact_name_type`` unreachable in
+    practice and blocking G4 on transfers between *identical* schemas. A
+    transform that merely names the logical type both sides already share is a
+    passthrough cast, not a value change.
+    """
+    xf = (transform or "").strip().lower()
+    if xf in _IDENTITY_TRANSFORMS:
+        return True
+    return bool(src_logical) and xf == src_logical == tgt_logical
+_STRUCTURAL_LOGICALS = frozenset({"json", "array", "struct", "map"})
 
 _TEMPORAL_NAME_TERMS = frozenset({"date", "time", "dt", "timestamp", "created", "updated"})
 _TEMPORAL_TYPE_TOKENS = (
@@ -220,7 +238,7 @@ def classify_mapping_confidence(
         str(mapping.get("target_type") or mapping.get("dest_type") or mapping.get("source_type") or "")
     )
     transform = str(mapping.get("transform") or "").strip().lower()
-    has_custom_xf = bool(transform) and transform not in _IDENTITY_TRANSFORMS
+    has_custom_xf = not _is_passthrough_transform(transform, src_logical, tgt_logical)
     samples = [str(x) for x in (profile.get("samples") or []) if str(x).strip()]
     if not samples and mapping.get("samples"):
         samples = [str(x) for x in mapping["samples"] if str(x).strip()]

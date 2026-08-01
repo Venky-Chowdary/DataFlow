@@ -330,7 +330,7 @@ def test_iceberg_decimal_overflow_quarantines_row(tmp_path: Path) -> None:
     assert result.ok, result.error
     assert result.rows_written == 1
     assert result.rejected_details
-    assert any("Iceberg decimal(5,2)" in (d.get("reason") or "") for d in result.rejected_details)
+    assert any("DECIMAL(5,2)" in (d.get("reason") or "").upper() for d in result.rejected_details)
 
 
 def test_iceberg_empty_string_preserved_on_string_column(tmp_path: Path) -> None:

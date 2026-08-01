@@ -180,14 +180,68 @@ class FilePreflightContext(PreflightContext):
             if m.target == col:
                 source_col = m.source
                 break
+        # Case-insensitive dest collations equate A/a — uniqueness must too
+        # (MySQL utf8mb4_*_ci / SQL Server *_CI_AS / CITEXT), else Validate false-greens.
+        dest_type = ""
+        for c in getattr(self.plan.destination, "target_columns", None) or []:
+            if getattr(c, "name", None) == col:
+                dest_type = str(getattr(c, "inferred_type", "") or "")
+                break
+        from services.type_system import (
+            unique_equality_key,
+            unique_key_forces_casefold,
+            unique_key_nulls_collide,
+            unique_key_row_in_scope,
+        )
+
+        unique_keys = getattr(self.plan, "destination_unique_keys", None) or []
+        casefold = unique_key_forces_casefold(
+            col,
+            ddl_type=dest_type,
+            unique_keys=unique_keys,
+        )
+        nulls_collide = unique_key_nulls_collide(col, unique_keys=unique_keys)
+        null_sentinel = "\x00NULL\x00" if nulls_collide else None
         seen: dict[str, int] = {}
+        examples: dict[str, str] = {}
         dupes: list[dict[str, Any]] = []
         for row in self.sample_rows:
-            val = cell_to_string(row.get(source_col, ""))
-            seen[val] = seen.get(val, 0) + 1
-        for val, count in seen.items():
-            if count > 1 and val:
-                dupes.append({"column": col, "value": val, "count": count})
+            scope = dict(row)
+            if col not in scope and source_col in scope:
+                scope[col] = scope.get(source_col)
+            if not unique_key_row_in_scope(scope, col, unique_keys=unique_keys):
+                continue
+            raw_cell = row.get(source_col, "")
+            raw = cell_to_string(raw_cell) if raw_cell is not None else ""
+            dest_kind = ""
+            try:
+                dest_kind = str(getattr(self.plan.destination, "db_type", "") or "")
+            except Exception:
+                dest_kind = ""
+            key = unique_equality_key(
+                None if raw_cell is None else raw,
+                dest_type,
+                force_casefold=casefold,
+                null_sentinel=null_sentinel,
+                dest_kind=dest_kind,
+            )
+            if not key and not nulls_collide:
+                continue
+            if not key:
+                continue
+            seen[key] = seen.get(key, 0) + 1
+            examples.setdefault(key, raw if raw else "<NULL>")
+        for key, count in seen.items():
+            if count > 1 and key:
+                dupes.append(
+                    {
+                        "column": col,
+                        "value": examples.get(key, key),
+                        "count": count,
+                        "collation_casefold": casefold,
+                        "nulls_not_distinct": nulls_collide,
+                    }
+                )
         return dupes[:5]
 
     def run_integrity_audit(self) -> dict[str, Any]:
@@ -234,6 +288,8 @@ class FilePreflightContext(PreflightContext):
             contract_primary_key=getattr(self.plan, "contract_primary_key", None)
             or None,
             destination_pk_columns=getattr(self.plan, "destination_pk_columns", None)
+            or None,
+            destination_unique_keys=getattr(self.plan, "destination_unique_keys", None)
             or None,
             source_duplicate_findings=self.source_duplicate_findings,
             source_duplicate_probe_ran=self.source_duplicate_probe_ran,
@@ -588,6 +644,7 @@ def run_file_preflight(
     column_types: dict[str, str],
     row_count: int,
     mappings: list[dict[str, Any]],
+    column_nullability: dict[str, bool] | None = None,
     destination_connected: bool = False,
     destination_error: str | None = None,
     source_connected: bool = True,
@@ -600,6 +657,7 @@ def run_file_preflight(
     confidence_threshold: float = 0.85,
     validation_mode: str = "strict",
     destination_column_types: dict[str, str] | None = None,
+    destination_column_nullability: dict[str, bool] | None = None,
     destination_table_exists: bool | None = None,
     destination_can_create: bool | None = None,
     destination_can_write: bool | None = None,
@@ -619,6 +677,7 @@ def run_file_preflight(
     previous_source_schema: dict[str, str] | None = None,
     contract_primary_key: str | None = None,
     destination_pk_columns: list[str] | None = None,
+    destination_unique_keys: list[dict[str, Any]] | None = None,
     date_locale: str = "",
     cursor_fields: list[str] | None = None,
     compliance_acknowledged: bool = False,
@@ -672,21 +731,52 @@ def run_file_preflight(
             except Exception as exc:
                 logger.debug("preflight schema inference failed: %s", exc, exc_info=exc)
 
+    # Source nullability defaults to True (unknown), which is the safe reading
+    # for files. For an introspected database source it is knowable, and
+    # assuming otherwise made G3's NOT NULL contract fire on a NOT NULL source
+    # column — so copying a table onto an identical table with a PRIMARY KEY
+    # blocked with a coercion issue that did not exist.
+    src_nulls = column_nullability or {}
+
+    def _src_nullable(name: str) -> bool:
+        if name in src_nulls:
+            return bool(src_nulls[name])
+        return next(
+            (bool(v) for k, v in src_nulls.items() if k.lower() == name.lower()),
+            True,
+        )
+
     source_cols = [
-        ColumnSchema(name=c, inferred_type=column_types.get(c, "VARCHAR").upper())
+        ColumnSchema(
+            name=c,
+            inferred_type=column_types.get(c, "VARCHAR").upper(),
+            nullable=_src_nullable(c),
+        )
         for c in columns
     ]
     dest_types = destination_column_types or {}
-    dest_cols = [
-        ColumnSchema(
-            name=m["target"],
-            inferred_type=dest_types.get(
-                m["target"],
-                m.get("target_type") or column_types.get(m["source"], "VARCHAR"),
-            ).upper(),
+    dest_nulls = destination_column_nullability or {}
+    dest_cols = []
+    for m in mappings:
+        tgt = m["target"]
+        inferred = dest_types.get(
+            tgt,
+            m.get("target_type") or column_types.get(m["source"], "VARCHAR"),
+        ).upper()
+        # Prefer explicit map; else case-insensitive lookup; default nullable=True
+        # (create-new / unknown) so we never invent NOT NULL.
+        if tgt in dest_nulls:
+            nullable = bool(dest_nulls[tgt])
+        else:
+            nullable = next(
+                (bool(dest_nulls[k]) for k in dest_nulls if k.lower() == str(tgt).lower()),
+                True,
+            )
+        if "target_nullable" in m:
+            nullable = bool(m.get("target_nullable"))
+        dest_cols.append(
+            ColumnSchema(name=tgt, inferred_type=inferred, nullable=nullable)
         )
-        for m in mappings
-    ]
     plan_mappings = [
         ColumnMapping(
             source=m["source"],
@@ -834,6 +924,7 @@ def run_file_preflight(
         sync_mode=sync_mode,
         contract_primary_key=str(contract_primary_key or "").strip(),
         destination_pk_columns=list(destination_pk_columns or []),
+        destination_unique_keys=list(destination_unique_keys or []),
     )
 
     # Source-side duplicate-key probe: a small sample can miss duplicates in large
@@ -1296,6 +1387,7 @@ def inspect_destination_for_preflight(
         "table_exists": None,
         "can_create_table": False,
         "column_types": {},
+        "column_nullability": {},
         "columns": [],
         "db_type": (dest_type or "").lower(),
         "message": "",
@@ -1391,6 +1483,20 @@ def inspect_destination_for_preflight(
     cols = info.get("columns") or list(schema.keys())
     out["columns"] = cols
     out["column_types"] = schema
+    out["column_nullability"] = {
+        str(k): bool(v)
+        for k, v in dict(info.get("schema_nullability") or {}).items()
+    }
+    # Live UNIQUE / PK catalog — feeds identity uniqueness + append PK enforce.
+    out["primary_key_columns"] = list(info.get("primary_key_columns") or [])
+    out["unique_keys"] = list(info.get("unique_keys") or [])
+    out["pk_columns"] = list(out["primary_key_columns"])
+    # Advisory-key / introspect honesty notes (BQ NOT ENFORCED, Redshift
+    # informational, Snowflake NOT ENFORCED) — warn-only, never invent blockers.
+    dest_warnings = [str(w) for w in (info.get("warnings") or []) if w]
+    if dest_warnings:
+        out["warnings"] = dest_warnings
+        out["schema_warnings"] = dest_warnings
     stream = dest_collection or dest_table or endpoint.collection or endpoint.table
     # Prefer introspect's explicit existence (True / False / None). Recomputing
     # with exact string match broke public.jobs vs jobs and wiped create-new.

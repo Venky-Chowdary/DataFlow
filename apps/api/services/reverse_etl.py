@@ -119,9 +119,108 @@ def _plan_hubspot(**kwargs: Any) -> ActivationPlan:
     )
 
 
+def _plan_zendesk(**kwargs: Any) -> ActivationPlan:
+    pk = kwargs["primary_key"]
+    notes = [
+        "Zendesk Support API create/update (tickets, users, orgs)",
+        "tagger/multiselect use option tag values — not display names",
+        "Failed records quarantine via rejected_details — never silently dropped",
+        "Batch size capped at 100 per request group",
+    ]
+    return ActivationPlan(
+        destination_kind="zendesk",
+        object_name=kwargs["object_name"],
+        primary_key=pk,
+        field_map=dict(kwargs.get("field_map") or {}),
+        mode=kwargs.get("mode") or "upsert",
+        batch_size=100,
+        notes=notes,
+    )
+
+
+def _plan_notion(**kwargs: Any) -> ActivationPlan:
+    pk = kwargs["primary_key"]
+    notes = [
+        "Notion database page create/update — property types from live schema",
+        "select/status/multi_select quarantine unknown option names",
+        "Failed records quarantine via rejected_details — never silently dropped",
+        "Batch size capped at 25 (Notion rate limits)",
+    ]
+    return ActivationPlan(
+        destination_kind="notion",
+        object_name=kwargs["object_name"],
+        primary_key=pk,
+        field_map=dict(kwargs.get("field_map") or {}),
+        mode=kwargs.get("mode") or "upsert",
+        batch_size=25,
+        notes=notes,
+    )
+
+
+def _plan_airtable(**kwargs: Any) -> ActivationPlan:
+    pk = kwargs["primary_key"]
+    notes = [
+        "Airtable REST batch create/upsert (10 records/request)",
+        "singleSelect/multipleSelects use choice names from Meta schema",
+        "Failed records quarantine via rejected_details — never silently dropped",
+    ]
+    return ActivationPlan(
+        destination_kind="airtable",
+        object_name=kwargs["object_name"],
+        primary_key=pk,
+        field_map=dict(kwargs.get("field_map") or {}),
+        mode=kwargs.get("mode") or "upsert",
+        batch_size=10,
+        notes=notes,
+    )
+
+
+def _plan_stripe(**kwargs: Any) -> ActivationPlan:
+    pk = kwargs["primary_key"]
+    notes = [
+        "Stripe API object create/update (customers, products, prices, …)",
+        "Closed enums (tax_exempt, billing_scheme, coupon duration) fail-closed",
+        "Failed records quarantine via rejected_details — never silently dropped",
+        "Batch size capped at 100",
+    ]
+    return ActivationPlan(
+        destination_kind="stripe",
+        object_name=kwargs["object_name"],
+        primary_key=pk,
+        field_map=dict(kwargs.get("field_map") or {}),
+        mode=kwargs.get("mode") or "upsert",
+        batch_size=100,
+        notes=notes,
+    )
+
+
+def _plan_shopify(**kwargs: Any) -> ActivationPlan:
+    pk = kwargs["primary_key"]
+    notes = [
+        "Shopify Admin REST/GraphQL upsert (customers, products, variants, …)",
+        "Metafield list.*/money/measurement polarity via shopify_metafield_type_to_carrier",
+        "Failed records quarantine via rejected_details — never silently dropped",
+        "Batch size capped at 50 (Shopify REST rate limits)",
+    ]
+    return ActivationPlan(
+        destination_kind="shopify",
+        object_name=kwargs["object_name"],
+        primary_key=pk,
+        field_map=dict(kwargs.get("field_map") or {}),
+        mode=kwargs.get("mode") or "upsert",
+        batch_size=50,
+        notes=notes,
+    )
+
+
 # Register first-class SaaS activation planners at import time.
 register_activation_planner("salesforce", _plan_salesforce)
 register_activation_planner("hubspot", _plan_hubspot)
+register_activation_planner("zendesk", _plan_zendesk)
+register_activation_planner("notion", _plan_notion)
+register_activation_planner("airtable", _plan_airtable)
+register_activation_planner("stripe", _plan_stripe)
+register_activation_planner("shopify", _plan_shopify)
 
 
 def supported_activation_kinds() -> list[str]:
@@ -136,6 +235,11 @@ def supported_activation_kinds() -> list[str]:
             "bigquery",
             "salesforce",
             "hubspot",
+            "zendesk",
+            "notion",
+            "airtable",
+            "stripe",
+            "shopify",
             "pgvector",
             "qdrant",
             "weaviate",

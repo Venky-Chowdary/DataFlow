@@ -92,7 +92,12 @@ def test_introspect_snowflake_ok_with_schema_fallback() -> None:
     cur.fetchall.side_effect = [
         [("PUBLIC",)],
         [("CUSTOMERS",), ("ORDERS",)],
-        [("ID", "NUMBER", "NO"), ("NAME", "TEXT", "YES")],
+        # name, data_type, nullable, char_len, num_prec, num_scale, dt_prec
+        [
+            ("ID", "NUMBER", "NO", None, 38, 0, None),
+            ("NAME", "TEXT", "YES", 50, None, None, None),
+            ("BLOB", "BINARY", "YES", 16, None, None, None),
+        ],
     ]
 
     with (
@@ -112,3 +117,7 @@ def test_introspect_snowflake_ok_with_schema_fallback() -> None:
     assert "CUSTOMERS" in out["tables"]
     assert out.get("warnings")
     assert "BAD_SCHEMA" in out["warnings"][0]
+    by_name = {c["name"]: c["inferred_type"] for c in out["columns"]}
+    assert by_name["NAME"] == "VARCHAR(50)"
+    assert by_name["BLOB"] == "BINARY(16)"
+    assert by_name["ID"].startswith("DECIMAL") or by_name["ID"] == "DECIMAL(38,0)"

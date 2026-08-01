@@ -4,6 +4,7 @@ import { DtIcon } from "./DtIcon";
 import type { IndexedMapping } from "../lib/columnWorkbench";
 import { attentionMappings, mappingTier } from "../lib/columnWorkbench";
 import type { EditableMapping } from "../lib/mapping";
+import { fidelityChipLabel, fidelityRiskForMapping } from "../lib/schemaIntelligence";
 
 interface MappingIntelligencePanelProps {
   allMappings: EditableMapping[];
@@ -156,19 +157,36 @@ export function MappingIntelligencePanel({
         <ul className="df2-mapping-intelligence-pairs">
           {items.map(({ mapping, index }) => {
             const tier = mappingTier(mapping, confidenceThreshold);
+            const fidelity = fidelityRiskForMapping(mapping, { destConnector: destType });
+            const pairTitle = [
+              mapping.reason || "Semantic match",
+              `${(mapping.confidence * 100).toFixed(0)}%`,
+              fidelity ? `${fidelity.title}: ${fidelity.detail}` : "",
+            ].filter(Boolean).join(" · ");
             return (
               <li key={`${mapping.source}-${index}`}>
                 <button
                   type="button"
-                  className={`df2-mapping-intelligence-pair tier-${tier}`}
+                  className={`df2-mapping-intelligence-pair tier-${tier}${fidelity ? " has-fidelity-risk" : ""}`}
                   onClick={() => onSelectSource?.(mapping.source)}
-                  title={`${mapping.reason || "Semantic match"} · ${(mapping.confidence * 100).toFixed(0)}%`}
+                  title={pairTitle}
                 >
                   <span className="pair-source">{mapping.source}</span>
                   <span className="pair-arrow" aria-hidden>→</span>
                   <span className="pair-target">{mapping.target}</span>
                   <span className={`pair-conf conf-${tier}`}>{(mapping.confidence * 100).toFixed(0)}</span>
+                  {fidelity && (
+                    <span
+                      className={`df2-badge df2-badge-xs ${fidelity.severity === "block" ? "df2-badge-run" : "df2-badge-warn"}`}
+                      title={fidelity.detail}
+                    >
+                      {fidelityChipLabel(fidelity)}
+                    </span>
+                  )}
                   {mapping.isPii && <span className="df2-badge df2-badge-run df2-badge-xs">PII</span>}
+                  {mapping.requiresReview && !mapping.approved && !fidelity && (
+                    <span className="df2-badge df2-badge-run df2-badge-xs">review</span>
+                  )}
                 </button>
               </li>
             );

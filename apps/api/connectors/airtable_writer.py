@@ -19,13 +19,162 @@ from connectors.saas_common import (
 )
 from connectors.writer_common import (
     WriteResult,
+    apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
+    resolve_mapping_dest_types,
     resolve_target_columns,
     transform_error_policy,
 )
 
 DEFAULT_HOST = "api.airtable.com"
 _BATCH = 10
+# Airtable cell values are capped at 100_000 characters (platform docs /
+# community-confirmed). Bound VARCHAR carriers so quarantine catches overflow
+# before the REST API returns a late 422.
+_AIRTABLE_CELL_CHARS = 100_000
+
+
+def airtable_field_to_carrier(field: dict[str, Any]) -> str:
+    """Map Airtable Meta field schema → DataFlow quarantine carrier.
+
+    Number/percent precision is 0–8; currency 0–7 (Airtable field-model).
+    We emit DECIMAL(38,s) so excess scale / non-numeric values quarantine
+    instead of round-tripping as silent IEEE drift.
+
+    singleSelect / multipleSelects keep closed ENUM/SET domains from
+    ``options.choices[].name`` (Census/Hightouch class — never invent open text).
+    """
+    from services.type_system import (
+        format_enum_domain_carrier,
+        format_set_domain_carrier,
+    )
+
+    ftype = str(field.get("type") or "").strip()
+    options = field.get("options") if isinstance(field.get("options"), dict) else {}
+    if ftype == "singleLineText":
+        return f"VARCHAR({_AIRTABLE_CELL_CHARS})"
+    if ftype in {"multilineText", "richText", "aiText"}:
+        return f"VARCHAR({_AIRTABLE_CELL_CHARS})"
+    if ftype == "email":
+        return "VARCHAR(254)"
+    if ftype == "url":
+        return "VARCHAR(2048)"
+    if ftype == "phoneNumber":
+        return "VARCHAR(64)"
+    if ftype in {"number", "percent"}:
+        prec = options.get("precision")
+        if prec is not None:
+            try:
+                return f"DECIMAL(38,{max(0, min(8, int(prec)))})"
+            except (TypeError, ValueError):
+                pass
+        return "FLOAT"
+    if ftype == "currency":
+        prec = options.get("precision", 2)
+        try:
+            return f"DECIMAL(38,{max(0, min(7, int(prec)))})"
+        except (TypeError, ValueError):
+            return "DECIMAL(38,2)"
+    if ftype == "checkbox":
+        return "BOOLEAN"
+    if ftype == "date":
+        return "DATE"
+    if ftype == "dateTime":
+        # Airtable dateTime includes timezone option — UTC instant polarity.
+        return "TIMESTAMPTZ"
+    if ftype in {"createdTime", "lastModifiedTime"}:
+        # Airbyte maps these to timestamp_with_timezone (RFC3339 Z).
+        return "TIMESTAMPTZ"
+    if ftype in {"duration", "rating", "autoNumber", "count"}:
+        return "INTEGER"
+    if ftype in {"singleSelect", "externalSyncSource"}:
+        labels = _airtable_choice_names(options)
+        if labels:
+            return format_enum_domain_carrier(labels)
+        return "VARCHAR(256)"
+    if ftype == "multipleSelects":
+        labels = _airtable_choice_names(options)
+        if labels:
+            return format_set_domain_carrier(labels)
+        return f"VARCHAR({_AIRTABLE_CELL_CHARS})"
+    if ftype == "barcode":
+        return "VARCHAR(512)"
+    # Attachments / collaborators / links / formula / rollup / lookup — wire
+    # as unbounded text; writer still sends JSON cell shapes when present.
+    return "VARCHAR"
+
+
+def _airtable_choice_names(options: dict[str, Any]) -> list[str]:
+    raw = options.get("choices") or []
+    if not isinstance(raw, list):
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+        if len(names) >= 256:
+            break
+    return names
+
+
+def _fetch_table_fields(
+    base_id: str,
+    table_name: str,
+    access_token: str,
+) -> list[dict[str, Any]] | None:
+    """Live Meta schema when ``schema.bases:read`` is granted; else None."""
+    url = f"https://{DEFAULT_HOST}/v0/meta/bases/{base_id}/tables"
+    try:
+        resp = request(method="GET", url=url, token=access_token, timeout=20)
+        resp.raise_for_status()
+        body = resp.json()
+    except Exception:
+        return None
+    tables = body.get("tables") if isinstance(body, dict) else None
+    if not isinstance(tables, list):
+        return None
+    want = (table_name or "").strip().lower()
+    for t in tables:
+        if not isinstance(t, dict):
+            continue
+        name = str(t.get("name") or "").strip()
+        tid = str(t.get("id") or "").strip()
+        if name.lower() == want or tid.lower() == want:
+            fields = t.get("fields")
+            return list(fields) if isinstance(fields, list) else None
+    return None
+
+
+def resolve_airtable_dest_types(
+    target_cols: list[str],
+    mappings: list[dict],
+    column_types: dict[str, str],
+    *,
+    logical_types: list[str] | None = None,
+    meta_fields: list[dict[str, Any]] | None = None,
+) -> dict[str, str]:
+    """Prefer live Meta field types; else Map/source carriers."""
+    live: dict[str, str] = {}
+    for f in meta_fields or []:
+        if not isinstance(f, dict):
+            continue
+        name = str(f.get("name") or "").strip()
+        if name:
+            live[name] = airtable_field_to_carrier(f)
+    return resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        live_types=live,
+        default="VARCHAR",
+    )
 
 
 def _batch_payload(
@@ -120,8 +269,20 @@ def write_mapped_rows(
             driver="airtable",
         )
 
-    target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(
+        mappings, column_types, preserve_case=True
+    )
     policy = transform_error_policy(error_policy)
+    # Live Meta when PAT has schema.bases:read — typed DECIMAL/VARCHAR(n)
+    # before batch create invents bad cells (Airbyte/Fivetran class honesty).
+    meta_fields = _fetch_table_fields(base_id, table, access_token)
+    dest_types = resolve_airtable_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        meta_fields=meta_fields,
+    )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
@@ -129,8 +290,18 @@ def write_mapped_rows(
         target_cols=target_cols,
         column_types=column_types,
         error_policy=policy,
-        dest_types={c: "string" for c in target_cols},
+        dest_types=dest_types,
         preserve_case=True,
+    )
+    tgt_types = [str(dest_types.get(c, "VARCHAR") or "VARCHAR") for c in target_cols]
+    mapped_rows = apply_write_quarantine_matrix(
+        mapped_rows,
+        target_cols,
+        tgt_types,
+        rejected_details,
+        policy,
+        dialect_label="Airtable",
+        mappings=mappings,
     )
     if transform_errors and policy == "fail":
         return WriteResult(
@@ -157,10 +328,15 @@ def write_mapped_rows(
     digest = hashlib.sha256()
     all_rejected = list(rejected_details)
     warnings: list[str] = []
+    written_ids: list[str] = []
+    produced_sample: list[dict[str, Any]] = []
 
     for i in range(0, len(mapped_rows), _BATCH):
         batch = mapped_rows[i : i + _BATCH]
         batch_dicts = [dict(zip(target_cols, row)) if not isinstance(row, dict) else dict(row) for row in batch]
+        for d in batch_dicts:
+            if len(produced_sample) < 50:
+                produced_sample.append(dict(d))
 
         url, method, payload = _batch_payload(
             batch_dicts,
@@ -215,6 +391,7 @@ def write_mapped_rows(
                 if rec_id:
                     written += 1
                     digest.update(str(rec_id).encode())
+                    written_ids.append(str(rec_id))
         except Exception as exc:
             if is_auth_error(exc):
                 return WriteResult(
@@ -271,4 +448,9 @@ def write_mapped_rows(
         rejected_rows=len(all_rejected),
         warnings=warnings[:20],
         driver="airtable",
+        meta={
+            "reconcile_sample": produced_sample,
+            "source_row_count": len(mapped_rows),
+            "written_ids": written_ids[:500],
+        },
     )

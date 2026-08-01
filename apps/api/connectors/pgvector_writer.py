@@ -152,6 +152,7 @@ def write_mapped_rows(
 
     inserted = 0
     rejected_details: list[dict[str, Any]] = []
+    valid_rows: list[dict[str, Any]] = []
     conn = get_connection(
         host=host,
         port=port,
@@ -193,7 +194,7 @@ def write_mapped_rows(
             batch_size = 1000
             inserted = 0
             # Filter to rows with valid embeddings matching dimension.
-            valid_rows: list[dict[str, Any]] = []
+            valid_rows = []
             for row in vector_rows:
                 emb, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
                 if err or emb is None:
@@ -293,4 +294,21 @@ def write_mapped_rows(
         rejected_details=rejected_details,
         rejected_rows=len(rejected_details),
         warnings=[r.get("reason") or "" for r in rejected_details[:10] if r.get("reason")],
+        meta=_pgvector_gate8_meta(valid_rows),
     )
+
+
+def _pgvector_gate8_meta(valid_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    from connectors.writer_common import vector_gate8_meta
+
+    rows = []
+    for row in valid_rows:
+        meta = dict(row.get("metadata") or {}) if isinstance(row.get("metadata"), dict) else {}
+        rows.append({
+            "id": row.get("id"),
+            "source_id": row.get("source_id"),
+            "content": row.get("content"),
+            "chunk_index": row.get("chunk_index"),
+            **meta,
+        })
+    return vector_gate8_meta(rows)

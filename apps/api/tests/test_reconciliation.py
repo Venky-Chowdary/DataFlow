@@ -183,6 +183,22 @@ def test_normalize_cell_equates_decimal_representations():
     assert normalize_cell("0.000") == "0"
 
 
+def test_normalize_cell_uuid_case_fold_with_ddl():
+    """PG UUID read-back is lowercase; source wire may be upper — Gate-8 must match."""
+    from services.reconciliation import normalize_cell
+
+    upper = "A1B2C3D4-E5F6-7890-ABCD-EF1234567890"
+    lower = upper.lower()
+    assert normalize_cell(upper, ddl_type="UUID") == lower
+    assert normalize_cell(lower, ddl_type="UUID") == lower
+    assert normalize_cell(upper, ddl_type="UNIQUEIDENTIFIER") == lower
+    # Braces / 32-hex also canonicalize (SQL Server / .NET wire forms).
+    assert normalize_cell("{" + upper + "}", ddl_type="UUID") == lower
+    assert normalize_cell(upper.replace("-", ""), ddl_type="GUID") == lower
+    # Without UUID DDL, preserve case (not every 8-4-4-4-12 string is a UUID column).
+    assert normalize_cell(upper) == upper
+
+
 def test_normalize_cell_preserves_booleans_and_text():
     from services.reconciliation import normalize_cell
 
@@ -200,6 +216,33 @@ def test_normalize_cell_preserves_booleans_and_text():
     assert normalize_cell("true") == "1"
     assert normalize_cell("yes") == "1"
     assert normalize_cell("false") == "0"
+
+
+def test_oracle_empty_string_equates_null_write_location():
+    """HVR write-location: Oracle '' ≡ NULL; Postgres keeps them distinct."""
+    from services.reconciliation import (
+        destination_empty_string_is_null,
+        fingerprint_for_reconcile,
+        normalize_cell,
+    )
+
+    assert destination_empty_string_is_null("oracle")
+    assert destination_empty_string_is_null("oracledb")
+    assert not destination_empty_string_is_null("postgresql")
+    assert not destination_empty_string_is_null("mysql")
+    assert not destination_empty_string_is_null("")
+
+    null_fp = normalize_cell(None, engine="oracle")
+    assert normalize_cell("", engine="oracle") == null_fp
+    assert fingerprint_for_reconcile("", engine="oracle") == null_fp
+    assert fingerprint_for_reconcile(None, engine="oracle") == null_fp
+
+    # Postgres / default: empty string remains a real value.
+    assert normalize_cell("", engine="postgresql") != normalize_cell(None, engine="postgresql")
+    assert normalize_cell("") != normalize_cell(None)
+
+    # Non-empty Oracle strings still fingerprint as text.
+    assert normalize_cell("x", engine="oracle") == "x"
 
 def test_normalize_cell_equates_offset_datetime_to_utc_instant():
     """Wire may keep +05:30; checksum must match destination UTC datetime objects."""

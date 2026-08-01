@@ -18,15 +18,44 @@ from connectors.saas_common import (
     request,
     token,
 )
+from connectors.saas_write_carriers import shopify_live_types_for_columns
 from connectors.writer_common import (
     WriteResult,
+    apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
+    gate8_writer_meta,
+    resolve_mapping_dest_types,
     resolve_target_columns,
     transform_error_policy,
 )
 
 DEFAULT_HOST = "myshopify.com"
 API_VERSION = "2024-04"
+
+
+def resolve_shopify_dest_types(
+    target_cols: list[str],
+    mappings: list[dict],
+    column_types: dict[str, str],
+    *,
+    logical_types: list[str] | None = None,
+    object_type: str = "customers",
+    metafield_defs: list[dict] | None = None,
+) -> dict[str, str]:
+    """Prefer Admin core + live metafield definitions; else Map/source carriers."""
+    live = shopify_live_types_for_columns(
+        object_type,
+        target_cols,
+        metafield_defs=metafield_defs,
+    )
+    return resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        live_types=live,
+        default="VARCHAR",
+    )
 
 
 def _singular(table: str) -> str:
@@ -116,8 +145,37 @@ def write_mapped_rows(
             driver="shopify",
         )
 
-    target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(
+        mappings, column_types, preserve_case=True
+    )
     policy = transform_error_policy(error_policy)
+    metafield_defs: list[dict] | None = None
+    try:
+        from connectors.shopify import describe_metafield_definitions
+
+        metafield_defs = describe_metafield_definitions(
+            {
+                "host": shop_host,
+                "username": username,
+                "password": password,
+                "connection_string": connection_string,
+                "api_key": api_key,
+                "database": database,
+                "table": obj,
+                "shop": shop_host,
+            },
+            obj,
+        )
+    except Exception:
+        metafield_defs = None
+    dest_types = resolve_shopify_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        object_type=obj,
+        metafield_defs=metafield_defs,
+    )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
@@ -125,8 +183,18 @@ def write_mapped_rows(
         target_cols=target_cols,
         column_types=column_types,
         error_policy=policy,
-        dest_types={c: "string" for c in target_cols},
+        dest_types=dest_types,
         preserve_case=True,
+    )
+    tgt_types = [str(dest_types.get(c, "VARCHAR") or "VARCHAR") for c in target_cols]
+    mapped_rows = apply_write_quarantine_matrix(
+        mapped_rows,
+        target_cols,
+        tgt_types,
+        rejected_details,
+        policy,
+        dialect_label="Shopify",
+        mappings=mappings,
     )
     if transform_errors and policy == "fail":
         return WriteResult(
@@ -148,6 +216,7 @@ def write_mapped_rows(
     written = 0
     chunks = 0
     digest = hashlib.sha256()
+    written_ids: list[str] = []
     all_rejected = list(rejected_details)
     warnings: list[str] = []
 
@@ -199,6 +268,7 @@ def write_mapped_rows(
             if rec_id:
                 written += 1
                 digest.update(str(rec_id).encode())
+                written_ids.append(str(rec_id))
         except Exception as exc:
             if is_auth_error(exc):
                 return WriteResult(
@@ -258,4 +328,5 @@ def write_mapped_rows(
         rejected_rows=len(all_rejected),
         warnings=warnings[:20],
         driver="shopify",
+        meta=gate8_writer_meta(mapped_rows, target_cols, written_ids),
     )

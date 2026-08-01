@@ -18,7 +18,9 @@ from connectors.sftp_common import connect_sftp, parse_sftp_config, split_remote
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
     _rejected_row_count,
+    apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
+    gate8_writer_meta,
     resolve_target_columns,
     row_checksum,
     to_json_value,
@@ -111,6 +113,19 @@ def write_mapped_rows(
             rejected_rows=len(rejected_details),
         )
 
+    # Same object-store honesty as S3/GCS/ADLS — typed DECIMAL/BINARY/VARCHAR(n)
+    # must quarantine before CSV/JSON serialize (Airbyte SFTP-JSON has no Gate-8).
+    tgt_types = [str(dest_types.get(c, "") or "") for c in target_cols]
+    mapped_rows = apply_write_quarantine_matrix(
+        mapped_rows,
+        target_cols,
+        tgt_types,
+        rejected_details,
+        policy,
+        dialect_label="SFTP",
+        mappings=mappings,
+    )
+
     directory, filename = split_remote_path(cfg.path)
     ext = (filename.rsplit(".", 1)[-1] if "." in filename else "").lower()
     if ext in ("csv", "jsonl", "json", "tsv"):
@@ -196,6 +211,7 @@ def write_mapped_rows(
             warnings=transform_errors[:10],
             rejected_rows=rejected_rows,
             rejected_details=rejected_details,
+            meta=gate8_writer_meta(records, target_cols),
         )
     except Exception as exc:
         return WriteResult(

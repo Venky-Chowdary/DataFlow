@@ -998,8 +998,10 @@ def stream_file_to_database(
         for idx, result in runner.run(batch_enum, _process_file_chunk):
             _apply_file_result(idx, result)
 
-    if written == 0:
+    if written == 0 and rejected_total == 0 and coerced_null_total == 0:
         raise ValueError("No records found in file")
+    # All rows may be quarantined (written == 0) — that is a real transfer with
+    # DLQ proof, not an empty file. Continue so rejected_details / checksum land.
 
     # The source checksum has been accumulated incrementally from each batch's
     # mapped fingerprints, so we do not need to parse the entire file a second

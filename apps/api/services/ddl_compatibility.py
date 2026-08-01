@@ -5,7 +5,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from services.db_type_utils import SCHEMALESS_DESTS, ci_get, normalize_dest_kind
+from services.db_type_utils import (
+    NO_RELATIONAL_DDL_DESTS,
+    SCHEMALESS_DESTS,
+    ci_get,
+    normalize_dest_kind,
+)
 from services.type_system import (
     ddl_type,
     decimal_precision_would_truncate,
@@ -18,7 +23,8 @@ from services.type_system import (
 )
 
 _VARCHAR_WIDTH = re.compile(
-    r"(?:n?varchar2?|n?char|character\s+varying|character)\s*\(\s*(\d+)\s*\)",
+    r"(?:n?varchar2?|n?char|character\s+varying|character)"
+    r"\s*\(\s*(\d+)\s*(?:BYTE|CHAR)?\s*\)",
     re.I,
 )
 _UNBOUNDED_STRING = re.compile(
@@ -153,6 +159,11 @@ def evaluate_ddl_compatibility(
     issues: list[str] = []
     dest_kind = normalize_dest_kind(dest_db_type, default="postgresql")
     schemaless = dest_kind in SCHEMALESS_DESTS
+    # Object/file sinks have no CREATE TABLE contract — sticky None must not
+    # block Validate the way a SQL warehouse probe failure does.
+    relational_ddl = (
+        dest_kind not in SCHEMALESS_DESTS and dest_kind not in NO_RELATIONAL_DDL_DESTS
+    )
 
     if not mappings:
         return False, ["No column mappings defined"]
@@ -180,7 +191,7 @@ def evaluate_ddl_compatibility(
     # table_exists=None means probe unknown — never coerce to create-new.
     if (
         dest_connected
-        and not schemaless
+        and relational_ddl
         and named_target
         and not overwrite
         and not target_schema
@@ -194,7 +205,7 @@ def evaluate_ddl_compatibility(
         )
     if (
         dest_connected
-        and not schemaless
+        and relational_ddl
         and named_target
         and not overwrite
         and table_exists is None
@@ -206,7 +217,7 @@ def evaluate_ddl_compatibility(
         )
     if (
         dest_connected
-        and not schemaless
+        and relational_ddl
         and named_target
         and overwrite
         and table_exists is None
@@ -278,8 +289,8 @@ def evaluate_ddl_compatibility(
         if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type):
             # Sample-aware soft-pass only for textual→typed coercions that the
             # write path can prove. Declared IEEE/precision collapses
-            # (float→decimal, float→integer, decimal→integer) stay hard issues
-            # even when a head sample coerces — body rows can still lose fidelity.
+            # (float→decimal, float→integer, decimal→integer, VARCHAR width,
+            # UNSIGNED→signed) stay hard issues even when a head sample coerces.
             src_logical = normalize_logical_type(src_type)
             tgt_logical = normalize_logical_type(tgt_type)
             precision_collapse = is_precision_collapse_coercion(src_type, tgt_type)
@@ -301,11 +312,34 @@ def evaluate_ddl_compatibility(
                     note = " — float→integer (fractional truncation risk)"
                 elif src_logical == "decimal" and tgt_logical == "integer":
                     note = " — decimal→integer (scale truncation risk)"
+                elif src_logical == "decimal" and tgt_logical == "decimal" and precision_collapse:
+                    note = " — DECIMAL(p,s) narrowing (scale/capacity shrink; not soft-passed by samples)"
                 elif src_logical == "datetime" and tgt_logical == "date":
                     note = " — datetime→date (time-of-day truncation; not soft-passed by samples)"
+                elif src_logical == "array" and tgt_logical == "array":
+                    note = " — ARRAY element type contract mismatch"
+                elif "unsigned" in src_type.lower():
+                    note = " — UNSIGNED→signed overflow risk (widen to BIGINT/DECIMAL)"
+                elif src_logical in {"string", "text"} and tgt_logical in {"string", "text"}:
+                    note = " — VARCHAR/CHAR width narrowing (declared capacity; not soft-passed by samples)"
                 issues.append(
                     f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type}){note}"
                 )
+
+        # Declared width narrow without needing samples (body rows can exceed head).
+        if (
+            not schemaless
+            and tgt_type
+            and is_precision_collapse_coercion(src_type, tgt_type)
+            and normalize_logical_type(src_type) in {"string", "text"}
+            and normalize_logical_type(tgt_type) in {"string", "text"}
+        ):
+            msg = (
+                f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type}) "
+                f"— VARCHAR/CHAR width narrowing (declared capacity; not soft-passed by samples)"
+            )
+            if msg not in issues:
+                issues.append(msg)
 
         if not schemaless and sample_rows and tgt_type:
             samples = _sample_values(sample_rows, src)

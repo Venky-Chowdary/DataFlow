@@ -97,7 +97,7 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     skipped = int(getattr(result, "rows_skipped", 0) or 0)
     warnings = list(getattr(result, "warnings", []) or [])
     rejected_details = list(getattr(result, "rejected_details", []) or [])
-    return {
+    out: dict[str, Any] = {
         "rejected_rows": rejected,
         "coerced_null_rows": coerced,
         "rows_skipped": skipped,
@@ -105,6 +105,13 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
         "warnings": warnings[:10],
         "error_policy": "quarantine" if (rejected or coerced) else "none",
     }
+    meta = getattr(result, "meta", None)
+    if isinstance(meta, dict) and meta:
+        # Promote Gate-8 sample / identity stamps into destination_summary.
+        for key in ("reconcile_sample", "written_ids", "source_row_count"):
+            if key in meta and meta[key] is not None:
+                out[key] = meta[key]
+    return out
 
 
 def _apply_vector_extra(common: dict[str, Any], endpoint: EndpointConfig) -> None:
@@ -657,7 +664,23 @@ def _lookup_saved_connector(
         return None
 
 
-def _introspect_table_schema(
+def _columns_type_and_nullability(
+    columns: list[dict[str, Any]],
+) -> tuple[dict[str, str], dict[str, bool]]:
+    """Split introspect column dicts into type map + nullable map."""
+    types: dict[str, str] = {}
+    nulls: dict[str, bool] = {}
+    for col in columns:
+        name = col.get("name")
+        if not name:
+            continue
+        types[str(name)] = str(col.get("inferred_type") or "TEXT")
+        if "nullable" in col:
+            nulls[str(name)] = bool(col["nullable"])
+    return types, nulls
+
+
+def _introspect_table_schema_rich(
     db_type: str,
     cfg: dict[str, Any],
     table: str,
@@ -665,19 +688,47 @@ def _introspect_table_schema(
     records: list[dict] | None = None,
     *,
     strict_namespace: bool = False,
-) -> dict[str, str]:
-    """Load column types from INFORMATION_SCHEMA or infer from sample records.
+) -> tuple[dict[str, str], dict[str, bool], dict[str, Any]]:
+    """Load column types + nullability + unique keys from INFORMATION_SCHEMA.
 
     ``strict_namespace`` is required for destination probes so missing tables in
     the chosen DB/schema are not "healed" from another namespace on the host.
+    Nullability feeds G3 NOT NULL contracts — never invent nullable=True when
+    the catalog says otherwise.
+    Third return value carries ``primary_key_columns`` / ``unique_keys`` when the
+    catalog exposes them (PG/MySQL today).
     """
+    empty_keys: dict[str, Any] = {
+        "primary_key_columns": [],
+        "unique_keys": [],
+        "warnings": [],
+    }
+
+    def _keys_from_info(payload: dict[str, Any]) -> dict[str, Any]:
+        warnings = [str(w) for w in (payload.get("warnings") or []) if w]
+        # Catalog message often carries the advisory-key honesty note when
+        # ``warnings`` was folded into ``message`` by introspect.
+        msg = str(payload.get("message") or "").strip()
+        if msg and any(
+            token in msg.lower()
+            for token in ("not enforced", "informational", "advisory")
+        ):
+            if msg not in warnings:
+                warnings.append(msg)
+        return {
+            "primary_key_columns": list(payload.get("primary_key_columns") or []),
+            "unique_keys": list(payload.get("unique_keys") or []),
+            "warnings": warnings,
+        }
+
     if db_type == "generic_sql":
         try:
             from connectors.generic_sql import introspect_table_schema
 
             info = introspect_table_schema(cfg, table)
             if info.get("ok") and info.get("columns"):
-                return {c["name"]: c["inferred_type"] for c in info["columns"]}
+                types, nulls = _columns_type_and_nullability(info["columns"])
+                return types, nulls, _keys_from_info(info)
         except Exception as exc:
             logger.debug("table schema introspection failed: %s", exc, exc_info=exc)
 
@@ -719,7 +770,8 @@ def _introspect_table_schema(
         strict_namespace=strict_namespace,
     )
     if info.get("ok") and info.get("columns"):
-        return {c["name"]: c["inferred_type"] for c in info["columns"]}
+        types, nulls = _columns_type_and_nullability(info["columns"])
+        return types, nulls, _keys_from_info(info)
 
     # Retry once with flipped SSL when the first probe failed (common when the
     # connector ssl flag does not match the host's TLS requirement).
@@ -761,7 +813,8 @@ def _introspect_table_schema(
             strict_namespace=strict_namespace,
         )
         if info_retry.get("ok") and info_retry.get("columns"):
-            return {c["name"]: c["inferred_type"] for c in info_retry["columns"]}
+            types, nulls = _columns_type_and_nullability(info_retry["columns"])
+            return types, nulls, _keys_from_info(info_retry)
 
     # Fallback: infer logical types from the sample records we already have in hand.
     # This is essential for schemaless sources (MongoDB, DynamoDB, Redis) whose
@@ -772,10 +825,31 @@ def _introspect_table_schema(
 
             inferred = FileParser.infer_schema(records)
             if inferred:
-                return {h: inferred.get(h, "TEXT") for h in headers}
+                return {h: inferred.get(h, "TEXT") for h in headers}, {}, empty_keys
         except Exception as exc:
             logger.debug("record schema inference failed: %s", exc, exc_info=exc)
-    return {h: "TEXT" for h in headers}
+    return {h: "TEXT" for h in headers}, {}, empty_keys
+
+
+def _introspect_table_schema(
+    db_type: str,
+    cfg: dict[str, Any],
+    table: str,
+    headers: list[str],
+    records: list[dict] | None = None,
+    *,
+    strict_namespace: bool = False,
+) -> dict[str, str]:
+    """Load column types from INFORMATION_SCHEMA or infer from sample records."""
+    types, _nulls, _keys = _introspect_table_schema_rich(
+        db_type,
+        cfg,
+        table,
+        headers,
+        records=records,
+        strict_namespace=strict_namespace,
+    )
+    return types
 
 
 _NON_STREAMING_ROW_LIMIT = 100_000
@@ -1233,7 +1307,16 @@ def write_destination_database(
     conflict_columns: list[str] | None = None,
     job_id: str | None = None,
     skip_preflight: bool = False,
+    error_policy: str | None = None,
 ) -> tuple[int, list[str], dict]:
+    """Write records to a SQL/NoSQL destination.
+
+    ``error_policy`` overrides the policy normally derived from
+    ``validation_mode``. It exists for write targets whose contract differs from
+    the user's validation intent — notably the pre-ingestion staging landing
+    zone, which must land every source row for inspection even when the job is
+    strict. Callers that omit it keep the validation-mode-derived policy.
+    """
     from .connector_capabilities import resolve_driver_type
     from connectors.write_resilience import build_write_batch_key
 
@@ -1242,9 +1325,16 @@ def write_destination_database(
     db_type = resolve_driver_type(cfg.get("type") or endpoint.format or "")
     ddl_log: list[str] = []
 
-    from connectors.writer_common import transform_error_policy_for_validation_mode
+    from connectors.writer_common import (
+        transform_error_policy,
+        transform_error_policy_for_validation_mode,
+    )
 
-    error_policy = transform_error_policy_for_validation_mode(validation_mode)
+    error_policy = (
+        transform_error_policy(error_policy)
+        if error_policy
+        else transform_error_policy_for_validation_mode(validation_mode)
+    )
 
     headers, data_rows = records_to_matrix(records, columns)
     column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in columns}

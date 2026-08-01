@@ -7,13 +7,59 @@ canonical parse path so both destinations behave the same.
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timezone
+import re
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 
+def round_to_smalldatetime(value: datetime) -> datetime:
+    """Round to SQL Server ``SMALLDATETIME`` minute accuracy (Microsoft docs).
+
+    Seconds ≤ 29.998 → floor to minute; ≥ 29.999 → ceil to next minute.
+    Result is timezone-naive (SMALLDATETIME has no offset polarity).
+    """
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    # Compare as whole microseconds past the minute.
+    us = value.second * 1_000_000 + value.microsecond
+    base = value.replace(second=0, microsecond=0)
+    if us >= 29_999_000:  # 29.999 seconds
+        return base + timedelta(minutes=1)
+    return base
+
+
 def sql_base_type(source_type: str) -> str:
-    """Strip length/precision suffixes: DATETIME(6) → DATETIME."""
-    upper = (source_type or "").upper().strip()
+    """Strip length/precision suffixes while preserving TZ polarity.
+
+    Airbyte / Postgres class:
+    - ``TIMESTAMP(6) WITH TIME ZONE`` → ``TIMESTAMPTZ`` (never bare ``TIMESTAMP``)
+    - ``TIMESTAMPTZ(3)`` → ``TIMESTAMPTZ``
+    - ``TIMESTAMP WITHOUT TIME ZONE`` → ``TIMESTAMP``
+    - ``DATETIME(6)`` → ``DATETIME``
+    - ``DECIMAL(10,2)`` → ``DECIMAL``
+    """
+    upper = re.sub(r"\s+", " ", (source_type or "").upper().strip())
+    if not upper:
+        return upper
+    # TZ polarity MUST be decided before splitting on '(' — otherwise
+    # ``TIMESTAMP(6) WITH TIME ZONE`` collapses to ``TIMESTAMP`` and writers
+    # silently strip offsets (enterprise fidelity failure).
+    if "WITH LOCAL TIME ZONE" in upper or upper.startswith("TIMESTAMP_LTZ"):
+        return "TIMESTAMPTZ"
+    if (
+        re.search(r"\bWITH TIME ZONE\b", upper)
+        or upper.startswith("TIMESTAMPTZ")
+        or upper.startswith("TIMETZ")
+        or upper == "DATETIMEOFFSET"
+        or upper.startswith("DATETIMEOFFSET")
+    ):
+        if re.match(r"^TIME\b", upper) and not upper.startswith("TIMESTAMP"):
+            return "TIME WITH TIME ZONE"
+        return "TIMESTAMPTZ"
+    if re.search(r"\bWITHOUT TIME ZONE\b", upper) or "TIMESTAMP_NTZ" in upper:
+        if re.match(r"^TIME\b", upper) and not upper.startswith("TIMESTAMP"):
+            return "TIME"
+        return "TIMESTAMP"
     if "(" in upper:
         upper = upper.split("(", 1)[0].strip()
     return upper
@@ -37,6 +83,18 @@ def parse_sql_datetime(value: Any, *, aware_utc: bool = False) -> datetime | Non
     if isinstance(value, date) and not isinstance(value, datetime):
         dt = datetime.combine(value, time.min)
         return dt.replace(tzinfo=timezone.utc) if aware_utc else dt
+    # Unix epoch seconds / millis as int/float (Stripe / HubSpot / SaaS wire).
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            raw = int(value)
+            if abs(raw) >= 10**12:
+                raw //= 1000  # epoch millis
+            dt = datetime.fromtimestamp(raw, tz=timezone.utc)
+            return dt if aware_utc else dt.replace(tzinfo=None)
+        except (OverflowError, OSError, ValueError):
+            return None
     if not isinstance(value, str):
         return None
     text = value.strip()
@@ -108,22 +166,45 @@ def coerce_sql_temporal(value: Any, source_type: str) -> Any:
     }:
         parsed = parse_sql_datetime(value, aware_utc=True)
         return parsed if parsed is not None else value
-    if base in {"DATETIME", "TIMESTAMP", "TIMESTAMP_LTZ", "TIMESTAMP_NTZ", "DATETIME2", "SMALLDATETIME"}:
+    if base in {
+        "DATETIME",
+        "TIMESTAMP",
+        "TIMESTAMP_LTZ",
+        "TIMESTAMP_NTZ",
+        "DATETIME2",
+        "SMALLDATETIME",
+        "TIMESTAMP WITHOUT TIME ZONE",
+    }:
         parsed = parse_sql_datetime(value)
-        return parsed if parsed is not None else value
+        if parsed is None:
+            return value
+        if base == "SMALLDATETIME":
+            return round_to_smalldatetime(parsed)
+        return parsed
     if base == "DATE":
         parsed = parse_sql_date(value)
         return parsed if parsed is not None else value
-    if base == "TIME":
+    if base in {"TIME", "TIME WITH TIME ZONE", "TIME WITHOUT TIME ZONE", "TIMETZ"}:
+        aware = base in {"TIME WITH TIME ZONE", "TIMETZ"}
         if isinstance(value, time):
+            if aware and value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+            if not aware and value.tzinfo is not None:
+                return value.replace(tzinfo=None)
             return value
-        parsed = parse_sql_datetime(value)
+        parsed = parse_sql_datetime(value, aware_utc=aware)
         if parsed is not None:
-            return parsed.time()
+            tm = parsed.timetz() if aware else parsed.time()
+            return tm
         if isinstance(value, str):
             text = value.strip()
             try:
-                return time.fromisoformat(text)
+                tm = time.fromisoformat(text.replace("Z", "+00:00"))
+                if aware and tm.tzinfo is None:
+                    return tm.replace(tzinfo=timezone.utc)
+                if not aware and tm.tzinfo is not None:
+                    return tm.replace(tzinfo=None)
+                return tm
             except ValueError:
                 return value
         return value
@@ -137,8 +218,16 @@ _TEMPORAL_BASES = frozenset({
     "TIMESTAMPTZ",
     "TIMESTAMP_LTZ",
     "TIMESTAMP_NTZ",
+    "TIMESTAMP WITH TIME ZONE",
+    "TIMESTAMP WITHOUT TIME ZONE",
     "DATE",
     "TIME",
+    "TIME WITH TIME ZONE",
+    "TIME WITHOUT TIME ZONE",
+    "TIMETZ",
+    "DATETIMEOFFSET",
+    "DATETIME2",
+    "SMALLDATETIME",
 })
 
 # Destinations that bind temporals like MySQL/Postgres (ISO-Z literals unsafe).
@@ -169,6 +258,14 @@ _WIRE_DESTS = frozenset({
     "sqlite",
     "snowflake",
     "bigquery",
+    "hive",
+    "impala",
+    "athena",
+    "awsathena",
+    "amazon_athena",
+    "teradata",
+    "vertica",
+    "hana",
 })
 
 

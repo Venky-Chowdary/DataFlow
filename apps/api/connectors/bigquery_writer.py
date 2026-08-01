@@ -19,9 +19,20 @@ from connectors.writer_common import (
     build_mapped_rows_with_details,
     dedupe_rows,
     dedupe_rows_by_pk_and_lsn,
+    null_safe_merge_on,
+    quarantine_currency_markers_into_numeric,
+    quarantine_unfit_arrays,
+    quarantine_unfit_binaries,
+    quarantine_unfit_bitstrings,
+    quarantine_unfit_booleans,
     quarantine_unfit_decimals,
+    quarantine_unfit_enum_set,
+    quarantine_unfit_integers,
+    quarantine_unfit_json,
     quarantine_unfit_specialty_types,
     quarantine_unfit_strings,
+    quarantine_unfit_temporals,
+    quarantine_unfit_years,
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
@@ -47,6 +58,9 @@ def bq_type(inferred: str) -> str:
     ``BIGNUMERIC(p,s)`` parameter strings and the emulator hangs when given
     one.  Strip parameters and fall back to STRING when the source scale
     or precision exceeds what BIGNUMERIC can store.
+
+    ``STRING(n)`` / ``BYTES(n)`` widths are applied via SchemaField.max_length —
+    never as ``field_type`` (client rejects parameterized type names).
     """
     import re
 
@@ -58,7 +72,34 @@ def bq_type(inferred: str) -> str:
         if scale > 38 or precision > 76:
             return "STRING"
         return "BIGNUMERIC"
+    widthed = re.match(r"(STRING|BYTES)\s*\(\s*\d+\s*\)", raw, re.IGNORECASE)
+    if widthed:
+        return widthed.group(1).upper()
     return raw
+
+
+def bq_schema_field(bigquery_mod: Any, col: str, inferred: str) -> Any:
+    """Build SchemaField with NUMERIC bare type + STRING/BYTES max_length."""
+    from services.type_system import (
+        parse_binary_carrier_width,
+        parse_string_carrier_width,
+    )
+
+    field_type = bq_type(inferred)
+    kwargs: dict[str, Any] = {}
+    if field_type == "STRING":
+        width = parse_string_carrier_width(ddl_type("bigquery", inferred))
+        if width is None:
+            width = parse_string_carrier_width(inferred)
+        if width is not None and width > 0:
+            kwargs["max_length"] = int(width)
+    elif field_type == "BYTES":
+        width = parse_binary_carrier_width(ddl_type("bigquery", inferred))
+        if width is None:
+            width = parse_binary_carrier_width(inferred)
+        if width is not None and width > 0:
+            kwargs["max_length"] = int(width)
+    return bigquery_mod.SchemaField(col, field_type, **kwargs)
 
 
 def resolve_bigquery_decimal_target_types(
@@ -66,11 +107,12 @@ def resolve_bigquery_decimal_target_types(
     logical_types: list[str],
     table_schema: list[Any] | None = None,
 ) -> list[str]:
-    """Prefer physical SchemaField (p,s); else mapped ``ddl_type`` / BQ defaults.
+    """Prefer physical SchemaField (p,s / max_length); else mapped ``ddl_type``.
 
-    CREATE uses bare ``BIGNUMERIC`` (client limitation), but quarantine must still
-    honor a narrower existing column (e.g. ``NUMERIC`` with precision/scale) so
-    append paths never silently overflow into streaming/load errors.
+    CREATE uses bare ``BIGNUMERIC`` / SchemaField.max_length (client limitation),
+    but quarantine must still honor a narrower existing column
+    (``NUMERIC(p,s)``, ``STRING(n)``, ``BYTES(n)``) so append paths never
+    silently overflow into streaming/load errors.
     """
     by_name: dict[str, Any] = {}
     if table_schema:
@@ -92,6 +134,20 @@ def resolve_bigquery_decimal_target_types(
                 else:
                     out.append(ftype)
                 continue
+            if ftype == "STRING":
+                max_len = getattr(field, "max_length", None)
+                if max_len is not None and int(max_len) > 0:
+                    out.append(f"STRING({int(max_len)})")
+                else:
+                    out.append("STRING")
+                continue
+            if ftype == "BYTES":
+                max_len = getattr(field, "max_length", None)
+                if max_len is not None and int(max_len) > 0:
+                    out.append(f"BYTES({int(max_len)})")
+                else:
+                    out.append("BYTES")
+                continue
             out.append(ftype or bq_type(logical))
             continue
         # No physical field yet — use parameterized ddl when available.
@@ -111,7 +167,12 @@ def build_bigquery_merge_sql(
     conflict = [c for c in conflict_columns if c in target_cols]
     if not conflict:
         raise ValueError("BigQuery MERGE requires conflict_columns present in target_cols")
-    on_clause = " AND ".join(f"T.`{c}` = S.`{c}`" for c in conflict)
+    on_clause = null_safe_merge_on(
+        conflict,
+        left_alias="T",
+        right_alias="S",
+        quote_column=lambda c: f"`{c}`",
+    )
     update_cols = [c for c in target_cols if c not in conflict]
     set_clause = ", ".join(f"T.`{c}` = S.`{c}`" for c in update_cols) or "T.`{0}` = S.`{0}`".format(
         conflict[0]
@@ -415,7 +476,7 @@ def write_mapped_rows(
         table_id = f"{project_id}.{dataset_id}.{table_name}"
 
         schema_fields = [
-            bigquery.SchemaField(col, bq_type(t)) for col, t in zip(target_cols, logical_types)
+            bq_schema_field(bigquery, col, t) for col, t in zip(target_cols, logical_types)
         ]
         dataset_ref = f"{project_id}.{dataset_id}"
         if not create_table:
@@ -444,7 +505,11 @@ def write_mapped_rows(
         if backfill_new_fields:
             table = client.get_table(table_id)
             existing = {f.name for f in table.schema}
-            new_fields = [bigquery.SchemaField(col, bq_type(t)) for col, t in zip(target_cols, logical_types) if col not in existing]
+            new_fields = [
+                bq_schema_field(bigquery, col, t)
+                for col, t in zip(target_cols, logical_types)
+                if col not in existing
+            ]
             if new_fields:
                 table.schema = list(table.schema) + new_fields
                 client.update_table(table, ["schema"])
@@ -467,6 +532,13 @@ def write_mapped_rows(
         decimal_target_types = resolve_bigquery_decimal_target_types(
             target_cols, logical_types, physical_schema
         )
+        mapped_rows = quarantine_currency_markers_into_numeric(
+            mapped_rows,
+            target_cols,
+            decimal_target_types,
+            rejected_details,
+            policy,
+        )
         mapped_rows = quarantine_unfit_decimals(
             mapped_rows,
             target_cols,
@@ -475,7 +547,58 @@ def write_mapped_rows(
             policy,
             dialect_label="BigQuery NUMERIC",
         )
+        mapped_rows = quarantine_unfit_years(
+            mapped_rows,
+            target_cols,
+            decimal_target_types,
+            rejected_details,
+            policy,
+        )
+        mapped_rows = quarantine_unfit_booleans(
+            mapped_rows,
+            target_cols,
+            decimal_target_types,
+            rejected_details,
+            policy,
+        )
+        mapped_rows = quarantine_unfit_temporals(
+            mapped_rows,
+            target_cols,
+            decimal_target_types,
+            rejected_details,
+            policy,
+        )
         mapped_rows = quarantine_unfit_specialty_types(
+            mapped_rows,
+            target_cols,
+            decimal_target_types,
+            rejected_details,
+            policy,
+        )
+        mapped_rows = quarantine_unfit_integers(
+            mapped_rows,
+            target_cols,
+            decimal_target_types,
+            rejected_details,
+            policy,
+            dialect_label="BigQuery INTEGER",
+        )
+        mapped_rows = quarantine_unfit_bitstrings(
+            mapped_rows,
+            target_cols,
+            decimal_target_types,
+            rejected_details,
+            policy,
+        )
+        mapped_rows = quarantine_unfit_binaries(
+            mapped_rows,
+            target_cols,
+            decimal_target_types,
+            rejected_details,
+            policy,
+            dialect_label="BigQuery BYTES",
+        )
+        mapped_rows = quarantine_unfit_enum_set(
             mapped_rows,
             target_cols,
             decimal_target_types,
@@ -489,6 +612,25 @@ def write_mapped_rows(
             rejected_details,
             policy,
             dialect_label="BigQuery STRING",
+        )
+        # BigQuery REPEATED columns reject NULL elements and arrays of arrays, so
+        # the array gate must run here — the scalar gates above cannot see inside
+        # an ARRAY payload.
+        mapped_rows = quarantine_unfit_arrays(
+            mapped_rows,
+            target_cols,
+            decimal_target_types,
+            rejected_details,
+            policy,
+            dialect_label="BigQuery",
+        )
+        mapped_rows = quarantine_unfit_json(
+            mapped_rows,
+            target_cols,
+            decimal_target_types,
+            rejected_details,
+            policy,
+            dialect_label="BigQuery JSON",
         )
         sparse_rows: list[tuple] = []
         rows_for_checksum: list[tuple] = list(mapped_rows)

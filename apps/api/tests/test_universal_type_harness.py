@@ -27,7 +27,9 @@ from services.type_system import (
     LOGICAL_INTEGER,
     LOGICAL_INTERVAL,
     LOGICAL_JSON,
+    LOGICAL_MAP,
     LOGICAL_STRING,
+    LOGICAL_STRUCT,
     LOGICAL_TEXT,
     LOGICAL_TIME,
     LOGICAL_UUID,
@@ -55,6 +57,8 @@ ALL_LOGICALS = [
     LOGICAL_INTERVAL,
     LOGICAL_GEOGRAPHY,
     LOGICAL_VECTOR,
+    LOGICAL_STRUCT,
+    LOGICAL_MAP,
 ]
 
 # Vendor introspect strings that MUST NOT fall through to bare string when
@@ -115,7 +119,13 @@ def test_vendor_native_normalizes(native: str, expected: str):
 def test_every_dest_has_ddl_for_every_logical(dest: str, logical: str):
     ddl = ddl_type(dest, logical)
     assert ddl, f"{dest}/{logical} empty"
-    assert ddl == DDL_TYPES[dest][logical] or logical == LOGICAL_DECIMAL
+    # STRUCT/MAP → opaque JSON/VARIANT on engines without native nested DDL.
+    if logical in {LOGICAL_STRUCT, LOGICAL_MAP}:
+        assert ddl == DDL_TYPES[dest].get(LOGICAL_JSON) or ddl == DDL_TYPES[dest].get(
+            logical, ddl
+        )
+    else:
+        assert ddl == DDL_TYPES[dest][logical] or logical == LOGICAL_DECIMAL
     # DECIMAL may be parameterized — still non-empty and not the unknown fallback
     # unless dest has no DECIMAL template (bigquery BIGNUMERIC, pg NUMERIC, etc.)
     assert isinstance(ddl, str) and len(ddl) >= 1
@@ -165,7 +175,10 @@ def test_lossy_coercion_matrix_hard_rules():
     assert is_lossy_coercion("datetime", "date") is True
     assert is_lossy_coercion("integer", "decimal") is False
     assert is_lossy_coercion("date", "datetime") is False
-    assert is_lossy_coercion("uuid", "string") is False
+    # UUID→string keeps the value but drops the UUID domain constraint. Wave 77
+    # surfaces that collapse instead of reporting silent green.
+    assert is_lossy_coercion("uuid", "string") is True
+    assert is_lossy_coercion("uuid", "uuid") is False
 
 
 def test_specialty_native_ddl_and_lossless_sinks():

@@ -112,20 +112,25 @@ def describe_properties(cfg: dict[str, Any], object_type: str = "") -> list[dict
         r.raise_for_status()
         payload = r.json() if hasattr(r, "json") else {}
         for p in payload.get("results") or []:
-            props.append(
-                {
-                    "name": p.get("name") or "",
-                    "type": p.get("type") or "string",
-                    "fieldType": p.get("fieldType") or "",
-                    "label": p.get("label") or "",
-                    "hasUniqueValue": bool(p.get("hasUniqueValue")),
-                    "numberDisplayHint": str(
-                        p.get("numberDisplayHint")
-                        or (p.get("options") or {}).get("numberDisplayHint")
-                        or ""
-                    ),
-                }
-            )
+            # Preserve validation / length metadata when HubSpot returns it so
+            # reverse-ETL quarantine can emit VARCHAR(n) tighter than 65_536.
+            row = {
+                "name": p.get("name") or "",
+                "type": p.get("type") or "string",
+                "fieldType": p.get("fieldType") or "",
+                "label": p.get("label") or "",
+                "hasUniqueValue": bool(p.get("hasUniqueValue")),
+                "numberDisplayHint": str(
+                    p.get("numberDisplayHint")
+                    or (p.get("options") or {}).get("numberDisplayHint")
+                    or ""
+                ),
+            }
+            if p.get("maxLength") is not None:
+                row["maxLength"] = p.get("maxLength")
+            if p.get("validationRules"):
+                row["validationRules"] = p.get("validationRules")
+            props.append(row)
         after = ((payload.get("paging") or {}).get("next") or {}).get("after")
         if not after:
             break

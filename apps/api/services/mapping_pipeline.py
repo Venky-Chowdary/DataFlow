@@ -320,10 +320,22 @@ def run_mapping_pipeline(
     schema_policy: str = "manual_review",
     sync_mode: str = "",
     destination_table_exists: bool | None = None,
+    source_types_authoritative: bool = False,
 ) -> dict:
     from services.semantic_analyzer import analyze_schema
 
     classification = classify_format(source_columns, file_format)
+    # Capture what the schema actually declared before canonicalization collapses
+    # VARCHAR(500) to VARCHAR. Without this the fidelity verdict cannot see a
+    # 500→40 truncation, which is precisely the loss no transform announces.
+    declared_source_types = {
+        str(s.get("name") or ""): str(s.get("native_type") or s.get("inferred_type") or "")
+        for s in (source_schemas or [])
+    }
+    declared_target_types = {
+        str(s.get("name") or ""): str(s.get("native_type") or s.get("inferred_type") or "")
+        for s in (target_schemas or [])
+    }
     source_schemas = _canonicalize_schema_rows(source_schemas)
     target_schemas = _canonicalize_schema_rows(target_schemas)
     enrichments = enrich_columns(source_columns, source_schemas)
@@ -348,6 +360,9 @@ def run_mapping_pipeline(
             merged_schema = merge_profiler_schema(
                 {s["name"]: s.get("inferred_type", "VARCHAR") for s in (source_schemas or [])},
                 profiled.get("schema", {}),
+                # A database source declares its own types; sampling must not
+                # re-guess them and lose precision or the numeric class.
+                authoritative_existing=source_types_authoritative,
             )
             source_schemas = [
                 {
@@ -456,7 +471,12 @@ def run_mapping_pipeline(
             str(x) for x in (schema_by_name.get(m["source"], {}).get("samples") or [])[:8]
         ] or None
         transform = infer_transform_for_mapping(
-            m["source"], m["target"], src_type, tgt_type, source_samples=col_samples
+            m["source"],
+            m["target"],
+            src_type,
+            tgt_type,
+            source_samples=col_samples,
+            destination_db_type=destination_db_type,
         )
         # New/generic destinations: the DDL type should match the chosen typed
         # transform so a date column is created for "date" transforms, etc.
@@ -559,6 +579,17 @@ def run_mapping_pipeline(
         enriched_mappings,
         column_types=column_type_map,
         dest_types=dest_type_map,
+    )
+
+    from services.mapping_proof import stamp_mapping_fidelity
+
+    # Transforms are final here, so the verdict computed now is the one every
+    # surface renders. Stamping it on the mapping keeps Map, column review, the
+    # proof drawer, and the Pilot plan from each inventing their own risk chip.
+    enriched_mappings = stamp_mapping_fidelity(
+        enriched_mappings,
+        source_types=declared_source_types,
+        target_types=declared_target_types,
     )
 
     transforms = generate_transforms(

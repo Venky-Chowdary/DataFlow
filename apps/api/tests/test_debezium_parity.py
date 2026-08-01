@@ -467,8 +467,8 @@ def test_extract_cdc_lsn_supports_gtid_mongo_scn() -> None:
 
     assert extract_cdc_lsn({"file": "bin.1", "pos": 9}) == "bin.1:9"
     assert extract_cdc_lsn({"gtid": "uuid:1-3"}) == "gtid:uuid:1-3"
-    assert extract_cdc_lsn({"_data": "mongo-token"}) == "mongo-token"
-    assert extract_cdc_lsn({"scn": 99}) == "99"
+    assert extract_cdc_lsn({"_data": "mongo-token"}) == "mongo:mongo-token"
+    assert extract_cdc_lsn({"scn": 99}) == "scn:99"
     assert extract_cdc_lsn("slot=x|phase=streaming|lsn=0/1A") == "0/1A"
 
 

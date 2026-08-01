@@ -18,7 +18,9 @@ from services.value_serializer import json_default
 
 from connectors.writer_common import (
     WriteResult,
+    apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
+    resolve_mapping_dest_types,
     resolve_target_columns,
     transform_error_policy,
 )
@@ -187,8 +189,20 @@ def write_mapped_rows(
             driver="kafka",
         )
 
-    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(
+        mappings, column_types, preserve_case=True
+    )
     policy = transform_error_policy(error_policy)
+    # JSON wire still serializes via json_default, but quarantine must catch
+    # DECIMAL/BOOLEAN/BINARY/VARCHAR(n) unfit before produce invents bad events
+    # (Schema Registry + compaction consumers assume typed fidelity).
+    dest_types = resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        default="VARCHAR",
+    )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
@@ -196,8 +210,18 @@ def write_mapped_rows(
         target_cols=target_cols,
         column_types=column_types,
         error_policy=policy,
-        dest_types={c: "string" for c in target_cols},
+        dest_types=dest_types,
         preserve_case=True,
+    )
+    tgt_types = [str(dest_types.get(c, "VARCHAR") or "VARCHAR") for c in target_cols]
+    mapped_rows = apply_write_quarantine_matrix(
+        mapped_rows,
+        target_cols,
+        tgt_types,
+        rejected_details,
+        policy,
+        dialect_label="Kafka",
+        mappings=mappings,
     )
     if transform_errors and policy == "fail":
         return WriteResult(
@@ -222,7 +246,10 @@ def write_mapped_rows(
         schema_obj = {
             "type": "object",
             "properties": {
-                c: _json_schema_property_for_logical(logical_types[i] if i < len(logical_types) else "string")
+                c: _json_schema_property_for_logical(
+                    dest_types.get(c)
+                    or (logical_types[i] if i < len(logical_types) else "string")
+                )
                 for i, c in enumerate(target_cols)
             },
         }
@@ -264,6 +291,7 @@ def write_mapped_rows(
     digest = hashlib.sha256()
     key_col = (conflict_columns or [None])[0]
     null_key_rejected = 0
+    produced_sample: list[dict[str, Any]] = []
     try:
         for idx, row in enumerate(mapped_rows):
             if isinstance(row, dict):
@@ -303,6 +331,8 @@ def write_mapped_rows(
             fut = producer.send(topic, value=payload, key=key)
             fut.get(timeout=30)
             written += 1
+            if len(produced_sample) < 50:
+                produced_sample.append(dict(payload))
             digest.update(json.dumps(payload, default=json_default, sort_keys=True).encode())
             if on_checkpoint and (idx + 1) % 100 == 0:
                 on_checkpoint(written, len(mapped_rows), 1)
@@ -336,4 +366,8 @@ def write_mapped_rows(
         rejected_details=rejected_details,
         rejected_rows=len(rejected_details),
         driver="kafka",
+        meta={
+            "reconcile_sample": produced_sample,
+            "source_row_count": len(mapped_rows),
+        },
     )

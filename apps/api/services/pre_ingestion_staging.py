@@ -4,11 +4,13 @@ Honesty
 -------
 When ``write_via_staging`` is enabled:
 
-1. All mapped rows land in ``{table}_df_staging`` (inspectable).
-2. Rows with any cell failure are **not** written to the primary table
-   (unlike balanced write-time quarantine, which coerces bad cells to NULL
-   on the primary).
-3. Findings still go to ``{table}_df_quarantine`` via the existing DLQ path.
+1. Every source row lands in ``{table}_df_staging`` (inspectable), with cells
+   that failed conversion stored as NULL. The stage is a complete landing zone:
+   a row the operator must diagnose is never absent from it.
+2. Rows with any cell failure are **not** written to the primary table, so the
+   primary is never altered by a bad row.
+3. Findings still go to ``{table}_df_quarantine`` via the existing DLQ path,
+   carrying the original cell value for replay.
 4. Promote is at-least-once upsert/insert of clean rows — not exactly-once.
 
 Strict / maximum validation fail-closed: staging is retained, primary is
@@ -99,7 +101,12 @@ def write_via_pre_ingestion_staging(
     stage_ep = staging_endpoint(destination)
     ddl_log: list[str] = []
 
-    # 1) Refresh staging and load every source row (balanced → bad cells NULL in staging).
+    # 1) Refresh staging and load *every* source row so the stage is a complete,
+    #    inspectable landing zone. ``coerce_null`` is explicit here rather than
+    #    inherited from validation_mode: balanced/strict both hold bad rows out of
+    #    the table they are writing, which would leave the stage missing exactly
+    #    the rows the operator needs to diagnose. The original cell value is still
+    #    preserved in rejected_details for DLQ and replay.
     _drop_table(stage_ep)
     staged_n, stage_ddl, stage_summary = write_destination_database(
         stage_ep,
@@ -113,6 +120,7 @@ def write_via_pre_ingestion_staging(
         write_mode="insert",
         conflict_columns=None,
         job_id=f"{job_id}_stg" if job_id else None,
+        error_policy="coerce_null",
     )
     ddl_log.extend(list(stage_ddl or [])[:50])
     ddl_log.append(f"PRE-INGESTION STAGE: {staged_n} row(s) → {stage_ep.table}")
@@ -131,6 +139,9 @@ def write_via_pre_ingestion_staging(
         "staged_rows": int(staged_n or 0),
         "rejected_row_count": len(rejected_row_nums),
         "validation_mode": mode,
+        # Rows present in the stage with at least one cell nulled by coercion.
+        # The primary never receives these rows, so this is stage-only context.
+        "staged_coerced_null_rows": len(rejected_row_nums),
     }
 
     # 2) Strict / maximum: fail-closed — leave primary untouched.

@@ -17,26 +17,65 @@ def _client():
     return TestClient(app)
 
 
-def test_quarantine_details_in_write_result():
+def _build_age_rows(error_policy: str):
     from connectors.writer_common import build_mapped_rows_with_details
 
-    headers = ["id", "age"]
-    data_rows = [["1", "30"], ["2", "not-a-number"]]
-    mappings = [
-        {"source": "id", "target": "id", "confidence": 0.95},
-        {"source": "age", "target": "age", "confidence": 0.95, "target_type": "integer"},
-    ]
-    mapped, errors, details = build_mapped_rows_with_details(
-        headers=headers,
-        data_rows=data_rows,
-        mappings=mappings,
+    return build_mapped_rows_with_details(
+        headers=["id", "age"],
+        data_rows=[["1", "30"], ["2", "not-a-number"]],
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 0.95},
+            {"source": "age", "target": "age", "confidence": 0.95, "target_type": "integer"},
+        ],
         target_cols=["id", "age"],
         column_types={"id": "string", "age": "string"},
         dest_types={"id": "string", "age": "integer"},
-        error_policy="quarantine",
+        error_policy=error_policy,
     )
-    assert len(mapped) == 2
-    assert any(d["value"] == "not-a-number" and "age" in (d["column"], d["target"]) for d in details)
+
+
+def test_quarantine_holds_bad_row_out_of_primary_and_surfaces_it():
+    """``quarantine`` never writes a NULL in place of a bad cell on the primary.
+
+    The whole row is held out, and it must still be fully recoverable: original
+    value, reason, source row number, replay payload, and identity stamp.
+    """
+    mapped, errors, details = _build_age_rows("quarantine")
+
+    assert mapped == [("1", 30)]
+    assert len(details) == 1
+    detail = details[0]
+    assert detail["value"] == "not-a-number"
+    assert "age" in (detail["column"], detail["target"])
+    assert detail["row"] == 2
+    assert detail["policy"] == "quarantine"
+    # Replay must not need to re-read the source.
+    assert detail["values"] == {"id": "2", "age": "not-a-number"}
+    assert detail["source_values"] == {"id": "2", "age": "not-a-number"}
+    # Identity stamp so replay can upsert the row back.
+    assert detail["primary_key"] == ["id"]
+    assert detail["pk_value"] == {"id": "2"}
+    assert any("not-a-number" in e for e in errors)
+
+
+def test_coerce_null_keeps_row_with_null_cell_instead_of_holding_it_out():
+    """``coerce_null`` is the opt-in that alters the primary row rather than drop it."""
+    mapped, _errors, details = _build_age_rows("coerce_null")
+
+    assert mapped == [("1", 30), ("2", None)]
+    assert len(details) == 1
+    assert details[0]["value"] == "not-a-number"
+    assert details[0]["policy"] == "coerce_null"
+
+
+def test_no_policy_silently_discards_a_bad_row():
+    """Whatever the policy, a bad row is either written or surfaced — never lost."""
+    for policy in ("quarantine", "coerce_null", "fail"):
+        mapped, _errors, details = _build_age_rows(policy)
+        rows_in = 2
+        assert len(mapped) + len({d["row"] for d in details}) >= rows_in, (
+            f"policy={policy} lost a row: mapped={mapped} details={details}"
+        )
 
 
 def test_job_quarantine_endpoint():

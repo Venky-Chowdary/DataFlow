@@ -12,9 +12,11 @@ from services.schema_introspect import _mysql_to_logical, _pg_to_logical, _sf_to
 
 def test_pg_preserves_interval_geography_vector_dims():
     assert _pg_to_logical("interval") == "INTERVAL"
-    assert _pg_to_logical("interval day to second") == "INTERVAL"
-    assert _pg_to_logical("geometry") == "GEOGRAPHY"
-    assert _pg_to_logical("geography(Point,4326)") == "GEOGRAPHY"
+    assert _pg_to_logical("interval day to second") == "INTERVAL DAY TO SECOND"
+    assert _pg_to_logical("interval year to month") == "INTERVAL YEAR TO MONTH"
+    assert _pg_to_logical("geometry") == "GEOMETRY"
+    assert _pg_to_logical("geography(Point,4326)") == "GEOGRAPHY(Point,4326)"
+    assert _pg_to_logical("geometry(Point,4326)") == "GEOMETRY(Point,4326)"
     assert _pg_to_logical("vector(1536)") == "VECTOR(1536)"
     assert _pg_to_logical("halfvec(768)") == "VECTOR(768)"
     assert _pg_to_logical("vector") == "VECTOR"
@@ -43,7 +45,8 @@ def test_pg_mysql_bq_sf_preserve_ieee_float():
     assert _mysql_to_logical("float") == "FLOAT"
     assert _mysql_to_logical("decimal(10,2)") == "DECIMAL(10,2)"
     assert _bq_to_logical("FLOAT64") == "FLOAT"
-    assert _bq_to_logical("BIGNUMERIC") == "DECIMAL"
+    # BIGNUMERIC stays distinct from NUMERIC/DECIMAL (76,38 vs 38,9 contract).
+    assert _bq_to_logical("BIGNUMERIC") == "BIGNUMERIC"
     assert _sf_to_logical("FLOAT") == "FLOAT"
     assert _sf_to_logical("FLOAT8") == "FLOAT"
     assert _sf_to_logical("NUMBER(38,10)") == "DECIMAL(38,10)"
@@ -82,8 +85,9 @@ def test_oracle_preserves_number_scale_and_ieee_float():
     assert _oracle_to_logical("BINARY_FLOAT") == "FLOAT"
     assert _oracle_to_logical("FLOAT") == "FLOAT"
     assert _oracle_to_logical("DATE") == "TIMESTAMP"  # Oracle DATE is datetime
-    assert _oracle_to_logical("INTERVAL DAY TO SECOND") == "INTERVAL"
-    assert _oracle_to_logical("SDO_GEOMETRY") == "GEOGRAPHY"
+    assert _oracle_to_logical("INTERVAL DAY TO SECOND") == "INTERVAL DAY TO SECOND"
+    assert _oracle_to_logical("INTERVAL YEAR TO MONTH") == "INTERVAL YEAR TO MONTH"
+    assert _oracle_to_logical("SDO_GEOMETRY") == "SDO_GEOMETRY"
     assert _oracle_to_logical("VARCHAR2") == "TEXT"
 
 
@@ -94,11 +98,13 @@ def test_sqlserver_preserves_decimal_and_float():
     assert _sqlserver_to_logical("numeric(10,0)") == "INTEGER"
     assert _sqlserver_to_logical("float") == "FLOAT"
     assert _sqlserver_to_logical("real") == "FLOAT"
-    assert _sqlserver_to_logical("money") == "DECIMAL(19,4)"
+    assert _sqlserver_to_logical("money") == "MONEY"
+    assert _sqlserver_to_logical("smallmoney") == "SMALLMONEY"
     assert _sqlserver_to_logical("bit") == "BOOLEAN"
     assert _sqlserver_to_logical("uniqueidentifier") == "UUID"
     assert _sqlserver_to_logical("datetime2") == "TIMESTAMP_NTZ"
     assert _sqlserver_to_logical("geography") == "GEOGRAPHY"
+    assert _sqlserver_to_logical("geometry") == "GEOMETRY"
     assert _sqlserver_to_logical("varbinary") == "BINARY"
     assert _sqlserver_to_logical("json") == "JSON"
 
@@ -125,14 +131,21 @@ def test_bq_sf_specialty_carriers_not_text():
     assert _bq_to_logical("TIME") == "TIME"
     assert _bq_to_logical("DATETIME") == "TIMESTAMP_NTZ"
     assert _bq_to_logical("TIMESTAMP") == "TIMESTAMPTZ"
-    assert _bq_to_logical("RECORD") == "JSON"
+    assert _bq_to_logical("RECORD") == "STRUCT"
     assert _bq_to_logical("NUMERIC", precision=38, scale=9) == "DECIMAL(38,9)"
     assert _sf_to_logical("VARIANT") == "JSON"
     assert _sf_to_logical("OBJECT") == "JSON"
     assert _sf_to_logical("ARRAY") == "ARRAY"
     assert _sf_to_logical("BINARY") == "BINARY"
+    assert _sf_to_logical("BINARY", character_maximum_length=16) == "BINARY(16)"
+    assert _sf_to_logical("BINARY(16)") == "BINARY(16)"
     assert _sf_to_logical("TIME") == "TIME"
-    assert _sf_to_logical("TIMESTAMP_TZ") == "TIMESTAMPTZ"
+    assert _sf_to_logical("TIME", datetime_precision=3) == "TIME(3)"
+    assert _sf_to_logical("TEXT", character_maximum_length=50) == "VARCHAR(50)"
+    assert _sf_to_logical("NUMBER", numeric_precision=10, numeric_scale=2) == "DECIMAL(10,2)"
+    # Wave 71: keep Snowflake LTZ/TZ carriers (do not collapse to TIMESTAMPTZ).
+    assert _sf_to_logical("TIMESTAMP_TZ") == "TIMESTAMP_TZ"
+    assert _sf_to_logical("TIMESTAMP_LTZ") == "TIMESTAMP_LTZ"
     assert _sf_to_logical("TIMESTAMP_NTZ") == "TIMESTAMP_NTZ"
 
 
@@ -151,17 +164,20 @@ def test_tz_polarity_introspect_and_ddl():
     assert _pg_to_logical("timestamptz") == "TIMESTAMPTZ"
     assert _mysql_to_logical("timestamp") == "TIMESTAMPTZ"
     assert _mysql_to_logical("datetime") == "TIMESTAMP_NTZ"
-    assert _mysql_to_logical("datetime(6)") == "TIMESTAMP_NTZ"
-    assert _sqlserver_to_logical("datetimeoffset") == "TIMESTAMPTZ"
+    assert _mysql_to_logical("datetime(6)") == "TIMESTAMP_NTZ(6)"
+    assert _sqlserver_to_logical("datetimeoffset") == "TIMESTAMP_TZ"
     assert _sqlserver_to_logical("datetime2") == "TIMESTAMP_NTZ"
-    assert _oracle_to_logical("TIMESTAMP WITH TIME ZONE") == "TIMESTAMPTZ"
+    assert _oracle_to_logical("TIMESTAMP WITH TIME ZONE") == "TIMESTAMP_TZ"
+    assert _oracle_to_logical("TIMESTAMP WITH LOCAL TIME ZONE") == "TIMESTAMP_LTZ"
     assert _oracle_to_logical("TIMESTAMP(6)") == "TIMESTAMP_NTZ"
 
     assert ddl_type("postgresql", "TIMESTAMPTZ") == "TIMESTAMPTZ"
     assert ddl_type("postgresql", "TIMESTAMP_NTZ") == "TIMESTAMP"
     # Ambiguous bare TIMESTAMP keeps PG platform default (TIMESTAMPTZ).
     assert ddl_type("postgresql", "TIMESTAMP") == "TIMESTAMPTZ"
-    assert ddl_type("snowflake", "TIMESTAMPTZ") == "TIMESTAMP_TZ"
+    # PG TIMESTAMPTZ ≈ Snowflake TIMESTAMP_LTZ (Openflow / Airbyte #80914).
+    assert ddl_type("snowflake", "TIMESTAMPTZ") == "TIMESTAMP_LTZ"
+    assert ddl_type("snowflake", "TIMESTAMP_TZ") == "TIMESTAMP_TZ"
     assert ddl_type("snowflake", "TIMESTAMP_NTZ") == "TIMESTAMP_NTZ"
     assert ddl_type("mysql", "TIMESTAMPTZ").upper().startswith("DATETIME")
     assert ddl_type("mysql", "TIMESTAMP_NTZ").upper().startswith("DATETIME")
@@ -174,8 +190,13 @@ def test_tz_polarity_introspect_and_ddl():
 
 
 def test_pg_hstore_point_not_text():
-    assert _pg_to_logical("hstore") == "JSON"
-    assert _pg_to_logical("point") == "GEOGRAPHY"
+    assert _pg_to_logical("hstore") == "HSTORE"
+    assert _pg_to_logical("point") == "POINT"
+    assert _pg_to_logical("inet") == "INET"
+    assert _pg_to_logical("pg_lsn") == "PG_LSN"
+    assert _pg_to_logical("oid") == "OID"
+    assert _pg_to_logical("lseg") == "LSEG"
+    assert _pg_to_logical("jsonb") == "JSONB"
 
 
 def test_elasticsearch_decimal_ddl_is_honest_keyword():

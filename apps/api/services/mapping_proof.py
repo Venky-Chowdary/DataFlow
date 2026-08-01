@@ -71,6 +71,106 @@ def transform_fidelity(transform: str | None) -> str:
     return "mutate"
 
 
+def mapping_fidelity(
+    mapping: dict,
+    *,
+    declared_source_type: str = "",
+    declared_target_type: str = "",
+) -> dict[str, object]:
+    """Canonical per-column fidelity verdict for one mapping.
+
+    The transform name alone is not the verdict. ``transform_fidelity`` calls a
+    ``decimal`` parse "lossy_cast" even when ``DECIMAL(12,2) → DECIMAL(12,2)``
+    loses nothing, and — far worse — calls ``VARCHAR(255) → VARCHAR(50)`` with an
+    identity transform "preserve" while the write silently truncates. The type
+    path is the stronger evidence, so :func:`is_lossy_coercion` decides first and
+    the transform only classifies what is left.
+
+    Every surface (Map list, column review, proof drawer, Pilot plan) must read
+    this one verdict. Re-deriving risk per component is how the same column ends
+    up green in one panel and red in another.
+
+    Pass the declared schema types when the caller has them. ``ddl_carrier_type``
+    deliberately collapses ``VARCHAR(500)`` to ``VARCHAR`` on the mapping, which
+    would hide a 500→40 truncation from the only check that can catch it.
+    """
+    src_type = str(
+        declared_source_type
+        or mapping.get("source_type")
+        or mapping.get("inferred_type")
+        or "VARCHAR"
+    )
+    tgt_type = str(
+        declared_target_type
+        or mapping.get("target_type")
+        or mapping.get("dest_type")
+        or src_type
+    )
+    transform = str(mapping.get("transform") or "none")
+    t_fidelity = transform_fidelity(transform)
+
+    if is_lossy_coercion(src_type, tgt_type):
+        return {
+            "verdict": "lossy_cast",
+            "reason": f"{src_type} → {tgt_type} can lose precision, range, or domain.",
+            "type_narrowing": True,
+            "transform_fidelity": t_fidelity,
+        }
+    if t_fidelity == "mutate":
+        return {
+            "verdict": "mutate",
+            "reason": f"Transform '{transform}' rewrites values before write.",
+            "type_narrowing": False,
+            "transform_fidelity": t_fidelity,
+        }
+    if t_fidelity == "lossy_cast":
+        return {
+            "verdict": "cast",
+            "reason": (
+                f"Parsed via '{transform}'; the type path holds, but unparseable "
+                "values are quarantined rather than written."
+            ),
+            "type_narrowing": False,
+            "transform_fidelity": t_fidelity,
+        }
+    return {
+        "verdict": "preserve",
+        "reason": f"{src_type} → {tgt_type} round-trips without loss.",
+        "type_narrowing": False,
+        "transform_fidelity": t_fidelity,
+    }
+
+
+def stamp_mapping_fidelity(
+    mappings: list[dict],
+    *,
+    source_types: dict[str, str] | None = None,
+    target_types: dict[str, str] | None = None,
+) -> list[dict]:
+    """Attach the canonical verdict to every mapping, in place of guessing.
+
+    ``source_types`` / ``target_types`` are the declared schema types keyed by
+    column name. They carry width and precision the mapping's carrier type has
+    already dropped, so pass them whenever the caller introspected a schema.
+    """
+    src_declared = source_types or {}
+    tgt_declared = target_types or {}
+    out: list[dict] = []
+    for m in mappings:
+        verdict = mapping_fidelity(
+            m,
+            declared_source_type=str(src_declared.get(str(m.get("source") or "")) or ""),
+            declared_target_type=str(tgt_declared.get(str(m.get("target") or "")) or ""),
+        )
+        out.append({
+            **m,
+            "fidelity": verdict["verdict"],
+            "fidelity_reason": verdict["reason"],
+            "type_narrowing": verdict["type_narrowing"],
+        })
+    return out
+
+
 def _quality_notes_from_reasoning(reasoning: str) -> list[str]:
     if not reasoning:
         return []
@@ -190,7 +290,31 @@ def _mapping_risks(
     src_raw = src_type.lower()
     lakehouse = dest in {"databricks", "iceberg", "snowflake", "bigquery", "redshift"}
 
-    if src_logical in {"datetime", "timestamp"} and tgt_logical in {"datetime", "timestamp", "date"}:
+    # Align Map proof severity with G3 fidelity helpers (never bury as info).
+    try:
+        from services.type_system import (
+            is_nested_document_collapse,
+            is_nested_shape_collapse,
+            is_precision_collapse_coercion,
+            is_timezone_polarity_loss,
+        )
+    except ImportError:  # pragma: no cover
+        is_nested_document_collapse = None  # type: ignore
+        is_nested_shape_collapse = None  # type: ignore
+        is_precision_collapse_coercion = None  # type: ignore
+        is_timezone_polarity_loss = None  # type: ignore
+
+    if is_timezone_polarity_loss and is_timezone_polarity_loss(src_type, tgt_type):
+        risks.append({
+            "code": "timezone_polarity_loss",
+            "severity": "warn",
+            "message": (
+                f"Timezone polarity drop: {src_type} → {tgt_type} discards offset "
+                "(Airbyte timestamp_with_timezone → without_timezone class). "
+                "Prefer TIMESTAMPTZ/TIMESTAMP_TZ/DATETIMEOFFSET on the destination."
+            ),
+        })
+    elif src_logical in {"datetime", "timestamp"} and tgt_logical in {"datetime", "timestamp", "date"}:
         if dest in {
             "snowflake", "bigquery", "redshift", "postgresql", "postgres", "mysql",
             "databricks", "iceberg",
@@ -204,6 +328,38 @@ def _mapping_risks(
                     "and Iceberg timestamptz vs timestamp without TZ differ — confirm expectations."
                 ),
             })
+
+    if is_precision_collapse_coercion and is_precision_collapse_coercion(src_type, tgt_type):
+        if not any(r.get("code") == "timezone_polarity_loss" for r in risks):
+            risks.append({
+                "code": "precision_collapse",
+                "severity": "warn",
+                "message": (
+                    f"Precision/fidelity collapse: {src_type} → {tgt_type} "
+                    "(IEEE, time-of-day, or DECIMAL(p,s) narrowing). Validate will hard-block "
+                    "under strict mode even when preview samples coerce."
+                ),
+            })
+
+    if is_nested_document_collapse and is_nested_document_collapse(src_type, tgt_type):
+        risks.append({
+            "code": "nested_document_collapse",
+            "severity": "warn",
+            "message": (
+                f"Nested→document: {src_type} → {tgt_type} keeps values as JSON/VARIANT "
+                "but drops field-level DDL. Set struct_policy=store_as_json or map to "
+                "native STRUCT/OBJECT."
+            ),
+        })
+    elif is_nested_shape_collapse and is_nested_shape_collapse(src_type, tgt_type):
+        risks.append({
+            "code": "nested_shape_collapse",
+            "severity": "warn",
+            "message": (
+                f"Nested shape contract mismatch: {src_type} → {tgt_type} "
+                "(STRUCT field, MAP value, or ARRAY element fidelity)."
+            ),
+        })
 
     # Per-SKU fidelity: unsigned MySQL integers into warehouse/PG/lakehouse.
     if "unsigned" in src_raw and src_logical in {"integer", "decimal"}:
@@ -240,12 +396,28 @@ def _mapping_risks(
                     ),
                 })
         else:
+            overflow = False
+            try:
+                from services.type_system import unsigned_integer_would_overflow
+
+                overflow = unsigned_integer_would_overflow(src_type, tgt_type)
+            except ImportError:
+                overflow = False
             risks.append({
                 "code": "unsigned_range",
-                "severity": "warn" if not widened else "info",
+                "severity": (
+                    "info" if widened and not overflow
+                    else "warn" if not overflow
+                    else "block"
+                ),
                 "message": (
                     f"Source appears UNSIGNED ({src_type}). Destination {native} must cover "
                     "the full unsigned range or values can overflow / quarantine."
+                    + (
+                        " Validate hard-blocks UNSIGNED→signed integer shrink."
+                        if overflow
+                        else ""
+                    )
                 ),
             })
 
@@ -644,6 +816,7 @@ def build_mapping_proof(
         confidences.append(conf)
         transform = m.get("transform") or "none"
         fidelity = transform_fidelity(str(transform))
+        verdict = mapping_fidelity(m)
         risks = _mapping_risks(
             m,
             dest_mode=dest_mode,
@@ -679,6 +852,9 @@ def build_mapping_proof(
             ),
             "transform": transform,
             "transform_fidelity": fidelity,
+            "fidelity": verdict["verdict"],
+            "fidelity_reason": verdict["reason"],
+            "type_narrowing": verdict["type_narrowing"],
             "confidence": round(display_conf, 3),
             "reasoning": m.get("reasoning") or "",
             "requires_review": bool(m.get("requires_review")),

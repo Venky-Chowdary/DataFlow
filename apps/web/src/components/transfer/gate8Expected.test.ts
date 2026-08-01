@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { classifyGate8Status, isGate8PreWriteSimulation, isGate8WriterAckOnly } from "./Gate8ProofCard";
+import { classifyGate8Status, isGate8PreWriteSimulation, isGate8SampleVerified, isGate8WriterAckOnly } from "./Gate8ProofCard";
 
 /** Mirror of Gate8ProofCard expected-dest math (quarantine hold-out). */
 function gate8ExpectedDest(sourceRows: number, rejectedRows: number, coercedNullRows: number) {
@@ -113,5 +113,23 @@ describe("Gate-8 pre-write simulation honesty", () => {
     assert.equal(view.label, "Writer ack");
     assert.equal(view.fullPass, false);
     assert.equal(view.tone, "warn");
+  });
+});
+
+describe("Gate-8 sample-verified reverse-ETL honesty", () => {
+  it("upgrades keyed sample proof above writer-ack", () => {
+    const report = {
+      passed: true,
+      phase: "post_write_sample_verified",
+      source_checksum: "abc",
+      target_checksum: "",
+      message: "Gate-8 sample-verified 4 key-aligned field(s) for 'hubspot'",
+      sample_compare: { passed: true, compared: 4, mismatches: [] },
+    };
+    assert.equal(isGate8SampleVerified(report), true);
+    assert.equal(isGate8WriterAckOnly(report), false);
+    const view = classifyGate8Status(report);
+    assert.equal(view.label, "Sample verified");
+    assert.equal(view.fullPass, true);
   });
 });

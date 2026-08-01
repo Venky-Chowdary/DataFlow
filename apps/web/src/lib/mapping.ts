@@ -87,6 +87,15 @@ export interface EditableMapping {
   structDerived?: boolean;
   /** Parent source column when structDerived. */
   structParent?: string;
+  /**
+   * Engine fidelity verdict from `mapping_fidelity` — preserve | cast | mutate | lossy_cast.
+   * Prefer this over client-side type heuristics when present.
+   */
+  fidelity?: "preserve" | "cast" | "mutate" | "lossy_cast" | string;
+  /** One-line reason from the engine explaining the verdict. */
+  fidelityReason?: string;
+  /** True when the type path itself narrows (independent of transform). */
+  typeNarrowing?: boolean;
 }
 
 const STATUS_ENUM_TOKENS = new Set([
@@ -833,6 +842,9 @@ export function editableFromPipelineMappings(
     struct_policy?: string;
     struct_derived?: boolean;
     struct_parent?: string;
+    fidelity?: string;
+    fidelity_reason?: string;
+    type_narrowing?: boolean;
   }>,
   sampleRows?: Record<string, unknown>[],
   destColumns?: string[],
@@ -886,6 +898,7 @@ export function editableFromPipelineMappings(
           : arrayish
             ? "store_as_json"
             : undefined;
+    const engineFidelity = (m.fidelity || "").trim().toLowerCase();
     const base: EditableMapping = {
       source: m.source,
       target: m.target,
@@ -917,6 +930,9 @@ export function editableFromPipelineMappings(
       createNew: rowCreateNew,
       assignmentStrategy: m.assignment_strategy,
       structPolicy: structPolicy ?? (arrayish ? "store_as_json" : undefined),
+      fidelity: engineFidelity || undefined,
+      fidelityReason: m.fidelity_reason || undefined,
+      typeNarrowing: Boolean(m.type_narrowing),
       structDerived: Boolean(m.struct_derived),
       structParent: m.struct_parent,
     };

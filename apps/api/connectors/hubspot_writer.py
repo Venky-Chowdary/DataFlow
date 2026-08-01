@@ -18,13 +18,282 @@ from connectors.saas_common import (
 )
 from connectors.writer_common import (
     WriteResult,
+    apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
+    gate8_writer_meta,
+    resolve_mapping_dest_types,
     resolve_target_columns,
     transform_error_policy,
 )
 
 DEFAULT_HOST = "api.hubapi.com"
 _CHUNK = 100
+# HubSpot Properties API: string type limited to 65,536 characters.
+_HUBSPOT_STRING_CHARS = 65_536
+# Unformatted numbers: ≤38 total digits, ≤10 right of decimal (HubSpot KB).
+_HUBSPOT_NUMBER_PRECISION = 38
+_HUBSPOT_NUMBER_SCALE = 10
+
+
+def _hubspot_enumeration_options(prop: dict[str, Any]) -> list[str]:
+    """Ordered active HubSpot enumeration *internal* values (not display labels).
+
+    Hightouch / Census reverse-ETL: enumeration properties only accept internal
+    ``options[].value`` — case-sensitive; labels must not invent wire.
+    """
+    raw = prop.get("options") or prop.get("optionsList") or []
+    if not isinstance(raw, list):
+        return []
+    values: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        if item.get("hidden") is True:
+            continue
+        val = str(item.get("value") or "").strip()
+        if not val or val in seen:
+            continue
+        seen.add(val)
+        values.append(val)
+        if len(values) >= 256:
+            break
+    return values
+
+
+def coerce_hubspot_datetime_wire(value: Any) -> str | None:
+    """Normalize HubSpot ``datetime`` property wire to epoch-millis string.
+
+    HubSpot CRM Properties API stores datetime as UTC milliseconds since epoch
+    (Airbyte / Census class). Refuse invent for unparseable values — never
+    silently stringify a bad ISO fragment into a CRM cell.
+    """
+    if value is None:
+        return None
+    from services.value_serializer import is_missing_sentinel
+
+    if is_missing_sentinel(value):
+        return value
+    if isinstance(value, bool):
+        raise ValueError("HubSpot datetime cannot bind bool — refuse invent")
+    if isinstance(value, (int, float)):
+        n = int(value)
+        # Seconds vs millis heuristic (same as sql_temporal).
+        if n < 10_000_000_000:
+            n *= 1000
+        if n < 0:
+            raise ValueError("HubSpot datetime epoch cannot be negative — refuse invent")
+        return str(n)
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return coerce_hubspot_datetime_wire(int(text))
+    from connectors.sql_temporal import coerce_sql_temporal
+
+    coerced = coerce_sql_temporal(value, "TIMESTAMPTZ")
+    from datetime import datetime
+
+    if not isinstance(coerced, datetime):
+        raise ValueError(
+            f"HubSpot datetime cannot parse {text[:64]!r} — refuse invent"
+        )
+    if coerced.tzinfo is None:
+        from datetime import timezone as _tz
+
+        coerced = coerced.replace(tzinfo=_tz.utc)
+    return str(int(coerced.timestamp() * 1000))
+
+
+def coerce_hubspot_date_wire(value: Any) -> str | None:
+    """Normalize HubSpot ``date`` property to ``YYYY-MM-DD`` (midnight UTC day)."""
+    if value is None:
+        return None
+    from services.value_serializer import is_missing_sentinel
+
+    if is_missing_sentinel(value):
+        return value
+    from connectors.sql_temporal import coerce_sql_temporal
+    from datetime import date, datetime
+
+    coerced = coerce_sql_temporal(value, "DATE")
+    if isinstance(coerced, datetime):
+        return coerced.date().isoformat()
+    if isinstance(coerced, date):
+        return coerced.isoformat()
+    raise ValueError(f"HubSpot date cannot parse {value!r} — refuse invent")
+
+
+def hubspot_property_to_carrier(prop: dict[str, Any]) -> str:
+    """Map HubSpot Properties Describe → quarantine carrier.
+
+    Prefer validation ``MAX_LENGTH`` when present (Property Validations API /
+    embedded rules); else platform string cap 65_536. Numbers use DECIMAL(38,10)
+    so excess scale / non-numeric values quarantine instead of silent IEEE invent.
+
+    Enumeration (select/radio/checkbox) keeps closed ENUM/SET domains from
+    ``options`` internal values — never invent open VARCHAR (Hightouch class).
+    """
+    from services.type_system import (
+        format_enum_domain_carrier,
+        format_set_domain_carrier,
+    )
+
+    ptype = str(prop.get("type") or "").strip().lower()
+    field_type = str(prop.get("fieldType") or "").strip().lower()
+    hint = str(prop.get("numberDisplayHint") or "").strip().lower()
+    max_len = prop.get("maxLength") or prop.get("max_length")
+    if max_len is None:
+        # Property Validations may surface as ruleArguments on the describe row.
+        for rule in prop.get("validationRules") or prop.get("validation_rules") or []:
+            if not isinstance(rule, dict):
+                continue
+            rtype = str(rule.get("ruleType") or rule.get("type") or "").upper()
+            if rtype == "MAX_LENGTH":
+                args = rule.get("ruleArguments") or rule.get("arguments") or []
+                if args:
+                    try:
+                        max_len = int(args[0])
+                    except (TypeError, ValueError):
+                        max_len = None
+                break
+    length_n: int | None = None
+    if max_len is not None:
+        try:
+            length_n = max(1, min(_HUBSPOT_STRING_CHARS, int(max_len)))
+        except (TypeError, ValueError):
+            length_n = None
+
+    if ptype in {"bool", "boolean"} or field_type == "booleancheckbox":
+        return "BOOLEAN"
+    if ptype == "date":
+        # HubSpot ``date`` is midnight UTC; ``datetime`` is epoch millis UTC.
+        return "DATE"
+    if ptype == "datetime":
+        # Epoch-millis UTC instant — TIMESTAMPTZ polarity (Airbyte/SF parity).
+        return "TIMESTAMPTZ"
+    if ptype == "number" or field_type == "number":
+        if hint == "currency":
+            return "DECIMAL(38,2)"
+        if hint == "percentage":
+            return "DECIMAL(38,4)"
+        return f"DECIMAL({_HUBSPOT_NUMBER_PRECISION},{_HUBSPOT_NUMBER_SCALE})"
+    if ptype == "enumeration" or field_type in {"select", "radio", "checkbox"}:
+        labels = _hubspot_enumeration_options(prop)
+        if labels:
+            # checkbox = multi-select (semicolon wire); select/radio = single.
+            if field_type == "checkbox":
+                return format_set_domain_carrier(labels)
+            return format_enum_domain_carrier(labels)
+        return "VARCHAR(256)"
+    if ptype in {"string", "phone_number"} or field_type in {
+        "text",
+        "textarea",
+        "html",
+        "phonenumber",
+        "file",
+    }:
+        if length_n:
+            return f"VARCHAR({length_n})"
+        return f"VARCHAR({_HUBSPOT_STRING_CHARS})"
+    if length_n:
+        return f"VARCHAR({length_n})"
+    return f"VARCHAR({_HUBSPOT_STRING_CHARS})"
+
+
+def resolve_hubspot_dest_types(
+    target_cols: list[str],
+    mappings: list[dict],
+    column_types: dict[str, str],
+    *,
+    logical_types: list[str] | None = None,
+    describe_props: list[dict[str, Any]] | None = None,
+) -> dict[str, str]:
+    """Prefer live Properties Describe; else Map/source carriers."""
+    live: dict[str, str] = {}
+    for p in describe_props or []:
+        if not isinstance(p, dict):
+            continue
+        name = str(p.get("name") or "").strip()
+        if name:
+            live[name] = hubspot_property_to_carrier(p)
+    return resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        live_types=live,
+        default="VARCHAR",
+    )
+
+
+def _normalize_hubspot_temporal_cells(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    target_types: list[str],
+    rejected_details: list[dict[str, Any]],
+    policy: str,
+) -> list[tuple]:
+    """Convert DATE/TIMESTAMPTZ cells to HubSpot CRM wire (YYYY-MM-DD / epoch ms)."""
+    from connectors.writer_common import append_write_quarantine_detail
+    from services.value_serializer import cell_to_string, is_missing_sentinel
+
+    temporal_cols: list[tuple[int, str]] = []
+    for i, typ in enumerate(target_types):
+        upper = str(typ or "").upper()
+        if upper.startswith("TIMESTAMPTZ") or upper in {"DATETIME", "TIMESTAMP"}:
+            temporal_cols.append((i, "datetime"))
+        elif upper.startswith("DATE") and "TIME" not in upper:
+            temporal_cols.append((i, "date"))
+    if not temporal_cols:
+        return mapped_rows
+    # ``fail`` must still convert. Skipping the whole pass under the strictest
+    # policy shipped raw ISO strings into CRM properties that expect
+    # YYYY-MM-DD / epoch millis — the loop below already holds bad cells out and
+    # the caller turns any rejected_details into a hard failure.
+
+    out: list[tuple] = []
+    for row_idx, row in enumerate(mapped_rows):
+        cells = list(row)
+        hold_out = False
+        for col_idx, kind in temporal_cols:
+            if col_idx >= len(cells) or cells[col_idx] is None:
+                continue
+            if is_missing_sentinel(cells[col_idx]):
+                continue
+            try:
+                if kind == "datetime":
+                    cells[col_idx] = coerce_hubspot_datetime_wire(cells[col_idx])
+                else:
+                    cells[col_idx] = coerce_hubspot_date_wire(cells[col_idx])
+            except ValueError:
+                sample = cell_to_string(cells[col_idx])[:120]
+                append_write_quarantine_detail(
+                    rejected_details,
+                    {
+                        "row": row_idx + 1,
+                        "column": target_cols[col_idx],
+                        "target": target_cols[col_idx],
+                        "value": sample,
+                        "reason": (
+                            f"invalid HubSpot {kind} wire — quarantined "
+                            "(expect ISO / epoch millis)"
+                        ),
+                        "policy": "write_quarantine",
+                        "chars": [],
+                    },
+                    mapped_row=cells,
+                    target_cols=target_cols,
+                )
+                if policy == "coerce_null":
+                    cells[col_idx] = None
+                else:
+                    hold_out = True
+                    break
+        if hold_out:
+            continue
+        out.append(tuple(cells))
+    return out
 
 
 def write_mapped_rows(
@@ -70,8 +339,37 @@ def write_mapped_rows(
             driver="hubspot",
         )
 
-    target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(
+        mappings, column_types, preserve_case=True
+    )
     policy = transform_error_policy(error_policy)
+    # Live Properties Describe when scopes allow — VARCHAR(65536)/DECIMAL(38,10)
+    # before batch upsert invents bad CRM cells (Salesforce Describe class).
+    describe_props: list[dict[str, Any]] | None = None
+    try:
+        from connectors.hubspot import describe_properties
+
+        describe_props = describe_properties(
+            {
+                "host": host,
+                "username": username,
+                "password": password,
+                "connection_string": connection_string,
+                "api_key": api_key,
+                "database": database,
+                "table": obj,
+            },
+            obj,
+        )
+    except Exception:
+        describe_props = None
+    dest_types = resolve_hubspot_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        describe_props=describe_props,
+    )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
@@ -79,8 +377,25 @@ def write_mapped_rows(
         target_cols=target_cols,
         column_types=column_types,
         error_policy=policy,
-        dest_types={c: "string" for c in target_cols},
+        dest_types=dest_types,
         preserve_case=True,
+    )
+    tgt_types = [str(dest_types.get(c, "VARCHAR") or "VARCHAR") for c in target_cols]
+    mapped_rows = apply_write_quarantine_matrix(
+        mapped_rows,
+        target_cols,
+        tgt_types,
+        rejected_details,
+        policy,
+        dialect_label="HubSpot",
+        mappings=mappings,
+    )
+    mapped_rows = _normalize_hubspot_temporal_cells(
+        mapped_rows,
+        target_cols,
+        tgt_types,
+        rejected_details,
+        policy,
     )
     if transform_errors and policy == "fail":
         return WriteResult(
@@ -105,6 +420,7 @@ def write_mapped_rows(
     written = 0
     chunks = 0
     digest = hashlib.sha256()
+    written_ids: list[str] = []
 
     try:
         for i in range(0, len(mapped_rows), chunk):
@@ -157,7 +473,10 @@ def write_mapped_rows(
                 )
             written += len(results)
             for r in results:
-                digest.update(str(r.get("id", "")).encode())
+                rid = str(r.get("id", "") or "")
+                digest.update(rid.encode())
+                if rid:
+                    written_ids.append(rid)
             for err in errors:
                 rejected_details.append({
                     "row_index": i,
@@ -212,4 +531,5 @@ def write_mapped_rows(
         rejected_details=rejected_details,
         rejected_rows=len(rejected_details),
         driver="hubspot",
+        meta=gate8_writer_meta(mapped_rows, target_cols, written_ids),
     )

@@ -106,9 +106,25 @@ def test_destination_schema_probe_preserves_none():
         "schema": {},
         "table_exists": None,
         "columns": [],
+        "message": "permission denied for relation jobs",
     }):
         _schema, exists = _destination_schema_probe(dest, sync_mode="full_refresh_append")
     assert exists is None
+    assert "permission denied" in (dest.extra or {}).get("schema_probe_error", "")
+
+
+def test_destination_schema_probe_stamps_exception_error():
+    from src.transfer.engine import _destination_schema_probe
+    from src.transfer.models import EndpointConfig
+
+    dest = EndpointConfig(kind="database", format="postgresql", table="jobs")
+    with patch(
+        "src.transfer.endpoint_intelligence.introspect_endpoint",
+        side_effect=RuntimeError("connection refused"),
+    ):
+        _schema, exists = _destination_schema_probe(dest, sync_mode="full_refresh_append")
+    assert exists is None
+    assert "connection refused" in (dest.extra or {}).get("schema_probe_error", "")
 
 
 def test_destination_schema_probe_overwrite_keeps_existence_clears_types():
@@ -125,3 +141,24 @@ def test_destination_schema_probe_overwrite_keeps_existence_clears_types():
     assert schema == {}
     assert exists is False
     assert intro.called
+    assert (dest.extra or {}).get("schema_nullability") == {}
+
+
+def test_destination_schema_probe_stamps_nullability_for_g3():
+    """Append/upsert must pass live NOT NULL into preflight via destination.extra."""
+    from src.transfer.engine import _destination_schema_probe
+    from src.transfer.models import EndpointConfig
+
+    dest = EndpointConfig(kind="database", format="postgresql", table="users")
+    with patch(
+        "src.transfer.endpoint_intelligence.introspect_endpoint",
+        return_value={
+            "schema": {"id": "INTEGER", "email": "VARCHAR(255)"},
+            "schema_nullability": {"id": False, "email": True},
+            "table_exists": True,
+        },
+    ):
+        schema, exists = _destination_schema_probe(dest, sync_mode="full_refresh_append")
+    assert exists is True
+    assert schema["email"] == "VARCHAR(255)"
+    assert (dest.extra or {}).get("schema_nullability") == {"id": False, "email": True}

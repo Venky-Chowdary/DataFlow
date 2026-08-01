@@ -1,13 +1,22 @@
 import { useState, useEffect, useRef } from "react";
 import { DtIcon } from "./DtIcon";
+import { PilotConfirmCard } from "./pilot/PilotConfirmCard";
+import { useToast } from "./Toast";
+import { useConfirm } from "./ui/ConfirmDialog";
 import {
   copilotChat,
   fetchCopilotPrompts,
   formatPilotReachError,
   CopilotAction,
   CopilotChatMessage,
+  CopilotPendingAction,
 } from "../lib/api";
 import { useActiveData } from "../lib/DataContext";
+import {
+  confirmPilotPending,
+  isDestructiveTransfer,
+  transferOverwriteMessage,
+} from "../lib/pilotConfirm";
 import { API_BASE, Screen } from "../lib/types";
 import { renderSafeMarkdown } from "../lib/safeMarkdown";
 import { loadRailChat, PilotMessage, saveRailChat } from "../lib/pilotChatStore";
@@ -44,9 +53,12 @@ const SCREEN_LABELS: Record<string, string> = {
 
 export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotProps) {
   const { activeData } = useActiveData();
+  const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [open, setOpen] = useState(variant === "rail");
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [prompts, setPrompts] = useState<string[]>([]);
   const restored = useRef(loadRailChat());
   const [history, setHistory] = useState<CopilotChatMessage[]>(() => restored.current?.history ?? []);
@@ -85,6 +97,70 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
     }
   };
 
+  const clearPending = (msgIndex: number, actionId: string) => {
+    setMessages((prev) =>
+      prev.map((m, i) =>
+        i === msgIndex
+          ? { ...m, pending_actions: (m.pending_actions || []).filter((p) => p.id !== actionId) }
+          : m,
+      ),
+    );
+  };
+
+  const confirmPending = async (msgIndex: number, action: CopilotPendingAction) => {
+    if (confirmingId) return;
+    if (action.type !== "create_connector" && action.type !== "start_transfer") {
+      // Studio / schedule mutations belong on the full Pilot page where the
+      // surrounding workspace is ready. Send the operator there instead of
+      // silently dropping the approval.
+      onNavigate?.("pilot");
+      toast({
+        title: "Open Data Pilot to confirm",
+        message: action.label || action.type,
+        tone: "info",
+      });
+      return;
+    }
+    setConfirmingId(action.id);
+    try {
+      if (action.type === "start_transfer" && isDestructiveTransfer(action)) {
+        const ok = await confirm({
+          title: "Overwrite the destination?",
+          message: transferOverwriteMessage(action),
+          confirmLabel: "Overwrite & run",
+          tone: "danger",
+        });
+        if (!ok) return;
+      }
+      const res = await confirmPilotPending(action);
+      if (res.kind === "create_connector") {
+        window.dispatchEvent(new CustomEvent("df2:connectors-changed"));
+        onNavigate?.("connectors");
+        toast({
+          title: res.idempotent ? "Connector already saved" : "Connector saved",
+          message: `“${res.name}” (${res.type}) is ready in Connectors.`,
+          tone: "success",
+        });
+      } else {
+        toast({
+          title: res.idempotent ? "Transfer already running" : "Transfer started",
+          message: `${res.source} → ${res.destination}`,
+          tone: "success",
+        });
+        onNavigate?.("jobs");
+      }
+      clearPending(msgIndex, action.id);
+    } catch (error) {
+      toast({
+        title: "Action failed",
+        message: error instanceof Error ? error.message : String(error),
+        tone: "error",
+      });
+    } finally {
+      setConfirmingId(null);
+    }
+  };
+
   const send = async (text?: string) => {
     const q = (text ?? input).trim();
     if (!q || loading) return;
@@ -106,10 +182,14 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
           role: "assistant",
           text: res.answer,
           actions: res.suggested_actions,
+          pending_actions: res.pending_actions,
           dataInsight: res.data_insight,
         },
       ]);
-      applyActions(res.suggested_actions);
+      // Stay on the Confirm card — never auto-navigate away from an approval.
+      if (!(res.pending_actions && res.pending_actions.length > 0)) {
+        applyActions(res.suggested_actions);
+      }
       if (res.suggested_prompts?.length) {
         setPrompts(res.suggested_prompts);
       }
@@ -169,7 +249,20 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
         {messages.map((msg, i) => (
           <div key={i} className={`df2-copilot-msg ${msg.role}`}>
             <div dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(msg.text) }} />
-            {msg.actions && msg.actions.length > 0 && (
+            {msg.pending_actions && msg.pending_actions.length > 0 && (
+              <div className="df2-pilot-pending">
+                {msg.pending_actions.map((pa) => (
+                  <PilotConfirmCard
+                    key={pa.id}
+                    action={pa}
+                    busy={confirmingId === pa.id}
+                    onConfirm={() => confirmPending(i, pa)}
+                    onCancel={() => clearPending(i, pa.id)}
+                  />
+                ))}
+              </div>
+            )}
+            {msg.actions && msg.actions.length > 0 && !(msg.pending_actions && msg.pending_actions.length > 0) && (
               <div className="df2-copilot-actions">
                 {msg.actions.map((action, j) => {
                   const screen = action.screen || action.route;

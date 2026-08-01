@@ -47,6 +47,28 @@ def test_nvarchar_counts_utf16_code_units():
     assert fits_varchar(emoji, 2, "NVARCHAR(2)") is True
 
 
+def test_oracle_byte_semantics_counts_utf8_bytes():
+    # “你” is one code point / 3 UTF-8 bytes — fits CHAR(1) but not BYTE(1).
+    han = "你"
+    assert string_storage_units(han, "VARCHAR(1 CHAR)") == 1
+    assert fits_varchar(han, 1, "VARCHAR(1 CHAR)") is True
+    assert string_storage_units(han, "VARCHAR(1 BYTE)") == 3
+    assert fits_varchar(han, 1, "VARCHAR(1 BYTE)") is False
+    assert fits_varchar(han, 3, "VARCHAR(3 BYTE)") is True
+    assert parse_varchar_width("VARCHAR2(10 BYTE)") == 10
+    assert parse_varchar_width("VARCHAR(10 CHAR)") == 10
+
+
+def test_redshift_varchar_counts_utf8_bytes():
+    # AWS Redshift VARCHAR(n) is byte-length — emoji is 4 UTF-8 bytes.
+    emoji = "😀"
+    assert string_storage_units(emoji, "VARCHAR(4)", dialect_label="Redshift VARCHAR") == 4
+    assert fits_varchar(emoji, 4, "VARCHAR(4)", dialect_label="Redshift VARCHAR") is True
+    assert fits_varchar(emoji, 3, "VARCHAR(3)", dialect_label="Redshift VARCHAR") is False
+    # PostgreSQL stays on code points.
+    assert fits_varchar(emoji, 1, "VARCHAR(1)", dialect_label="PostgreSQL VARCHAR") is True
+
+
 def test_quarantine_holds_out_oversized_string():
     rows = [("too-long-value", "ok"), ("short", "fine")]
     details: list[dict] = []

@@ -201,6 +201,9 @@ class MapColumnsRequest(BaseModel):
     # None = unknown; True = confirmed on destination; False = will CREATE.
     # Empty target_columns + True must NOT invent identity create-new.
     destination_table_exists: Optional[bool] = None
+    # "database"/"warehouse" means source_schema came from introspected DDL, so
+    # sample inference must not re-guess DECIMAL(12,2) down to a bare DECIMAL.
+    source_kind: str = ""
 
 
 @router.get("/capabilities")
@@ -317,6 +320,7 @@ async def map_columns_route(body: MapColumnsRequest):
     _api_root = Path(__file__).resolve().parents[2]
     if str(_api_root) not in sys.path:
         sys.path.insert(0, str(_api_root))
+    from services.data_profiler import source_types_are_authoritative
     from services.mapping_pipeline import run_mapping_pipeline
 
     threshold = confidence_threshold_for_mode(body.validation_mode)
@@ -348,6 +352,9 @@ async def map_columns_route(body: MapColumnsRequest):
         schema_policy=body.schema_policy or "manual_review",
         sync_mode=body.sync_mode or "",
         destination_table_exists=body.destination_table_exists,
+        source_types_authoritative=source_types_are_authoritative(
+            body.source_kind, body.file_format or ""
+        ),
     )
     nested_fields: list[dict[str, str]] = []
     try:
@@ -371,6 +378,10 @@ async def map_columns_route(body: MapColumnsRequest):
         "plan_summary": result.get("plan_summary", {}),
         "mapping_proof": result.get("mapping_proof", {}),
         "quality_issues": result.get("quality_issues", []),
+        # The engine computes these; dropping them here left the Map step
+        # showing client-side guesses while the real verdict stayed server-side.
+        "coercion_issues": result.get("coercion_issues", []),
+        "integrity": result.get("integrity", {}),
         "nested_fields": nested_fields,
     }
 

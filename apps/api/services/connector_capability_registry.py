@@ -100,7 +100,11 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "requires_schema": True,
         "supports_binary": True,
         "cdc_prerequisites": "Prefer native SQL Server CDC (cdc.*). Change Tracking is the fallback. Query-based CDC requires a monotonic cursor column.",
-        "common_issues": ["MERGE requires a unique key on the target.", "IDENTITY inserts may need SET IDENTITY_INSERT.", "Enable CDC on the database and table before log capture."],
+        "common_issues": [
+            "MERGE uses HOLDLOCK + NULL-safe PK match; falls back to delete+insert if MERGE fails.",
+            "IDENTITY inserts may need SET IDENTITY_INSERT.",
+            "Enable CDC on the database and table before log capture.",
+        ],
         "recommended_batch_size": 2000,
     },
     "oracle": {
@@ -117,7 +121,12 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "requires_schema": True,
         "supports_binary": True,
         "cdc_prerequisites": "Prefer LogMiner CDC when privileges allow; Flashback Query is the fallback. Query-based CDC requires a monotonic cursor column.",
-        "common_issues": ["Table names may be case-sensitive. Use uppercase unless quoted.", "NUMBER with no precision maps to a wide decimal.", "LogMiner needs supplemental logging."],
+        "common_issues": [
+            "Table names may be case-sensitive. Use uppercase unless quoted.",
+            "NUMBER with no precision maps to a wide decimal.",
+            "Upsert prefers native MERGE with NULL-safe PK match (PTT/GTT stage); falls back to delete+insert. Still at-least-once.",
+            "LogMiner needs supplemental logging.",
+        ],
         "recommended_batch_size": 2000,
     },
     "sqlite": {
@@ -142,13 +151,18 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "pattern": "batch",
         "supports_cdc": False,
         "supports_streaming": False,
-        "supports_upsert": False,
+        # Native MERGE INTO (NULL-safe ON); not SQL MERGE-as-ANSI synonym only.
+        "supports_upsert": True,
         "supports_append": True,
         "supports_overwrite": True,
         "supports_merge": True,
+        "supports_lsn_guard": True,
         "requires_schema": True,
         "supports_binary": True,
-        "common_issues": ["DuckDB is in-process; multiple writers to the same file can conflict."],
+        "common_issues": [
+            "DuckDB is in-process; multiple writers to the same file can conflict.",
+            "Upsert prefers MERGE INTO with NULL-safe PK match; falls back to delete+insert. Still at-least-once.",
+        ],
         "recommended_batch_size": 10000,
     },
     # Warehouses / lakes
@@ -197,16 +211,16 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_upsert": True,
         "supports_append": True,
         "supports_overwrite": True,
-        # Native MERGE not yet wired; upsert uses delete+insert (at-least-once).
-        "supports_merge": False,
-        # Application-side compare_lsn before delete+insert when `_df_lsn` is present.
+        # Native MERGE wired (NULL-safe ON); delete+insert fallback if MERGE fails.
+        "supports_merge": True,
+        # Application-side compare_lsn before MERGE/delete+insert when `_df_lsn` is present.
         "supports_lsn_guard": True,
         "requires_schema": True,
         "supports_binary": True,
         "common_issues": [
             "VARCHAR without length maps to VARCHAR(65535) — still truncates beyond that.",
             "JSON/ARRAY land as SUPER; binary as VARBYTE.",
-            "Upsert is delete+insert with optional _df_lsn guard (no ON CONFLICT); not exactly-once. Native MERGE not yet wired.",
+            "Upsert prefers native MERGE with NULL-safe PK match; falls back to delete+insert. Still at-least-once (not exactly-once).",
             "DISTKEY/SORTKEY are operator-owned — DataFlow does not invent them.",
         ],
         "recommended_batch_size": 5000,
@@ -754,10 +768,17 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_append": True,
         "supports_overwrite": True,
         "supports_merge": True,
+        # Filesystem + catalog path today is Copy-on-Write rewrite (not MoR /
+        # deletion-vector). MoR is Planned — do not claim Iceberg V3 DV yet.
+        "write_strategy": "copy-on-write",
+        "supports_merge_on_read": False,
         "supports_lsn_guard": True,
         "requires_schema": True,
         "supports_binary": True,
-        "common_issues": ["Schema evolution is supported but should be declared explicitly."],
+        "common_issues": [
+            "Schema evolution is supported but should be declared explicitly.",
+            "Upserts/deletes rewrite data files (copy-on-write); merge-on-read / deletion vectors are Planned.",
+        ],
         "recommended_batch_size": 10000,
     },
     "delta": {

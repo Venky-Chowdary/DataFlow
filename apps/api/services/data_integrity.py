@@ -348,6 +348,323 @@ def _target_for_source(source: str, mappings: list[dict]) -> str:
     return source
 
 
+def _source_for_target(target: str, mappings: list[dict]) -> str:
+    for m in (mappings or []):
+        if (m.get("target") or "").lower() == (target or "").lower():
+            return str(m.get("source") or target)
+    return target
+
+
+def _unique_key_column_list(uk: dict[str, Any]) -> list[str]:
+    cols: list[str] = []
+    for c in list(uk.get("columns") or []) + list(uk.get("expression_columns") or []):
+        name = str(c or "").strip()
+        if name and name.lower() not in {x.lower() for x in cols}:
+            cols.append(name)
+    return cols
+
+
+def _lookup_target_ddl(target_col: str, target_types: dict[str, str] | None) -> str:
+    if not target_types:
+        return ""
+    if target_col in target_types:
+        return str(target_types.get(target_col) or "")
+    lower_map = {str(k).lower(): v for k, v in target_types.items()}
+    return str(lower_map.get(target_col.lower(), "") or "")
+
+
+def _sample_unique_constraint_dupes(
+    mappings: list[dict],
+    rows: list[dict[str, Any]],
+    *,
+    columns: list[str],
+    unique_meta: dict[str, Any] | None,
+    target_types: dict[str, str] | None,
+    label: str,
+    dest_kind: str = "",
+) -> list[str]:
+    """Detect sample duplicates for a (possibly composite) destination UNIQUE/PK.
+
+    Airbyte-class composite keys: uniqueness is on the combination, not each
+    column alone — ``(org=1,code=A)`` and ``(org=2,code=A)`` must not false-fail.
+    """
+    if not columns or not rows:
+        return []
+    from services.type_system import (
+        unique_equality_key,
+        unique_key_forces_casefold,
+        unique_key_nulls_collide,
+        unique_key_row_in_scope,
+    )
+
+    uk_list = [unique_meta] if unique_meta else []
+    col_specs: list[tuple[str, str, str, bool, str | None]] = []
+    for dest_col in columns:
+        src = _source_for_target(dest_col, mappings)
+        ddl = _lookup_target_ddl(dest_col, target_types)
+        casefold = unique_key_forces_casefold(
+            dest_col, ddl_type=ddl, unique_keys=uk_list
+        )
+        nulls_collide = unique_key_nulls_collide(dest_col, unique_keys=uk_list)
+        null_sentinel = "\x00NULL\x00" if nulls_collide else None
+        col_specs.append((dest_col, src, ddl, casefold, null_sentinel))
+
+    seen: dict[str, int] = {}
+    examples: dict[str, str] = {}
+    scope_col = columns[0]
+    for row in rows:
+        scope_row = dict(row)
+        for dest_col, src, *_rest in col_specs:
+            if dest_col not in scope_row and src in scope_row:
+                scope_row[dest_col] = scope_row.get(src)
+        if unique_meta and not unique_key_row_in_scope(
+            scope_row, scope_col, unique_keys=uk_list
+        ):
+            continue
+        parts: list[str] = []
+        display: list[str] = []
+        skip = False
+        for dest_col, src, ddl, casefold, null_sentinel in col_specs:
+            # Preserve trailing spaces for NO PAD engines — cell_to_string only.
+            raw_cell = row.get(src, row.get(dest_col, ""))
+            raw = cell_to_string(raw_cell) if raw_cell is not None else ""
+            key_part = unique_equality_key(
+                None if raw_cell is None else raw,
+                ddl,
+                force_casefold=casefold,
+                null_sentinel=null_sentinel,
+                dest_kind=dest_kind,
+            )
+            if not key_part and null_sentinel is None:
+                # Default UNIQUE: NULL / empty key column → not colliding.
+                skip = True
+                break
+            parts.append(key_part)
+            display.append(raw if raw else "<NULL>")
+        if skip or not parts:
+            continue
+        key = "\x1f".join(parts)
+        seen[key] = seen.get(key, 0) + 1
+        examples.setdefault(key, "(" + ", ".join(display) + ")")
+
+    dupes = [(examples.get(v, v), c) for v, c in seen.items() if c > 1]
+    if not dupes:
+        return []
+    sample = ", ".join(f"{v}×{c}" for v, c in dupes[:3])
+    return [f"{label}: duplicate key values ({sample})"]
+
+
+def _destination_constraints_advisory(
+    dest_kind: str,
+    destination_unique_keys: list[dict[str, Any]] | None = None,
+) -> bool:
+    """True when dest PK/UNIQUE are optimizer/metadata-only (BQ / Redshift / SF NOT ENFORCED)."""
+    kind = normalize_dest_kind(dest_kind or "")
+    if kind in {"bigquery", "redshift"}:
+        return True
+    # Snowflake hybrid may mix; only advisory when every covering key says so.
+    keys = list(destination_unique_keys or [])
+    if keys and all(uk.get("enforced") is False for uk in keys):
+        return True
+    return False
+
+
+def _unique_constraint_enforced(
+    uk: dict[str, Any] | None,
+    *,
+    dest_kind: str = "",
+) -> bool:
+    if uk is not None and uk.get("enforced") is False:
+        return False
+    if uk is not None and uk.get("enforced") is True:
+        return True
+    return not _destination_constraints_advisory(dest_kind, [uk] if uk else None)
+
+
+def _advisory_unique_key_warnings(
+    *,
+    dest_kind: str,
+    destination_unique_keys: list[dict[str, Any]] | None,
+    mappings: list[dict] | None = None,
+    rows: list[dict[str, Any]] | None = None,
+    destination_pk_columns: list[str] | None = None,
+    target_types: dict[str, str] | None = None,
+) -> list[str]:
+    """Warn-only honesty for BQ / Redshift / Snowflake NOT ENFORCED keys.
+
+    Never invent blockers — operators must prove uniqueness in pipeline tests
+    (dbt unique / Gate-9 sample) before trusting merges.
+    """
+    warnings: list[str] = []
+    keys = list(destination_unique_keys or [])
+    advisory = [
+        uk for uk in keys if not _unique_constraint_enforced(uk, dest_kind=dest_kind)
+    ]
+    kind = normalize_dest_kind(dest_kind or "") or "destination"
+    if not advisory and not _destination_constraints_advisory(dest_kind, keys):
+        return warnings
+    if advisory:
+        labels: list[str] = []
+        for uk in advisory[:6]:
+            name = str(uk.get("name") or ("PRIMARY" if uk.get("primary") else "UNIQUE"))
+            cols = _unique_key_column_list(uk)
+            labels.append(f"{name}({', '.join(cols)})" if cols else name)
+        warnings.append(
+            f"{kind} PRIMARY KEY / UNIQUE is NOT ENFORCED (advisory/optimizer "
+            f"metadata): {', '.join(labels)} — Validate will not invent write "
+            "blockers; prove uniqueness with pipeline tests before trusting merges."
+        )
+    elif _destination_constraints_advisory(dest_kind, keys):
+        warnings.append(
+            f"{kind} PRIMARY KEY / UNIQUE constraints are informational "
+            "(not enforced at write) — Validate will not invent duplicate blockers."
+        )
+
+    # Soft-probe sample collisions under advisory keys (warn, never block).
+    if rows and mappings and advisory:
+        mapped_targets = {
+            str(m.get("target") or "").lower()
+            for m in mappings
+            if m.get("target")
+        }
+        for uk in advisory:
+            cols = _unique_key_column_list(uk)
+            if not cols or not all(c.lower() in mapped_targets for c in cols):
+                continue
+            name = str(uk.get("name") or ("PRIMARY" if uk.get("primary") else "UNIQUE"))
+            soft = _sample_unique_constraint_dupes(
+                mappings,
+                rows,
+                columns=cols,
+                unique_meta=uk,
+                target_types=target_types,
+                label=f"advisory {name} (" + ", ".join(cols) + ")",
+                dest_kind=dest_kind,
+            )
+            for msg in soft:
+                warnings.append(
+                    f"{msg} — destination will accept duplicates (NOT ENFORCED)"
+                )
+        # Composite PK columns listed without unique_keys primary bucket.
+        pk_cols = [str(c) for c in (destination_pk_columns or []) if c]
+        if len(pk_cols) >= 2 and all(c.lower() in mapped_targets for c in pk_cols):
+            if not any(_unique_key_column_list(uk) == pk_cols for uk in advisory):
+                soft = _sample_unique_constraint_dupes(
+                    mappings,
+                    rows,
+                    columns=pk_cols,
+                    unique_meta={
+                        "name": "PRIMARY",
+                        "columns": pk_cols,
+                        "primary": True,
+                        "enforced": False,
+                    },
+                    target_types=target_types,
+                    label="advisory PRIMARY KEY (" + ", ".join(pk_cols) + ")",
+                    dest_kind=dest_kind,
+                )
+                for msg in soft:
+                    warnings.append(
+                        f"{msg} — destination will accept duplicates (NOT ENFORCED)"
+                    )
+    return warnings[:12]
+
+
+def _check_destination_unique_constraints(
+    mappings: list[dict],
+    rows: list[dict[str, Any]],
+    *,
+    destination_pk_columns: list[str] | None,
+    destination_unique_keys: list[dict[str, Any]] | None,
+    target_types: dict[str, str] | None,
+    dest_kind: str = "",
+) -> list[str]:
+    """Probe all fully-mapped destination PK/UNIQUE constraints (incl. composites)."""
+    issues: list[str] = []
+    mapped_targets = {
+        str(m.get("target") or "").lower()
+        for m in (mappings or [])
+        if m.get("target")
+    }
+
+    def _fully_mapped(cols: list[str]) -> bool:
+        return bool(cols) and all(c.lower() in mapped_targets for c in cols)
+
+    pk_cols = [str(c) for c in (destination_pk_columns or []) if c]
+    pk_meta = next(
+        (
+            uk
+            for uk in (destination_unique_keys or [])
+            if uk.get("primary")
+        ),
+        {
+            "name": "PRIMARY",
+            "columns": pk_cols,
+            "primary": True,
+            "enforced": not _destination_constraints_advisory(
+                dest_kind, destination_unique_keys
+            ),
+        },
+    )
+    if (
+        len(pk_cols) >= 2
+        and _fully_mapped(pk_cols)
+        and _unique_constraint_enforced(pk_meta, dest_kind=dest_kind)
+    ):
+        issues.extend(
+            _sample_unique_constraint_dupes(
+                mappings,
+                rows,
+                columns=pk_cols,
+                unique_meta=pk_meta,
+                target_types=target_types,
+                label="PRIMARY KEY (" + ", ".join(pk_cols) + ")",
+                dest_kind=dest_kind,
+            )
+        )
+
+    for uk in destination_unique_keys or []:
+        # BQ / Redshift / Snowflake NOT ENFORCED — advisory only, do not invent blockers.
+        if not _unique_constraint_enforced(uk, dest_kind=dest_kind):
+            continue
+        if uk.get("primary") and len(_unique_key_column_list(uk)) >= 2:
+            # Already handled via pk_cols path above.
+            continue
+        cols = _unique_key_column_list(uk)
+        if len(cols) < 2:
+            # Single-column UNIQUE still matters when identity path skipped it
+            # (e.g. append onto hybrid UNIQUE that is not the Studio PK).
+            if len(cols) == 1 and _fully_mapped(cols):
+                name = str(uk.get("name") or "UNIQUE")
+                issues.extend(
+                    _sample_unique_constraint_dupes(
+                        mappings,
+                        rows,
+                        columns=cols,
+                        unique_meta=uk,
+                        target_types=target_types,
+                        label=f"UNIQUE {name} (" + ", ".join(cols) + ")",
+                        dest_kind=dest_kind,
+                    )
+                )
+            continue
+        if not _fully_mapped(cols):
+            continue
+        name = str(uk.get("name") or "UNIQUE")
+        issues.extend(
+            _sample_unique_constraint_dupes(
+                mappings,
+                rows,
+                columns=cols,
+                unique_meta=uk,
+                target_types=target_types,
+                label=f"UNIQUE {name} (" + ", ".join(cols) + ")",
+                dest_kind=dest_kind,
+            )
+        )
+    return issues
+
+
 def _check_duplicate_keys(
     mappings: list[dict],
     rows: list[dict[str, Any]],
@@ -358,6 +675,8 @@ def _check_duplicate_keys(
     source_duplicate_findings: list[dict[str, Any]] | None = None,
     sync_mode: str = "",
     destination_pk_columns: list[str] | None = None,
+    destination_unique_keys: list[dict[str, Any]] | None = None,
+    target_types: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Duplicate check on the resolved identity key (sample + source-side probe).
 
@@ -365,69 +684,190 @@ def _check_duplicate_keys(
       unique identity (upsert/CDC/mirror/SCD2) always enforce duplicates.
     - Overwrite modes enforce duplicates because the destination table is recreated
       and the mapped identity key is likely to become the primary key.
-    - Append-like modes only enforce duplicates when the destination primary key is
-      known to include the mapped target column; otherwise duplicates may be legal.
+    - Append-like modes only enforce duplicates when the destination primary key or
+      a UNIQUE index is known to include the mapped target column.
+    - Destination CI/AI collations / CITEXT / ``UNIQUE (lower(col))`` equate
+      case/accents so Validate does not false-green engine-equal keys.
+    - Composite UNIQUE/PK constraints are probed as tuples (Airbyte composite
+      primary key class) — never invent single-column uniqueness from a multi-col index.
     """
     issues: list[str] = []
-    if not primary_key:
-        return {
-            "check": "duplicate_keys",
-            "passed": True,
-            "blocks_transfer": False,
-            "issues": [],
-            "primary_key": None,
-        }
-
     from services.primary_key import sync_requires_unique_identity
 
     schemaless = dest_kind in SCHEMALESS_DESTS
     sync = (sync_mode or "").strip().lower()
-    # Default to enforcing duplicate identity checks: any destination will fail to
-    # write two rows with the same key unless the sync mode is explicitly append-like
-    # and the destination PK is not known to include the mapped target.
-    enforce = (
+    target_col = _target_for_source(primary_key, mappings) if primary_key else ""
+    advisory_warnings = _advisory_unique_key_warnings(
+        dest_kind=dest_kind,
+        destination_unique_keys=destination_unique_keys,
+        mappings=mappings,
+        rows=rows,
+        destination_pk_columns=destination_pk_columns,
+        target_types=target_types,
+    )
+
+    # Single-column identity enforcement (upsert/CDC/PK/single UNIQUE).
+    enforce_identity = bool(primary_key) and (
         schemaless
         or sync_requires_unique_identity(sync, dest_kind=dest_kind)
         or _is_overwrite_like(sync)
         or not _is_append_like(sync)
     )
-    if _is_append_like(sync) and destination_pk_columns:
-        # Append-like modes block when the destination PK is known to include target.
-        target = _target_for_source(primary_key, mappings)
-        dest_pk_lower = {str(c).lower() for c in destination_pk_columns}
-        if target.lower() in dest_pk_lower:
-            enforce = True
+    covering_single = False
+    covering_composite_only = False
+    if primary_key and _is_append_like(sync) and (
+        destination_pk_columns or destination_unique_keys
+    ):
+        dest_pk = [str(c) for c in (destination_pk_columns or []) if c]
+        pk_enforced = not _destination_constraints_advisory(
+            dest_kind, destination_unique_keys
+        )
+        # Prefer explicit primary bucket flag when present.
+        for uk in destination_unique_keys or []:
+            if uk.get("primary"):
+                pk_enforced = _unique_constraint_enforced(uk, dest_kind=dest_kind)
+                break
+        if (
+            pk_enforced
+            and len(dest_pk) == 1
+            and dest_pk[0].lower() == target_col.lower()
+        ):
+            covering_single = True
+            enforce_identity = True
+        elif (
+            pk_enforced
+            and len(dest_pk) > 1
+            and target_col.lower() in {c.lower() for c in dest_pk}
+        ):
+            covering_composite_only = True
+        for uk in destination_unique_keys or []:
+            if not _unique_constraint_enforced(uk, dest_kind=dest_kind):
+                continue
+            cols = _unique_key_column_list(uk)
+            if target_col.lower() not in {c.lower() for c in cols}:
+                continue
+            if len(cols) == 1:
+                covering_single = True
+                enforce_identity = True
+            else:
+                covering_composite_only = True
 
-    if not enforce:
+    # Composite UNIQUE/PK probes run whenever catalog keys are known and mapped —
+    # not only when the Studio identity column participates.
+    composite_issues = _check_destination_unique_constraints(
+        mappings,
+        rows,
+        destination_pk_columns=destination_pk_columns,
+        destination_unique_keys=destination_unique_keys,
+        target_types=target_types,
+        dest_kind=dest_kind,
+    )
+    issues.extend(composite_issues)
+
+    if not primary_key and not issues:
         return {
             "check": "duplicate_keys",
             "passed": True,
             "blocks_transfer": False,
             "issues": [],
+            "warnings": advisory_warnings,
+            "primary_key": None,
+        }
+
+    if not enforce_identity and not issues:
+        return {
+            "check": "duplicate_keys",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+            "warnings": advisory_warnings,
             "primary_key": primary_key,
             "dest_kind": dest_kind,
         }
 
     # Source-side probe is authoritative: it scans the full table, not just the
     # preview sample, so duplicates that would fail the write batch are caught on Validate.
-    findings = source_duplicate_findings or []
-    if findings:
-        sample = ", ".join(
-            f"{f.get('value')}×{f.get('count', 1)}" for f in findings[:3]
-        )
-        issues.append(f"{primary_key}: duplicate key values from source probe ({sample})")
+    if enforce_identity and primary_key:
+        findings = source_duplicate_findings or []
+        if findings:
+            sample = ", ".join(
+                f"{f.get('value')}×{f.get('count', 1)}" for f in findings[:3]
+            )
+            issues.append(
+                f"{primary_key}: duplicate key values from source probe ({sample})"
+            )
 
-    # Fall back to / augment with the preview sample.
-    seen: dict[str, int] = {}
-    for row in rows:
-        val = cell_to_string(row.get(primary_key, "")).strip()
-        if not val:
-            continue
-        seen[val] = seen.get(val, 0) + 1
-    dupes = [(v, c) for v, c in seen.items() if c > 1]
-    if dupes:
-        sample = ", ".join(f"{v}×{c}" for v, c in dupes[:3])
-        issues.append(f"{primary_key}: duplicate key values ({sample})")
+    # Single-column sample identity — skip when the only covering constraint is
+    # composite (same code under different orgs must not false-fail).
+    run_single = bool(
+        enforce_identity
+        and primary_key
+        and not (covering_composite_only and not covering_single)
+    )
+    if run_single and primary_key:
+        from services.type_system import (
+            unique_equality_key,
+            unique_key_forces_casefold,
+            unique_key_nulls_collide,
+            unique_key_row_in_scope,
+        )
+
+        dest_ddl = _lookup_target_ddl(target_col, target_types) or _lookup_target_ddl(
+            primary_key, target_types
+        )
+        # Prefer single-column uniques covering the target for casefold/nulls flags.
+        single_uks = [
+            uk
+            for uk in (destination_unique_keys or [])
+            if len(_unique_key_column_list(uk)) == 1
+            and target_col.lower()
+            in {c.lower() for c in _unique_key_column_list(uk)}
+        ] or (destination_unique_keys or [])
+        casefold = unique_key_forces_casefold(
+            target_col,
+            ddl_type=dest_ddl,
+            unique_keys=single_uks,
+        )
+        nulls_collide = unique_key_nulls_collide(
+            target_col, unique_keys=single_uks
+        )
+        null_sentinel = "\x00NULL\x00" if nulls_collide else None
+        seen: dict[str, int] = {}
+        examples: dict[str, str] = {}
+        for row in rows:
+            scope_row = dict(row)
+            if target_col and target_col not in scope_row and primary_key in scope_row:
+                scope_row[target_col] = scope_row.get(primary_key)
+            if not unique_key_row_in_scope(
+                scope_row, target_col, unique_keys=single_uks
+            ):
+                continue
+            raw_cell = row.get(primary_key, "")
+            raw = cell_to_string(raw_cell) if raw_cell is not None else ""
+            key = unique_equality_key(
+                None if raw_cell is None else raw,
+                dest_ddl,
+                force_casefold=casefold,
+                null_sentinel=null_sentinel,
+                dest_kind=dest_kind,
+            )
+            if not key and not nulls_collide:
+                continue
+            if not key:
+                continue
+            seen[key] = seen.get(key, 0) + 1
+            examples.setdefault(key, raw if raw else "<NULL>")
+        dupes = [(examples.get(v, v), c) for v, c in seen.items() if c > 1]
+        if dupes:
+            sample = ", ".join(f"{v}×{c}" for v, c in dupes[:3])
+            issues.append(f"{primary_key}: duplicate key values ({sample})")
+
+    # Dedupe issue strings while preserving order.
+    deduped: list[str] = []
+    for item in issues:
+        if item not in deduped:
+            deduped.append(item)
+    issues = deduped
     blocks = len(issues) > 0
     mode = (validation_mode or "").strip().lower()
     if blocks and mode == "balanced":
@@ -445,7 +885,7 @@ def _check_duplicate_keys(
                 "passed": False,
                 "blocks_transfer": True,
                 "issues": issues[:15],
-                "warnings": issues[:15],
+                "warnings": (advisory_warnings + issues)[:15],
                 "primary_key": primary_key,
                 "dest_kind": dest_kind,
                 "note": (
@@ -459,7 +899,7 @@ def _check_duplicate_keys(
             "passed": True,
             "blocks_transfer": False,
             "issues": [],
-            "warnings": issues[:15],
+            "warnings": (advisory_warnings + issues)[:15],
             "primary_key": primary_key,
             "dest_kind": dest_kind,
         }
@@ -468,6 +908,7 @@ def _check_duplicate_keys(
         "passed": not blocks,
         "blocks_transfer": blocks,
         "issues": issues[:15],
+        "warnings": advisory_warnings,
         "primary_key": primary_key,
         "dest_kind": dest_kind,
     }
@@ -668,6 +1109,7 @@ def run_integrity_audit(
     sync_mode: str = "",
     contract_primary_key: str | None = None,
     destination_pk_columns: list[str] | None = None,
+    destination_unique_keys: list[dict[str, Any]] | None = None,
     source_duplicate_findings: list[dict[str, Any]] | None = None,
     source_duplicate_probe_ran: bool = False,
     source_duplicate_probe_pk: str = "",
@@ -765,7 +1207,20 @@ def run_integrity_audit(
         # Duplicate identity keys block when the write path will enforce uniqueness:
         # schemaless destinations, upsert/CDC/mirror/SCD2, overwrite (table recreated),
         # or append when the destination PK is known to include the mapped target.
-        checks.append(_check_duplicate_keys(mappings, rows, validation_mode, dest_kind=dest_kind, primary_key=pk_uniqueness, source_duplicate_findings=source_duplicate_findings, sync_mode=sync_mode, destination_pk_columns=destination_pk_columns))
+        checks.append(
+            _check_duplicate_keys(
+                mappings,
+                rows,
+                validation_mode,
+                dest_kind=dest_kind,
+                primary_key=pk_uniqueness,
+                source_duplicate_findings=source_duplicate_findings,
+                sync_mode=sync_mode,
+                destination_pk_columns=destination_pk_columns,
+                destination_unique_keys=destination_unique_keys,
+                target_types=target_types,
+            )
+        )
         checks.append(
             _check_mapping_confidence(mappings, confidence_min=cfg["confidence"], validation_mode=validation_mode)
         )

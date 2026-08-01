@@ -119,6 +119,8 @@ class TransferPlan:
     contract_primary_key: str = ""
     # Introspected destination PK column names (when table exists).
     destination_pk_columns: list[str] = field(default_factory=list)
+    # Introspected UNIQUE indexes/constraints (columns + optional expression CI flags).
+    destination_unique_keys: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

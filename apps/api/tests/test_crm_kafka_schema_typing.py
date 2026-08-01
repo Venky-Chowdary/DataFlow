@@ -31,9 +31,11 @@ def test_salesforce_field_type_map():
     assert salesforce_field_to_logical("datetime") == "TIMESTAMPTZ"
     assert salesforce_field_to_logical("base64") == "BINARY"
     assert salesforce_field_to_logical("address") == "JSON"
-    assert salesforce_field_to_logical("id") == "TEXT"
+    assert salesforce_field_to_logical("id") == "VARCHAR(18)"
     assert salesforce_field_to_logical("picklist") == "TEXT"
     assert salesforce_field_to_logical("email") == "TEXT"
+    assert salesforce_field_to_logical("email", length=80) == "VARCHAR(80)"
+    assert salesforce_field_to_logical("string", length=255) == "VARCHAR(255)"
 
 
 def test_hubspot_property_type_map():

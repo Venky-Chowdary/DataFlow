@@ -11,7 +11,7 @@ from connectors.mongodb_common import _mongo_client
 from services.value_serializer import cell_to_string
 
 from .adapters import (
-    _introspect_table_schema,
+    _introspect_table_schema_rich,
     mongodb_connection_string,
     parse_file_content,
     resolve_connector_config,
@@ -337,7 +337,16 @@ def introspect_endpoint(
             _attach_db_sample(out, endpoint)
         return out
 
-    if fmt == "sqlite" or resolve_driver_type(fmt) == "generic_sql":
+    # SQLAlchemy-backed engines (sqlite, generic_sql, sqlserver, oracle, duckdb):
+    # prove existence via information_schema / reflection — never leave sticky None
+    # when the driver is live (Validate overwrite needs True/False, not unknown).
+    _sql_driver = resolve_driver_type(fmt)
+    if fmt == "sqlite" or _sql_driver in {
+        "generic_sql",
+        "sqlserver",
+        "oracle",
+        "duckdb",
+    }:
         out["connected"] = True
         out["message"] = f"{fmt.title()} connected — introspecting table schema"
         if endpoint.table:
@@ -683,22 +692,38 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         # Short-circuiting on table_exists=False falsely flipped Map into create-new
         # while writers still appended into the real table (e.g. railway.airports).
         # For destination, same-namespace-only (strict) — LIMIT miss still works.
-        schema_map = _introspect_table_schema(
+        schema_map, schema_nulls, schema_keys = _introspect_table_schema_rich(
             fmt, cfg, resolve_table, [], strict_namespace=strict_namespace
         )
         if not schema_map and listed and listed != table:
-            schema_map = _introspect_table_schema(
+            schema_map, schema_nulls, schema_keys = _introspect_table_schema_rich(
                 fmt, cfg, table, [], strict_namespace=strict_namespace
             )
         if not schema_map and not listed:
             # Last chance: bare leaf name may live outside the connector schema
             # for *source* discovery only. Destination stays strict above.
-            schema_map = _introspect_table_schema(
+            schema_map, schema_nulls, schema_keys = _introspect_table_schema_rich(
                 fmt, cfg, table, [], strict_namespace=strict_namespace
             )
         if schema_map:
             out["columns"] = list(schema_map.keys())
             out["schema"] = schema_map
+            out["schema_nullability"] = schema_nulls
+            out["primary_key_columns"] = list(
+                (schema_keys or {}).get("primary_key_columns") or []
+            )
+            out["unique_keys"] = list((schema_keys or {}).get("unique_keys") or [])
+            schema_warnings = [
+                str(w) for w in ((schema_keys or {}).get("warnings") or []) if w
+            ]
+            if schema_warnings:
+                # Preserve introspect honesty (BQ/Redshift/SF NOT ENFORCED) for
+                # Validate — never drop advisory-key warnings at the adapter edge.
+                existing = [str(w) for w in (out.get("warnings") or []) if w]
+                for w in schema_warnings:
+                    if w not in existing:
+                        existing.append(w)
+                out["warnings"] = existing
             out["table_exists"] = True
             if not listed:
                 # Heal the objects list so Destination/Map pickers see the table.
@@ -706,7 +731,11 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 out["objects"] = [{"name": leaf, "type": "table"}] + [
                     o for o in (out.get("objects") or []) if isinstance(o, dict) and o.get("name") != leaf
                 ]
-            out["message"] = out.get("message") or f"Found existing table `{resolve_table}`"
+            # Prefer advisory catalog message when present; else table-found note.
+            if schema_warnings and not out.get("message"):
+                out["message"] = schema_warnings[0]
+            else:
+                out["message"] = out.get("message") or f"Found existing table `{resolve_table}`"
             # Schema-only is not enough for Validate dry-run — fetch a bounded
             # sample so Transfer Studio can run transform integrity checks.
             _attach_sql_sample_rows(out, endpoint, cfg, fmt, resolve_table, sample_limit)
@@ -961,6 +990,8 @@ def build_transfer_plan(source: EndpointConfig, destination: EndpointConfig, sou
             from services.mapping_pipeline import run_mapping_pipeline
 
             dest_cols = plan.get("destination", {}).get("columns") or []
+            from services.data_profiler import source_types_are_authoritative
+
             preview = run_mapping_pipeline(
                 columns,
                 dest_cols,
@@ -974,6 +1005,9 @@ def build_transfer_plan(source: EndpointConfig, destination: EndpointConfig, sou
                 ] if dest_cols else None,
                 file_format=src_fmt if source.kind == "file" else None,
                 confidence_threshold=0.75,
+                source_types_authoritative=source_types_are_authoritative(
+                    source.kind or "", src_fmt or ""
+                ),
             )
             plan["mapping_preview"] = preview["mappings"][:20]
             plan["mapping_agents"] = preview.get("agents_used", [])

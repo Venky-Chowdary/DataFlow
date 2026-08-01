@@ -36,9 +36,18 @@ from connectors.writer_common import (
     dedupe_rows,
     dedupe_rows_by_pk_and_lsn,
     filter_stale_lsn_rows,
+    quarantine_currency_markers_into_numeric,
+    quarantine_unfit_binaries,
+    quarantine_unfit_bitstrings,
+    quarantine_unfit_booleans,
     quarantine_unfit_decimals,
+    quarantine_unfit_enum_set,
+    quarantine_unfit_integers,
+    quarantine_unfit_json,
     quarantine_unfit_specialty_types,
     quarantine_unfit_strings,
+    quarantine_unfit_temporals,
+    quarantine_unfit_years,
     quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
@@ -261,6 +270,18 @@ def write_mapped_rows(
             checksum="", chunks_completed=0, error="No column mappings",
         )
 
+    from connectors.writer_common import omit_generated_always_columns
+
+    target_cols, logical_types, _, _ = omit_generated_always_columns(
+        target_cols, logical_types, []
+    )
+    if not target_cols:
+        return WriteResult(
+            ok=False, rows_written=0, table_name=table_name, target_schema=database,
+            checksum="", chunks_completed=0,
+            error="All mapped columns are GENERATED ALWAYS — nothing to insert",
+        )
+
     table_name = sanitize_identifier(table_name, preserve_case=True)
     target_types = [mysql_type(t) for t in logical_types]
     dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
@@ -278,6 +299,9 @@ def write_mapped_rows(
         preserve_case=True,
     )
     # Fail-closed DECIMAL(p,s) fit — never silently truncate/round into target.
+    mapped_rows = quarantine_currency_markers_into_numeric(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
     mapped_rows = quarantine_unfit_decimals(
         mapped_rows,
         target_cols,
@@ -286,8 +310,39 @@ def write_mapped_rows(
         policy,
         dialect_label="MySQL DECIMAL",
     )
+    mapped_rows = quarantine_unfit_years(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_booleans(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_temporals(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
     mapped_rows = quarantine_unfit_specialty_types(
         mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_integers(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="MySQL INTEGER",
+    )
+    mapped_rows = quarantine_unfit_bitstrings(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_binaries(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="MySQL VARBINARY",
+    )
+    mapped_rows = quarantine_unfit_enum_set(
+        mapped_rows, target_cols, logical_types, rejected_details, policy
     )
     mapped_rows = quarantine_unfit_strings(
         mapped_rows,
@@ -296,6 +351,16 @@ def write_mapped_rows(
         rejected_details,
         policy,
         dialect_label="MySQL VARCHAR",
+    )
+    # MySQL has no ARRAY type: arrays and documents both land in JSON, so the
+    # JSON gate is what keeps a malformed document from degrading into text.
+    mapped_rows = quarantine_unfit_json(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="MySQL JSON",
     )
     sparse_rows: list[tuple] = []
     rows_for_checksum: list[tuple] = list(mapped_rows)

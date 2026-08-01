@@ -188,27 +188,135 @@ def _endpoint_from_connector(conn: dict[str, Any], table: str = "") -> Any:
     )
 
 
+def introspect_connector_table(
+    conn: dict[str, Any],
+    table: str = "",
+    *,
+    purpose: str = "",
+) -> dict[str, Any]:
+    """Canonical live schema read for a saved connector.
+
+    Every pilot capability that needs real column types — aggregation grounding,
+    filter coercion, transfer mapping — goes through this one path.
+    ``introspect_endpoint`` is not equivalent: it returns empty columns for
+    MongoDB, whose document shape only comes from ``introspect_schema``'s
+    sample-and-majority-vote. Splitting the two would let SUM refuse on a
+    genuinely numeric Mongo field while accepting it on Postgres.
+
+    ``purpose`` is passed to the introspector as ``introspect_purpose`` so
+    destination reads can distinguish "table absent" from "cannot connect" —
+    the difference between create-new and a hard failure.
+    """
+    from services.dialect_profiles import normalize_schema
+    from services.schema_introspect import introspect_schema
+
+    from src.transfer.adapters import resolve_connector_config
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    endpoint = _endpoint_from_connector(conn, table=table)
+    if purpose:
+        endpoint.extra = {**(getattr(endpoint, "extra", None) or {}), "introspect_purpose": purpose}
+    cfg = resolve_connector_config(endpoint)
+    db_type = resolve_driver_type(cfg.get("type") or endpoint.format or "")
+    info = introspect_schema(
+        db_type,
+        host=str(cfg.get("host") or ""),
+        port=int(cfg.get("port") or 0) or 5432,
+        database=str(cfg.get("database") or ""),
+        username=str(cfg.get("username") or ""),
+        password=str(cfg.get("password") or ""),
+        schema=normalize_schema(db_type, cfg.get("schema"), username=cfg.get("username")) or "",
+        connection_string=str(cfg.get("connection_string") or ""),
+        ssl=bool(cfg.get("ssl")),
+        warehouse=str(cfg.get("warehouse") or ""),
+        table=table,
+        catalog_type=str(cfg.get("type") or ""),
+        auth_source=str(cfg.get("auth_source") or ""),
+    )
+    ok = bool(info.get("ok"))
+    return {
+        "ok": ok,
+        "error": str(info.get("error") or ""),
+        "db_type": db_type,
+        "columns": _normalize_columns(info) if ok else [],
+        "tables": info.get("tables") or [],
+        "config": cfg,
+        "endpoint": endpoint,
+        "raw": info,
+    }
+
+
 def _normalize_columns(info: dict[str, Any]) -> list[dict[str, Any]]:
+    """Collapse the several shapes ``introspect_endpoint`` returns into one list.
+
+    Newer introspectors put typed columns in ``info["columns"]`` as dicts; older
+    ones put bare names there and the real DDL in ``info["schema"]``. Without
+    reading the schema map, every column collapses to TEXT and the pilot
+    refuses SUM/AVG on NUMERIC and "by month" on DATE.
+    """
+    schema_map = info.get("schema") if isinstance(info.get("schema"), dict) else {}
+    nullability = (
+        info.get("schema_nullability")
+        if isinstance(info.get("schema_nullability"), dict)
+        else {}
+    )
     cols = info.get("columns") or []
     if isinstance(cols, dict):
-        return [
-            {"name": str(k), "inferred_type": str(v), "nullable": True}
-            for k, v in cols.items()
-        ]
+        # Some engines return columns as {name: type} already.
+        schema_map = {**schema_map, **{str(k): str(v) for k, v in cols.items()}}
+        cols = list(cols.keys())
+
     out: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for c in cols:
         if isinstance(c, dict):
+            name = str(c.get("name") or "").strip()
+            if not name or name in seen:
+                continue
+            typed = str(
+                c.get("inferred_type")
+                or c.get("type")
+                or c.get("data_type")
+                or schema_map.get(name)
+                or "TEXT"
+            )
             out.append({
-                "name": str(c.get("name") or ""),
-                "inferred_type": str(
-                    c.get("inferred_type") or c.get("type") or c.get("data_type") or "TEXT"
+                "name": name,
+                "inferred_type": typed,
+                "nullable": bool(
+                    c["nullable"] if "nullable" in c else nullability.get(name, True)
                 ),
-                "nullable": bool(c.get("nullable", True)),
-                "data_type": str(c.get("data_type") or c.get("column_type") or ""),
+                "data_type": str(
+                    c.get("data_type") or c.get("column_type") or schema_map.get(name) or ""
+                ),
             })
+            seen.add(name)
         else:
-            out.append({"name": str(c), "inferred_type": "TEXT", "nullable": True})
-    return [c for c in out if c.get("name")]
+            name = str(c).strip()
+            if not name or name in seen:
+                continue
+            typed = str(schema_map.get(name) or "TEXT")
+            out.append({
+                "name": name,
+                "inferred_type": typed,
+                "nullable": bool(nullability.get(name, True)),
+                "data_type": typed,
+            })
+            seen.add(name)
+
+    # Schema map may carry columns the bare-name list omitted.
+    for name, typed in schema_map.items():
+        name = str(name).strip()
+        if not name or name in seen:
+            continue
+        out.append({
+            "name": name,
+            "inferred_type": str(typed or "TEXT"),
+            "nullable": bool(nullability.get(name, True)),
+            "data_type": str(typed or ""),
+        })
+        seen.add(name)
+    return out
 
 
 def _schema_map(columns: list[dict[str, Any]]) -> dict[str, str]:

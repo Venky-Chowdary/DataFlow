@@ -72,8 +72,11 @@ def run_plan_mapping(
         for c in plan.target_columns
     ]
 
+    from services.data_profiler import source_types_are_authoritative
+
     policies = getattr(plan, "policies", None) or {}
     dest = plan.destination if isinstance(plan.destination, dict) else {}
+    src = plan.source if isinstance(plan.source, dict) else {}
     table_exists = dest.get("table_exists")
     if not isinstance(table_exists, bool):
         table_exists = None
@@ -90,6 +93,10 @@ def run_plan_mapping(
         schema_policy=policies.get("schema_policy", "manual_review"),
         sync_mode=str(policies.get("sync_mode") or ""),
         destination_table_exists=table_exists,
+        source_types_authoritative=source_types_are_authoritative(
+            str(src.get("kind") or ""),
+            str(src.get("format") or ""),
+        ),
     )
 
     updated = add_mapping_revision(plan_id, result)
@@ -226,6 +233,7 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         validation_mode=validation_mode,
         date_locale=policies.get("date_locale", ""),
         destination_column_types=live_target_schema,
+        destination_column_nullability=dest_meta.get("column_nullability") or {},
         destination_table_exists=table_exists,
         destination_can_create=dest_meta.get("can_create_table"),
         destination_can_write=dest_meta.get("can_write"),
@@ -239,6 +247,7 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         previous_source_schema=prev_schema or None,
         contract_primary_key=extract_contract_primary_key(policies.get("stream_contracts")),
         destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
+        destination_unique_keys=dest_meta.get("unique_keys") or [],
     )
     pf = apply_policy_gates(
         pf,
@@ -256,6 +265,14 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
 
     if pf.get("effective_mappings"):
         pf["mappings"] = pf["effective_mappings"]
+    # Surface destination catalog honesty (BQ/Redshift/SF NOT ENFORCED) warn-only.
+    for w in dest_meta.get("warnings") or dest_meta.get("schema_warnings") or []:
+        note = str(w).strip()
+        if not note:
+            continue
+        bucket = pf.setdefault("warnings", [])
+        if note not in bucket:
+            bucket.append(note)
     add_preflight_run(plan_id, pf)
     drift = pf.get("schema_drift") or {}
     append_audit_event(

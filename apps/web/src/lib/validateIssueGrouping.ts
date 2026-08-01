@@ -302,6 +302,17 @@ export function partitionExplainIssues(issues: ValidationIssue[]): {
   return { blockers, warnings, isoGroup };
 }
 
+/** True when samples look green but declared types still collapse fidelity. */
+export function isDeclaredFidelityCollapse(col: CoercionColumn): boolean {
+  if (col.fidelity_collapse) return true;
+  const kind = (col.framing?.kind || "").toLowerCase();
+  return (
+    kind === "fidelity_collapse"
+    || kind === "nested_shape_collapse"
+    || kind === "nested_document_serialization"
+  );
+}
+
 export function partitionCoercionColumns(columns: CoercionColumn[]): {
   isoNormalize: CoercionColumn[];
   otherActionable: CoercionColumn[];
@@ -311,6 +322,12 @@ export function partitionCoercionColumns(columns: CoercionColumn[]): {
   const otherActionable: CoercionColumn[] = [];
   const clean: CoercionColumn[] = [];
   for (const col of columns) {
+    // Declared fidelity collapse must never land in "convert cleanly" — even if
+    // a stale client payload still says severity=ok (Airbyte sample-green class).
+    if (isDeclaredFidelityCollapse(col)) {
+      otherActionable.push(col);
+      continue;
+    }
     if (col.severity === "ok") {
       clean.push(col);
       continue;

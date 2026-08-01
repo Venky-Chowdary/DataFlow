@@ -13,6 +13,7 @@ from connectors.elasticsearch_reader import _client
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
     build_mapped_rows_with_details,
+    gate8_writer_meta,
     resolve_target_columns,
     row_checksum,
     transform_error_policy,
@@ -27,7 +28,12 @@ class WriteResult(_WriteResult):
 
 
 def _to_es_value(value: Any, source_type: str) -> Any:
-    """Convert transform-engine values to Elasticsearch-native JSON shapes."""
+    """Convert transform-engine values to Elasticsearch-native JSON shapes.
+
+    Binary is stored as base64 text (JSON-safe); invalid base64 / UUID raise
+    ValueError so the writer can quarantine — never invent UTF-8 bytes or a
+    random UUID (Airbyte/Fivetran fail-closed class).
+    """
     if value is None:
         return None
     upper = source_type.upper()
@@ -39,6 +45,21 @@ def _to_es_value(value: Any, source_type: str) -> Any:
             return float(value)
         except (ValueError, TypeError):
             return value
+    if upper in {"BOOLEAN", "BOOL"}:
+        from connectors.sql_bind import coerce_boolean_wire
+
+        return bool(coerce_boolean_wire(value, as_int=False))
+    if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
+        from connectors.sql_bind import coerce_uuid_wire
+
+        return coerce_uuid_wire(value)
+    if upper in {"BINARY", "BLOB", "BYTEA", "VARBINARY"}:
+        import base64
+
+        from connectors.sql_bind import coerce_binary_wire
+
+        raw = coerce_binary_wire(value)
+        return base64.b64encode(raw).decode("ascii") if raw is not None else None
     if upper in {"JSON", "OBJECT", "ARRAY", "VARIANT"}:
         # ES dynamic mapping can only assign one JSON kind per field; storing the
         # JSON as a string keeps the transfer lossless and avoids object/array
@@ -175,10 +196,33 @@ def write_mapped_rows(
         identity_missing = 0
         actions: list[dict[str, Any]] = []
         for row_idx, row in enumerate(mapped_rows):
-            source = {
-                target_cols[i]: _to_es_value(value, logical_types[i])
-                for i, value in enumerate(row)
-            }
+            try:
+                source = {
+                    target_cols[i]: _to_es_value(value, logical_types[i])
+                    for i, value in enumerate(row)
+                }
+            except (ValueError, TypeError) as cell_exc:
+                rejected_details.append({
+                    "row": row_idx + 1,
+                    "column": "",
+                    "target": index,
+                    "value": "",
+                    "reason": str(cell_exc)[:500],
+                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                    "chars": [],
+                })
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=index,
+                        target_schema=host or "localhost",
+                        checksum="",
+                        chunks_completed=0,
+                        error=str(cell_exc)[:500],
+                        rejected_details=rejected_details[:100],
+                    )
+                continue
             doc_id = _resolve_doc_id(
                 source,
                 conflict_columns=conflict,
@@ -274,6 +318,7 @@ def write_mapped_rows(
             warnings=(errors + [str(e) for e in (bulk_errors or [])[:5]])[:10],
             rejected_rows=len({str(d.get("row")) for d in all_rejected if d.get("row") not in (None, "")}),
             rejected_details=all_rejected[:100],
+            meta=gate8_writer_meta(mapped_rows, target_cols) if not fail_closed else {},
         )
     except Exception as exc:
         return WriteResult(

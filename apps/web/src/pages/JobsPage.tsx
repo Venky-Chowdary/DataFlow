@@ -1949,8 +1949,13 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                 mappings: maps,
               });
             }}
-            onReplayComplete={() => {
+            onReplayComplete={(childJobId) => {
               void onRefresh?.();
+              if (childJobId) {
+                // Open the child job so Gate-8 / trust score from replay are visible.
+                setSelectedId(childJobId);
+                setEvidenceDrawer(null);
+              }
             }}
           />
         </Drawer>

@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -26,8 +27,8 @@ from services.value_serializer import json_default
 from connectors.writer_common import (
     WriteResult,
     _rejected_row_count,
+    apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
-    quarantine_unfit_decimals,
     resolve_target_columns,
     transform_error_policy,
 )
@@ -85,7 +86,12 @@ def _decimal_target_types_for_iceberg_write(
     arrow_schema: Any | None = None,
     pa_mod: Any | None = None,
 ) -> list[str]:
-    """Prefer committed Arrow/Iceberg (p,s); else mapped carriers with params."""
+    """Prefer committed Arrow/Iceberg physical types; else mapped carriers.
+
+    Used by the shared quarantine matrix (decimal / int / fixed(L) / temporal).
+    Iceberg ``string`` / ``binary`` are unbounded — string/binary quarantine
+    no-ops unless ``fixed(L)`` / DECIMAL(p,s) / int32 are present (spec honesty).
+    """
     out: list[str] = []
     for col in target_cols:
         if (
@@ -94,16 +100,80 @@ def _decimal_target_types_for_iceberg_write(
             and col in getattr(arrow_schema, "names", [])
         ):
             field = arrow_schema.field(col)
-            if pa_mod.types.is_decimal(field.type):
-                out.append(f"DECIMAL({field.type.precision},{field.type.scale})")
+            ftype = field.type
+            if pa_mod.types.is_decimal(ftype):
+                out.append(f"DECIMAL({ftype.precision},{ftype.scale})")
+                continue
+            if pa_mod.types.is_fixed_size_binary(ftype):
+                out.append(f"BINARY({int(ftype.byte_width)})")
+                continue
+            if pa_mod.types.is_int32(ftype):
+                out.append("INT")
+                continue
+            if pa_mod.types.is_int16(ftype):
+                out.append("SMALLINT")
+                continue
+            if pa_mod.types.is_int64(ftype):
+                out.append("BIGINT")
+                continue
+            if pa_mod.types.is_boolean(ftype):
+                out.append("BOOLEAN")
+                continue
+            if pa_mod.types.is_date(ftype):
+                out.append("DATE")
+                continue
+            if pa_mod.types.is_timestamp(ftype):
+                out.append("TIMESTAMPTZ" if getattr(ftype, "tz", None) else "TIMESTAMP_NTZ")
+                continue
+            if pa_mod.types.is_time(ftype):
+                out.append("TIME")
+                continue
+            if pa_mod.types.is_binary(ftype) or pa_mod.types.is_large_binary(ftype):
+                out.append("BINARY")
+                continue
+            if pa_mod.types.is_string(ftype) or pa_mod.types.is_large_string(ftype):
+                out.append("STRING")
                 continue
         raw = ""
         if write_types and col in write_types:
             raw = str(write_types.get(col) or "")
         if not raw:
             raw = str(dest_types.get(col) or "string")
+        # Preserve fixed(L) / BINARY(n) from mapped create-new carriers.
+        from services.type_system import (
+            LOGICAL_BINARY,
+            ddl_type,
+            normalize_logical_type,
+            parse_binary_carrier_width,
+        )
+
+        if normalize_logical_type(raw) == LOGICAL_BINARY:
+            width = parse_binary_carrier_width(raw)
+            if width is not None:
+                out.append(ddl_type("iceberg", raw) or f"fixed({width})")
+                continue
+            out.append("BINARY")
+            continue
         out.append(_ensure_iceberg_decimal_carrier(raw))
     return out
+
+
+def _apply_iceberg_write_quarantine(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    target_types: list[str],
+    rejected_details: list[dict[str, Any]],
+    policy: str,
+) -> list[tuple]:
+    """Delegate to SSOT matrix — Iceberg string/binary unbounded no-op on width."""
+    return apply_write_quarantine_matrix(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="Iceberg",
+    )
 
 
 def _iceberg_type_to_logical_carrier(iceberg_type: Any) -> str:
@@ -114,14 +184,28 @@ def _iceberg_type_to_logical_carrier(iceberg_type: Any) -> str:
             p = int(iceberg_type.get("precision") or 38)
             s = int(iceberg_type.get("scale") or 0)
             return f"DECIMAL({p},{s})"
+        if kind == "fixed":
+            length = iceberg_type.get("length") or iceberg_type.get("len")
+            try:
+                n = int(length)
+                if n > 0:
+                    return f"BINARY({n})"
+            except (TypeError, ValueError):
+                pass
+            return "BINARY"
         if kind in {"list", "map", "struct"}:
             return "JSON"
         return kind or "string"
     t = str(iceberg_type or "string").lower()
+    m_fixed = re.match(r"fixed\s*\[\s*(\d+)\s*\]", t) or re.match(
+        r"fixed\s*\(\s*(\d+)\s*\)", t
+    )
+    if m_fixed:
+        return f"BINARY({int(m_fixed.group(1))})"
     mapping = {
         "string": "string",
-        "long": "integer",
-        "int": "integer",
+        "long": "BIGINT",
+        "int": "INT",
         "double": "float",
         "float": "float",
         "boolean": "boolean",
@@ -259,9 +343,10 @@ def _merge_upsert_rows(
     pk_cols: list[str],
     lsn_col: str = "_df_lsn",
 ) -> list[dict[str, Any]]:
-    """PK upsert with LSN guard: keep row with higher/equal LSN; no LSN → last wins.
+    """PK upsert with LSN guard: keep row with strictly newer LSN; equal → keep existing.
 
-    Sparse CDC: ``DF_MISSING`` keys are omitted and never wipe prior column values.
+    No LSN on either side → last wins (batch overwrite). Sparse CDC: ``DF_MISSING``
+    keys are omitted and never wipe prior column values.
     """
     from connectors.writer_common import compare_lsn
     from services.value_serializer import is_missing_sentinel
@@ -341,6 +426,12 @@ def _logical_to_arrow_type(logical: str, pa: Any) -> Any:
     if logical_n == LOGICAL_TIME:
         return pa.time64("us")
     if logical_n == LOGICAL_BINARY:
+        from services.type_system import parse_binary_carrier_width
+
+        width = parse_binary_carrier_width(raw)
+        if width is not None and width > 0:
+            # Iceberg fixed(L) — exact byte width (spec); never silent truncate.
+            return pa.binary(int(width))
         return pa.large_binary()
     # PyIceberg maps Iceberg string -> large_string; use it consistently.
     return pa.large_string()
@@ -422,9 +513,12 @@ def _coerce_arrow_cell(value: Any, arrow_type: Any, pa: Any) -> Any:
             return value.time()
         return time.fromisoformat(str(value))
     if pa.types.is_binary(arrow_type) or pa.types.is_large_binary(arrow_type):
-        if isinstance(value, (bytes, bytearray)):
-            return bytes(value)
-        return str(value).encode("utf-8")
+        if value is None:
+            return None
+        from connectors.sql_bind import coerce_binary_wire
+
+        # Same SSOT as SQL BYTEA/BLOB — refuse silent UTF-8 invent on invalid wire.
+        return coerce_binary_wire(value)
     if isinstance(value, (dict, list)):
         return json.dumps(value, default=json_default)
     return str(value)
@@ -683,20 +777,19 @@ def _write_mapped_rows_pyiceberg(
             existing_arrow = tbl.schema().as_arrow()
 
         final_arrow = existing_arrow
-        # Fail-closed DECIMAL(p,s) — quarantine before pa.array (batch abort → row hold-out).
-        decimal_types = _decimal_target_types_for_iceberg_write(
+        # Fail-closed quarantine before pa.array (one bad row must not abort the batch).
+        quarantine_types = _decimal_target_types_for_iceberg_write(
             target_cols,
             dest_types,
             arrow_schema=final_arrow,
             pa_mod=pa,
         )
-        mapped_rows = quarantine_unfit_decimals(
+        mapped_rows = _apply_iceberg_write_quarantine(
             mapped_rows,
             target_cols,
-            decimal_types,
+            quarantine_types,
             rejected_details,
             policy,
-            dialect_label="Iceberg decimal",
         )
         if not mapped_rows:
             return WriteResult(
@@ -1009,9 +1102,9 @@ def _write_mapped_rows_filesystem(
     # Always write Parquet/JSONL using committed field types — never diverge from
     # type_locked metadata (incoming dest_types may differ).
     write_types = _write_types_from_schema(schema_json, dest_types)
-    # Fail-closed DECIMAL(p,s) against committed schema — never let pa.array abort
-    # the whole batch on one overflow row.
-    mapped_rows = quarantine_unfit_decimals(
+    # Fail-closed quarantine against committed schema — never let one overflow
+    # row abort the whole Parquet/Arrow batch.
+    mapped_rows = _apply_iceberg_write_quarantine(
         mapped_rows,
         target_cols,
         _decimal_target_types_for_iceberg_write(
@@ -1019,7 +1112,6 @@ def _write_mapped_rows_filesystem(
         ),
         rejected_details,
         policy,
-        dialect_label="Iceberg decimal",
     )
     file_warnings: list[str] = []
     if write_mode in {"overwrite", "replace"} and current_meta:
@@ -1081,6 +1173,7 @@ def _write_mapped_rows_filesystem(
             "added-data-files": "1",
             "dataflow.checksum": checksum,
             "dataflow.write_mode": mode,
+            "dataflow.write_strategy": "copy-on-write",
         },
         "manifest-list": rel_path,
         "schema-id": schema_json.get("schema-id", 0),
@@ -1105,6 +1198,7 @@ def _write_mapped_rows_filesystem(
             "dataflow.engine": "iceberg_writer",
             "dataflow.evolve": ",".join(evolve_notes) if evolve_notes else "",
             "dataflow.write_mode": mode,
+            "dataflow.write_strategy": "copy-on-write",
         },
         "data-files": data_files,
     }
@@ -1356,6 +1450,7 @@ def _delete_filesystem(
             "added-data-files": "1",
             "dataflow.checksum": checksum,
             "dataflow.write_mode": "cdc_delete",
+            "dataflow.write_strategy": "copy-on-write",
             "dataflow.deleted_keys": str(deleted),
         },
         "manifest-list": rel_path,
@@ -1371,6 +1466,7 @@ def _delete_filesystem(
         "properties": {
             **(current_meta.get("properties") or {}),
             "dataflow.write_mode": "cdc_delete",
+            "dataflow.write_strategy": "copy-on-write",
         },
     }
     meta_path = meta_dir / f"v{new_version}.metadata.json"

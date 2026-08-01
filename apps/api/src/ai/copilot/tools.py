@@ -240,8 +240,58 @@ TOOL_DEFINITIONS: list[dict] = [
                 "source": {"type": "string", "description": "Source system, connector, file type, or table"},
                 "destination": {"type": "string", "description": "Destination system, warehouse, database, file type, or table"},
                 "workload": {"type": "string", "description": "full_load, incremental, cdc, file_export, or unknown"},
+                "table": {"type": "string", "description": "Source table — required for a real plan"},
+                "dest_table": {"type": "string", "description": "Destination table (defaults to the source name)"},
+                "sync_mode": {"type": "string"},
             },
             "required": [],
+        },
+    },
+    {
+        "name": "plan_transfer",
+        "description": (
+            "Plan a real transfer between two saved connectors: introspect both schemas live, "
+            "map columns, list type conversions and lossy casts, and run the 9 preflight gates. "
+            "Read-only — it never moves data. Use whenever the operator asks what a transfer "
+            "would do, or before starting one."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source_connector_name": {"type": "string", "description": "Saved source connector"},
+                "source_table": {"type": "string", "description": "Source table or collection"},
+                "dest_connector_name": {"type": "string", "description": "Saved destination connector"},
+                "dest_table": {"type": "string", "description": "Destination table (defaults to the source name)"},
+                "sync_mode": {
+                    "type": "string",
+                    "description": (
+                        "full_refresh_append, full_refresh_overwrite, incremental_append, "
+                        "incremental_upsert, or cdc_incremental"
+                    ),
+                },
+                "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
+            },
+            "required": ["source_table"],
+        },
+    },
+    {
+        "name": "start_transfer",
+        "description": (
+            "Stage a transfer between two saved connectors for the operator to Confirm. "
+            "Runs the plan and preflight first and refuses when any gate blocks. "
+            "This never moves data on its own — execution happens only after Confirm."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source_connector_name": {"type": "string"},
+                "source_table": {"type": "string"},
+                "dest_connector_name": {"type": "string"},
+                "dest_table": {"type": "string"},
+                "sync_mode": {"type": "string"},
+                "limit": {"type": "integer", "description": "Cap rows moved (0 = all)"},
+            },
+            "required": ["source_table"],
         },
     },
     {
@@ -425,6 +475,54 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "aggregate_data",
+        "description": (
+            "Answer an analytics question with an exact server-side aggregate: row "
+            "counts, SUM/AVG/MIN/MAX, COUNT(DISTINCT), and GROUP BY / top-N "
+            "breakdowns. Use this for “how many orders”, “count by status”, "
+            "“average price”, “revenue by month”, “top 5 regions by revenue”. "
+            "Columns are validated against the live schema, so prefer this over "
+            "hand-written SQL. Totals are exact — never sampled or estimated."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "connector_id": {"type": "string"},
+                "connector_name": {"type": "string"},
+                "table": {"type": "string", "description": "Table or view to aggregate"},
+                "metric": {
+                    "type": "string",
+                    "enum": ["count", "count_distinct", "sum", "avg", "min", "max"],
+                    "default": "count",
+                },
+                "column": {
+                    "type": "string",
+                    "description": "Measure column; required for every metric except count",
+                },
+                "group_by": {
+                    "type": "string",
+                    "description": (
+                        "Dimension column, or a time grain (day/week/month/quarter/year) "
+                        "to bucket the table's date column"
+                    ),
+                },
+                "order": {"type": "string", "enum": ["desc", "asc"], "default": "desc"},
+                "limit": {"type": "integer", "default": 20},
+                "session_id": {"type": "string"},
+                "where": {
+                    "type": "string",
+                    "description": (
+                        "Filter phrase in plain language: \"status = open\", "
+                        "\"amount > 100\", \"email is null\", \"in 2024\", "
+                        "\"last 30 days\". Columns are validated and values are "
+                        "bound as typed parameters — never inlined into SQL."
+                    ),
+                },
+            },
+            "required": ["table"],
+        },
+    },
+    {
         "name": "analyze_result",
         "description": (
             "Profile a previously sampled/queried result by result_id (or the latest "
@@ -534,6 +632,7 @@ TOOL_FAMILIES: list[dict] = [
             "list_connector_objects",
             "introspect_connector_schema",
             "sample_connector_object",
+            "aggregate_data",
             "run_query",
             "analyze_result",
             "filter_result",
@@ -629,6 +728,8 @@ class DataPilotTools:
             "search_knowledge": self._search_knowledge,
             "describe_pilot": self._describe_pilot,
             "plan_transfer_route": self._plan_transfer_route,
+            "plan_transfer": self._plan_transfer,
+            "start_transfer": self._start_transfer,
             "explain_mapping_assurance": self._explain_mapping_assurance,
             "recommend_sync_mode": self._recommend_sync_mode,
             "inspect_schema_policy": self._inspect_schema_policy,
@@ -643,6 +744,7 @@ class DataPilotTools:
             "list_connector_objects": self._list_connector_objects,
             "sample_connector_object": self._sample_connector_object,
             "run_query": self._run_query,
+            "aggregate_data": self._aggregate_data,
             "analyze_result": self._analyze_result,
             "filter_result": self._filter_result,
             "introspect_connector_schema": self._introspect_connector_schema,
@@ -1111,6 +1213,8 @@ class DataPilotTools:
                 "role": "Data Pilot",
                 "runtime": "local_first",
                 "can": [
+                    "Answer analytics questions with exact aggregates "
+                    "(count / sum / avg / min / max / distinct / group by / top-N)",
                     "Plan source→destination routes and sync modes",
                     "Inspect schema risk, mappings, and validation failures",
                     "Triage jobs by ID (validation runs or job IDs)",
@@ -1123,6 +1227,12 @@ class DataPilotTools:
                     "Compare source vs destination schemas and map columns",
                     "List and run pipeline schedules (with confirmation)",
                     "Open any app screen (Transfer, Jobs, Pipelines, Contracts, Query, …)",
+                ],
+                "cannot_yet": [
+                    "Start a transfer or create a schedule from chat "
+                    "(I can plan the route and open Transfer Studio)",
+                    "Export a table to a file (use Query for larger pulls)",
+                    "Delete connectors, jobs, or data",
                 ],
                 "tools": [t["name"] for t in TOOL_DEFINITIONS],
                 "screens": [
@@ -1143,11 +1253,22 @@ class DataPilotTools:
                     for c in connectors
                 ],
                 "ask_examples": [
-                    "Analyze logistics data",
+                    "How many rows in airports on Local Postgres?",
+                    "Count of orders by status on Local Postgres where amount > 100",
+                    "Average price in products on Local Postgres",
+                    "and by region?",
+                    "Plan a transfer of orders from Local Postgres to Warehouse",
+                    "Transfer orders from Local Postgres to Warehouse as upsert",
                     "Why did job <id> fail?",
                     "Show my pipelines",
-                    "Run schedule Test now",
-                    "Take me to contracts",
+                ],
+                "remembers": [
+                    "Last connector, table, metric, and grouping in this chat",
+                    "Clarification answers (which connector / table / column)",
+                ],
+                "transfers": [
+                    "Plans use the same mapping pipeline and 9 gates as Transfer Studio",
+                    "Nothing moves until you Confirm — overwrite is never the default",
                 ],
             },
         )
@@ -1192,42 +1313,53 @@ class DataPilotTools:
         except Exception as e:
             return ToolResult(name="search_knowledge", success=False, output=None, error=str(e))
 
-    def _plan_transfer_route(self, source: str = "", destination: str = "", workload: str = "unknown") -> ToolResult:
-        source_l = source.lower()
-        dest_l = destination.lower()
-        workload_l = workload.lower()
-        is_file_source = any(x in source_l for x in ("csv", "json", "jsonl", "tsv", "file", "s3"))
-        is_file_dest = any(x in dest_l for x in ("csv", "json", "jsonl", "parquet", "file", "s3"))
-        is_cdc = workload_l == "cdc" or any(x in source_l for x in ("postgres", "mysql", "sql server", "oracle"))
-        route_type = (
-            "file_to_file" if is_file_source and is_file_dest else
-            "file_to_database" if is_file_source else
-            "database_to_file" if is_file_dest else
-            "database_to_database"
-        )
-        gates = [
-            "source_contract",
-            "schema_inference",
-            "semantic_mapping",
-            "type_compatibility",
-            "destination_probe",
-            "dry_run_transform",
-            "capacity_check",
-            "row_count_checksum_reconciliation",
-        ]
+    def _plan_transfer_route(
+        self,
+        source: str = "",
+        destination: str = "",
+        workload: str = "unknown",
+        table: str = "",
+        dest_table: str = "",
+        sync_mode: str = "",
+    ) -> ToolResult:
+        """Route guidance. Real plan when connectors resolve, honest sketch otherwise.
+
+        This used to substring-match "csv" in the connector name and return a
+        gate list whose IDs did not exist in ``PREFLIGHT_GATES``. Now the named
+        gates come from the registry, and naming a table gets the operator the
+        engine's actual mapping and gate results instead of a guess.
+        """
+        if source and destination and table:
+            from .transfer_tools import plan_transfer
+
+            planned = plan_transfer(
+                source_connector_name=source,
+                source_table=table,
+                dest_connector_name=destination,
+                dest_table=dest_table or table,
+                sync_mode=sync_mode or workload,
+            )
+            if planned.success:
+                return planned
+
+        try:
+            from preflight.gates import PREFLIGHT_GATES
+
+            gate_ids = [gid.value if hasattr(gid, "value") else str(gid) for gid, _ in PREFLIGHT_GATES]
+        except Exception:
+            gate_ids = []
+
         return ToolResult(name="plan_transfer_route", success=True, output={
-            "route_type": route_type,
+            "generic": True,
             "source": source or "source not specified",
             "destination": destination or "destination not specified",
-            "recommended_sync": "cdc_incremental" if is_cdc and workload_l != "full_load" else "full_refresh_overwrite",
-            "schema_policy": "detect_before_run_pause_on_breaking_changes",
-            "required_gates": gates,
-            "review_required_when": [
-                "mapping score gap below threshold",
-                "primary key or cursor removed",
-                "type coercion is lossy",
-                "destination contract conflicts",
-            ],
+            "required_gates": gate_ids,
+            "note": (
+                "This is the standard gate sequence, not a plan for your data. "
+                "Name two saved connectors and a table and I will introspect both "
+                "ends, map the columns and run the real gates."
+            ),
+            "next": 'Try: "plan a transfer of orders from Local Postgres to Warehouse".',
         })
 
     def _explain_mapping_assurance(self) -> ToolResult:
@@ -1518,6 +1650,88 @@ class DataPilotTools:
             session_id=session_id,
         )
 
+    def _aggregate_data(
+        self,
+        connector_id: str = "",
+        connector_name: str = "",
+        table: str = "",
+        metric: str = "count",
+        column: str = "",
+        group_by: str = "",
+        order: str = "desc",
+        limit: int = 20,
+        session_id: str = "",
+        where: str = "",
+    ) -> ToolResult:
+        from .aggregate_tools import aggregate_connector_data
+
+        return aggregate_connector_data(
+            connector_id=connector_id,
+            connector_name=connector_name,
+            table=table,
+            metric=metric,
+            column=column,
+            group_by=group_by,
+            order=order,
+            limit=limit,
+            session_id=session_id,
+            where=where,
+        )
+
+    def _plan_transfer(
+        self,
+        source_connector_id: str = "",
+        source_connector_name: str = "",
+        source_table: str = "",
+        dest_connector_id: str = "",
+        dest_connector_name: str = "",
+        dest_table: str = "",
+        sync_mode: str = "",
+        schema_policy: str = "manual_review",
+        validation_mode: str = "balanced",
+    ) -> ToolResult:
+        from .transfer_tools import plan_transfer
+
+        return plan_transfer(
+            source_connector_id=source_connector_id,
+            source_connector_name=source_connector_name,
+            source_table=source_table,
+            dest_connector_id=dest_connector_id,
+            dest_connector_name=dest_connector_name,
+            dest_table=dest_table,
+            sync_mode=sync_mode,
+            schema_policy=schema_policy,
+            validation_mode=validation_mode,
+        )
+
+    def _start_transfer(
+        self,
+        source_connector_id: str = "",
+        source_connector_name: str = "",
+        source_table: str = "",
+        dest_connector_id: str = "",
+        dest_connector_name: str = "",
+        dest_table: str = "",
+        sync_mode: str = "",
+        schema_policy: str = "manual_review",
+        validation_mode: str = "balanced",
+        limit: int = 0,
+    ) -> ToolResult:
+        from .transfer_tools import start_transfer
+
+        return start_transfer(
+            source_connector_id=source_connector_id,
+            source_connector_name=source_connector_name,
+            source_table=source_table,
+            dest_connector_id=dest_connector_id,
+            dest_connector_name=dest_connector_name,
+            dest_table=dest_table,
+            sync_mode=sync_mode,
+            schema_policy=schema_policy,
+            validation_mode=validation_mode,
+            limit=limit,
+        )
+
     def _analyze_result(
         self,
         result_id: str = "",
@@ -1668,6 +1882,60 @@ def _is_meta_pilot_question(lower: str) -> bool:
     return bool(re.search(r"\b(what|which)\s+(knowledge|skills|tools)\b", lower))
 
 
+# A pasted statement, not an English sentence that happens to contain "with".
+_SQL_FENCE_RE = re.compile(r"```(?:sql)?\s*(.+?)```", re.IGNORECASE | re.DOTALL)
+_SQL_SELECT_SHAPE = re.compile(r"^\s*select\b[\s\S]*?\bfrom\b\s*\S", re.IGNORECASE)
+_SQL_WITH_SHAPE = re.compile(
+    r"^\s*with\s+[\"`\[]?[a-z_][\w]*[\"`\]]?\s+as\s*\(", re.IGNORECASE
+)
+
+# Phrases that are never a connector name. "errors from yesterday" used to be
+# read as a table on a connector literally named "yesterday".
+_TIME_PHRASE_RE = re.compile(
+    r"^(?:yesterday|today|tonight|tomorrow|now|recently|lately|"
+    r"(?:the\s+)?(?:last|past|previous|this|current|next)\s+"
+    r"(?:few\s+|\d+\s+)?(?:second|minute|hour|day|week|month|quarter|year)s?|"
+    r"\d+\s+(?:second|minute|hour|day|week|month|quarter|year)s?(?:\s+ago)?)$",
+    re.IGNORECASE,
+)
+_NON_CONNECTOR_PHRASES = frozenset({
+    "it", "them", "this", "that", "these", "those", "here", "there",
+    "the database", "my database", "the source", "the destination",
+    "the table", "the collection", "anywhere", "everywhere",
+})
+
+
+def _extract_sql_statement(message: str) -> str:
+    """Return a pasted SQL statement, or "" when the text is plain English.
+
+    Anchored at the start of the statement on purpose. The previous pattern
+    matched a bare ``WITH``/``SELECT`` anywhere in the message, so
+    "what is wrong with my mapping" was sent to a live database as
+    ``WITH my mapping`` — ``_is_safe_sql`` allows ``WITH`` as a read-only start,
+    so the garbage reached the driver before failing.
+    """
+    text = (message or "").strip()
+    fenced = _SQL_FENCE_RE.search(text)
+    if fenced:
+        text = fenced.group(1).strip()
+    if _SQL_SELECT_SHAPE.match(text) or _SQL_WITH_SHAPE.match(text):
+        return text
+    return ""
+
+
+def _clean_connector_phrase(raw: str) -> str:
+    """Normalize a captured connector phrase, or "" when it cannot be one."""
+    phrase = (raw or "").strip().strip("\"'`").strip(" .,;:!?")
+    phrase = re.sub(r"\b(?:please|now|thanks?|thank\s+you)\b\s*$", "", phrase, flags=re.I)
+    phrase = phrase.strip(" .,;:!?")
+    if not phrase:
+        return ""
+    low = phrase.lower()
+    if low in _NON_CONNECTOR_PHRASES or _TIME_PHRASE_RE.match(low):
+        return ""
+    return phrase
+
+
 def _is_raw_knowledge_shard(text: str) -> bool:
     t = text.strip()
     if t.startswith("Semantic type:"):
@@ -1730,9 +1998,16 @@ def _looks_like_domain_knowledge_query(lower: str) -> bool:
 
 # Higher = preferred primary intent when multiple tools fire.
 _TOOL_PRIORITY: dict[str, int] = {
+    # A named source→destination move is the most specific thing an operator can
+    # ask for, so it outranks the schema tools it is built from.
+    "start_transfer": 110,
+    "plan_transfer": 108,
     "map_connector_schemas": 100,
     "diff_schemas": 95,
     "introspect_connector_schema": 90,
+    # A parsed analytics question outranks sampling and raw SQL: "count of orders
+    # by status" must answer with a real GROUP BY, not 25 preview rows.
+    "aggregate_data": 89,
     "sample_connector_object": 88,
     "run_query": 87,
     "analyze_result": 86,
@@ -1772,6 +2047,7 @@ _LIVE_SCHEMA_TOOLS = frozenset({
     "diff_schemas",
     "introspect_connector_schema",
     "sample_connector_object",
+    "aggregate_data",
     "run_query",
     "analyze_result",
     "filter_result",
@@ -1789,6 +2065,26 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
         planned = [
             (n, a) for n, a in planned
             if n not in ("analyze_dataset", "compare_datasets", "search_knowledge", "search_data")
+        ]
+    # A real aggregate answers the question; a 25-row sample or a regex-scraped
+    # query on the same table is strictly worse noise beside it.
+    if "aggregate_data" in names:
+        planned = [
+            (n, a) for n, a in planned
+            if n not in ("sample_connector_object", "run_query", "analyze_dataset")
+        ]
+    # A concrete transfer already contains the mapping, gates and route, so the
+    # generic advice tools beside it are redundant noise.
+    if names & {"start_transfer", "plan_transfer"}:
+        planned = [
+            (n, a) for n, a in planned
+            if n not in (
+                "plan_transfer_route", "recommend_sync_mode", "start_transfer_studio",
+                "explain_mapping_assurance", "get_transfer_capabilities",
+                "map_connector_schemas", "diff_schemas", "introspect_connector_schema",
+                "sample_connector_object", "list_connector_objects", "search_connectors",
+                "list_connectors",
+            )
         ]
     # Job ID triage wins over generic list_jobs
     if "get_job" in names or "get_preflight_run" in names or "open_job" in names:
@@ -1822,6 +2118,87 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
         (n, a) for n, a in planned
         if (n, json.dumps(a, sort_keys=True, default=str)) in keep_set
     ]
+
+
+# "move orders from Local Postgres to Warehouse" and its many phrasings. The
+# table is captured separately from the endpoints so the planner can introspect
+# a real object rather than pattern-matching the connector's name.
+_TRANSFER_VERBS = r"transfer|move|copy|sync|migrate|replicate|load|push|send|export"
+_TRANSFER_RE = re.compile(
+    rf"\b(?:{_TRANSFER_VERBS})\b"
+    r"(?:\s+(?:a|an|the))?"
+    r"(?:\s+(?:transfer|copy|sync|data|rows|records|everything))?"
+    r"(?:\s+(?:of|for))?"
+    r"\s+(?P<table>[A-Za-z_][\w.$]*)"
+    r"(?:\s+(?:table|collection|dataset))?"
+    r"\s+(?:from|out\s+of)\s+(?P<src>.+?)"
+    r"\s+(?:to|into|onto|over\s+to|->)\s+(?P<dst>.+?)\s*$",
+    re.IGNORECASE,
+)
+# Trailing qualifiers that belong to the run, not to the destination's name.
+_TRANSFER_TAIL_RE = re.compile(
+    r"\s+(?:as|using|with|in|via)\s+(?P<mode>[\w\s-]{2,40})$",
+    re.IGNORECASE,
+)
+# When the operator is asking rather than instructing, plan instead of staging.
+# Ambiguity resolves toward the read-only branch on purpose.
+_PLAN_ONLY_WORDS = (
+    "plan", "would", "dry run", "dry-run", "preview", "what happens",
+    "check", "simulate", "estimate", "before i", "safe", "should i",
+    "is it ok", "risk",
+)
+
+
+def _strip_transfer_tail(dest: str) -> tuple[str, str]:
+    """Split "Warehouse as upsert" into the connector and the sync mode."""
+    from .transfer_tools import normalize_sync_mode
+
+    # A trailing clause ("…to wh, is that safe?") is commentary, not a name.
+    dest = re.split(r"[,;?]", dest, maxsplit=1)[0].strip()
+    tail = _TRANSFER_TAIL_RE.search(dest)
+    if not tail:
+        return dest.strip(), ""
+    spoken = tail.group("mode").strip()
+    mode = normalize_sync_mode(spoken, default="")
+    if not mode:
+        # "into orders in production" — the tail was part of the name.
+        return dest.strip(), ""
+    return dest[: tail.start()].strip(), mode
+
+
+def parse_transfer_intent(message: str) -> dict | None:
+    """Extract source/destination/table from a transfer request, or None."""
+    text = (message or "").strip()
+    if not text:
+        return None
+    match = _TRANSFER_RE.search(text)
+    if not match:
+        return None
+    table = match.group("table").strip()
+    source = match.group("src").strip().strip("\"'")
+    dest, mode = _strip_transfer_tail(match.group("dst").strip().strip("\"'"))
+    if not table or not source or not dest:
+        return None
+    lowered = text.lower()
+    if not mode:
+        mode = normalize_sync_mode_for_message(lowered)
+    return {
+        "source_table": table,
+        "source_connector_name": source[:80],
+        "dest_connector_name": dest[:80],
+        "sync_mode": mode,
+        # Asking what a transfer *would* do must never stage a mutation.
+        "plan_only": any(w in lowered for w in _PLAN_ONLY_WORDS),
+    }
+
+
+def normalize_sync_mode_for_message(lowered: str) -> str:
+    from .transfer_tools import normalize_sync_mode
+
+    for phrase in ("overwrite", "replace", "truncate", "upsert", "merge", "append", "cdc"):
+        if phrase in lowered:
+            return normalize_sync_mode(phrase, default="")
+    return ""
 
 
 def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
@@ -1946,7 +2323,15 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     if any(w in lower for w in ("capabilities", "what can transfer", "supported", "any to any")):
         planned.append(("get_transfer_capabilities", {}))
 
-    if any(w in lower for w in ("plan transfer", "transfer plan", "route plan", "move from", "migrate from")):
+    transfer_intent = parse_transfer_intent(message)
+    if transfer_intent:
+        plan_only = transfer_intent.pop("plan_only", False)
+        transfer_intent = {k: v for k, v in transfer_intent.items() if v}
+        planned.append(("plan_transfer" if plan_only else "start_transfer", transfer_intent))
+
+    if not transfer_intent and any(
+        w in lower for w in ("plan transfer", "transfer plan", "route plan", "move from", "migrate from")
+    ):
         src, dst = "", ""
         route = re.search(
             r"(?:from|source)\s+[\"']?([^\"'\n]+?)[\"']?\s+(?:to|into|->|destination)\s+[\"']?([^\"'\n]+?)[\"']?\s*$",
@@ -2034,6 +2419,15 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         cname = tables_on.group(1).strip().strip("\"'")
         planned.append(("list_connector_objects", {"connector_name": cname}))
 
+    # Aggregations: "count of orders by status", "average price in products",
+    # "top 5 regions by revenue", "revenue by month". Parsed structurally; the
+    # tool then grounds every name in the live schema.
+    from .aggregate_tools import parse_aggregation_request
+
+    agg = parse_aggregation_request(message)
+    if agg is not None and not agg.missing and "aggregate_data" not in [p[0] for p in planned]:
+        planned.append(("aggregate_data", agg.as_tool_args()))
+
     # Sample / analyze live table data
     sample_m = re.search(
         r"(?:sample|preview|show(?:\s+me)?(?:\s+some)?(?:\s+data)?(?:\s+from)?|rows?\s+from|"
@@ -2056,30 +2450,32 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         if "schema" not in lower and "columns" not in lower and "describe" not in lower:
             table = (sample_m.group(1) or "").strip()
             cname = (sample_m.group(2) or "").strip() if sample_m.lastindex and sample_m.lastindex >= 2 else ""
-            cname = re.sub(r"\b(please|now|table|schema|collection)\b", "", cname).strip(" .,")
+            cname = re.sub(r"\b(table|schema|collection)\b", "", cname)
+            cname = _clean_connector_phrase(cname)
             if table and table not in {"data", "rows", "me", "some", "the"}:
                 args = {"table": table, "analyze": "analy" in lower or "profile" in lower}
                 if cname:
                     args["connector_name"] = cname
                 planned.append(("sample_connector_object", args))
 
-    # Explicit SQL
-    sql_m = re.search(
+    # Explicit SQL — either "run this sql: …" or a genuinely pasted statement.
+    explicit_sql = re.search(
         r"(?:run|execute)\s+(?:this\s+)?(?:sql|query)\s*[:\-]?\s*(.+)$",
         message,
         re.IGNORECASE | re.DOTALL,
-    ) or re.search(
-        r"\b((?:SELECT|WITH)\s+.+)\s*$",
-        message,
-        re.IGNORECASE | re.DOTALL,
     )
-    if sql_m and "run_query" not in [p[0] for p in planned]:
-        sql = (sql_m.group(1) or "").strip().strip("`")
+    raw_sql = (
+        (explicit_sql.group(1) or "").strip()
+        if explicit_sql
+        else _extract_sql_statement(message)
+    )
+    if raw_sql and "run_query" not in [p[0] for p in planned]:
+        sql = raw_sql.strip().strip("`")
         # Optional "on Connector" suffix
         on_m = re.search(r"\s+(?:on|using|against)\s+[\"']?([^\"'\n]+?)[\"']?\s*$", sql, re.IGNORECASE)
         cname = ""
         if on_m:
-            cname = on_m.group(1).strip()
+            cname = _clean_connector_phrase(on_m.group(1))
             sql = sql[: on_m.start()].strip()
         args = {"query": sql, "analyze": "analy" in lower}
         if cname:

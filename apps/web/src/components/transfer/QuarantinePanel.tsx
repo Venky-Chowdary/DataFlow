@@ -272,6 +272,7 @@ export function QuarantinePanel({
         transform_overrides: overrides,
       });
       const promoted = result.dest_dlq_promoted;
+      const gate8 = result.reconciliation;
       setReplayResult({
         job_id: result.job_id,
         rows_written: result.rows_written,
@@ -279,10 +280,18 @@ export function QuarantinePanel({
         dest_dlq_promoted: promoted,
       });
       toast({
-        title: result.rejected ? "Promote finished with rejects" : "Promote / Replay finished",
+        title: !result.success
+          ? "Promote failed Gate-8"
+          : result.rejected
+            ? "Promote finished with rejects"
+            : "Promote / Replay finished",
         message: [
           `Wrote ${result.rows_written.toLocaleString()} row(s)`,
           result.rejected ? `${result.rejected} still rejected` : null,
+          gate8?.phase
+            ? `Gate-8: ${gate8.passed ? "passed" : "failed"} (${gate8.phase})`
+            : null,
+          gate8?.message && !gate8.passed ? gate8.message.slice(0, 160) : null,
           promoted?.updated != null && !result.rejected
             ? `DLQ promoted ${promoted.updated} row(s)${promoted.table ? ` on ${promoted.table}` : ""}`
             : destDlq?.table && !result.rejected
@@ -292,7 +301,7 @@ export function QuarantinePanel({
         ]
           .filter(Boolean)
           .join(" · "),
-        tone: result.rejected || promoted?.error ? "warning" : "success",
+        tone: !result.success || result.rejected || promoted?.error ? "warning" : "success",
       });
       onReplayComplete?.(result.job_id);
       await load();

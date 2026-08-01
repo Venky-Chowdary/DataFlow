@@ -38,7 +38,7 @@ def test_pg_array_preserves_element_carrier():
     assert _pg_to_logical("integer[]") == "ARRAY<INTEGER>"
     assert _pg_to_logical("text[]") == "ARRAY<VARCHAR>"
     assert _pg_to_logical("numeric(12,4)[]") == "ARRAY<DECIMAL(12,4)>"
-    assert _pg_to_logical("jsonb") == "JSON"
+    assert _pg_to_logical("jsonb") == "JSONB"
 
 
 def test_mysql_unsigned_widths_preserved():

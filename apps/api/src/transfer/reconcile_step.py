@@ -192,8 +192,13 @@ def run_reconciliation(
             "rows_skipped": rows_skipped,
         })
 
-    db_type = endpoint.format.lower()
+    from .connector_capabilities import resolve_driver_type
+
     cfg = resolve_connector_config(endpoint)
+    # Prefer canonical driver (amazon_s3→s3) while preserving catalog type on cfg.
+    db_type = resolve_driver_type(
+        str(cfg.get("type") or endpoint.format or "")
+    ).lower()
     from services.dialect_profiles import schema_from_cfg
 
     schema = dest_summary.get("schema") or schema_from_cfg(db_type, cfg)
@@ -274,6 +279,12 @@ def run_reconciliation(
         target_columns=target_cols,
         limit=checksum_limit,
         dest_types=dest_types,
+        written_ids=[
+            str(x)
+            for x in (dest_summary.get("written_ids") or [])
+            if x is not None and str(x) != ""
+        ]
+        or None,
     )
 
     strict_checksum = validation_mode in ("strict", "maximum")
@@ -373,6 +384,32 @@ def run_reconciliation(
             dest_only = bool(_DRIVER_CAPS.get(db_type, {}).get("dest_only"))
         except Exception:
             dest_only = False
+        # SaaS / Kafka: keyed sample compare is independent enough for reverse-ETL
+        # (Hightouch/Census row sync status) when full-table COUNT is unavailable.
+        if (
+            sample_compare
+            and sample_compare.get("passed")
+            and int(sample_compare.get("compared") or 0) > 0
+            and rows_written == expected_written
+        ):
+            return _finalize_reconcile({
+                "passed": True,
+                "message": (
+                    f"Gate-8 sample-verified {int(sample_compare.get('compared') or 0)} "
+                    f"key-aligned field(s) for '{db_type}' "
+                    f"({rows_written:,} rows written"
+                    + (f", {rejected_rows:,} rejected" if rejected_rows else "")
+                    + ")"
+                ),
+                "source_rows": source_rows,
+                "target_rows": rows_written,
+                "source_checksum": source_checksum,
+                "target_checksum": "",
+                "rejected_rows": rejected_rows,
+                "coerced_null_rows": coerced_null_rows,
+                "rows_skipped": rows_skipped,
+                "sample_compare": sample_compare,
+            })
         if strict_checksum and not dest_only:
             return _finalize_reconcile({
                 "passed": False,
@@ -387,6 +424,7 @@ def run_reconciliation(
                 "rejected_rows": rejected_rows,
                 "coerced_null_rows": coerced_null_rows,
                 "rows_skipped": rows_skipped,
+                "sample_compare": sample_compare,
             })
         if rows_written == expected_written:
             return _finalize_reconcile({
@@ -404,6 +442,7 @@ def run_reconciliation(
                 "rejected_rows": rejected_rows,
                 "coerced_null_rows": coerced_null_rows,
                 "rows_skipped": rows_skipped,
+                "sample_compare": sample_compare,
             })
         report = reconcile(
             source_rows=source_rows,
@@ -414,6 +453,7 @@ def run_reconciliation(
             strict_checksum=False,
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
+            sample_compare=sample_compare,
         )
         return _finalize_reconcile(report.to_dict())
 
@@ -457,7 +497,7 @@ def run_reconciliation(
         and not sample_compare
         and not sample_records
         and db_type
-        not in {"pinecone", "qdrant", "weaviate", "milvus", "pgvector", "email", "kafka"}
+        not in {"pinecone", "qdrant", "weaviate", "milvus", "pgvector", "email"}
     ):
         from services.reconciliation import ReconciliationReport
 

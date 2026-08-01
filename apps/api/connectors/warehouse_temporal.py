@@ -172,6 +172,63 @@ def coerce_mapped_rows_snowflake(
     return out
 
 
+# JSON numbers are parsed as binary64 by BigQuery's ingestion layer, so only
+# integers inside the RFC 7159 / ECMAScript exact range may travel as numbers.
+_BQ_EXACT_JSON_INT_MAX = 2**53 - 1
+
+
+def bigquery_json_cell(value: Any) -> Any:
+    """Render one cell for BigQuery JSON ingestion without losing exact digits.
+
+    BigQuery's JSON wire format has no NUMERIC/BIGNUMERIC/BYTES notion: a JSON
+    number is inferred as FLOAT64, so exact decimals must arrive as strings, and
+    integers beyond ±(2^53−1) must too — "pass it as a string to avoid data
+    corruption" (BigQuery loading-JSON docs). ``sanitize_json_value`` owns the
+    canonical shape rules (Decimal → exact text, bytes → base64, UUID → text,
+    recursive for repeated/STRUCT fields); JSON-native scalars are handed back
+    untouched so FLOAT64 semantics stay exactly as the source produced them.
+    """
+    from services.value_serializer import sanitize_json_value
+
+    if value is None or isinstance(value, (bool, str, float)):
+        return value
+    if isinstance(value, int):
+        return str(value) if abs(value) > _BQ_EXACT_JSON_INT_MAX else value
+    return sanitize_json_value(value)
+
+
+def bigquery_repeated_element(bq_or_logical_type: str) -> str | None:
+    """Return the element type when a column is a BigQuery REPEATED field.
+
+    Bare ``array`` / ``json`` map to a BigQuery JSON column, where a JSON *text*
+    payload is the correct wire form. Only a parameterized ``ARRAY<T>`` becomes a
+    REPEATED field, and those reject text outright — BigQuery answers a JSON
+    string with ``invalid value type string for ARRAY column``, so the two cases
+    must not share a serialization path.
+    """
+    text = (bq_or_logical_type or "").strip()
+    if not text.lower().startswith("array<") or not text.endswith(">"):
+        return None
+    return text[len("array<") : -1].strip() or None
+
+
+def bigquery_repeated_cell(value: Any, element_type: str) -> Any:
+    """Build a real JSON array for a REPEATED column, preserving element digits."""
+    from connectors.writer_common import parse_array_wire_elements
+
+    elements, _error = parse_array_wire_elements(value)
+    if elements is None:
+        # Ambiguous or unusable payload: pass it through so BigQuery rejects it
+        # into quarantine rather than us inventing an array shape.
+        return bigquery_json_cell(value)
+    if bigquery_temporal_ddl(element_type):
+        return [
+            format_bigquery_bind(el, element_type) if el is not None else None
+            for el in elements
+        ]
+    return [bigquery_json_cell(el) for el in elements]
+
+
 def records_for_bigquery(
     batch: list[tuple],
     target_cols: list[str],
@@ -190,10 +247,15 @@ def records_for_bigquery(
             # Sparse CDC: omit DF_MISSING — never leak sentinel or invent NULL via MERGE.
             if is_missing_sentinel(val):
                 continue
-            if val is not None and bigquery_temporal_ddl(typ):
+            element_type = bigquery_repeated_element(typ)
+            if val is not None and element_type is not None:
+                rec[col] = bigquery_repeated_cell(val, element_type)
+            elif val is not None and bigquery_temporal_ddl(typ):
                 rec[col] = format_bigquery_bind(val, typ)
             elif val is not None:
-                rec[col] = normalize_sql_bind_value(val, typ, engine="bigquery")
+                rec[col] = bigquery_json_cell(
+                    normalize_sql_bind_value(val, typ, engine="bigquery")
+                )
             else:
                 rec[col] = val
         records.append(rec)

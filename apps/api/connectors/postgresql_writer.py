@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import binascii
 import importlib.util
 import io
 import json
@@ -45,9 +44,19 @@ from connectors.writer_common import (
     dedupe_rows_by_pk_and_lsn,
     filter_stale_lsn_rows,
     postgres_lsn_update_guard_sql,
+    quarantine_currency_markers_into_numeric,
+    quarantine_unfit_binaries,
+    quarantine_unfit_bitstrings,
+    quarantine_unfit_booleans,
     quarantine_unfit_decimals,
+    quarantine_unfit_arrays,
+    quarantine_unfit_enum_set,
+    quarantine_unfit_integers,
+    quarantine_unfit_json,
     quarantine_unfit_specialty_types,
     quarantine_unfit_strings,
+    quarantine_unfit_temporals,
+    quarantine_unfit_years,
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
@@ -147,16 +156,32 @@ def _redshift_delete_by_keys(
     conflict_cols: list[str],
     batch: list[tuple] | list[list],
 ) -> list[tuple] | list[list]:
-    """Delete matching keys before insert (Redshift upsert), honoring ``_df_lsn``.
+    """Upsert matching keys on Redshift (MERGE preferred, delete+insert fallback).
 
-    Prefer a single set-based DELETE via a TEMP stage table (atomic within the
-    open transaction) so a mid-batch crash cannot leave half-deleted keys.
-    Falls back to per-row deletes when temp staging is unavailable.
+    Prefer native ``MERGE`` (AWS Redshift) so update+insert is one statement —
+    Airbyte/Fivetran-class. Falls back to TEMP stage DELETE + caller INSERT when
+    MERGE is unavailable. Honors ``_df_lsn`` (stale redelivery skip). Returns
+    rows that still need INSERT (empty when MERGE applied the batch).
     """
-    from connectors.writer_common import DF_LSN_COL, compare_lsn
-
     if not batch or not conflict_cols:
         return list(batch)
+
+    try:
+        return _redshift_merge_upsert(
+            cursor,
+            sql_mod,
+            schema=schema,
+            table_name=table_name,
+            target_cols=target_cols,
+            conflict_cols=conflict_cols,
+            batch=batch,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Redshift MERGE unavailable (%s); falling back to delete+insert",
+            exc,
+            exc_info=exc,
+        )
 
     # Set-based path: stage → DELETE USING → return rows that should insert.
     try:
@@ -171,6 +196,8 @@ def _redshift_delete_by_keys(
         )
     except Exception as exc:
         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+
+    from connectors.writer_common import DF_LSN_COL, compare_lsn
 
     conflict_idxs = [target_cols.index(c) for c in conflict_cols]
     lsn_idx = target_cols.index(DF_LSN_COL) if DF_LSN_COL in target_cols else None
@@ -215,6 +242,147 @@ def _redshift_delete_by_keys(
         )
         to_write.append(row)
     return to_write
+
+
+def _redshift_null_safe_match(sql_mod: Any, conflict_cols: list[str], *, left: str, right: str):
+    """Airbyte-class NULL-safe PK match: ``(a=b) OR (a IS NULL AND b IS NULL)``."""
+    parts = []
+    for c in conflict_cols:
+        col = sql_mod.Identifier(c)
+        parts.append(
+            sql_mod.SQL(
+                "(({l}.{c} = {r}.{c}) OR ({l}.{c} IS NULL AND {r}.{c} IS NULL))"
+            ).format(l=sql_mod.Identifier(left), r=sql_mod.Identifier(right), c=col)
+        )
+    return sql_mod.SQL(" AND ").join(parts)
+
+
+def _redshift_filter_stale_lsn_rows(
+    cursor: Any,
+    sql_mod: Any,
+    *,
+    schema: str,
+    table_name: str,
+    target_cols: list[str],
+    conflict_cols: list[str],
+    batch: list[tuple] | list[list],
+) -> list[Any]:
+    from connectors.writer_common import DF_LSN_COL, compare_lsn
+
+    conflict_idxs = [target_cols.index(c) for c in conflict_cols]
+    lsn_idx = target_cols.index(DF_LSN_COL) if DF_LSN_COL in target_cols else None
+    to_write: list[Any] = []
+    for row in batch:
+        if lsn_idx is not None:
+            predicates = []
+            values: list[Any] = []
+            for col, idx in zip(conflict_cols, conflict_idxs):
+                val = row[idx] if idx < len(row) else None
+                if val is None:
+                    predicates.append(sql_mod.SQL("{} IS NULL").format(sql_mod.Identifier(col)))
+                else:
+                    predicates.append(
+                        sql_mod.SQL("{} = {}").format(
+                            sql_mod.Identifier(col), sql_mod.Placeholder()
+                        )
+                    )
+                    values.append(val)
+            where = sql_mod.SQL(" AND ").join(predicates)
+            cursor.execute(
+                sql_mod.SQL("SELECT {} FROM {}.{} WHERE {} LIMIT 1").format(
+                    sql_mod.Identifier(DF_LSN_COL),
+                    sql_mod.Identifier(schema),
+                    sql_mod.Identifier(table_name),
+                    where,
+                ),
+                values,
+            )
+            existing = cursor.fetchone()
+            incoming_lsn = row[lsn_idx] if lsn_idx < len(row) else None
+            if existing is not None and compare_lsn(incoming_lsn, existing[0]) <= 0:
+                continue
+        to_write.append(row)
+    return to_write
+
+
+def _redshift_merge_upsert(
+    cursor: Any,
+    sql_mod: Any,
+    *,
+    schema: str,
+    table_name: str,
+    target_cols: list[str],
+    conflict_cols: list[str],
+    batch: list[tuple] | list[list],
+) -> list[tuple] | list[list]:
+    """Apply batch via native Redshift MERGE; return [] (nothing left to INSERT)."""
+    to_write = _redshift_filter_stale_lsn_rows(
+        cursor,
+        sql_mod,
+        schema=schema,
+        table_name=table_name,
+        target_cols=target_cols,
+        conflict_cols=conflict_cols,
+        batch=batch,
+    )
+    if not to_write:
+        return []
+
+    stage = f"_df_merge_stage_{abs(hash((schema, table_name, tuple(conflict_cols)))) % 10_000_000}"
+    # Clone target shape — avoids inventing VARCHAR widths for SUPER/VARBYTE.
+    cursor.execute(
+        sql_mod.SQL("CREATE TEMP TABLE {} AS SELECT * FROM {}.{} WHERE 0=1").format(
+            sql_mod.Identifier(stage),
+            sql_mod.Identifier(schema),
+            sql_mod.Identifier(table_name),
+        )
+    )
+    insert_cols = sql_mod.SQL(", ").join(sql_mod.Identifier(c) for c in target_cols)
+    placeholders = sql_mod.SQL(", ").join(sql_mod.Placeholder() for _ in target_cols)
+    insert_sql = sql_mod.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+        sql_mod.Identifier(stage), insert_cols, placeholders
+    )
+    rows_out = []
+    for row in to_write:
+        rows_out.append(
+            tuple(row[i] if i < len(row) else None for i in range(len(target_cols)))
+        )
+    cursor.executemany(insert_sql, rows_out)
+
+    # Redshift MERGE: target without alias; source aliased as s.
+    # NULL-safe ON (Airbyte destination-redshift class).
+    tgt = sql_mod.SQL("{}.{}").format(
+        sql_mod.Identifier(schema), sql_mod.Identifier(table_name)
+    )
+    set_clause = sql_mod.SQL(", ").join(
+        sql_mod.SQL("{} = s.{}").format(sql_mod.Identifier(c), sql_mod.Identifier(c))
+        for c in target_cols
+    )
+    insert_col_list = sql_mod.SQL(", ").join(sql_mod.Identifier(c) for c in target_cols)
+    insert_val_list = sql_mod.SQL(", ").join(
+        sql_mod.SQL("s.{}").format(sql_mod.Identifier(c)) for c in target_cols
+    )
+    on_parts = []
+    for c in conflict_cols:
+        col = sql_mod.Identifier(c)
+        on_parts.append(
+            sql_mod.SQL(
+                "(({t}.{c} = s.{c}) OR ({t}.{c} IS NULL AND s.{c} IS NULL))"
+            ).format(t=tgt, c=col)
+        )
+    on_sql = sql_mod.SQL(" AND ").join(on_parts)
+    merge_sql = sql_mod.SQL(
+        "MERGE INTO {} USING {} AS s ON {} "
+        "WHEN MATCHED THEN UPDATE SET {} "
+        "WHEN NOT MATCHED THEN INSERT ({}) VALUES ({})"
+    ).format(tgt, sql_mod.Identifier(stage), on_sql, set_clause, insert_col_list, insert_val_list)
+    cursor.execute(merge_sql)
+    try:
+        cursor.execute(sql_mod.SQL("DROP TABLE IF EXISTS {}").format(sql_mod.Identifier(stage)))
+    except Exception as exc:
+        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+    # MERGE already wrote — caller must not INSERT again.
+    return []
 
 
 def _redshift_stage_delete(
@@ -468,6 +636,23 @@ def write_mapped_rows(
             error="No column mappings",
         )
 
+    # GENERATED ALWAYS must not appear in INSERT — DB assigns values.
+    from connectors.writer_common import omit_generated_always_columns
+
+    target_cols, logical_types, _, _omitted_identity = omit_generated_always_columns(
+        target_cols, logical_types, []
+    )
+    if not target_cols:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "public",
+            checksum="",
+            chunks_completed=0,
+            error="All mapped columns are GENERATED ALWAYS — nothing to insert",
+        )
+
     schema = schema or "public"
     table_name = sanitize_identifier(table_name, preserve_case=True)
     engine = str(_kwargs.get("engine") or _kwargs.get("db_type") or "postgresql").lower()
@@ -486,6 +671,9 @@ def write_mapped_rows(
         error_policy=policy,
         preserve_case=True,
     )
+    mapped_rows = quarantine_currency_markers_into_numeric(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
     # Fail-closed NUMERIC/DECIMAL(p,s) fit — never silently truncate/round into target.
     mapped_rows = quarantine_unfit_decimals(
         mapped_rows,
@@ -495,8 +683,44 @@ def write_mapped_rows(
         policy,
         dialect_label="PostgreSQL NUMERIC",
     )
+    mapped_rows = quarantine_unfit_years(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_booleans(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_temporals(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
     mapped_rows = quarantine_unfit_specialty_types(
         mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_integers(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="PostgreSQL INTEGER",
+    )
+    mapped_rows = quarantine_unfit_bitstrings(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_binaries(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="PostgreSQL BYTEA",
+    )
+    mapped_rows = quarantine_unfit_enum_set(
+        mapped_rows, target_cols, logical_types, rejected_details, policy
+    )
+    string_dialect = (
+        "Redshift VARCHAR"
+        if engine in {"redshift", "amazon_redshift", "redshift_serverless"}
+        else "PostgreSQL VARCHAR"
     )
     mapped_rows = quarantine_unfit_strings(
         mapped_rows,
@@ -504,7 +728,23 @@ def write_mapped_rows(
         target_types,
         rejected_details,
         policy,
-        dialect_label="PostgreSQL VARCHAR",
+        dialect_label=string_dialect,
+    )
+    mapped_rows = quarantine_unfit_arrays(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="Redshift" if engine.startswith("redshift") else "PostgreSQL",
+    )
+    mapped_rows = quarantine_unfit_json(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label=string_dialect.split()[0] + " JSON",
     )
     sparse_rows: list[tuple] = []
     rows_for_checksum: list[tuple] = list(mapped_rows)
@@ -522,8 +762,7 @@ def write_mapped_rows(
             mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
 
     if any(t == "BYTEA" for t in target_types):
-        from base64 import b64decode
-
+        from connectors.sql_bind import coerce_binary_wire
         from services.value_serializer import is_missing_sentinel
 
         bytea_positions = [i for i, t in enumerate(target_types) if t == "BYTEA"]
@@ -532,17 +771,10 @@ def write_mapped_rows(
             row_list = list(row)
             for idx in bytea_positions:
                 val = row_list[idx]
-                if is_missing_sentinel(val):
+                if is_missing_sentinel(val) or val is None:
                     continue
-                if isinstance(val, str):
-                    try:
-                        row_list[idx] = b64decode(val, validate=True)
-                    except (binascii.Error, ValueError):
-                        row_list[idx] = val.encode("utf-8")
-                elif isinstance(val, bytes):
-                    row_list[idx] = val
-                elif val is not None:
-                    row_list[idx] = str(val).encode("utf-8")
+                # Airbyte/Fivetran class: base64 → bytes; never invent UTF-8 payload.
+                row_list[idx] = coerce_binary_wire(val)
             return tuple(row_list)
 
         mapped_rows = [_coerce_bytea_row(row) for row in mapped_rows]
@@ -552,41 +784,39 @@ def write_mapped_rows(
     # Boolean/JSON wire: Mongo cell_to_string ("true"/"false", JSON text, "") must
     # match MySQL's shared sql_bind path — never leave string bools for BOOLEAN.
     from connectors.sql_bind import normalize_sql_bind_value
-    from connectors.sql_temporal import sql_base_type as _sql_base_type
+    from services.type_system import parse_enum_or_set_ordered_members
     from services.value_serializer import is_missing_sentinel
 
-    bind_positions = [
-        i
-        for i, t in enumerate(target_types)
-        if _sql_base_type(t)
-        in {
-            "DATE",
-            "TIME",
-            "DATETIME",
-            "TIMESTAMP",
-            "TIMESTAMPTZ",
-            "TIMESTAMP_TZ",
-            "TIMESTAMP_LTZ",
-            "BOOLEAN",
-            "BOOL",
-            "JSON",
-            "JSONB",
-        }
-    ]
-    if bind_positions:
+    # Wave 64: normalize every column through SSOT — ENUM/SET use logical
+    # carriers (domain + SET→list for TEXT[]), other columns use target DDL.
 
-        def _coerce_bind_row(row: tuple) -> tuple:
-            row_list = list(row)
-            for idx in bind_positions:
-                if is_missing_sentinel(row_list[idx]):
-                    continue
-                row_list[idx] = normalize_sql_bind_value(
-                    row_list[idx], target_types[idx], engine="postgresql"
-                )
-            return tuple(row_list)
+    def _bind_ddl(idx: int) -> str:
+        logical = logical_types[idx] if idx < len(logical_types) else ""
+        target = target_types[idx] if idx < len(target_types) else ""
+        if logical and parse_enum_or_set_ordered_members(logical) is not None:
+            return logical
+        # ROWVERSION / HIERARCHYID carriers must bind via logical polarity
+        # (binary concurrency / slash→ltree) even when target DDL is BYTEA/LTREE.
+        logical_u = (logical or "").strip().upper()
+        if logical_u in {"ROWVERSION", "HIERARCHYID", "SQL_VARIANT", "ROWID", "UROWID"}:
+            return logical
+        return target or logical
 
-        mapped_rows = [_coerce_bind_row(row) for row in mapped_rows]
-        sparse_rows = [_coerce_bind_row(row) for row in sparse_rows]
+    def _coerce_bind_row(row: tuple) -> tuple:
+        row_list = list(row)
+        for idx in range(len(row_list)):
+            if is_missing_sentinel(row_list[idx]):
+                continue
+            ddl = _bind_ddl(idx)
+            if not ddl:
+                continue
+            row_list[idx] = normalize_sql_bind_value(
+                row_list[idx], ddl, engine="postgresql"
+            )
+        return tuple(row_list)
+
+    mapped_rows = [_coerce_bind_row(row) for row in mapped_rows]
+    sparse_rows = [_coerce_bind_row(row) for row in sparse_rows]
 
     rejected_rows = _rejected_row_count(
         data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
@@ -706,6 +936,11 @@ def write_mapped_rows(
             ensure_postgres_write_ledger(cursor, schema)
         if create_table:
             cursor.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
+            if engine not in {"redshift", "amazon_redshift", "redshift_serverless"}:
+                from services.type_system import collect_pg_enum_prerequisites
+
+                for stmt in collect_pg_enum_prerequisites(logical_types):
+                    cursor.execute(stmt)
             col_defs = sql.SQL(", ").join(
                 sql.SQL("{} {}").format(sql.Identifier(c), sql.SQL(t))
                 for c, t in zip(target_cols, target_types)

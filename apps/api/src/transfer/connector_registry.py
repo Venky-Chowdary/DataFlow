@@ -324,6 +324,29 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
             "and not ports 3306/5432."
         )
 
+    # TLS mismatch — must be classified before auth and timeout. A server that
+    # does not speak TLS aborts the handshake, and the driver surfaces that as
+    # "EOF occurred in violation of protocol" plus a socket timeout. Reporting
+    # it as "connection timed out" sent operators to check firewalls when the
+    # actual fix is one checkbox on the connector.
+    if re.search(
+        r"ssl handshake failed|tls handshake|violation of protocol|wrong version number|"
+        r"sslv3|record layer failure|unsupported protocol|certificate verify failed|"
+        r"ssl: |sslerror",
+        text,
+    ):
+        if re.search(r"certificate verify failed|self.signed|hostname mismatch|CERTIFICATE_VERIFY", text, re.I):
+            return (
+                "TLS certificate could not be verified. Check the server certificate, "
+                "its hostname, and the CA chain — do not disable SSL to work around a "
+                "certificate you cannot verify."
+            )
+        return (
+            "The server refused the TLS handshake — it is most likely not configured "
+            "for SSL. Turn off SSL on this connector if the server is plaintext "
+            "(common for local/dev databases), or enable TLS on the server."
+        )
+
     # Auth / credentials — first because it is the most common and sensitive.
     if re.search(r"authentication|auth|login|credential|password|incorrect|access denied|not authorized|unauthorized|no such user|permission denied|privilege", text):
         if driver in ("salesforce", "hubspot", "stripe", "rest_api"):

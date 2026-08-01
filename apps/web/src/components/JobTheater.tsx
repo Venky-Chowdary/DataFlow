@@ -1284,6 +1284,9 @@ export function JobTheaterView({
             onRepairDecided={() => {
               onBackToValidate?.();
             }}
+            onReplayComplete={(childJobId) => {
+              onOpenJob?.(childJobId);
+            }}
           />
         </section>
       )}

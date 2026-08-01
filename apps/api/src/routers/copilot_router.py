@@ -111,6 +111,49 @@ async def copilot_chat(request: CopilotChatRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+async def _start_confirmed_transfer(payload: dict) -> dict:
+    """Launch a transfer the operator explicitly confirmed.
+
+    The engine is reached through the same job-creation path the Transfer
+    Studio uses, so chat-started runs are ordinary jobs: they appear in Jobs,
+    stream progress, reconcile, and quarantine identically. ``skip_preflight``
+    is forced off here as well as at staging time — a tampered ack still cannot
+    bypass the gates.
+    """
+    from ..transfer.background import run_transfer_async
+    from ..transfer.engine import get_transfer_engine
+    from ..transfer.models import EndpointConfig, TransferRequest
+
+    src = dict(payload.get("source") or {})
+    dst = dict(payload.get("destination") or {})
+    if not src.get("connector_id") or not dst.get("connector_id"):
+        raise HTTPException(status_code=400, detail="Transfer approval is missing its endpoints.")
+
+    request_obj = TransferRequest(
+        source=EndpointConfig.from_dict("database", src),
+        destination=EndpointConfig.from_dict("database", dst),
+        mappings=list(payload.get("mappings") or []),
+        column_types=dict(payload.get("column_types") or {}),
+        sync_mode=str(payload.get("sync_mode") or "full_refresh_append"),
+        schema_policy=str(payload.get("schema_policy") or "manual_review"),
+        validation_mode=str(payload.get("validation_mode") or "balanced"),
+        limit=max(0, int(payload.get("limit") or 0)),
+        skip_preflight=False,
+        triggered_by="data-pilot",
+    )
+    engine = get_transfer_engine()
+    job_id = engine._create_pending_job(request_obj)
+    run_transfer_async(job_id, request_obj)
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "source": f"{src.get('connector_id')}.{src.get('table')}",
+        "destination": f"{dst.get('connector_id')}.{dst.get('table')}",
+        "sync_mode": request_obj.sync_mode,
+        "preflight_run_id": payload.get("preflight_run_id") or "",
+    }
+
+
 @router.post("/confirm")
 async def copilot_confirm(request: ConfirmActionRequest):
     """Consume a Pilot mutation ack (e.g. create_connector) — secrets never leave the ledger."""
@@ -140,16 +183,29 @@ async def copilot_confirm(request: ConfirmActionRequest):
     assert payload is not None
 
     if payload.get("_idempotent"):
-        return {
-            "ok": True,
-            "idempotent": True,
-            "kind": peek.get("kind"),
-            "connector_id": payload.get("connector_id"),
-            "name": payload.get("name"),
-            "type": payload.get("type"),
-        }
+        # Replaying a confirmed ack returns the original outcome — it never
+        # creates a second connector or launches a second transfer.
+        echo = {k: v for k, v in payload.items() if k != "_idempotent"}
+        return {"ok": True, "idempotent": True, "kind": peek.get("kind"), **echo}
 
     kind = peek.get("kind") or ""
+    if kind == "start_transfer":
+        try:
+            result = await _start_confirmed_transfer(payload)
+        except HTTPException:
+            ledger.release_claim(ack_id)
+            raise
+        except Exception as exc:
+            ledger.release_claim(ack_id)
+            raise HTTPException(status_code=400, detail=f"Failed to start transfer: {exc}") from exc
+        ledger.finalize(
+            ack_id,
+            actor=request.actor or "pilot-ui",
+            reason=request.reason or "confirmed",
+            result=result,
+        )
+        return {"ok": True, "idempotent": False, "kind": kind, **result}
+
     if kind == "create_connector":
         try:
             conn = create_connector(payload)

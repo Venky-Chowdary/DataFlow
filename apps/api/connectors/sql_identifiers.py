@@ -94,7 +94,7 @@ def quote_table_ref(
     ``dialect``: ansi | postgresql | snowflake | sqlite | duckdb | mysql | bigquery
     """
     dialect = (dialect or "ansi").lower()
-    if dialect in ("mysql", "mariadb"):
+    if dialect in ("mysql", "mariadb", "clickhouse"):
         q = "`"
         tbl = require_safe_identifier(table, preserve_case=True) if sanitize else require_safe_identifier(
             table, allow_raw=True, max_len=64

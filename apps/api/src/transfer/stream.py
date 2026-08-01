@@ -1730,6 +1730,22 @@ def stream_database_transfer(
         details = "; ".join(filter(None, warning_samples[:10]))
         if details:
             raise ValueError(f"No rows were written to the destination: {details}")
+        if rejected_total:
+            # Quarantine is not an empty source. Reporting "empty" here sent
+            # operators to look at data that was in fact read, rejected and
+            # held — the reason is already recorded, so name it.
+            reasons: list[str] = []
+            for detail in (dest_summary.get("rejected_details") or [])[:200]:
+                reason = str((detail or {}).get("reason") or "").strip()
+                if reason and reason not in reasons:
+                    reasons.append(reason)
+                if len(reasons) >= 3:
+                    break
+            raise ValueError(
+                f"All {rejected_total} row(s) were quarantined, so nothing was "
+                "written to the destination"
+                + (f" — {'; '.join(reasons)}" if reasons else "")
+            )
         raise ValueError("Source table is empty")
 
     if incremental and running_cursor and cursor_key and running_cursor != watermark:

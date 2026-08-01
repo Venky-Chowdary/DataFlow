@@ -29,6 +29,14 @@ def avro_type_to_logical(avro_type: Any) -> str:
 
     if isinstance(avro_type, str):
         base = avro_type.lower()
+        try:
+            from services.type_system import avro_logical_token_to_carrier
+
+            token = avro_logical_token_to_carrier(base)
+            if token:
+                return token
+        except Exception:
+            pass
         return {
             "null": "TEXT",
             "boolean": "BOOLEAN",
@@ -50,29 +58,54 @@ def avro_type_to_logical(avro_type: Any) -> str:
         precision = int(avro_type.get("precision") or 38)
         scale = int(avro_type.get("scale") or 0)
         return f"DECIMAL({precision},{scale})"
-    if logical in {"uuid"}:
-        return "UUID"
-    if logical in {"date"}:
-        return "DATE"
-    if logical in {"time-millis", "time-micros"}:
-        return "TIME"
-    if logical in {"timestamp-millis", "timestamp-micros", "local-timestamp-millis", "local-timestamp-micros"}:
-        if "local" in logical:
-            return "TIMESTAMP_NTZ"
-        return "TIMESTAMPTZ"
-    if logical in {"duration"}:
-        return "INTERVAL"
+    if logical:
+        try:
+            from services.type_system import avro_logical_token_to_carrier
+
+            token = avro_logical_token_to_carrier(logical)
+            if token:
+                return token
+        except Exception:
+            pass
+        if logical in {"uuid"}:
+            return "UUID"
+        if logical in {"date"}:
+            return "DATE"
+        if logical in {"time-millis", "time-micros"}:
+            return "TIME(6)" if "micros" in logical else "TIME(3)"
+        if logical in {
+            "timestamp-millis",
+            "timestamp-micros",
+            "local-timestamp-millis",
+            "local-timestamp-micros",
+        }:
+            if "local" in logical:
+                return "TIMESTAMP_NTZ"
+            return "TIMESTAMPTZ"
+        if logical in {"duration"}:
+            return "INTERVAL DAY TO SECOND"
 
     if type_name in {"boolean", "int", "long", "float", "double", "bytes", "string", "null"}:
         return avro_type_to_logical(type_name)
 
     if type_name == "enum":
+        # Closed Avro enum domain — preserve symbols for create-new ENUM DDL.
+        symbols = [str(s) for s in (avro_type.get("symbols") or []) if s is not None]
+        if symbols:
+            escaped = ", ".join("'" + s.replace("'", "''") + "'" for s in symbols)
+            return f"ENUM({escaped})"
         return "TEXT"
     if type_name == "fixed":
         if logical == "decimal":
             precision = int(avro_type.get("precision") or 38)
             scale = int(avro_type.get("scale") or 0)
             return f"DECIMAL({precision},{scale})"
+        size = avro_type.get("size")
+        if size is not None:
+            try:
+                return f"BINARY({int(size)})"
+            except (TypeError, ValueError):
+                pass
         return "BINARY"
     if type_name == "array":
         items = avro_type.get("items", "string")

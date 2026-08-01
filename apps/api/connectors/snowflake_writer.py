@@ -31,6 +31,7 @@ from connectors.writer_common import (
     build_mapped_rows_with_details,
     dedupe_rows,
     dedupe_rows_by_pk_and_lsn,
+    null_safe_merge_on,
     quarantine_unfit_decimals,
     quarantine_unfit_specialty_types,
     quarantine_unfit_strings,
@@ -520,9 +521,11 @@ def _merge_batch_via_temp(
             prefer_copy=prefer_copy,
             conn=conn,
         )
-        on_clause = " AND ".join(
-            f"t.{quote_sql_identifier(c)} = s.{quote_sql_identifier(c)}"
-            for c in conflict
+        on_clause = null_safe_merge_on(
+            conflict,
+            left_alias="t",
+            right_alias="s",
+            quote_column=quote_sql_identifier,
         )
         col_list = ", ".join(quote_sql_identifier(c) for c in target_cols)
         source_cols = ", ".join(f"s.{quote_sql_identifier(c)}" for c in target_cols)
@@ -759,11 +762,55 @@ def write_mapped_rows(
     )
     from connectors.writer_common import (
         normalize_temporal_cells,
+        quarantine_currency_markers_into_numeric,
+        quarantine_unfit_arrays,
+        quarantine_unfit_binaries,
+        quarantine_unfit_bitstrings,
+        quarantine_unfit_booleans,
+        quarantine_unfit_enum_set,
+        quarantine_unfit_integers,
+        quarantine_unfit_json,
         quarantine_unfit_specialty_types,
         quarantine_unfit_strings,
+        quarantine_unfit_temporals,
+        quarantine_unfit_years,
     )
 
+    mapped_rows = quarantine_currency_markers_into_numeric(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_years(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_booleans(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_temporals(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
     mapped_rows = quarantine_unfit_specialty_types(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_integers(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="Snowflake INTEGER",
+    )
+    mapped_rows = quarantine_unfit_bitstrings(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_binaries(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="Snowflake BINARY",
+    )
+    mapped_rows = quarantine_unfit_enum_set(
         mapped_rows, target_cols, target_types, rejected_details, policy
     )
     mapped_rows = quarantine_unfit_strings(
@@ -773,6 +820,22 @@ def write_mapped_rows(
         rejected_details,
         policy,
         dialect_label="Snowflake VARCHAR",
+    )
+    mapped_rows = quarantine_unfit_arrays(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="Snowflake",
+    )
+    mapped_rows = quarantine_unfit_json(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="Snowflake VARIANT",
     )
     # Destination-native temporal normalize (ISO-Z → TIMESTAMP_NTZ wall clock).
     mapped_rows = normalize_temporal_cells(

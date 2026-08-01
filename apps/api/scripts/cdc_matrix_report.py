@@ -47,9 +47,47 @@ CDC_TARGETS = [
 ]
 
 
+def parse_pytest_summary(output: str) -> tuple[int, int, int, str]:
+    """Parse pytest -q summary into (passed, failed, skipped, summary_line).
+
+    Handles ``5 passed, 2 skipped in 1.2s`` and error lines. Never invents
+    greens — missing counts stay 0.
+    """
+    import re
+
+    passed = failed = skipped = errors = 0
+    summary_line = ""
+    for line in reversed((output or "").splitlines()):
+        if re.search(r"\d+\s+(passed|failed|skipped|error)", line):
+            summary_line = line.strip()
+            break
+    for kind, attr in (
+        ("failed", "failed"),
+        ("passed", "passed"),
+        ("skipped", "skipped"),
+        ("error", "errors"),
+        ("errors", "errors"),
+    ):
+        mm = re.search(rf"(\d+)\s+{kind}\b", summary_line)
+        if not mm:
+            continue
+        n = int(mm.group(1))
+        if attr == "failed":
+            failed = n
+        elif attr == "passed":
+            passed = n
+        elif attr == "skipped":
+            skipped = n
+        else:
+            errors = n
+    # Collection/import errors are failures for the proof gate.
+    failed += errors
+    return passed, failed, skipped, summary_line
+
+
 def main() -> int:
     targets = [t for t in CDC_TARGETS if (ROOT / t).is_file()]
-    missing = [t for t in CDC_TARGETS if t not in targets]
+    missing = [t for t in CDC_TARGETS if not (ROOT / t).is_file()]
     cmd = [
         sys.executable,
         "-m",
@@ -68,25 +106,7 @@ def main() -> int:
         text=True,
     )
     out = (proc.stdout or "") + (proc.stderr or "")
-    import re
-
-    passed = failed = skipped = 0
-    summary_line = ""
-    for line in reversed(out.splitlines()):
-        if re.search(r"\d+\s+(passed|failed|skipped)", line):
-            summary_line = line.strip()
-            break
-    for kind in ("failed", "passed", "skipped"):
-        mm = re.search(rf"(\d+)\s+{kind}", summary_line)
-        if not mm:
-            continue
-        n = int(mm.group(1))
-        if kind == "failed":
-            failed = n
-        elif kind == "passed":
-            passed = n
-        else:
-            skipped = n
+    passed, failed, skipped, summary_line = parse_pytest_summary(out)
 
     proof = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -113,11 +133,13 @@ def main() -> int:
                 "Proactive CDC retention probe (ok/at_risk/gap) on ops API + Studio Validate/Theater/Results.",
                 "Append-only CDC sinks fail-fast unless allow_append_only.",
                 "Oracle live IT is env-gated (DATAFLOW_ORACLE_ENABLE=1); optional cdc-oracle CI job.",
+                "MySQL locked snapshot handoff stamps file/pos + gtid_executed (Debezium-class; still at-least-once).",
                 "Leases: Redis multi-node (fail-closed) or file single-host; fencing generation on steal.",
                 "Apply-path lease assert_holder refuses zombie upsert after steal (still at-least-once).",
                 "PG TOAST merge + typed txn buffer overflow (no silent drop/wipe).",
                 "Shared multi-table live IT + ack-barrier chaos are in matrix.",
                 "_df_lsn PK-sink LSN-guarded idempotent upsert proofs are not platform exactly-once.",
+                "Skipped live ITs are counted honestly — skip ≠ pass.",
             ],
         },
     }

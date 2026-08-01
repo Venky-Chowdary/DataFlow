@@ -37,8 +37,10 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       const cleanTitle = title.trim();
       const cleanMessage = message?.trim() || undefined;
       setItems((prev) => [...prev.slice(-3), { id, title: cleanTitle, message: cleanMessage, tone }]);
-      // Durations match --df-toast-duration / --df-toast-duration-error in tokens.css
-      window.setTimeout(() => dismiss(id), tone === "error" ? 8000 : 4500);
+      // Errors/warnings often carry multi-sentence remediation (TLS, quarantine).
+      // Give the operator time to read — success stays short.
+      const holdMs = tone === "error" ? 16000 : tone === "warning" ? 10000 : 4500;
+      window.setTimeout(() => dismiss(id), holdMs);
     },
     [dismiss]
   );

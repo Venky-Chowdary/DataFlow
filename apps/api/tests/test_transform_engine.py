@@ -171,9 +171,35 @@ def test_apply_date_handles_various_separators_and_two_digit_years(text, expecte
 
 
 def test_apply_datetime_with_mixed_format_and_two_digit_year():
+    """A source value with no zone stays zoneless — parsing is not a zone claim."""
     val, err = apply_transform("12-31-24 14:30:00", "datetime")
     assert err is None
-    assert val == "2024-12-31T14:30:00Z"
+    assert val == "2024-12-31T14:30:00"
+
+
+def test_apply_datetime_keeps_real_zones_and_never_invents_one():
+    """``Z`` means the source said UTC, so it cannot appear on naive input.
+
+    Stamping naive values with ``Z`` is the "UTC invent" the NTZ write
+    quarantine exists to catch; the two together silently blocked every
+    Postgres TIMESTAMP row from reaching a MySQL DATETIME column.
+    """
+    naive, err = apply_transform("2024-01-05 10:30:00", "datetime")
+    assert err is None
+    assert naive == "2024-01-05T10:30:00"
+
+    utc, err = apply_transform("2024-01-05T10:30:00Z", "datetime")
+    assert err is None
+    assert utc == "2024-01-05T10:30:00Z"
+
+    offset, err = apply_transform("2024-01-05 10:30:00+05:30", "datetime")
+    assert err is None
+    assert offset == "2024-01-05T10:30:00+05:30"
+
+    # An epoch is an instant by definition, so UTC here is stated, not invented.
+    epoch, err = apply_transform("1704451800", "datetime")
+    assert err is None
+    assert epoch.endswith("Z")
 
 
 def test_apply_date_reconciles_same_value_across_formats():
@@ -185,4 +211,31 @@ def test_apply_date_reconciles_same_value_across_formats():
         values.append(val)
     assert len(set(values)) == 1
     assert values[0] == "2024-12-31"
+
+
+def test_mongodb_date_carrier_does_not_truncate_a_datetime_source():
+    """BSON date holds an instant; a TIMESTAMP source must keep its time of day."""
+    from services.transform_engine import infer_transform_for_mapping
+
+    assert (
+        infer_transform_for_mapping(
+            "created_at",
+            "created_at",
+            "TIMESTAMP_NTZ",
+            "DATE",
+            destination_db_type="mongodb",
+        )
+        == "datetime"
+    )
+    # On MySQL, DATE really is a calendar day — narrowing is honest there.
+    assert (
+        infer_transform_for_mapping(
+            "created_at",
+            "created_at",
+            "TIMESTAMP_NTZ",
+            "DATE",
+            destination_db_type="mysql",
+        )
+        == "date"
+    )
 

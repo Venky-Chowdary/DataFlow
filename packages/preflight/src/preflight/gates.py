@@ -252,15 +252,23 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
 
     try:
         from services.type_system import (
+            decimal_precision_would_truncate,
             decimal_scale_would_truncate,
             is_lossy_coercion,
+            is_nested_document_collapse,
+            is_nested_shape_collapse,
+            is_precision_collapse_coercion,
             normalize_logical_type,
             vector_dim_mismatch,
             vector_dim_unknown_for_native,
         )
     except ImportError:
         is_lossy_coercion = None
+        is_nested_document_collapse = None
+        is_nested_shape_collapse = None
+        is_precision_collapse_coercion = None
         decimal_scale_would_truncate = None
+        decimal_precision_would_truncate = None
         normalize_logical_type = None
         vector_dim_mismatch = None
         vector_dim_unknown_for_native = None
@@ -291,15 +299,32 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             lossy = is_lossy_coercion(source_col.inferred_type, target.inferred_type)
         # Fractional scale that exceeds destination DECIMAL caps is silent truncation
         # unless the mapping target is already a lossless text sink.
+        platform_decimal_trunc = False
         if (
-            not lossy
-            and decimal_scale_would_truncate
-            and normalize_logical_type
-            and decimal_scale_would_truncate(source_col.inferred_type, dest_kind)
+            normalize_logical_type
             and normalize_logical_type(target.inferred_type) not in {"string", "text", "json"}
         ):
-            lossy = True
-            pair = (source_col.inferred_type.upper(), f"{target.inferred_type.upper()} [scale truncates]")
+            if decimal_scale_would_truncate and decimal_scale_would_truncate(
+                source_col.inferred_type, dest_kind
+            ):
+                platform_decimal_trunc = True
+                lossy = True
+                pair = (
+                    source_col.inferred_type.upper(),
+                    f"{target.inferred_type.upper()} [scale truncates]",
+                )
+            if (
+                decimal_precision_would_truncate
+                and decimal_precision_would_truncate(
+                    source_col.inferred_type, dest_kind
+                )
+            ):
+                platform_decimal_trunc = True
+                lossy = True
+                pair = (
+                    source_col.inferred_type.upper(),
+                    f"{target.inferred_type.upper()} [precision clamps]",
+                )
         # Embedding width drift / unknown native VECTOR dims — never invent 1536.
         if (
             not lossy
@@ -317,6 +342,25 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         ):
             lossy = True
             pair = (source_col.inferred_type.upper(), f"{target.inferred_type.upper()} [vector dim unknown]")
+        # Both sides may normalize to the same logical family (datetime) while
+        # still collapsing TZ polarity / IEEE precision — treat as lossy.
+        if (
+            not lossy
+            and is_precision_collapse_coercion
+            and is_precision_collapse_coercion(
+                source_col.inferred_type, target.inferred_type
+            )
+        ):
+            lossy = True
+        # Nested STRUCT/MAP field contract or nested→document collapse.
+        nested_collapse = bool(
+            is_nested_shape_collapse
+            and is_nested_shape_collapse(
+                source_col.inferred_type, target.inferred_type
+            )
+        )
+        if not lossy and nested_collapse:
+            lossy = True
         if not lossy:
             continue
 
@@ -330,13 +374,147 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             if note:
                 label = f"{label} — {note}"
 
+        # IEEE→fixed, datetime→date, timestamptz→NTZ, DECIMAL(p,s) narrow,
+        # platform DECIMAL caps: never sample soft-pass.
+        fidelity_collapse = bool(
+            (
+                is_precision_collapse_coercion
+                and is_precision_collapse_coercion(
+                    source_col.inferred_type, target.inferred_type
+                )
+            )
+            or platform_decimal_trunc
+        )
+        if fidelity_collapse:
+            if "float" in source_col.inferred_type.lower() and "decimal" in (
+                target.inferred_type.lower()
+            ):
+                label = f"{label} — float→decimal (IEEE precision risk; not soft-passed by samples)"
+            elif "decimal" in source_col.inferred_type.lower() and "float" in (
+                target.inferred_type.lower()
+            ):
+                label = (
+                    f"{label} — decimal→float (IEEE magnitude/scale loss; "
+                    "not soft-passed by samples)"
+                )
+            elif normalize_logical_type and normalize_logical_type(
+                target.inferred_type
+            ) == "date":
+                label = f"{label} — datetime→date (time-of-day truncation; not soft-passed by samples)"
+            elif "ntz" in target.inferred_type.lower() or "without time zone" in (
+                target.inferred_type.lower()
+            ):
+                label = f"{label} — timestamptz→ntz (timezone polarity drop; not soft-passed by samples)"
+            elif "decimal" in source_col.inferred_type.lower() and "decimal" in (
+                target.inferred_type.lower()
+            ):
+                label = (
+                    f"{label} — DECIMAL(p,s) narrowing / platform cap "
+                    "(scale or integer-digit capacity shrinks; not soft-passed by samples)"
+                )
+            elif "unsigned" in source_col.inferred_type.lower() or "uint" in (
+                source_col.inferred_type.lower()
+            ):
+                label = (
+                    f"{label} — UNSIGNED→signed integer overflow risk "
+                    "(not soft-passed by samples; widen to BIGINT/DECIMAL)"
+                )
+            elif normalize_logical_type and normalize_logical_type(
+                source_col.inferred_type
+            ) in {"string", "text"} and normalize_logical_type(
+                target.inferred_type
+            ) in {"string", "text"}:
+                label = (
+                    f"{label} — VARCHAR/CHAR width narrowing "
+                    "(declared capacity shrinks; not soft-passed by samples)"
+                )
+            elif platform_decimal_trunc:
+                label = (
+                    f"{label} — destination DECIMAL platform cap "
+                    "(not soft-passed by samples)"
+                )
+
+        document_collapse = bool(
+            is_nested_document_collapse
+            and is_nested_document_collapse(
+                source_col.inferred_type, target.inferred_type
+            )
+        )
+        field_shape_loss = bool(nested_collapse and not document_collapse)
+        if document_collapse:
+            label = (
+                f"{label} — nested→document (STRUCT/MAP field DDL not preserved; "
+                "Airbyte-style JSON/VARIANT path)"
+            )
+        elif field_shape_loss:
+            label = (
+                f"{label} — nested field/element contract mismatch "
+                "(STRUCT/MAP/ARRAY shape)"
+            )
+
+        # Explicit Map struct_policy acknowledges document serialization.
+        policy = (getattr(m, "struct_policy", None) or "").strip().lower()
+        intentional_json = policy in {
+            "store_as_json",
+            "flatten_top_level_keys",
+            "flatten_deep",
+            "explode_rows",
+        }
+
         # With sampled values we only hard-block when a real value cannot be
         # coerced. A declared-type mismatch whose values all coerce cleanly (or
         # are placeholder text that becomes NULL) is downgraded to a warning —
         # this is what stops schemaless sources (MongoDB widened to TEXT) from
         # producing a wall of false coercion blocks.
+        # Exception: fidelity_collapse / nested field mismatch always block.
+        # nested→document blocks unless struct_policy acknowledges the path.
         probe = by_source.get(m.source) if value_aware else None
-        if probe is not None:
+        if fidelity_collapse or field_shape_loss:
+            issues.append(label)
+            if probe is not None:
+                issues_detail.append({
+                    "source": m.source,
+                    "target": m.target,
+                    "source_type": source_col.inferred_type,
+                    "target_type": target.inferred_type,
+                    "severity": "block",
+                    "fidelity_collapse": fidelity_collapse,
+                    "nested_shape_collapse": field_shape_loss,
+                    "sampled": probe.get("sampled", 0),
+                    "failed": probe.get("failed", 0),
+                    "sentinel_nulls": probe.get("sentinel_nulls", 0),
+                    "sample_failures": probe.get("sample_failures", []),
+                    "suggested_fix": probe.get("suggested_fix", ""),
+                    "suggested_target_type": probe.get("suggested_target_type"),
+                    "suggested_transform": probe.get("suggested_transform"),
+                })
+        elif document_collapse and not intentional_json:
+            mode = (ctx.plan.validation_mode or "strict").strip().lower()
+            if mode in {"balanced", "review"}:
+                warnings.append(label + " — set struct_policy=store_as_json to acknowledge")
+            else:
+                issues.append(
+                    label + " — set Map struct_policy to store_as_json (or flatten) to proceed"
+                )
+            if probe is not None:
+                issues_detail.append({
+                    "source": m.source,
+                    "target": m.target,
+                    "source_type": source_col.inferred_type,
+                    "target_type": target.inferred_type,
+                    "severity": "block" if mode not in {"balanced", "review"} else "warn",
+                    "nested_document_collapse": True,
+                    "sampled": probe.get("sampled", 0),
+                    "failed": probe.get("failed", 0),
+                    "sentinel_nulls": probe.get("sentinel_nulls", 0),
+                    "sample_failures": probe.get("sample_failures", []),
+                    "suggested_fix": "Set struct_policy=store_as_json or map to native STRUCT/OBJECT",
+                    "suggested_target_type": probe.get("suggested_target_type"),
+                    "suggested_transform": probe.get("suggested_transform"),
+                })
+        elif document_collapse and intentional_json:
+            warnings.append(label + f" — acknowledged via struct_policy={policy}")
+        elif probe is not None:
             severity = probe.get("severity", "ok")
             detail = {
                 "source": m.source,
@@ -369,6 +547,42 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 warnings.append(label + " (declared; no samples — balanced warn)")
             else:
                 issues.append(label)
+
+    # Destination NOT NULL contract (Airbyte required-field class): existing
+    # typed columns that refuse NULL must not receive nullable sources / empty samples.
+    sample_rows = list(getattr(ctx, "sample_rows", None) or [])
+    for m in ctx.plan.mappings:
+        target = dest_by_name.get(m.target.lower())
+        if not target or target.nullable:
+            continue
+        source_col = next((c for c in ctx.plan.source.columns if c.name == m.source), None)
+        src_nullable = True if source_col is None else bool(source_col.nullable)
+        null_samples = 0
+        for row in sample_rows[:200]:
+            if not isinstance(row, dict):
+                continue
+            val = row.get(m.source)
+            if val is None or str(val).strip() == "":
+                null_samples += 1
+        if src_nullable or null_samples:
+            label = (
+                f"NOT NULL contract: {m.source} → {m.target} "
+                f"({target.inferred_type}) rejects NULL"
+            )
+            if null_samples:
+                label += f" — {null_samples} empty/null sample value(s)"
+            elif src_nullable:
+                label += " — source column is nullable"
+            issues.append(label)
+            issues_detail.append({
+                "source": m.source,
+                "target": m.target,
+                "source_type": source_col.inferred_type if source_col else "",
+                "target_type": target.inferred_type,
+                "severity": "block",
+                "not_null_contract": True,
+                "null_samples": null_samples,
+            })
 
     sample_n = int(report.get("sampled_rows") or 0) if isinstance(report, dict) else 0
     g3_scope = evidence_scope(
@@ -1074,12 +1288,55 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
 
     duplicates = 0
     if pk_target:
+        # Match destination CI / CITEXT / UNIQUE(lower(col)) equality.
+        dest_ddl = ""
+        try:
+            for c in getattr(ctx.plan.destination, "target_columns", None) or []:
+                if getattr(c, "name", None) == pk_target:
+                    dest_ddl = str(getattr(c, "inferred_type", "") or "")
+                    break
+        except Exception:
+            dest_ddl = ""
+        unique_keys = getattr(ctx.plan, "destination_unique_keys", None) or []
+        nulls_collide = False
+        try:
+            from services.type_system import (
+                unique_equality_key,
+                unique_key_forces_casefold,
+                unique_key_nulls_collide,
+                unique_key_row_in_scope,
+            )
+
+            casefold = unique_key_forces_casefold(
+                pk_target, ddl_type=dest_ddl, unique_keys=unique_keys
+            )
+            nulls_collide = unique_key_nulls_collide(
+                pk_target, unique_keys=unique_keys
+            )
+        except Exception:
+            unique_equality_key = lambda v, _d=None, force_casefold=False, null_sentinel=None: (  # noqa: E731
+                (null_sentinel or "") if v is None or not str(v).strip() else str(v).strip()
+            )
+            unique_key_row_in_scope = lambda _row, _col, unique_keys=None: True  # noqa: E731
+            casefold = False
+
+        null_sentinel = "\x00NULL\x00" if nulls_collide else None
         seen: set[str] = set()
         for row in mapped_rows:
-            val = str(row.get(pk_target, "") or "")
+            if not unique_key_row_in_scope(row, pk_target, unique_keys=unique_keys):
+                continue
+            raw = str(row.get(pk_target, "") or "")
+            val = unique_equality_key(
+                raw if raw else None,
+                dest_ddl,
+                force_casefold=casefold,
+                null_sentinel=null_sentinel,
+                dest_kind=dest_kind,
+            )
             if val and val in seen:
                 duplicates += 1
-            seen.add(val)
+            if val:
+                seen.add(val)
 
     if duplicates:
         return _block(
@@ -1094,6 +1351,52 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 "remediation_kind": "fix_source_keys",
             },
         )
+
+    # G9 parity: composite / dest UNIQUE constraints (hybrid Snowflake, PG composites).
+    # Append mode skips identity uniqueness above — still must catch enforced UNIQUE.
+    try:
+        from services.data_integrity import _check_destination_unique_constraints
+
+        target_types: dict[str, str] = {}
+        for c in getattr(ctx.plan.destination, "target_columns", None) or []:
+            name = getattr(c, "name", None)
+            if name:
+                target_types[str(name)] = str(
+                    getattr(c, "inferred_type", None)
+                    or getattr(c, "type", None)
+                    or ""
+                )
+        # Mapped rows already use target names — identity source=target for probe.
+        mapping_dicts = [
+            {"source": m.target, "target": m.target} for m in ctx.plan.mappings
+        ]
+        composite_issues = _check_destination_unique_constraints(
+            mapping_dicts,
+            mapped_rows,
+            destination_pk_columns=getattr(ctx.plan, "destination_pk_columns", None)
+            or [],
+            destination_unique_keys=getattr(ctx.plan, "destination_unique_keys", None)
+            or [],
+            target_types=target_types,
+            dest_kind=dest_kind,
+        )
+        if composite_issues:
+            return _block(
+                GateId.G8_RECONCILIATION,
+                _block_message(
+                    "Dry-run reconciliation failed — destination UNIQUE/PK duplicates",
+                    composite_issues,
+                ),
+                start,
+                {
+                    "issues": composite_issues[:15],
+                    "target_rows": len(mapped_rows),
+                    "rule_id": "g8_reconciliation.destination_unique",
+                    "remediation_kind": "fix_source_keys",
+                },
+            )
+    except Exception:
+        pass
 
     # Fingerprint: raw source cells vs write-path transformed values (not transform↔transform).
     if not nondeterministic:

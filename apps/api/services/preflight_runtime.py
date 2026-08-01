@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -80,9 +79,63 @@ class RuntimePreflightContext(PreflightContext):
         if idx is None:
             return []
 
-        values = [row[idx] for row in rows if idx < len(row) and row[idx].strip()]
-        counts = Counter(values)
-        return [{"value": v, "count": c} for v, c in counts.items() if c > 1][:10]
+        dest_type = ""
+        for c in getattr(self.plan.destination, "target_columns", None) or []:
+            if getattr(c, "name", None) == pk_col:
+                dest_type = str(getattr(c, "inferred_type", "") or "")
+                break
+        from services.type_system import (
+            unique_equality_key,
+            unique_key_forces_casefold,
+            unique_key_nulls_collide,
+            unique_key_row_in_scope,
+        )
+
+        unique_keys = getattr(self.plan, "destination_unique_keys", None) or []
+        casefold = unique_key_forces_casefold(
+            pk_col,
+            ddl_type=dest_type,
+            unique_keys=unique_keys,
+        )
+        nulls_collide = unique_key_nulls_collide(pk_col, unique_keys=unique_keys)
+        null_sentinel = "\x00NULL\x00" if nulls_collide else None
+        seen: dict[str, int] = {}
+        examples: dict[str, str] = {}
+        for row in rows:
+            if idx >= len(row):
+                continue
+            row_dict = {h: (row[i] if i < len(row) else None) for i, h in enumerate(headers)}
+            if not unique_key_row_in_scope(row_dict, pk_col, unique_keys=unique_keys):
+                continue
+            raw = "" if row[idx] is None else str(row[idx])
+            dest_kind = ""
+            try:
+                dest_kind = str(getattr(self.plan.destination, "db_type", "") or "")
+            except Exception:
+                dest_kind = ""
+            key = unique_equality_key(
+                None if row[idx] is None else raw,
+                dest_type,
+                force_casefold=casefold,
+                null_sentinel=null_sentinel,
+                dest_kind=dest_kind,
+            )
+            if not key and not nulls_collide:
+                continue
+            if not key:
+                continue
+            seen[key] = seen.get(key, 0) + 1
+            examples.setdefault(key, raw if raw else "<NULL>")
+        return [
+            {
+                "value": examples.get(v, v),
+                "count": c,
+                "collation_casefold": casefold,
+                "nulls_not_distinct": nulls_collide,
+            }
+            for v, c in seen.items()
+            if c > 1
+        ][:10]
 
     def run_dry_run(self, sample_size: int = 1000) -> tuple[bool, list[str]]:
         headers, rows, column_types = self._load_sample()

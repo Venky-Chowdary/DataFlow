@@ -18,14 +18,38 @@ from connectors.saas_common import (
     request,
     token,
 )
+from connectors.saas_write_carriers import stripe_live_types_for_columns
 from connectors.writer_common import (
     WriteResult,
+    apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
+    gate8_writer_meta,
+    resolve_mapping_dest_types,
     resolve_target_columns,
     transform_error_policy,
 )
 
 DEFAULT_HOST = "api.stripe.com"
+
+
+def resolve_stripe_dest_types(
+    target_cols: list[str],
+    mappings: list[dict],
+    column_types: dict[str, str],
+    *,
+    logical_types: list[str] | None = None,
+    object_type: str = "customers",
+) -> dict[str, str]:
+    """Prefer Stripe API-documented field limits; else Map/source carriers."""
+    live = stripe_live_types_for_columns(object_type, target_cols)
+    return resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        live_types=live,
+        default="VARCHAR",
+    )
 
 
 def _row_id(row: dict[str, Any], conflict_columns: list[str] | None) -> str | None:
@@ -82,8 +106,19 @@ def write_mapped_rows(
             driver="stripe",
         )
 
-    target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(
+        mappings, column_types, preserve_case=True
+    )
     policy = transform_error_policy(error_policy)
+    # Stripe has no Describe API — use documented OpenAPI field maxima so
+    # email/phone/metadata overflow quarantines before inventing bad customers.
+    dest_types = resolve_stripe_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        object_type=obj,
+    )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
@@ -91,8 +126,18 @@ def write_mapped_rows(
         target_cols=target_cols,
         column_types=column_types,
         error_policy=policy,
-        dest_types={c: "string" for c in target_cols},
+        dest_types=dest_types,
         preserve_case=True,
+    )
+    tgt_types = [str(dest_types.get(c, "VARCHAR") or "VARCHAR") for c in target_cols]
+    mapped_rows = apply_write_quarantine_matrix(
+        mapped_rows,
+        target_cols,
+        tgt_types,
+        rejected_details,
+        policy,
+        dialect_label="Stripe",
+        mappings=mappings,
     )
     if transform_errors and policy == "fail":
         return WriteResult(
@@ -114,6 +159,7 @@ def write_mapped_rows(
     written = 0
     chunks = 0
     digest = hashlib.sha256()
+    written_ids: list[str] = []
     all_rejected = list(rejected_details)
     warnings: list[str] = []
 
@@ -148,7 +194,10 @@ def write_mapped_rows(
             resp.raise_for_status()
             body = resp.json()
             written += 1
-            digest.update(str(body.get("id", i)).encode())
+            rid = str(body.get("id", "") or record_id or i)
+            digest.update(rid.encode())
+            if rid:
+                written_ids.append(rid)
             if isinstance(row, dict):
                 row["id"] = body.get("id", "")
         except Exception as exc:
@@ -210,4 +259,5 @@ def write_mapped_rows(
         rejected_rows=len(all_rejected),
         warnings=warnings[:20],
         driver="stripe",
+        meta=gate8_writer_meta(mapped_rows, target_cols, written_ids),
     )

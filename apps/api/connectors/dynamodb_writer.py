@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 from dataclasses import dataclass
 from decimal import Decimal
@@ -12,6 +11,7 @@ from connectors.aws_common import boto3_client
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
     build_mapped_rows_with_details,
+    gate8_writer_meta,
     resolve_target_columns,
     row_checksum,
     transform_error_policy,
@@ -71,12 +71,10 @@ def _to_dynamo_value(value: Any, source_type: str) -> Any:
     if upper in {"BINARY", "BLOB", "BYTEA", "VARBINARY"}:
         if isinstance(value, bytes):
             return value
-        if isinstance(value, str):
-            try:
-                return base64.b64decode(value, validate=True)
-            except Exception:
-                return value.encode("utf-8")
-        return value
+        from connectors.sql_bind import coerce_binary_wire
+
+        # Fail-closed — never UTF-8-invent bytes (Airbyte/Fivetran class).
+        return coerce_binary_wire(value)
     return value
 
 
@@ -146,6 +144,19 @@ def write_mapped_rows(
             rejected_rows=len({d["row"] for d in rejected_details}),
             rejected_details=rejected_details[:100],
         )
+
+    tgt_types = [str(dest_types.get(c, logical_types[i] if i < len(logical_types) else "VARCHAR") or "VARCHAR") for i, c in enumerate(target_cols)]
+    from connectors.writer_common import apply_write_quarantine_matrix
+
+    mapped_rows = apply_write_quarantine_matrix(
+        mapped_rows,
+        target_cols,
+        tgt_types,
+        rejected_details,
+        policy,
+        dialect_label="DynamoDB",
+        mappings=mappings,
+    )
 
     client = boto3_client("dynamodb", cfg)
     if create_table:
@@ -249,8 +260,12 @@ def write_mapped_rows(
                         except Exception:
                             value = value
                     elif attr_type == "B":
+                        from connectors.sql_bind import coerce_binary_wire
+
                         if isinstance(value, str):
-                            value = value.encode("utf-8")
+                            value = coerce_binary_wire(value)
+                        elif value is not None and not isinstance(value, (bytes, bytearray)):
+                            value = coerce_binary_wire(value)
                     item[col] = _to_attr(value, logical_types[i])
                 request_items.append({"PutRequest": {"Item": item}})
             _batch_write_with_retry(client, table, request_items)
@@ -277,6 +292,7 @@ def write_mapped_rows(
             warnings=errors[:10],
             rejected_rows=len({d["row"] for d in rejected_details}),
             rejected_details=rejected_details[:100],
+            meta=gate8_writer_meta(valid_rows, target_cols),
         )
     except Exception as exc:
         return WriteResult(

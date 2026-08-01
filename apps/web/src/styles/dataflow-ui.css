@@ -6281,10 +6281,16 @@ html,
   font-size: 12.5px;
   line-height: 1.45;
   overflow-wrap: anywhere;
-  display: -webkit-box;
-  -webkit-line-clamp: 4;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+  white-space: pre-wrap;
+  max-height: 12em;
+  overflow-y: auto;
+}
+
+/* Errors carry remediation text (TLS advice, quarantine reasons). Never
+   truncate them into a 4-line clamp — operators need the full sentence. */
+.dt-toast--error .dt-toast-message,
+.dt-toast--warning .dt-toast-message {
+  max-height: 16em;
 }
 
 .dt-toast-close {

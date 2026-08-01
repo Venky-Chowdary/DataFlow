@@ -410,4 +410,15 @@ def write_mapped_rows(
         rejected_details=rejected,
         rejected_rows=len(rejected),
         warnings=[r.get("reason") or "" for r in rejected[:10] if r.get("reason")],
+        meta=_weaviate_gate8_meta(objects),
     )
+
+
+def _weaviate_gate8_meta(objects: list[dict[str, Any]]) -> dict[str, Any]:
+    from connectors.writer_common import vector_gate8_meta
+
+    rows = []
+    for obj in objects:
+        props = dict(obj.get("properties") or {}) if isinstance(obj.get("properties"), dict) else {}
+        rows.append({"id": obj.get("id"), **props})
+    return vector_gate8_meta(rows)

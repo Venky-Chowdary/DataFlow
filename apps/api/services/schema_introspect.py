@@ -155,6 +155,8 @@ def introspect_schema(
             ssl=ssl,
             table=table,
             strict_namespace=strict_namespace,
+            # Redshift constraints are informational — mark advisory like BQ.
+            advisory_keys=(db_type == "redshift"),
         )
     if db_type == "snowflake":
         return _introspect_snowflake(
@@ -268,6 +270,26 @@ def introspect_schema(
     if db_type in ("stripe", "airtable", "notion", "rest_api"):
         return _introspect_thin_saas(
             db_type,
+            host=host,
+            database=database,
+            table=table,
+            connection_string=connection_string,
+            api_key=api_key,
+            username=username,
+            password=password,
+        )
+    if db_type == "shopify":
+        return _introspect_shopify(
+            host=host,
+            database=database,
+            table=table,
+            connection_string=connection_string,
+            api_key=api_key,
+            username=username,
+            password=password,
+        )
+    if db_type == "zendesk":
+        return _introspect_zendesk(
             host=host,
             database=database,
             table=table,
@@ -391,9 +413,23 @@ def _introspect_redis(
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}
 
 
+def _mark_unique_keys_advisory(unique_meta: dict[str, Any]) -> dict[str, Any]:
+    """Flag catalog PK/UNIQUE as NOT ENFORCED (BigQuery / Redshift class)."""
+    keys = []
+    for uk in unique_meta.get("unique_keys") or []:
+        bucket = dict(uk)
+        bucket["enforced"] = False
+        keys.append(bucket)
+    return {
+        "primary_key_columns": list(unique_meta.get("primary_key_columns") or []),
+        "unique_keys": keys,
+    }
+
+
 def _introspect_postgresql(**kwargs) -> dict[str, Any]:
     table = kwargs.get("table")
     schema = kwargs.get("schema") or "public"
+    advisory_keys = bool(kwargs.get("advisory_keys"))
     try:
         from connectors.postgresql_conn import get_connection
 
@@ -420,6 +456,10 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
             columns: list[dict] = []
             resolved_schema = schema
             target = table or (tables[0] if tables else None)
+            unique_meta: dict[str, Any] = {
+                "primary_key_columns": [],
+                "unique_keys": [],
+            }
             if target:
                 columns = _pg_fetch_columns(cur, schema, target)
                 # Table may live outside the requested schema (common when UI
@@ -452,13 +492,26 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                     columns = _refine_columns_by_samples(
                         conn, columns, target, resolved_schema
                     )
+                    unique_meta = _pg_fetch_unique_keys(cur, resolved_schema, target)
+                    if advisory_keys:
+                        unique_meta = _mark_unique_keys_advisory(unique_meta)
         conn.close()
-        return {
+        out: dict[str, Any] = {
             "ok": True,
             "tables": tables,
             "columns": columns,
             "schema": resolved_schema if table else schema,
+            "primary_key_columns": unique_meta.get("primary_key_columns") or [],
+            "unique_keys": unique_meta.get("unique_keys") or [],
         }
+        if advisory_keys and (out["primary_key_columns"] or out["unique_keys"]):
+            out["warnings"] = [
+                "Redshift PRIMARY KEY / UNIQUE constraints are informational "
+                "(not enforced at write) — Validate will not invent duplicate "
+                "blockers; maintain uniqueness in the pipeline (dbt/Airbyte class)."
+            ]
+            out["message"] = out["warnings"][0]
+        return out
     except ImportError:
         return {
             "ok": False,
@@ -657,7 +710,9 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
                     logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
                 cur.execute(
                     """
-                    SELECT column_name, data_type, is_nullable
+                    SELECT column_name, data_type, is_nullable,
+                           character_maximum_length, numeric_precision,
+                           numeric_scale, datetime_precision
                     FROM information_schema.columns
                     WHERE UPPER(table_schema) = UPPER(%s) AND table_name = %s
                     ORDER BY ordinal_position
@@ -690,7 +745,9 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
                             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
                         cur.execute(
                             """
-                            SELECT column_name, data_type, is_nullable
+                            SELECT column_name, data_type, is_nullable,
+                                   character_maximum_length, numeric_precision,
+                                   numeric_scale, datetime_precision
                             FROM information_schema.columns
                             WHERE UPPER(table_schema) = UPPER(%s) AND table_name = %s
                             ORDER BY ordinal_position
@@ -702,21 +759,54 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
                             schema = found_schema
                             target_table = found_table
                             break
-                for name, dtype, nullable in col_rows:
+                for row in col_rows:
+                    # Tolerate legacy 3-tuple mocks and full INFORMATION_SCHEMA rows.
+                    name = row[0]
+                    dtype = row[1]
+                    nullable = row[2]
+                    char_len = row[3] if len(row) > 3 else None
+                    num_prec = row[4] if len(row) > 4 else None
+                    num_scale = row[5] if len(row) > 5 else None
+                    dt_prec = row[6] if len(row) > 6 else None
                     columns.append(
                         {
                             "name": name,
-                            "inferred_type": _sf_to_logical(dtype),
+                            "inferred_type": _sf_to_logical(
+                                dtype,
+                                character_maximum_length=char_len,
+                                numeric_precision=num_prec,
+                                numeric_scale=num_scale,
+                                datetime_precision=dt_prec,
+                            ),
                             "nullable": nullable == "YES",
                         }
                     )
+            unique_meta = (
+                _snowflake_fetch_unique_keys(cur, schema, str(target_table))
+                if target_table and columns
+                else {"primary_key_columns": [], "unique_keys": []}
+            )
         conn.close()
         out: dict[str, Any] = {
             "ok": True,
             "tables": tables,
             "columns": columns,
             "schema": schema,
+            "primary_key_columns": unique_meta.get("primary_key_columns") or [],
+            "unique_keys": unique_meta.get("unique_keys") or [],
         }
+        # Advisory (NOT ENFORCED) keys — do not invent write blockers, but tell the operator.
+        advisory = [
+            u.get("name")
+            for u in (unique_meta.get("unique_keys") or [])
+            if u.get("enforced") is False
+        ]
+        if advisory:
+            warnings.append(
+                "Snowflake UNIQUE/PRIMARY KEY declared but NOT ENFORCED "
+                f"({', '.join(str(n) for n in advisory[:5])}) — Validate will not "
+                "block duplicates; hybrid tables enforce constraints at write time."
+            )
         if warnings:
             out["warnings"] = warnings
             # Surface the primary warning in error-adjacent field for older UI clients.
@@ -810,7 +900,8 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
             if target:
                 cur.execute(
                     """
-                    SELECT column_name, column_type, is_nullable
+                    SELECT column_name, column_type, is_nullable, EXTRA,
+                           COLLATION_NAME, CHARACTER_SET_NAME
                     FROM information_schema.columns
                     WHERE table_schema = %s AND table_name = %s
                     ORDER BY ordinal_position
@@ -821,7 +912,8 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                 if not rows:
                     cur.execute(
                         """
-                        SELECT column_name, column_type, is_nullable
+                        SELECT column_name, column_type, is_nullable, EXTRA,
+                               COLLATION_NAME, CHARACTER_SET_NAME
                         FROM information_schema.columns
                         WHERE table_schema = %s AND LOWER(table_name) = LOWER(%s)
                         ORDER BY ordinal_position
@@ -853,7 +945,8 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                     for found_db, found_table in cur.fetchall() or []:
                         cur.execute(
                             """
-                            SELECT column_name, column_type, is_nullable
+                            SELECT column_name, column_type, is_nullable, EXTRA,
+                                   COLLATION_NAME, CHARACTER_SET_NAME
                             FROM information_schema.columns
                             WHERE table_schema = %s AND table_name = %s
                             ORDER BY ordinal_position
@@ -865,18 +958,51 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                             db_name = found_db
                             target = found_table
                             break
-                for name, dtype, nullable in rows:
+                for row in rows:
+                    name, dtype, nullable = row[0], row[1], row[2]
+                    extra = str(row[3] if len(row) > 3 else "").lower()
+                    collation = str(row[4] if len(row) > 4 and row[4] else "").strip()
+                    charset = str(row[5] if len(row) > 5 and row[5] else "").strip()
+                    logical = _mysql_to_logical(dtype)
+                    if "auto_increment" in extra:
+                        logical = f"{logical} AUTO_INCREMENT"
+                    # VIRTUAL/STORED GENERATED — client INSERT must omit (like PG ALWAYS).
+                    elif "generated" in extra:
+                        logical = f"{logical} GENERATED ALWAYS"
+                    if collation:
+                        logical = f"{logical} COLLATE {collation}"
                     columns.append({
                         "name": name,
-                        "inferred_type": _mysql_to_logical(dtype),
+                        "inferred_type": logical,
                         "nullable": nullable == "YES",
+                        "is_identity": "auto_increment" in extra,
+                        "generation": (
+                            "always"
+                            if "generated" in extra
+                            else ("by_default" if "auto_increment" in extra else "")
+                        ),
+                        "collation": collation,
+                        "charset": charset,
                     })
                 if columns:
                     columns = _refine_columns_by_samples(
                         conn, columns, target, db_name, quote_char="`"
                     )
+            unique_meta: dict[str, Any] = {
+                "primary_key_columns": [],
+                "unique_keys": [],
+            }
+            if columns and target:
+                unique_meta = _mysql_fetch_unique_keys(cur, db_name, target)
         conn.close()
-        return {"ok": True, "tables": tables, "columns": columns, "schema": db_name}
+        return {
+            "ok": True,
+            "tables": tables,
+            "columns": columns,
+            "schema": db_name,
+            "primary_key_columns": unique_meta.get("primary_key_columns") or [],
+            "unique_keys": unique_meta.get("unique_keys") or [],
+        }
     except ImportError:
         return {"ok": False, "error": "Install pymysql for MySQL schema introspection", "columns": [], "tables": []}
     except Exception as exc:
@@ -917,31 +1043,163 @@ def _introspect_bigquery(**kwargs) -> dict[str, Any]:
                         resolved_dataset = ds_id
                         target = table
                         break
+            tbl_for_keys = None
             if tbl is not None:
+                tbl_for_keys = tbl
                 for field in tbl.schema:
                     columns.append({
                         "name": field.name,
                         "inferred_type": _bq_field_to_logical(field),
                         "nullable": getattr(field, "mode", "NULLABLE") != "REQUIRED",
                     })
-        return {"ok": True, "tables": tables, "columns": columns, "schema": resolved_dataset}
+        else:
+            tbl_for_keys = None
+        unique_meta = (
+            _bigquery_fetch_primary_key(tbl_for_keys)
+            if tbl_for_keys is not None and columns
+            else {"primary_key_columns": [], "unique_keys": []}
+        )
+        out: dict[str, Any] = {
+            "ok": True,
+            "tables": tables,
+            "columns": columns,
+            "schema": resolved_dataset,
+            "primary_key_columns": unique_meta.get("primary_key_columns") or [],
+            "unique_keys": unique_meta.get("unique_keys") or [],
+        }
+        if unique_meta.get("primary_key_columns"):
+            out["warnings"] = [
+                "BigQuery PRIMARY KEY is NOT ENFORCED (optimizer metadata only) — "
+                "Validate will not invent write blockers; prove uniqueness with "
+                "pipeline tests (dbt unique / Gate-9 sample) before trusting merges."
+            ]
+            out["message"] = out["warnings"][0]
+        return out
     except ImportError:
         return {"ok": False, "error": "Install google-cloud-bigquery for schema introspection", "columns": [], "tables": []}
     except Exception as exc:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}
 
 
-def _bq_to_logical(dtype: str, *, precision: int | None = None, scale: int | None = None) -> str:
-    d = (dtype or "").upper()
-    if d in ("INT64", "INTEGER"):
+def _bigquery_fetch_primary_key(tbl: Any) -> dict[str, Any]:
+    """Return declared BigQuery PRIMARY KEY columns — always ``enforced=False``.
+
+    BigQuery has no UNIQUE constraint API; PK/FK are NOT ENFORCED optimizer
+    hints (Google Cloud docs). Never invent uniqueness from clustering.
+    """
+    pk_cols: list[str] = []
+    try:
+        constraints = getattr(tbl, "table_constraints", None)
+        primary = getattr(constraints, "primary_key", None) if constraints else None
+        cols = getattr(primary, "columns", None) if primary else None
+        if cols:
+            pk_cols = [str(c) for c in cols if c]
+    except Exception:
+        pk_cols = []
+    if not pk_cols:
+        return {"primary_key_columns": [], "unique_keys": []}
+    return {
+        "primary_key_columns": pk_cols,
+        "unique_keys": [
+            {
+                "name": "PRIMARY",
+                "columns": list(pk_cols),
+                "primary": True,
+                "expression": "",
+                "expression_columns": [],
+                "case_insensitive": False,
+                "filter_predicate": "",
+                "enforced": False,
+            }
+        ],
+    }
+
+
+def _bq_to_logical(
+    dtype: str,
+    *,
+    precision: int | None = None,
+    scale: int | None = None,
+    max_length: int | None = None,
+) -> str:
+    """Map BigQuery dtype strings to logical carriers (never invent TEXT).
+
+    Nested ``ARRAY<T>`` / ``STRUCT<…>`` / ``RANGE<T>`` must be parsed *before*
+    scalar token checks — otherwise ``RANGE<TIMESTAMP>`` falsely becomes
+    ``TIMESTAMPTZ`` via a substring trap (Airbyte/Fivetran-class fidelity).
+
+    ``BIGNUMERIC`` stays distinct from ``NUMERIC``/``DECIMAL`` so create-new and
+    preflight can honor the (76,38) vs (38,9) contract (Google SQL docs).
+    """
+    raw = (dtype or "").strip()
+    if not raw:
+        return "TEXT"
+    upper = raw.upper()
+
+    # --- Nested / RANGE carriers (before any "TIMESTAMP" substring match) ---
+    if (upper.startswith("ARRAY<") or upper.startswith("LIST<")) and raw.endswith(">"):
+        inner = raw[raw.index("<") + 1 : -1].strip()
+        if not inner:
+            return "ARRAY"
+        return f"ARRAY<{_bq_to_logical(inner)}>"
+    if upper in {"ARRAY", "LIST"}:
+        return "ARRAY"
+
+    if (upper.startswith("STRUCT<") or upper.startswith("RECORD<")) and raw.endswith(">"):
+        from services.type_system import parse_struct_fields
+
+        fields = parse_struct_fields(raw)
+        if not fields:
+            return "STRUCT"
+        parts = [f"{name}:{_bq_to_logical(typ)}" for name, typ in fields]
+        return f"STRUCT<{', '.join(parts)}>"
+    if upper in {"RECORD", "STRUCT"}:
+        # Fielded nested — distinct from opaque JSON (G3 nested→document collapse).
+        return "STRUCT"
+
+    if upper.startswith("RANGE<") and raw.endswith(">"):
+        inner = raw[raw.index("<") + 1 : -1].strip().upper()
+        # BigQuery RANGE ↔ PostgreSQL range twins (no Snowflake native RANGE).
+        if inner == "DATE":
+            return "DATERANGE"
+        if inner == "DATETIME":
+            return "TSRANGE"
+        if inner in {"TIMESTAMP", "TIMESTAMPTZ"}:
+            return "TSTZRANGE"
+        return f"RANGE<{inner}>" if inner else "RANGE"
+    if upper == "RANGE":
+        return "RANGE"
+
+    # Parametric numeric from dtype string (INFORMATION_SCHEMA / DDL paste).
+    m_num = re.match(
+        r"^(NUMERIC|DECIMAL|BIGNUMERIC|BIGDECIMAL)\s*\(\s*(\d+)\s*(?:,\s*(\d+))?\s*\)$",
+        raw,
+        re.I,
+    )
+    if m_num:
+        kind = m_num.group(1).upper()
+        p = int(m_num.group(2))
+        s = int(m_num.group(3)) if m_num.group(3) is not None else None
+        if kind in {"BIGNUMERIC", "BIGDECIMAL"}:
+            return f"BIGNUMERIC({p},{s})" if s is not None else f"BIGNUMERIC({p})"
+        return f"DECIMAL({p},{s})" if s is not None else f"DECIMAL({p})"
+
+    d = upper
+    if d in {"INT64", "INTEGER", "SMALLINT", "BIGINT", "TINYINT", "BYTEINT"}:
         return "INTEGER"
-    if d in ("NUMERIC", "BIGNUMERIC"):
+    if d in {"BIGNUMERIC", "BIGDECIMAL"}:
+        if precision is not None and scale is not None:
+            return f"BIGNUMERIC({int(precision)},{int(scale)})"
+        if precision is not None:
+            return f"BIGNUMERIC({int(precision)})"
+        return "BIGNUMERIC"
+    if d in {"NUMERIC", "DECIMAL"}:
         if precision is not None and scale is not None:
             return f"DECIMAL({int(precision)},{int(scale)})"
         if precision is not None:
             return f"DECIMAL({int(precision)})"
         return "DECIMAL"
-    if d in ("FLOAT64", "FLOAT", "DOUBLE"):
+    if d in {"FLOAT64", "FLOAT", "DOUBLE"}:
         return "FLOAT"
     if d == "BOOL":
         return "BOOLEAN"
@@ -952,19 +1210,29 @@ def _bq_to_logical(dtype: str, *, precision: int | None = None, scale: int | Non
     # BigQuery DATETIME is wall-clock NTZ; TIMESTAMP is UTC instant (TZ-aware).
     if d == "DATETIME":
         return "TIMESTAMP_NTZ"
-    if d == "TIMESTAMP" or "TIMESTAMP" in d:
+    if d == "TIMESTAMP":
         return "TIMESTAMPTZ"
     if d == "INTERVAL":
         return "INTERVAL"
-    if d == "BYTES":
+    if d == "BYTES" or d.startswith("BYTES("):
+        if d.startswith("BYTES("):
+            m_len = re.match(r"^BYTES\((\d+)\)$", d)
+            if m_len:
+                return f"BINARY({int(m_len.group(1))})"
+        if max_length is not None and int(max_length) > 0:
+            return f"BINARY({int(max_length)})"
         return "BINARY"
     if d == "JSON":
         return "JSON"
     if d == "GEOGRAPHY":
         return "GEOGRAPHY"
-    if d in ("RECORD", "STRUCT"):
-        return "JSON"
-    if d == "STRING":
+    if d == "STRING" or d.startswith("STRING("):
+        if d.startswith("STRING("):
+            m_len = re.match(r"^STRING\((\d+)\)$", d)
+            if m_len:
+                return f"STRING({int(m_len.group(1))})"
+        if max_length is not None and int(max_length) > 0:
+            return f"STRING({int(max_length)})"
         return "TEXT"
     return "TEXT"
 
@@ -973,6 +1241,7 @@ def _bq_field_to_logical(field: Any) -> str:
     """Preserve BigQuery RECORD/ARRAY nesting — never collapse child types to bare JSON."""
     precision = getattr(field, "precision", None)
     scale = getattr(field, "scale", None)
+    max_length = getattr(field, "max_length", None)
     ftype = str(getattr(field, "field_type", "") or "")
     mode = str(getattr(field, "mode", "NULLABLE") or "NULLABLE").upper()
     children = list(getattr(field, "fields", None) or [])
@@ -992,6 +1261,7 @@ def _bq_field_to_logical(field: Any) -> str:
             ftype,
             precision=precision if isinstance(precision, int) else None,
             scale=scale if isinstance(scale, int) else None,
+            max_length=max_length if isinstance(max_length, int) else None,
         )
 
     if mode == "REPEATED" and not base.upper().startswith("ARRAY<"):
@@ -1002,10 +1272,22 @@ def _bq_field_to_logical(field: Any) -> str:
 _PG_COLUMN_SQL = """
 SELECT a.attname AS column_name,
        format_type(a.atttypid, a.atttypmod) AS data_type,
-       CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable
+       CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable,
+       COALESCE(a.attidentity, '') AS attidentity,
+       pg_get_expr(ad.adbin, ad.adrelid) AS default_expr,
+       COALESCE(col.collname, '') AS collname,
+       COALESCE(col.collisdeterministic, TRUE) AS coll_deterministic,
+       COALESCE(a.attgenerated, '') AS attgenerated,
+       a.atttypid AS type_oid,
+       t.typtype AS typ_type
 FROM pg_catalog.pg_attribute a
 JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
 JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+JOIN pg_catalog.pg_type t ON a.atttypid = t.oid
+LEFT JOIN pg_catalog.pg_attrdef ad
+  ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
+LEFT JOIN pg_catalog.pg_collation col
+  ON a.attcollation = col.oid AND a.attcollation <> 0
 WHERE n.nspname = %s
   AND c.relname = %s
   AND a.attnum > 0
@@ -1014,17 +1296,690 @@ ORDER BY a.attnum
 """
 
 
+def format_enum_domain_carrier(members: list[str] | tuple[str, ...]) -> str:
+    """Build ``ENUM('a','b')`` carrier from ordered labels (MySQL / PG pg_enum)."""
+    from services.type_system import format_enum_domain_carrier as _fmt
+
+    return _fmt(members)
+
+
+def _pg_fetch_enum_labels(cur: Any, type_oids: list[int]) -> dict[int, list[str]]:
+    """Load ``pg_enum`` labels ordered by ``enumsortorder`` (Postgres catalog)."""
+    if not type_oids:
+        return {}
+    # Deduplicate while preserving order for stable ANY/IN binds.
+    uniq: list[int] = []
+    seen: set[int] = set()
+    for oid in type_oids:
+        if oid in seen:
+            continue
+        seen.add(oid)
+        uniq.append(int(oid))
+    placeholders = ",".join(["%s"] * len(uniq))
+    cur.execute(
+        f"""
+        SELECT enumtypid, enumlabel
+        FROM pg_catalog.pg_enum
+        WHERE enumtypid IN ({placeholders})
+        ORDER BY enumtypid, enumsortorder
+        """,
+        tuple(uniq),
+    )
+    out: dict[int, list[str]] = {}
+    for typoid, label in cur.fetchall():
+        out.setdefault(int(typoid), []).append(str(label))
+    return out
+
+
+def _pg_apply_identity_carrier(logical: str, attidentity: str, default_expr: str | None) -> str:
+    """Annotate INTEGER carriers with GENERATED / SERIAL when catalog says so."""
+    ident = (attidentity or "").strip().lower()
+    default = (default_expr or "").lower()
+    base = (logical or "INTEGER").upper()
+    if ident == "a":
+        # GENERATED ALWAYS AS IDENTITY — client INSERT must omit the column.
+        return f"{base} GENERATED ALWAYS"
+    if ident == "d":
+        return f"{base} GENERATED BY DEFAULT"
+    if "nextval(" in default:
+        if "bigint" in base or base in {"INT8"}:
+            return "BIGSERIAL"
+        if "smallint" in base or base in {"INT2"}:
+            return "SMALLSERIAL"
+        return "SERIAL"
+    return logical
+
+
+def _pg_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
+    """Return PRIMARY KEY + UNIQUE constraints and unique indexes (incl. expressions).
+
+    ``UNIQUE (lower(email))`` is invisible in ``information_schema`` alone — we
+    also read ``pg_index`` / ``pg_get_expr`` so Validate casefolds like the engine.
+    """
+    from services.type_system import parse_case_insensitive_index_expression
+
+    pk: list[str] = []
+    unique_keys: list[dict[str, Any]] = []
+    by_name: dict[str, dict[str, Any]] = {}
+    try:
+        cur.execute(
+            """
+            SELECT tc.constraint_name,
+                   tc.constraint_type,
+                   kcu.column_name,
+                   kcu.ordinal_position
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON tc.constraint_schema = kcu.constraint_schema
+             AND tc.constraint_name = kcu.constraint_name
+             AND tc.table_schema = kcu.table_schema
+             AND tc.table_name = kcu.table_name
+            WHERE tc.table_schema = %s
+              AND tc.table_name = %s
+              AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+            ORDER BY tc.constraint_type,
+                     tc.constraint_name,
+                     kcu.ordinal_position
+            """,
+            (schema, table),
+        )
+        for name, ctype, col, _ord in cur.fetchall() or []:
+            key = str(name)
+            bucket = by_name.setdefault(
+                key,
+                {
+                    "name": key,
+                    "columns": [],
+                    "primary": str(ctype).upper() == "PRIMARY KEY",
+                    "expression": "",
+                    "expression_columns": [],
+                    "case_insensitive": False,
+                },
+            )
+            bucket["columns"].append(str(col))
+    except Exception:
+        return {"primary_key_columns": [], "unique_keys": []}
+
+    # Unique indexes (including expression / functional indexes).
+    try:
+        cur.execute(
+            """
+            SELECT a.attnum, a.attname
+            FROM pg_catalog.pg_attribute a
+            JOIN pg_catalog.pg_class t ON t.oid = a.attrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
+            WHERE n.nspname = %s
+              AND t.relname = %s
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+            """,
+            (schema, table),
+        )
+        attmap = {int(num): str(name) for num, name in (cur.fetchall() or [])}
+
+        try:
+            cur.execute(
+                """
+                SELECT ic.relname AS index_name,
+                       i.indisprimary AS is_primary,
+                       COALESCE(pg_get_expr(i.indexprs, i.indrelid), '') AS exprs,
+                       COALESCE(pg_get_expr(i.indpred, i.indrelid), '') AS pred,
+                       pg_get_indexdef(i.indexrelid) AS indexdef,
+                       i.indkey,
+                       COALESCE(i.indnullsnotdistinct, false) AS nulls_not_distinct
+                FROM pg_catalog.pg_index i
+                JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
+                JOIN pg_catalog.pg_class t ON t.oid = i.indrelid
+                JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
+                WHERE n.nspname = %s
+                  AND t.relname = %s
+                  AND i.indisunique
+                  AND i.indisvalid
+                """,
+                (schema, table),
+            )
+        except Exception:
+            # PG < 15 lacks indnullsnotdistinct.
+            cur.execute(
+                """
+                SELECT ic.relname AS index_name,
+                       i.indisprimary AS is_primary,
+                       COALESCE(pg_get_expr(i.indexprs, i.indrelid), '') AS exprs,
+                       COALESCE(pg_get_expr(i.indpred, i.indrelid), '') AS pred,
+                       pg_get_indexdef(i.indexrelid) AS indexdef,
+                       i.indkey,
+                       false AS nulls_not_distinct
+                FROM pg_catalog.pg_index i
+                JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
+                JOIN pg_catalog.pg_class t ON t.oid = i.indrelid
+                JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
+                WHERE n.nspname = %s
+                  AND t.relname = %s
+                  AND i.indisunique
+                  AND i.indisvalid
+                """,
+                (schema, table),
+            )
+        for (
+            idx_name,
+            is_primary,
+            exprs,
+            pred,
+            indexdef,
+            indkey,
+            nulls_not_distinct,
+        ) in cur.fetchall() or []:
+            key = str(idx_name)
+            bucket = by_name.setdefault(
+                key,
+                {
+                    "name": key,
+                    "columns": [],
+                    "primary": bool(is_primary),
+                    "expression": "",
+                    "expression_columns": [],
+                    "case_insensitive": False,
+                    "filter_predicate": "",
+                    "nulls_not_distinct": False,
+                },
+            )
+            bucket["primary"] = bool(is_primary) or bool(bucket.get("primary"))
+            bucket["nulls_not_distinct"] = bool(nulls_not_distinct)
+            if pred:
+                bucket["filter_predicate"] = str(pred).strip()
+            expr_text = str(exprs or "").strip() or str(indexdef or "")
+            if exprs:
+                bucket["expression"] = str(exprs).strip()
+            ci_cols = parse_case_insensitive_index_expression(expr_text)
+            if ci_cols:
+                bucket["case_insensitive"] = True
+                for c in ci_cols:
+                    if c not in bucket["expression_columns"]:
+                        bucket["expression_columns"].append(c)
+            # Resolve simple column attnums when constraints did not already list them.
+            if not bucket["columns"] and indkey is not None:
+                try:
+                    attnums = [
+                        int(x)
+                        for x in str(indkey).split()
+                        if str(x).lstrip("-").isdigit() and int(x) > 0
+                    ]
+                except Exception:
+                    attnums = []
+                for attnum in attnums:
+                    attname = attmap.get(attnum)
+                    if attname and attname not in bucket["columns"]:
+                        bucket["columns"].append(attname)
+    except Exception:
+        # Constraints alone are still useful when pg_index probe fails.
+        pass
+
+    for bucket in by_name.values():
+        if bucket.get("primary"):
+            pk = list(bucket.get("columns") or [])
+        unique_keys.append(bucket)
+    return {"primary_key_columns": pk, "unique_keys": unique_keys}
+
+
+def _sqlserver_fetch_unique_keys(conn: Any, schema: str, table: str) -> dict[str, Any]:
+    """Return PRIMARY KEY + UNIQUE indexes from ``sys.indexes``.
+
+    Also resolves computed-column definitions (``LOWER(email)``) so Validate
+    casefolds like the engine when uniqueness is on a computed CI column.
+    """
+    import sqlalchemy as sa
+    from services.type_system import parse_case_insensitive_index_expression
+
+    pk: list[str] = []
+    unique_keys: list[dict[str, Any]] = []
+    try:
+        rows = conn.execute(
+            sa.text(
+                """
+                SELECT
+                  i.name AS index_name,
+                  i.is_primary_key,
+                  c.name AS column_name,
+                  ic.key_ordinal,
+                  CONVERT(nvarchar(4000), cc.definition) AS computed_def,
+                  CONVERT(nvarchar(4000), i.filter_definition) AS filter_def
+                FROM sys.indexes i
+                JOIN sys.index_columns ic
+                  ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+                JOIN sys.columns c
+                  ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+                LEFT JOIN sys.computed_columns cc
+                  ON cc.object_id = c.object_id AND cc.column_id = c.column_id
+                JOIN sys.tables t ON t.object_id = i.object_id
+                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                WHERE s.name = :schema
+                  AND t.name = :table
+                  AND i.is_unique = 1
+                  AND ic.is_included_column = 0
+                  AND i.is_hypothetical = 0
+                ORDER BY i.name, ic.key_ordinal
+                """
+            ),
+            {"schema": schema, "table": table},
+        ).fetchall()
+    except Exception:
+        return {"primary_key_columns": [], "unique_keys": []}
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for idx_name, is_pk, col, _ord, computed_def, filter_def in rows or []:
+        if not idx_name:
+            continue
+        key = str(idx_name)
+        bucket = grouped.setdefault(
+            key,
+            {
+                "name": key,
+                "columns": [],
+                "primary": bool(is_pk),
+                "expression": "",
+                "expression_columns": [],
+                "case_insensitive": False,
+                "filter_predicate": "",
+            },
+        )
+        bucket["primary"] = bool(is_pk) or bool(bucket.get("primary"))
+        bucket["columns"].append(str(col))
+        if filter_def and not bucket.get("filter_predicate"):
+            bucket["filter_predicate"] = str(filter_def).strip()
+        expr = str(computed_def or "").strip()
+        if expr:
+            bucket["expression"] = (
+                f"{bucket['expression']}; {expr}" if bucket["expression"] else expr
+            )
+            # SQL Server brackets: LOWER([email]) → LOWER(email)
+            normalized = expr.replace("[", "").replace("]", "")
+            ci_cols = parse_case_insensitive_index_expression(normalized)
+            if ci_cols:
+                bucket["case_insensitive"] = True
+                for c in ci_cols:
+                    if c not in bucket["expression_columns"]:
+                        bucket["expression_columns"].append(c)
+    for bucket in grouped.values():
+        if bucket.get("primary"):
+            pk = list(bucket.get("columns") or [])
+        unique_keys.append(bucket)
+    return {"primary_key_columns": pk, "unique_keys": unique_keys}
+
+
+def _oracle_fetch_unique_keys(conn: Any, owner: str, table: str) -> dict[str, Any]:
+    """Return PRIMARY/UNIQUE constraints + function-based unique indexes.
+
+    ``CREATE UNIQUE INDEX … (UPPER(email))`` lives in ``ALL_IND_EXPRESSIONS``,
+    not ``ALL_CONSTRAINTS`` — must be read or Validate false-greens Abc/abc.
+    """
+    import sqlalchemy as sa
+    from services.type_system import parse_case_insensitive_index_expression
+
+    pk: list[str] = []
+    unique_keys: list[dict[str, Any]] = []
+    by_name: dict[str, dict[str, Any]] = {}
+    owner_u = (owner or "").upper()
+    table_u = (table or "").upper()
+    try:
+        rows = conn.execute(
+            sa.text(
+                """
+                SELECT
+                  ac.constraint_name,
+                  ac.constraint_type,
+                  acc.column_name,
+                  acc.position
+                FROM all_constraints ac
+                JOIN all_cons_columns acc
+                  ON ac.owner = acc.owner
+                 AND ac.constraint_name = acc.constraint_name
+                 AND ac.table_name = acc.table_name
+                WHERE ac.owner = :owner
+                  AND ac.table_name = :table
+                  AND ac.constraint_type IN ('P', 'U')
+                  AND ac.status = 'ENABLED'
+                ORDER BY ac.constraint_name, acc.position
+                """
+            ),
+            {"owner": owner_u, "table": table_u},
+        ).fetchall()
+    except Exception:
+        return {"primary_key_columns": [], "unique_keys": []}
+
+    for name, ctype, col, _pos in rows or []:
+        key = str(name)
+        bucket = by_name.setdefault(
+            key,
+            {
+                "name": key,
+                "columns": [],
+                "primary": str(ctype).upper() == "P",
+                "expression": "",
+                "expression_columns": [],
+                "case_insensitive": False,
+                "filter_predicate": "",
+            },
+        )
+        bucket["columns"].append(str(col))
+
+    # Unique function-based indexes (UPPER/LOWER) — not constraint-backed.
+    try:
+        fbi_rows = conn.execute(
+            sa.text(
+                """
+                SELECT
+                  ai.index_name,
+                  TO_CHAR(aie.column_expression) AS column_expression,
+                  aie.column_position
+                FROM all_indexes ai
+                JOIN all_ind_expressions aie
+                  ON ai.owner = aie.index_owner
+                 AND ai.index_name = aie.index_name
+                WHERE ai.table_owner = :owner
+                  AND ai.table_name = :table
+                  AND ai.uniqueness = 'UNIQUE'
+                ORDER BY ai.index_name, aie.column_position
+                """
+            ),
+            {"owner": owner_u, "table": table_u},
+        ).fetchall()
+        for idx_name, expr, _pos in fbi_rows or []:
+            key = str(idx_name)
+            bucket = by_name.setdefault(
+                key,
+                {
+                    "name": key,
+                    "columns": [],
+                    "primary": False,
+                    "expression": "",
+                    "expression_columns": [],
+                    "case_insensitive": False,
+                    "filter_predicate": "",
+                },
+            )
+            expr_text = str(expr or "").strip()
+            if expr_text:
+                bucket["expression"] = (
+                    f"{bucket['expression']}; {expr_text}"
+                    if bucket["expression"]
+                    else expr_text
+                )
+                # Oracle quotes identifiers: UPPER("EMAIL")
+                normalized = expr_text.replace('"', "")
+                ci_cols = parse_case_insensitive_index_expression(normalized)
+                if ci_cols:
+                    bucket["case_insensitive"] = True
+                    for c in ci_cols:
+                        if c not in bucket["expression_columns"]:
+                            bucket["expression_columns"].append(c)
+    except Exception:
+        pass
+
+    for bucket in by_name.values():
+        if bucket.get("primary"):
+            pk = list(bucket.get("columns") or [])
+        unique_keys.append(bucket)
+    return {"primary_key_columns": pk, "unique_keys": unique_keys}
+
+
+def _snowflake_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
+    """Return PRIMARY KEY / UNIQUE from Snowflake INFORMATION_SCHEMA.
+
+    Hybrid tables enforce these at write time; standard tables often declare
+    ``NOT ENFORCED`` constraints — surface ``enforced`` so Validate does not
+    invent blockers for advisory-only keys (Snowflake honesty bar).
+    """
+    pk: list[str] = []
+    unique_keys: list[dict[str, Any]] = []
+    by_name: dict[str, dict[str, Any]] = {}
+    try:
+        try:
+            cur.execute(
+                """
+                SELECT tc.constraint_name,
+                       tc.constraint_type,
+                       kcu.column_name,
+                       kcu.ordinal_position,
+                       COALESCE(tc.enforced, 'YES') AS enforced
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                  ON tc.constraint_catalog = kcu.constraint_catalog
+                 AND tc.constraint_schema = kcu.constraint_schema
+                 AND tc.constraint_name = kcu.constraint_name
+                 AND tc.table_schema = kcu.table_schema
+                 AND tc.table_name = kcu.table_name
+                WHERE UPPER(tc.table_schema) = UPPER(%s)
+                  AND tc.table_name = %s
+                  AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+                ORDER BY tc.constraint_type, tc.constraint_name, kcu.ordinal_position
+                """,
+                (schema, table),
+            )
+        except Exception:
+            # Older SF builds may lack ENFORCED — treat as YES (fail-closed).
+            cur.execute(
+                """
+                SELECT tc.constraint_name,
+                       tc.constraint_type,
+                       kcu.column_name,
+                       kcu.ordinal_position,
+                       'YES' AS enforced
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                  ON tc.constraint_catalog = kcu.constraint_catalog
+                 AND tc.constraint_schema = kcu.constraint_schema
+                 AND tc.constraint_name = kcu.constraint_name
+                 AND tc.table_schema = kcu.table_schema
+                 AND tc.table_name = kcu.table_name
+                WHERE UPPER(tc.table_schema) = UPPER(%s)
+                  AND tc.table_name = %s
+                  AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+                ORDER BY tc.constraint_type, tc.constraint_name, kcu.ordinal_position
+                """,
+                (schema, table),
+            )
+        for name, ctype, col, _ord, enforced in cur.fetchall() or []:
+            key = str(name)
+            is_primary = str(ctype).upper() == "PRIMARY KEY"
+            bucket = by_name.setdefault(
+                key,
+                {
+                    "name": key,
+                    "columns": [],
+                    "primary": is_primary,
+                    "expression": "",
+                    "expression_columns": [],
+                    "case_insensitive": False,
+                    "filter_predicate": "",
+                    "enforced": str(enforced or "YES").upper() != "NO",
+                },
+            )
+            bucket["primary"] = is_primary or bool(bucket.get("primary"))
+            if str(enforced or "YES").upper() == "NO":
+                bucket["enforced"] = False
+            if col:
+                bucket["columns"].append(str(col))
+    except Exception:
+        return {"primary_key_columns": [], "unique_keys": []}
+
+    for bucket in by_name.values():
+        if bucket.get("primary"):
+            pk = list(bucket.get("columns") or [])
+        unique_keys.append(bucket)
+    return {"primary_key_columns": pk, "unique_keys": unique_keys}
+
+
+def _mysql_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
+    """Return PRIMARY / UNIQUE indexes from ``STATISTICS`` (incl. functional exprs)."""
+    from services.type_system import parse_case_insensitive_index_expression
+
+    pk: list[str] = []
+    unique_keys: list[dict[str, Any]] = []
+    try:
+        # MySQL 8.0.13+ exposes EXPRESSION for functional indexes; older builds
+        # lack the column — fall back to COLUMN_NAME only.
+        try:
+            cur.execute(
+                """
+                SELECT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX, NON_UNIQUE, EXPRESSION
+                FROM information_schema.STATISTICS
+                WHERE TABLE_SCHEMA = %s
+                  AND TABLE_NAME = %s
+                  AND NON_UNIQUE = 0
+                ORDER BY INDEX_NAME, SEQ_IN_INDEX
+                """,
+                (schema, table),
+            )
+            rows = cur.fetchall() or []
+            has_expr = True
+        except Exception:
+            cur.execute(
+                """
+                SELECT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX, NON_UNIQUE
+                FROM information_schema.STATISTICS
+                WHERE TABLE_SCHEMA = %s
+                  AND TABLE_NAME = %s
+                  AND NON_UNIQUE = 0
+                ORDER BY INDEX_NAME, SEQ_IN_INDEX
+                """,
+                (schema, table),
+            )
+            rows = [(*r, None) for r in (cur.fetchall() or [])]
+            has_expr = False
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            idx_name, col, _seq, _nu = row[0], row[1], row[2], row[3]
+            expr = row[4] if has_expr and len(row) > 4 else None
+            key = str(idx_name)
+            bucket = grouped.setdefault(
+                key,
+                {
+                    "name": key,
+                    "columns": [],
+                    "primary": key.upper() == "PRIMARY",
+                    "expression": "",
+                    "expression_columns": [],
+                    "case_insensitive": False,
+                    "filter_predicate": "",
+                },
+            )
+            if col:
+                bucket["columns"].append(str(col))
+            expr_text = str(expr or "").strip()
+            if expr_text:
+                bucket["expression"] = (
+                    f"{bucket['expression']}; {expr_text}"
+                    if bucket["expression"]
+                    else expr_text
+                )
+                ci_cols = parse_case_insensitive_index_expression(expr_text)
+                if ci_cols:
+                    bucket["case_insensitive"] = True
+                    for c in ci_cols:
+                        if c not in bucket["expression_columns"]:
+                            bucket["expression_columns"].append(c)
+        for bucket in grouped.values():
+            if bucket["primary"]:
+                pk = list(bucket["columns"])
+            unique_keys.append(bucket)
+    except Exception:
+        return {"primary_key_columns": [], "unique_keys": []}
+    return {"primary_key_columns": pk, "unique_keys": unique_keys}
+
+
 def _pg_fetch_columns(cur: Any, schema: str, table: str) -> list[dict]:
     """Read column metadata via ``format_type`` so typmod (vector dim, decimal p,s) survives."""
-    cur.execute(_PG_COLUMN_SQL, (schema, table))
+    try:
+        cur.execute(_PG_COLUMN_SQL, (schema, table))
+        rows = list(cur.fetchall())
+        has_typtype = True
+    except Exception:
+        # PG < 12 lacks collisdeterministic / attgenerated — fall back.
+        cur.execute(
+            """
+            SELECT a.attname AS column_name,
+                   format_type(a.atttypid, a.atttypmod) AS data_type,
+                   CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable,
+                   COALESCE(a.attidentity, '') AS attidentity,
+                   pg_get_expr(ad.adbin, ad.adrelid) AS default_expr,
+                   COALESCE(col.collname, '') AS collname,
+                   TRUE AS coll_deterministic,
+                   '' AS attgenerated,
+                   a.atttypid AS type_oid,
+                   t.typtype AS typ_type
+            FROM pg_catalog.pg_attribute a
+            JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+            JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+            JOIN pg_catalog.pg_type t ON a.atttypid = t.oid
+            LEFT JOIN pg_catalog.pg_attrdef ad
+              ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
+            LEFT JOIN pg_catalog.pg_collation col
+              ON a.attcollation = col.oid AND a.attcollation <> 0
+            WHERE n.nspname = %s
+              AND c.relname = %s
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+            ORDER BY a.attnum
+            """,
+            (schema, table),
+        )
+        rows = list(cur.fetchall())
+        has_typtype = True
+        # If join to pg_type fails on ancient servers, last-resort without enum.
+        if not rows:
+            has_typtype = False
+
+    enum_oids = [
+        int(row[8])
+        for row in rows
+        if has_typtype and len(row) > 9 and str(row[9] or "").strip().lower() == "e"
+    ]
+    enum_labels = _pg_fetch_enum_labels(cur, enum_oids) if enum_oids else {}
+
     columns: list[dict] = []
-    for name, dtype, nullable in cur.fetchall():
+    for row in rows:
+        name, dtype, nullable, attidentity, default_expr = row[:5]
+        collname = str(row[5] if len(row) > 5 else "").strip()
+        coll_det = bool(row[6]) if len(row) > 6 else True
+        attgenerated = str(row[7] if len(row) > 7 else "").strip().lower()
+        type_oid = int(row[8]) if len(row) > 8 and row[8] is not None else 0
+        typ_type = str(row[9] if len(row) > 9 else "").strip().lower()
+        if typ_type == "e" and type_oid in enum_labels and enum_labels[type_oid]:
+            # Preserve pg_enum domain — Airbyte invents bare string and loses labels.
+            logical = format_enum_domain_carrier(enum_labels[type_oid])
+        else:
+            logical = _pg_to_logical(str(dtype or ""))
+        logical = _pg_apply_identity_carrier(
+            logical, str(attidentity or ""), default_expr
+        )
+        # STORED/VIRTUAL generated columns — client INSERT must omit (like ALWAYS).
+        if attgenerated in {"s", "v"} and "GENERATED ALWAYS" not in logical.upper():
+            logical = f"{logical} GENERATED ALWAYS"
+        # Skip libc default/C/POSIX noise; keep ICU / named / nondeterministic.
+        if collname and collname.lower() not in {"default", "c", "posix"}:
+            logical = f"{logical} COLLATE {collname}"
+            if not coll_det:
+                logical = f"{logical} NONDETERMINISTIC"
+        generation = ""
+        if (attidentity or "").strip().lower() == "a" or attgenerated in {"s", "v"}:
+            generation = "always"
+        elif (attidentity or "").strip().lower() == "d" or (
+            default_expr and "nextval(" in str(default_expr).lower()
+        ):
+            generation = "by_default"
         columns.append(
             {
                 "name": name,
-                "inferred_type": _pg_to_logical(str(dtype or "")),
+                "inferred_type": logical,
                 "nullable": str(nullable).upper() == "YES",
                 "data_type": dtype,
+                "is_identity": bool(
+                    (attidentity or "").strip()
+                    or (default_expr and "nextval(" in str(default_expr).lower())
+                ),
+                "generation": generation,
+                "collation": collname,
+                "collation_deterministic": coll_det,
             }
         )
     return columns
@@ -1054,18 +2009,25 @@ def _pg_elem_to_logical(elem: str) -> str:
     if e.startswith("timestamp"):
         return "TIMESTAMPTZ" if "with time zone" in e or e.endswith("tz") else "TIMESTAMP_NTZ"
     if e.startswith("time"):
+        if "with time zone" in e or e in {"timetz", "time tz"}:
+            return "TIMETZ"
         return "TIME"
     if e in {"uuid"}:
         return "UUID"
     if e in {"json", "jsonb"}:
-        return "JSON"
+        return "JSONB" if e == "jsonb" else "JSON"
     if e in {"bytea", "varbyte"}:
         return "BINARY"
     if e in {"text", "varchar", "character varying", "character", "char", "citext", "name"}:
-        return "VARCHAR"
+        return "VARCHAR" if e != "citext" else "CITEXT"
     if e.startswith("character varying") or e.startswith("varchar") or e.startswith("character("):
         return "VARCHAR"
-    return "VARCHAR"
+    # Specialty scalars (inet, point, pg_lsn, …) — reuse scalar mapper so
+    # ARRAY<INET> survives introspect (Airbyte historically emitted untyped arrays).
+    scalar = _pg_to_logical(e)
+    if scalar.startswith("ARRAY<") or scalar.endswith("[]"):
+        return "VARCHAR"
+    return scalar
 
 
 def _pg_to_logical(dtype: str) -> str:
@@ -1093,30 +2055,79 @@ def _pg_to_logical(dtype: str) -> str:
         return "VECTOR"
 
     if d == "interval" or d.startswith("interval "):
+        # Preserve YM vs DS polarity — bare INTERVAL stays unqualified.
+        if "year" in d and "month" in d:
+            return "INTERVAL YEAR TO MONTH"
+        if any(tok in d for tok in ("day", "second", "hour", "minute")):
+            return "INTERVAL DAY TO SECOND"
         return "INTERVAL"
-    if d in {"geometry", "geography"} or d.startswith("geometry(") or d.startswith("geography("):
-        return "GEOGRAPHY"
+    if d.startswith("geography("):
+        # Keep typmod/SRID (geography(Point,4326)) for contract checks.
+        return f"GEOGRAPHY{raw[raw.lower().index('('):]}" if "(" in raw else "GEOGRAPHY"
+    if d.startswith("geometry("):
+        return f"GEOMETRY{raw[raw.lower().index('('):]}" if "(" in raw else "GEOMETRY"
+    if d in {"geometry", "geography"}:
+        return "GEOGRAPHY" if d == "geography" else "GEOMETRY"
 
-    if d in ("integer", "smallint", "bigint", "serial", "bigserial",
-             "smallserial", "oid", "xid", "cid", "tid"):
+    if d in ("serial", "bigserial", "smallserial"):
+        return d.upper()
+    # System / WAL identifiers — preserve native carriers (never invent INTEGER/TEXT).
+    if d == "oid":
+        return "OID"
+    if d == "xid8":
+        return "XID8"
+    if d == "xid":
+        return "XID"
+    if d == "cid":
+        return "CID"
+    if d == "tid":
+        return "TID"
+    if d == "pg_lsn":
+        return "PG_LSN"
+    if d in ("integer", "smallint", "bigint"):
         return "INTEGER"
     # IEEE floats stay FLOAT — never silently rewrite to fixed-point DECIMAL.
     if d in ("real", "double precision", "double", "float", "float4", "float8"):
         return "FLOAT"
-    if d in ("numeric", "decimal", "money"):
+    if d == "money":
+        # PostgreSQL money ≈ fixed-scale currency — mirror SQL Server MONEY fidelity.
+        return "DECIMAL(19,4)"
+    if d in ("numeric", "decimal"):
         return "DECIMAL"
     if d == "boolean":
         return "BOOLEAN"
     if d == "date":
         return "DATE"
-    # Preserve TZ polarity (Redshift TIMESTAMPTZ shares this mapper).
+    if d == "citext":
+        # citext is case-insensitive by type — preserve for uniqueness / Gate-8.
+        return "CITEXT"
+    # Preserve TZ polarity + fractional-second precision (timestamp(6), time(3)).
+    # format_type may emit timestamptz(3) or "timestamp(3) with time zone".
     if "timestamp" in d:
-        if "with time zone" in d or d in {"timestamptz", "timestamp with time zone"}:
-            return "TIMESTAMPTZ"
-        # Explicit NTZ token so ddl_type does not invent TIMESTAMPTZ on PG.
-        return "TIMESTAMP_NTZ"
-    if d == "time" or d.startswith("time with") or d.startswith("time without"):
-        return "TIME"
+        m = re.search(r"timestamptz\s*\(\s*(\d+)\s*\)", d)
+        if m:
+            return f"TIMESTAMPTZ({m.group(1)})"
+        m = re.search(r"timestamp\s*\(\s*(\d+)\s*\)", d)
+        fsp = m.group(1) if m else None
+        if (
+            "with time zone" in d
+            or d == "timestamptz"
+            or d.startswith("timestamptz")
+        ):
+            return f"TIMESTAMPTZ({fsp})" if fsp else "TIMESTAMPTZ"
+        return f"TIMESTAMP_NTZ({fsp})" if fsp else "TIMESTAMP_NTZ"
+    if (
+        d in {"timetz", "time tz"}
+        or d.startswith("timetz")
+        or (d.startswith("time") and "with time zone" in d and "without" not in d)
+    ):
+        m = re.search(r"time(?:tz)?\s*\(\s*(\d+)\s*\)", d)
+        fsp = m.group(1) if m else None
+        return f"TIMETZ({fsp})" if fsp else "TIMETZ"
+    if d == "time" or d.startswith("time without") or d.startswith("time("):
+        m = re.search(r"time\s*\(\s*(\d+)\s*\)", d)
+        fsp = m.group(1) if m else None
+        return f"TIME({fsp})" if fsp else "TIME"
     if d == "uuid":
         return "UUID"
     if d == "bytea":
@@ -1135,29 +2146,104 @@ def _pg_to_logical(dtype: str) -> str:
         elem = d.replace(" array", "").strip()
         elem_logical = _pg_elem_to_logical(elem)
         return f"ARRAY<{elem_logical}>"
+    if d == "jsonpath":
+        # PostgreSQL jsonpath — path expression type (never invent TEXT).
+        return "JSONPATH"
     if d in {"json", "jsonb"}:
-        return "JSON"
-    if d.startswith("bit(") or d == "bit" or d.startswith("bit varying") or d == "varbit":
-        # BIT(1) → boolean via type_system; BIT(n>1) → binary.
-        return raw.upper() if "(" in d else "BIT"
-    if d in ("xml", "tsvector", "tsquery", "text", "character varying",
-             "varchar", "character", "char", "name",
-             "line", "lseg", "box", "path", "polygon", "circle",
-             "inet", "cidr", "macaddr", "macaddr8", "pg_lsn",
-             "txid_snapshot", "pg_snapshot", "user-defined"):
-        return "TEXT"
+        # Preserve JSONB polarity — bind SSOT uses native structures on PG.
+        return "JSONB" if d == "jsonb" else "JSON"
     if d == "hstore":
-        return "JSON"
+        return "HSTORE"
+    if d == "ltree":
+        return "LTREE"
+    if d == "xml":
+        return "XML"
+    if d == "tsvector":
+        return "TSVECTOR"
+    if d == "tsquery":
+        return "TSQUERY"
     if d == "point":
-        return "GEOGRAPHY"
-    # character varying(n) / character(n)
-    if d.startswith("character varying") or d.startswith("varchar") or d.startswith("character("):
+        return "POINT"
+    if d == "line":
+        return "LINE"
+    if d == "lseg":
+        return "LSEG"
+    if d == "box":
+        return "BOX"
+    if d == "path":
+        return "PATH"
+    if d == "polygon":
+        return "POLYGON"
+    if d == "circle":
+        return "CIRCLE"
+    if d == "inet":
+        return "INET"
+    if d == "cidr":
+        return "CIDR"
+    if d == "macaddr":
+        return "MACADDR"
+    if d == "macaddr8":
+        return "MACADDR8"
+    if d.endswith("multirange"):
+        return d.upper()
+    if d.endswith("range") and d not in {"range"}:
+        return d.upper()  # int4range, tstzrange, …
+    if (
+        d.startswith("bit(")
+        or d == "bit"
+        or d.startswith("bit varying")
+        or d.startswith("varbit")
+    ):
+        # BIT(1) → boolean via type_system; BIT(n>1)/VARBIT → bitstring binary.
+        m = re.match(r"^bit\s+varying\s*\(\s*(\d+)\s*\)$", d)
+        if m:
+            return f"BIT VARYING({m.group(1)})"
+        m = re.match(r"^varbit\s*\(\s*(\d+)\s*\)$", d)
+        if m:
+            return f"VARBIT({m.group(1)})"
+        m = re.match(r"^bit\s*\(\s*(\d+)\s*\)$", d)
+        if m:
+            return f"BIT({m.group(1)})"
+        if d in {"bit varying", "varbit"}:
+            return "BIT VARYING"
+        return "BIT"
+    if d in {"text", "name", "user-defined"}:
         return "TEXT"
+    if d == "txid_snapshot":
+        return "TXID_SNAPSHOT"
+    if d == "pg_snapshot":
+        return "PG_SNAPSHOT"
+    # Preserve declared width — VARCHAR(n)/CHAR(n) must not collapse to TEXT
+    # (G3 width-narrow + write quarantine depend on parametric carriers).
+    m = re.match(r"^(?:character\s+varying|varchar)\s*\(\s*(\d+)\s*\)$", d)
+    if m:
+        return f"VARCHAR({m.group(1)})"
+    m = re.match(r"^(?:character|char)\s*\(\s*(\d+)\s*\)$", d)
+    if m:
+        return f"CHAR({m.group(1)})"
+    if d in {"character varying", "varchar"}:
+        return "VARCHAR"
+    if d in {"character", "char"}:
+        return "CHAR"
+    if d.startswith("character varying") or d.startswith("varchar") or d.startswith("character("):
+        return "VARCHAR"
     return "TEXT"
 
 def _mysql_to_logical(dtype: str) -> str:
     """Map MySQL ``column_type`` to logical carriers, preserving DECIMAL(p,s)."""
     raw = (dtype or "").strip()
+    d_early = raw.lower().strip()
+    # BIT(n) before text fallback — BIT(1)→boolean via type_system; BIT(n>1)
+    # is a bitstring (never opaque TEXT — wave 71).
+    if (
+        d_early.startswith("bit(")
+        or d_early == "bit"
+        or d_early.startswith("bit varying")
+    ):
+        m = re.match(r"^bit\s*\(\s*(\d+)\s*\)$", d_early)
+        if m:
+            return f"BIT({m.group(1)})"
+        return "BIT"
     d = raw.lower()
     if "tinyint(1)" in d:
         return "BOOLEAN"
@@ -1187,7 +2273,12 @@ def _mysql_to_logical(dtype: str) -> str:
         if "int" in d:
             return "INT UNSIGNED"
     if d == "year" or d.startswith("year("):
-        return "INTEGER"
+        # MySQL YEAR — keep carrier so write quarantine enforces 1901–2155 / 0000
+        # (non-strict MySQL silently stores invalid years as 0000).
+        return "YEAR"
+    # Preserve MEDIUMINT range (−8388608..8388607) for bind quarantine.
+    if "mediumint" in d:
+        return "MEDIUMINT"
     if "int" in d:
         return "INTEGER"
     # IEEE float/double/real — distinct from DECIMAL(p,s).
@@ -1198,18 +2289,38 @@ def _mysql_to_logical(dtype: str) -> str:
     if d == "date":
         return "DATE"
     # MySQL TIMESTAMP is session-TZ aware; DATETIME is wall-clock NTZ.
+    # Preserve fractional-second precision (datetime(6), time(3), timestamp(2)).
     if "timestamp" in d and "datetime" not in d:
-        return "TIMESTAMPTZ"
+        m = re.search(r"timestamp\s*\(\s*(\d+)\s*\)", d)
+        return f"TIMESTAMPTZ({m.group(1)})" if m else "TIMESTAMPTZ"
     if "datetime" in d:
-        return "TIMESTAMP_NTZ"
+        m = re.search(r"datetime\s*\(\s*(\d+)\s*\)", d)
+        return f"TIMESTAMP_NTZ({m.group(1)})" if m else "TIMESTAMP_NTZ"
     if d.startswith("time"):
-        return "TIME"
+        m = re.search(r"time\s*\(\s*(\d+)\s*\)", d)
+        return f"TIME({m.group(1)})" if m else "TIME"
     if "json" in d:
         return "JSON"
+    # Preserve BINARY(n)/VARBINARY(n) — G3 width-narrow + write quarantine.
+    m = re.match(r"^(varbinary|binary)\s*\(\s*(\d+)\s*\)$", d)
+    if m:
+        return f"{m.group(1).upper()}({m.group(2)})"
     if "binary" in d or "blob" in d or "varbinary" in d:
         return "BINARY"
     if "uuid" in d:
         return "UUID"
+    # MySQL ENUM/SET domains — keep members so G3/write can fail-closed.
+    m = re.match(r"^(enum|set)\s*\((.*)\)$", d, re.I | re.DOTALL)
+    if m:
+        return f"{m.group(1).upper()}({m.group(2).strip()})"
+    # Preserve MySQL column_type widths (varchar(255), char(10), …).
+    m = re.match(r"^(varchar|char)\s*\(\s*(\d+)\s*\)$", d)
+    if m:
+        return f"{m.group(1).upper()}({m.group(2)})"
+    if d in {"varchar", "char"}:
+        return d.upper()
+    if "text" in d:
+        return "TEXT"
     return "TEXT"
 
 
@@ -1242,19 +2353,68 @@ def _oracle_to_logical(dtype: str) -> str:
     if d == "DATE":
         return "TIMESTAMP"  # Oracle DATE is datetime
     if "TIMESTAMP" in d:
-        if "WITHLOCALTIMEZONE" in d or "WITHTIMEZONE" in d:
-            return "TIMESTAMPTZ"
+        if "WITHLOCALTIMEZONE" in d:
+            return "TIMESTAMP_LTZ"
+        if "WITHTIMEZONE" in d:
+            return "TIMESTAMP_TZ"
         return "TIMESTAMP_NTZ"
-    if d.startswith("INTERVAL"):
+    if "INTERVAL" in raw.upper():
+        # Preserve Oracle leading-field / fractional-second precision
+        # (INTERVAL DAY(3) TO SECOND(6) — ANSI/Oracle contract).
+        raw_u = re.sub(r"\s+", " ", raw.upper()).strip()
+        m_ym = re.match(
+            r"INTERVAL YEAR(?:\((\d+)\))? TO MONTH(?:\((\d+)\))?",
+            raw_u,
+        )
+        if m_ym:
+            if m_ym.group(1):
+                return f"INTERVAL YEAR({m_ym.group(1)}) TO MONTH"
+            return "INTERVAL YEAR TO MONTH"
+        m_ds = re.match(
+            r"INTERVAL DAY(?:\((\d+)\))? TO SECOND(?:\((\d+)\))?",
+            raw_u,
+        )
+        if m_ds:
+            if m_ds.group(1) or m_ds.group(2):
+                day_p = m_ds.group(1) or "2"
+                sec_p = m_ds.group(2) or "6"
+                return f"INTERVAL DAY({day_p}) TO SECOND({sec_p})"
+            return "INTERVAL DAY TO SECOND"
+        if "YEAR" in raw_u and "MONTH" in raw_u:
+            return "INTERVAL YEAR TO MONTH"
+        if any(tok in raw_u for tok in ("DAY", "SECOND", "HOUR", "MINUTE")):
+            return "INTERVAL DAY TO SECOND"
         return "INTERVAL"
+    # VARCHAR2(n BYTE|CHAR) — BYTE is Oracle default; multi-byte UTF-8 can
+    # truncate under BYTE while CHAR semantics still fit (Informatica-class bug).
+    m = re.match(r"^(VARCHAR2|NVARCHAR2|CHAR|NCHAR)\((\d+)(?:(BYTE|CHAR))?\)$", d)
+    if m:
+        fixed = m.group(1) in {"CHAR", "NCHAR"}
+        national = m.group(1) in {"NVARCHAR2", "NCHAR"}
+        if national:
+            prefix = "NCHAR" if fixed else "NVARCHAR"
+        else:
+            prefix = "CHAR" if fixed else "VARCHAR"
+        unit = (m.group(3) or "").upper()
+        if unit in {"BYTE", "CHAR"}:
+            return f"{prefix}({m.group(2)} {unit})"
+        return f"{prefix}({m.group(2)})"
     if d in {"CLOB", "NCLOB", "LONG", "VARCHAR2", "NVARCHAR2", "CHAR", "NCHAR", "VARCHAR"}:
         return "TEXT"
     if d in {"BLOB", "RAW", "LONGRAW", "BFILE"} or d.startswith("RAW("):
         return "BINARY"
     if d == "JSON":
         return "JSON"
-    if "SDO_GEOMETRY" in d or d in {"GEOMETRY", "GEOGRAPHY"}:
+    if d in {"XMLTYPE", "XML"}:
+        return "XMLTYPE"
+    if d in {"ROWID", "UROWID"}:
+        return d
+    if "SDO_GEOMETRY" in d:
+        return "SDO_GEOMETRY"
+    if d == "GEOGRAPHY":
         return "GEOGRAPHY"
+    if d == "GEOMETRY":
+        return "GEOMETRY"
     return "TEXT"
 
 
@@ -1273,8 +2433,10 @@ def _sqlserver_to_logical(dtype: str) -> str:
         return f"DECIMAL({m.group(2)})"
     if d.startswith("decimal") or d.startswith("numeric"):
         return "DECIMAL"
-    if d in {"money", "smallmoney"}:
-        return "DECIMAL(19,4)" if d == "money" else "DECIMAL(10,4)"
+    if d == "money":
+        return "MONEY"  # → DECIMAL(19,4) via normalize/ddl; keep token for money quarantine
+    if d == "smallmoney":
+        return "SMALLMONEY"
     if d in {"float", "real"}:
         return "FLOAT"
     if d in {"int", "bigint", "smallint", "tinyint"}:
@@ -1284,25 +2446,64 @@ def _sqlserver_to_logical(dtype: str) -> str:
     if d == "date":
         return "DATE"
     if d == "time" or d.startswith("time("):
-        return "TIME"
+        m = re.search(r"time\s*\(\s*(\d+)\s*\)", d)
+        return f"TIME({m.group(1)})" if m else "TIME"
     if d == "datetimeoffset" or d.startswith("datetimeoffset"):
-        return "TIMESTAMPTZ"
-    if d in {"datetime", "datetime2", "smalldatetime"} or d.startswith("datetime"):
+        # Offset-pinned (SQL Server) — TIMESTAMP_TZ polarity, not session LTZ.
+        m = re.search(r"datetimeoffset\s*\(\s*(\d+)\s*\)", d)
+        return f"TIMESTAMP_TZ({m.group(1)})" if m else "TIMESTAMP_TZ"
+    if d.startswith("datetime2"):
+        m = re.search(r"datetime2\s*\(\s*(\d+)\s*\)", d)
+        return f"TIMESTAMP_NTZ({m.group(1)})" if m else "TIMESTAMP_NTZ"
+    # Minute accuracy + Microsoft rounding — keep carrier (wave 70).
+    if d == "smalldatetime":
+        return "SMALLDATETIME"
+    if d in {"datetime"} or d.startswith("datetime"):
         return "TIMESTAMP_NTZ"
     if d == "uniqueidentifier":
         return "UUID"
+    if d == "hierarchyid":
+        # Path polarity `/1/2/` — PG create-new maps to LTREE (wave 67).
+        return "HIERARCHYID"
     if d == "json":
         return "JSON"
     if d == "xml":
-        return "TEXT"
-    if d in {"geography", "geometry"}:
+        # Preserve XML specialty (not opaque TEXT) — PG/Oracle XML bind SSOT.
+        return "XML"
+    if d == "sql_variant":
+        # Opaque typed union — JSONB envelope on PG create-new (wave 69).
+        return "SQL_VARIANT"
+    if d == "geography":
         return "GEOGRAPHY"
-    if d in {"binary", "varbinary", "image", "rowversion", "timestamp"}:
+    if d == "geometry":
+        return "GEOMETRY"
+    m = re.match(r"^(varbinary|binary)\s*\(\s*(\d+)\s*\)$", d)
+    if m:
+        return f"{m.group(1).upper()}({m.group(2)})"
+    # SQL Server TIMESTAMP is ROWVERSION (8-byte concurrency token), NOT datetime.
+    # HVR/Estuary map it to BYTEA — never invent a clock type (wave 66).
+    if d in {"rowversion", "timestamp"}:
+        return "ROWVERSION"
+    if d in {"binary", "varbinary", "image"}:
         return "BINARY"
-    if "binary" in d or d.endswith("(max)") and "varbinary" in d:
+    if "varbinary" in d and "(max)" in d:
         return "BINARY"
-    if any(tok in d for tok in ("nvarchar", "varchar", "nchar", "char", "text", "ntext", "sysname")):
+    if "binary" in d:
+        return "BINARY"
+    # Prefer parametric carriers when length was folded into dtype (e.g. varchar(50)).
+    m = re.match(r"^(n?varchar|n?char)\s*\(\s*(\d+)\s*\)$", d)
+    if m:
+        base = m.group(1).lower()
+        width = m.group(2)
+        if base.startswith("n"):
+            return f"N{'CHAR' if 'char' in base and 'varchar' not in base else 'VARCHAR'}({width})"
+        return f"{'CHAR' if base == 'char' else 'VARCHAR'}({width})"
+    if d in {"text", "ntext"} or "(max)" in d:
         return "TEXT"
+    if any(tok in d for tok in ("nvarchar", "varchar", "nchar", "char", "sysname")):
+        if "char" in d and "varchar" not in d:
+            return "CHAR"
+        return "VARCHAR"
     return "TEXT"
 
 
@@ -1357,17 +2558,52 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                 return {"ok": True, "columns": [], "tables": tables, "schema": schema}
 
             owner = schema or (kwargs.get("username") or "").upper()
-            col_rows = conn.execute(
-                sa.text(
+            resolved_table = table.upper()
+            # VIRTUAL_COLUMN / IDENTITY_COLUMN — client INSERT must omit ALWAYS.
+            _oracle_col_sql = """
+                    SELECT atc.column_name, atc.data_type, atc.data_precision, atc.data_scale,
+                           atc.nullable, atc.char_length, atc.char_used,
+                           atc.virtual_column, atc.identity_column,
+                           ic.generation_type
+                    FROM all_tab_columns atc
+                    LEFT JOIN all_tab_identity_cols ic
+                      ON atc.owner = ic.owner
+                     AND atc.table_name = ic.table_name
+                     AND atc.column_name = ic.column_name
+                    WHERE atc.owner = :owner AND atc.table_name = :table
+                    ORDER BY atc.column_id
                     """
-                    SELECT column_name, data_type, data_precision, data_scale, nullable
+            try:
+                col_rows = conn.execute(
+                    sa.text(_oracle_col_sql),
+                    {"owner": owner, "table": resolved_table},
+                ).fetchall()
+            except Exception:
+                # Pre-12c / limited grants: fall back without identity join.
+                _oracle_col_sql = """
+                    SELECT column_name, data_type, data_precision, data_scale, nullable,
+                           char_length, char_used, virtual_column, 'NO', NULL
                     FROM all_tab_columns
                     WHERE owner = :owner AND table_name = :table
                     ORDER BY column_id
                     """
-                ),
-                {"owner": owner, "table": table.upper()},
-            ).fetchall()
+                try:
+                    col_rows = conn.execute(
+                        sa.text(_oracle_col_sql),
+                        {"owner": owner, "table": resolved_table},
+                    ).fetchall()
+                except Exception:
+                    _oracle_col_sql = """
+                        SELECT column_name, data_type, data_precision, data_scale, nullable,
+                               char_length, char_used, 'NO', 'NO', NULL
+                        FROM all_tab_columns
+                        WHERE owner = :owner AND table_name = :table
+                        ORDER BY column_id
+                        """
+                    col_rows = conn.execute(
+                        sa.text(_oracle_col_sql),
+                        {"owner": owner, "table": resolved_table},
+                    ).fetchall()
             if not col_rows:
                 found = conn.execute(
                     sa.text(
@@ -1384,37 +2620,72 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                     {"table": table, "owner": owner},
                 ).fetchall()
                 for found_owner, found_table in found or []:
-                    col_rows = conn.execute(
-                        sa.text(
-                            """
-                            SELECT column_name, data_type, data_precision, data_scale, nullable
-                            FROM all_tab_columns
-                            WHERE owner = :owner AND table_name = :table
-                            ORDER BY column_id
-                            """
-                        ),
-                        {"owner": found_owner, "table": found_table},
-                    ).fetchall()
+                    try:
+                        col_rows = conn.execute(
+                            sa.text(_oracle_col_sql),
+                            {"owner": found_owner, "table": found_table},
+                        ).fetchall()
+                    except Exception:
+                        col_rows = []
                     if col_rows:
                         owner = found_owner
+                        resolved_table = str(found_table)
                         break
             columns: list[dict] = []
-            for name, data_type, precision, scale, nullable in col_rows:
+            for row in col_rows:
+                name, data_type, precision, scale, nullable = row[:5]
+                char_length = row[5] if len(row) > 5 else None
+                char_used = row[6] if len(row) > 6 else None
+                virtual_col = row[7] if len(row) > 7 else "NO"
+                identity_col = row[8] if len(row) > 8 else "NO"
+                generation = row[9] if len(row) > 9 else None
                 dtype = str(data_type or "")
-                if str(data_type or "").upper() == "NUMBER" and precision is not None:
+                dtype_u = dtype.upper()
+                if dtype_u == "NUMBER" and precision is not None:
                     if scale is not None:
                         dtype = f"NUMBER({int(precision)},{int(scale)})"
                     else:
                         dtype = f"NUMBER({int(precision)})"
+                elif (
+                    dtype_u in {"VARCHAR2", "NVARCHAR2", "CHAR", "NCHAR"}
+                    and char_length is not None
+                    and int(char_length) > 0
+                ):
+                    unit = "CHAR" if str(char_used or "").upper() == "C" else "BYTE"
+                    # NVARCHAR2/NCHAR are always character semantics in Oracle.
+                    if dtype_u in {"NVARCHAR2", "NCHAR"}:
+                        unit = "CHAR"
+                    dtype = f"{dtype_u}({int(char_length)} {unit})"
+                logical = _oracle_to_logical(dtype)
+                if str(virtual_col or "").upper() == "YES":
+                    logical = f"{logical} GENERATED ALWAYS"
+                elif str(identity_col or "").upper() == "YES":
+                    gen = str(generation or "").upper()
+                    if "ALWAYS" in gen and "DEFAULT" not in gen:
+                        logical = f"{logical} GENERATED ALWAYS"
+                    else:
+                        logical = f"{logical} GENERATED BY DEFAULT"
                 columns.append(
                     {
                         "name": name,
-                        "inferred_type": _oracle_to_logical(dtype),
+                        "inferred_type": logical,
                         "nullable": str(nullable).upper() == "Y",
                         "data_type": dtype,
                     }
                 )
-            return {"ok": True, "columns": columns, "tables": tables, "schema": owner}
+            unique_meta = (
+                _oracle_fetch_unique_keys(conn, owner, resolved_table)
+                if columns
+                else {"primary_key_columns": [], "unique_keys": []}
+            )
+            return {
+                "ok": True,
+                "columns": columns,
+                "tables": tables,
+                "schema": owner,
+                "primary_key_columns": unique_meta.get("primary_key_columns") or [],
+                "unique_keys": unique_meta.get("unique_keys") or [],
+            }
     except Exception as exc:
         logger.warning("oracle introspect failed", exc_info=True)
         try:
@@ -1496,6 +2767,9 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                       c.DATA_TYPE,
                       c.NUMERIC_PRECISION,
                       c.NUMERIC_SCALE,
+                      c.CHARACTER_MAXIMUM_LENGTH,
+                      c.DATETIME_PRECISION,
+                      c.COLLATION_NAME,
                       c.IS_NULLABLE
                     FROM INFORMATION_SCHEMA.COLUMNS c
                     WHERE c.TABLE_SCHEMA = :schema AND c.TABLE_NAME = :table
@@ -1530,6 +2804,9 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                               c.DATA_TYPE,
                               c.NUMERIC_PRECISION,
                               c.NUMERIC_SCALE,
+                              c.CHARACTER_MAXIMUM_LENGTH,
+                              c.DATETIME_PRECISION,
+                              c.COLLATION_NAME,
                               c.IS_NULLABLE
                             FROM INFORMATION_SCHEMA.COLUMNS c
                             WHERE c.TABLE_SCHEMA = :schema AND c.TABLE_NAME = :table
@@ -1542,7 +2819,16 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                         schema = found_schema
                         break
             columns: list[dict] = []
-            for name, data_type, precision, scale, nullable in col_rows:
+            for (
+                name,
+                data_type,
+                precision,
+                scale,
+                char_len,
+                dt_prec,
+                collation,
+                nullable,
+            ) in col_rows:
                 dtype = str(data_type or "")
                 base = dtype.lower()
                 if base in {"decimal", "numeric"} and precision is not None:
@@ -1550,15 +2836,70 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                         dtype = f"{base}({int(precision)},{int(scale)})"
                     else:
                         dtype = f"{base}({int(precision)})"
+                elif (
+                    base in {"varchar", "nvarchar", "char", "nchar", "binary", "varbinary"}
+                    and char_len is not None
+                    and int(char_len) > 0
+                ):
+                    # -1 means MAX — leave unbounded (logical TEXT/BINARY via mapper).
+                    dtype = f"{base}({int(char_len)})"
+                elif base in {"time", "datetime2", "datetimeoffset"} and dt_prec is not None:
+                    dtype = f"{base}({int(dt_prec)})"
+                logical = _sqlserver_to_logical(dtype)
+                coll = str(collation or "").strip()
+                if coll:
+                    from services.type_system import normalize_logical_type
+
+                    if normalize_logical_type(logical) in {"string", "text"}:
+                        logical = f"{logical} COLLATE {coll}"
                 columns.append(
                     {
                         "name": name,
-                        "inferred_type": _sqlserver_to_logical(dtype),
+                        "inferred_type": logical,
                         "nullable": str(nullable).upper() == "YES",
                         "data_type": dtype,
+                        "collation": coll,
                     }
                 )
-            return {"ok": True, "columns": columns, "tables": tables, "schema": schema}
+            # Computed columns are not insertable — annotate GENERATED ALWAYS
+            # so writers omit them (same path as PG/MySQL identity).
+            if columns:
+                try:
+                    computed_rows = conn.execute(
+                        sa.text(
+                            """
+                            SELECT c.name
+                            FROM sys.computed_columns cc
+                            JOIN sys.columns c
+                              ON cc.object_id = c.object_id AND cc.column_id = c.column_id
+                            JOIN sys.tables t ON t.object_id = cc.object_id
+                            JOIN sys.schemas s ON s.schema_id = t.schema_id
+                            WHERE s.name = :schema AND t.name = :table
+                            """
+                        ),
+                        {"schema": schema, "table": table},
+                    ).fetchall()
+                    computed_names = {str(r[0]) for r in (computed_rows or []) if r and r[0]}
+                    for col in columns:
+                        if col["name"] in computed_names:
+                            typ = str(col.get("inferred_type") or "")
+                            if "GENERATED ALWAYS" not in typ.upper():
+                                col["inferred_type"] = f"{typ} GENERATED ALWAYS"
+                except Exception:
+                    pass
+            unique_meta = (
+                _sqlserver_fetch_unique_keys(conn, schema, table)
+                if columns
+                else {"primary_key_columns": [], "unique_keys": []}
+            )
+            return {
+                "ok": True,
+                "columns": columns,
+                "tables": tables,
+                "schema": schema,
+                "primary_key_columns": unique_meta.get("primary_key_columns") or [],
+                "unique_keys": unique_meta.get("unique_keys") or [],
+            }
     except Exception as exc:
         logger.warning("sqlserver introspect failed", exc_info=True)
         try:
@@ -1574,25 +2915,217 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
-def _sf_to_logical(dtype: str) -> str:
-    """Map Snowflake data types, preserving VECTOR(FLOAT, n) and NUMBER(p,s)."""
+def _arrow_to_logical(dtype: str) -> str:
+    """Map Apache Arrow / PyArrow dtype strings to DataFlow carriers."""
+    from services.type_system import arrow_dtype_to_carrier
+
+    carrier = arrow_dtype_to_carrier(dtype)
+    return carrier if carrier else "TEXT"
+
+
+def _ch_to_logical(dtype: str) -> str:
+    """Map ClickHouse dtype strings to logical carriers (never invent String).
+
+    Research: ClickHouse DateTime64 stores UTC ticks with optional column TZ
+    metadata; Tuple/Map/Array are native nested; IPv4/IPv6 are specialty (PG INET).
+    """
+    raw = (dtype or "").strip()
+    if not raw:
+        return "TEXT"
+    upper = raw.upper()
+
+    from services.type_system import (
+        parse_array_element,
+        parse_map_key_value,
+        parse_struct_fields,
+    )
+
+    arr_el = parse_array_element(raw)
+    if arr_el is not None:
+        return f"ARRAY<{_ch_to_logical(arr_el)}>"
+    if upper == "ARRAY":
+        return "ARRAY"
+
+    map_kv = parse_map_key_value(raw)
+    if map_kv is not None:
+        key_t, val_t = map_kv
+        return f"MAP<{_ch_to_logical(key_t)},{_ch_to_logical(val_t)}>"
+    if upper == "MAP":
+        return "MAP"
+
+    if upper.startswith("TUPLE(") and raw.endswith(")"):
+        fields = parse_struct_fields(raw)
+        if not fields:
+            return "STRUCT"
+        parts = [f"{name}:{_ch_to_logical(typ)}" for name, typ in fields]
+        return f"STRUCT<{', '.join(parts)}>"
+
+    # Nested(name Type, ...) — parallel arrays; logical shape is ARRAY<STRUCT>.
+    if upper.startswith("NESTED(") and raw.endswith(")"):
+        fields = parse_struct_fields(raw)
+        if not fields:
+            return "ARRAY"
+        parts = [f"{name}:{_ch_to_logical(typ)}" for name, typ in fields]
+        return f"ARRAY<STRUCT<{', '.join(parts)}>>"
+
+    # Enum8/Enum16('label' = n, ...) → closed ENUM domain (MySQL/PG class).
+    if upper.startswith("ENUM8(") or upper.startswith("ENUM16("):
+        labels = re.findall(r"'((?:\\'|[^'])*)'", raw)
+        if labels:
+            from services.type_system import format_enum_domain_carrier
+
+            return format_enum_domain_carrier(
+                [lab.replace("\\'", "'") for lab in labels]
+            )
+
+    if upper.startswith("DATETIME64"):
+        return raw  # keep DateTime64(p[, tz]) carrier
+    if upper == "DATETIME" or (
+        upper.startswith("DATETIME(") and not upper.startswith("DATETIME2")
+    ):
+        return raw
+
+    if upper == "IPV4":
+        return "IPv4"
+    if upper == "IPV6":
+        return "IPv6"
+    if upper == "UUID":
+        return "UUID"
+    if upper == "BOOL" or upper == "BOOLEAN":
+        return "BOOLEAN"
+    if upper == "DATE":
+        return "DATE"
+    if upper.startswith("DECIMAL(") or upper.startswith("DECIMAL32") or upper.startswith(
+        "DECIMAL64"
+    ) or upper.startswith("DECIMAL128") or upper.startswith("DECIMAL256"):
+        # Decimal(p,s) or Decimal32/64/128/256(S) where S is scale only (CH docs).
+        m_ps = re.match(
+            r"^DECIMAL(?:32|64|128|256)?\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)$",
+            upper,
+        )
+        if m_ps:
+            return f"DECIMAL({m_ps.group(1)},{m_ps.group(2)})"
+        m_scale = re.match(r"^DECIMAL(32|64|128|256)\s*\(\s*(\d+)\s*\)$", upper)
+        if m_scale:
+            prec = {"32": 9, "64": 18, "128": 38, "256": 76}[m_scale.group(1)]
+            return f"DECIMAL({prec},{int(m_scale.group(2))})"
+        return "DECIMAL"
+    if upper in {"FLOAT32", "FLOAT64", "FLOAT", "DOUBLE"}:
+        return "FLOAT"
+    if re.match(
+        r"^(U?INT\d*|INT8|INT16|INT32|INT64|INT128|INT256|UINT8|UINT16|UINT32|UINT64)$",
+        upper,
+    ):
+        return "INTEGER"
+    # FixedString(n) is a fixed-length byte string (CH) — BINARY(n), not TEXT.
+    if upper.startswith("FIXEDSTRING("):
+        m_fs = re.match(r"^FIXEDSTRING\((\d+)\)$", upper)
+        if m_fs:
+            return f"BINARY({int(m_fs.group(1))})"
+        return "BINARY"
+    if upper == "FIXEDSTRING":
+        return "BINARY"
+    if upper == "STRING":
+        return "TEXT"
+    if upper.startswith("NULLABLE(") and raw.endswith(")"):
+        return _ch_to_logical(raw[raw.index("(") + 1 : -1].strip())
+    if upper.startswith("LOWCARDINALITY(") and raw.endswith(")"):
+        return _ch_to_logical(raw[raw.index("(") + 1 : -1].strip())
+    return "TEXT"
+
+
+def _sf_to_logical(
+    dtype: str,
+    *,
+    character_maximum_length: Any = None,
+    numeric_precision: Any = None,
+    numeric_scale: Any = None,
+    datetime_precision: Any = None,
+) -> str:
+    """Map Snowflake data types, preserving VECTOR / NUMBER(p,s) / VARCHAR(n).
+
+    INFORMATION_SCHEMA often returns bare ``TEXT`` / ``NUMBER`` / ``BINARY``;
+    fold CHARACTER_MAXIMUM_LENGTH / NUMERIC_* / DATETIME_PRECISION so Map/G3
+    and write quarantine see real physical capacity (Airbyte catalog-width class).
+    """
     raw = (dtype or "").strip()
     d = raw.upper()
+
+    def _as_int(value: Any) -> int | None:
+        try:
+            if value is None:
+                return None
+            n = int(value)
+            return n if n > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    char_len = _as_int(character_maximum_length)
+    num_prec = _as_int(numeric_precision)
+    num_scale = (
+        int(numeric_scale)
+        if numeric_scale is not None
+        and str(numeric_scale).strip() != ""
+        and str(numeric_scale).lstrip("-").isdigit()
+        else None
+    )
+    dt_prec = _as_int(datetime_precision)
+
+    # Structured nested FIRST — ``OBJECT(... NUMBER ...)`` / ``MAP(..., INT)``
+    # must never hit the NUMBER/INT substring traps below (Snowflake structured
+    # types docs; Iceberg list/struct/map ↔ SF ARRAY/OBJECT/MAP).
+    from services.type_system import (
+        parse_array_element,
+        parse_map_key_value,
+        parse_struct_fields,
+    )
+
+    arr_el = parse_array_element(raw)
+    if arr_el is not None:
+        return f"ARRAY<{_sf_to_logical(arr_el)}>"
+    if d == "ARRAY":
+        return "ARRAY"
+
+    if d.startswith("OBJECT(") and raw.endswith(")"):
+        fields = parse_struct_fields(raw)
+        if not fields:
+            return "STRUCT"
+        parts = [f"{name}:{_sf_to_logical(typ)}" for name, typ in fields]
+        return f"STRUCT<{', '.join(parts)}>"
+    # Bare OBJECT is semi-structured (VARIANT-shaped); structured OBJECT(...) above.
+    if d == "OBJECT":
+        return "JSON"
+
+    map_kv = parse_map_key_value(raw)
+    if map_kv is not None:
+        key_t, val_t = map_kv
+        return f"MAP<{_sf_to_logical(key_t)},{_sf_to_logical(val_t)}>"
+    if d == "MAP":
+        return "MAP"
+
+    if d == "VARIANT":
+        return "JSON"
+
     if "VECTOR" in d:
         return raw  # keep VECTOR(FLOAT, n) carrier
-    if "GEOGRAPHY" in d or "GEOMETRY" in d:
+    if "GEOGRAPHY" in d:
         return "GEOGRAPHY"
+    if "GEOMETRY" in d:
+        return "GEOMETRY"
     if "INTERVAL" in d:
+        if "YEAR" in d and "MONTH" in d:
+            return "INTERVAL YEAR TO MONTH"
+        if "DAY" in d or "SECOND" in d:
+            return "INTERVAL DAY TO SECOND"
         return "INTERVAL"
-    # Semi-structured — never collapse to TEXT (Airbyte-class catalog honesty).
-    if d in {"VARIANT", "OBJECT"}:
-        return "JSON"
-    if d == "ARRAY" or d.startswith("ARRAY"):
-        return "ARRAY"
     if d == "BINARY" or d.startswith("BINARY("):
-        return "BINARY"
+        m_bin = re.match(r"^BINARY\s*\(\s*(\d+)\s*\)$", d)
+        width = int(m_bin.group(1)) if m_bin else char_len
+        return f"BINARY({width})" if width else "BINARY"
     if d == "TIME" or d.startswith("TIME("):
-        return "TIME"
+        m_time = re.match(r"^TIME\s*\(\s*(\d+)\s*\)$", d)
+        prec = int(m_time.group(1)) if m_time else dt_prec
+        return f"TIME({prec})" if prec is not None else "TIME"
     # NUMBER(p,0) → INTEGER when p ≤ 18; else DECIMAL(p,0) (never silent BIGINT overflow).
     m = re.match(r"^(NUMBER|DECIMAL|NUMERIC)\s*\(\s*(\d+)\s*(?:,\s*(\d+))?\s*\)$", d)
     if m:
@@ -1603,8 +3136,21 @@ def _sf_to_logical(dtype: str) -> str:
         if m.group(3) is not None:
             return f"DECIMAL({m.group(2)},{m.group(3)})"
         return f"DECIMAL({m.group(2)})"
-    if "NUMBER" in d or "DECIMAL" in d or "NUMERIC" in d or "INT" in d:
-        return "INTEGER" if ",0" in d.replace(" ", "") else "DECIMAL"
+    if d in {"NUMBER", "DECIMAL", "NUMERIC"}:
+        if num_prec is not None:
+            from services.type_system import zero_scale_numeric_carrier
+
+            scale = 0 if num_scale is None else int(num_scale)
+            if scale == 0:
+                return zero_scale_numeric_carrier(num_prec)
+            return f"DECIMAL({num_prec},{scale})"
+        return "DECIMAL"
+    # Token-anchored integers only — never ``"INT" in d`` (breaks MAP/OBJECT).
+    if re.match(
+        r"^(INT|INTEGER|BIGINT|SMALLINT|TINYINT|BYTEINT)(\s*\(|$)",
+        d,
+    ):
+        return "INTEGER"
     # Snowflake FLOAT / DOUBLE / REAL — approximate IEEE, not NUMBER.
     if d in {"FLOAT", "FLOAT4", "FLOAT8", "DOUBLE", "DOUBLE PRECISION", "REAL"} or d.startswith("FLOAT"):
         return "FLOAT"
@@ -1612,13 +3158,39 @@ def _sf_to_logical(dtype: str) -> str:
         return "BOOLEAN"
     if d == "DATE":
         return "DATE"
-    # Preserve TZ polarity when Snowflake declared it (Map/Validate can warn).
-    if "TIMESTAMP_TZ" in d or "TIMESTAMP_LTZ" in d:
-        return "TIMESTAMPTZ"
+    # Preserve LTZ vs TZ polarity (Snowflake Openflow / Airbyte #80914 class).
+    # TIMESTAMP_LTZ ≈ session-relative instant; TIMESTAMP_TZ pins per-row offset.
+    if "TIMESTAMP_LTZ" in d:
+        m_ltz = re.match(r"^TIMESTAMP_LTZ\s*\(\s*(\d+)\s*\)$", d)
+        prec = int(m_ltz.group(1)) if m_ltz else dt_prec
+        return f"TIMESTAMP_LTZ({prec})" if prec is not None else "TIMESTAMP_LTZ"
+    if "TIMESTAMP_TZ" in d:
+        m_tz = re.match(r"^TIMESTAMP_TZ\s*\(\s*(\d+)\s*\)$", d)
+        prec = int(m_tz.group(1)) if m_tz else dt_prec
+        return f"TIMESTAMP_TZ({prec})" if prec is not None else "TIMESTAMP_TZ"
     if "TIMESTAMP_NTZ" in d:
+        if dt_prec is not None and "(" not in d:
+            return f"TIMESTAMP_NTZ({dt_prec})"
         return "TIMESTAMP_NTZ"
     if "TIMESTAMP" in d:
+        if dt_prec is not None and "(" not in d:
+            return f"TIMESTAMP_NTZ({dt_prec})"
         return "TIMESTAMP_NTZ"
+    # TEXT / VARCHAR / CHAR — fold CHARACTER_MAXIMUM_LENGTH (SF catalog often
+    # returns bare TEXT even when the column was created as VARCHAR(n)).
+    if d in {"TEXT", "VARCHAR", "CHAR", "CHARACTER", "STRING"} or d.startswith(
+        ("VARCHAR(", "CHAR(", "CHARACTER(", "TEXT(")
+    ):
+        m_str = re.match(
+            r"^(?:VARCHAR|CHAR|CHARACTER(?:\s+VARYING)?|TEXT|STRING)\s*\(\s*(\d+)\s*\)$",
+            d,
+        )
+        width = int(m_str.group(1)) if m_str else char_len
+        if width:
+            return f"VARCHAR({width})"
+        return "TEXT"
+    if char_len:
+        return f"VARCHAR({char_len})"
     return "TEXT"
 
 
@@ -1633,12 +3205,32 @@ def _sample_logical_type(value: Any, key: str = "") -> str:
         return "INTEGER"
     if isinstance(value, float):
         return "FLOAT"
+    # BSON ObjectId / Binary before generic str/bytes fallthrough.
+    try:
+        from bson import ObjectId as _BsonObjectId
+
+        if isinstance(value, _BsonObjectId):
+            return "OBJECTID"
+    except Exception:
+        pass
+    try:
+        from bson.binary import Binary as _BsonBinary
+
+        if isinstance(value, _BsonBinary):
+            return "BINARY"
+    except Exception:
+        pass
     if isinstance(value, datetime.datetime):
-        return "TIMESTAMP"
+        # Mongo UTCDateTime is always timezone-aware in pymongo (UTC).
+        if value.tzinfo is not None:
+            return "TIMESTAMPTZ"
+        return "TIMESTAMP_NTZ"
     if isinstance(value, datetime.date):
         return "DATE"
     if _BSON_DECIMAL and isinstance(value, _BSON_DECIMAL):
         return "DECIMAL"
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return "BINARY"
     if isinstance(value, list):
         return "ARRAY"
     if isinstance(value, dict):
@@ -1665,7 +3257,10 @@ _MONGO_TYPE_ORDER = {
     "DECIMAL": 3,
     "DATE": 4,
     "UUID": 5,
+    "OBJECTID": 5,
     "TIMESTAMP": 6,
+    "TIMESTAMP_NTZ": 6,
+    "TIMESTAMPTZ": 6,
     "BINARY": 7,
     "ARRAY": 8,
     "OBJECT": 9,
@@ -2149,7 +3744,15 @@ def _introspect_sqlite(
                     col_out["semantic_role"] = semantic_role
                 columns.append(col_out)
 
-            return {"ok": True, "tables": [table], "columns": columns, "schema": ""}
+            unique_meta = _sqlite_fetch_unique_keys(cur, table_q, info_rows)
+            return {
+                "ok": True,
+                "tables": [table],
+                "columns": columns,
+                "schema": "",
+                "primary_key_columns": unique_meta.get("primary_key_columns") or [],
+                "unique_keys": unique_meta.get("unique_keys") or [],
+            }
         finally:
             conn.close()
     except Exception as exc:
@@ -2162,16 +3765,102 @@ def _introspect_sqlite(
         }
 
 
+def _sqlite_fetch_unique_keys(
+    cur: Any, table_quoted: str, info_rows: list[Any]
+) -> dict[str, Any]:
+    """Return SQLite PRIMARY KEY + UNIQUE indexes (enforced at write)."""
+    pk_ord: list[tuple[int, str]] = []
+    for row in info_rows or []:
+        # PRAGMA table_info: cid, name, type, notnull, dflt_value, pk
+        try:
+            name = str(row[1])
+            pk_flag = int(row[5] or 0)
+        except Exception:
+            continue
+        if pk_flag > 0:
+            pk_ord.append((pk_flag, name))
+    pk_ord.sort(key=lambda x: x[0])
+    pk_cols = [name for _, name in pk_ord]
+
+    unique_keys: list[dict[str, Any]] = []
+    if pk_cols:
+        unique_keys.append(
+            {
+                "name": "PRIMARY",
+                "columns": list(pk_cols),
+                "primary": True,
+                "expression": "",
+                "expression_columns": [],
+                "case_insensitive": False,
+                "filter_predicate": "",
+                "enforced": True,
+            }
+        )
+    try:
+        cur.execute(f"PRAGMA index_list({table_quoted})")
+        for idx in cur.fetchall() or []:
+            # seq, name, unique, origin, partial
+            try:
+                idx_name = str(idx[1])
+                is_unique = int(idx[2] or 0) == 1
+                origin = str(idx[3] or "").lower() if len(idx) > 3 else ""
+            except Exception:
+                continue
+            if not is_unique:
+                continue
+            # PK already covered via table_info.
+            if origin == "pk":
+                continue
+            cur.execute(f"PRAGMA index_info({quote_sql_identifier_safe(idx_name)})")
+            cols: list[str] = []
+            for info in cur.fetchall() or []:
+                try:
+                    col = info[2]
+                except Exception:
+                    col = None
+                if col:
+                    cols.append(str(col))
+            if not cols:
+                continue
+            unique_keys.append(
+                {
+                    "name": idx_name,
+                    "columns": cols,
+                    "primary": False,
+                    "expression": "",
+                    "expression_columns": [],
+                    "case_insensitive": False,
+                    "filter_predicate": "",
+                    "enforced": True,
+                }
+            )
+    except Exception:
+        pass
+    return {"primary_key_columns": pk_cols, "unique_keys": unique_keys}
+
+
+def quote_sql_identifier_safe(name: str) -> str:
+    """Quote a SQLite identifier for PRAGMA index_info (local helper)."""
+    try:
+        from connectors.sql_identifiers import quote_sql_identifier
+
+        return quote_sql_identifier(name)
+    except Exception:
+        return '"' + str(name).replace('"', '""') + '"'
+
+
 def salesforce_field_to_logical(
     field_type: str,
     *,
     precision: int | None = None,
     scale: int | None = None,
+    length: int | None = None,
 ) -> str:
     """Map Salesforce describe field type → DataFlow logical carrier.
 
     Currency/percent without Describe precision still get honest DECIMAL defaults
     (never bare DECIMAL that invents warehouse NUMBER). Datetime is UTC → TIMESTAMPTZ.
+    String fields with Describe ``length`` stamp ``VARCHAR(n)`` (writer SSOT).
     """
     t = (field_type or "string").strip().lower()
     if t in {"boolean"}:
@@ -2200,8 +3889,18 @@ def salesforce_field_to_logical(
     if t in {"address", "location", "complexvalue", "json"}:
         return "JSON"
     if t == "id":
-        return "TEXT"  # Salesforce Ids are 15/18-char strings, not UUID
+        # Salesforce Ids are 15/18-char strings — bound when length absent.
+        if length is not None and int(length) > 0:
+            return f"VARCHAR({int(length)})"
+        return "VARCHAR(18)"
     # string, textarea, phone, url, email, picklist, reference, …
+    if length is not None:
+        try:
+            n = int(length)
+            if n > 0:
+                return f"VARCHAR({n})"
+        except (TypeError, ValueError):
+            pass
     return "TEXT"
 
 
@@ -2284,21 +3983,32 @@ def _introspect_salesforce(**kwargs: Any) -> dict[str, Any]:
     except Exception as exc:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": tables}
 
-    columns = [
-        {
-            "name": f["name"],
-            "inferred_type": salesforce_field_to_logical(
+    columns = []
+    for f in fields:
+        if not f.get("name"):
+            continue
+        # Prefer writer SSOT carrier (VARCHAR(n) from Describe length) so Map
+        # chips and reverse-ETL quarantine share one honesty bar.
+        try:
+            from connectors.salesforce_writer import salesforce_field_to_carrier
+
+            inferred = salesforce_field_to_carrier(f)
+        except Exception:
+            inferred = salesforce_field_to_logical(
                 str(f.get("type") or "string"),
                 precision=f.get("precision") if isinstance(f.get("precision"), int) else None,
                 scale=f.get("scale") if isinstance(f.get("scale"), int) else None,
-            ),
-            "nullable": bool(f.get("nillable", True)),
-            "data_type": f.get("type") or "string",
-            "label": f.get("label") or "",
-        }
-        for f in fields
-        if f.get("name")
-    ]
+                length=f.get("length") if isinstance(f.get("length"), int) else None,
+            )
+        columns.append(
+            {
+                "name": f["name"],
+                "inferred_type": inferred,
+                "nullable": bool(f.get("nillable", True)),
+                "data_type": f.get("type") or "string",
+                "label": f.get("label") or "",
+            }
+        )
     return {"ok": True, "columns": columns, "tables": tables, "schema": table}
 
 
@@ -2365,6 +4075,7 @@ def _introspect_thin_saas(brand: str, **kwargs: Any) -> dict[str, Any]:
         for name in headers
         if name
     ]
+    columns = _stamp_thin_saas_write_carriers(brand, table, columns, cfg)
     return {
         "ok": True,
         "columns": columns,
@@ -2373,6 +4084,76 @@ def _introspect_thin_saas(brand: str, **kwargs: Any) -> dict[str, Any]:
         "certification": meta.get("certification") or "planned_typed_read",
         "saas_typed": bool(meta.get("saas_typed")),
     }
+
+
+def _stamp_thin_saas_write_carriers(
+    brand: str,
+    table: str,
+    columns: list[dict[str, Any]],
+    cfg: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Overlay writer SSOT carriers (VARCHAR(n)/DECIMAL) onto thin-SaaS Map types."""
+    if not columns:
+        return columns
+    names = [str(c.get("name") or "") for c in columns if c.get("name")]
+    live: dict[str, str] = {}
+    try:
+        if brand == "stripe":
+            from connectors.saas_write_carriers import stripe_live_types_for_columns
+
+            live = stripe_live_types_for_columns(table, names)
+        elif brand == "airtable":
+            from connectors.airtable_writer import (
+                airtable_field_to_carrier,
+                _fetch_table_fields,
+            )
+            from connectors.saas_common import token as saas_token
+
+            access = saas_token(
+                str(cfg.get("api_key") or ""),
+                str(cfg.get("connection_string") or ""),
+                str(cfg.get("username") or ""),
+                str(cfg.get("password") or ""),
+            )
+            base_id = str(cfg.get("database") or "").strip()
+            if access and base_id:
+                meta_fields = _fetch_table_fields(base_id, table, access) or []
+                for f in meta_fields:
+                    if isinstance(f, dict) and f.get("name"):
+                        live[str(f["name"])] = airtable_field_to_carrier(f)
+        elif brand == "notion":
+            from connectors.notion_writer import (
+                notion_property_to_carrier,
+                _fetch_database_properties,
+                _database_id,
+            )
+            from connectors.saas_common import token as saas_token
+
+            access = saas_token(
+                str(cfg.get("api_key") or ""),
+                str(cfg.get("connection_string") or ""),
+                str(cfg.get("username") or ""),
+                str(cfg.get("password") or ""),
+            )
+            db_id = _database_id(table or str(cfg.get("database") or ""))
+            if access and db_id:
+                props = _fetch_database_properties(db_id, access)
+                for name, typ in (props or {}).items():
+                    live[name] = notion_property_to_carrier(typ)
+    except Exception:
+        live = {}
+    if not live:
+        return columns
+    live_l = {str(k).lower(): v for k, v in live.items()}
+    out: list[dict[str, Any]] = []
+    for c in columns:
+        name = str(c.get("name") or "")
+        stamped = live.get(name) or live_l.get(name.lower())
+        if stamped:
+            out.append({**c, "inferred_type": stamped})
+        else:
+            out.append(c)
+    return out
 
 
 def _introspect_hubspot(**kwargs: Any) -> dict[str, Any]:
@@ -2400,30 +4181,180 @@ def _introspect_hubspot(**kwargs: Any) -> dict[str, Any]:
     columns = [
         {
             "name": "id",
-            "inferred_type": "TEXT",
+            "inferred_type": "VARCHAR(65536)",
             "nullable": False,
             "data_type": "string",
             "label": "Record ID",
         }
     ]
+    try:
+        from connectors.hubspot_writer import hubspot_property_to_carrier
+    except Exception:
+        hubspot_property_to_carrier = None  # type: ignore[assignment]
     for p in props:
         if not p.get("name") or p["name"] == "id":
             continue
+        if hubspot_property_to_carrier is not None:
+            inferred = hubspot_property_to_carrier(p)
+        else:
+            inferred = hubspot_property_to_logical(
+                str(p.get("type") or "string"),
+                field_type=str(p.get("fieldType") or ""),
+                number_display_hint=str(p.get("numberDisplayHint") or ""),
+                name=str(p.get("name") or ""),
+            )
         columns.append(
             {
                 "name": p["name"],
-                "inferred_type": hubspot_property_to_logical(
-                    str(p.get("type") or "string"),
-                    field_type=str(p.get("fieldType") or ""),
-                    number_display_hint=str(p.get("numberDisplayHint") or ""),
-                    name=str(p.get("name") or ""),
-                ),
+                "inferred_type": inferred,
                 "nullable": True,
                 "data_type": p.get("type") or "string",
                 "label": p.get("label") or "",
             }
         )
     return {"ok": True, "columns": columns, "tables": tables, "schema": table}
+
+
+def _introspect_shopify(**kwargs: Any) -> dict[str, Any]:
+    """Shopify Admin core + live metafield definitions → Map carriers."""
+    table = (kwargs.get("table") or kwargs.get("database") or "customers").strip()
+    cfg = _saas_cfg(**kwargs)
+    cfg["shop"] = cfg.get("host") or ""
+    metafield_defs: list[dict[str, Any]] = []
+    try:
+        from connectors.shopify import describe_metafield_definitions
+
+        metafield_defs = describe_metafield_definitions(cfg, table) or []
+    except Exception:
+        metafield_defs = []
+    try:
+        from connectors.saas_write_carriers import (
+            shopify_core_field_carriers,
+            shopify_live_types_for_columns,
+        )
+
+        # Core Admin fields always stamp (note 5000, email 255) even without samples.
+        core = shopify_core_field_carriers(table)
+        names = list(
+            dict.fromkeys(
+                [
+                    *core.keys(),
+                    *[
+                        f"{d.get('namespace')}.{d.get('key')}"
+                        for d in metafield_defs
+                        if d.get("namespace") and d.get("key")
+                    ],
+                    *[str(d.get("key")) for d in metafield_defs if d.get("key")],
+                ]
+            )
+        )
+        live = shopify_live_types_for_columns(
+            table, names, metafield_defs=metafield_defs
+        )
+        for k, v in core.items():
+            live.setdefault(k, v)
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": [table]}
+
+    columns = [
+        {
+            "name": name,
+            "inferred_type": carrier,
+            "nullable": name.lower() != "id",
+            "data_type": carrier,
+            "label": name,
+        }
+        for name, carrier in live.items()
+        if name
+    ]
+    return {
+        "ok": True,
+        "columns": columns,
+        "tables": [table],
+        "schema": table,
+        "certification": "planned_typed_read",
+        "saas_typed": True,
+    }
+
+
+def _introspect_zendesk(**kwargs: Any) -> dict[str, Any]:
+    """Zendesk ticket/user/org fields → Map carriers (writer SSOT)."""
+    table = (kwargs.get("table") or kwargs.get("database") or "tickets").strip()
+    cfg = _saas_cfg(**kwargs)
+    try:
+        from connectors.zendesk import describe_fields
+        from connectors.zendesk_writer import zendesk_field_to_carrier
+
+        fields = describe_fields(cfg, table) or []
+    except Exception as exc:
+        # Soft catalog of system fields when Describe is scoped out.
+        from connectors.zendesk_writer import resolve_zendesk_dest_types
+
+        seed = ["subject", "description", "email", "name", "status", "priority"]
+        live = resolve_zendesk_dest_types(seed, [], {}, describe_fields=None)
+        columns = [
+            {
+                "name": n,
+                "inferred_type": live.get(n, "VARCHAR"),
+                "nullable": True,
+                "data_type": live.get(n, "VARCHAR"),
+                "label": n,
+            }
+            for n in seed
+        ]
+        return {
+            "ok": True,
+            "columns": columns,
+            "tables": [table],
+            "schema": table,
+            "certification": "planned_typed_read",
+            "saas_typed": True,
+            "warning": f"{type(exc).__name__}: {exc}",
+        }
+
+    seen: set[str] = set()
+    columns: list[dict[str, Any]] = []
+    for f in fields:
+        if not isinstance(f, dict):
+            continue
+        carrier = zendesk_field_to_carrier(f)
+        for key in (f.get("name"), f.get("title")):
+            name = str(key or "").strip()
+            if not name or name.lower() in seen:
+                continue
+            seen.add(name.lower())
+            columns.append(
+                {
+                    "name": name,
+                    "inferred_type": carrier,
+                    "nullable": True,
+                    "data_type": str(f.get("type") or carrier),
+                    "label": str(f.get("title") or name),
+                }
+            )
+    if not columns:
+        from connectors.zendesk_writer import resolve_zendesk_dest_types
+
+        seed = ["subject", "description", "email", "name"]
+        live = resolve_zendesk_dest_types(seed, [], {}, describe_fields=None)
+        columns = [
+            {
+                "name": n,
+                "inferred_type": live.get(n, "VARCHAR"),
+                "nullable": True,
+                "data_type": live.get(n, "VARCHAR"),
+                "label": n,
+            }
+            for n in seed
+        ]
+    return {
+        "ok": True,
+        "columns": columns,
+        "tables": [table],
+        "schema": table,
+        "certification": "planned_typed_read",
+        "saas_typed": True,
+    }
 
 
 def _kafka_value_to_logical(value: Any) -> str:

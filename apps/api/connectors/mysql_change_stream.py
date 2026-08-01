@@ -308,6 +308,10 @@ class MySqlChangeStreamCdc:
 
             if locked:
                 with lock_conn.cursor() as cur:
+                    # Capture GTID on the same locked session (Debezium-class
+                    # handoff). File/pos alone is weaker when binlogs rotate or
+                    # poll prefers auto_position — at-least-once upserts still apply.
+                    gtid = self._current_gtid_executed(cur)
                     for sql in ("SHOW MASTER STATUS", "SHOW BINARY LOG STATUS"):
                         try:
                             cur.execute(sql)
@@ -319,9 +323,13 @@ class MySqlChangeStreamCdc:
                                     "table": self.table,
                                     "tables": list(self.tables),
                                 }
+                                if gtid:
+                                    start_pos["gtid"] = gtid
                                 break
                         except Exception as exc:
                             _logger.debug("CDC binlog status query failed: %s", exc)
+                    if gtid and not start_pos.get("gtid"):
+                        start_pos["gtid"] = gtid
         except Exception as exc:
             _logger.warning(
                 "Could not acquire MySQL lock connection for CDC snapshot: %s", exc
@@ -674,34 +682,76 @@ class MySqlChangeStreamCdc:
         return by_lower.get((table or "").lower(), table or self.table)
 
     def _fetch_incremental_chunk(self, sig: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
-        """PK-ordered chunk reader for Debezium-style incremental snapshots."""
+        """PK-ordered chunk reader for Debezium-style incremental snapshots.
+
+        Stamps MySQL ``gtid_executed`` low/high watermarks on the signal
+        (DBZ-3577 read-only window). Composite primary keys use lexicographic
+        ``(c1, c2, …)`` ordering — never invent a single-column ORDER BY.
+        """
         from connectors.sql_identifiers import (
             quote_sql_identifier,
             require_safe_identifier,
         )
+        from services.cdc_incremental_snapshot import update_signal
+        from services.cdc_snapshot_window import _PK_SEP, _pk_columns, _pk_value
 
-        pk_name = sig.primary_key or self.primary_key
-        pk = quote_sql_identifier(require_safe_identifier(pk_name, preserve_case=True))
+        pk_cols = _pk_columns(sig.primary_key or self.primary_key)
+        pk_quoted = [
+            quote_sql_identifier(require_safe_identifier(c, preserve_case=True))
+            for c in pk_cols
+        ]
         table = quote_sql_identifier(require_safe_identifier(self.table, preserve_case=True))
         db = quote_sql_identifier(require_safe_identifier(self.database, preserve_case=True)) if self.database else ""
         qualified = f"{db}.{table}" if db else table
         limit = int(sig.chunk_size or self.batch_size)
         last_pk = sig.last_pk or ""
+        order_sql = ", ".join(pk_quoted)
         conn = self._conn()
+        gtid_low = ""
+        gtid_high = ""
         try:
             with conn.cursor() as cur:
-                if last_pk:
+                gtid_low = self._current_gtid_executed(cur) or ""
+                if last_pk and len(pk_cols) == 1:
                     cur.execute(
-                        f"SELECT * FROM {qualified} WHERE {pk} > %s ORDER BY {pk} LIMIT %s",  # nosec B608
+                        f"SELECT * FROM {qualified} WHERE {pk_quoted[0]} > %s "  # nosec B608
+                        f"ORDER BY {order_sql} LIMIT %s",
                         (last_pk, limit),
+                    )
+                elif last_pk and len(pk_cols) > 1:
+                    parts = last_pk.split(_PK_SEP)
+                    if len(parts) != len(pk_cols):
+                        raise ValueError(
+                            f"composite last_pk arity mismatch: expected {len(pk_cols)} "
+                            f"parts, got {len(parts)}"
+                        )
+                    # Lexicographic successor: (a > a0) OR (a = a0 AND b > b0) OR …
+                    clauses: list[str] = []
+                    params: list[Any] = []
+                    for i in range(len(pk_cols)):
+                        eq = " AND ".join(
+                            f"{pk_quoted[j]} = %s" for j in range(i)
+                        )
+                        gt = f"{pk_quoted[i]} > %s"
+                        clause = f"({gt})" if not eq else f"({eq} AND {gt})"
+                        clauses.append(clause)
+                        params.extend(parts[:i])
+                        params.append(parts[i])
+                    where = " OR ".join(clauses)
+                    params.append(limit)
+                    cur.execute(
+                        f"SELECT * FROM {qualified} WHERE {where} "  # nosec B608
+                        f"ORDER BY {order_sql} LIMIT %s",
+                        tuple(params),
                     )
                 else:
                     cur.execute(
-                        f"SELECT * FROM {qualified} ORDER BY {pk} LIMIT %s",  # nosec B608
+                        f"SELECT * FROM {qualified} ORDER BY {order_sql} LIMIT %s",  # nosec B608
                         (limit,),
                     )
                 cols = [d[0] for d in (cur.description or [])]
                 rows = cur.fetchall() or []
+                gtid_high = self._current_gtid_executed(cur) or ""
             conn.commit()
         finally:
             conn.close()
@@ -709,15 +759,32 @@ class MySqlChangeStreamCdc:
             {cols[i]: "" if row[i] is None else str(row[i]) for i in range(len(cols))}
             for row in rows
         ]
-        new_last = records[-1].get(pk_name) if records else last_pk
+        if records:
+            new_last = _pk_value(records[-1], pk_cols)
+        else:
+            new_last = last_pk
         done = len(records) < limit
+        # Mutate claimed signal so runner resume_token can surface watermarks.
+        try:
+            sig.gtid_low = gtid_low
+            sig.gtid_high = gtid_high
+        except Exception:
+            pass
+        if gtid_low or gtid_high:
+            update_signal(sig.id, gtid_low=gtid_low, gtid_high=gtid_high)
         return records, str(new_last) if new_last is not None else last_pk, done
 
     def _peek_stream_events_during_chunk(self, sig: Any) -> list[dict[str, Any]]:
-        """Non-acking binlog peek for DDD-3 stream-wins during incremental snapshot."""
+        """Non-acking binlog peek for DDD-3 stream-wins during incremental snapshot.
+
+        When GTID low/high watermarks are present (DBZ-3577), drop row events
+        whose GTID is still contained in the low watermark (older than chunk
+        SELECT start) — never invent stream-wins from stale binlog.
+        """
         events: list[dict[str, Any]] = []
         try:
             from pymysqlreplication import BinLogStreamReader
+            from pymysqlreplication.event import GtidEvent
             from pymysqlreplication.row_event import (
                 DeleteRowsEvent,
                 UpdateRowsEvent,
@@ -725,21 +792,47 @@ class MySqlChangeStreamCdc:
             )
         except ImportError:
             return []
+        from connectors.writer_common import gtid_set_contains
+        from services.cdc_snapshot_window import (
+            _pk_columns,
+            _pk_row_dict,
+            _pk_value,
+        )
+
+        # Same key the SnapshotWindow buffers under — composite aware.
+        peek_pk_cols = _pk_columns(sig.primary_key or self.primary_key)
+
         kwargs = self._binlog_kwargs(
             blocking=False,
-            only_events=[WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent],
+            only_events=[GtidEvent, WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent],
         )
         # Distinct server_id so peek does not collide with the durable poll session.
         kwargs["server_id"] = int(kwargs.get("server_id") or 10_000) + 7
         # Bound peek — do not advance durable resume_token.
         peek_limit = min(int(sig.chunk_size or self.batch_size), 200)
+        gtid_low = str(getattr(sig, "gtid_low", "") or "")
+        current_gtid = ""
         stream = BinLogStreamReader(**kwargs)
         try:
             count = 0
             for binlog_event in stream:
+                if isinstance(binlog_event, GtidEvent):
+                    current_gtid = str(
+                        getattr(binlog_event, "gtid", None)
+                        or getattr(binlog_event, "gset", None)
+                        or ""
+                    )
+                    continue
                 if getattr(binlog_event, "schema", "") != self.database:
                     continue
                 if not self._table_allowed(getattr(binlog_event, "table", "") or ""):
+                    continue
+                # Stale vs chunk start: GTID already in low watermark.
+                if (
+                    gtid_low
+                    and current_gtid
+                    and gtid_set_contains(gtid_low, current_gtid)
+                ):
                     continue
                 if isinstance(binlog_event, WriteRowsEvent):
                     for row in getattr(binlog_event, "rows", []):
@@ -748,19 +841,43 @@ class MySqlChangeStreamCdc:
                             if isinstance(row, dict) and "values" in row
                             else row
                         )
-                        events.append({"op": "c", "row": self._row_to_record(values)})
+                        events.append(
+                            {
+                                "op": "c",
+                                "row": self._row_to_record(values),
+                                "gtid": current_gtid,
+                            }
+                        )
                         count += 1
                 elif isinstance(binlog_event, UpdateRowsEvent):
                     for row in getattr(binlog_event, "rows", []):
                         after = row.get("after_values") if isinstance(row, dict) else getattr(row, "after_values", {})
-                        events.append({"op": "u", "row": self._row_to_record(after)})
+                        events.append(
+                            {
+                                "op": "u",
+                                "row": self._row_to_record(after),
+                                "gtid": current_gtid,
+                            }
+                        )
                         count += 1
                 elif isinstance(binlog_event, DeleteRowsEvent):
                     for row in getattr(binlog_event, "rows", []):
                         values = row.get("values") if isinstance(row, dict) else getattr(row, "values", {})
-                        pk = self._pk_value(values)
+                        # The window buffers snapshot rows under the signal's
+                        # composite key. A single-column pk here never collides,
+                        # so a row deleted mid-chunk would still be emitted as a
+                        # snapshot READ and land at the destination.
+                        record = self._row_to_record(values)
+                        pk = _pk_value(record, peek_pk_cols)
                         if pk:
-                            events.append({"op": "d", "pk": pk, "row": {self.primary_key: pk}})
+                            events.append(
+                                {
+                                    "op": "d",
+                                    "pk": pk,
+                                    "row": _pk_row_dict(peek_pk_cols, pk),
+                                    "gtid": current_gtid,
+                                }
+                            )
                             count += 1
                 if count >= peek_limit:
                     break

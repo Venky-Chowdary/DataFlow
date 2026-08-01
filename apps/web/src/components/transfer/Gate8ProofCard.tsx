@@ -75,11 +75,33 @@ function exportGate8Proof(report: Gate8Reconciliation) {
 /** True when evidence is writer-ack only — not independent source/target Verified. */
 export function isGate8WriterAckOnly(report: Gate8Reconciliation): boolean {
   const phase = String(report.phase || "").toLowerCase();
+  if (phase.includes("sample_verified")) return false;
   if (phase.includes("writer_ack")) return true;
   const msg = String(report.message || "").toLowerCase();
+  if (/sample-verified|sample verified|key-aligned field/i.test(msg)) return false;
   if (/verified by writer|read-back verifier not available/i.test(msg)) return true;
-  if (report.passed && report.source_checksum && !report.target_checksum) return true;
+  if (report.passed && report.source_checksum && !report.target_checksum) {
+    // Keyed sample proof upgrades writer-ack when present.
+    const compared = Number(report.sample_compare?.compared ?? 0);
+    if (compared > 0 && report.sample_compare?.passed !== false) return false;
+    return true;
+  }
   return false;
+}
+
+/** True when evidence is keyed sample read-back (SaaS / Kafka reverse-ETL class). */
+export function isGate8SampleVerified(report: Gate8Reconciliation): boolean {
+  const phase = String(report.phase || "").toLowerCase();
+  if (phase.includes("sample_verified")) return true;
+  const msg = String(report.message || "").toLowerCase();
+  if (/sample-verified|sample verified/i.test(msg)) return true;
+  const compared = Number(report.sample_compare?.compared ?? 0);
+  return Boolean(
+    report.passed
+    && compared > 0
+    && report.sample_compare?.passed !== false
+    && !String(report.target_checksum || "").trim()
+  );
 }
 
 /** True when evidence is pre-write only — never show Verified / match claims. */
@@ -130,6 +152,9 @@ export function classifyGate8Status(
   if (isGate8WriterAckOnly(report)) {
     return { label: "Writer ack", tone: "warn", fullPass: false };
   }
+  if (isGate8SampleVerified(report)) {
+    return { label: "Sample verified", tone: "ok", fullPass: true };
+  }
   if (isGate8PreWriteSimulation(report)) {
     return { label: "Pre-write only", tone: "warn", fullPass: false };
   }
@@ -153,7 +178,8 @@ export function Gate8ProofCard({
   onRerun,
 }: Gate8ProofCardProps) {
   const preWrite = isGate8PreWriteSimulation(report);
-  const writerAck = !preWrite && isGate8WriterAckOnly(report);
+  const sampleVerified = !preWrite && isGate8SampleVerified(report);
+  const writerAck = !preWrite && !sampleVerified && isGate8WriterAckOnly(report);
   const passed = Boolean(report.passed) && !preWrite && !writerAck;
   const simulationOk = Boolean(report.passed) && preWrite;
   const writerAckOk = Boolean(report.passed) && writerAck;
@@ -188,12 +214,16 @@ export function Gate8ProofCard({
       ? (writerAckOk
         ? "Writer acknowledged — independent read-back not available"
         : "Writer acknowledgment did not verify")
-      : (passed ? "Source and destination match" : "Reconciliation did not verify");
+      : sampleVerified
+        ? "Keyed sample read-back matched (reverse-ETL class proof)"
+        : (passed ? "Source and destination match" : "Reconciliation did not verify");
   const badge = preWrite
     ? (simulationOk ? "Pending" : "Failed")
     : writerAck
       ? (writerAckOk ? "Writer ack" : "Failed")
-      : (passed ? "Verified" : "Failed");
+      : sampleVerified
+        ? "Sample verified"
+        : (passed ? "Verified" : "Failed");
   const badgeClass = preWrite
     ? (simulationOk ? "is-pending" : "is-bad")
     : writerAck

@@ -165,6 +165,21 @@ export function inferTransferFailureHint(
         || 'Snowflake treats quoted "public" differently from PUBLIC. Set connector schema to PUBLIC, confirm role USAGE, then reload sample preview.',
     };
   }
+  if (
+    text.includes("were quarantined")
+    || text.includes("row(s) were quarantined")
+    || text.includes("all rows were quarantined")
+    || (text.includes("quarantined") && text.includes("nothing was written"))
+  ) {
+    return {
+      code: errorCode || "all_rows_quarantined",
+      title: errorTitle || "Every row was quarantined — nothing landed",
+      confidence: "high",
+      fix:
+        errorFix
+        || "Open the Quarantine tab on this job, read the per-row reason, fix the Map transform or destination type, then Replay. This is not an empty source — the engine held the rows so nothing was silently dropped.",
+    };
+  }
   if (errorTitle && errorFix) {
     return {
       code: errorCode || "transfer_failed",
