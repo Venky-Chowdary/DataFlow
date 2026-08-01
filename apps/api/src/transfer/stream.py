@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import threading
+import time
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable
@@ -39,6 +40,13 @@ from .adapters import (
     resolve_dest_table,
 )
 from .connector_capabilities import resolve_driver_type
+
+from services.phase_profile import (  # noqa: E402
+    PHASE_CHECKSUM,
+    PHASE_READ,
+    PHASE_TRANSFORM_WRITE,
+    PhaseProfile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1052,6 +1060,11 @@ def stream_database_transfer(
     # Memory-safe chunk sizing: sample a few rows, then size batches to keep
     # per-batch memory within a destination-safe limit while respecting CHUNK_SIZE.
     sample_limit = 100 if limit == 0 else min(100, limit)
+    # Created before the first read so the sizing probe and the first data page
+    # are attributed too. Both are real source reads; leaving them out reported
+    # "Reading source 0.0s" on any transfer that fit in a single batch.
+    phase_profile = PhaseProfile()
+    _sample_started = time.perf_counter()
     sample_probe, _ = _unwrap_read(
         _read_batch(
             src_type, src_cfg, table, None, 0, sample_limit, database=src_db,
@@ -1059,6 +1072,11 @@ def stream_database_transfer(
             cursor_after=watermark if incremental else None,
             cursor_type=normalize_inferred(schema.get(cursor_source_col, "string")).upper() if schema and incremental else None,
         )
+    )
+    phase_profile.add(
+        PHASE_READ,
+        time.perf_counter() - _sample_started,
+        rows=len(sample_probe.rows or []),
     )
     sample_rows = sample_probe.rows or []
     avg_row_size = 100
@@ -1092,6 +1110,7 @@ def stream_database_transfer(
             return max(0, min(default, limit - offset))
         return default
 
+    _probe_started = time.perf_counter()
     probe, ddb_cursor = _unwrap_read(
         _read_batch(
             src_type, src_cfg, table, None, 0, _batch_limit(0), database=src_db,
@@ -1099,6 +1118,10 @@ def stream_database_transfer(
             cursor_after=watermark if incremental else None,
             cursor_type=normalize_inferred(schema.get(cursor_source_col, "string")).upper() if schema and incremental else None,
         )
+    )
+    # This page is not thrown away — it becomes the first written batch.
+    phase_profile.add(
+        PHASE_READ, time.perf_counter() - _probe_started, rows=len(probe.rows or [])
     )
     columns = probe.headers
     if not columns:
@@ -1323,6 +1346,21 @@ def stream_database_transfer(
     committed_offset = offset
 
     def _fetch_next_batch(last_batch):
+        """Timed wrapper — source read time is the first thing to rule out."""
+        started = time.perf_counter()
+        try:
+            result = _fetch_source_batch(last_batch)
+        except BaseException:
+            phase_profile.add(PHASE_READ, time.perf_counter() - started)
+            raise
+        phase_profile.add(
+            PHASE_READ,
+            time.perf_counter() - started,
+            rows=len(getattr(result, "rows", None) or []),
+        )
+        return result
+
+    def _fetch_source_batch(last_batch):
         nonlocal ddb_cursor, es_search_after, redis_scan_state, keyset_after, kafka_cursor
         if limit > 0 and fetch_offset >= limit:
             return None
@@ -1564,6 +1602,21 @@ def stream_database_transfer(
         return sf_conn_state["conn"]
 
     def _process_db_chunk(idx: int, batch: Any) -> dict[str, Any]:
+        """Timed wrapper around the transform + destination write for one chunk.
+
+        Runs on the worker pool, so these totals overlap the reader's — that is
+        what ``overlap_factor`` in the profile snapshot reports.
+        """
+        rows = len(getattr(batch, "rows", None) or [])
+        started = time.perf_counter()
+        try:
+            return _process_db_chunk_inner(idx, batch)
+        finally:
+            phase_profile.add(
+                PHASE_TRANSFORM_WRITE, time.perf_counter() - started, rows=rows
+            )
+
+    def _process_db_chunk_inner(idx: int, batch: Any) -> dict[str, Any]:
         if not batch or not getattr(batch, "rows", None):
             return {
                 "batch_written": 0,
@@ -1845,6 +1898,7 @@ def stream_database_transfer(
         # reconciliation memory-bounded by a single batch, even for billion-row
         # tables, and avoids the previous `source_rows_for_checksum` list that
         # materialized the full source a second time.
+        checksum_started = time.perf_counter()
         fp_accumulator = FingerprintAccumulator()
         cursor_type_for_read: str | None = None
         if incremental and cursor_source_col:
@@ -1907,10 +1961,20 @@ def stream_database_transfer(
             else:
                 read_offset += len(batch.rows)
         final_checksum = fp_accumulator.digest() if fp_accumulator.total else last_checksum
+        phase_profile.add(
+            PHASE_CHECKSUM, time.perf_counter() - checksum_started, rows=fp_accumulator.total
+        )
     else:
         final_checksum = last_checksum
 
     dest_summary["checksum"] = final_checksum or last_checksum
+    # Where the time actually went. Without this the only signal was a single
+    # end-of-run rows/second figure, which cannot distinguish a slow source scan
+    # from a slow destination write from a doubled cost in strict verification.
+    phase_snapshot = phase_profile.snapshot()
+    dest_summary["phase_profile"] = phase_snapshot
+    if phase_snapshot.get("phases"):
+        logger.info("Transfer phase breakdown — %s", phase_profile.summary())
     dest_summary["rejected_rows"] = rejected_total
     dest_summary["coerced_null_rows"] = coerced_null_total
     dest_summary["rejected_details"] = list(dest_summary.get("rejected_details") or [])[:2000]
