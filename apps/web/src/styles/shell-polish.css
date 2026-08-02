@@ -1312,23 +1312,28 @@ textarea.df2-pilot-composer textarea {
 }
 
 /* ─── Fixed shell: sidebar never scrolls, only main content scrolls ───
-   Heights use zoom-compensated layout viewport (see tokens.css). Raw 100vh
-   under `zoom: 0.8` left a blank strip at the bottom of laptop browsers. */
+   Sidebar space is reserved with padding (not main margin-left) so flex
+   children never spill past the right edge at 100% browser zoom. */
 @media (min-width: 1025px) {
   .df2-app {
-    min-height: var(--df-layout-viewport-h, 100dvh);
-    height: var(--df-layout-viewport-h, 100dvh);
-    max-height: var(--df-layout-viewport-h, 100dvh);
     overflow: hidden;
+    height: 100%;
+    max-height: 100%;
+    min-height: 100dvh;
+    padding-left: var(--df-sidebar-width, 260px);
+    box-sizing: border-box;
+  }
+
+  .df2-app.df2-sidebar-nav-compact {
+    padding-left: var(--df-sidebar-compact-w, 88px);
   }
 
   .df2-app .df2-sidebar {
     position: fixed !important;
     left: 0;
     top: 0;
-    /* Fixed boxes resolve % against the viewport — use zoom-compensated height. */
-    height: var(--df-layout-viewport-h, 100dvh) !important;
-    max-height: var(--df-layout-viewport-h, 100dvh) !important;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
     overflow: hidden !important;
     z-index: 50;
   }
@@ -1346,16 +1351,21 @@ textarea.df2-pilot-composer textarea {
   }
 
   .df2-app .df2-main {
-    margin-left: var(--df-sidebar-width, 260px);
-    height: var(--df-layout-viewport-h, 100dvh);
-    max-height: var(--df-layout-viewport-h, 100dvh);
+    margin-left: 0 !important;
+    flex: 1 1 auto;
+    min-width: 0;
+    width: auto;
+    max-width: 100%;
+    box-sizing: border-box;
+    height: 100%;
+    max-height: 100%;
     overflow-y: auto;
     overflow-x: hidden;
     -webkit-overflow-scrolling: touch;
   }
 
   .df2-app.df2-sidebar-nav-compact .df2-main {
-    margin-left: var(--df-sidebar-compact-w, 88px);
+    margin-left: 0 !important;
   }
 }
 
@@ -5560,7 +5570,6 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-app {
-  min-height: var(--df-layout-viewport-h, 100dvh);
   overflow: hidden;
 }
 

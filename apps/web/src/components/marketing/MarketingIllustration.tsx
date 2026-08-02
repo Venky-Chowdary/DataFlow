@@ -44,16 +44,31 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
 
   if (kind === "enterprise") {
     return (
-      <svg className={cls} viewBox="0 0 480 280" role="img" aria-label="Enterprise deployment">
-        <rect width="480" height="280" rx="16" fill="#f8fafc" stroke="#e2e8f0" />
-        <rect x="40" y="48" width="400" height="48" rx="10" fill="#fff" stroke="#cbd5e1" />
-        <text x="240" y="78" textAnchor="middle" fontSize="12" fill="#334155" fontWeight="600">dataflow.company.com · SSO</text>
-        <rect x="40" y="116" width="180" height="120" rx="10" fill="#fff" stroke="#99f6e4" />
-        <text x="130" y="148" textAnchor="middle" fontSize="11" fill="#0f766e" fontWeight="650">Workspace A</text>
-        <text x="130" y="172" textAnchor="middle" fontSize="10" fill="#64748b">RBAC · Pipelines</text>
-        <rect x="260" y="116" width="180" height="120" rx="10" fill="#fff" stroke="#99f6e4" />
-        <text x="350" y="148" textAnchor="middle" fontSize="11" fill="#0f766e" fontWeight="650">Workspace B</text>
-        <text x="350" y="172" textAnchor="middle" fontSize="10" fill="#64748b">Audit · MCP</text>
+      <svg className={cls} viewBox="0 0 480 300" role="img" aria-label="Enterprise deployment">
+        <defs>
+          <linearGradient id="lp-ent-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor="#0b1220" />
+            <stop offset="100%" stopColor="#132033" />
+          </linearGradient>
+        </defs>
+        <rect width="480" height="300" rx="18" fill="url(#lp-ent-bg)" />
+        <rect x="28" y="28" width="424" height="44" rx="12" fill="#111827" stroke="#334155" />
+        <circle cx="52" cy="50" r="5" fill="#14b8a6" />
+        <text x="70" y="55" fontSize="12" fill="#e2e8f0" fontWeight="650">dataflow.company.com · SSO enforced</text>
+        <rect x="28" y="92" width="200" height="168" rx="14" fill="#111827" stroke="#134e4a" />
+        <text x="48" y="122" fontSize="11" fill="#5eead4" fontWeight="700">WORKSPACE A</text>
+        <text x="48" y="148" fontSize="13" fill="#f8fafc" fontWeight="650">Analytics ops</text>
+        <text x="48" y="172" fontSize="11" fill="#94a3b8">RBAC · Pipelines · Quarantine</text>
+        <rect x="48" y="196" width="160" height="10" rx="5" fill="#1e293b" />
+        <rect x="48" y="196" width="118" height="10" rx="5" fill="#0d9488" />
+        <text x="48" y="232" fontSize="11" fill="#99f6e4">Preflight 8/8 · checksum match</text>
+        <rect x="252" y="92" width="200" height="168" rx="14" fill="#111827" stroke="#334155" />
+        <text x="272" y="122" fontSize="11" fill="#94a3b8" fontWeight="700">WORKSPACE B</text>
+        <text x="272" y="148" fontSize="13" fill="#f8fafc" fontWeight="650">Regulated loads</text>
+        <text x="272" y="172" fontSize="11" fill="#94a3b8">BYOK · Audit · MCP under policy</text>
+        <rect x="272" y="196" width="160" height="10" rx="5" fill="#1e293b" />
+        <rect x="272" y="196" width="96" height="10" rx="5" fill="#64748b" />
+        <text x="272" y="232" fontSize="11" fill="#cbd5e1">Region pinned · tenant isolated</text>
       </svg>
     );
   }
@@ -131,8 +146,8 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
         <g className="lp-cust-tile" style={{ "--i": 1 } as CSSProperties}>
           <rect x="240" y="24" width="216" height="120" rx="14" fill="#0f766e" />
           <text x="256" y="54" fontSize="11" fill="#99f6e4" fontWeight="700">HEALTHCARE</text>
-          <text x="256" y="88" fontSize="22" fill="#fff" fontWeight="700">99.2%</text>
-          <text x="256" y="112" fontSize="12" fill="#ccfbf1">preflight pass rate</text>
+          <text x="256" y="88" fontSize="22" fill="#fff" fontWeight="700">G1–G8</text>
+          <text x="256" y="112" fontSize="12" fill="#ccfbf1">gates before every write</text>
         </g>
         <g className="lp-cust-tile" style={{ "--i": 2 } as CSSProperties}>
           <rect x="24" y="160" width="140" height="116" rx="14" fill="#fff" stroke="#ccece7" />

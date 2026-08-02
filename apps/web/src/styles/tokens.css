@@ -247,96 +247,79 @@ body,
 }
 
 /*
- * Laptop workspace density — app-level scale so Chrome 100% zoom feels like
- * the ~80% browser zoom operators preferred. Scales px + rem (unlike rem-only).
- * Landing / login sit outside `.df2-app` and stay full size.
+ * Laptop workspace density — enterprise-safe (no CSS `zoom`).
  *
- * CRITICAL: CSS `zoom` shrinks the element's *visual* size relative to the
- * viewport. A shell sized to 100vh at zoom 0.8 only paints ~80vh and leaves a
- * blank strip at the bottom (and often the right). Layout width/height MUST be
- * inflated by 1/scale so the post-zoom visual exactly fills the viewport.
+ * Operators keep Chrome at 100%. CSS zoom was used to fake ~80% browser zoom
+ * but left blank strips / right-edge overflow on real laptops. Density is now
+ * real tokens (control heights, gutters, type) so the shell always fills the
+ * viewport at 100% browser zoom — Airbyte/Fivetran-class layout honesty.
+ * Landing / login sit outside `.df2-app` and stay full marketing scale.
  */
 :root {
-  --df-ui-scale: 1;
-  /* Layout viewport used by the zoomed shell + fit pages (pre-zoom units).
-     Prefer % width over 100vw to avoid scrollbar-induced horizontal spill. */
-  --df-layout-viewport-h: calc(100dvh / var(--df-ui-scale));
-  --df-layout-viewport-w: calc(100% / var(--df-ui-scale));
-  /* Alias consumed by transfer studio / column workbench fit math. */
-  --df-viewport-h: var(--df-layout-viewport-h);
-}
-
-@media (max-width: 1680px) {
-  :root {
-    --df-ui-scale: 0.85;
-  }
-}
-
-/* 13–15" CSS widths (MacBook / typical laptop at 100% OS scaling) */
-@media (max-width: 1512px) {
-  :root {
-    --df-ui-scale: 0.8;
-  }
+  --df-ui-scale: 1; /* retained for tests / docs; never applied via zoom */
+  --df-layout-viewport-h: 100dvh;
+  --df-layout-viewport-w: 100%;
+  --df-viewport-h: 100dvh;
 }
 
 /* Lock document scroll only when the workspace shell is mounted — landing
    pages outside `.df2-app` must keep normal document scrolling. */
 body:has(.df2-app) {
   overflow: hidden;
+  width: 100%;
+  max-width: 100%;
   height: 100%;
   max-height: 100%;
 }
 
 body:has(.df2-app) #root {
+  width: 100%;
+  max-width: 100%;
   height: 100%;
   max-height: 100%;
   overflow: hidden;
 }
 
 .df2-app {
-  zoom: var(--df-ui-scale);
-  width: var(--df-layout-viewport-w);
-  max-width: var(--df-layout-viewport-w);
-  height: var(--df-layout-viewport-h);
-  min-height: var(--df-layout-viewport-h);
-  max-height: var(--df-layout-viewport-h);
+  position: relative;
+  width: 100%;
+  max-width: 100%;
+  height: 100%;
+  min-height: 100dvh;
+  max-height: 100%;
   overflow: hidden;
   box-sizing: border-box;
 }
 
-/* Firefox has no zoom — approximate with root type + slightly denser controls.
-   No layout inflation: font-size density does not leave a blank viewport strip. */
-@supports not (zoom: 1) {
-  :root {
-    --df-layout-viewport-h: 100dvh;
-    --df-layout-viewport-w: 100%;
-    --df-viewport-h: 100dvh;
-  }
-
+/* ≤1680 CSS px — typical 14–16" laptop at 100% browser zoom */
+@media (max-width: 1680px) {
   .df2-app {
-    zoom: unset;
-    width: 100%;
-    max-width: none;
-    height: 100%;
-    min-height: 100dvh;
-    max-height: none;
+    --df-btn-height: 32px;
+    --df-btn-height-sm: 28px;
+    --df-btn-height-lg: 36px;
+    --df-control-height: 32px;
+    --df-control-height-sm: 28px;
+    --df-header-height: 48px;
+    --df-sidebar-width: 220px;
+    --df-page-gutter: 12px;
+    --df-page-gutter-sm: 10px;
+    --df-card-pad: 12px;
+    --df-card-head-pad: 10px 12px;
+    --df-nav-item-height: 32px;
+    --df-table-row-height: 40px;
+    --df-table-row-height-sm: 34px;
+    font-size: 13px;
   }
+}
 
-  @media (max-width: 1680px) {
-    .df2-app {
-      font-size: 85%;
-      --df-btn-height: 32px;
-      --df-control-height: 32px;
-      --df-header-height: 48px;
-      --df-sidebar-width: 220px;
-      --df-page-gutter: 12px;
-      --df-card-pad: 12px;
-    }
-  }
-  @media (max-width: 1512px) {
-    .df2-app {
-      font-size: 80%;
-    }
+/* 13–15" CSS widths (MacBook Air / typical laptop) */
+@media (max-width: 1512px) {
+  .df2-app {
+    --df-sidebar-width: 204px;
+    --df-page-gutter: 10px;
+    --df-card-pad: 10px;
+    --df-rail-width: 320px;
+    font-size: 12.5px;
   }
 }
 

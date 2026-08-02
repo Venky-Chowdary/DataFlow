@@ -49,13 +49,19 @@ describe("Transfer Studio chrome contracts", () => {
     );
   });
 
-  it("tokens apply laptop UI scale (~80%) and compensate zoom viewport fill", () => {
+  it("laptop density uses tokens at 100% browser zoom — never CSS zoom", () => {
     const css = readFileSync(join(webRoot, "styles/tokens.css"), "utf8");
-    assert.match(css, /--df-ui-scale:\s*0\.8/);
-    assert.match(css, /\.df2-app \{[\s\S]*zoom: var\(--df-ui-scale\)/);
-    assert.match(css, /--df-layout-viewport-h:\s*calc\(100dvh \/ var\(--df-ui-scale\)\)/);
-    assert.match(css, /height: var\(--df-layout-viewport-h\)/);
+    assert.doesNotMatch(css, /\.df2-app\s*\{[^}]*\bzoom\s*:/);
     assert.match(css, /@media \(max-width: 1512px\)/);
+    assert.match(css, /--df-sidebar-width:\s*204px/);
+    assert.match(css, /--df-btn-height:\s*32px/);
+    assert.match(css, /--df-layout-viewport-h:\s*100dvh/);
+  });
+
+  it("shell reserves sidebar with padding so main cannot spill past the right edge", () => {
+    const css = readFileSync(join(webRoot, "styles/shell-polish.css"), "utf8");
+    assert.match(css, /padding-left:\s*var\(--df-sidebar-width/);
+    assert.match(css, /\.df2-app \.df2-main \{[\s\S]*margin-left:\s*0\s*!important/);
   });
 
   it("transfer-studio stacks chrome via container query + 1280 fallback", () => {

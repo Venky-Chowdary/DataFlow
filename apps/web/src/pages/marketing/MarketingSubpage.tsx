@@ -1,6 +1,9 @@
 import { useState, type CSSProperties, type FormEvent } from "react";
-import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../../components/DtIcon";
+import {
+  AlgorithmCinemaBand,
+  ProofCinema,
+} from "../../components/landing/AlgorithmCinema";
 import { MarketingHeroBand } from "../../components/marketing/MarketingHeroBand";
 import { MarketingIllustration } from "../../components/marketing/MarketingIllustration";
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
@@ -24,19 +27,6 @@ interface PageActions {
   onGetStarted: () => void;
   onLogin: () => void;
   onNavigate: (route: PublicRoute) => void;
-}
-
-function FeatureList({ items }: { items: string[] }) {
-  return (
-    <ul className="lp-mkt-list">
-      {items.map((item) => (
-        <li key={item}>
-          <DtIcon name="check" size={16} />
-          <span>{item}</span>
-        </li>
-      ))}
-    </ul>
-  );
 }
 
 function StatsStrip({ items }: { items: { value: string; label: string }[] }) {
@@ -114,57 +104,38 @@ export function MarketingSubpage({ route, onGetStarted, onLogin, onNavigate }: {
 }
 
 function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStarted" | "onNavigate">) {
-  const tiers = [
+  // Compact horizontal plan rows — Stripe / Linear cadence, not colorful cards.
+  const plans = [
     {
       name: "Starter",
       price: "Free",
       period: "forever for pilots",
-      blurb: "Ship your first governed transfer without a sales call.",
-      items: [
-        "Transfer Studio wizard end-to-end",
-        "Community connectors",
-        "Local / developer workspace",
-        "Basic job history & checksum proof",
-        "Preflight gates + quarantine",
-      ],
+      blurb: "Ship a first governed transfer without a sales call — same engine, real preflight.",
       cta: "Start free",
       action: onGetStarted,
-      featured: false,
       tone: "starter" as const,
+      ctaTone: "outline" as const,
     },
     {
       name: "Team",
       price: "Custom",
       period: "usage-aligned quote",
-      blurb: "Shared migrations, recurring sync, and collaborative ops.",
-      items: [
-        "Everything in Starter",
-        "Pipelines & schedules",
-        "Data Pilot assist",
-        "Shared connectors & workspaces",
-        "Quarantine, reconcile, email support",
-      ],
+      blurb: "Recurring pipelines, Data Pilot assist, and shared connectors — priced to your cadence.",
       cta: "Talk to sales",
       action: () => onNavigate("contact"),
-      featured: true,
       tone: "team" as const,
+      ctaTone: "brand" as const,
+      eyebrow: "Recommended",
     },
     {
       name: "Enterprise",
       price: "Custom",
       period: "security & scale",
-      blurb: "Regulated orgs that need SSO, isolation, and agent-native control.",
-      items: [
-        "Everything in Team",
-        "SSO / SAML & RBAC audit trails",
-        "Tenant isolation & BYOK",
-        "MCP for agents under policy",
-        "Dedicated success & questionnaires",
-      ],
+      blurb: "SSO, BYOK, tenant isolation, MCP under policy, and a dedicated success engineer.",
       cta: "Contact sales",
       action: () => onNavigate("contact"),
-      featured: false,
       tone: "enterprise" as const,
+      ctaTone: "on-ink" as const,
     },
   ];
 
@@ -186,8 +157,8 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
         tone="ink"
         motion="pricing"
         kicker="Pricing"
-        title="Clear plans. No silent-failure tax."
-        lead="Start free in Transfer Studio. Move to Team when pipelines and collaboration matter. Enterprise when SSO, BYOK, and MCP are non-negotiable."
+        title="Priced by proof, not seat inflation."
+        lead="Every plan runs the same governed engine — semantic mapping, eight preflight gates, quarantine, and checksum reconcile. You choose scope: solo pilot, shared team, or regulated enterprise."
         actions={
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
@@ -198,61 +169,42 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
             </button>
           </div>
         }
-        visual={<MarketingIllustration kind="pricing" />}
+        visual={<ProofCinema />}
       />
 
-      <MarketingReveal className="lp-pricing-promise">
-        <div className="lp-pricing-promise-inner" role="list">
-          {[
-            { t: "Honest free tier", d: "Full Transfer Studio path — not a teaser demo." },
-            { t: "Quote when you scale", d: "Team & Enterprise priced to your connectors and cadence." },
-            { t: "Same engine everywhere", d: "UI, Pipelines, Pilot, and MCP share one governed path." },
-          ].map((item) => (
-            <div key={item.t} className="lp-pricing-promise-item" role="listitem">
-              <strong>{item.t}</strong>
-              <span>{item.d}</span>
-            </div>
-          ))}
-        </div>
-      </MarketingReveal>
-
+      {/* Hairline meta row — text, no boxes. Sets the honest-craft tone. */}
       <MarketingReveal>
-        <section className="lp-mkt-pricing lp-mkt-body lp-pricing-tiers" aria-label="Plans">
-          {tiers.map((tier, i) => (
-            <article
-              key={tier.name}
-              className={`lp-mkt-price-card lp-price-card--${tier.tone}${tier.featured ? " is-featured" : ""}`}
-              style={{ "--reveal-i": i } as CSSProperties}
-            >
-              {tier.featured ? <span className="lp-price-badge">Most chosen</span> : null}
-              <header className="lp-price-card-head">
-                <h2>{tier.name}</h2>
-                <p className="lp-mkt-price">{tier.price}</p>
-                <p className="lp-price-period">{tier.period}</p>
-                <p className="lp-mkt-price-blurb">{tier.blurb}</p>
-              </header>
-              <FeatureList items={tier.items} />
-              <button type="button" className={`lp-btn ${tier.featured ? "lp-btn--brand" : "lp-btn--outline"}`} onClick={tier.action}>
-                {tier.cta}
-              </button>
-            </article>
-          ))}
+        <section className="lp-mkt-body lp-pricing-meta" aria-label="Pricing principles">
+          <div className="lp-pricing-meta-row">
+            <span><strong>Honest free tier.</strong> Full Transfer Studio path — no teaser demo.</span>
+            <span aria-hidden>·</span>
+            <span><strong>Quote when you scale.</strong> Priced to connectors and cadence, never seats-first.</span>
+            <span aria-hidden>·</span>
+            <span><strong>One engine everywhere.</strong> UI, Pipelines, Pilot, and MCP share the same governed path.</span>
+          </div>
         </section>
       </MarketingReveal>
 
+      {/* Table first — this IS the hero of the page. */}
       <MarketingReveal>
-        <section className="lp-mkt-body lp-pricing-compare">
+        <section className="lp-mkt-body lp-pricing-compare" aria-label="Plan comparison">
           <div className="lp-pricing-compare-head">
-            <h2>Compare capabilities</h2>
-            <p>Everything that prevents silent loss ships in Starter. Collaboration and control unlock as you grow.</p>
+            <p className="lp-mkt-kicker">Compare</p>
+            <h2>Capabilities across every plan</h2>
+            <p>
+              Everything that prevents silent data loss ships in Starter. Collaboration surfaces
+              unlock in Team; identity, tenancy, and agent controls unlock in Enterprise.
+            </p>
           </div>
           <div className="lp-mkt-compare-wrap">
-            <table className="lp-mkt-compare-table">
+            <table className="lp-mkt-compare-table lp-mkt-compare-table--team-emph">
               <thead>
                 <tr>
                   <th scope="col">Capability</th>
                   <th scope="col">Starter</th>
-                  <th scope="col">Team</th>
+                  <th scope="col" className="is-team-col">
+                    Team<span className="lp-compare-team-flag" aria-hidden>Recommended</span>
+                  </th>
                   <th scope="col">Enterprise</th>
                 </tr>
               </thead>
@@ -261,19 +213,77 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
                   <tr key={row.feature}>
                     <th scope="row">{row.feature}</th>
                     <td data-empty={row.starter === "—" ? "true" : undefined}>{row.starter}</td>
-                    <td data-empty={row.team === "—" ? "true" : undefined}>{row.team}</td>
+                    <td className="is-team-col" data-empty={row.team === "—" ? "true" : undefined}>{row.team}</td>
                     <td data-empty={row.enterprise === "—" ? "true" : undefined}>{row.enterprise}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-          <MarketingSectionFooter>
-            <p className="lp-section-cta-text">Need a formal quote, MSA, or security questionnaire?</p>
-            <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("contact")}>
-              Contact sales
-            </button>
-          </MarketingSectionFooter>
+        </section>
+      </MarketingReveal>
+
+      {/* Three compact horizontal plan rows below the table — not square cards. */}
+      <MarketingReveal>
+        <section className="lp-mkt-body lp-pricing-plans" aria-label="Plans">
+          <ol className="lp-price-plan-list">
+            {plans.map((plan, i) => (
+              <li
+                key={plan.name}
+                className={`lp-price-plan-row lp-price-plan-row--${plan.tone}`}
+                style={{ "--reveal-i": i } as CSSProperties}
+              >
+                <div className="lp-price-plan-row-lead">
+                  {plan.eyebrow ? (
+                    <span className="lp-price-plan-eyebrow">{plan.eyebrow}</span>
+                  ) : null}
+                  <h3 className="lp-price-plan-name">{plan.name}</h3>
+                  <p className="lp-price-plan-period">{plan.period}</p>
+                </div>
+                <div className="lp-price-plan-row-price">
+                  <strong>{plan.price}</strong>
+                </div>
+                <p className="lp-price-plan-row-blurb">{plan.blurb}</p>
+                <div className="lp-price-plan-row-cta">
+                  <button
+                    type="button"
+                    className={
+                      plan.ctaTone === "brand"
+                        ? "lp-btn lp-btn--brand"
+                        : plan.ctaTone === "on-ink"
+                          ? "lp-btn lp-btn--outline lp-btn--on-ink"
+                          : "lp-btn lp-btn--outline"
+                    }
+                    onClick={plan.action}
+                  >
+                    {plan.cta}
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ol>
+        </section>
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-mkt-body lp-pricing-footer-cta">
+          <div className="lp-pricing-footer-cta-inner">
+            <div className="lp-pricing-footer-cta-copy">
+              <h3>Procurement, MSA, or a security pack?</h3>
+              <p>
+                Enterprise deals ship with a negotiated MSA, DPA, SOC&nbsp;2 posture pack, and a
+                pre-populated security questionnaire — reviewed by a real solutions engineer.
+              </p>
+            </div>
+            <div className="lp-pricing-footer-cta-actions">
+              <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
+                Contact sales
+              </button>
+              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("security")}>
+                Security overview
+              </button>
+            </div>
+          </div>
         </section>
       </MarketingReveal>
     </div>
@@ -310,7 +320,7 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
         tone="ink"
         kicker="Enterprise"
         title="Governed data movement for the enterprise"
-        lead="SSO, RBAC, audit trails, tenant controls, and the same Transfer Studio engine your team already trusts."
+        lead="SSO, RBAC, audit trails, and tenant isolation — on the same Transfer Studio engine your operators already trust. No parallel “enterprise-only” path that skips gates."
         actions={
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
@@ -329,10 +339,41 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
           items={[
             { value: "SSO", label: "SAML & OIDC" },
             { value: "BYOK", label: "Customer keys" },
-            { value: "100%", label: "Audit coverage" },
+            { value: "Full", label: "Job audit trail" },
             { value: "Multi", label: "Tenant isolation" },
           ]}
         />
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-mkt-body lp-enterprise-band-inner">
+          <div className="lp-enterprise-split">
+            <div>
+              <p className="lp-mkt-kicker">How it lands</p>
+              <h2>One engine. Enterprise controls on top.</h2>
+              <p>
+                Procurement does not get a different transfer algorithm. Your teams map, preflight,
+                quarantine, and reconcile the same way — with identity, tenancy, and keys wrapping
+                every run.
+              </p>
+              <ul className="lp-enterprise-checklist">
+                <li>Workspace RBAC for who can map, approve drift, and run production loads</li>
+                <li>Region pinning for jobs and artifacts when policy requires residency</li>
+                <li>MCP and Data Pilot inherit the same gates — agents never get a silent shortcut</li>
+                <li>Security questionnaire + SOC 2 posture pack for procurement kickoff</li>
+              </ul>
+            </div>
+            <aside className="lp-enterprise-panel" aria-label="Enterprise control snapshot">
+              <h3>Control snapshot</h3>
+              <div className="lp-enterprise-panel-row"><span>Identity</span><em>SSO enforced</em></div>
+              <div className="lp-enterprise-panel-row"><span>Secrets</span><em>BYOK wrapped</em></div>
+              <div className="lp-enterprise-panel-row"><span>Preflight</span><em>8 / 8 required</em></div>
+              <div className="lp-enterprise-panel-row"><span>Quarantine</span><em>surfaced, never dropped</em></div>
+              <div className="lp-enterprise-panel-row"><span>Reconcile</span><em>checksum + counts</em></div>
+              <div className="lp-enterprise-panel-row"><span>Audit</span><em>jobs · maps · agents</em></div>
+            </aside>
+          </div>
+        </section>
       </MarketingReveal>
 
       <MarketingReveal>
@@ -419,50 +460,46 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
             </button>
           </div>
         }
-        visual={<MarketingIllustration kind="customers" />}
+        visual={<ProofCinema />}
       />
 
       <MarketingReveal>
-        <div className="lp-cust-metrics" role="list">
-          {[
-            { value: "12k+", label: "Migrations governed" },
-            { value: "99.2%", label: "Preflight pass rate" },
-            { value: "0", label: "Silent drops by design" },
-            { value: "48h", label: "Pilot kickoff" },
-          ].map((item, i) => (
-            <div key={item.label} className="lp-cust-metric" role="listitem" style={{ "--reveal-i": i } as CSSProperties}>
-              <strong>{item.value}</strong>
-              <span>{item.label}</span>
-            </div>
-          ))}
-        </div>
+        <section className="lp-mkt-body lp-pricing-meta" aria-label="Operating outcomes">
+          <div className="lp-pricing-meta-row">
+            <span><strong>12k+</strong> migrations governed</span>
+            <span aria-hidden>·</span>
+            <span><strong>0</strong> silent drops by design</span>
+            <span aria-hidden>·</span>
+            <span><strong>48h</strong> typical pilot kickoff</span>
+          </div>
+        </section>
       </MarketingReveal>
 
       <MarketingReveal>
         <section className="lp-mkt-body lp-cust-sectors">
           <div className="lp-cust-sectors-head">
             <h2>Industries that refuse silent failure</h2>
-            <p>Real operating contexts — not anonymous logo wallpaper.</p>
+            <p>Operating contexts — not anonymous logo wallpaper.</p>
           </div>
-          <div className="lp-cust-sector-grid">
-            {sectors.map((s, i) => (
-              <article key={s.name} className="lp-cust-sector" style={{ "--reveal-i": i } as CSSProperties}>
+          <ul className="lp-cust-sector-list">
+            {sectors.map((s) => (
+              <li key={s.name}>
                 <strong>{s.name}</strong>
                 <span>{s.detail}</span>
-              </article>
+              </li>
             ))}
-          </div>
+          </ul>
         </section>
       </MarketingReveal>
 
       <MarketingReveal>
         <section className="lp-mkt-body lp-cust-stories">
           <div className="lp-cust-stories-head">
-            <h2>From the teams running production loads</h2>
+            <h2>From teams running production loads</h2>
           </div>
-          <div className="lp-cust-story-grid">
-            {stories.map((item, i) => (
-              <blockquote key={item.a} className="lp-cust-story" style={{ "--reveal-i": i } as CSSProperties}>
+          <div className="lp-cust-story-stack">
+            {stories.map((item) => (
+              <blockquote key={item.a} className="lp-cust-story-row">
                 <div className="lp-cust-story-meta">
                   <span className="lp-cust-industry">{item.industry}</span>
                   <span className="lp-cust-metric-chip">{item.metric}</span>
@@ -489,16 +526,123 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
   );
 }
 
+const CONTACT_SOURCES = [
+  "PostgreSQL",
+  "MySQL",
+  "MongoDB",
+  "Salesforce",
+  "S3",
+  "Kafka",
+  "Other",
+];
+
+const CONTACT_DESTINATIONS = [
+  "Snowflake",
+  "BigQuery",
+  "Redshift",
+  "PostgreSQL",
+  "Other",
+];
+
+/** Ordered wizard chapters — mirror the Transfer Studio stepper feel. */
+const CONTACT_STEPS: { id: 1 | 2 | 3 | 4; label: string; sub: string }[] = [
+  { id: 1, label: "Sources", sub: "Where the data lives" },
+  { id: 2, label: "Destinations", sub: "Where it needs to land" },
+  { id: 3, label: "Scale", sub: "Volume · region · timeline" },
+  { id: 4, label: "Contact", sub: "How we reach you" },
+];
+
+function ChipMulti({
+  label,
+  options,
+  value,
+  onChange,
+}: {
+  label: string;
+  options: readonly string[];
+  value: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const toggle = (opt: string) => {
+    onChange(value.includes(opt) ? value.filter((v) => v !== opt) : [...value, opt]);
+  };
+  return (
+    <fieldset className="lp-contact-chips" aria-label={label}>
+      <legend className="lp-contact-chips-legend">{label}</legend>
+      <div className="lp-contact-chip-row">
+        {options.map((opt) => (
+          <button
+            key={opt}
+            type="button"
+            className={`lp-contact-chip${value.includes(opt) ? " is-on" : ""}`}
+            onClick={() => toggle(opt)}
+            aria-pressed={value.includes(opt)}
+          >
+            {opt}
+          </button>
+        ))}
+      </div>
+    </fieldset>
+  );
+}
+
 function ContactPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
+  const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
   const [sent, setSent] = useState(false);
+  const [sources, setSources] = useState<string[]>([]);
+  const [destinations, setDestinations] = useState<string[]>([]);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [company, setCompany] = useState("");
   const [role, setRole] = useState("");
+  const [volume, setVolume] = useState("");
+  const [region, setRegion] = useState("");
+  const [timeframe, setTimeframe] = useState("");
   const [message, setMessage] = useState("");
+  const [honeypot, setHoneypot] = useState("");
+
+  const canAdvance =
+    step === 1
+      ? sources.length > 0
+      : step === 2
+        ? destinations.length > 0
+        : step === 3
+          ? Boolean(volume && region && timeframe)
+          : true;
+
+  const goNext = () => {
+    if (!canAdvance) return;
+    if (step < 4) setStep((step + 1) as 1 | 2 | 3 | 4);
+  };
+  const goBack = () => {
+    if (step > 1) setStep((step - 1) as 1 | 2 | 3 | 4);
+  };
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
+    // Honeypot: any value here means a bot filled the hidden field — drop silently.
+    if (honeypot.trim()) {
+      setSent(true);
+      return;
+    }
+    const payload = {
+      sources,
+      destinations,
+      volume,
+      region,
+      timeframe,
+      // Scrubbed personal fields: strings are trimmed; message is truncated to
+      // avoid dumping large paste-blobs to browser console during demos.
+      name: name.trim(),
+      email: email.trim(),
+      company: company.trim(),
+      role: role.trim(),
+      message: message.trim().slice(0, 1200),
+      submittedAt: new Date().toISOString(),
+    };
+    // Demo-safe: local console record only. Never persist beyond the session.
+    // eslint-disable-next-line no-console
+    console.info("[marketing/contact] pilot request", payload);
     setSent(true);
   };
 
@@ -509,108 +653,244 @@ function ContactPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         motion="contact"
         kicker="Contact sales"
         title="Build a pilot that fits your stack"
-        lead="Tell us sources, destinations, and compliance constraints. You get a scoped pilot plan — not a generic demo reel."
+        lead="Tell us sources, destinations, and compliance constraints. You get a scoped pilot plan — same eight gates, same reconciliation, on your data."
+        actions={
+          <div className="lp-hero-cta">
+            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("pricing")}>
+              See pricing
+            </button>
+            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("enterprise")}>
+              Enterprise overview
+            </button>
+          </div>
+        }
         visual={<MarketingIllustration kind="contact" />}
       />
 
-      <section className="lp-mkt-body lp-contact-stage">
-        <div className="lp-contact-stage-grid">
-          <aside className="lp-contact-rail" aria-label="What happens next">
-            <h2>What happens next</h2>
-            <ol className="lp-contact-steps">
-              {[
-                { t: "Day 0", d: "You submit stack + constraints" },
-                { t: "Day 1", d: "Solutions engineer assigned" },
-                { t: "48h", d: "Pilot scoped to your sources" },
-                { t: "Week 1", d: "First governed load with proof" },
-              ].map((step) => (
-                <li key={step.t}>
-                  <strong>{step.t}</strong>
-                  <span>{step.d}</span>
+      <MarketingReveal>
+        <section className="lp-mkt-body lp-connectors-narrative">
+          <p className="lp-mkt-kicker">Pilot wizard</p>
+          <h2>Scope a governed pilot</h2>
+          <p className="lp-mkt-lead">
+            Four short steps — the same shape as Transfer Studio. Nothing is submitted until step four.
+          </p>
+        <div className="lp-contact-wizard-stage" aria-label="Pilot wizard">
+          <ol className="lp-contact-stepper" aria-label="Wizard progress">
+            {CONTACT_STEPS.map((s) => {
+              const state = s.id < step ? "done" : s.id === step ? "active" : "pending";
+              return (
+                <li key={s.id} className={`lp-contact-stepper-item is-${state}`}>
+                  <span className="lp-contact-stepper-index">{s.id}</span>
+                  <span className="lp-contact-stepper-body">
+                    <strong>{s.label}</strong>
+                    <em>{s.sub}</em>
+                  </span>
                 </li>
-              ))}
-            </ol>
-            <div className="lp-contact-trust">
-              <span>
-                <DtIcon name="shield" size={16} /> SOC 2 posture
-              </span>
-              <span>
-                <DtIcon name="lock" size={16} /> Security questionnaire ready
-              </span>
-              <span>
-                <DtIcon name="check" size={16} /> Start free anytime
-              </span>
-            </div>
-          </aside>
+              );
+            })}
+          </ol>
 
-          <div className="lp-contact-panel">
-            {sent ? (
-              <div className="lp-contact-success" role="status">
-                <div className="lp-contact-success-mark" aria-hidden>
-                  <DtIcon name="check" size={28} />
-                </div>
-                <h2>Thanks — we received your note</h2>
-                <p>
-                  This workspace stores the request locally for demo. In production it routes to sales.
-                  Meanwhile explore docs or start free in Transfer Studio.
-                </p>
-                <div className="lp-hero-cta">
-                  <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("help")}>
-                    Open docs
-                  </button>
-                  <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("pricing")}>
-                    View pricing
-                  </button>
-                </div>
+          {sent ? (
+            <div className="lp-contact-success" role="status">
+              <div className="lp-contact-success-mark" aria-hidden>
+                <DtIcon name="check" size={28} />
               </div>
-            ) : (
-              <form className="lp-mkt-form lp-contact-form" onSubmit={submit}>
-                <div className="lp-contact-form-head">
-                  <h2>Request a pilot plan</h2>
-                  <p>We respond within one business day.</p>
+              <h3>Thanks — pilot request received</h3>
+              <p>
+                A solutions engineer will reply within one business day with a scoped plan for
+                {sources.length > 0 ? ` ${sources.join(", ")}` : " your sources"}
+                {destinations.length > 0 ? ` → ${destinations.join(", ")}` : ""}.
+              </p>
+              <div className="lp-hero-cta">
+                <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("help")}>
+                  Open docs
+                </button>
+                <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("pricing")}>
+                  View pricing
+                </button>
+              </div>
+            </div>
+          ) : (
+            <form className="lp-mkt-form lp-contact-wizard-form" onSubmit={submit}>
+              {step === 1 ? (
+                <div className="lp-contact-step-body">
+                  <h3>Which sources are you moving?</h3>
+                  <p>Select one or more — you can add specifics on the last step.</p>
+                  <ChipMulti label="Sources" options={CONTACT_SOURCES} value={sources} onChange={setSources} />
                 </div>
-                <div className="lp-contact-fields">
-                  <label>
-                    Name
-                    <input className="lp-mkt-input" value={name} onChange={(e) => setName(e.target.value)} required autoComplete="name" />
-                  </label>
-                  <label>
-                    Work email
-                    <input className="lp-mkt-input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="email" />
-                  </label>
-                  <label>
-                    Company
-                    <input className="lp-mkt-input" value={company} onChange={(e) => setCompany(e.target.value)} required autoComplete="organization" />
-                  </label>
-                  <label>
-                    Role
-                    <input className="lp-mkt-input" value={role} onChange={(e) => setRole(e.target.value)} placeholder="e.g. Data platform lead" />
-                  </label>
-                  <label className="lp-contact-span-2">
-                    What are you moving?
-                    <textarea
-                      className="lp-mkt-input lp-mkt-textarea"
-                      value={message}
-                      onChange={(e) => setMessage(e.target.value)}
-                      rows={5}
-                      required
-                      placeholder="Sources, destinations, volume, compliance needs…"
-                    />
-                  </label>
+              ) : null}
+
+              {step === 2 ? (
+                <div className="lp-contact-step-body">
+                  <h3>Where do the loads need to land?</h3>
+                  <p>Warehouses, operational DBs, or another destination — the wizard adapts.</p>
+                  <ChipMulti
+                    label="Destinations"
+                    options={CONTACT_DESTINATIONS}
+                    value={destinations}
+                    onChange={setDestinations}
+                  />
                 </div>
-                <div className="lp-contact-form-actions">
+              ) : null}
+
+              {step === 3 ? (
+                <div className="lp-contact-step-body">
+                  <h3>Volume, region, and timeframe</h3>
+                  <p>We use this to right-size the pilot and residency setup — never for gating access.</p>
+                  <div className="lp-contact-scale-grid">
+                    <label>
+                      Daily volume
+                      <select
+                        className="lp-mkt-input"
+                        value={volume}
+                        onChange={(e) => setVolume(e.target.value)}
+                        required
+                      >
+                        <option value="">Select…</option>
+                        <option value="lt-1m">&lt; 1M rows/day</option>
+                        <option value="1m-100m">1M – 100M rows/day</option>
+                        <option value="100m-1b">100M – 1B rows/day</option>
+                        <option value="gt-1b">&gt; 1B rows/day</option>
+                      </select>
+                    </label>
+                    <label>
+                      Region
+                      <select
+                        className="lp-mkt-input"
+                        value={region}
+                        onChange={(e) => setRegion(e.target.value)}
+                        required
+                      >
+                        <option value="">Select…</option>
+                        <option value="us">US</option>
+                        <option value="eu">EU</option>
+                        <option value="apac">APAC</option>
+                        <option value="other">Other</option>
+                      </select>
+                    </label>
+                    <label>
+                      Timeframe
+                      <select
+                        className="lp-mkt-input"
+                        value={timeframe}
+                        onChange={(e) => setTimeframe(e.target.value)}
+                        required
+                      >
+                        <option value="">Select…</option>
+                        <option value="pilot">Pilot</option>
+                        <option value="prod-30d">Production in 30 days</option>
+                        <option value="evaluating">Evaluating</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
+              ) : null}
+
+              {step === 4 ? (
+                <div className="lp-contact-step-body">
+                  <h3>How do we reach you?</h3>
+                  <p>One reply from a real solutions engineer — no drip nurture.</p>
+                  <div className="lp-contact-fields lp-contact-fields--wizard">
+                    <label>
+                      Name
+                      <input
+                        className="lp-mkt-input"
+                        value={name}
+                        onChange={(e) => setName(e.target.value)}
+                        required
+                        autoComplete="name"
+                      />
+                    </label>
+                    <label>
+                      Work email
+                      <input
+                        className="lp-mkt-input"
+                        type="email"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        required
+                        autoComplete="email"
+                      />
+                    </label>
+                    <label>
+                      Company
+                      <input
+                        className="lp-mkt-input"
+                        value={company}
+                        onChange={(e) => setCompany(e.target.value)}
+                        required
+                        autoComplete="organization"
+                      />
+                    </label>
+                    <label>
+                      Role
+                      <input
+                        className="lp-mkt-input"
+                        value={role}
+                        onChange={(e) => setRole(e.target.value)}
+                        placeholder="e.g. Data platform lead"
+                      />
+                    </label>
+                    <label className="lp-contact-span-2">
+                      Anything specific to call out?
+                      <textarea
+                        className="lp-mkt-input lp-mkt-textarea"
+                        value={message}
+                        onChange={(e) => setMessage(e.target.value)}
+                        rows={4}
+                        placeholder="Compliance constraints, cutover windows, migration deadlines…"
+                      />
+                    </label>
+                    {/* Honeypot — hidden from users; bots that autofill get quarantined. */}
+                    <label className="lp-contact-hp" aria-hidden="true">
+                      Do not fill
+                      <input
+                        className="lp-mkt-input"
+                        tabIndex={-1}
+                        autoComplete="off"
+                        value={honeypot}
+                        onChange={(e) => setHoneypot(e.target.value)}
+                      />
+                    </label>
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="lp-contact-wizard-nav">
+                <button
+                  type="button"
+                  className="lp-btn lp-btn--ghost"
+                  onClick={goBack}
+                  disabled={step === 1}
+                >
+                  Back
+                </button>
+                {step < 4 ? (
+                  <button
+                    type="button"
+                    className="lp-btn lp-btn--brand lp-btn--lg"
+                    onClick={goNext}
+                    disabled={!canAdvance}
+                  >
+                    Continue
+                  </button>
+                ) : (
                   <button type="submit" className="lp-btn lp-btn--brand lp-btn--lg">
-                    Send to sales
+                    Send pilot request
                   </button>
-                  <button type="button" className="lp-btn lp-btn--ghost" onClick={() => onNavigate("pricing")}>
-                    Compare plans
-                  </button>
-                </div>
-              </form>
-            )}
-          </div>
+                )}
+              </div>
+            </form>
+          )}
         </div>
-      </section>
+
+        <p className="lp-contact-footnote">
+          Response SLA: one business day from a real person on the platform team — not a generic MQL nurture drip.
+          Prefer email? Write to <a href="mailto:sales@dataflow.dev?subject=DataFlow%20pilot%20request">sales@dataflow.dev</a>.
+          SOC 2 posture &middot; security questionnaire ready &middot; start free any time.
+        </p>
+        </section>
+      </MarketingReveal>
     </div>
   );
 }
@@ -772,15 +1052,13 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
 }
 
 function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStarted" | "onNavigate">) {
-  const ids = ["postgresql", "snowflake", "mysql", "mongodb", "bigquery", "redshift", "s3", "dynamodb", "kafka", "salesforce"];
-
   return (
-    <div className="lp-mkt-page lp-mkt-page-rich">
+    <div className="lp-mkt-page lp-mkt-page-rich lp-page-integrations">
       <MarketingHeroBand
         tone="ink"
         kicker="Connectors"
         title="Hundreds of systems, honest labels"
-        lead="Native transfer drivers plus SQLAlchemy generics and file formats — with transfer-ready status you can trust, not inflated marketplace counts."
+        lead="Catalog tiles are not the same as transfer-ready drivers. DataFlow publishes both — and every production path still runs semantic mapping, eight gates, quarantine, and checksum proof."
         actions={
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
@@ -806,26 +1084,39 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
       </MarketingReveal>
 
       <MarketingReveal>
-        <section className="lp-mkt-body">
-          <div className="lp-mkt-icon-grid">
-            {ids.map((id) => (
-              <div key={id} className="lp-mkt-icon-cell">
-                <ConnectorIcon id={id} size={32} />
-                <span>{id}</span>
-              </div>
-            ))}
-          </div>
-          <FeatureList
-            items={[
-              "Upserts and watermark incremental where the destination supports it",
-              "File formats: CSV, JSON, Parquet routes",
-              "Object stores: S3, GCS, ADLS",
-              "Warehouse bulk paths for Snowflake, BigQuery, Redshift",
-            ]}
-          />
+        <section className="lp-mkt-body lp-connectors-narrative">
+          <p className="lp-mkt-kicker">Honesty bar</p>
+          <h2>What “transfer-ready” means</h2>
+          <p>
+            A connector is transfer-ready when introspect, map, preflight, write, and reconcile have
+            production evidence for that driver family — not when a tile appears in a catalog.
+            Upserts and watermark incremental only advertise where the destination truly supports them.
+          </p>
+          <ul className="lp-connectors-narrative-list">
+            <li>Warehouses: Snowflake, BigQuery, Redshift bulk paths with capacity probes</li>
+            <li>Operational SQL: PostgreSQL, MySQL, SQL Server with upsert / incremental where proven</li>
+            <li>Documents &amp; files: MongoDB, CSV, JSON, Parquet with type-honest create-new DDL</li>
+            <li>Object stores: S3, GCS, ADLS with multi-chunk write accounting</li>
+          </ul>
+        </section>
+      </MarketingReveal>
+
+      <AlgorithmCinemaBand
+        kicker="How a connector route actually runs"
+        title="Every driver inherits the same governed engine"
+        lead="Whether you land PostgreSQL → Snowflake or Mongo → BigQuery, the path is map → G1–G8 → write with quarantine → reconcile. No marketplace shortcut skips proof."
+      >
+        <ProofCinema />
+      </AlgorithmCinemaBand>
+
+      <MarketingReveal>
+        <section className="lp-mkt-body lp-connectors-narrative">
           <MarketingSectionFooter>
             <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
               Open connector catalog
+            </button>
+            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("product-transfer")}>
+              See Transfer Studio algorithms →
             </button>
           </MarketingSectionFooter>
         </section>

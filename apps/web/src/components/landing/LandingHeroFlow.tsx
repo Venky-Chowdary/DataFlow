@@ -1,12 +1,15 @@
 import { useEffect, useRef } from "react";
+import { useInView } from "../../hooks/useInView";
 
 /**
  * Clean enterprise hero stage: source → map → destination with living packet trails.
- * Replaces the heavier rack/3D composition with a product-forward motion plane.
+ * Animation pauses when off-screen to keep landing scroll smooth.
  */
 export function LandingHeroFlow() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const wrapRef = useRef<HTMLDivElement>(null);
+  const { ref: wrapRef, inView } = useInView<HTMLDivElement>("100px 0px");
+  const inViewRef = useRef(inView);
+  inViewRef.current = inView;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -14,7 +17,7 @@ export function LandingHeroFlow() {
     if (!canvas || !wrap) return;
 
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d", { alpha: true });
     if (!ctx) return;
 
     let raf = 0;
@@ -22,14 +25,14 @@ export function LandingHeroFlow() {
     let t0 = performance.now();
 
     type Packet = { t: number; lane: number; speed: number };
-    const packets: Packet[] = Array.from({ length: 14 }, (_, i) => ({
+    const packets: Packet[] = Array.from({ length: 8 }, (_, i) => ({
       t: Math.random(),
       lane: i % 3,
-      speed: 0.12 + Math.random() * 0.18,
+      speed: 0.1 + Math.random() * 0.14,
     }));
 
     const resize = () => {
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
       const { width, height } = wrap.getBoundingClientRect();
       canvas.width = Math.max(1, Math.floor(width * dpr));
       canvas.height = Math.max(1, Math.floor(height * dpr));
@@ -46,6 +49,11 @@ export function LandingHeroFlow() {
 
     const tick = (now: number) => {
       if (!running) return;
+      if (!inViewRef.current) {
+        raf = requestAnimationFrame(tick);
+        return;
+      }
+
       const { width, height } = wrap.getBoundingClientRect();
       ctx.clearRect(0, 0, width, height);
 
@@ -54,14 +62,13 @@ export function LandingHeroFlow() {
       const x1 = width * 0.5;
       const x2 = width * 0.82;
 
-      // Soft guide curves
       for (let lane = 0; lane < 3; lane++) {
         const y = pathY(lane, height);
         ctx.beginPath();
         ctx.moveTo(x0, y);
         ctx.bezierCurveTo(x0 + width * 0.12, y - 18, x1 - width * 0.1, y + 18, x1, y);
         ctx.bezierCurveTo(x1 + width * 0.1, y - 14, x2 - width * 0.1, y + 14, x2, y);
-        ctx.strokeStyle = "rgba(13, 148, 136, 0.14)";
+        ctx.strokeStyle = "rgba(13, 148, 136, 0.16)";
         ctx.lineWidth = 1.5;
         ctx.stroke();
       }
@@ -72,31 +79,27 @@ export function LandingHeroFlow() {
           if (p.t > 1.15) p.t = -0.05;
           const u = Math.min(1, Math.max(0, p.t));
           const yBase = pathY(p.lane, height);
-          const bob = Math.sin((u + elapsed * 0.4) * Math.PI * 2) * 6;
+          const bob = Math.sin((u + elapsed * 0.4) * Math.PI * 2) * 5;
           let x: number;
           let y: number;
           if (u < 0.5) {
             const s = u / 0.5;
             x = x0 + (x1 - x0) * s;
-            y = yBase + bob - Math.sin(s * Math.PI) * 16;
+            y = yBase + bob - Math.sin(s * Math.PI) * 14;
           } else {
             const s = (u - 0.5) / 0.5;
             x = x1 + (x2 - x1) * s;
-            y = yBase + bob - Math.sin(s * Math.PI) * 12;
+            y = yBase + bob - Math.sin(s * Math.PI) * 10;
           }
 
-          const glow = ctx.createRadialGradient(x, y, 0, x, y, 14);
-          glow.addColorStop(0, "rgba(15, 118, 110, 0.85)");
-          glow.addColorStop(0.45, "rgba(20, 184, 166, 0.28)");
-          glow.addColorStop(1, "rgba(13, 148, 136, 0)");
-          ctx.fillStyle = glow;
+          ctx.fillStyle = "rgba(15, 118, 110, 0.22)";
           ctx.beginPath();
-          ctx.arc(x, y, 14, 0, Math.PI * 2);
+          ctx.arc(x, y, 8, 0, Math.PI * 2);
           ctx.fill();
 
           ctx.fillStyle = "#0f766e";
           ctx.beginPath();
-          ctx.arc(x, y, 3.2, 0, Math.PI * 2);
+          ctx.arc(x, y, 2.8, 0, Math.PI * 2);
           ctx.fill();
         }
       }
@@ -110,12 +113,11 @@ export function LandingHeroFlow() {
       cancelAnimationFrame(raf);
       ro.disconnect();
     };
-  }, []);
+  }, [wrapRef]);
 
   return (
     <div className="lp-hero-flow" ref={wrapRef} aria-hidden>
       <div className="lp-hero-flow-stage">
-        <div className="lp-hero-flow-glow" />
         <canvas className="lp-hero-flow-canvas" ref={canvasRef} />
 
         <article className="lp-hero-flow-card lp-hero-flow-card--source">
@@ -143,7 +145,6 @@ export function LandingHeroFlow() {
             <div><span>Preflight</span><em>8 / 8</em></div>
             <div><span>Checksum</span><em>match</em></div>
           </div>
-          <div className="lp-hero-flow-pulse" />
         </article>
 
         <article className="lp-hero-flow-card lp-hero-flow-card--dest">

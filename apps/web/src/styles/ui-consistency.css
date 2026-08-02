@@ -220,11 +220,9 @@
 }
 
 /*
- * Card / panel borders must stay visible under laptop UI scale (zoom).
- * Fractional zoom can clip 1px edges when parents use overflow:hidden and
- * zero padding — keep a paint gutter and force borders onto the box.
+ * Card / panel borders — keep a paint gutter so 1px edges stay visible when
+ * parents use overflow:hidden (laptop density tokens, not CSS zoom).
  */
-/* Anti-clip gutter so 1px borders stay visible under laptop zoom */
 .df2-app .df2-content-inner:not(.df2-content-studio):not(.df2-content-flush) {
   padding: 4px max(12px, var(--df-page-gutter, 16px)) 16px;
   box-sizing: border-box;

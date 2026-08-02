@@ -1,4 +1,5 @@
 import { useEffect, useState, type CSSProperties } from "react";
+import { useInView } from "../../hooks/useInView";
 
 type PreviewKind = "studio" | "theater" | "mapping" | "connectors" | "pilot";
 
@@ -6,13 +7,15 @@ type PreviewKind = "studio" | "theater" | "mapping" | "connectors" | "pilot";
  * Animated product UI previews for Help — live app surfaces, not icon cards.
  */
 export function HelpAppPreview({ kind, bare = false }: { kind: PreviewKind; bare?: boolean }) {
+  const { ref, inView } = useInView<HTMLDivElement>("80px 0px");
   const [tick, setTick] = useState(0);
 
   useEffect(() => {
+    if (!inView) return;
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     const id = window.setInterval(() => setTick((t) => t + 1), 900);
     return () => window.clearInterval(id);
-  }, []);
+  }, [inView]);
 
   const gates = Math.min(8, 2 + (tick % 7));
   const phase = tick % 4;
@@ -124,7 +127,7 @@ export function HelpAppPreview({ kind, bare = false }: { kind: PreviewKind; bare
 
   if (bare) {
     return (
-      <div className="lp-help-preview lp-help-preview--bare" aria-hidden>
+      <div className="lp-help-preview lp-help-preview--bare" ref={ref} aria-hidden>
         {body}
       </div>
     );
@@ -139,7 +142,7 @@ export function HelpAppPreview({ kind, bare = false }: { kind: PreviewKind; bare
   };
 
   return (
-    <div className="lp-help-preview" aria-hidden>
+    <div className="lp-help-preview" ref={ref} aria-hidden>
       <div className="lp-help-preview-chrome">
         <span /><span /><span />
         <em>{labels[kind]}</em>

@@ -2,6 +2,12 @@ import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { MarketingHeroBand } from "../../components/marketing/MarketingHeroBand";
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
 import { MarketingSectionFooter } from "../../components/marketing/MarketingSectionFooter";
+import {
+  AlgorithmCinemaBand,
+  CdcCinema,
+  MappingCinema,
+  ProofCinema,
+} from "../../components/landing/AlgorithmCinema";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import {
   AlgoBlock,
@@ -498,20 +504,18 @@ export function TransferStudioPage({
             },
           ]}
         />
-        <div className="lp-mkt-capability-grid">
-          {[
-            { t: "Role detection", d: "Amounts, emails, IDs, and timestamps classified so synonyms align across schemas." },
-            { t: "Confidence scores", d: "Every edge shows a score. You pin, reject, or override before production write." },
-            { t: "Type-aware coerce", d: "Only fail-fast-safe coercions are offered. Unsafe casts never silently apply." },
-            { t: "Synonym dictionary", d: "Workspace synonyms improve over time — Pilot can propose additions from failed jobs." },
-          ].map((c) => (
-            <article key={c.t} className="lp-mkt-capability-card">
-              <h3>{c.t}</h3>
-              <p>{c.d}</p>
-            </article>
-          ))}
-        </div>
       </Chapter>
+
+      <MarketingReveal>
+        <AlgorithmCinemaBand
+          kicker="Mapping · Preflight"
+          title="Watch the semantic mapper score every edge"
+          lead="Format classify, role enrichment, and continuous confidence — not a string-match guess. Ambiguous edges pause for human review before they can pin into workspace synonyms."
+          compact
+        >
+          <MappingCinema />
+        </AlgorithmCinemaBand>
+      </MarketingReveal>
 
       <Chapter id="ts-scenario" kicker="Worked example" title="Retail orders CSV → PostgreSQL">
         <div className="lp-mkt-scenario">
@@ -616,23 +620,16 @@ export function JobTheaterPage({
         </ProofCallout>
       </Chapter>
 
-      <Chapter id="jt-caps" kicker="Capabilities" title="What operators get on every run">
-        <div className="lp-mkt-capability-grid">
-          {[
-            { t: "Phase timeline", d: "Ordered phases with timestamps — no opaque spinner that hides where time went." },
-            { t: "Batch counters", d: "Source, written, quarantined, and skipped counts update as batches commit." },
-            { t: "Quarantine samples", d: "Inspect failing values without dumping the whole table into logs." },
-            { t: "Proof report", d: "Row counts and content checksums after write — matched or failed, never assumed." },
-            { t: "Retry with context", d: "Re-run from the failed plan with the same mapping and gate evidence attached." },
-            { t: "Agent parity", d: "MCP-triggered jobs appear identically — same phases, same proof artifacts." },
-          ].map((c) => (
-            <article key={c.t} className="lp-mkt-capability-card">
-              <h3>{c.t}</h3>
-              <p>{c.d}</p>
-            </article>
-          ))}
-        </div>
-      </Chapter>
+      <MarketingReveal>
+        <AlgorithmCinemaBand
+          kicker="Proof"
+          title="Checksum + row-count reconcile lands on every job"
+          lead="Job Theater does not claim success on status alone. The engine hashes mapped source rows, reads the destination sample, compares — then flashes MATCH only when counts and content agree."
+          compact
+        >
+          <ProofCinema />
+        </AlgorithmCinemaBand>
+      </MarketingReveal>
 
       <Chapter id="jt-scenario" kicker="Worked example" title="Watching a warehouse load fail safely">
         <div className="lp-mkt-scenario">
@@ -730,21 +727,16 @@ export function PipelinesPage({
         />
       </Chapter>
 
-      <Chapter id="pl-modes" kicker="Write modes" title="Pick the mode that matches the destination">
-        <div className="lp-mkt-capability-grid">
-          {[
-            { t: "Watermark incremental", d: "Advance a high-water mark column; only new/changed rows move each tick." },
-            { t: "Upsert", d: "Merge on primary/business keys where the destination driver supports it." },
-            { t: "Append", d: "Insert-only streams for events and immutable fact tables." },
-            { t: "Overwrite", d: "Full refresh when the table must match source exactly after the run." },
-          ].map((c) => (
-            <article key={c.t} className="lp-mkt-capability-card">
-              <h3>{c.t}</h3>
-              <p>{c.d}</p>
-            </article>
-          ))}
-        </div>
-      </Chapter>
+      <MarketingReveal>
+        <AlgorithmCinemaBand
+          kicker="CDC"
+          title="Snapshot handoff, then idempotent streaming upserts"
+          lead="Pipelines default to at-least-once upserts on the primary key. The snapshot window backfills, LSN 0/16A2B40 hands off, and streaming ticks apply — until exactly-once is proven for a route, we say so."
+          compact
+        >
+          <CdcCinema />
+        </AlgorithmCinemaBand>
+      </MarketingReveal>
 
       <Chapter id="pl-scenario" kicker="Worked example" title="Hourly orders into BigQuery">
         <div className="lp-mkt-scenario">
@@ -843,20 +835,14 @@ export function QueryPlaygroundPage({
       </Chapter>
 
       <Chapter id="qy-caps" kicker="Capabilities" title="What you can do in the playground">
-        <div className="lp-mkt-capability-grid">
-          {[
-            { t: "Multi-driver SQL", d: "PostgreSQL, MySQL, Snowflake, BigQuery, and other SQLAlchemy-backed engines." },
-            { t: "Document queries", d: "Mongo-style filters for collections when the connector is document-native." },
-            { t: "Result preview", d: "Column types and sample rows before you commit to a transfer plan." },
-            { t: "Export samples", d: "CSV/JSONL samples for offline review — still scoped by preview limits." },
-            { t: "Studio handoff", d: "Promote a validated query/table selection into a Transfer Studio plan." },
-            { t: "Audit context", d: "Who queried what is attributable in enterprise workspaces." },
-          ].map((c) => (
-            <article key={c.t} className="lp-mkt-capability-card">
-              <h3>{c.t}</h3>
-              <p>{c.d}</p>
-            </article>
-          ))}
+        <div className="lp-mkt-prose">
+          <p>
+            Author multi-driver SQL against PostgreSQL, MySQL, Snowflake, BigQuery, and other SQLAlchemy-backed
+            engines — plus Mongo-style filters when the connector is document-native. Every result is a preview,
+            capped by workspace policy, with column types surfaced so you know what Studio will map. When a slice
+            is ready, promote it into a Transfer Studio plan; the mapping, gates, and proof still apply. Every
+            query is attributable in enterprise workspaces — nothing runs anonymously.
+          </p>
         </div>
       </Chapter>
     </SurfaceShell>
@@ -926,19 +912,6 @@ export function DataPilotPage({
             },
           ]}
         />
-        <div className="lp-mkt-capability-grid">
-          {[
-            { t: "Gate explainers", d: "Plain-language reasons for G1–G8 failures with the underlying evidence." },
-            { t: "Mapping proposals", d: "Suggest synonym pins and coerce rules from failed samples." },
-            { t: "Job inspection", d: "Summarize Theater phases, quarantine counts, and proof status." },
-            { t: "Safe handoff", d: "Deep-link into Studio or Theater with the job and map context preserved." },
-          ].map((c) => (
-            <article key={c.t} className="lp-mkt-capability-card">
-              <h3>{c.t}</h3>
-              <p>{c.d}</p>
-            </article>
-          ))}
-        </div>
       </Chapter>
     </SurfaceShell>
   );
@@ -1030,18 +1003,14 @@ export function McpServerPage({
       </Chapter>
 
       <Chapter id="mcp-tools" kicker="Tooling" title="Representative tool groups">
-        <div className="lp-mkt-capability-grid">
-          {[
-            { t: "Catalog & connectors", d: "List transfer-ready drivers and connection health." },
-            { t: "Transfer plans", d: "Create/update maps; never skip review flags on ambiguous edges." },
-            { t: "Run & status", d: "Enqueue governed runs; poll phases and proof." },
-            { t: "Quarantine read", d: "Sample bad rows for agent-assisted fixes — still policy-scoped." },
-          ].map((c) => (
-            <article key={c.t} className="lp-mkt-capability-card">
-              <h3>{c.t}</h3>
-              <p>{c.d}</p>
-            </article>
-          ))}
+        <div className="lp-mkt-prose">
+          <p>
+            Tools group cleanly around <strong>catalog &amp; connectors</strong> (transfer-ready drivers and
+            connection health), <strong>transfer plans</strong> (create/update maps without skipping review flags
+            on ambiguous edges), <strong>run &amp; status</strong> (enqueue governed runs and poll phases + proof),
+            and <strong>quarantine read</strong> (sample bad rows for agent-assisted fixes, still policy-scoped).
+            The API surface is thin on purpose — the engine, not the wrapper, decides what is safe.
+          </p>
         </div>
       </Chapter>
     </SurfaceShell>
@@ -1075,38 +1044,43 @@ export function MigrationsSolutionPage({
       nextLabel="Warehouse loading"
       onNavigate={onNavigate}
     >
-      <Chapter id="mig-flow" kicker="How it works" title="Migration flow from discovery to cutover">
+      <Chapter id="mig-flow" kicker="How it works" title="From discovery to signed-off cutover">
         <div className="lp-mkt-prose">
           <p>
-            Migrations fail when teams assume name equality. DataFlow profiles both sides, proposes role-aware maps,
-            and forces a review on anything ambiguous. Preflight blocks cutover until contracts, types, and capacity
-            clear — then Job Theater proves the load.
+            Migrations fail when teams assume name equality. DataFlow profiles both sides, proposes
+            role-aware maps, and forces a review on anything ambiguous — no silent guessing between
+            <code> order_amt</code> and <code> payment_amount</code>.
+          </p>
+          <p>
+            Preflight blocks cutover until contracts, types, and capacity clear. A pilot subset earns
+            checksum confidence first, then the full write ships with quarantine and a reconcile
+            report — the audit pack finance and compliance archive.
           </p>
         </div>
-        <PacketFlow
-          nodes={[
-            { label: "Discover", sub: "Schemas" },
-            { label: "Map", sub: "Semantics", accent: true },
-            { label: "Pilot load", sub: "Sample proof" },
-            { label: "Cutover", sub: "Full write", accent: true },
-            { label: "Reconcile", sub: "Checksums" },
-            { label: "Sign-off", sub: "Evidence" },
-          ]}
-        />
       </Chapter>
+
+      <MarketingReveal>
+        <AlgorithmCinemaBand
+          kicker="Mapping"
+          title="Watch the semantic mapper score every edge"
+          lead="Format classify, role enrichment, and continuous confidence — not string matching. Ambiguous edges pause for human review before they can pin into workspace synonyms."
+          compact
+        >
+          <MappingCinema />
+        </AlgorithmCinemaBand>
+      </MarketingReveal>
+
       <Chapter id="mig-caps" kicker="Capabilities" title="Built for messy real-world schemas">
-        <div className="lp-mkt-capability-grid">
-          {[
-            { t: "Role-aware matching", d: "Amounts, emails, and identifiers align even when column names differ." },
-            { t: "Dual-run proof", d: "Pilot subset first; full cutover only after checksum confidence." },
-            { t: "Quarantine cutover", d: "Bad rows never block the clean set — and never disappear." },
-            { t: "Audit pack", d: "Maps, gates, and proof export for migration sign-off." },
-          ].map((c) => (
-            <article key={c.t} className="lp-mkt-capability-card">
-              <h3>{c.t}</h3>
-              <p>{c.d}</p>
-            </article>
-          ))}
+        <div className="lp-mkt-prose">
+          <p>
+            Amounts, emails, and identifiers align even when column names diverge. A pilot subset
+            earns checksum confidence before the full cutover — bad rows quarantine at write time
+            with column, value, and reason, so nothing vanishes in the transition.
+          </p>
+          <p>
+            The sign-off artifact is the reconcile pack: mapping decisions, gate results, quarantine
+            samples, and matched checksums — exportable to compliance without a screenshot pass.
+          </p>
         </div>
       </Chapter>
     </SurfaceShell>
@@ -1140,28 +1114,32 @@ export function WarehouseSolutionPage({
       nextLabel="Recurring sync"
       onNavigate={onNavigate}
     >
-      <Chapter id="wh-flow" kicker="How it works" title="Warehouse-specific probes before bulk write">
+      <Chapter id="wh-flow" kicker="How it works" title="Probes before bulk write, proof after">
         <div className="lp-mkt-prose">
           <p>
-            Warehouse loads are expensive to get wrong. DataFlow probes permissions and capacity, validates the write
-            mode against the driver, then executes bulk paths. Post-load row counts and content checksums become the
-            report analytics and finance teams can archive.
+            Warehouse loads are expensive to get wrong. DataFlow probes permissions and capacity,
+            validates the write mode against the driver, then executes bulk paths — Snowflake with
+            warehouse-slot awareness, BigQuery via load jobs, Redshift through capacity-checked
+            bulk copy.
+          </p>
+          <p>
+            Post-load, row counts and content checksums become the report analytics and finance
+            teams archive. Any warehouse plan can graduate into Pipelines for cadence — same gates,
+            same reconciliation, every tick.
           </p>
         </div>
-        <div className="lp-mkt-capability-grid">
-          {[
-            { t: "Snowflake", d: "Upsert and overwrite with warehouse slot awareness." },
-            { t: "BigQuery", d: "Load jobs with destination table probes and proof counts." },
-            { t: "Redshift", d: "Bulk paths with capacity and permission checks." },
-            { t: "Scheduled refresh", d: "Promote any warehouse plan into Pipelines for cadence." },
-          ].map((c) => (
-            <article key={c.t} className="lp-mkt-capability-card">
-              <h3>{c.t}</h3>
-              <p>{c.d}</p>
-            </article>
-          ))}
-        </div>
       </Chapter>
+
+      <MarketingReveal>
+        <AlgorithmCinemaBand
+          kicker="Proof"
+          title="Checksum + row-count reconcile flashes MATCH"
+          lead="Success is never “status = complete.” The engine hashes mapped source rows, reads the destination sample, compares — then flashes MATCH only when counts and content agree. Quarantine counters surface alongside so nothing is silently dropped."
+          compact
+        >
+          <ProofCinema />
+        </AlgorithmCinemaBand>
+      </MarketingReveal>
     </SurfaceShell>
   );
 }
@@ -1193,25 +1171,31 @@ export function SyncSolutionPage({
       nextLabel="Pricing"
       onNavigate={onNavigate}
     >
-      <Chapter id="sy-flow" kicker="How it works" title="From proven plan to reliable ticks">
+      <Chapter id="sy-flow" kicker="How it works" title="From a proven plan to reliable ticks">
         <div className="lp-mkt-prose">
           <p>
-            Recurring sync is the Pipelines product applied to operational keep-warm loads. Promote a Studio plan,
-            pick cadence and mode, and every tick inherits gates and proof. Drift stops the line instead of writing
-            into a silently wrong schema.
+            Recurring sync is Pipelines applied to keep-warm loads. Promote a Studio plan, pick
+            cadence and mode, and every tick inherits the same mapping, eight gates, quarantine,
+            and reconcile — never a scheduler-only shortcut.
+          </p>
+          <p>
+            Schema drift blocks the line instead of writing into a silently wrong shape. Watermarks
+            resolve deltas cleanly, upserts keep primary keys authoritative, and every tick lands
+            as a job in Theater with a checksummed proof report attached.
           </p>
         </div>
-        <PacketFlow
-          nodes={[
-            { label: "Promote", sub: "Studio plan" },
-            { label: "Cadence", sub: "Schedule", accent: true },
-            { label: "Delta", sub: "Watermark" },
-            { label: "Gates", sub: "Each tick", accent: true },
-            { label: "Sync", sub: "Upsert/append" },
-            { label: "Prove", sub: "Theater" },
-          ]}
-        />
       </Chapter>
+
+      <MarketingReveal>
+        <AlgorithmCinemaBand
+          kicker="CDC"
+          title="Snapshot + LSN handoff, then streaming upserts"
+          lead="Honest CDC copy: DataFlow starts with a snapshot window, hands off at a logical LSN, and streams idempotent upserts on primary keys. At-least-once is the default until exactly-once is proven for a route."
+          compact
+        >
+          <CdcCinema />
+        </AlgorithmCinemaBand>
+      </MarketingReveal>
     </SurfaceShell>
   );
 }

@@ -1045,7 +1045,8 @@
 
 .docs-sidebar {
   position: sticky;
-  top: 88px;
+  /* Clear the marketing nav pill/bar; falls back to 60px if header token unset. */
+  top: calc(var(--df-header-height, 60px) + 12px);
   align-self: start;
   max-height: calc(100vh - 110px);
   overflow: auto;
@@ -1765,4 +1766,43 @@
   .docs-space-tree-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* Docs space home — algorithm path instead of duplicate tree grid */
+.docs-space-algorithm {
+  margin-top: 28px;
+  padding: 22px 24px;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #fff, #f8fafc);
+}
+.docs-space-algorithm h2 {
+  margin: 0 0 14px;
+  font-size: 1.15rem;
+  letter-spacing: -0.02em;
+}
+.docs-space-algorithm-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 12px;
+}
+.docs-space-algorithm-steps li {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px 12px 16px;
+  border-left: 3px solid var(--df-brand, #0d9488);
+  background: #fff;
+  border-radius: 0 10px 10px 0;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+.docs-space-algorithm-steps strong {
+  font-size: 13.5px;
+  color: #0f172a;
+}
+.docs-space-algorithm-steps span {
+  font-size: 13px;
+  color: #475569;
+  line-height: 1.45;
 }

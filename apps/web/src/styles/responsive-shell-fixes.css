@@ -4,7 +4,7 @@
 
 :root {
   --df-header-height: 60px;
-  /* Prefer zoom-compensated layout height from tokens.css (fills laptop viewport). */
+  /* Real viewport height — density tokens handle laptop scale (no CSS zoom). */
   --df-viewport-h: var(--df-layout-viewport-h, 100dvh);
 }
 

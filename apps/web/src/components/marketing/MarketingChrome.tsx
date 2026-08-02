@@ -77,10 +77,8 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
       className={`lp ${isHome ? "lp-home" : "lp-subpage"} ${scrolled ? "is-page-scrolled" : ""}`}
       data-lp-route={route}
     >
-      <div className={`lp-ambient${isHome ? "" : " lp-ambient--quiet"}`} aria-hidden>
-        <span className="lp-ambient-orb lp-ambient-orb--a" />
-        <span className="lp-ambient-orb lp-ambient-orb--b" />
-        {isHome ? <span className="lp-ambient-orb lp-ambient-orb--c" /> : null}
+      {/* Quiet grid only — floating orbs read as AI decoration; remove everywhere. */}
+      <div className="lp-ambient lp-ambient--quiet" aria-hidden>
         <span className="lp-ambient-grid" />
       </div>
 
@@ -251,7 +249,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
 
             <div className="lp-nav-end">
               <div className="lp-nav-actions">
-                <button type="button" className="lp-btn lp-btn--ghost lp-nav-action-secondary" onClick={() => go("contact")}>
+                <button type="button" className="lp-btn lp-btn--outline lp-nav-action-secondary" onClick={() => go("contact")}>
                   Contact sales
                 </button>
                 <button type="button" className="lp-btn lp-btn--ghost lp-nav-action-login" onClick={onLogin}>

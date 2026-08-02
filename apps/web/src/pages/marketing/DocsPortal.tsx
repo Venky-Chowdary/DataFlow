@@ -165,7 +165,8 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
         <h2>Start here</h2>
         <p>
           Follow the same path operators use: connect systems, map schemas, pass eight preflight
-          gates, write with quarantine, and prove the load in Job Theater.
+          gates, write with quarantine, and prove the load in Job Theater. Use the left sidebar for
+          every article in this space — we do not duplicate the tree as a card wall.
         </p>
         <div className="docs-featured-actions">
           <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("help-getting-started")}>
@@ -174,37 +175,32 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
           <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("help-transfer-studio")}>
             Transfer Studio
           </button>
-          <button type="button" className="lp-btn lp-btn--ghost" onClick={onGetStarted}>
+          <button type="button" className="lp-btn lp-btn--outline" onClick={onGetStarted}>
             Open the app
           </button>
         </div>
       </section>
 
-      <section className="docs-space-tree">
-        <h2>Pages in this space</h2>
-        <div className="docs-space-tree-grid">
-          {HELP_DOC_CATEGORIES.map((cat) => (
-            <div key={cat.id} className="docs-space-tree-group">
-              <h3>{cat.title}</h3>
-              <ul>
-                {cat.docs.map((id) => {
-                  const doc = getHelpDoc(id);
-                  return (
-                    <li key={id}>
-                      <button type="button" onClick={() => onNavigate(id)}>
-                        <DtIcon name={doc.icon as "book"} size={14} />
-                        <span>
-                          <strong>{doc.title}</strong>
-                          <em>{doc.readTime} read</em>
-                        </span>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          ))}
-        </div>
+      <section className="docs-space-algorithm" aria-label="Governed path overview">
+        <h2>The governed path in one page</h2>
+        <ol className="docs-space-algorithm-steps">
+          <li>
+            <strong>Map</strong>
+            <span>Semantic roles, synonyms, and type fit — not string equality.</span>
+          </li>
+          <li>
+            <strong>Preflight G1–G8</strong>
+            <span>Fail-fast before write; dry-run isolates coerce failures into quarantine.</span>
+          </li>
+          <li>
+            <strong>Write + quarantine</strong>
+            <span>Bad rows never land in the clean set and never disappear silently.</span>
+          </li>
+          <li>
+            <strong>Reconcile</strong>
+            <span>Checksum + row counts prove the load — Job Theater shows the artifact.</span>
+          </li>
+        </ol>
       </section>
     </DocsSpaceShell>
   );
@@ -317,7 +313,7 @@ export function DocArticlePage({ docId, onNavigate, onGetStarted }: DocArticlePa
           <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
             Try in Transfer Studio
           </button>
-          <button type="button" className="lp-btn lp-btn--ghost" onClick={() => onNavigate("contact")}>
+          <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("contact")}>
             Contact sales
           </button>
         </div>

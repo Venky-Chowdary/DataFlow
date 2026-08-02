@@ -3686,7 +3686,8 @@ export function TransferPage({
         setResult(localResult);
         setRunStartupProgress(100);
         setStep(STEP_RUN);
-        onTransferComplete();
+        // Local export has no server job — skip onTransferComplete (that toast
+        // says "View progress in Job Theater" and would double with this one).
         toast({
           title: "Exported locally",
           message: `${localResult.records_transferred?.toLocaleString() ?? 0} rows saved — start the API for governed Job Theater proof.`,

@@ -5,8 +5,8 @@ interface MarketingSectionFooterProps {
   align?: "center" | "start";
 }
 
-/** Centered CTA row — never a stray left-aligned text link. */
-export function MarketingSectionFooter({ children, align = "center" }: MarketingSectionFooterProps) {
+/** Dense CTA row aligned to the marketing shell. */
+export function MarketingSectionFooter({ children, align = "start" }: MarketingSectionFooterProps) {
   return (
     <div className={`lp-section-footer lp-section-footer--${align}`}>
       {children}

@@ -782,7 +782,7 @@ function AppShell({
             await loadConnectors();
             setConnectorsViewToken((n) => n + 1);
             setScreen("connectors");
-            toast({ title: "Connection saved", message: "Visible in My connections.", tone: "success" });
+            // Toast owned by ConnectorModal (includes connector name) — do not double-fire.
           }}
         />
       )}

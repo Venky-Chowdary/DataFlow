@@ -1,15 +1,20 @@
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { DtLogo } from "../components/DtLogo";
+import { useEffect, useState, type ReactNode } from "react";
 import { DtIcon } from "../components/DtIcon";
 import { ConnectorIcon } from "../app/brand-icons";
+import {
+  AlgorithmCinemaBand,
+  MappingCinema,
+  ProductSurfaceStrip,
+  ProofCinema,
+} from "../components/landing/AlgorithmCinema";
 import { ComparisonSection } from "../components/landing/ComparisonSection";
 import { TrustSection } from "../components/landing/TrustSection";
 import { TestimonialSection } from "../components/landing/TestimonialSection";
 import { LandingHeroFlow } from "../components/landing/LandingHeroFlow";
 import { LandingInfraRibbon } from "../components/landing/LandingInfraRibbon";
 import { fetchCatalogStats } from "../lib/api";
+import { useInView } from "../hooks/useInView";
 import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
-import { MarketingSectionFooter } from "../components/marketing/MarketingSectionFooter";
 import type { PublicRoute } from "../lib/publicNavigation";
 
 export interface LandingHomeProps {
@@ -34,6 +39,7 @@ function Reveal({ children, className = "" }: { children: ReactNode; className?:
 }
 
 function KnowledgeField() {
+  const { ref, inView } = useInView<HTMLDivElement>("80px 0px");
   const [step, setStep] = useState(0);
   const items = [
     {
@@ -54,14 +60,19 @@ function KnowledgeField() {
   ];
 
   useEffect(() => {
+    if (!inView) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setStep(1);
+      return;
+    }
     const id = window.setInterval(() => setStep((s) => (s + 1) % 3), 2800);
     return () => window.clearInterval(id);
-  }, []);
+  }, [inView]);
 
   const current = items[step];
 
   return (
-    <div className="lp-knowledge-field" key={step}>
+    <div className="lp-knowledge-field" ref={ref} key={step}>
       <span className="lp-knowledge-field-label">{current.label}</span>
       <p className="lp-knowledge-field-rule">{current.rule}</p>
       <div className="lp-knowledge-field-actions">
@@ -81,9 +92,10 @@ function KnowledgeField() {
 }
 
 function ConnectorMarqueeBand() {
+  const { ref, inView } = useInView<HTMLDivElement>("60px 0px");
   const track = [...MARQUEE_IDS, ...MARQUEE_IDS];
   return (
-    <div className="lp-marquee" aria-hidden>
+    <div className={`lp-marquee ${inView ? "is-running" : ""}`} ref={ref} aria-hidden>
       <div className="lp-marquee-track">
         {track.map((id, i) => (
           <span key={`${id}-${i}`} className="lp-marquee-item">
@@ -102,247 +114,36 @@ function ConnectorMarqueeBand() {
   );
 }
 
-/**
- * Count-up metric that animates once when scrolled into view. Honors
- * prefers-reduced-motion by rendering the final value immediately.
- */
-function CountUpStat({
-  target,
-  prefix = "",
-  suffix = "",
-  label,
-  detail,
-  index,
-}: {
-  target: number;
-  prefix?: string;
-  suffix?: string;
-  label: string;
-  detail: string;
-  index: number;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [value, setValue] = useState(0);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-
-    const prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (prefersReduced || target === 0) {
-      setValue(target);
-      return;
-    }
-
-    let raf = 0;
-    let started = false;
-    const run = () => {
-      if (started) return;
-      started = true;
-      const duration = 1100;
-      const start = performance.now();
-      const tick = (now: number) => {
-        const t = Math.min(1, (now - start) / duration);
-        const eased = 1 - Math.pow(1 - t, 3);
-        setValue(Math.round(eased * target));
-        if (t < 1) raf = window.requestAnimationFrame(tick);
-      };
-      raf = window.requestAnimationFrame(tick);
-    };
-
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          run();
-          observer.disconnect();
-        }
-      },
-      { threshold: 0.4 },
-    );
-    observer.observe(el);
-    return () => {
-      observer.disconnect();
-      window.cancelAnimationFrame(raf);
-    };
-  }, [target]);
-
-  return (
-    <div ref={ref} className="lp-outcome" style={{ "--reveal-i": index } as CSSProperties}>
-      <strong className="lp-outcome-value">
-        {prefix}
-        {value.toLocaleString()}
-        {suffix}
-      </strong>
-      <span className="lp-outcome-label">{label}</span>
-      <span className="lp-outcome-detail">{detail}</span>
-    </div>
-  );
-}
-
 function OutcomesBand({
   uniqueDrivers,
-  catalogTiles,
+  catalogTiles: _catalogTiles,
 }: {
   uniqueDrivers: number | null;
   catalogTiles: number | null;
 }) {
-  const driverTarget = uniqueDrivers ?? 0;
-  const driverDetail =
-    catalogTiles != null && catalogTiles > 0
-      ? `${catalogTiles} catalog tiles · unique drivers primary`
-      : "Package-available unique drivers — not alias inflation";
+  const driverLabel = uniqueDrivers != null ? `${uniqueDrivers} transfer-ready drivers` : "Transfer-ready drivers";
 
   return (
-    <section className="lp-section lp-outcomes" id="outcomes" aria-label="Outcomes">
+    <section className="lp-outcomes-rail" id="outcomes" aria-label="Outcomes">
       <Reveal>
-        <div className="lp-section-head">
-          <p className="lp-section-kicker">Outcomes</p>
-          <h2>Built to prove every transfer</h2>
-          <p>Governance isn&rsquo;t a dashboard afterthought — it&rsquo;s enforced on every run, before and after write.</p>
+        <div className="lp-outcomes-rail-inner">
+          <p className="lp-outcomes-rail-eyebrow">Enforced on every run</p>
+          <ul className="lp-outcomes-rail-list">
+            <li><strong>8</strong><span>preflight gates before write</span></li>
+            <li><strong>{driverLabel}</strong><span>unique drivers, not alias inflation</span></li>
+            <li><strong>Every job</strong><span>row-count + checksum reconcile</span></li>
+            <li><strong>0</strong><span>silently dropped rows — quarantine surfaces them</span></li>
+          </ul>
         </div>
-      </Reveal>
-      <Reveal className="lp-outcomes-grid">
-        <CountUpStat index={0} target={8} label="Preflight gates" detail="Block bad writes before production" />
-        <CountUpStat
-          index={1}
-          target={driverTarget || 24}
-          suffix={uniqueDrivers != null ? "" : "+"}
-          label="Unique drivers"
-          detail={driverDetail}
-        />
-        <CountUpStat
-          index={2}
-          target={8}
-          label="Gate-8 reconcile"
-          detail="Row counts + checksums after every write — measured, not marketing"
-        />
-        <CountUpStat index={3} target={0} label="Silently dropped rows" detail="Bad rows are quarantined, never lost" />
       </Reveal>
     </section>
   );
 }
 
 /** Home marketing body — chrome (nav/footer) lives in MarketingChrome. */
-function HeroStudioMock({ gateStep }: { gateStep: number }) {
-  const gates = [
-    "Schema contract",
-    "Type coercion",
-    "Nullability",
-    "Destination probe",
-    "Capacity",
-    "Write plan",
-    "Quarantine policy",
-    "Reconcile plan",
-  ];
-
-  return (
-    <div className="lp-hero-mock" aria-label="DataFlow Transfer Studio preview">
-      <div className="lp-mock-shell">
-        <aside className="lp-mock-side">
-          <div className="lp-mock-side-title">
-            <span className="lp-mock-org">
-              <DtLogo size={16} />
-              DataFlow
-            </span>
-            <DtIcon name="chevron-down" size={12} />
-          </div>
-          {[
-            { id: "transfer", label: "Transfer Studio", icon: "transfer" as const, active: true },
-            { id: "pilot", label: "Data Pilot", icon: "sparkle" as const, active: false },
-            { id: "jobs", label: "Job Theater", icon: "jobs" as const, active: false },
-            { id: "connectors", label: "Connectors", icon: "connectors" as const, active: false },
-          ].map((item) => (
-            <div key={item.id} className={`lp-mock-nav-item ${item.active ? "is-active" : ""}`}>
-              <DtIcon name={item.icon} size={14} />
-              {item.label}
-            </div>
-          ))}
-          <div className="lp-mock-section-label">
-            <span>Recent</span>
-            <span className="lp-mock-section-actions">
-              <DtIcon name="search" size={12} />
-              <DtIcon name="plus" size={12} />
-            </span>
-          </div>
-          {[
-            { title: "Orders CSV → PostgreSQL", meta: "Completed · 12k rows", active: true, badge: "proof" },
-            { title: "Mongo customers → BigQuery", meta: "Running · 64%", active: false, badge: "live" },
-            { title: "S3 events → Snowflake", meta: "Queued", active: false, badge: "queued" },
-          ].map((job) => (
-            <div key={job.title} className={`lp-mock-job ${job.active ? "is-active" : ""}`}>
-              <strong>{job.title}</strong>
-              <span>{job.meta}</span>
-              <em>{job.badge}</em>
-            </div>
-          ))}
-        </aside>
-
-        <div className="lp-mock-main">
-          <div className="lp-mock-main-head">
-            <span>Transfer Studio / Orders migration</span>
-            <span className="lp-mock-live-chip">
-              <span className="lp-mock-live-dot" aria-hidden />
-              Live
-            </span>
-          </div>
-          <div className="lp-mock-prompt">
-            <div className="lp-mock-prompt-text">
-              Map source <code>order_amt</code> to destination <code>payment_amount</code>, then run preflight before load.
-            </div>
-            <div className="lp-mock-avatar" aria-hidden>DF</div>
-          </div>
-          <div className="lp-mock-reply">
-            Mapping <code>order_amt → payment_amount</code> at 96% confidence. Running eight preflight gates, then writing with reconciliation.
-          </div>
-          <div className="lp-mock-stat">
-            <span>Preflight</span>
-            <strong>{Math.min(gateStep + 1, 8)} / 8 gates passed</strong>
-            <div className="lp-mock-progress" aria-hidden>
-              <i style={{ width: `${((Math.min(gateStep + 1, 8)) / 8) * 100}%` }} />
-            </div>
-          </div>
-          <div className="lp-mock-pr">
-            <div className="lp-mock-pr-top">
-              <strong>Proof report: Orders migration</strong>
-              <span className="lp-mock-open">matched</span>
-            </div>
-            <div className="lp-mock-pr-meta">
-              <span>Source 12,480</span>
-              <span>·</span>
-              <span>Target 12,480</span>
-              <span>·</span>
-              <span>Checksum OK</span>
-            </div>
-          </div>
-        </div>
-
-        <aside className="lp-mock-detail">
-          <h3>Proof report: Orders migration</h3>
-          <p>Independent reconciliation verifies row counts and content checksums after write.</p>
-          <ul>
-            <li>Source rows: 12,480</li>
-            <li>Target rows: 12,480</li>
-            <li>Checksum: matched</li>
-          </ul>
-          <div className="lp-mock-gates">
-            {gates.map((g, i) => (
-              <div key={g} className={`lp-mock-gate ${i <= gateStep ? "is-pass" : "is-pending"}`}>
-                <span>{g}</span>
-                <em>{i <= gateStep ? "pass" : "…"}</em>
-              </div>
-            ))}
-          </div>
-        </aside>
-      </div>
-    </div>
-  );
-}
-
-export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomeProps) {
+export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: LandingHomeProps) {
   const [liveDrivers, setLiveDrivers] = useState<number | null>(null);
   const [catalogTiles, setCatalogTiles] = useState<number | null>(null);
-  const [gateStep, setGateStep] = useState(0);
-  const heroRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     fetchCatalogStats()
@@ -356,41 +157,9 @@ export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomePr
       });
   }, []);
 
-  useEffect(() => {
-    const prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (prefersReduced) {
-      setGateStep(7);
-      return;
-    }
-    const id = window.setInterval(() => setGateStep((s) => (s + 1) % 8), 900);
-    return () => window.clearInterval(id);
-  }, []);
-
-  // Parallax the immersive 3D stage
-  useEffect(() => {
-    const hero = heroRef.current;
-    if (!hero) return;
-    const prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (prefersReduced) return;
-
-    const stage = hero.querySelector<HTMLElement>(".lp-d3");
-    if (!stage) return;
-
-    const onScroll = () => {
-      const rect = hero.getBoundingClientRect();
-      const progress = Math.min(1, Math.max(0, -rect.top / Math.max(rect.height, 1)));
-      stage.style.setProperty("--lp-parallax", `${progress * 48}px`);
-      stage.style.setProperty("--lp-parallax-op", String(1 - progress * 0.18));
-      stage.style.setProperty("--lp-tilt", `${progress * 4}deg`);
-    };
-    onScroll();
-    window.addEventListener("scroll", onScroll, { passive: true });
-    return () => window.removeEventListener("scroll", onScroll);
-  }, []);
-
   return (
     <>
-      <section className="lp-hero lp-hero--immersive lp-hero--bleed" ref={heroRef}>
+      <section className="lp-hero lp-hero--immersive lp-hero--bleed">
         <div className="lp-hero-immersive-grid">
           <div className="lp-hero-copy">
             <span className="lp-hero-eyebrow">
@@ -398,17 +167,21 @@ export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomePr
               Universal data movement, proven end-to-end
             </span>
             <h1 className="lp-hero-title">
-              Move any schema <span className="lp-hero-title-b">anywhere</span>
+              <span className="lp-hero-title-line">Move any schema</span>
+              <span className="lp-hero-title-b lp-hero-title-line">anywhere.</span>
             </h1>
             <p className="lp-hero-sub">
-              Semantic mapping, eight preflight gates, and checksum proof — so every load is destination-honest.
-              Transfer Studio, Pipelines, Pilot, and MCP share one governed engine.
+              Semantic mapping earns a confidence score on every column — no string-match guessing.
+              Eight preflight gates fail-fast before write, quarantine isolates bad rows with reasons,
+              and checksum reconciliation proves every load. Transfer Studio, Pipelines, Pilot, and MCP
+              share one governed engine — never a silent shortcut.
               {liveDrivers != null ? ` ${liveDrivers} unique transfer-ready drivers today.` : ""}
             </p>
 
             <div className="lp-hero-cta">
               <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
                 Try DataFlow
+                <DtIcon name="arrow-right" size={16} />
               </button>
               <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("help")}>
                 Read the docs
@@ -428,29 +201,22 @@ export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomePr
         </div>
       </section>
 
-      <section className="lp-studio-band lp-band--full" aria-label="Transfer Studio preview">
-        <div className="lp-studio-band-inner">
-          <div className="lp-studio-band-copy lp-band-copy--center">
-            <p className="lp-section-kicker">Product</p>
-            <h2>Transfer Studio in motion</h2>
-            <p>Map → preflight → write → reconcile on one governed path. The same engine under Pipelines, Pilot, and MCP.</p>
-          </div>
-          <HeroStudioMock gateStep={gateStep} />
-          <div className="lp-studio-band-docs">
-            <p>Prefer a step-by-step runbook? Open the public documentation with product screenshots.</p>
-            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("help")}>
-              Browse documentation
-            </button>
-          </div>
-        </div>
-      </section>
-
       <section className="lp-logos lp-logos--float lp-band--center" aria-label="Trusted stacks">
         <h5>Works with the stacks you already run</h5>
         <div className="lp-logos-float-row">
-          {["postgresql", "snowflake", "bigquery", "mongodb", "sqlserver", "s3"].map((id, i) => (
-            <span key={id} className="lp-logo-float" style={{ "--i": i } as CSSProperties} title={id}>
-              <ConnectorIcon id={id} size={48} />
+          {[
+            "postgresql",
+            "snowflake",
+            "bigquery",
+            "redshift",
+            "mongodb",
+            "mysql",
+            "kafka",
+            "salesforce",
+            "s3",
+          ].map((id) => (
+            <span key={id} className="lp-logo-float" title={id}>
+              <ConnectorIcon id={id} size={40} />
               <em>{id}</em>
             </span>
           ))}
@@ -470,239 +236,132 @@ export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomePr
         <LandingInfraRibbon />
       </section>
 
-      <section className="lp-section lp-section-band" id="product">
-        <Reveal>
-          <div className="lp-section-head">
+      <section className="lp-surface-strip-band" id="product">
+        <div className="lp-surface-strip-inner">
+          <Reveal className="lp-surface-strip-copy">
             <p className="lp-section-kicker">Product</p>
             <h2>Every surface. One governed engine.</h2>
-            <p>Transfer Studio plans the load. Job Theater proves it. Pipelines, Query, Pilot, and MCP reuse the same path — never a silent shortcut.</p>
-          </div>
-        </Reveal>
-        <Reveal className="lp-product-cards lp-product-cards--six">
-          {[
-            { title: "Transfer Studio", body: "Map → preflight → write → reconcile in one wizard.", route: "product-transfer" as PublicRoute, icon: "transfer" as const },
-            { title: "Job Theater", body: "Live phases, quarantine samples, and checksum proof.", route: "product-jobs" as PublicRoute, icon: "jobs" as const },
-            { title: "Pipelines", body: "Hourly to weekly sync with watermarks and gates.", route: "product-pipelines" as PublicRoute, icon: "activity" as const },
-            { title: "Query Playground", body: "Ad-hoc SQL and document queries with Studio handoff.", route: "product-query" as PublicRoute, icon: "database" as const },
-            { title: "Data Pilot", body: "Natural-language triage on failed gates and maps.", route: "product-pilot" as PublicRoute, icon: "sparkle" as const },
-            { title: "MCP Server", body: "Agent tools under RBAC — never raw passwords.", route: "product-mcp" as PublicRoute, icon: "zap" as const },
-          ].map((card, i) => (
-            <button
-              key={card.title}
-              type="button"
-              className="lp-product-card"
-              style={{ "--reveal-i": i } as CSSProperties}
-              onClick={() => onNavigate(card.route)}
-            >
-              <span className="lp-product-card-icon" aria-hidden>
-                <DtIcon name={card.icon} size={22} />
-              </span>
-              <h3>{card.title}</h3>
-              <p>{card.body}</p>
-              <span className="lp-section-link">Learn more →</span>
-            </button>
-          ))}
-        </Reveal>
-        <Reveal>
-          <MarketingSectionFooter>
-            <p className="lp-section-cta-text">See how teams ship governed migrations without brittle scripts.</p>
-            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("customers")}>
-              Hear from our customers
-            </button>
-          </MarketingSectionFooter>
-        </Reveal>
+            <p>Transfer Studio plans the load; Job Theater proves it. Pipelines, Query, Pilot, and MCP reuse the same path — pick a surface to see the chapter.</p>
+          </Reveal>
+          <Reveal>
+            <ProductSurfaceStrip<PublicRoute> onNavigate={onNavigate} />
+          </Reveal>
+        </div>
       </section>
 
-      <section className="lp-section" id="usecases" style={{ paddingTop: 0 }}>
-        <Reveal>
-          <div className="lp-section-head lp-section-head--left">
-            <h2>Use cases</h2>
-            <p>Use DataFlow to plan and execute complex data movement — from one-shot migrations to recurring syncs.</p>
-          </div>
-        </Reveal>
-        <Reveal className="lp-usecases">
-          {[
-            {
-              title: "Cross-schema migrations",
-              items: [
-                "Semantic column mapping across SQL, NoSQL, and files",
-                "Type coercion with fail-fast preflight gates",
-                "Checksum-proven loads into warehouses",
-              ],
-              cta: "Learn about migrations →",
-              route: "solution-migrations" as PublicRoute,
-            },
-            {
-              title: "Schema intelligence",
-              items: [
-                "Auto-detect roles like amount, email, and identifiers",
-                "Review ambiguous maps before production write",
-                "Backfill new fields when schemas drift",
-              ],
-              cta: "Learn about Data Pilot →",
-              route: "product-pilot" as PublicRoute,
-            },
-            {
-              title: "Governed recurring sync",
-              items: [
-                "Hourly, daily, and weekly pipelines",
-                "Upsert, append, overwrite, and watermark incremental",
-                "Quarantine bad rows without silent failure",
-              ],
-              cta: "Learn about sync →",
-              route: "solution-sync" as PublicRoute,
-            },
-            {
-              title: "Preflight & proof",
-              items: [
-                "Eight gates before any production write",
-                "Destination probes and capacity checks",
-                "Post-load reconciliation reports",
-              ],
-              cta: "Learn about Transfer Studio →",
-              route: "product-transfer" as PublicRoute,
-            },
-            {
-              title: "Agent-native ops",
-              items: [
-                "MCP server for Cursor, Claude, and VS Code",
-                "Natural-language Data Pilot for triage",
-                "Same governed engine under every surface",
-              ],
-              cta: "Learn about MCP →",
-              route: "product-mcp" as PublicRoute,
-            },
-            {
-              title: "Warehouse loading",
-              items: [
-                "Snowflake, BigQuery, and Redshift bulk paths",
-                "Finance-ready row counts and checksums",
-                "Scheduled refreshes from Pipelines",
-              ],
-              cta: "Learn about warehouses →",
-              route: "solution-warehouse" as PublicRoute,
-            },
-          ].map((card, i) => (
-            <article key={card.title} className="lp-usecase" style={{ "--reveal-i": i } as CSSProperties}>
-              <h3>{card.title}</h3>
-              <ul>
-                {card.items.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-              {card.cta && card.route ? (
-                <button type="button" className="lp-section-link lp-usecase-link" onClick={() => onNavigate(card.route)}>
-                  {card.cta}
+      <Reveal>
+        <AlgorithmCinemaBand
+          kicker="Mapping"
+          title="Semantic mapping — roles, synonyms, type fit"
+          lead="Watch every source column earn a continuous confidence score. Format, role, and type compatibility outrank string similarity — and ambiguous edges wait for review before they can pin into workspace synonyms."
+        >
+          <MappingCinema />
+        </AlgorithmCinemaBand>
+      </Reveal>
+
+      <Reveal>
+        <AlgorithmCinemaBand
+          kicker="Proof"
+          title="Checksum + row-count reconcile flashes MATCH"
+          lead="Success is never “status = complete.” The engine hashes mapped source rows, reads the destination sample, compares, and only then flashes MATCH — with quarantine counts surfaced alongside so nothing is silently dropped."
+        >
+          <ProofCinema />
+        </AlgorithmCinemaBand>
+      </Reveal>
+
+      <section className="lp-story-band" id="usecases">
+        <div className="lp-story-band-inner">
+          <Reveal className="lp-story-band-head">
+            <h2>What operators run</h2>
+            <p>Three story arcs — migration, recurring sync, warehouse loading — each with the same eight gates and reconciliation guarantees.</p>
+          </Reveal>
+
+          <Reveal>
+            <article className="lp-story-row">
+              <span className="lp-story-row-tag">Migration</span>
+              <div className="lp-story-row-copy">
+                <h3>Cross-schema cutover with dual-run proof</h3>
+                <p>Profile both sides, propose role-aware maps, pilot a subset for checksum confidence, then cutover with quarantine keeping bad rows visible instead of dropped.</p>
+              </div>
+              <div className="lp-story-row-actions">
+                <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("solution-migrations")}>
+                  Read the migration path →
                 </button>
-              ) : null}
+              </div>
             </article>
-          ))}
-        </Reveal>
+            <article className="lp-story-row">
+              <span className="lp-story-row-tag">Sync</span>
+              <div className="lp-story-row-copy">
+                <h3>Recurring sync that still runs preflight</h3>
+                <p>Every tick is a real job in Job Theater — watermark incremental, upsert, append, or overwrite — with schema drift blocking the next tick until you review the diff.</p>
+              </div>
+              <div className="lp-story-row-actions">
+                <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("solution-sync")}>
+                  Read the sync path →
+                </button>
+              </div>
+            </article>
+            <article className="lp-story-row">
+              <span className="lp-story-row-tag">Warehouse</span>
+              <div className="lp-story-row-copy">
+                <h3>Bulk warehouse loads finance can archive</h3>
+                <p>Snowflake, BigQuery, and Redshift with destination probes, capacity checks, and reconciliation reports — the numbers analytics and finance teams need to sign off.</p>
+              </div>
+              <div className="lp-story-row-actions">
+                <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("solution-warehouse")}>
+                  Read the warehouse path →
+                </button>
+              </div>
+            </article>
+          </Reveal>
+        </div>
       </section>
 
       <ComparisonSection />
       <TestimonialSection onNavigate={onNavigate} />
 
-      <section className="lp-section" id="customers">
-        <Reveal>
-          <div className="lp-section-head">
-            <h2>Learn and work together</h2>
-            <p>DataFlow is built for data teams with complex, multi-system stacks.</p>
+      <Reveal>
+        <AlgorithmCinemaBand
+          kicker="Together"
+          title="Learns your schemas and mapping corrections"
+          lead="Every accepted or rejected mapping updates the workspace synonym dictionary. Data Pilot can propose additions from failed jobs — humans still confirm, gates still run."
+        >
+          <div className="lp-cinema-stage" aria-label="Knowledge field animation">
+            <KnowledgeField />
           </div>
-        </Reveal>
-        <Reveal className="lp-together">
-          <article className="lp-together-card">
-            <div className="lp-together-visual">
-              <KnowledgeField />
-            </div>
-            <h3>Learns your schemas &amp; mapping corrections</h3>
-            <p>Semantic patterns, synonym dictionaries, and optional LLM fallback improve with every reviewed map.</p>
-          </article>
-          <article className="lp-together-card">
-            <div className="lp-together-visual">
-              <div className="lp-collab">
-                <span>Transfer Studio</span>
-                <span>Data Pilot</span>
-                <span>MCP</span>
-                <span>API</span>
-              </div>
-            </div>
-            <h3>Works where your team works</h3>
-            <p>Run Transfer Studio in the UI, ask Data Pilot in chat, or trigger governed transfers from MCP-connected agents.</p>
-          </article>
-          <article className="lp-together-card">
-            <div className="lp-together-visual">
-              <div className="lp-fleet">
-                <div className="lp-fleet-card">
-                  <ConnectorIcon id="csv" size={18} />
-                  <span>CSV → Postgres</span>
-                </div>
-                <div className="lp-fleet-card">
-                  <ConnectorIcon id="mongodb" size={18} />
-                  <span>Mongo → BigQuery</span>
-                </div>
-                <div className="lp-fleet-card">
-                  <ConnectorIcon id="s3" size={18} />
-                  <span>S3 → Snowflake</span>
-                </div>
-                <strong>3 routes · 1 proof plan</strong>
-              </div>
-            </div>
-            <h3>Multi-route, multi-destination projects</h3>
-            <p>Move files, databases, and warehouses in one platform — with Job Theater visibility from queue to reconcile.</p>
-          </article>
-        </Reveal>
-      </section>
+        </AlgorithmCinemaBand>
+      </Reveal>
 
-      <section className="lp-section" id="tools">
-        <Reveal>
-          <div className="lp-section-head">
-            <h2>Able to work with hundreds of systems</h2>
-            <p>Native transfer drivers plus SQLAlchemy generics and file formats — with honest transfer-ready labels.</p>
-          </div>
-        </Reveal>
-        <Reveal>
-          <ConnectorMarqueeBand />
-        </Reveal>
-        <Reveal className="lp-tools">
-          <div className="lp-tools-grid">
-            {[
-              ["postgresql", "PostgreSQL", "Read, write, upsert, incremental"],
-              ["snowflake", "Snowflake", "Warehouse bulk loads with proof"],
-              ["bigquery", "BigQuery", "Analytics destination routes"],
-              ["mongodb", "MongoDB", "Document → relational mappings"],
-              ["mysql", "MySQL", "Operational database sync"],
-              ["s3", "Amazon S3", "Object store ingest and export"],
-              ["redis", "Redis", "Key-value transfer paths"],
-              ["elasticsearch", "Elasticsearch", "Search index destinations"],
-            ].map(([id, name, blurb]) => (
-              <div key={id} className="lp-tool">
-                <ConnectorIcon id={id} size={28} />
-                <strong>{name}</strong>
-                <span>{blurb}</span>
-              </div>
-            ))}
-          </div>
-          <div className="lp-tools-featured">
-            <article>
-              <h4>PostgreSQL</h4>
-              <p>DataFlow ships upserts and watermark incremental the way your warehouse team expects — with preflight before every write.</p>
-            </article>
-            <article>
-              <h4>Snowflake &amp; BigQuery</h4>
-              <p>Bulk-load destinations with reconciliation reports so finance and analytics can trust the row counts.</p>
-            </article>
-            <article>
-              <h4>MCP &amp; Data Pilot</h4>
-              <p>Tag DataFlow from Cursor or Claude to launch the same governed engine your UI already uses.</p>
-            </article>
-          </div>
-          <MarketingSectionFooter>
-            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("integrations")}>
+      <section className="lp-connectors-callout" id="tools">
+        <div className="lp-connectors-callout-inner">
+          <Reveal className="lp-connectors-callout-copy">
+            <p className="lp-section-kicker">Connectors</p>
+            <h2>Hundreds of systems — with honest labels</h2>
+            <p>
+              Native transfer drivers plus SQLAlchemy generics and file formats (CSV, JSON, Parquet). We
+              publish two counts: catalog tiles you can browse, and unique <strong>transfer-ready</strong>
+              drivers with production evidence.
+            </p>
+          </Reveal>
+          <Reveal>
+            <ConnectorMarqueeBand />
+          </Reveal>
+          <Reveal>
+            <p className="lp-connectors-callout-honesty">
+              Catalog count ≠ transfer-live. Only routes that carry <code>TRANSFER_READY</code>
+              &nbsp;evidence get the transfer-ready badge — every other tile is labelled Planned so
+              operators know exactly what they can run today.
+            </p>
+          </Reveal>
+          <Reveal className="lp-connectors-callout-actions">
+            <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("integrations")}>
               Browse the connector catalog
             </button>
-          </MarketingSectionFooter>
-        </Reveal>
+            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("help")}>
+              Read the driver docs
+            </button>
+          </Reveal>
+        </div>
       </section>
 
       <TrustSection />
