@@ -91,7 +91,7 @@ import {
   ENGINE_TO_UI_TRANSFORM,
   engineTransformToUi,
   isEnumToBooleanConflict,
-  isLossyMapping,
+  mappingRequiresRiskAck,
   uiTransformToEngine,
   widenMappingToVarchar,
   mappingsFromAnalysis,
@@ -99,9 +99,9 @@ import {
   type MappingTransform,
 } from "../lib/mapping";
 
-/** Remediations must not clear lossy/narrowing without Accept loss risk. */
+/** Remediations must not clear fidelity/STRUCT risk without Accept risk. */
 function sealRemediationApproval(m: EditableMapping): EditableMapping {
-  if (isLossyMapping(m) && !m.riskAcknowledged) {
+  if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) {
     return { ...m, approved: false, requiresReview: true };
   }
   return m;

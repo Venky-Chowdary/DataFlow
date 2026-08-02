@@ -120,6 +120,39 @@ def test_g3_typed_sink_missing_probe_is_unproven_not_soft_green():
     assert any(d.get("probe_unproven") for d in details)
 
 
+def test_g3_declared_lossy_not_sample_soft_passed_without_risk_ack():
+    """VARCHAR→INTEGER with clean head samples still blocks until risk_acknowledged."""
+
+    class _Ctx(PreflightContext):
+        def coercion_report(self):
+            return {
+                "sampled_rows": 2,
+                "by_source": {
+                    "qty": {
+                        "severity": "ok",
+                        "sampled": 2,
+                        "failed": 0,
+                        "sentinel_nulls": 0,
+                        "sample_failures": [],
+                    }
+                },
+            }
+
+    plan = _ctx(
+        {"qty": "VARCHAR"},
+        {"qty": "INTEGER"},
+        [("qty", "qty")],
+    ).plan
+    result = gate_g3_schema_contract(_Ctx(plan=plan))
+    assert result.status.value == "block"
+    issues = (result.details or {}).get("issues", [])
+    assert any("soft-pass" in i.lower() or "declared lossy" in i.lower() for i in issues)
+
+    plan.mappings[0].risk_acknowledged = True
+    result_ack = gate_g3_schema_contract(_Ctx(plan=plan))
+    assert result_ack.status.value == "pass"
+
+
 def test_g3_decimal_to_float_not_sample_soft_passed():
     """DECIMAL→FLOAT is fidelity collapse — never soft-pass on clean head samples."""
 

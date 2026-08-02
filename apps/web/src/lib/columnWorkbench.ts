@@ -31,20 +31,31 @@ export function mappingTier(
   return "block";
 }
 
+function mappingNeedsRiskAck(m: EditableMapping): boolean {
+  const fidelity = (m.fidelity || "").toLowerCase();
+  if (fidelity === "lossy_cast" || fidelity === "mutate" || m.typeNarrowing) return true;
+  if (m.transform === "identity_specialty") return true;
+  if (
+    m.structPolicy === "flatten_top_level_keys"
+    || m.structPolicy === "flatten_deep"
+    || m.structPolicy === "explode_rows"
+    || m.structDerived
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export function isMappingReady(m: EditableMapping, threshold: number): boolean {
   if (m.transform === "omit" || m.engineTransform === "omit") {
     return Boolean(m.approved);
   }
-  const lossy =
-    (m.fidelity || "").toLowerCase() === "lossy_cast" || Boolean(m.typeNarrowing);
-  if (lossy && !m.riskAcknowledged) return false;
+  if (mappingNeedsRiskAck(m) && !m.riskAcknowledged) return false;
   return m.approved || (!m.requiresReview && m.confidence >= threshold);
 }
 
 export function needsMappingReview(m: EditableMapping, threshold: number): boolean {
-  const lossy =
-    (m.fidelity || "").toLowerCase() === "lossy_cast" || Boolean(m.typeNarrowing);
-  if (lossy && !m.riskAcknowledged) return true;
+  if (mappingNeedsRiskAck(m) && !m.riskAcknowledged) return true;
   return !m.approved && (m.requiresReview || m.confidence < threshold);
 }
 

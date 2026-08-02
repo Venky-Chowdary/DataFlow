@@ -148,6 +148,26 @@ def test_g4_allows_lossy_with_risk_acknowledged():
     assert result.passed
 
 
+def test_g4_blocks_mutate_without_risk_ack():
+    plan = _happy_plan()
+    plan.mappings[0].fidelity = "mutate"
+    plan.mappings[0].transform = "phone"
+    plan.mappings[0].user_override = True
+    result = PreflightEngine().run(_happy_ctx(plan))
+    assert not result.passed
+    assert any(b.gate_id.value == "g4_mapping_confidence" for b in result.blockers)
+
+
+def test_g4_blocks_struct_flatten_override_without_risk_ack():
+    plan = _happy_plan()
+    plan.mappings[0].struct_policy = "flatten_top_level_keys"
+    plan.mappings[0].requires_review = True
+    plan.mappings[0].user_override = True
+    result = PreflightEngine().run(_happy_ctx(plan))
+    assert not result.passed
+    assert any(b.gate_id.value == "g4_mapping_confidence" for b in result.blockers)
+
+
 def test_g4_skips_intentional_omit_from_confidence():
     plan = _happy_plan()
     plan.mappings.append(

@@ -130,10 +130,30 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     });
   }
 
-  const lowConfidence = input.mappings.filter(
-    (m) => m.transform !== "omit" && !m.approved && m.confidence < threshold,
+  const activeMaps = input.mappings.filter((m) => m.transform !== "omit");
+  const riskUnacked = activeMaps.filter((m) => {
+    const fidelity = (m.fidelity || "").toLowerCase();
+    const needsAck =
+      fidelity === "lossy_cast"
+      || fidelity === "mutate"
+      || Boolean(m.typeNarrowing)
+      || m.transform === "identity_specialty"
+      || m.structDerived
+      || m.structPolicy === "flatten_top_level_keys"
+      || m.structPolicy === "flatten_deep"
+      || m.structPolicy === "explode_rows";
+    return needsAck && !m.riskAcknowledged;
+  });
+  const lowConfidence = activeMaps.filter(
+    (m) => !m.approved && m.confidence < threshold && !m.riskAcknowledged,
   );
-  if (lowConfidence.length > 0) {
+  if (riskUnacked.length > 0) {
+    block(
+      "g4_mapping_confidence",
+      `${riskUnacked.length} mapping(s) need Accept risk on Map (lossy/mutate/STRUCT/specialty).`,
+      { kind: "mapping_confidence", coverage: "full_schema", columns: input.mappings.length },
+    );
+  } else if (lowConfidence.length > 0) {
     block(
       "g4_mapping_confidence",
       `${lowConfidence.length} mapping(s) below ${(threshold * 100).toFixed(0)}% confidence — review in Map step.`,

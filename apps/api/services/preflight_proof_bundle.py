@@ -159,14 +159,9 @@ def build_preflight_proof_bundle(
     if not reconciliation.get("preview") and not reconciliation.get("passed"):
         blockers.append("Row-level reconciliation proof failed")
 
-    # Use the validation-mode aware confidence floor. The gate-level confidence
-    # check (G4) already accepts mappings above the floor (threshold - 0.3) so
-    # the data-integrity audit can be the stricter authority. The proof bundle
-    # should not be stricter than G4; it should report low confidence (via the
-    # confidence_band) without blocking transfers that have already passed the
-    # mapping gate. The average semantic score is reported for UX, not as a hard
-    # gate on its own.
-    effective_threshold = max(0.55, confidence_threshold - 0.3)
+    # Align with G4: Map confidence_threshold is the floor (no soft −0.3 band).
+    # Proof bundle must not disagree with the gate that unlocks Execute.
+    effective_threshold = max(0.55, float(confidence_threshold or 0.85))
     confidences = [float(m.get("confidence", 0)) for m in mappings if m.get("confidence") is not None]
     min_confidence = round(min(confidences) if confidences else 0.0, 3)
     if min_confidence < effective_threshold:

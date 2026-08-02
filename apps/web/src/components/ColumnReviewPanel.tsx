@@ -22,6 +22,7 @@ import {
   isLossyMapping,
   isSpecialtyLogicalType,
   isStructLogicalType,
+  mappingRequiresRiskAck,
   pipelineTransformChip,
   widenMappingToVarchar,
   type EditableMapping,
@@ -203,10 +204,10 @@ export function ColumnReviewPanel({
   const approveOne = (index: number) => {
     const m = mappings[index];
     if (!m) return;
-    // Lossy/narrowing needs explicit risk ack — bare Approve must not clear G4.
+    // Fidelity / STRUCT / specialty need explicit risk ack — bare Approve must not clear G4.
     updateMapping(
       index,
-      isLossyMapping(m) ? acknowledgeMappingRisk(m) : approveMappingHonestly(m),
+      mappingRequiresRiskAck(m) ? acknowledgeMappingRisk(m) : approveMappingHonestly(m),
     );
   };
 
@@ -562,19 +563,23 @@ export function ColumnReviewPanel({
                         </span>
                       )}
                       {m.isPii && <span className="df2-badge df2-badge-run df2-badge-xs">PII</span>}
-                      {m.requiresReview && !m.approved && !omitted && !isLossyMapping(m) && (
+                      {m.requiresReview && !m.approved && !omitted && !mappingRequiresRiskAck(m) && (
                         <span className="df2-badge df2-badge-run df2-badge-xs">ambiguous</span>
                       )}
-                      {isLossyMapping(m) && !m.riskAcknowledged && !omitted && (
+                      {mappingRequiresRiskAck(m) && !m.riskAcknowledged && !omitted && (
                         <span
                           className="df2-badge df2-badge-run df2-badge-xs"
-                          title={m.fidelityReason || "Type/precision loss — accept risk before Validate"}
+                          title={m.fidelityReason || "Fidelity / structural risk — accept before Validate"}
                         >
-                          lossy
+                          {isLossyMapping(m)
+                            ? "lossy"
+                            : (m.fidelity || "").toLowerCase() === "mutate"
+                              ? "mutates"
+                              : "review risk"}
                         </span>
                       )}
-                      {m.riskAcknowledged && isLossyMapping(m) && !omitted && (
-                        <span className="df2-badge df2-badge-warn df2-badge-xs" title="Operator accepted type/precision loss">
+                      {m.riskAcknowledged && mappingRequiresRiskAck(m) && !omitted && (
+                        <span className="df2-badge df2-badge-warn df2-badge-xs" title="Operator accepted mapping risk">
                           risk accepted
                         </span>
                       )}
@@ -755,7 +760,7 @@ export function ColumnReviewPanel({
                       <span className="df2-badge df2-badge-muted df2-badge-xs">Omitted</span>
                     ) : ready ? (
                       <span className="df2-badge df2-badge-live df2-badge-xs">
-                        {m.riskAcknowledged && isLossyMapping(m) ? "Risk accepted" : "Ready"}
+                        {m.riskAcknowledged && mappingRequiresRiskAck(m) ? "Risk accepted" : "Ready"}
                       </span>
                     ) : (
                       <button
@@ -763,12 +768,12 @@ export function ColumnReviewPanel({
                         className="df2-btn df2-btn-sm"
                         onClick={() => approveOne(index)}
                         title={
-                          isLossyMapping(m)
-                            ? m.fidelityReason || "Accept type/precision loss for this column"
+                          mappingRequiresRiskAck(m)
+                            ? m.fidelityReason || "Accept fidelity / structural risk for this column"
                             : undefined
                         }
                       >
-                        {isLossyMapping(m) ? "Accept loss risk" : "Approve"}
+                        {mappingRequiresRiskAck(m) ? "Accept risk" : "Approve"}
                       </button>
                     )}
                   </td>

@@ -1341,7 +1341,6 @@ def nested_struct_fields_incompatible(source_type: str, target_type: str) -> boo
     # Safe leaf widenings inside a nested shape (mirrors is_lossy allow-list subset).
     safe_leaf: set[tuple[str, str]] = {
         (LOGICAL_INTEGER, LOGICAL_DECIMAL),
-        (LOGICAL_INTEGER, LOGICAL_FLOAT),
         (LOGICAL_INTEGER, LOGICAL_STRING),
         (LOGICAL_INTEGER, LOGICAL_TEXT),
         (LOGICAL_INTEGER, LOGICAL_JSON),
@@ -1409,7 +1408,6 @@ def nested_array_elements_incompatible(source_type: str, target_type: str) -> bo
     # Safe element widenings (same allow-list subset as STRUCT leaves).
     safe_el = {
         (LOGICAL_INTEGER, LOGICAL_DECIMAL),
-        (LOGICAL_INTEGER, LOGICAL_FLOAT),
         (LOGICAL_INTEGER, LOGICAL_STRING),
         (LOGICAL_INTEGER, LOGICAL_TEXT),
         (LOGICAL_INTEGER, LOGICAL_JSON),
@@ -1458,7 +1456,6 @@ def is_nested_shape_collapse(source_type: str, target_type: str) -> bool:
             if s_l != t_l and t_l not in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON}:
                 if (s_l, t_l) not in {
                     (LOGICAL_INTEGER, LOGICAL_DECIMAL),
-                    (LOGICAL_INTEGER, LOGICAL_FLOAT),
                     (LOGICAL_DATE, LOGICAL_DATETIME),
                 }:
                     return True
@@ -4975,7 +4972,7 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         (LOGICAL_JSON, LOGICAL_ARRAY),
         # numeric widening and text renderings
         (LOGICAL_INTEGER, LOGICAL_DECIMAL),
-        (LOGICAL_INTEGER, LOGICAL_FLOAT),
+        # integer→float is LOSSY for large ints (IEEE mantissa) — not allow-listed
         (LOGICAL_INTEGER, LOGICAL_STRING),
         (LOGICAL_INTEGER, LOGICAL_TEXT),
         (LOGICAL_INTEGER, LOGICAL_JSON),

@@ -28,6 +28,19 @@ LOSSY_COERCIONS = {
     ("NUMERIC", "INTEGER"),
     ("NUMBER", "INTEGER"),
     ("TIMESTAMP", "DATE"),
+    # IEEE / fixed-point — kept even when host type_system is unavailable.
+    ("FLOAT", "DECIMAL"),
+    ("DOUBLE", "DECIMAL"),
+    ("REAL", "DECIMAL"),
+    ("FLOAT", "NUMERIC"),
+    ("DOUBLE", "NUMERIC"),
+    ("DECIMAL", "FLOAT"),
+    ("DECIMAL", "DOUBLE"),
+    ("NUMERIC", "FLOAT"),
+    ("INTEGER", "FLOAT"),
+    ("INTEGER", "DOUBLE"),
+    ("BIGINT", "FLOAT"),
+    ("BIGINT", "DOUBLE"),
 }
 
 
@@ -615,20 +628,18 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     pass
             issues_detail.append(detail)
         elif document_collapse and not intentional_json:
-            mode = (ctx.plan.validation_mode or "strict").strip().lower()
-            if mode in {"balanced", "review"}:
-                warnings.append(label + " — set struct_policy=store_as_json to acknowledge")
-            else:
-                issues.append(
-                    label + " — set Map struct_policy to store_as_json (or flatten) to proceed"
-                )
+            # Nested→document always blocks without explicit Map struct_policy —
+            # balanced/review must not soft-pass (enterprise fail-closed).
+            issues.append(
+                label + " — set Map struct_policy to store_as_json (or flatten) to proceed"
+            )
             if probe is not None:
                 issues_detail.append({
                     "source": m.source,
                     "target": m.target,
                     "source_type": source_col.inferred_type,
                     "target_type": target.inferred_type,
-                    "severity": "block" if mode not in {"balanced", "review"} else "warn",
+                    "severity": "block",
                     "nested_document_collapse": True,
                     "sampled": probe.get("sampled", 0),
                     "failed": probe.get("failed", 0),
@@ -642,22 +653,38 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             warnings.append(label + f" — acknowledged via struct_policy={policy}")
         elif probe is not None:
             severity = probe.get("severity", "ok")
+            risk_ack = bool(getattr(m, "risk_acknowledged", False))
+            # Head-sample "ok" must never soft-pass declared lossy without
+            # explicit Map risk acknowledgment (Fivetran/Airbyte still sample-
+            # bound; we refuse silent truncation on clean heads).
+            force_block = bool(lossy and not risk_ack)
             detail = {
                 "source": m.source,
                 "target": m.target,
                 "source_type": source_col.inferred_type,
                 "target_type": target.inferred_type,
-                "severity": severity,
+                "severity": "block" if force_block or severity == "block" else severity,
                 "sampled": probe.get("sampled", 0),
                 "failed": probe.get("failed", 0),
                 "sentinel_nulls": probe.get("sentinel_nulls", 0),
                 "sample_failures": probe.get("sample_failures", []),
-                "suggested_fix": probe.get("suggested_fix", ""),
+                "suggested_fix": probe.get("suggested_fix", "")
+                or (
+                    "Accept loss risk on Map, widen the destination type, or remap"
+                    if force_block
+                    else ""
+                ),
                 "suggested_target_type": probe.get("suggested_target_type"),
                 "suggested_transform": probe.get("suggested_transform"),
+                "risk_acknowledged": risk_ack,
+                "declared_lossy": True,
             }
             issues_detail.append(detail)
-            if severity == "block":
+            if force_block:
+                issues.append(
+                    label + " — declared lossy; accept risk or remap (samples cannot soft-pass)"
+                )
+            elif severity == "block":
                 issues.append(label)
             else:
                 warnings.append(label)
@@ -673,18 +700,15 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             if tgt_l in {"string", "text", "json", "variant", "document"}:
                 warnings.append(label)
             else:
-                mode = (ctx.plan.validation_mode or "strict").strip().lower()
                 unproven = label + " — unproven (no per-column coercion probe)"
-                if mode in {"balanced", "review"}:
-                    warnings.append(unproven)
-                else:
-                    issues.append(unproven)
+                # Typed sinks stay fail-closed in every validation mode.
+                issues.append(unproven)
                 issues_detail.append({
                     "source": m.source,
                     "target": m.target,
                     "source_type": source_col.inferred_type,
                     "target_type": target.inferred_type,
-                    "severity": "warn" if mode in {"balanced", "review"} else "block",
+                    "severity": "block",
                     "probe_unproven": True,
                     "suggested_fix": (
                         "Re-run Validate so every mapped column receives a "
@@ -692,10 +716,13 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     ),
                 })
         else:
-            # No samples — strict/maximum fail-closed on declared lossy pairs;
-            # balanced warns so operators can proceed after acknowledging risk.
+            # No samples — declared lossy always blocks unless risk_acknowledged.
+            # Balanced may warn only for non-lossy declared mismatches.
+            risk_ack = bool(getattr(m, "risk_acknowledged", False))
             mode = (ctx.plan.validation_mode or "strict").strip().lower()
-            if mode in {"balanced", "review"}:
+            if lossy and not risk_ack:
+                issues.append(label + " — declared lossy; accept risk or remap")
+            elif mode in {"balanced", "review"} and not lossy:
                 warnings.append(label + " (declared; no samples — balanced warn)")
             else:
                 issues.append(label)
@@ -803,6 +830,25 @@ def _is_lossy_mapping(m: Any) -> bool:
     return bool(getattr(m, "type_narrowing", False))
 
 
+def _requires_risk_ack(m: Any) -> bool:
+    """Lossy casts, type narrowing, and mutate transforms need explicit ack."""
+    if _is_lossy_mapping(m):
+        return True
+    fidelity = str(getattr(m, "fidelity", None) or "").strip().lower()
+    return fidelity == "mutate"
+
+
+def _is_structural_review_mapping(m: Any) -> bool:
+    """STRUCT flatten / specialty identity cannot clear via bare user_override."""
+    if getattr(m, "struct_derived", False):
+        return True
+    policy = str(getattr(m, "struct_policy", None) or "").strip().lower()
+    if policy in {"flatten_top_level_keys", "flatten_deep", "explode_rows"}:
+        return True
+    xf = str(getattr(m, "transform", None) or "").strip().lower()
+    return xf in {"identity_specialty", "specialty"}
+
+
 def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     threshold = ctx.plan.confidence_threshold
@@ -828,19 +874,39 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
             _with_scope({"unmapped": unmapped_required}, g4_scope),
         )
 
-    # Lossy / narrowing cannot clear via bare user_override — need risk_acknowledged.
-    lossy_unacked = [
+    # Lossy / mutate / narrowing cannot clear via bare user_override.
+    risk_unacked = [
         m
         for m in active
-        if _is_lossy_mapping(m) and not getattr(m, "risk_acknowledged", False)
+        if _requires_risk_ack(m) and not getattr(m, "risk_acknowledged", False)
     ]
-    if lossy_unacked:
-        names = [f"{m.source}→{m.target}" for m in lossy_unacked]
+    if risk_unacked:
+        names = [f"{m.source}→{m.target}" for m in risk_unacked]
         return _block(
             GateId.G4_MAPPING_CONFIDENCE,
-            f"{len(lossy_unacked)} lossy/narrowing mapping(s) require explicit risk acknowledgment",
+            f"{len(risk_unacked)} mapping(s) require explicit risk acknowledgment "
+            "(lossy/narrowing/mutate)",
             start,
-            _with_scope({"lossy_unacknowledged": names}, g4_scope),
+            _with_scope({"risk_unacknowledged": names}, g4_scope),
+        )
+
+    # STRUCT flatten / specialty — API user_override alone is insufficient.
+    structural_unacked = [
+        m
+        for m in active
+        if (
+            (m.requires_review or _is_structural_review_mapping(m))
+            and _is_structural_review_mapping(m)
+            and not getattr(m, "risk_acknowledged", False)
+        )
+    ]
+    if structural_unacked:
+        names = [f"{m.source}→{m.target}" for m in structural_unacked]
+        return _block(
+            GateId.G4_MAPPING_CONFIDENCE,
+            f"{len(structural_unacked)} STRUCT/specialty mapping(s) require explicit acknowledgment",
+            start,
+            _with_scope({"structural_unacknowledged": names}, g4_scope),
         )
 
     low_confidence = [
@@ -848,7 +914,7 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
         for m in active
         if m.confidence < confidence_floor
         and not m.user_override
-        and not _is_lossy_mapping(m)
+        and not _requires_risk_ack(m)
     ]
     if low_confidence:
         names = [f"{m.source}→{m.target} ({m.confidence:.2f})" for m in low_confidence]
@@ -864,7 +930,8 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
         for m in active
         if m.requires_review
         and not m.user_override
-        and not _is_lossy_mapping(m)
+        and not _requires_risk_ack(m)
+        and not _is_structural_review_mapping(m)
     ]
     if ambiguous:
         names = [

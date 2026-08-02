@@ -137,6 +137,26 @@ describe("fail-closed Map approve", () => {
     assert.equal(pf[0].risk_acknowledged, true);
     assert.equal(pf[0].fidelity, "lossy_cast");
   });
+
+  it("approve-all refuses mutate fidelity without risk ack", () => {
+    const next = approveMappingsHonestly([
+      {
+        source: "phone",
+        target: "phone",
+        confidence: 0.99,
+        approved: false,
+        fidelity: "mutate",
+        transform: "phone",
+        inferredType: "VARCHAR",
+        destType: "VARCHAR",
+      },
+    ]);
+    assert.equal(next[0].approved, false);
+    assert.equal(next[0].requiresReview, true);
+    const acked = acknowledgeMappingRisk(next[0]);
+    assert.equal(acked.riskAcknowledged, true);
+    assert.equal(acked.approved, true);
+  });
 });
 
 describe("existing DDL honesty", () => {

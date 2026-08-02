@@ -132,9 +132,17 @@ def search_catalog(
 
     categories = sorted({c.get("category", "other") for c in data.get("connectors", [])})
     enriched_all = _enriched_connectors()
-    certified = sum(1 for c in enriched_all if c.get("certification_tier") == "certified" or c.get("transfer_ready"))
+    certified_tiles = sum(
+        1 for c in enriched_all if c.get("certification_tier") == "certified" or c.get("transfer_ready")
+    )
     source_only = sum(1 for c in enriched_all if c.get("certification_tier") == "source_only")
     planned = sum(1 for c in enriched_all if c.get("certification_tier") == "planned" or c.get("effective_status") == "planned")
+    try:
+        from src.transfer.connector_capabilities import transfer_live_driver_types
+
+        unique_drivers = len(transfer_live_driver_types())
+    except Exception:
+        unique_drivers = sum(1 for c in enriched_all if c.get("transfer_ready"))
 
     return {
         "total": total,
@@ -142,10 +150,13 @@ def search_catalog(
         "connectors": page,
         "suggested": suggested if not q else page[:16],
         "categories": categories,
-        "transfer_live": sum(1 for c in enriched_all if c.get("transfer_ready")),
+        # Primary honesty metrics — unique engines, not alias tiles.
+        "transfer_live": unique_drivers,
+        "transfer_live_tiles": sum(1 for c in enriched_all if c.get("transfer_ready")),
         "connect_only": sum(1 for c in enriched_all if c.get("connect_only")),
         "roadmap": sum(1 for c in enriched_all if c.get("effective_status") == "planned"),
-        "certified": certified,
+        "certified": unique_drivers,
+        "certified_tiles": certified_tiles,
         "source_only": source_only,
         "planned_count": planned,
     }
@@ -161,7 +172,9 @@ def catalog_summary() -> dict:
 
     catalog_tiles = sum(1 for c in enriched if c.get("transfer_ready"))
     connect_only = sum(1 for c in enriched if c.get("connect_only"))
-    certified = sum(1 for c in enriched if c.get("certification_tier") == "certified" or c.get("transfer_ready"))
+    certified_tiles = sum(
+        1 for c in enriched if c.get("certification_tier") == "certified" or c.get("transfer_ready")
+    )
     source_only = sum(1 for c in enriched if c.get("certification_tier") == "source_only")
     planned_tier = sum(1 for c in enriched if c.get("certification_tier") == "planned")
 
@@ -187,7 +200,9 @@ def catalog_summary() -> dict:
         "transfer_live_tiles": catalog_tiles,
         "connect_only": connect_only,
         "roadmap": len(enriched) - catalog_tiles - connect_only,
-        "certified": certified,
+        # "certified" = unique duplex/live engines (never alias inflation).
+        "certified": len(unique_types),
+        "certified_tiles": certified_tiles,
         "source_only": source_only,
         "planned_count": planned_tier,
     }

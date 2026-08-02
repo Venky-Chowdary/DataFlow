@@ -281,45 +281,68 @@ export function isLossyMapping(m: EditableMapping): boolean {
   return (m.fidelity || "").toLowerCase() === "lossy_cast" || Boolean(m.typeNarrowing);
 }
 
+/** Lossy, mutate, specialty, or STRUCT expand — G4 needs risk_acknowledged. */
+export function mappingRequiresRiskAck(m: EditableMapping): boolean {
+  if (isIntentionalOmit(m)) return false;
+  const fidelity = (m.fidelity || "").toLowerCase();
+  if (fidelity === "lossy_cast" || fidelity === "mutate" || m.typeNarrowing) return true;
+  if (isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType)) return true;
+  if (m.transform === "identity_specialty") return true;
+  if (
+    m.structPolicy === "flatten_top_level_keys"
+    || m.structPolicy === "flatten_deep"
+    || m.structPolicy === "explode_rows"
+    || m.structDerived
+  ) {
+    return true;
+  }
+  return false;
+}
+
 /** True when Approve-all must leave this row for operator review. */
 export function mappingRequiresManualApproval(m: EditableMapping): boolean {
   if (isIntentionalOmit(m)) return false;
   if (isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m)) return true;
-  if (isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType)) return true;
-  if (m.transform === "identity_specialty") return true;
-  if (m.structPolicy === "flatten_top_level_keys" || m.structPolicy === "flatten_deep" || m.structPolicy === "explode_rows" || m.structDerived) return true;
-  if (isLossyMapping(m) && !m.riskAcknowledged) return true;
+  if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) return true;
   return false;
 }
 
 /**
- * Explicit operator acceptance of precision/type loss — unlocks G4 risk_acknowledged.
- * Distinct from Approve: clients can prove intentional loss was never silent.
+ * Explicit operator acceptance of fidelity / structural risk — unlocks G4.
+ * Distinct from Approve: clients can prove intentional change was never silent.
  */
 export function acknowledgeMappingRisk(m: EditableMapping): EditableMapping {
-  if (!isLossyMapping(m)) {
+  if (!mappingRequiresRiskAck(m)) {
     return approveMappingHonestly(m);
   }
+  const fidelity = (m.fidelity || "").toLowerCase();
+  const ackNote =
+    fidelity === "mutate"
+      ? "Operator acknowledged value-mutating transform"
+      : m.structDerived || m.structPolicy === "flatten_top_level_keys" || m.structPolicy === "flatten_deep" || m.structPolicy === "explode_rows"
+        ? "Operator acknowledged STRUCT/ARRAY expand policy"
+        : isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType) || m.transform === "identity_specialty"
+          ? "Operator acknowledged specialty identity transport"
+          : "Operator acknowledged type/precision loss risk";
   return {
     ...m,
     riskAcknowledged: true,
     approved: true,
     requiresReview: false,
-    reason: [
-      m.reason,
-      m.fidelityReason,
-      "Operator acknowledged type/precision loss risk",
-    ]
-      .filter(Boolean)
-      .join(" · "),
+    transform:
+      (isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType))
+      && (!m.transform || m.transform === "none")
+        ? "identity_specialty"
+        : m.transform,
+    reason: [m.reason, m.fidelityReason, ackNote].filter(Boolean).join(" · "),
   };
 }
 
 /**
  * Single honesty path for Approve / Approve-all (Map panel + Validate CTA).
  * Never auto-approves specialty identity, STRUCT flatten children, lossy casts,
- * type narrowing, or existing DDL conflicts — fail closed on fidelity risk.
- * Lossy rows require {@link acknowledgeMappingRisk}, not bare Approve.
+ * mutate transforms, type narrowing, or existing DDL conflicts.
+ * Risk rows require {@link acknowledgeMappingRisk}, not bare Approve.
  */
 export function approveMappingHonestly(m: EditableMapping): EditableMapping {
   if (isExistingEnumBooleanConflict(m)) {
@@ -331,22 +354,20 @@ export function approveMappingHonestly(m: EditableMapping): EditableMapping {
   if (isEnumToBooleanConflict(m) && canWidenMapping(m)) {
     return { ...widenMappingToVarchar(m), approved: true, requiresReview: false };
   }
-  if (isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType) || m.transform === "identity_specialty") {
+  if (mappingRequiresRiskAck(m)) {
+    if (m.riskAcknowledged) {
+      return { ...m, approved: true, requiresReview: false };
+    }
     return {
       ...m,
       approved: false,
       requiresReview: true,
-      transform: m.transform === "none" || !m.transform ? "identity_specialty" : m.transform,
+      transform:
+        (isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType))
+        && (!m.transform || m.transform === "none")
+          ? "identity_specialty"
+          : m.transform,
     };
-  }
-  if (m.structPolicy === "flatten_top_level_keys" || m.structPolicy === "flatten_deep" || m.structPolicy === "explode_rows" || m.structDerived) {
-    return { ...m, approved: false, requiresReview: true };
-  }
-  if (isLossyMapping(m)) {
-    if (m.riskAcknowledged) {
-      return { ...m, approved: true, requiresReview: false };
-    }
-    return { ...m, approved: false, requiresReview: true };
   }
   return { ...m, approved: true, requiresReview: false };
 }

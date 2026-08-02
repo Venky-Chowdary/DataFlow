@@ -13,8 +13,20 @@ export function MappingAccuracyBar({
   llmUsed,
 }: MappingAccuracyBarProps) {
   const total = mappings.length;
-  const lossy = (m: EditableMapping) =>
-    (m.fidelity || "").toLowerCase() === "lossy_cast" || Boolean(m.typeNarrowing);
+  const needsRisk = (m: EditableMapping) => {
+    const f = (m.fidelity || "").toLowerCase();
+    return (
+      f === "lossy_cast"
+      || f === "mutate"
+      || Boolean(m.typeNarrowing)
+      || m.transform === "identity_specialty"
+      || Boolean(m.structDerived)
+      || m.structPolicy === "flatten_top_level_keys"
+      || m.structPolicy === "flatten_deep"
+      || m.structPolicy === "explode_rows"
+    );
+  };
+  const lossy = (m: EditableMapping) => needsRisk(m) && !m.riskAcknowledged;
   const ready = mappings.filter(
     (m) =>
       !lossy(m) &&
