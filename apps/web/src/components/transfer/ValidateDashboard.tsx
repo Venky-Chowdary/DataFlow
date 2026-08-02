@@ -953,8 +953,11 @@ export function ValidateDashboard({
   }, [running, preflight?.run_id, preflight?.gates]);
 
   const proof = preflight?.proof_bundle;
+  // Missing transfer_decision must never default to approve — Execute requires
+  // an explicit API decision === "approve". Fall back to review when gates pass
+  // without a proof decision so the hero cannot greenwash.
   const decision = proof?.transfer_decision?.decision
-    ?? (preflight?.passed ? "approve" : preflight ? "review" : "pending");
+    ?? (preflight ? "review" : "pending");
   const readiness = preflight?.readiness_score ?? 0;
   const totalGates = preflight?.total_gates || GATE_META.length;
   const passedCount = preflight?.passed_count ?? 0;

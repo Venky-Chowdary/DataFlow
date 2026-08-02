@@ -244,6 +244,31 @@ class TestReflectionCache:
             == "C"
         )
 
+    def test_none_loader_results_are_not_cached(self):
+        """Transient PK probe failures must not poison chunked ORDER BY."""
+        identity = reflection_cache.dsn_identity(
+            driver="mysql", host="h", database="d", username="u"
+        )
+        loads = []
+
+        def loader():
+            loads.append(1)
+            return None
+
+        assert (
+            reflection_cache.get_or_load_by_identity(
+                identity, "", "orders", "pk_columns", loader
+            )
+            is None
+        )
+        assert (
+            reflection_cache.get_or_load_by_identity(
+                identity, "", "orders", "pk_columns", loader
+            )
+            is None
+        )
+        assert len(loads) == 2
+
     def test_empty_mysql_types_are_not_cached(self):
         """An empty answer means the table is missing — never pin that."""
         identity = reflection_cache.dsn_identity(

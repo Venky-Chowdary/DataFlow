@@ -127,6 +127,7 @@ import {
   isEncodingIntegritySignal,
 } from "../lib/validateIssueGrouping";
 import { suggestUniqueKeyCandidates } from "../lib/uniqueKeySuggestions";
+import { needsMappingReview } from "../lib/columnWorkbench";
 import {
   buildStreamContracts,
   seedStreamFieldsFromCandidates,
@@ -400,8 +401,8 @@ export function TransferPage({
   const [runStartupPhase, setRunStartupPhase] = useState<string>(RUN_LAUNCH_STAGES[0]);
 
   const confidenceThreshold = confidenceThresholdForMode(validationMode);
-  const mappingReviewCount = columnMappings.filter(
-    (m) => !m.approved && (m.requiresReview || m.confidence < confidenceThreshold),
+  const mappingReviewCount = columnMappings.filter((m) =>
+    needsMappingReview(m, confidenceThreshold),
   ).length;
   const duplicateKeyRoot = useMemo(
     () => findDuplicateKeyRoot(preflight, syncMode),
@@ -2648,8 +2649,8 @@ export function TransferPage({
   const goToPreflight = () => {
     if (explainDestinationGap()) return;
     const threshold = confidenceThreshold;
-    const pendingReview = columnMappings.filter(
-      (m) => !m.approved && (m.requiresReview || m.confidence < threshold),
+    const pendingReview = columnMappings.filter((m) =>
+      needsMappingReview(m, threshold),
     ).length;
     if (columnMappings.length && pendingReview > 0) {
       toast({
@@ -3092,8 +3093,8 @@ export function TransferPage({
       setStep(STEP_SOURCE);
       return;
     }
-    const pendingReview = activeMappings.filter(
-      (m) => !m.approved && (m.requiresReview || m.confidence < threshold),
+    const pendingReview = activeMappings.filter((m) =>
+      needsMappingReview(m, threshold),
     ).length;
     if (pendingReview > 0) {
       toast({
@@ -5285,7 +5286,9 @@ export function TransferPage({
             </div>
             <div className="df2-dest-sync-summary-actions">
               <span className={`df2-badge ${streamNeedsReview ? "df2-badge-run" : "df2-badge-live"}`}>
-                {currentSourceColumns.length ? (streamNeedsReview ? "Review required" : "Ready") : "Waiting for schema"}
+                {currentSourceColumns.length
+                  ? (streamNeedsReview ? "Sync contract incomplete" : "Identity fields set")
+                  : "Waiting for schema"}
               </span>
             </div>
             {(syncMode === "scd2" || syncMode === "mirror") && requiresPrimaryKey && !primaryKeyField && (

@@ -175,6 +175,12 @@ def get_or_load_by_identity(
     # and the result is identical.
     value = loader()
 
+    # Never cache None — PK / column probes return None on transient
+    # information_schema failures. Poisoning the TTL would make every later
+    # chunk fall back to ORDER BY first-column / "1" and silently drop/dupe rows.
+    if value is None:
+        return value
+
     with _LOCK:
         _CACHE[key] = _Entry(value=value, expires_at=time.monotonic() + _ttl())
         _evict_if_needed_locked()

@@ -57,7 +57,7 @@ export function ValidateActionsRail({
   const blocked = preflight && !preflight.passed && !preflighting;
   const mappingBlocked = preflight?.blockers.some((b) => b.id.includes("mapping"));
   const decision = preflight?.proof_bundle?.transfer_decision?.decision
-    ?? (passed ? "approve" : preflight ? "review" : "pending");
+    ?? (preflight ? "review" : "pending");
   const reviewGrade = Boolean(passed && decision === "review");
   const executeDisabled = transferring || !passed || reviewGrade || executeBlocked;
   const executiveSummary = useMemo(() => buildExecutiveSummary(preflight), [preflight]);
