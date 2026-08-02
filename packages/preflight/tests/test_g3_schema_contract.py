@@ -99,6 +99,30 @@ def test_g3_float_to_decimal_not_sample_soft_passed():
     assert result.status.value == "block"
     assert any("float→decimal" in i.lower() or "ieee" in i.lower() for i in (result.details or {}).get("issues", []))
 
+    plan.mappings[0].risk_acknowledged = True
+    cleared = gate_g3_schema_contract(_Ctx(plan=plan))
+    assert cleared.status.value == "pass"
+    warns = (cleared.details or {}).get("warnings", []) or []
+    assert any("risk acknowledged" in str(w).lower() for w in warns)
+
+
+def test_g3_not_null_does_not_block_on_nullable_meta_with_clean_samples():
+    """Mongo/file default nullable=True must not false-block NOT NULL dests."""
+    plan = _ctx(
+        {"email": "VARCHAR"},
+        {"email": "VARCHAR"},
+        [("email", "email")],
+    ).plan
+    plan.source.columns[0].nullable = True
+    plan.destination.target_columns[0].nullable = False
+    plan.destination.table_exists = True
+    result = gate_g3_schema_contract(
+        PreflightContext(plan=plan, sample_rows=[{"email": "a@b.com"}, {"email": "c@d.com"}])
+    )
+    assert result.status.value == "pass"
+    issues = (result.details or {}).get("issues", []) or []
+    assert not any("NOT NULL" in str(i) for i in issues)
+
 
 def test_g3_typed_sink_missing_probe_is_unproven_not_soft_green():
     """Samples exist but typed column has no by_source row — fail-closed in strict."""
@@ -433,7 +457,8 @@ def test_g3_generated_always_overwrite_blocks():
     assert result.status.value == "block"
 
 
-def test_g3_not_null_contract_blocks_nullable_source():
+def test_g3_not_null_contract_warns_on_nullable_meta_without_null_samples():
+    """Default nullable=True (Mongo/file) must not hard-block without null evidence."""
     plan = TransferPlan(
         source=SourceConfig(
             kind="file",
@@ -454,5 +479,34 @@ def test_g3_not_null_contract_blocks_nullable_source():
         mappings=[ColumnMapping(source="email", target="email", confidence=0.95)],
     )
     result = gate_g3_schema_contract(PreflightContext(plan=plan))
+    assert result.status.value == "pass"
+    warns = (result.details or {}).get("warnings", []) or []
+    assert any("not null" in str(w).lower() for w in warns)
+
+
+def test_g3_not_null_contract_blocks_when_samples_contain_nulls():
+    plan = TransferPlan(
+        source=SourceConfig(
+            kind="file",
+            connected=True,
+            parseable=True,
+            columns=[ColumnSchema(name="email", inferred_type="VARCHAR", nullable=True)],
+            row_count_estimate=10,
+        ),
+        destination=DestinationConfig(
+            kind="database",
+            connected=True,
+            can_write=True,
+            can_create_table=True,
+            target_columns=[
+                ColumnSchema(name="email", inferred_type="VARCHAR", nullable=False)
+            ],
+        ),
+        mappings=[ColumnMapping(source="email", target="email", confidence=0.95)],
+    )
+    result = gate_g3_schema_contract(PreflightContext(
+        plan=plan,
+        sample_rows=[{"email": "a@b.com"}, {"email": None}, {"email": ""}],
+    ))
     assert result.status.value == "block"
     assert any("not null" in i.lower() for i in (result.details or {}).get("issues", []))

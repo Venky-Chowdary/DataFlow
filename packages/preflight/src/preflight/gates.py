@@ -624,25 +624,40 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             else:
                 issues.append(oid_label + " — accept risk or remap to VARCHAR(24)")
         elif fidelity_collapse or field_shape_loss:
-            issues.append(label)
-            # Always emit structured detail so Inspect Quarantine can show
-            # source/target even when no per-column value probe ran.
+            # Nested field mismatch always hard-blocks. Declared fidelity collapses
+            # (IEEE, width, specialty polarity) honor Map Accept risk — otherwise
+            # G4/CTA say cleared while G3/G6 still block (client-deploy confusion).
+            risk_ack = bool(getattr(m, "risk_acknowledged", False))
+            collapse_warn = bool(fidelity_collapse and risk_ack and not field_shape_loss)
+            if collapse_warn:
+                warnings.append(label + " (risk acknowledged)")
+            else:
+                issues.append(
+                    label
+                    if field_shape_loss or not fidelity_collapse
+                    else (label + " — accept risk or remap")
+                )
             detail = {
                 "source": m.source,
                 "target": m.target,
                 "column": m.source,
                 "source_type": source_col.inferred_type,
                 "target_type": target.inferred_type,
-                "severity": "block",
+                "severity": "warn" if collapse_warn else "block",
                 "fidelity_collapse": fidelity_collapse,
                 "nested_shape_collapse": field_shape_loss,
+                "risk_acknowledged": risk_ack,
                 "reason": label,
                 "message": label,
                 "sampled": 0,
                 "failed": 0,
                 "sentinel_nulls": 0,
                 "sample_failures": [],
-                "suggested_fix": "",
+                "suggested_fix": (
+                    "Accept risk on Map, or remap to a fidelity-preserving type."
+                    if fidelity_collapse and not field_shape_loss
+                    else ""
+                ),
                 "suggested_target_type": None,
                 "suggested_transform": None,
             }
@@ -652,7 +667,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     "failed": probe.get("failed", 0),
                     "sentinel_nulls": probe.get("sentinel_nulls", 0),
                     "sample_failures": probe.get("sample_failures", []),
-                    "suggested_fix": probe.get("suggested_fix", "") or "",
+                    "suggested_fix": probe.get("suggested_fix", "") or detail["suggested_fix"],
                     "suggested_target_type": probe.get("suggested_target_type"),
                     "suggested_transform": probe.get("suggested_transform"),
                 })
@@ -798,15 +813,12 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             val = row.get(m.source)
             if val is None or str(val).strip() == "":
                 null_samples += 1
-        if src_nullable or null_samples:
+        if null_samples:
             label = (
                 f"NOT NULL contract: {m.source} → {m.target} "
-                f"({target.inferred_type}) rejects NULL"
+                f"({target.inferred_type}) rejects NULL — "
+                f"{null_samples} empty/null sample value(s)"
             )
-            if null_samples:
-                label += f" — {null_samples} empty/null sample value(s)"
-            elif src_nullable:
-                label += " — source column is nullable"
             issues.append(label)
             issues_detail.append({
                 "source": m.source,
@@ -817,6 +829,18 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 "not_null_contract": True,
                 "null_samples": null_samples,
             })
+        elif src_nullable and sample_rows:
+            # Mongo/file introspect defaults nullable=True — clean samples must not
+            # false-block every NOT NULL destination column.
+            warnings.append(
+                f"NOT NULL contract: {m.source} → {m.target} — source marked nullable; "
+                f"{len(sample_rows[:200])} sample row(s) have no nulls"
+            )
+        elif src_nullable and not sample_rows:
+            warnings.append(
+                f"NOT NULL contract: {m.source} → {m.target} — source marked nullable "
+                "(no samples to prove non-null)"
+            )
 
     sample_n = int(report.get("sampled_rows") or 0) if isinstance(report, dict) else 0
     g3_scope = evidence_scope(

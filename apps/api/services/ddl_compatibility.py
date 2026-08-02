@@ -288,37 +288,33 @@ def evaluate_ddl_compatibility(
                 f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type or 'proposed'}) "
                 f"— precision clamps on {dest_kind}"
             )
+        risk_ack = bool(
+            m.get("risk_acknowledged") or m.get("riskAcknowledged")
+        )
         if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type):
             # Align with G3: declared lossy never soft-passes on head samples
-            # without explicit Map risk_acknowledged.
+            # without explicit Map risk_acknowledged. Accept risk clears the DDL
+            # gate (still warn via G3) so Map CTA and Validate agree.
             src_logical = normalize_logical_type(src_type)
             tgt_logical = normalize_logical_type(tgt_type)
-            precision_collapse = is_precision_collapse_coercion(src_type, tgt_type)
-            risk_ack = bool(
-                m.get("risk_acknowledged") or m.get("riskAcknowledged")
-            )
-            sample_ok = False
-            if sample_rows and not precision_collapse and risk_ack:
-                from services.coercion_probe import samples_coerce_mapping
-
-                sample_ok = samples_coerce_mapping(
-                    m,
-                    source_types=source_schema or {},
-                    target_types=target_schema or {},
-                    rows=sample_rows,
-                )
-            if not sample_ok:
+            # Accept risk clears declared lossy / fidelity collapse (G3/G4 parity).
+            # Without ack: never sample soft-pass precision collapses.
+            if not risk_ack:
                 note = ""
                 if src_logical == "float" and tgt_logical == "decimal":
-                    note = " — float→decimal (IEEE precision risk; not soft-passed by samples)"
+                    note = " — float→decimal (IEEE precision risk; accept risk or remap)"
                 elif src_logical == "float" and tgt_logical == "integer":
                     note = " — float→integer (fractional truncation risk)"
                 elif src_logical == "decimal" and tgt_logical == "integer":
                     note = " — decimal→integer (scale truncation risk)"
-                elif src_logical == "decimal" and tgt_logical == "decimal" and precision_collapse:
-                    note = " — DECIMAL(p,s) narrowing (scale/capacity shrink; not soft-passed by samples)"
+                elif (
+                    src_logical == "decimal"
+                    and tgt_logical == "decimal"
+                    and is_precision_collapse_coercion(src_type, tgt_type)
+                ):
+                    note = " — DECIMAL(p,s) narrowing (scale/capacity shrink; accept risk or remap)"
                 elif src_logical == "datetime" and tgt_logical == "date":
-                    note = " — datetime→date (time-of-day truncation; not soft-passed by samples)"
+                    note = " — datetime→date (time-of-day truncation; accept risk or remap)"
                 elif src_logical == "array" and tgt_logical == "array":
                     note = " — ARRAY element type contract mismatch"
                 elif "unsigned" in src_type.lower():
@@ -333,16 +329,17 @@ def evaluate_ddl_compatibility(
                     and tgt_logical in {"string", "text"}
                     and string_width_would_narrow(src_type, tgt_type)
                 ):
-                    note = " — VARCHAR/CHAR width narrowing (declared capacity; not soft-passed by samples)"
+                    note = " — VARCHAR/CHAR width narrowing (declared capacity; accept risk or remap)"
                 issues.append(
                     f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type}){note}"
                 )
 
-        # Declared width / specialty collapse without needing samples.
+        # Declared width / specialty collapse — skip when Accept risk already cleared.
         if (
             not schemaless
             and tgt_type
             and is_precision_collapse_coercion(src_type, tgt_type)
+            and not risk_ack
         ):
             if specialty_carrier_would_collapse(src_type, tgt_type):
                 msg = (
@@ -357,7 +354,7 @@ def evaluate_ddl_compatibility(
             ):
                 msg = (
                     f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type}) "
-                    "— VARCHAR/CHAR width narrowing (declared capacity; not soft-passed by samples)"
+                    "— VARCHAR/CHAR width narrowing (declared capacity; accept risk or remap)"
                 )
             else:
                 msg = ""

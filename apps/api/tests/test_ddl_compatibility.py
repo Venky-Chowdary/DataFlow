@@ -299,6 +299,44 @@ def test_float_to_decimal_not_soft_passed_by_samples():
     assert any("float→decimal" in i.lower() or "float->decimal" in i.lower() or "ieee" in i.lower() for i in issues)
 
 
+def test_float_to_decimal_clears_when_risk_acknowledged():
+    """Map Accept risk must clear G6 so Validate agrees with G3/G4."""
+    ok, issues = evaluate_ddl_compatibility(
+        mappings=[{
+            "source": "amt",
+            "target": "amt",
+            "confidence": 0.99,
+            "risk_acknowledged": True,
+        }],
+        source_schema={"amt": "FLOAT"},
+        target_schema={"amt": "DECIMAL(12,4)"},
+        table_exists=True,
+        dest_connected=True,
+        dest_db_type="postgresql",
+        sample_rows=[{"amt": "1.5"}, {"amt": "2.25"}],
+    )
+    assert ok, issues
+    assert not any("Lossy type coercion" in i for i in issues)
+
+
+def test_objectid_to_text_clears_g6_when_risk_acknowledged():
+    ok, issues = evaluate_ddl_compatibility(
+        mappings=[{
+            "source": "_id",
+            "target": "user_id",
+            "confidence": 0.95,
+            "risk_acknowledged": True,
+        }],
+        source_schema={"_id": "OBJECTID"},
+        target_schema={"user_id": "TEXT"},
+        table_exists=True,
+        dest_connected=True,
+        dest_db_type="postgresql",
+    )
+    assert ok, issues
+    assert not any("specialty polarity" in i.lower() for i in issues)
+
+
 def test_datetime_to_date_not_soft_passed_by_samples():
     """datetime→date truncates time-of-day — hard issue even if samples look date-only."""
     ok, issues = evaluate_ddl_compatibility(
