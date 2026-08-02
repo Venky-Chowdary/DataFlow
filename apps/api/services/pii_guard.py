@@ -60,7 +60,15 @@ def mask(value: Any) -> str:
         raw = email_match.group(0)
         local, _, domain = raw.partition("@")
         if local and domain:
-            return f"{local[0]}{'*' * max(1, len(local) - 1)}@{domain}"
+            # Keep local first character + TLD so operators still see "this is an
+            # email", but never leave the full domain (org identity) readable.
+            local_mask = f"{local[0]}{'*' * max(1, len(local) - 1)}"
+            if "." in domain:
+                name, _, tld = domain.rpartition(".")
+                domain_mask = f"{'*' * max(3, len(name))}.{tld}"
+            else:
+                domain_mask = "*" * max(3, len(domain))
+            return f"{local_mask}@{domain_mask}"
     if len(text) <= 4:
         return "*" * len(text)
     if len(text) <= 12:

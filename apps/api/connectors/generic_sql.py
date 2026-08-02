@@ -467,11 +467,12 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
     if not port:
         port = _default_port(db_type)
 
-    query = None
+    query: dict[str, str] | None = None
     if drivername.startswith("mssql"):
         drivername = _mssql_drivername()
+        query = {}
         if drivername == "mssql+pyodbc":
-            query = {"driver": "ODBC Driver 17 for SQL Server"}
+            query["driver"] = "ODBC Driver 17 for SQL Server"
         # Always On listener: MultiSubnetFailover speeds AG failover reconnect.
         multi = cfg.get("multi_subnet_failover")
         if multi is None:
@@ -484,6 +485,8 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
         if intent:
             # ReadOnly routes to a readable secondary when the AG allows it.
             query["ApplicationIntent"] = intent
+        if not query:
+            query = None
 
     return sa.URL.create(
         drivername,

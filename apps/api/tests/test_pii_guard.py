@@ -53,14 +53,20 @@ def test_detect_pii_credit_card():
 
 def test_mask_short_and_long():
     assert mask("1234") == "****"
-    assert mask("alice@example.com") == "al***om"
+    masked = mask("alice@example.com")
+    assert masked.startswith("a")
+    assert "*" in masked
+    assert "@" in masked
+    # Org domain must not leak — only the TLD may remain for shape.
+    assert "example" not in masked
+    assert "alice" not in masked
 
 
 def test_mask_record():
     record = {"email": "a@b.com", "amount": "100"}
     masked = mask_record(record, {"email"})
     assert masked["email"].startswith("a")
-    assert "***" in masked["email"]
+    assert "*" in masked["email"]
     assert masked["amount"] == "100"
 
 
@@ -76,15 +82,25 @@ def test_classify_columns():
 def test_apply_transform_mask_pii():
     val, err = apply_transform("alice@example.com", "mask_pii")
     assert err is None
-    assert "***" in val
+    assert "*" in val
     assert "example.com" not in val
+    assert "alice" not in val
 
 
-def test_apply_transform_hash_pii():
+def test_apply_transform_hash_pii(monkeypatch):
+    monkeypatch.setenv("DATAFLOW_PII_HASH_KEY", "unit-test-pii-key")
     val, err = apply_transform("alice@example.com", "hash_pii")
     assert err is None
     assert len(val) == 32
     assert val == apply_transform("alice@example.com", "hash_pii")[0]
+
+
+def test_apply_transform_hash_pii_refuses_insecure_default(monkeypatch):
+    monkeypatch.delenv("DATAFLOW_PII_HASH_KEY", raising=False)
+    monkeypatch.delenv("DATAFLOW_SECRET", raising=False)
+    val, err = apply_transform("alice@example.com", "hash_pii")
+    assert val is None or val == ""
+    assert err and "DATAFLOW_PII_HASH_KEY" in err
 
 
 def test_redact_reconciliation_masks_mismatch_values():
@@ -108,9 +124,11 @@ def test_redact_reconciliation_masks_mismatch_values():
         ],
     }
     redacted = redact_reconciliation(recon, [])
-    assert redacted["mismatches"][0]["source_value"].startswith("al")
-    assert "***" in redacted["mismatches"][0]["source_value"]
-    assert redacted["mismatches"][0]["target_value"].startswith("al")
+    src = redacted["mismatches"][0]["source_value"]
+    assert src.startswith("a")
+    assert "*" in src
+    assert "alice" not in src
+    assert "example" not in src
     assert redacted["mismatches"][1]["source_value"] == "100.50"
 
 
@@ -131,5 +149,7 @@ def test_redact_reconciliation_masks_sample_compare_mismatches():
         },
     }
     redacted = redact_reconciliation(recon, [])
-    assert "***" in redacted["sample_compare"]["mismatches"][0]["source_value"]
-    assert "***" in redacted["sample_compare"]["mismatches"][0]["target_value"]
+    src = redacted["sample_compare"]["mismatches"][0]["source_value"]
+    tgt = redacted["sample_compare"]["mismatches"][0]["target_value"]
+    assert "*" in src and "*" in tgt
+    assert "bob" not in src and "example" not in src
