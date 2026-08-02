@@ -460,7 +460,7 @@ export function ColumnReviewPanel({
           </div>
         )}
 
-        {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && destTableExists === false && (
+        {!isDialog && !compact && !destSchemaLoading && destColumnSet.size === 0 && destTableExists === false && (
           <div className="df2-column-review-alert df2-column-review-alert-info" role="status">
             <DtIcon name="sparkle" size={16} />
             <span>
@@ -470,7 +470,7 @@ export function ColumnReviewPanel({
             </span>
           </div>
         )}
-        {!isDialog && !destSchemaLoading && destColumnSet.size > 0 && destTableExists === true && (
+        {!isDialog && !compact && !destSchemaLoading && destColumnSet.size > 0 && destTableExists === true && (
           <div className="df2-column-review-alert df2-column-review-alert-info" role="status">
             <DtIcon name="check" size={16} />
             <span>
@@ -481,7 +481,7 @@ export function ColumnReviewPanel({
             </span>
           </div>
         )}
-        {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && destTableExists === true && (
+        {!isDialog && !compact && !destSchemaLoading && destColumnSet.size === 0 && destTableExists === true && (
           <div className="df2-column-review-alert df2-column-review-alert-warn" role="status">
             <DtIcon name="alert" size={16} />
             <span>
@@ -490,7 +490,7 @@ export function ColumnReviewPanel({
             </span>
           </div>
         )}
-        {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && destTableExists == null && (
+        {!isDialog && !compact && !destSchemaLoading && destColumnSet.size === 0 && destTableExists == null && (
           <div className="df2-column-review-alert df2-column-review-alert-warn" role="status">
             <DtIcon name="alert" size={16} />
             <span>

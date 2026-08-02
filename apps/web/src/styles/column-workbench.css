@@ -1184,16 +1184,17 @@
 
 .df2-column-workbench-toolbar {
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: 8px 10px;
   margin-bottom: 0;
   min-width: 0;
 }
 
 .df2-column-workbench-toolbar .df2-column-workbench-filters {
-  flex: 1 1 0;
+  flex: 1 1 auto;
   min-width: 0;
+  max-width: 100%;
   margin-bottom: 0;
 }
 
@@ -1215,11 +1216,24 @@
 
 .df2-column-workbench-search-wrap {
   position: relative;
-  flex: 0 1 220px;
-  min-width: 160px;
+  flex: 1 1 200px;
+  min-width: 180px;
+  max-width: 320px;
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* Compact Map editor: keep search usable on one toolbar row */
+.df2-column-review.is-compact .df2-column-workbench-search-wrap {
+  flex: 1 1 220px;
+  min-width: 200px;
+  max-width: 360px;
+}
+
+.df2-column-review.is-compact .df2-column-workbench-actions {
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .df2-column-workbench-search-wrap > svg:first-child {

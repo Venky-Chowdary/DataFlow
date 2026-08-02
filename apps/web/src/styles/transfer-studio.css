@@ -118,12 +118,17 @@
 }
 
 .df2-page-transfer-studio .df2-column-reason {
-  max-width: 280px;
+  max-width: 220px;
   font-size: 12px;
-  line-height: 1.45;
+  line-height: 1.35;
   color: #64748b;
   white-space: normal;
   word-break: break-word;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  max-height: calc(1.35em * 2);
 }
 
 .df2-page-transfer-studio .df2-column-review-table th {
@@ -650,10 +655,10 @@
 
 .df2-page-transfer-studio {
   --df-studio-rail-w: clamp(220px, 20vw, 280px);
-  --df-studio-gap: clamp(12px, 1.5vw, 18px);
-  --df-studio-panel-min-h: clamp(380px, 58vh, 620px);
-  --df-stepper-node: clamp(26px, 2.4vw, 32px);
-  padding-bottom: clamp(16px, 2.5vh, 32px);
+  --df-studio-gap: clamp(10px, 1.2vw, 14px);
+  --df-studio-panel-min-h: clamp(320px, 52vh, 580px);
+  --df-stepper-node: clamp(22px, 2vw, 26px);
+  padding-bottom: clamp(12px, 2vh, 24px);
 }
 
 .df2-page-transfer-studio .df2-page-head-enterprise {
@@ -684,12 +689,12 @@
 .df2-transfer-studio-chrome {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: clamp(10px, 1.2vw, 14px) clamp(12px, 1.6vw, 18px);
+  gap: 0;
+  padding: 4px 8px;
   border: 1px solid #e2e8f0;
-  border-radius: var(--df-radius-card, 10px);
-  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
-  box-shadow: 0 2px 12px rgba(15, 23, 42, 0.05);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: none;
   animation: df2-studio-rise 0.35s ease-out both;
   /* Content-box width ignores sidebar — stack before stepper + route fight */
   container-type: inline-size;
@@ -707,16 +712,16 @@
 }
 
 .df2-transfer-studio-chrome .df2-wizard-studio {
-  flex: 1 1 420px;
+  flex: 1 1 520px;
   min-width: 0;
   max-width: 100%;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .df2-transfer-studio-chrome .df2-route-bar {
-  flex: 0 1 220px;
+  flex: 0 1 180px;
   min-width: 0;
-  max-width: 240px;
+  max-width: 200px;
   overflow: hidden;
 }
 
@@ -737,24 +742,36 @@
   align-items: center;
   width: 100%;
   gap: 0;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  padding-bottom: 2px;
+}
+
+.df2-wizard-studio .df2-wizard-track::-webkit-scrollbar {
+  display: none;
 }
 
 .df2-wizard-studio .df2-wizard-item {
   display: flex;
   align-items: center;
-  flex: 1;
-  min-width: 0;
+  flex: 1 1 0;
+  min-width: 4.75rem;
 }
 
 .df2-wizard-studio .df2-wizard-item:last-child {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 3.5rem;
 }
 
 .df2-wizard-studio .df2-wizard-line {
-  flex: 1;
+  flex: 1 1 auto;
   height: 3px;
-  min-width: clamp(16px, 3vw, 48px);
-  margin: 0 clamp(6px, 1vw, 12px);
+  min-width: 10px;
+  max-width: 48px;
+  margin: 0 clamp(4px, 0.8vw, 10px);
   border-radius: 999px;
   background: #e2e8f0;
   transition: background 0.45s cubic-bezier(0.22, 1, 0.36, 1);
@@ -765,9 +782,9 @@
 }
 
 .df2-wizard-studio .df2-wizard-step {
-  gap: clamp(6px, 0.8vw, 10px);
-  padding: 6px clamp(8px, 1.2vw, 14px);
-  border-radius: 10px;
+  gap: 5px;
+  padding: 3px clamp(6px, 1vw, 10px);
+  border-radius: 8px;
   transition: background 0.25s ease, transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -798,13 +815,18 @@
 }
 
 .df2-wizard-studio .df2-wizard-label {
-  font-size: clamp(12px, 1.1vw, 14px);
+  font-size: clamp(11px, 1vw, 12.5px);
   font-weight: 650;
   letter-spacing: -0.01em;
 }
 
+.df2-wizard-studio .df2-wizard-progress,
+.df2-transfer-studio-chrome .df2-wizard-progress {
+  display: none;
+}
+
 .df2-wizard-progress {
-  height: 4px;
+  height: 3px;
   border-radius: 999px;
   background: #e2e8f0;
   overflow: hidden;
@@ -993,13 +1015,13 @@
   to { opacity: 1; transform: translateX(0); }
 }
 
-/* Unified step panel — equal visual weight */
+/* Unified step panel — plain plane (no card chrome) */
 .df2-transfer-step-panel {
-  border: 1px solid #e2e8f0;
-  border-radius: 14px;
-  background: #fff;
+  border: none;
+  border-radius: 0;
+  background: transparent;
   overflow: visible;
-  box-shadow: 0 4px 24px rgba(15, 23, 42, 0.04);
+  box-shadow: none;
   min-height: var(--df-studio-panel-min-h);
 }
 
@@ -1007,10 +1029,10 @@
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  padding: clamp(14px, 2vw, 18px) clamp(18px, 2.5vw, 24px);
+  gap: 8px;
+  padding: 6px 4px 8px;
   border-bottom: 1px solid #f1f5f9;
-  background: linear-gradient(180deg, #fafbfc 0%, #fff 100%);
+  background: transparent;
 }
 .df2-transfer-step-panel .df2-card-head > div:first-child {
   min-width: 0;
@@ -1032,22 +1054,22 @@
 
 .df2-transfer-step-panel .df2-card-body {
   flex: 1;
-  padding: clamp(18px, 2.5vw, 24px);
+  padding: 8px 4px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 8px;
   min-height: 0;
 }
 
 .df2-transfer-step-panel .df2-card-footer,
 .df2-transfer-step-panel .df2-wizard-footer {
-  padding: 14px clamp(18px, 2.5vw, 24px);
-  border-top: 1px solid #f1f5f9;
-  background: #fafbfc;
+  padding: 8px 4px;
+  border-top: 1px solid #e2e8f0;
+  background: transparent;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
   margin-top: auto;
 }
@@ -1056,7 +1078,7 @@
 .df2-transfer-step-split {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: clamp(16px, 2vw, 24px);
+  gap: 12px;
   flex: 1;
   min-height: 0;
   align-items: stretch;
@@ -1073,58 +1095,75 @@
 
 .df2-transfer-step-secondary {
   border-left: 1px solid #f1f5f9;
-  padding-left: clamp(16px, 2vw, 24px);
+  padding-left: 12px;
 }
 
 .df2-transfer-step-secondary .df2-structure-preview {
   flex: 1;
-  min-height: 280px;
+  min-height: var(--df-preview-card-min, 420px);
   display: flex;
   flex-direction: column;
 }
 
-/* Large upload canvas */
+/* Compact upload canvas — tall only when empty, never a giant hero */
 .df2-page-transfer-studio .df2-upload.df2-upload-studio {
-  flex: 1;
-  min-height: clamp(220px, 32vh, 360px);
-  padding: clamp(32px, 4vh, 56px) clamp(20px, 3vw, 32px) !important;
-  border-radius: 12px;
-  transition: border-color 0.25s ease, background 0.25s ease, box-shadow 0.25s ease, transform 0.25s ease;
+  flex: 0 1 auto;
+  min-height: 120px;
+  padding: 16px 14px !important;
+  border-radius: 10px;
+  transition: border-color 0.25s ease, background 0.25s ease, box-shadow 0.25s ease;
 }
 
 .df2-page-transfer-studio .df2-upload.df2-upload-studio:hover {
-  transform: translateY(-1px);
+  transform: none;
 }
 
 .df2-page-transfer-studio .df2-upload-icon {
-  width: 56px;
-  height: 56px;
-  border-radius: 14px;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
 }
 
 .df2-page-transfer-studio .df2-upload-title {
-  font-size: clamp(14px, 1.2vw, 16px) !important;
+  font-size: 13px !important;
 }
 
-/* Source kind tiles — equal width in primary column */
+.df2-page-transfer-studio .df2-upload-formats {
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.df2-page-transfer-studio .df2-upload-format-chip {
+  padding: 2px 6px;
+  font-size: 10px;
+}
+
+/* Source kind tiles — compact equal-width rail */
 .df2-page-transfer-studio .df2-source-kind-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  gap: 6px;
 }
 
 .df2-page-transfer-studio .df2-source-kind-tile {
   flex-direction: row;
   align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
+  gap: 8px;
+  padding: 8px 10px;
   min-height: 0;
+  border-radius: 10px;
+  border-width: 1.5px;
+}
+
+.df2-page-transfer-studio .df2-source-kind-tile:hover {
+  transform: none;
+  box-shadow: 0 2px 8px rgba(13, 148, 136, 0.08);
 }
 
 .df2-page-transfer-studio .df2-source-kind-icon {
-  width: 32px;
-  height: 32px;
-  border-radius: 9px;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
   flex-shrink: 0;
 }
 
@@ -1134,7 +1173,7 @@
 }
 
 .df2-page-transfer-studio .df2-source-kind-tile strong {
-  font-size: 13px;
+  font-size: 12.5px;
   line-height: 1.2;
 }
 
@@ -1143,15 +1182,16 @@
   -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  font-size: 11px;
+  font-size: 10.5px;
+  line-height: 1.25;
 }
 
 /* Structure preview fills secondary pane */
 .df2-page-transfer-studio .df2-structure-preview {
   border: 1px solid #e2e8f0;
-  border-radius: 12px;
+  border-radius: 10px;
   background: #fafbfc;
-  padding: 16px;
+  padding: 10px 12px;
   overflow: hidden;
   min-width: 0;
   max-width: 100%;
@@ -1197,9 +1237,18 @@
   overflow: hidden !important;
 }
 
-.df2-transfer-step-panel.df2-map-step-panel .df2-card-body {
+.df2-transfer-step-panel.df2-map-step-panel .df2-card-body,
+.df2-transfer-step-panel.df2-map-step-panel .df2-map-step-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
   overflow: hidden;
   min-height: 0;
+}
+
+.df2-transfer-step-panel.df2-map-step-panel .df2-wizard-footer,
+.df2-transfer-step-panel.df2-map-step-panel .df2-map-footer {
+  flex-shrink: 0;
 }
 
 .df2-map-step-layout {
@@ -1922,8 +1971,10 @@ th.df2-type-string .df2-type-badge {
 
 /* Compact, even card rhythm — no oversized surfaces inside the studio */
 .df2-page-transfer-studio .df2-transfer-step-panel {
-  border-radius: 10px;
-  box-shadow: 0 1px 6px rgba(15, 23, 42, 0.04);
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  background: transparent !important;
 }
 
 .df2-page-transfer-studio .df2-field {
@@ -2043,7 +2094,7 @@ th.df2-type-string .df2-type-badge {
 
 .df2-source-step .df2-transfer-step-primary {
   min-height: 0;
-  overflow-y: auto;
+  overflow: visible;
   overscroll-behavior: contain;
 }
 
@@ -2099,7 +2150,7 @@ th.df2-type-string .df2-type-badge {
 
 .df2-source-step .df2-structure-table-wrap {
   flex: 1 1 0;
-  min-height: 0;
+  min-height: var(--df-preview-table-min, 356px);
   max-height: none !important;
   overflow: auto;
 }
@@ -2126,11 +2177,23 @@ th.df2-type-string .df2-type-badge {
 .df2-source-step .df2-transfer-step-split {
   flex: 1 1 0;
   min-height: 0;
+  align-items: start;
+}
+
+.df2-source-step .df2-transfer-step-primary {
+  height: auto;
+  max-height: 100%;
+  align-self: start;
+}
+
+.df2-source-step .df2-transfer-step-secondary {
+  align-self: stretch;
+  min-height: var(--df-preview-card-min, 444px);
 }
 
 .df2-source-step .df2-upload.df2-upload-studio {
-  min-height: 160px !important;
-  padding: 24px 16px !important;
+  min-height: 112px !important;
+  padding: 14px 12px !important;
 }
 
 /* After upload: compact file row (no giant replace dropzone) */
@@ -2138,10 +2201,10 @@ th.df2-type-string .df2-type-badge {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 8px 10px;
+  gap: 8px;
+  padding: 6px 10px;
   border: 1px solid #99f6e4;
-  border-radius: 10px;
+  border-radius: 8px;
   background: linear-gradient(180deg, #f0fdfa 0%, #fff 100%);
 }
 .df2-upload-result-compact .df2-upload-result-main {
@@ -2166,6 +2229,117 @@ th.df2-type-string .df2-type-badge {
   min-width: 0;
 }
 
+.df2-dest-mode-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.df2-dest-mode-row .df2-filter-bar,
+.df2-dest-mode-row [role="tablist"] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.df2-dest-toolbar .df2-dest-advanced-btn {
+  flex: 0 0 auto;
+  height: 32px;
+  align-self: center;
+  white-space: nowrap;
+}
+
+/* Destination — Connectors-style left catalog / right details */
+.df2-dest-step-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, 38%) minmax(0, 1fr);
+  gap: 14px;
+  flex: 1 1 auto;
+  min-height: 0;
+  align-items: stretch;
+}
+
+.df2-dest-step-left,
+.df2-dest-step-right {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.df2-dest-step-left {
+  padding-right: 12px;
+  border-right: 1px solid #f1f5f9;
+  overflow: auto;
+}
+
+.df2-dest-connector-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: 0 0 8px;
+  padding: 0 10px;
+  height: 34px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  flex-shrink: 0;
+}
+
+.df2-dest-connector-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 13px;
+  color: #0f172a;
+}
+
+.df2-dest-connector-search > svg {
+  flex-shrink: 0;
+  color: #94a3b8;
+}
+
+.df2-dest-step .df2-card-footer.df2-wizard-footer {
+  flex-shrink: 0;
+}
+
+.df2-dest-step-right {
+  overflow: auto;
+  padding-left: 2px;
+}
+
+.df2-dest-right-empty {
+  margin: 12px 0;
+  padding: 16px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #64748b;
+}
+
+.df2-dest-step .df2-dest-sync-summary {
+  margin-top: auto;
+}
+
+@media (max-width: 1100px) {
+  .df2-dest-step-layout {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .df2-dest-step-left {
+    padding-right: 0;
+    border-right: none;
+    border-bottom: 1px solid #f1f5f9;
+    padding-bottom: 10px;
+  }
+}
+
 .df2-wizard-label-short {
   display: none;
 }
@@ -2188,11 +2362,11 @@ th.df2-type-string .df2-type-badge {
   flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px 16px;
-  margin-top: 4px;
-  padding: 12px 14px;
+  gap: 8px 12px;
+  margin-top: 2px;
+  padding: 8px 12px;
   border: 1px solid var(--df-border, #e6e9ee);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--df-surface-muted, #f8fafc);
 }
 .df2-dest-sync-summary-main {
@@ -2348,7 +2522,13 @@ th.df2-type-string .df2-type-badge {
 .df2-dest-step .df2-card-body {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 10px;
+  min-height: 0;
+  flex: 1;
+}
+
+.df2-dest-step .df2-dest-step-layout {
+  flex: 1 1 auto;
 }
 
 .df2-dest-step .df2-card-body > * {
@@ -2399,15 +2579,15 @@ th.df2-type-string .df2-type-badge {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 4px;
-  padding: 10px 12px;
+  gap: 2px;
+  padding: 8px 10px;
   width: 100%;
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
   box-sizing: border-box;
   border: 1px solid #e2e8f0;
-  border-radius: 10px;
+  border-radius: 8px;
   background: #fff;
   cursor: pointer;
   text-align: left;
@@ -2872,6 +3052,47 @@ th.df2-type-string .df2-type-badge {
   overflow: hidden;
 }
 
+.df2-run-footer {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+
+.df2-run-footer-status {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+  font-size: 12.5px;
+  color: #475569;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.df2-run-footer-status strong {
+  color: #0f172a;
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+.df2-run-footer-actions {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.df2-result-host > .df2-card-body.df2-result-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 4px;
+}
+
 .df2-run-step > .df2-card-body.df2-run-center {
   align-items: center;
   justify-content: flex-start;
@@ -3331,8 +3552,9 @@ th.df2-type-string .df2-type-badge {
     grid-template-columns: 1fr;
   }
 
+  /* Preview grows with the 10-row floor; body scrolls — do not cap at 36vh */
   .df2-source-step .df2-transfer-step-secondary {
-    max-height: min(36vh, 320px);
+    max-height: none;
   }
 }
 
@@ -3463,11 +3685,11 @@ th.df2-type-string .df2-type-badge {
 }
 
 .df2-transfer-studio-chrome {
-  padding: 12px 14px;
+  padding: 4px 8px;
   border: 1px solid #e2e8f0;
-  border-radius: 12px;
-  background: linear-gradient(180deg, #fff 0%, #f8fafb 100%);
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: none;
 }
 
 .df2-transfer-step-panel .df2-label,
@@ -3544,8 +3766,9 @@ th.df2-type-string .df2-type-badge {
   grid-template-columns: 1fr !important;
 }
 
-.df2-transfer-studio-body.is-validate-step {
-  grid-template-columns: minmax(0, 1fr) clamp(280px, 26vw, 340px) !important;
+.df2-transfer-studio-body.is-validate-step,
+.df2-transfer-studio-body.is-validate-step.is-full-width {
+  grid-template-columns: minmax(0, 1fr) !important;
 }
 
 /* Destination picker */
@@ -3579,11 +3802,20 @@ th.df2-type-string .df2-type-badge {
 }
 
 .df2-dest-manual-types {
-  margin-top: 10px;
-  padding: 10px 12px;
+  margin-top: 8px;
+  padding: 8px 10px;
   border: 1px dashed #cbd5e1;
-  border-radius: 10px;
+  border-radius: 8px;
   background: #f8fafc;
+}
+
+.df2-dest-engine-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  margin-bottom: 4px;
 }
 
 .df2-dest-manual-types-label {
@@ -3594,11 +3826,70 @@ th.df2-type-string .df2-type-badge {
   letter-spacing: 0.04em;
 }
 
+.df2-dest-engine-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 180px;
+  max-width: 280px;
+  min-width: 140px;
+  padding: 5px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  color: #94a3b8;
+}
+
+.df2-dest-engine-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font-size: 12.5px;
+  color: #0f172a;
+}
+
+.df2-dest-engine-search input::placeholder {
+  color: #94a3b8;
+}
+
+.df2-dest-engine-hint {
+  margin: 8px 0 4px;
+  font-size: 11px;
+  font-weight: 650;
+  color: #64748b;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.df2-dest-engine-more {
+  margin-top: 8px;
+}
+
+.df2-dest-engine-more-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.df2-dest-engine-more-head .df2-dest-engine-hint {
+  margin: 0;
+}
+
 .df2-dest-type-chips {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 6px;
+}
+
+.df2-dest-type-chips--scroll {
+  max-height: 160px;
+  overflow: auto;
+  padding-right: 2px;
 }
 
 .df2-dest-type-chip {
@@ -3826,17 +4117,14 @@ th.df2-type-string .df2-type-badge {
   overflow: hidden;
 }
 
-/* Validate split */
+/* Validate dashboard host — content scrolls in body; footer pinned */
 .df2-validate-split {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  overflow-y: auto !important;
-  overflow-x: hidden !important;
-  overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
-  padding: 12px 14px !important;
-  gap: 10px;
+  overflow: hidden;
+  padding: 0 !important;
+  gap: 0;
 }
 
 .df2-preflight.is-compact {
@@ -4039,17 +4327,97 @@ th.df2-type-string .df2-type-badge {
   margin-bottom: 2px;
 }
 
-/* Validate right rail — actions-first, no duplicate proof dump */
-.df2-validate-rail {
+/* Validate — full-width dashboard + bottom wizard footer (no right rail) */
+.df2-validate-step.df2-validate-dashboard-host {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  border: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+}
+
+.df2-validate-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 4px !important;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 12px;
-  border: 1px solid var(--df-border, #e2e8f0);
-  border-radius: var(--df-radius-panel, 12px);
-  background: var(--df-surface-muted, #fafbfc);
-  min-height: 0;
-  overflow: hidden;
+}
+
+.df2-validate-footer-cdc {
+  flex-shrink: 0;
+  padding: 6px 4px 0;
+  border-top: 1px solid #f1f5f9;
+}
+
+.df2-validate-footer {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 10px 14px;
+  flex-shrink: 0;
+}
+
+.df2-validate-footer-status {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  font-size: 12.5px;
+  color: #475569;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.df2-validate-footer-status strong {
+  color: #0f172a;
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+.df2-validate-footer-status .is-warn {
+  color: #b45309;
+}
+
+.df2-validate-footer-status .is-ok {
+  color: #0f766e;
+}
+
+.df2-validate-footer-actions {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.df2-validate-footer-actions .df2-btn {
+  width: auto !important;
+  max-width: none !important;
+  flex: 0 0 auto !important;
+}
+
+@media (max-width: 1100px) {
+  .df2-validate-footer {
+    flex-wrap: wrap;
+  }
+
+  .df2-validate-footer-actions {
+    width: 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+}
+
+/* Legacy rail selectors kept inert if any markup remains */
+.df2-validate-rail {
+  display: none !important;
 }
 
 .df2-validate-rail-runid {
@@ -7174,33 +7542,35 @@ button.df2-vd-assist-toggle:focus-visible {
 }
 .df2-map-identity-chip {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  margin: 0 0 12px;
-  padding: 12px 14px;
-  border-radius: 12px;
+  gap: 12px;
+  margin: 0 0 8px;
+  padding: 8px 12px;
+  border-radius: 10px;
   border: 1px solid #e2e8f0;
   background: #f8fafc;
+  flex-shrink: 0;
 }
 .df2-map-identity-chip-main {
   flex: 1;
   min-width: 0;
 }
 .df2-map-identity-chip-kicker {
-  display: block;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  display: inline;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
   color: #64748b;
-  margin-bottom: 6px;
+  margin: 0 8px 0 0;
 }
 .df2-map-identity-chip-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 16px;
-  font-size: 13px;
+  align-items: center;
+  gap: 6px 14px;
+  font-size: 12.5px;
   color: #334155;
 }
 .df2-map-identity-chip-meta strong {
@@ -7208,10 +7578,7 @@ button.df2-vd-assist-toggle:focus-visible {
   color: #0f172a;
 }
 .df2-map-identity-chip-hint {
-  margin: 8px 0 0;
-  font-size: 12px;
-  line-height: 1.45;
-  color: #64748b;
+  display: none; /* dense Map — details live in Settings tooltip */
 }
 .df2-map-identity-suggest {
   display: flex;
@@ -7222,9 +7589,9 @@ button.df2-vd-assist-toggle:focus-visible {
 }
 .df2-map-footer {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 12px;
+  gap: 10px 14px;
 }
 /* Back is first child — left-aligned like Source/Dest */
 .df2-map-footer > .df2-btn:first-child {
@@ -7233,22 +7600,61 @@ button.df2-vd-assist-toggle:focus-visible {
 }
 .df2-map-footer-status {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
   font-size: 12.5px;
   color: #475569;
   min-width: 0;
-  flex: 1 1 160px;
+  flex: 1 1 auto;
 }
 .df2-map-footer-status strong {
   color: #0f172a;
   font-weight: 600;
+  margin-right: 4px;
+}
+.df2-map-footer-status .is-warn {
+  color: #b45309;
+}
+.df2-map-footer-status .is-ok {
+  color: #0f766e;
+}
+.df2-map-footer-pk-suggest {
+  border: none;
+  background: none;
+  padding: 0;
+  margin: 0 2px 0 0;
+  color: var(--df-brand, #0d9488);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.df2-map-footer-pk-suggest:hover {
+  color: var(--df-brand-deep, #0f766e);
 }
 .df2-map-footer-actions {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  align-items: center;
   gap: 8px;
   margin-left: auto;
+  flex-shrink: 0;
+}
+.df2-map-identity-banner.is-compact {
+  align-items: center;
+  margin: 0 0 8px;
+  padding: 8px 12px;
+  gap: 10px;
+}
+.df2-map-identity-banner.is-compact .df2-map-identity-banner-actions {
+  margin-top: 0;
+  flex-shrink: 0;
+}
+.df2-map-identity-banner.is-compact .df2-map-identity-banner-hint {
+  display: none;
 }
 .df2-validate-rail-primary-fix {
   margin-top: 0;
@@ -7999,3 +8405,537 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-notify-strip.is-compact .df2-notify-channel { display: none; }
 .df2-theater-v3-notify,
 .df2-result-notify { margin-top: 4px; }
+
+/* ── Transfer Studio density: equal rail buttons, visible Map/Source rows ── */
+.df2-validate-footer-actions > .df2-btn {
+  height: var(--df-btn-height, 36px) !important;
+  min-height: var(--df-btn-height, 36px) !important;
+}
+
+/* Full-width Map editor — intel aside removed; status lives in footer */
+.df2-map-step-workspace,
+.df2-map-step-workspace.is-full-editor {
+  grid-template-columns: minmax(0, 1fr) !important;
+  min-height: 0 !important;
+  flex: 1 1 0 !important;
+  gap: 0 !important;
+}
+
+.df2-map-intel-aside {
+  display: none !important;
+}
+
+.df2-map-editor-pane {
+  min-height: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  overflow: hidden !important;
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+}
+
+.df2-map-editor-scroll-host {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+  padding: 0 !important;
+}
+
+.df2-map-editor-scroll-host .df2-column-review-scroll,
+.df2-map-editor-scroll-host .df2-column-review-table-wrap {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  overflow: auto !important;
+}
+
+.df2-map-editor-scroll-host .df2-column-review-table tbody tr {
+  height: auto;
+}
+
+.df2-map-editor-scroll-host .df2-column-destination-cell .df2-input,
+.df2-map-editor-scroll-host .df2-column-transform-cell .df2-input,
+.df2-map-editor-scroll-host .df2-column-destination-cell .df2-select,
+.df2-map-editor-scroll-host .df2-column-transform-cell .df2-select {
+  min-height: 30px !important;
+  height: 30px !important;
+  padding-top: 2px !important;
+  padding-bottom: 2px !important;
+  font-size: 12px !important;
+}
+
+/* Compact Map callouts so the mapping table keeps viewport height */
+.df2-map-step-panel .df2-map-health-banner,
+.df2-map-editor-pane .df2-map-health-banner,
+.df2-column-review .df2-alert,
+.df2-map-step-panel .df2-alert {
+  margin: 0.35rem 0 0 !important;
+  padding: 0.45rem 0.7rem !important;
+  font-size: 12px !important;
+  gap: 0.45rem !important;
+}
+
+.df2-map-step-panel .df2-map-health-banner strong,
+.df2-column-review .df2-alert strong {
+  font-size: 12px;
+  margin-bottom: 0;
+}
+
+.df2-map-step-panel .df2-map-health-banner p,
+.df2-column-review .df2-alert p {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.df2-page-transfer-studio .df2-structure-preview {
+  display: flex !important;
+  flex-direction: column !important;
+  min-height: 0 !important;
+  height: 100%;
+  max-height: 100%;
+}
+
+.df2-page-transfer-studio .df2-structure-preview-head {
+  flex-shrink: 0;
+  margin-bottom: 6px;
+}
+
+.df2-structure-field-block {
+  flex-shrink: 0;
+  margin: 0 0 4px;
+  border: 0;
+  padding: 0;
+}
+
+.df2-structure-field-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+  font-weight: 650;
+  color: #475569;
+  padding: 2px 0;
+}
+
+.df2-structure-field-summary::-webkit-details-marker {
+  display: none;
+}
+
+.df2-structure-field-summary span {
+  font-size: 11px;
+  font-weight: 500;
+  color: #94a3b8;
+}
+
+.df2-structure-field-block:not([open]) .df2-structure-field-strip {
+  display: none;
+}
+
+.df2-page-transfer-studio .df2-structure-field-strip {
+  flex-wrap: nowrap;
+  max-height: 56px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  margin-bottom: 6px;
+}
+
+/* Compact Transfer Studio — reclaim chrome, keep ≥10 preview rows */
+.df2-page-transfer-studio {
+  --df-preview-row-h: 28px;
+  --df-preview-head-h: 32px;
+  --df-preview-rows: 10;
+  --df-preview-table-min: calc(var(--df-preview-rows) * var(--df-preview-row-h) + var(--df-preview-head-h));
+  /* head + closed field details + padding — not the old 88px chip strip */
+  --df-preview-card-min: calc(var(--df-preview-table-min) + 56px);
+}
+
+.df2-page-transfer-studio .df2-transfer-studio-chrome {
+  padding: 3px 8px;
+  gap: 0;
+}
+
+.df2-page-transfer-studio .df2-transfer-studio-chrome-row {
+  padding: 2px 0;
+  gap: 8px 10px;
+}
+
+.df2-page-transfer-studio .df2-transfer-step-panel .df2-card-body {
+  padding: 6px 2px;
+  gap: 8px;
+}
+
+.df2-page-transfer-studio .df2-transfer-step-panel .df2-card-footer,
+.df2-page-transfer-studio .df2-transfer-step-panel .df2-wizard-footer {
+  padding: 6px 2px;
+}
+
+/* Source tiles — label only; formats live in native title tooltip */
+.df2-page-transfer-studio .df2-source-kind-desc {
+  display: none !important;
+}
+
+.df2-page-transfer-studio .df2-source-kind-tile {
+  padding: 6px 8px;
+  gap: 6px;
+  min-height: 0;
+}
+
+.df2-page-transfer-studio .df2-source-kind-icon {
+  width: 22px;
+  height: 22px;
+}
+
+.df2-page-transfer-studio .df2-source-kind-tile strong {
+  font-size: 12px;
+}
+
+.df2-page-transfer-studio .df2-dest-type-tile {
+  min-height: 64px;
+  padding: 10px 8px;
+  gap: 6px;
+  border-radius: 10px;
+}
+
+.df2-page-transfer-studio .df2-dest-type-tile:hover {
+  transform: none;
+}
+
+.df2-page-transfer-studio .df2-dest-type-chip {
+  padding: 5px 9px;
+  min-height: 30px;
+  font-size: 12px;
+}
+
+.df2-page-transfer-studio .df2-dest-sync-summary {
+  padding: 6px 8px;
+  gap: 6px 10px;
+}
+
+.df2-page-transfer-studio .df2-structure-preview-head {
+  margin-bottom: 4px;
+  gap: 6px;
+}
+
+.df2-page-transfer-studio .df2-dest-picker {
+  margin-bottom: 8px;
+}
+
+.df2-page-transfer-studio .df2-dest-toolbar {
+  margin-bottom: 6px;
+  gap: 6px 10px;
+}
+
+.df2-page-transfer-studio .df2-dest-connector-card {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  min-height: 0;
+}
+
+.df2-page-transfer-studio .df2-dest-connector-card-meta {
+  -webkit-line-clamp: 1;
+  font-size: 10.5px;
+}
+
+.df2-page-transfer-studio .df2-dest-connector-card-status {
+  display: none;
+}
+
+.df2-page-transfer-studio .df2-dest-engine-hint {
+  margin: 4px 0 2px;
+}
+
+.df2-page-transfer-studio .df2-dest-type-chips {
+  margin-top: 4px;
+  gap: 5px;
+}
+
+.df2-page-transfer-studio .df2-dest-manual-types {
+  margin-top: 6px;
+  padding: 6px 8px;
+}
+
+.df2-page-transfer-studio .df2-label-hint {
+  margin-top: 2px;
+  margin-bottom: 0;
+}
+
+.df2-page-transfer-studio .df2-structure-table-wrap {
+  flex: 1 1 auto !important;
+  min-height: var(--df-preview-table-min) !important;
+  max-height: none !important;
+  overflow: auto !important;
+}
+
+.df2-page-transfer-studio .df2-structure-table tbody tr {
+  height: var(--df-preview-row-h);
+}
+
+.df2-page-transfer-studio .df2-structure-table th,
+.df2-page-transfer-studio .df2-structure-table td {
+  padding-top: 3px !important;
+  padding-bottom: 3px !important;
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.df2-transfer-step-secondary .df2-structure-preview {
+  min-height: var(--df-preview-card-min) !important;
+}
+
+.df2-page-transfer-studio .df2-source-kind-desc {
+  -webkit-line-clamp: 1;
+}
+
+.df2-page-transfer-studio .df2-source-ocr-toggle,
+.df2-page-transfer-studio label:has(> input[type="checkbox"]) {
+  min-height: 28px !important;
+  margin: 0 0 4px !important;
+  gap: 6px;
+}
+
+.df2-page-transfer-studio .df2-source-ocr-toggle small {
+  font-size: 10.5px;
+  line-height: 1.25;
+}
+
+.df2-page-transfer-studio .df2-label {
+  margin-bottom: 4px;
+  font-size: 11px;
+}
+
+.df2-page-transfer-studio .df2-label-hint {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.df2-dest-step .df2-dest-sync-summary-main > p,
+.df2-dest-step .df2-dest-sync-summary-main .df2-label-hint {
+  overflow: visible;
+  white-space: normal;
+  text-overflow: unset;
+  line-height: 1.4;
+  font-size: 11.5px;
+}
+
+.df2-dest-step .df2-dest-empty-hint,
+.df2-dest-step .df2-muted,
+.df2-dest-step .df2-help-text {
+  margin-top: 4px;
+  line-height: 1.35;
+}
+
+.df2-dest-step .df2-connector-picker,
+.df2-dest-step [aria-label="Destination connectors"] {
+  min-height: 0;
+}
+
+.df2-dest-step .df2-export-format-row,
+.df2-dest-step .df2-file-export-panel {
+  max-width: 640px;
+}
+
+.df2-dest-step .df2-field {
+  margin-bottom: 8px;
+}
+
+.df2-map-step-panel .df2-card-body,
+.df2-map-step .df2-card-body {
+  gap: 8px !important;
+  padding: 10px 12px !important;
+}
+
+.df2-page-transfer-studio .df2-filter-tabs .df2-tab,
+.df2-page-transfer-studio .df2-tab {
+  padding: 4px 10px;
+  font-size: 12px;
+  min-height: 28px;
+}
+
+/* ≤1280: stack source, hide intel, keep 10-row floors */
+@media (max-width: 1280px) {
+  .df2-page-transfer-studio {
+    --df-preview-row-h: 30px;
+  }
+
+  .df2-map-step-workspace {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .df2-map-intel-aside {
+    display: none !important;
+  }
+
+  .df2-map-editor-scroll-host {
+    min-height: 0 !important;
+  }
+
+  .df2-map-editor-scroll-host .df2-column-review-scroll,
+  .df2-map-editor-scroll-host .df2-column-review-table-wrap {
+    min-height: 0 !important;
+  }
+
+  .df2-map-footer {
+    flex-wrap: wrap;
+  }
+
+  .df2-source-step .df2-transfer-step-split {
+    /* Flex column stack — CSS grid was crushing the primary row to ~14px */
+    display: flex !important;
+    flex-direction: column !important;
+    grid-template-columns: none !important;
+    grid-template-rows: none !important;
+    gap: 10px !important;
+    flex: 0 0 auto !important;
+    height: auto !important;
+    min-height: 0 !important;
+    align-items: stretch !important;
+  }
+
+  .df2-source-step .df2-transfer-step-primary {
+    display: flex !important;
+    flex-direction: column !important;
+    height: auto !important;
+    max-height: none !important;
+    min-height: min-content !important;
+    align-self: stretch !important;
+    overflow: visible !important;
+    flex: 0 0 auto !important;
+  }
+
+  .df2-source-step .df2-transfer-step-secondary {
+    border-left: none !important;
+    padding-left: 0 !important;
+    border-top: 1px solid #f1f5f9;
+    padding-top: 10px;
+    /* Kill older 36vh cap that fought the 10-row floor and collapsed primary */
+    max-height: none !important;
+    min-height: var(--df-preview-card-min);
+    height: auto !important;
+    overflow: visible !important;
+    align-self: stretch !important;
+    flex: 0 0 auto !important;
+  }
+
+  .df2-source-step .df2-transfer-step-secondary > .df2-structure-preview,
+  .df2-source-step .df2-transfer-step-secondary > .df2-source-aside {
+    height: auto !important;
+    max-height: none !important;
+    min-height: var(--df-preview-card-min) !important;
+    flex: 1 1 auto !important;
+  }
+
+  .df2-source-step.df2-transfer-step-viewport > .df2-card-body {
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+  }
+
+  .df2-page-transfer-studio .df2-source-kind-tile {
+    padding: 6px 8px;
+  }
+
+  .df2-page-transfer-studio .df2-source-kind-icon {
+    width: 24px;
+    height: 24px;
+  }
+
+  .df2-page-transfer-studio .df2-source-kind-desc {
+    display: none;
+  }
+
+  .df2-source-step .df2-upload.df2-upload-studio {
+    min-height: 96px !important;
+    padding: 12px 10px !important;
+  }
+
+  .df2-transfer-studio-chrome .df2-wizard-studio {
+    overflow: visible !important;
+  }
+}
+
+@media (max-width: 900px) {
+  .df2-page-transfer-studio {
+    --df-preview-row-h: 30px;
+    --df-preview-head-h: 34px;
+  }
+
+  .df2-page-transfer-studio .df2-transfer-step-panel .df2-card-body {
+    padding: 10px 12px !important;
+    gap: 8px !important;
+  }
+
+  .df2-transfer-step-secondary .df2-structure-preview,
+  .df2-page-transfer-studio .df2-structure-preview {
+    min-height: var(--df-preview-card-min) !important;
+    height: auto !important;
+    max-height: none !important;
+    padding: 8px 10px !important;
+  }
+
+  .df2-map-editor-scroll-host {
+    min-height: max(420px, calc(10 * 38px + 52px)) !important;
+  }
+
+  .df2-dest-picker-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+
+  .df2-dest-engine-search {
+    max-width: none;
+  }
+
+  .df2-dest-type-chips--scroll {
+    max-height: 140px;
+  }
+
+  .df2-page-transfer-studio .df2-source-kind-grid {
+    gap: 5px;
+  }
+
+  .df2-upload-result-compact {
+    padding: 5px 8px;
+  }
+}
+
+@media (max-width: 640px) {
+  .df2-page-transfer-studio {
+    --df-preview-row-h: 32px;
+    --df-preview-head-h: 34px;
+  }
+
+  .df2-page-transfer-studio .df2-transfer-step-panel .df2-card-body {
+    padding: 8px 10px !important;
+    gap: 6px !important;
+  }
+
+  .df2-page-transfer-studio .df2-transfer-step-panel .df2-card-footer,
+  .df2-page-transfer-studio .df2-transfer-step-panel .df2-wizard-footer {
+    padding: 6px 10px;
+  }
+
+  .df2-page-transfer-studio .df2-source-kind-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .df2-wizard-studio .df2-wizard-item {
+    min-width: 3.25rem;
+  }
+
+  .df2-page-transfer-studio .df2-upload-formats {
+    display: none;
+  }
+
+  .df2-transfer-studio-chrome {
+    padding: 6px 8px;
+  }
+}

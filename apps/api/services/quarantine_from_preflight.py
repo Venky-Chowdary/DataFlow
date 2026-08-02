@@ -7,7 +7,13 @@ write-time rejection.
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+_PAIR_RE = re.compile(
+    r"(?P<source>[A-Za-z_][\w.]*)\s*\((?P<source_type>[^)]+)\)\s*→\s*"
+    r"(?P<target>[A-Za-z_][\w.]*)\s*\((?P<target_type>[^)]+)\)",
+)
 
 
 def _as_issue_dict(item: Any) -> dict[str, Any] | None:
@@ -16,6 +22,23 @@ def _as_issue_dict(item: Any) -> dict[str, Any] | None:
     if isinstance(item, str) and item.strip():
         return {"message": item.strip(), "reason": item.strip()}
     return None
+
+
+def _enrich_from_message(issue: dict[str, Any]) -> dict[str, Any]:
+    """Fill source/target/column from Lossy coercion / integrity message text."""
+    if issue.get("source") or issue.get("column") or issue.get("field"):
+        return issue
+    text = str(issue.get("reason") or issue.get("message") or "")
+    m = _PAIR_RE.search(text)
+    if not m:
+        return issue
+    enriched = dict(issue)
+    enriched.setdefault("source", m.group("source"))
+    enriched.setdefault("column", m.group("source"))
+    enriched.setdefault("target", m.group("target"))
+    enriched.setdefault("source_type", m.group("source_type"))
+    enriched.setdefault("target_type", m.group("target_type"))
+    return enriched
 
 
 def _collect_issue_lists(preflight: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -28,14 +51,22 @@ def _collect_issue_lists(preflight: dict[str, Any] | None) -> list[dict[str, Any
         details = gate.get("details") or {}
         if not isinstance(details, dict):
             continue
-        for key in ("encoding_issues", "issues", "errors", "issue_texts"):
+        # Prefer structured issues_detail (has source/target) over flat strings.
+        detail_raw = details.get("issues_detail") or []
+        has_structured = isinstance(detail_raw, list) and any(
+            isinstance(x, dict) for x in detail_raw
+        )
+        keys = ("issues_detail", "encoding_issues")
+        if not has_structured:
+            keys = ("issues_detail", "encoding_issues", "issues", "errors", "issue_texts")
+        for key in keys:
             raw = details.get(key) or []
             if not isinstance(raw, list):
                 continue
             for item in raw:
                 parsed = _as_issue_dict(item)
                 if parsed:
-                    out.append(parsed)
+                    out.append(_enrich_from_message(parsed))
         # Nested integrity payload
         for nested_key in ("integrity_issues", "checks"):
             nested = details.get(nested_key)
@@ -43,23 +74,45 @@ def _collect_issue_lists(preflight: dict[str, Any] | None) -> list[dict[str, Any
                 for item in nested:
                     parsed = _as_issue_dict(item)
                     if parsed:
-                        out.append(parsed)
+                        out.append(_enrich_from_message(parsed))
     for blocker in preflight.get("blockers") or []:
         if not isinstance(blocker, dict):
             continue
         guidance = blocker.get("guidance") or {}
         details = blocker.get("details") or {}
-        for item in (details.get("encoding_issues") or details.get("issues") or []):
+        for item in (
+            details.get("issues_detail")
+            or details.get("encoding_issues")
+            or details.get("issues")
+            or []
+        ):
             parsed = _as_issue_dict(item)
             if parsed:
-                out.append(parsed)
+                out.append(_enrich_from_message(parsed))
         msg = blocker.get("message")
         if msg and not out:
-            out.append({"message": str(msg), "reason": str(msg)})
+            out.append(_enrich_from_message({"message": str(msg), "reason": str(msg)}))
         if isinstance(guidance, dict) and guidance.get("fix") and out:
             for row in out:
                 row.setdefault("suggested_fix", guidance.get("fix"))
     return out
+
+
+def _pair_key(issue: dict[str, Any]) -> tuple[str, str, str]:
+    """Dedupe G3 lossy + G9 integrity for the same source→target pair."""
+    source = str(issue.get("source") or issue.get("column") or issue.get("field") or "").lower()
+    target = str(issue.get("target") or "").lower()
+    reason = str(issue.get("reason") or issue.get("message") or "").lower()
+    # Same column→target type-contract findings collapse (G3 + G9 noise).
+    if source and target and (
+        "lossy" in reason
+        or "integrity failed" in reason
+        or "coercion" in reason
+        or "→" in reason
+        or "->" in reason
+    ):
+        return (source, target, "schema_coercion")
+    return (source, target, reason[:80])
 
 
 def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -69,6 +122,7 @@ def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dic
     seen: set[tuple[Any, ...]] = set()
     for issue in issues:
         column = str(issue.get("column") or issue.get("source") or issue.get("field") or "")
+        target = str(issue.get("target") or "") or None
         row_num = issue.get("row")
         try:
             row_i = int(row_num) if row_num is not None else None
@@ -83,10 +137,14 @@ def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dic
             or issue.get("suggested_fix")
             or "Preflight integrity finding"
         )
-        key = (row_i, column, reason[:120], str(value)[:80])
+        pair = _pair_key(issue)
+        key = (row_i, pair[0], pair[1], pair[2], str(value)[:80] if value is not None else "")
         if key in seen:
             continue
         seen.add(key)
+        # Prefer the richer specialty/lossy label over bare integrity text.
+        if "specialty polarity" in reason.lower() or reason.lower().startswith("lossy"):
+            pass
         # Never default schema/policy findings to strip_controls — that misleads
         # operators into encoding remediations for DDL/policy blockers.
         suggested_transform = issue.get("suggested_transform")
@@ -108,13 +166,16 @@ def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dic
         detail: dict[str, Any] = {
             "row": row_i,
             "column": column or None,
-            "target": issue.get("target") or column or None,
+            "target": target or column or None,
             "value": "" if value is None else str(value)[:500],
             "reason": reason[:500],
             "policy": "preflight_quarantine",
             "chars": issue.get("chars"),
             "suggested_transform": suggested_transform,
             "suggested_fix": issue.get("suggested_fix") or issue.get("suggested_fix"),
+            "suggested_target_type": issue.get("suggested_target_type"),
+            "source_type": issue.get("source_type"),
+            "target_type": issue.get("target_type"),
         }
         if column and value is not None:
             detail["values"] = {column: str(value)[:500]}

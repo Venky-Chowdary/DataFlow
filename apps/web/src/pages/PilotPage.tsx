@@ -13,7 +13,7 @@ import {
   ModelCapabilities,
   runScheduleNow,
 } from "../lib/api";
-import { AUTOMATION_CATEGORIES, AUTOMATION_IDEAS } from "../lib/automationIdeas";
+import { AUTOMATION_IDEAS } from "../lib/automationIdeas";
 import { useActiveData } from "../lib/DataContext";
 import {
   confirmPilotPending,
@@ -27,7 +27,6 @@ import { useConfirm } from "../components/ui/ConfirmDialog";
 import { renderSafeMarkdown } from "../lib/safeMarkdown";
 import { CopyIdChip } from "../components/ui/CopyIdChip";
 import { PageFrame } from "../components/ui/PageFrame";
-import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageShell } from "../components/ui/PageShell";
 import {
   createEmptySession,
@@ -83,7 +82,6 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
   const [activeId, setActiveId] = useState(boot.current.activeId);
   const [asideOpen, setAsideOpen] = useState(() => loadAsideOpen(true));
   const [input, setInput] = useState("");
-  const [category, setCategory] = useState("all");
   const [loading, setLoading] = useState(false);
   /** Which pending action is currently being confirmed — drives the Confirm button spinner. */
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
@@ -130,9 +128,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
     }
   }, [session.messages.length, loading]);
 
-  const ideas = category === "all"
-    ? AUTOMATION_IDEAS
-    : AUTOMATION_IDEAS.filter((i) => i.category === category);
+  const ideas = AUTOMATION_IDEAS;
 
   const applySafeActions = (actions?: CopilotAction[]) => {
     actions?.forEach((a) => {
@@ -448,28 +444,16 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
               </button>
               <button
                 type="button"
-                className="df2-btn df2-btn-ghost df2-btn-sm df2-pilot-aside-close"
+                className="df2-btn df2-btn-ghost df2-btn-sm df2-pilot-aside-collapse"
                 onClick={() => setAsideOpen(false)}
-                aria-label="Close recent chats"
-                title="Close recent chats"
+                aria-label="Collapse recent chats"
+                title="Collapse"
               >
-                <DtIcon name="x" size={14} />
+                <DtIcon name="chevron-left" size={14} />
               </button>
             </div>
 
             <div className="df2-pilot-aside-scroll">
-              <div className="df2-pilot-section-label">Categories</div>
-              <FilterTabs
-                ariaLabel="Automation ideas by category"
-                className="df2-pilot-categories"
-                value={category}
-                onChange={setCategory}
-                items={[
-                  { id: "all", label: "All" },
-                  ...AUTOMATION_CATEGORIES.filter((c) => c.id !== "all").map((c) => ({ id: c.id, label: c.label })),
-                ]}
-              />
-
               <div className="df2-pilot-section-label">
                 Recent chats
                 <span className="df2-pilot-session-count">
@@ -511,7 +495,6 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                   })
                 )}
               </div>
-
             </div>
           </>
         ) : (

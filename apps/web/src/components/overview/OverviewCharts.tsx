@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import type { DayThroughput, JobStatusSlice } from "../../lib/overviewAnalytics";
 
-const CHART_HEIGHT = 200;
+const CHART_HEIGHT = 140;
 
 interface ThroughputChartProps {
   series: DayThroughput[];

@@ -207,21 +207,57 @@
   gap: 8px;
 }
 
-.df2-app .df2-topbar-actions > .df2-btn,
-.df2-app .df2-topbar-actions > button {
-  height: 36px;
-  min-height: 36px;
-  box-sizing: border-box;
-  border-radius: 9px;
-  display: inline-flex;
+.df2-app .df2-api-offline-banner.df2-alert {
+  display: flex;
   align-items: center;
-  gap: 6px;
-  white-space: nowrap;
+  gap: 10px;
+  padding: 8px 14px;
+  margin: 0 0 8px;
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
 }
 
-.df2-app .df2-topbar-actions > .df2-btn {
-  padding: 0 14px;
+.df2-app .df2-api-offline-banner.df2-alert p {
+  margin: 0;
+  display: inline;
+  font-size: 12.5px;
+}
+
+.df2-app .df2-api-offline-banner.df2-alert strong {
+  margin-right: 0.35rem;
+}
+
+.df2-app .df2-topbar-actions > .df2-btn,
+.df2-app .df2-topbar-actions > button,
+.df2-app .df2-topbar-actions > .df2-system-pill,
+.df2-app .df2-topbar-actions .df2-btn {
+  height: 34px !important;
+  min-height: 34px !important;
+  max-height: 34px !important;
+  box-sizing: border-box !important;
+  border-radius: 9px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px;
+  white-space: nowrap;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  line-height: 1 !important;
+  font-size: 13px !important;
+}
+
+.df2-app .df2-topbar-actions > .df2-btn,
+.df2-app .df2-topbar-actions .df2-btn {
+  padding-left: 12px !important;
+  padding-right: 12px !important;
   font-weight: 600;
+}
+
+.df2-app .df2-topbar-actions .df2-btn-primary {
+  /* Match ghost/status height — brand fill only, not taller padding */
+  height: 34px !important;
+  min-height: 34px !important;
 }
 
 .df2-app .df2-topbar-actions .df2-btn-ghost.active {
@@ -449,12 +485,12 @@
 }
 
 .df2-app .df2-overview-v3-analytics > .df2-overview-v3-card {
-  min-height: 280px;
+  min-height: 200px;
 }
 
 .df2-app .df2-overview-v3-card--chart .df2-overview-v3-chart-body {
   flex: 1 1 auto;
-  min-height: 196px;
+  min-height: 120px;
 }
 
 /* Workspace row: main column + sticky rail, aligned tops */

@@ -796,7 +796,7 @@ function AppShell({
           aria-label="Expand Data Pilot"
           title="Expand Data Pilot"
         >
-          <DtIcon name="chevron-left" size={14} />
+          <DtIcon name="sparkle" size={14} />
           <span>Pilot</span>
         </button>
       )}

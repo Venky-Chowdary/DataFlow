@@ -6,6 +6,9 @@ import { FilterBar } from "../ui/FilterBar";
 import { Connector } from "../../lib/types";
 import { getConnectorDefaults } from "../../lib/connectorTypes";
 
+/** Curated engines shown first — matches TransferPage FALLBACK_DEST_TYPES. */
+const FEATURED_DEST_IDS = ["postgresql", "mongodb", "mysql", "snowflake", "bigquery"] as const;
+
 interface DestinationPickerProps {
   connectors: Connector[];
   connectorId: string;
@@ -14,6 +17,12 @@ interface DestinationPickerProps {
   onSelectConnector: (id: string) => void;
   onSelectManual: () => void;
   onSelectType: (type: string) => void;
+}
+
+function matchesEngineQuery(d: { id: string; label: string }, q: string): boolean {
+  if (!q) return true;
+  const hay = `${d.id} ${d.label}`.toLowerCase();
+  return hay.includes(q);
 }
 
 export function DestinationPicker({
@@ -25,13 +34,12 @@ export function DestinationPicker({
   onSelectManual,
   onSelectType,
 }: DestinationPickerProps) {
+  // Filter tabs only reflect saved connector types — never dump the full catalog.
   const typeFilters = useMemo(() => {
-    const fromConnectors = [...new Set(connectors.map((c) => c.type))];
-    const fromLive = liveDestTypes.map((d) => d.id);
-    const merged = [...new Set([...fromConnectors, ...fromLive])].sort();
+    const fromConnectors = [...new Set(connectors.map((c) => c.type))].sort();
     return [
       { id: "all", label: "All" },
-      ...merged.map((id) => ({
+      ...fromConnectors.map((id) => ({
         id,
         label: liveDestTypes.find((d) => d.id === id)?.label ?? getConnectorDefaults(id).label,
       })),
@@ -39,13 +47,41 @@ export function DestinationPicker({
   }, [connectors, liveDestTypes]);
 
   const [filter, setFilter] = useState("all");
+  const [connectorQuery, setConnectorQuery] = useState("");
+  const [engineQuery, setEngineQuery] = useState("");
+  const [showAllEngines, setShowAllEngines] = useState(false);
 
-  const filtered = useMemo(
-    () => connectors.filter((c) => filter === "all" || c.type === filter),
-    [connectors, filter],
-  );
+  const filtered = useMemo(() => {
+    const cq = connectorQuery.trim().toLowerCase();
+    return connectors.filter((c) => {
+      if (filter !== "all" && c.type !== filter) return false;
+      if (!cq) return true;
+      const hay = `${c.name} ${c.type} ${c.database || ""} ${c.host || ""}`.toLowerCase();
+      return hay.includes(cq);
+    });
+  }, [connectors, filter, connectorQuery]);
 
   const manualActive = !connectorId;
+  const query = engineQuery.trim().toLowerCase();
+
+  const featuredEngines = useMemo(() => {
+    const byId = new Map(liveDestTypes.map((d) => [d.id, d]));
+    const featured = FEATURED_DEST_IDS
+      .map((id) => byId.get(id) ?? { id, label: getConnectorDefaults(id).label })
+      .filter((d) => matchesEngineQuery(d, query));
+    return featured;
+  }, [liveDestTypes, query]);
+
+  const otherEngines = useMemo(() => {
+    const featuredSet = new Set<string>(FEATURED_DEST_IDS);
+    return liveDestTypes
+      .filter((d) => !featuredSet.has(d.id) && matchesEngineQuery(d, query))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [liveDestTypes, query]);
+
+  const showBrowseAll = showAllEngines || Boolean(query);
+  const visibleOthers = showBrowseAll ? otherEngines : [];
+  const hiddenCount = otherEngines.length;
 
   return (
     <div className="df2-dest-picker">
@@ -56,15 +92,30 @@ export function DestinationPicker({
             Pick a saved connection — the route updates to that system, not a default engine.
           </p>
         </div>
-        <FilterBar ariaLabel="Filter destinations by type">
-          <FilterTabs
-            ariaLabel="Filter destinations by type"
-            value={filter}
-            onChange={setFilter}
-            items={typeFilters}
-          />
-        </FilterBar>
+        {connectors.length > 0 && typeFilters.length > 1 && (
+          <FilterBar ariaLabel="Filter destinations by type">
+            <FilterTabs
+              ariaLabel="Filter destinations by type"
+              value={filter}
+              onChange={setFilter}
+              items={typeFilters}
+            />
+          </FilterBar>
+        )}
       </div>
+
+      {connectors.length > 3 && (
+        <label className="df2-dest-connector-search">
+          <DtIcon name="search" size={13} />
+          <input
+            type="search"
+            value={connectorQuery}
+            onChange={(e) => setConnectorQuery(e.target.value)}
+            placeholder="Search connections…"
+            aria-label="Search destination connections"
+          />
+        </label>
+      )}
 
       <div className="df2-dest-connector-grid" role="listbox" aria-label="Destination connectors">
         {filtered.map((c) => (
@@ -107,12 +158,28 @@ export function DestinationPicker({
 
       {manualActive && (
         <div className="df2-dest-manual-types">
-          <span className="df2-dest-manual-types-label">Engine</span>
-          <div className="df2-dest-type-chips">
-            {liveDestTypes.map((d) => (
+          <div className="df2-dest-engine-toolbar">
+            <span className="df2-dest-manual-types-label">Engine</span>
+            <label className="df2-dest-engine-search">
+              <DtIcon name="search" size={13} />
+              <input
+                type="search"
+                value={engineQuery}
+                onChange={(e) => setEngineQuery(e.target.value)}
+                placeholder="Search engines…"
+                aria-label="Search destination engines"
+              />
+            </label>
+          </div>
+
+          <p className="df2-dest-engine-hint">Popular engines</p>
+          <div className="df2-dest-type-chips" role="listbox" aria-label="Featured destination engines">
+            {featuredEngines.map((d) => (
               <button
                 key={d.id}
                 type="button"
+                role="option"
+                aria-selected={destType === d.id}
                 className={`df2-dest-type-chip${destType === d.id ? " active" : ""}`}
                 onClick={() => onSelectType(d.id)}
               >
@@ -120,7 +187,61 @@ export function DestinationPicker({
                 {d.label}
               </button>
             ))}
+            {featuredEngines.length === 0 && (
+              <span className="df2-label-hint">No featured engines match “{engineQuery.trim()}”.</span>
+            )}
           </div>
+
+          {hiddenCount > 0 && !showBrowseAll && (
+            <button
+              type="button"
+              className="df2-btn df2-btn-sm df2-btn-ghost df2-dest-engine-more"
+              onClick={() => setShowAllEngines(true)}
+            >
+              Browse all engines ({hiddenCount})
+            </button>
+          )}
+
+          {showBrowseAll && (
+            <>
+              <div className="df2-dest-engine-more-head">
+                <p className="df2-dest-engine-hint">
+                  {query ? `Matches (${visibleOthers.length})` : `All engines (${visibleOthers.length})`}
+                </p>
+                {!query && (
+                  <button
+                    type="button"
+                    className="df2-btn df2-btn-sm df2-btn-ghost"
+                    onClick={() => setShowAllEngines(false)}
+                  >
+                    Show less
+                  </button>
+                )}
+              </div>
+              <div
+                className="df2-dest-type-chips df2-dest-type-chips--scroll"
+                role="listbox"
+                aria-label="All destination engines"
+              >
+                {visibleOthers.map((d) => (
+                  <button
+                    key={d.id}
+                    type="button"
+                    role="option"
+                    aria-selected={destType === d.id}
+                    className={`df2-dest-type-chip${destType === d.id ? " active" : ""}`}
+                    onClick={() => onSelectType(d.id)}
+                  >
+                    <ConnectorIcon id={d.id} size={14} />
+                    {d.label}
+                  </button>
+                ))}
+                {visibleOthers.length === 0 && (
+                  <span className="df2-label-hint">No engines match “{engineQuery.trim()}”.</span>
+                )}
+              </div>
+            </>
+          )}
         </div>
       )}
 
@@ -129,7 +250,12 @@ export function DestinationPicker({
           No saved connectors yet — use Custom connection or add connectors in the Connectors page.
         </p>
       )}
+
+      {manualActive && !destType && (
+        <p className="df2-label-hint">
+          Select an engine above. The route stays empty until you choose a destination.
+        </p>
+      )}
     </div>
   );
-
 }

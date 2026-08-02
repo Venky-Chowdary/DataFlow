@@ -47,6 +47,8 @@ interface TransferResultDashboardProps {
   onOpenChildJob?: (jobId: string) => void;
   /** Map / Validate repair mappings for quarantine propose/apply. */
   repairMappings?: RepairMapping[];
+  /** When true, omit internal action bar — parent renders shared wizard footer. */
+  hideActions?: boolean;
 }
 
 function fmt(value: string | number | undefined): string | null {
@@ -90,6 +92,7 @@ export function TransferResultDashboard({
   onResume,
   onOpenChildJob,
   repairMappings = [],
+  hideActions = false,
 }: TransferResultDashboardProps) {
   const { setActiveData } = useActiveData();
   const [proofOpen, setProofOpen] = useState(false);
@@ -728,26 +731,28 @@ export function TransferResultDashboard({
         )}
       </div>
 
-      <div className="df2-result-actions df2-result-actions-remediate">
-        {onOpenValidate && (!result.success || hasIntegrityLoss) && (
-          <button type="button" className="df2-btn df2-btn-primary" onClick={onOpenValidate}>
-            <DtIcon name="gate" size={14} /> Open Validate
+      {!hideActions && (
+        <div className="df2-result-actions df2-result-actions-remediate">
+          {onOpenValidate && (!result.success || hasIntegrityLoss) && (
+            <button type="button" className="df2-btn df2-btn-primary" onClick={onOpenValidate}>
+              <DtIcon name="gate" size={14} /> Open Validate
+            </button>
+          )}
+          <button type="button" className="df2-btn df2-btn-primary" onClick={onNewTransfer}>
+            New transfer
           </button>
-        )}
-        <button type="button" className="df2-btn df2-btn-primary" onClick={onNewTransfer}>
-          New transfer
-        </button>
-        {onViewJobs && (
-          <button type="button" className="df2-btn" onClick={onViewJobs}>
-            <DtIcon name="jobs" size={14} /> Job Theater
-          </button>
-        )}
-        {onSchedule && (
-          <button type="button" className="df2-btn" onClick={onSchedule}>
-            <DtIcon name="activity" size={14} /> Schedule route
-          </button>
-        )}
-      </div>
+          {onViewJobs && (
+            <button type="button" className="df2-btn" onClick={onViewJobs}>
+              <DtIcon name="jobs" size={14} /> Job Theater
+            </button>
+          )}
+          {onSchedule && (
+            <button type="button" className="df2-btn" onClick={onSchedule}>
+              <DtIcon name="activity" size={14} /> Schedule route
+            </button>
+          )}
+        </div>
+      )}
 
       <section className="df2-job-log-panel is-result is-open" aria-label="Job event log">
         <LiveEventLog

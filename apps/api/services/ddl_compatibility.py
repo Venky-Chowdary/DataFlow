@@ -18,6 +18,8 @@ from services.type_system import (
     is_lossy_coercion,
     is_precision_collapse_coercion,
     normalize_logical_type,
+    specialty_carrier_would_collapse,
+    string_width_would_narrow,
     vector_dim_mismatch,
     vector_dim_unknown_for_native,
 )
@@ -320,25 +322,45 @@ def evaluate_ddl_compatibility(
                     note = " — ARRAY element type contract mismatch"
                 elif "unsigned" in src_type.lower():
                     note = " — UNSIGNED→signed overflow risk (widen to BIGINT/DECIMAL)"
-                elif src_logical in {"string", "text"} and tgt_logical in {"string", "text"}:
+                elif specialty_carrier_would_collapse(src_type, tgt_type):
+                    note = (
+                        " — specialty polarity collapse "
+                        "(prefer VARCHAR(24)/BINARY(12) for ObjectId; bare TEXT/VARCHAR drops carrier domain)"
+                    )
+                elif (
+                    src_logical in {"string", "text"}
+                    and tgt_logical in {"string", "text"}
+                    and string_width_would_narrow(src_type, tgt_type)
+                ):
                     note = " — VARCHAR/CHAR width narrowing (declared capacity; not soft-passed by samples)"
                 issues.append(
                     f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type}){note}"
                 )
 
-        # Declared width narrow without needing samples (body rows can exceed head).
+        # Declared width / specialty collapse without needing samples.
         if (
             not schemaless
             and tgt_type
             and is_precision_collapse_coercion(src_type, tgt_type)
-            and normalize_logical_type(src_type) in {"string", "text"}
-            and normalize_logical_type(tgt_type) in {"string", "text"}
         ):
-            msg = (
-                f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type}) "
-                f"— VARCHAR/CHAR width narrowing (declared capacity; not soft-passed by samples)"
-            )
-            if msg not in issues:
+            if specialty_carrier_would_collapse(src_type, tgt_type):
+                msg = (
+                    f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type}) "
+                    "— specialty polarity collapse "
+                    "(prefer VARCHAR(24)/BINARY(12) for ObjectId; bare TEXT/VARCHAR drops carrier domain)"
+                )
+            elif (
+                normalize_logical_type(src_type) in {"string", "text"}
+                and normalize_logical_type(tgt_type) in {"string", "text"}
+                and string_width_would_narrow(src_type, tgt_type)
+            ):
+                msg = (
+                    f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type}) "
+                    "— VARCHAR/CHAR width narrowing (declared capacity; not soft-passed by samples)"
+                )
+            else:
+                msg = ""
+            if msg and msg not in issues:
                 issues.append(msg)
 
         if not schemaless and sample_rows and tgt_type:

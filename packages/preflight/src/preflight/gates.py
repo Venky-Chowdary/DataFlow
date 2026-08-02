@@ -419,20 +419,54 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     f"{label} — UNSIGNED→signed integer overflow risk "
                     "(not soft-passed by samples; widen to BIGINT/DECIMAL)"
                 )
-            elif normalize_logical_type and normalize_logical_type(
-                source_col.inferred_type
-            ) in {"string", "text"} and normalize_logical_type(
-                target.inferred_type
-            ) in {"string", "text"}:
-                label = (
-                    f"{label} — VARCHAR/CHAR width narrowing "
-                    "(declared capacity shrinks; not soft-passed by samples)"
-                )
             elif platform_decimal_trunc:
                 label = (
                     f"{label} — destination DECIMAL platform cap "
                     "(not soft-passed by samples)"
                 )
+            else:
+                # Specialty polarity (ObjectId→TEXT, …) must not be mislabeled
+                # as VARCHAR width narrowing — OBJECTID logical family is string.
+                try:
+                    from services.type_system import (
+                        specialty_carrier_base,
+                        specialty_carrier_would_collapse,
+                        string_width_would_narrow,
+                    )
+
+                    if specialty_carrier_would_collapse(
+                        source_col.inferred_type, target.inferred_type
+                    ):
+                        spec = specialty_carrier_base(source_col.inferred_type) or "specialty"
+                        label = (
+                            f"{label} — {spec} specialty polarity collapse "
+                            "(prefer VARCHAR(24)/BINARY(12) for ObjectId; "
+                            "bare TEXT/VARCHAR drops carrier domain)"
+                        )
+                    elif (
+                        normalize_logical_type
+                        and normalize_logical_type(source_col.inferred_type)
+                        in {"string", "text"}
+                        and normalize_logical_type(target.inferred_type)
+                        in {"string", "text"}
+                        and string_width_would_narrow(
+                            source_col.inferred_type, target.inferred_type
+                        )
+                    ):
+                        label = (
+                            f"{label} — VARCHAR/CHAR width narrowing "
+                            "(declared capacity shrinks; not soft-passed by samples)"
+                        )
+                except ImportError:
+                    if normalize_logical_type and normalize_logical_type(
+                        source_col.inferred_type
+                    ) in {"string", "text"} and normalize_logical_type(
+                        target.inferred_type
+                    ) in {"string", "text"}:
+                        label = (
+                            f"{label} — VARCHAR/CHAR width narrowing "
+                            "(declared capacity shrinks; not soft-passed by samples)"
+                        )
 
         document_collapse = bool(
             is_nested_document_collapse
@@ -524,23 +558,60 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 })
         elif fidelity_collapse or field_shape_loss:
             issues.append(label)
+            # Always emit structured detail so Inspect Quarantine can show
+            # source/target even when no per-column value probe ran.
+            detail = {
+                "source": m.source,
+                "target": m.target,
+                "column": m.source,
+                "source_type": source_col.inferred_type,
+                "target_type": target.inferred_type,
+                "severity": "block",
+                "fidelity_collapse": fidelity_collapse,
+                "nested_shape_collapse": field_shape_loss,
+                "reason": label,
+                "message": label,
+                "sampled": 0,
+                "failed": 0,
+                "sentinel_nulls": 0,
+                "sample_failures": [],
+                "suggested_fix": "",
+                "suggested_target_type": None,
+                "suggested_transform": None,
+            }
             if probe is not None:
-                issues_detail.append({
-                    "source": m.source,
-                    "target": m.target,
-                    "source_type": source_col.inferred_type,
-                    "target_type": target.inferred_type,
-                    "severity": "block",
-                    "fidelity_collapse": fidelity_collapse,
-                    "nested_shape_collapse": field_shape_loss,
+                detail.update({
                     "sampled": probe.get("sampled", 0),
                     "failed": probe.get("failed", 0),
                     "sentinel_nulls": probe.get("sentinel_nulls", 0),
                     "sample_failures": probe.get("sample_failures", []),
-                    "suggested_fix": probe.get("suggested_fix", ""),
+                    "suggested_fix": probe.get("suggested_fix", "") or "",
                     "suggested_target_type": probe.get("suggested_target_type"),
                     "suggested_transform": probe.get("suggested_transform"),
                 })
+            else:
+                # Schema-contract specialty / width collapses: guide remap.
+                try:
+                    from services.type_system import (
+                        specialty_carrier_would_collapse,
+                        create_new_mapping_target_type,
+                    )
+
+                    if specialty_carrier_would_collapse(
+                        source_col.inferred_type, target.inferred_type
+                    ):
+                        suggested = create_new_mapping_target_type(
+                            source_col.inferred_type,
+                            getattr(ctx.plan.destination, "db_type", "") or "",
+                        )
+                        detail["suggested_target_type"] = suggested
+                        detail["suggested_fix"] = (
+                            f"Remap target type to {suggested} (or create-new "
+                            "with that DDL) — bare TEXT/VARCHAR drops specialty domain."
+                        )
+                except ImportError:
+                    pass
+            issues_detail.append(detail)
         elif document_collapse and not intentional_json:
             mode = (ctx.plan.validation_mode or "strict").strip().lower()
             if mode in {"balanced", "review"}:

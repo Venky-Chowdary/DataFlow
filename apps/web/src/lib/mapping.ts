@@ -1014,7 +1014,11 @@ export function mappingHealthSummary(
     headline = `${existingTypeConflict} existing-column type conflict(s)`;
     detail = "Remap to a compatible column or ALTER the destination — Map Widen cannot change DDL.";
   } else if (needsReview > 0 || lowConfidence > 0) {
-    headline = `${needsReview + lowConfidence} mapping(s) need review`;
+    // One row can be both requiresReview and low-confidence — count unique mappings.
+    const reviewCount = active.filter(
+      (m) => !m.approved && (m.requiresReview || m.confidence < threshold),
+    ).length;
+    headline = `${reviewCount} mapping(s) need review`;
     detail = `Approve or fix low-confidence / specialty rows (threshold ${(threshold * 100).toFixed(0)}%).`;
   } else if (specialtyIdentity > 0) {
     headline = `${specialtyIdentity} specialty type(s) use identity`;

@@ -146,7 +146,11 @@ function PreviewBody({
       </div>
 
       {showFieldStrip && (
-        <div className="df2-structure-field-block">
+        <details className="df2-structure-field-block">
+          <summary className="df2-structure-field-summary">
+            {previewCols.length} fields
+            <span>Expand field chips — sample rows stay visible below</span>
+          </summary>
           <div className="df2-structure-field-strip" aria-label="Detected fields">
             {stripCols.map((col) => (
               <span
@@ -177,7 +181,7 @@ function PreviewBody({
               </button>
             )}
           </div>
-        </div>
+        </details>
       )}
 
       {previewRows.length > 0 && allowJson && view === "json" ? (

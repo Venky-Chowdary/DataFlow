@@ -865,13 +865,13 @@ export function TransferPage({
     [samplePreviewRows, currentSourceColumns, primaryKeyField],
   );
 
+  /** Opens Advanced drawer in-place — never navigates away from Map / Validate. */
   const openIdentitySettings = useCallback(() => {
-    setStep(STEP_DESTINATION);
     setAdvancedOpen(true);
     toast({
-      title: "Identity & sync settings",
+      title: "Advanced settings",
       message:
-        "Change the primary key field or sync mode here, then return to Validate and Re-run. Mapping approve cannot remove duplicate source rows.",
+        "Primary key, sync mode, cursor, and write policies. Stay on this step — close the drawer when done, then continue or re-run Validate.",
       tone: "info",
     });
   }, [toast]);
@@ -4289,7 +4289,7 @@ export function TransferPage({
         </div>
       </header>
 
-      <div className={`df2-transfer-studio-body ${step === STEP_MAP ? "is-map-step is-full-width" : ""}${step === STEP_VALIDATE ? " is-validate-step" : " is-full-width"}`}>
+      <div className={`df2-transfer-studio-body ${step === STEP_MAP ? "is-map-step is-full-width" : ""}${step === STEP_VALIDATE ? " is-validate-step is-full-width" : " is-full-width"}`}>
       <main className="df2-transfer-main-panel" key={step}>
       {step === STEP_MAP && columnMappings.length > 0 && !analyzing && (
         <TransferMapStep
@@ -4444,6 +4444,11 @@ export function TransferPage({
                 <label className="df2-label">Where is your data?</label>
                 <SourceKindTiles
                   value={sourceKind}
+                  hideHint={
+                    (sourceKind === "file" && Boolean(parsed))
+                    || (sourceKind === "database" && Boolean(sourceConnectorId || currentSourceColumns.length))
+                    || (sourceKind === "cloud" && Boolean(cloudPath))
+                  }
                   onChange={(kind) => {
                     setSourceKind(kind);
                     setSourceConnectorId("");
@@ -4793,92 +4798,99 @@ export function TransferPage({
       {step === STEP_DESTINATION && (
       <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-dest-step">
         <div className="df2-card-body">
-          <div className="df2-dest-toolbar">
-            <div className="df2-field df2-dest-mode-field">
-              <label className="df2-label">Destination Mode</label>
-              <FilterBar ariaLabel="Destination mode">
-                <FilterTabs
-                  ariaLabel="Destination mode"
-                  value={destKindMode}
-                  onChange={(mode) => {
-                    setDestKindMode(mode);
-                    resetRouteForDestinationChange();
-                    if (mode === "file_export") void loadTransferPlan();
-                  }}
-                  items={[
-                    { id: "database", label: "Database / Warehouse" },
-                    { id: "file_export", label: "File Export" },
-                  ]}
-                />
-              </FilterBar>
-            </div>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => setAdvancedOpen(true)}
-              leadingIcon={<DtIcon name="settings" size={14} />}
-              title="Sync mode, primary key, cursor, and write policies"
-            >
-              Advanced
-            </Button>
-          </div>
+          <div className="df2-dest-step-layout">
+            <div className="df2-dest-step-left">
+              <div className="df2-dest-toolbar">
+                <div className="df2-field df2-dest-mode-field">
+                  <label className="df2-label">Destination Mode</label>
+                  <div className="df2-dest-mode-row">
+                    <FilterBar ariaLabel="Destination mode">
+                      <FilterTabs
+                        ariaLabel="Destination mode"
+                        value={destKindMode}
+                        onChange={(mode) => {
+                          setDestKindMode(mode);
+                          resetRouteForDestinationChange();
+                        }}
+                        items={[
+                          { id: "database", label: "Database / Warehouse" },
+                          { id: "file_export", label: "File Export" },
+                        ]}
+                      />
+                    </FilterBar>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                  className="df2-dest-advanced-btn"
+                  onClick={() => setAdvancedOpen(true)}
+                  leadingIcon={<DtIcon name="settings" size={14} />}
+                  title="Advanced settings — sync mode, primary key, cursor, and write policies"
+                >
+                  Advanced
+                </Button>
+                  </div>
+                </div>
+              </div>
 
-          {destKindMode === "file_export" ? (
-            <>
-              <div className="df2-field">
-                <label className="df2-label">Export Format</label>
-                <FilterBar ariaLabel="Export format">
-                  <FilterTabs
-                    ariaLabel="Export format"
-                    value={exportFormat}
-                    onChange={(format) => {
-                      setExportFormat(format);
-                      setTransferPlan(null);
-                    }}
-                    items={liveExportFormats.map((f) => ({ id: f.id, label: f.label }))}
-                  />
-                </FilterBar>
-              </div>
-              <div className="df2-field">
-                <label className="df2-label">Output path (optional)</label>
-                <input
-                  className="df2-input"
-                  value={destOutputPath}
-                  onChange={(e) => setDestOutputPath(e.target.value)}
-                  placeholder="exports/my-export.csv — leave empty for server exports folder"
+              {destKindMode === "file_export" ? (
+                <div className="df2-field">
+                  <label className="df2-label">Export Format</label>
+                  <FilterBar ariaLabel="Export format">
+                    <FilterTabs
+                      ariaLabel="Export format"
+                      value={exportFormat}
+                      onChange={(format) => {
+                        setExportFormat(format);
+                        setTransferPlan(null);
+                      }}
+                      items={liveExportFormats.map((f) => ({ id: f.id, label: f.label }))}
+                    />
+                  </FilterBar>
+                </div>
+              ) : (
+                <DestinationPicker
+                  connectors={transferDestConnectors}
+                  connectorId={connectorId}
+                  destType={destType}
+                  liveDestTypes={liveDestTypes}
+                  onSelectConnector={applyConnectorSelection}
+                  onSelectManual={() => {
+                    setConnectorId("");
+                    resetRouteForDestinationChange();
+                  }}
+                  onSelectType={(type) => {
+                    resetRouteForDestinationChange();
+                    setDestType(type);
+                    setConnectorId("");
+                    setTargetCollection("");
+                    setDestHost(getConnectorDefaults(type).host);
+                    setDestPort(defaultPortForType(type));
+                    setDestConnectionString("");
+                    setDestSchema(defaultSchemaForDriver(type));
+                    if (resolveDriverType(type) === "iceberg") {
+                      setTargetDb("");
+                    }
+                  }}
                 />
-                <p className="df2-label-hint">
-                  Leave empty to generate a downloadable file in the server exports folder.
-                </p>
-              </div>
-            </>
+              )}
+            </div>
+
+            <div className="df2-dest-step-right">
+          {destKindMode === "file_export" ? (
+            <div className="df2-field">
+              <label className="df2-label">Output path (optional)</label>
+              <input
+                className="df2-input"
+                value={destOutputPath}
+                onChange={(e) => setDestOutputPath(e.target.value)}
+                placeholder={`exports/my-export.${exportFormat || "json"} — leave empty for server exports folder`}
+              />
+              <p className="df2-label-hint">
+                Leave empty to generate a downloadable {exportFormat.toUpperCase()} file in the server exports folder.
+              </p>
+            </div>
           ) : (
             <>
-          <DestinationPicker
-            connectors={transferDestConnectors}
-            connectorId={connectorId}
-            destType={destType}
-            liveDestTypes={liveDestTypes}
-            onSelectConnector={applyConnectorSelection}
-            onSelectManual={() => {
-              setConnectorId("");
-              resetRouteForDestinationChange();
-            }}
-            onSelectType={(type) => {
-              resetRouteForDestinationChange();
-              setDestType(type);
-              setConnectorId("");
-              setTargetCollection("");
-              setDestHost(getConnectorDefaults(type).host);
-              setDestPort(defaultPortForType(type));
-              setDestConnectionString("");
-              setDestSchema(defaultSchemaForDriver(type));
-              if (resolveDriverType(type) === "iceberg") {
-                setTargetDb("");
-              }
-            }}
-          />
-
           {!connectorId && destType && destType !== "bigquery" && destDriverType === "iceberg" && (
           <div className="df2-dest-section df2-dest-manual-fields df2-dest-iceberg">
             <label className="df2-label">Iceberg warehouse</label>
@@ -4977,15 +4989,9 @@ export function TransferPage({
             </p>
           )}
 
-          {!destType && destKindMode === "database" && (
-            <p className="df2-label-hint" style={{ marginTop: 8 }}>
-              Select a saved connector or Custom connection engine above. The route stays empty until you choose a destination.
-            </p>
-          )}
-
           {destType ? (
             <>
-          <div className="df2-dest-section df2-dest-target-fields">
+          <div className="df2-dest-section df2-dest-target-fields df2-dest-right-section">
             <div className="df2-dest-target-head">
               <label className="df2-label" id="dest-target-location-label">
                 Target location
@@ -5204,7 +5210,11 @@ export function TransferPage({
             </p>
           )}
             </>
-          ) : null}
+          ) : (
+            <p className="df2-label-hint df2-dest-right-empty">
+              Select a saved connector or engine on the left to configure the destination.
+            </p>
+          )}
             </>
           )}
 
@@ -5219,26 +5229,17 @@ export function TransferPage({
                 {VALIDATION_MODES.find((m) => m.id === validationMode)?.label ?? validationMode} validation
               </p>
               <p className="df2-label-hint">
-                Destination selection stays on this page. Overwrite, CDC, SCD2, mirror, cursors, and drift
-                policies open in Advanced settings.
+                Overwrite, CDC, SCD2, mirror, cursors, and drift policies open from Advanced.
               </p>
             </div>
             <div className="df2-dest-sync-summary-actions">
               <span className={`df2-badge ${streamNeedsReview ? "df2-badge-run" : "df2-badge-live"}`}>
                 {currentSourceColumns.length ? (streamNeedsReview ? "Review required" : "Ready") : "Waiting for schema"}
               </span>
-              <Button
-                size="sm"
-                variant="secondary"
-                onClick={() => setAdvancedOpen(true)}
-                leadingIcon={<DtIcon name="settings" size={14} />}
-              >
-                Advanced settings
-              </Button>
             </div>
             {(syncMode === "scd2" || syncMode === "mirror") && requiresPrimaryKey && !primaryKeyField && (
               <p className="df2-label-hint df2-dest-sync-warning">
-                {syncMode === "scd2" ? "SCD Type 2" : "Mirror"} requires a primary key — open Advanced settings to set it.
+                {syncMode === "scd2" ? "SCD Type 2" : "Mirror"} requires a primary key — open Advanced to set it.
               </p>
             )}
             {isMultiStreamSource && syncMode === "cdc" && (
@@ -5260,130 +5261,8 @@ export function TransferPage({
               </p>
             )}
           </div>
-
-          <DestinationAdvancedDrawer
-            open={advancedOpen}
-            onClose={() => setAdvancedOpen(false)}
-            syncModes={SYNC_MODES}
-            schemaPolicies={SCHEMA_POLICIES}
-            validationModes={VALIDATION_MODES}
-            dateLocales={DATE_LOCALES}
-            syncMode={syncMode}
-            schemaPolicy={schemaPolicy}
-            validationMode={validationMode}
-            dateLocale={dateLocale}
-            backfillNewFields={backfillNewFields}
-            streamNames={advancedStreamNames}
-            streamFields={streamFields}
-            defaultCursor={cursorField}
-            defaultPrimaryKey={primaryKeyField}
-            sourceColumns={currentSourceColumns}
-            sourceSchema={currentSourceSchema}
-            syncModeLabel={syncModeLabel}
-            schemaPolicyLabel={schemaPolicyLabel}
-            requiresCursor={requiresCursor}
-            requiresPrimaryKey={requiresPrimaryKey}
-            streamNeedsReview={streamNeedsReview}
-            suggestedCursor={cursorCandidate}
-            suggestedPrimaryKey={primaryKeyCandidate}
-            uniqueKeySuggestions={uniqueKeySuggestions}
-            snapshotMode={snapshotMode}
-            onSnapshotModeChange={setSnapshotMode}
-            allowAppendOnly={allowAppendOnly}
-            onAllowAppendOnlyChange={setAllowAppendOnly}
-            multiSubnetFailover={multiSubnetFailover}
-            onMultiSubnetFailoverChange={setMultiSubnetFailover}
-            showMultiSubnetFailover={
-              syncMode === "cdc"
-              && ["sqlserver", "mssql", "azure_sql_database", "microsoft_sql_server", "amazon_rds_sql_server"].includes(
-                resolveDriverType(sourceConnector?.type || ""),
-              )
-            }
-            cdcRowFilter={cdcRowFilter}
-            onCdcRowFilterChange={setCdcRowFilter}
-            showCdcRowFilter={
-              syncMode === "cdc"
-              && ["sqlserver", "mssql", "azure_sql_database", "microsoft_sql_server", "amazon_rds_sql_server"].includes(
-                resolveDriverType(sourceConnector?.type || ""),
-              )
-            }
-            writeViaStaging={writeViaStaging}
-            onWriteViaStagingChange={setWriteViaStaging}
-            showVectorOptions={
-              destDriverType === "pgvector" ||
-              destDriverType === "qdrant" ||
-              destDriverType === "weaviate" ||
-              destDriverType === "pinecone" ||
-              destDriverType === "milvus"
-            }
-            vectorContentColumn={vectorContentColumn}
-            vectorEmbeddingColumn={vectorEmbeddingColumn}
-            vectorMetadataColumns={vectorMetadataColumns}
-            vectorEmbeddingModel={vectorEmbeddingModel}
-            vectorChunkSize={vectorChunkSize}
-            vectorChunkOverlap={vectorChunkOverlap}
-            onVectorContentColumnChange={setVectorContentColumn}
-            onVectorEmbeddingColumnChange={setVectorEmbeddingColumn}
-            onVectorMetadataColumnsChange={setVectorMetadataColumns}
-            onVectorEmbeddingModelChange={setVectorEmbeddingModel}
-            onVectorChunkSizeChange={setVectorChunkSize}
-            onVectorChunkOverlapChange={setVectorChunkOverlap}
-            vectorRoutingFields={vectorRoutingFields}
-            vectorRoutingLoading={vectorRoutingLoading}
-            vectorExcludePiiColumns={vectorExcludePiiColumns}
-            onApplyVectorRouting={() => void runVectorRouting(true)}
-            vectorDurableCache={vectorDurableCache}
-            onVectorDurableCacheChange={setVectorDurableCache}
-            embeddingCacheStats={embeddingCacheStats}
-            embeddingCacheBusy={embeddingCacheBusy}
-            onRefreshEmbeddingCache={() => void refreshEmbeddingCacheStats()}
-            onClearEmbeddingCache={() => void handleClearEmbeddingCache()}
-            priorityColumn={priorityColumn}
-            priorityDirection={priorityDirection}
-            rowLimit={rowLimit}
-            onPriorityColumnChange={setPriorityColumn}
-            onPriorityDirectionChange={setPriorityDirection}
-            onRowLimitChange={setRowLimit}
-            onSyncModeChange={setSyncMode}
-            onSchemaPolicyChange={(policy) => {
-              setSchemaPolicy(policy);
-              if (policy === "propagate_columns" || policy === "propagate_all") {
-                setBackfillNewFields(true);
-              } else {
-                // Leaving propagate must clear the stuck toggle — otherwise Execute
-                // fails with "Backfill new fields requires automatic column propagation"
-                // after Validate already passed under manual_review.
-                setBackfillNewFields(false);
-              }
-            }}
-            onValidationModeChange={setValidationMode}
-            onDateLocaleChange={setDateLocale}
-            onBackfillChange={setBackfillNewFields}
-            onStreamCursorChange={(stream, value) => {
-              setStreamFields((prev) => ({
-                ...prev,
-                [stream]: {
-                  cursorField: value,
-                  primaryKeyField: prev[stream]?.primaryKeyField ?? primaryKeyField,
-                },
-              }));
-              if (!isMultiStreamSource || stream === advancedStreamNames[0]) {
-                setCursorField(value);
-              }
-            }}
-            onStreamPrimaryKeyChange={(stream, value) => {
-              setStreamFields((prev) => ({
-                ...prev,
-                [stream]: {
-                  cursorField: prev[stream]?.cursorField ?? cursorField,
-                  primaryKeyField: value,
-                },
-              }));
-              if (!isMultiStreamSource || stream === advancedStreamNames[0]) {
-                setPrimaryKeyField(value);
-              }
-            }}
-          />
+            </div>
+          </div>
 
           {destKindMode === "database" && destColumns.length > 0 && !destSchemaLoading && (
             <div className="df2-dest-schema-preview">
@@ -5451,7 +5330,8 @@ export function TransferPage({
       )}
 
       {step === STEP_VALIDATE && (
-        <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-validate-step df2-validate-split df2-validate-dashboard-host">
+        <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-validate-step df2-validate-dashboard-host">
+          <div className="df2-card-body df2-validate-body">
           <ValidateDashboard
             preflight={preflight}
             running={preflighting}
@@ -5566,6 +5446,54 @@ export function TransferPage({
               });
             }}
           />
+          </div>
+          <ValidateActionsRail
+            preflight={preflight}
+            preflighting={preflighting}
+            transferring={transferring}
+            mappingReviewCount={mappingReviewCount}
+            rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
+            transferLaunch={transferLaunch}
+            savingContract={savingContract}
+            executeBlocked={multiStreamUnsupportedMode}
+            executeBlockedReason={
+              multiStreamUnsupportedMode
+                ? "Multi-stream SCD2/mirror is not supported — switch to full/incremental/CDC or a single stream."
+                : undefined
+            }
+            cdcRetentionSlot={
+              syncMode === "cdc"
+              && sourceConnector
+              && ["sqlserver", "mssql", "oracle", "azure_sql_database", "microsoft_sql_server", "amazon_rds_sql_server"].includes(
+                resolveDriverType(sourceConnector.type),
+              )
+                ? (
+                  <CdcRetentionPanel
+                    probeRequest={{
+                      type: sourceConnector.type,
+                      host: sourceConnector.host,
+                      port: sourceConnector.port,
+                      database: sourceConnector.database,
+                      username: sourceConnector.username,
+                      password: sourceConnector.password,
+                      schema: sourceConnector.schema,
+                      connection_string: sourceConnector.connection_string,
+                      table: primarySourceStream || "",
+                      multi_subnet_failover: multiSubnetFailover || undefined,
+                    }}
+                  />
+                )
+                : undefined
+            }
+            onBack={() => setStep(STEP_MAP)}
+            onRunPreflight={() => void executePreflight()}
+            onApproveMappings={() => void approveAllAndPreflight()}
+            onExecute={() => void executeTransfer()}
+            onOpenJobTheater={openJobTheater}
+            onSaveAsContract={() => void handleSaveAsContract()}
+            onPrimaryFix={primaryFix.onPrimaryFix}
+            primaryFixLabel={primaryFix.primaryFixLabel}
+          />
         </div>
       )}
 
@@ -5643,31 +5571,42 @@ export function TransferPage({
                   ? "Preflight passed on Validate. Re-open gate cards anytime, or execute here to start the write."
                   : "This Run step is available, but preflight is missing or review-grade. Prefer Validate → API pass before Execute."
               }
-              action={
-                <div className="df2-run-ready-actions">
-                  <button
-                    type="button"
-                    className="df2-btn"
-                    onClick={() => setStep(STEP_VALIDATE)}
-                  >
-                    ← Review Validate gates
-                  </button>
-                  <button
-                    type="button"
-                    className="df2-btn df2-btn-primary df2-btn-lg"
-                    onClick={() => void executeTransfer()}
-                    disabled={multiStreamUnsupportedMode}
-                    title={
-                      multiStreamUnsupportedMode
-                        ? "Multi-stream SCD2/mirror is not supported — switch mode or select a single stream"
-                        : undefined
-                    }
-                  >
-                    <DtIcon name="transfer" size={18} /> Execute Transfer
-                  </button>
-                </div>
-              }
             />
+          </div>
+          <div className="df2-card-footer df2-wizard-footer df2-run-footer">
+            <button
+              type="button"
+              className="df2-btn"
+              onClick={() => setStep(STEP_VALIDATE)}
+            >
+              ← Back
+            </button>
+            <div className="df2-run-footer-status" aria-live="polite">
+              <span>
+                <strong>Route</strong> {sourceLabel} → {mapDestRouteLabel}
+              </span>
+              <span>
+                <strong>Preflight</strong>{" "}
+                {preflight
+                  ? `${preflight.passed_count}/${preflight.total_gates} checks`
+                  : "not proven"}
+              </span>
+            </div>
+            <div className="df2-run-footer-actions">
+              <button
+                type="button"
+                className="df2-btn df2-btn-primary"
+                onClick={() => void executeTransfer()}
+                disabled={multiStreamUnsupportedMode}
+                title={
+                  multiStreamUnsupportedMode
+                    ? "Multi-stream SCD2/mirror is not supported — switch mode or select a single stream"
+                    : undefined
+                }
+              >
+                <DtIcon name="transfer" size={16} /> Execute Transfer
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -5740,31 +5679,84 @@ export function TransferPage({
 
       {step === STEP_RUN && result && !activeJobId && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-run-step df2-result-host">
-          <TransferResultDashboard
-            result={result}
-            sourceLabel={sourceLabel}
-            destLabel={mapDestRouteLabel}
-            sourceType={sourceKind === "file" ? "file" : sourceConnector?.type || sourceKind}
-            destType={destKindMode === "file_export" ? exportFormat : destType}
-            mappingProof={mappingProof}
-            repairMappings={columnMappings.map((m) => ({
-              source: m.source,
-              destination: m.target || m.source,
-              destination_type: m.destType,
-              target_type: m.destType,
-              transform: m.transform || undefined,
-            }))}
-            onNewTransfer={resetTransferStudio}
-            onSchedule={() => void handleScheduleRoute()}
-            onOpenValidate={() => setStep(STEP_VALIDATE)}
-            onOpenChildJob={(childId) => {
-              setActiveJobId(childId);
-              setTransferring(true);
-              setResult(null);
-            }}
-            onResume={
-              result.job_id && !result.success
-                ? () => {
+          <div className="df2-card-body df2-result-body">
+            <TransferResultDashboard
+              result={result}
+              sourceLabel={sourceLabel}
+              destLabel={mapDestRouteLabel}
+              sourceType={sourceKind === "file" ? "file" : sourceConnector?.type || sourceKind}
+              destType={destKindMode === "file_export" ? exportFormat : destType}
+              mappingProof={mappingProof}
+              hideActions
+              repairMappings={columnMappings.map((m) => ({
+                source: m.source,
+                destination: m.target || m.source,
+                destination_type: m.destType,
+                target_type: m.destType,
+                transform: m.transform || undefined,
+              }))}
+              onNewTransfer={resetTransferStudio}
+              onSchedule={() => void handleScheduleRoute()}
+              onOpenValidate={() => setStep(STEP_VALIDATE)}
+              onOpenChildJob={(childId) => {
+                setActiveJobId(childId);
+                setTransferring(true);
+                setResult(null);
+              }}
+              onResume={
+                result.job_id && !result.success
+                  ? () => {
+                      void (async () => {
+                        try {
+                          await resumeJob(result.job_id!);
+                          toast({
+                            title: "Resume started",
+                            message: "Continuing from the last durable checkpoint.",
+                            tone: "success",
+                          });
+                          setActiveJobId(result.job_id!);
+                          setTransferring(true);
+                          setResult(null);
+                        } catch (e) {
+                          toast({
+                            title: "Resume failed",
+                            message: e instanceof Error ? e.message : "Resume failed",
+                            tone: "error",
+                          });
+                        }
+                      })();
+                    }
+                  : undefined
+              }
+            />
+          </div>
+          <div className="df2-card-footer df2-wizard-footer df2-run-footer">
+            <button
+              type="button"
+              className="df2-btn"
+              onClick={() => setStep(STEP_VALIDATE)}
+            >
+              ← Back
+            </button>
+            <div className="df2-run-footer-status" aria-live="polite">
+              <span>
+                <strong>Result</strong> {result.success ? "Completed" : "Needs attention"}
+              </span>
+              <span>
+                <strong>Rows</strong> {(result.records_transferred ?? 0).toLocaleString()}
+              </span>
+            </div>
+            <div className="df2-run-footer-actions">
+              {(!result.success || Boolean(result.destination_summary?.rejected_rows)) && (
+                <button type="button" className="df2-btn" onClick={() => setStep(STEP_VALIDATE)}>
+                  <DtIcon name="gate" size={14} /> Open Validate
+                </button>
+              )}
+              {result.job_id && !result.success && (
+                <button
+                  type="button"
+                  className="df2-btn"
+                  onClick={() => {
                     void (async () => {
                       try {
                         await resumeJob(result.job_id!);
@@ -5784,63 +5776,145 @@ export function TransferPage({
                         });
                       }
                     })();
-                  }
-                : undefined
-            }
-          />
+                  }}
+                >
+                  Resume
+                </button>
+              )}
+              <button type="button" className="df2-btn" onClick={() => void handleScheduleRoute()}>
+                <DtIcon name="activity" size={14} /> Schedule
+              </button>
+              <button type="button" className="df2-btn df2-btn-primary" onClick={resetTransferStudio}>
+                New transfer
+              </button>
+            </div>
+          </div>
         </div>
       )}
       </main>
-      {step === STEP_VALIDATE && (
-        <ValidateActionsRail
-          preflight={preflight}
-          preflighting={preflighting}
-          transferring={transferring}
-          mappingReviewCount={mappingReviewCount}
-          rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
-          transferLaunch={transferLaunch}
-          savingContract={savingContract}
-          executeBlocked={multiStreamUnsupportedMode}
-          executeBlockedReason={
-            multiStreamUnsupportedMode
-              ? "Multi-stream SCD2/mirror is not supported — switch to full/incremental/CDC or a single stream."
-              : undefined
-          }
-          cdcRetentionSlot={
-            syncMode === "cdc"
-            && sourceConnector
-            && ["sqlserver", "mssql", "oracle", "azure_sql_database", "microsoft_sql_server", "amazon_rds_sql_server"].includes(
-              resolveDriverType(sourceConnector.type),
-            )
-              ? (
-                <CdcRetentionPanel
-                  probeRequest={{
-                    type: sourceConnector.type,
-                    host: sourceConnector.host,
-                    port: sourceConnector.port,
-                    database: sourceConnector.database,
-                    username: sourceConnector.username,
-                    password: sourceConnector.password,
-                    schema: sourceConnector.schema,
-                    connection_string: sourceConnector.connection_string,
-                    table: primarySourceStream || "",
-                    multi_subnet_failover: multiSubnetFailover || undefined,
-                  }}
-                />
-              )
-              : undefined
-          }
-          onBack={() => setStep(STEP_MAP)}
-          onRunPreflight={() => void executePreflight()}
-          onApproveMappings={() => void approveAllAndPreflight()}
-          onExecute={() => void executeTransfer()}
-          onOpenJobTheater={openJobTheater}
-          onSaveAsContract={() => void handleSaveAsContract()}
-          onPrimaryFix={primaryFix.onPrimaryFix}
-          primaryFixLabel={primaryFix.primaryFixLabel}
-        />
-      )}
       </div>
+
+      {/* Shared Advanced drawer — Dest / Map / Validate open it in-place (no step change). */}
+      <DestinationAdvancedDrawer
+        open={advancedOpen}
+        onClose={() => setAdvancedOpen(false)}
+        syncModes={SYNC_MODES}
+        schemaPolicies={SCHEMA_POLICIES}
+        validationModes={VALIDATION_MODES}
+        dateLocales={DATE_LOCALES}
+        syncMode={syncMode}
+        schemaPolicy={schemaPolicy}
+        validationMode={validationMode}
+        dateLocale={dateLocale}
+        backfillNewFields={backfillNewFields}
+        streamNames={advancedStreamNames}
+        streamFields={streamFields}
+        defaultCursor={cursorField}
+        defaultPrimaryKey={primaryKeyField}
+        sourceColumns={currentSourceColumns}
+        sourceSchema={currentSourceSchema}
+        syncModeLabel={syncModeLabel}
+        schemaPolicyLabel={schemaPolicyLabel}
+        requiresCursor={requiresCursor}
+        requiresPrimaryKey={requiresPrimaryKey}
+        streamNeedsReview={streamNeedsReview}
+        suggestedCursor={cursorCandidate}
+        suggestedPrimaryKey={primaryKeyCandidate}
+        uniqueKeySuggestions={uniqueKeySuggestions}
+        snapshotMode={snapshotMode}
+        onSnapshotModeChange={setSnapshotMode}
+        allowAppendOnly={allowAppendOnly}
+        onAllowAppendOnlyChange={setAllowAppendOnly}
+        multiSubnetFailover={multiSubnetFailover}
+        onMultiSubnetFailoverChange={setMultiSubnetFailover}
+        showMultiSubnetFailover={
+          syncMode === "cdc"
+          && ["sqlserver", "mssql", "azure_sql_database", "microsoft_sql_server", "amazon_rds_sql_server"].includes(
+            resolveDriverType(sourceConnector?.type || ""),
+          )
+        }
+        cdcRowFilter={cdcRowFilter}
+        onCdcRowFilterChange={setCdcRowFilter}
+        showCdcRowFilter={
+          syncMode === "cdc"
+          && ["sqlserver", "mssql", "azure_sql_database", "microsoft_sql_server", "amazon_rds_sql_server"].includes(
+            resolveDriverType(sourceConnector?.type || ""),
+          )
+        }
+        writeViaStaging={writeViaStaging}
+        onWriteViaStagingChange={setWriteViaStaging}
+        showVectorOptions={
+          destDriverType === "pgvector" ||
+          destDriverType === "qdrant" ||
+          destDriverType === "weaviate" ||
+          destDriverType === "pinecone" ||
+          destDriverType === "milvus"
+        }
+        vectorContentColumn={vectorContentColumn}
+        vectorEmbeddingColumn={vectorEmbeddingColumn}
+        vectorMetadataColumns={vectorMetadataColumns}
+        vectorEmbeddingModel={vectorEmbeddingModel}
+        vectorChunkSize={vectorChunkSize}
+        vectorChunkOverlap={vectorChunkOverlap}
+        onVectorContentColumnChange={setVectorContentColumn}
+        onVectorEmbeddingColumnChange={setVectorEmbeddingColumn}
+        onVectorMetadataColumnsChange={setVectorMetadataColumns}
+        onVectorEmbeddingModelChange={setVectorEmbeddingModel}
+        onVectorChunkSizeChange={setVectorChunkSize}
+        onVectorChunkOverlapChange={setVectorChunkOverlap}
+        vectorRoutingFields={vectorRoutingFields}
+        vectorRoutingLoading={vectorRoutingLoading}
+        vectorExcludePiiColumns={vectorExcludePiiColumns}
+        onApplyVectorRouting={() => void runVectorRouting(true)}
+        vectorDurableCache={vectorDurableCache}
+        onVectorDurableCacheChange={setVectorDurableCache}
+        embeddingCacheStats={embeddingCacheStats}
+        embeddingCacheBusy={embeddingCacheBusy}
+        onRefreshEmbeddingCache={() => void refreshEmbeddingCacheStats()}
+        onClearEmbeddingCache={() => void handleClearEmbeddingCache()}
+        priorityColumn={priorityColumn}
+        priorityDirection={priorityDirection}
+        rowLimit={rowLimit}
+        onPriorityColumnChange={setPriorityColumn}
+        onPriorityDirectionChange={setPriorityDirection}
+        onRowLimitChange={setRowLimit}
+        onSyncModeChange={setSyncMode}
+        onSchemaPolicyChange={(policy) => {
+          setSchemaPolicy(policy);
+          if (policy === "propagate_columns" || policy === "propagate_all") {
+            setBackfillNewFields(true);
+          } else {
+            setBackfillNewFields(false);
+          }
+        }}
+        onValidationModeChange={setValidationMode}
+        onDateLocaleChange={setDateLocale}
+        onBackfillChange={setBackfillNewFields}
+        onStreamCursorChange={(stream, value) => {
+          setStreamFields((prev) => ({
+            ...prev,
+            [stream]: {
+              cursorField: value,
+              primaryKeyField: prev[stream]?.primaryKeyField ?? primaryKeyField,
+            },
+          }));
+          if (!isMultiStreamSource || stream === advancedStreamNames[0]) {
+            setCursorField(value);
+          }
+        }}
+        onStreamPrimaryKeyChange={(stream, value) => {
+          setStreamFields((prev) => ({
+            ...prev,
+            [stream]: {
+              cursorField: prev[stream]?.cursorField ?? cursorField,
+              primaryKeyField: value,
+            },
+          }));
+          if (!isMultiStreamSource || stream === advancedStreamNames[0]) {
+            setPrimaryKeyField(value);
+          }
+        }}
+      />
       </PageFrame>
     </PageShell>
   );

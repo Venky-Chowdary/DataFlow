@@ -131,7 +131,7 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
   }
 
   const lowConfidence = input.mappings.filter(
-    (m) => m.transform !== "omit" && m.confidence < threshold,
+    (m) => m.transform !== "omit" && !m.approved && m.confidence < threshold,
   );
   if (lowConfidence.length > 0) {
     block(

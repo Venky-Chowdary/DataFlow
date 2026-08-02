@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import logging
 import os
-import resource
 import sys
 import threading
 import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Iterator, Optional
+
+try:
+    import resource  # Unix-only; unavailable on Windows
+except ImportError:  # pragma: no cover - Windows
+    resource = None  # type: ignore[assignment]
 
 # Ensure the API root (parent of the `src` package) is first on sys.path so the
 # `services` intelligence package resolves to `apps/api/services`, not an
@@ -1462,7 +1466,10 @@ class UniversalTransferEngine:
     @staticmethod
     def _peak_memory_bytes() -> int:
         """Return the maximum resident set size (bytes) for this process so far."""
+        if resource is None:
+            return 0
         try:
+            # Linux reports KB; macOS reports bytes — keep prior Linux-oriented scale.
             return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
         except Exception as exc:
             logger.debug("peak memory read failed: %s", exc, exc_info=exc)

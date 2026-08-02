@@ -16,7 +16,7 @@ interface ValidateActionsRailProps {
   /** Extra execute block (e.g. non-CDC multi-stream). */
   executeBlocked?: boolean;
   executeBlockedReason?: string;
-  /** CDC retention Check control (SQL Server / Oracle). */
+  /** CDC retention Check control (SQL Server / Oracle) — shown above footer when present. */
   cdcRetentionSlot?: ReactNode;
   /** Primary remediation for the top blocker (e.g. open identity settings). */
   onPrimaryFix?: () => void;
@@ -30,9 +30,8 @@ interface ValidateActionsRailProps {
 }
 
 /**
- * Validate step action rail — actions first, minimal status.
- * Detailed blockers / proof chips live in ValidateDashboard (left column).
- * Do not re-render the same gates, metrics, and captions here.
+ * Validate step bottom action bar — same pattern as Source / Dest / Map.
+ * Status + blockers summary live in the footer; detail stays in ValidateDashboard.
  */
 export function ValidateActionsRail({
   preflight,
@@ -60,8 +59,6 @@ export function ValidateActionsRail({
   const decision = preflight?.proof_bundle?.transfer_decision?.decision
     ?? (passed ? "approve" : preflight ? "review" : "pending");
   const reviewGrade = Boolean(passed && decision === "review");
-  const scoreLabel = reviewGrade ? "review" : passed ? "ready" : "blocked";
-  const scoreTone = reviewGrade ? "review" : passed ? "passed" : "blocked";
   const executeDisabled = transferring || !passed || reviewGrade || executeBlocked;
   const executiveSummary = useMemo(() => buildExecutiveSummary(preflight), [preflight]);
   const displayBlockers = useMemo(
@@ -71,14 +68,57 @@ export function ValidateActionsRail({
   const firstBlocker = displayBlockers[0];
   const firstBlockerMessage = firstBlocker?.impact || firstBlocker?.message;
 
+  const statusLabel = preflighting
+    ? "Validating…"
+    : transferLaunch
+      ? "Transfer started"
+      : !preflight
+        ? "Not run"
+        : reviewGrade
+          ? "Review-grade"
+          : passed
+            ? "Ready"
+            : "Blocked";
+
+  const statusDetail = transferLaunch
+    ? `Job queued · ${transferLaunch.rows.toLocaleString()} rows`
+    : preflighting
+      ? "Gates running"
+      : preflight
+        ? (executiveSummary?.railLine
+          ?? `${preflight.passed_count}/${preflight.total_gates} gates · ${preflight.readiness_score}%`)
+        : "Run preflight to unlock Execute";
+
   return (
-    <aside className="df2-validate-rail" aria-label="Validation actions">
-      <div className="df2-validate-rail-scroll">
-        {transferLaunch ? (
-          <div className="df2-validate-rail-panel df2-validate-launch">
-            <DtIcon name="transfer" size={18} />
-            <strong>Transfer started</strong>
-            <p>Job queued — {transferLaunch.rows.toLocaleString()} rows.</p>
+    <>
+      {cdcRetentionSlot ? (
+        <div className="df2-validate-footer-cdc" aria-label="CDC retention">
+          {cdcRetentionSlot}
+        </div>
+      ) : null}
+
+      <div className="df2-card-footer df2-wizard-footer df2-validate-footer" aria-label="Validation actions">
+        <Button onClick={onBack} leadingIcon={<DtIcon name="chevron-left" size={16} />}>
+          Back
+        </Button>
+
+        <div className="df2-validate-footer-status" aria-live="polite">
+          <span className={passed && !reviewGrade ? "is-ok" : blocked || reviewGrade ? "is-warn" : undefined}>
+            <strong>Validate</strong> {statusLabel}
+          </span>
+          <span title={firstBlockerMessage || undefined}>{statusDetail}</span>
+          {blocked && firstBlocker && (
+            <span className="is-warn" title={firstBlockerMessage || undefined}>
+              <strong>{firstBlocker.title}</strong>
+            </span>
+          )}
+          {executeBlocked && executeBlockedReason && (
+            <span className="is-warn" role="alert">{executeBlockedReason}</span>
+          )}
+        </div>
+
+        <div className="df2-validate-footer-actions">
+          {transferLaunch ? (
             <Button
               variant="primary"
               onClick={onOpenJobTheater}
@@ -86,156 +126,95 @@ export function ValidateActionsRail({
             >
               Open live progress
             </Button>
-          </div>
-        ) : null}
+          ) : (
+            <>
+              {(blocked || (!preflight && !preflighting)) && (
+                <Button
+                  variant={!preflight ? "primary" : "secondary"}
+                  onClick={onRunPreflight}
+                  loading={preflighting}
+                  leadingIcon={<DtIcon name="gate" size={16} />}
+                >
+                  {!preflight ? "Run preflight" : "Re-run"}
+                </Button>
+              )}
 
-        {cdcRetentionSlot ? (
-          <div className="df2-validate-rail-panel" aria-label="CDC retention">
-            {cdcRetentionSlot}
-          </div>
-        ) : null}
+              {blocked && onPrimaryFix && primaryFixLabel && (
+                <Button
+                  variant="secondary"
+                  onClick={onPrimaryFix}
+                  leadingIcon={
+                    <DtIcon
+                      name={
+                        /bad data|strip|quarantine|map/i.test(primaryFixLabel)
+                          ? (/map/i.test(primaryFixLabel) ? "layers" : "shield")
+                          : "settings"
+                      }
+                      size={16}
+                    />
+                  }
+                  title={primaryFixLabel}
+                >
+                  {primaryFixLabel.length > 28
+                    ? `${primaryFixLabel.slice(0, 26)}…`
+                    : primaryFixLabel}
+                </Button>
+              )}
 
-        {preflighting && (
-          <div className="df2-validate-rail-panel df2-validate-status df2-validate-rail-scorecard live">
-            <div className="df2-validate-rail-score">
-              <strong>…</strong>
-              <span>validating</span>
-            </div>
-            <p>Gates running — actions unlock when checks finish.</p>
-          </div>
-        )}
+              {blocked && mappingBlocked && mappingReviewCount > 0 && (
+                <Button
+                  variant="secondary"
+                  onClick={onApproveMappings}
+                  leadingIcon={<DtIcon name="check" size={16} />}
+                >
+                  Approve mappings
+                </Button>
+              )}
 
-        {preflight && !preflighting && (
-          <div
-            className={`df2-validate-rail-panel df2-validate-status df2-validate-rail-scorecard df2-validate-rail-compact ${scoreTone}`}
-          >
-            <div className="df2-validate-rail-score">
-              <strong>{preflight.readiness_score}%</strong>
-              <span>{scoreLabel}</span>
-            </div>
-            <p className="df2-validate-rail-outcome">
-              {executiveSummary?.railLine
-                ?? `${preflight.passed_count}/${preflight.total_gates} gates · ${passed ? "PASS" : "BLOCK"}`}
-            </p>
-            {blocked && firstBlocker && (
-              <p className="df2-validate-rail-top-blocker" title={firstBlockerMessage || undefined}>
-                <strong>{firstBlocker.title}</strong>
-                {firstBlockerMessage ? ` · ${firstBlockerMessage}` : null}
-              </p>
-            )}
-            {preflight.run_id && (
-              <p className="df2-validate-rail-runid" title="Paste into Data Pilot to triage this validation">
-                Run <code>{preflight.run_id}</code>
-              </p>
-            )}
-          </div>
-        )}
-      </div>
+              {preflight && (
+                <Button
+                  variant={blocked || reviewGrade ? "secondary" : "primary"}
+                  onClick={onExecute}
+                  loading={transferring}
+                  loadingLabel="Starting…"
+                  disabled={executeDisabled}
+                  title={
+                    executeBlocked
+                      ? (executeBlockedReason || "Execution blocked")
+                      : reviewGrade
+                        ? "Review-grade / local preflight — confirm API Validate before Execute"
+                        : !passed
+                          ? `Blocked: ${firstBlockerMessage || "Resolve failed checks and re-run preflight"}`
+                          : rowCount != null
+                            ? `Execute transfer · ${rowCount.toLocaleString()} rows`
+                            : "Execute transfer"
+                  }
+                  leadingIcon={<DtIcon name="arrow-right" size={16} />}
+                >
+                  {executeBlocked || !passed
+                    ? "Execute (blocked)"
+                    : reviewGrade
+                      ? "Execute (review)"
+                      : "Execute"}
+                </Button>
+              )}
 
-      <div className="df2-validate-rail-actions">
-        <div className="df2-validate-rail-actions-row">
-          <Button onClick={onBack} leadingIcon={<DtIcon name="chevron-left" size={16} />}>
-            Back
-          </Button>
-
-          {(blocked || (!preflight && !preflighting)) && (
-            <Button
-              variant={!preflight ? "primary" : "secondary"}
-              onClick={onRunPreflight}
-              loading={preflighting}
-              leadingIcon={<DtIcon name="gate" size={16} />}
-            >
-              {!preflight ? "Run preflight" : "Re-run"}
-            </Button>
+              {preflight && onSaveAsContract && (
+                <Button
+                  onClick={onSaveAsContract}
+                  loading={savingContract}
+                  loadingLabel="Saving…"
+                  disabled={savingContract || preflighting}
+                  leadingIcon={<DtIcon name="shield" size={16} />}
+                  title="Save mappings + gates as a draft data contract under Contracts"
+                >
+                  Save contract
+                </Button>
+              )}
+            </>
           )}
         </div>
-
-        {blocked && onPrimaryFix && primaryFixLabel && (
-          <Button
-            variant="primary"
-            className="df2-validate-rail-primary-fix"
-            onClick={onPrimaryFix}
-            leadingIcon={
-              <DtIcon
-                name={/bad data|strip|quarantine|map/i.test(primaryFixLabel) ? (/map/i.test(primaryFixLabel) ? "layers" : "shield") : "settings"}
-                size={16}
-              />
-            }
-            title={primaryFixLabel}
-          >
-            {primaryFixLabel.length > 32
-              ? `${primaryFixLabel.slice(0, 30)}…`
-              : primaryFixLabel}
-          </Button>
-        )}
-
-        {blocked && mappingBlocked && mappingReviewCount > 0 && (
-          <Button
-            variant={onPrimaryFix ? "secondary" : "primary"}
-            onClick={onApproveMappings}
-            leadingIcon={<DtIcon name="check" size={16} />}
-          >
-            Approve mappings
-          </Button>
-        )}
-
-        {preflight && !transferLaunch && (
-          <Button
-            variant={blocked || reviewGrade ? "secondary" : "primary"}
-            onClick={onExecute}
-            loading={transferring}
-            loadingLabel="Starting…"
-            disabled={executeDisabled}
-            title={
-              executeBlocked
-                ? (executeBlockedReason || "Execution blocked")
-                : reviewGrade
-                  ? "Review-grade / local preflight — confirm API Validate before Execute"
-                  : !passed
-                    ? `Blocked: ${firstBlockerMessage || "Resolve failed checks and re-run preflight"}`
-                    : rowCount != null
-                      ? `Execute transfer · ${rowCount.toLocaleString()} rows`
-                      : "Execute transfer"
-            }
-            leadingIcon={<DtIcon name="arrow-right" size={16} />}
-          >
-            {executeBlocked || !passed
-              ? "Execute (blocked)"
-              : reviewGrade
-                ? "Execute (review)"
-                : "Execute"}
-          </Button>
-        )}
-
-        {preflight && onSaveAsContract && (
-          <Button
-            onClick={onSaveAsContract}
-            loading={savingContract}
-            loadingLabel="Saving…"
-            disabled={savingContract || preflighting}
-            leadingIcon={<DtIcon name="shield" size={16} />}
-            title="Save mappings + gates as a draft data contract under Contracts"
-          >
-            Save as contract
-          </Button>
-        )}
-
-        {reviewGrade && !transferLaunch && !executeBlocked && (
-          <p className="df2-validate-rail-explain" role="status">
-            Review-grade result — re-run API Validate before Execute unlocks the write.
-          </p>
-        )}
-        {passed && !reviewGrade && !transferLaunch && !executeBlocked && (
-          <p className="df2-validate-rail-explain is-ok">
-            Execute starts the write and opens Job Theater for live progress.
-          </p>
-        )}
-        {executeBlocked && executeBlockedReason && (
-          <p className="df2-validate-rail-explain" role="alert">
-            {executeBlockedReason}
-          </p>
-        )}
       </div>
-    </aside>
+    </>
   );
 }

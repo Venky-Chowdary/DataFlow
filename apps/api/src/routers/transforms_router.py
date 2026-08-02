@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from services.transform_models import (
@@ -211,19 +211,20 @@ def update_project(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.delete("/{project_id}", status_code=204)
+@router.delete("/{project_id}", status_code=204, response_class=Response)
 def delete_project(
     project_id: str,
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
-) -> None:
-    ws = resolve_write_workspace(request, workspace_id)
+) -> Response:
+    resolve_write_workspace(request, workspace_id)
     store = get_transform_store()
     project = store.get(project_id)
     if project:
         assert_resource_workspace(request, project.workspace_id or "")
     if not store.delete(project_id):
         raise HTTPException(status_code=404, detail="Transformation project not found")
+    return Response(status_code=204)
 
 
 @router.post("/plan")
