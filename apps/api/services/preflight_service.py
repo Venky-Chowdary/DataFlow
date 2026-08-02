@@ -101,7 +101,10 @@ class FilePreflightContext(PreflightContext):
                 "source": m.source,
                 "target": m.target,
                 "transform": getattr(m, "transform", ""),
-                "target_type": dest_types_by_name.get(m.target),
+                # Prefer live dest DDL; keep stamped create-new type when absent.
+                "target_type": dest_types_by_name.get(m.target)
+                or getattr(m, "target_type", None),
+                "create_new": bool(getattr(m, "create_new", False)),
             }
             for m in self.plan.mappings
         ]
@@ -150,7 +153,9 @@ class FilePreflightContext(PreflightContext):
                     "source": m.source,
                     "target": m.target,
                     "transform": getattr(m, "transform", None),
-                    "target_type": dest_types.get(m.target),
+                    "target_type": dest_types.get(m.target)
+                    or getattr(m, "target_type", None),
+                    "create_new": bool(getattr(m, "create_new", False)),
                 }
                 for m in self.plan.mappings
             ]
@@ -262,7 +267,9 @@ class FilePreflightContext(PreflightContext):
                         if c.name == m.target
                     ),
                     None,
-                ),
+                )
+                or getattr(m, "target_type", None),
+                "create_new": bool(getattr(m, "create_new", False)),
             }
             for m in self.plan.mappings
         ]
@@ -787,6 +794,8 @@ def run_file_preflight(
             reasoning=m.get("reasoning") or m.get("reason", ""),
             requires_review=bool(m.get("requires_review", False)),
             score_gap=float(m.get("score_gap", 1.0)),
+            target_type=m.get("target_type") or m.get("targetType"),
+            create_new=bool(m.get("create_new") or m.get("createNew", False)),
             struct_policy=m.get("struct_policy") or m.get("structPolicy"),
             struct_derived=bool(
                 m.get("struct_derived") or m.get("structDerived", False)

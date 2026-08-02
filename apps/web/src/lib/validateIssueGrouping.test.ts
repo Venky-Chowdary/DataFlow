@@ -14,7 +14,22 @@ import {
   isIsoNormalizeCoercion,
   partitionCoercionColumns,
   partitionExplainIssues,
+  remapToTypeForMismatch,
 } from "./validateIssueGrouping.js";
+
+describe("remapToTypeForMismatch", () => {
+  it("keeps UUID/ObjectId/DECIMAL/temporal families — never invents bare VARCHAR for them", () => {
+    assert.equal(remapToTypeForMismatch("UUID", "VARCHAR"), "UUID");
+    assert.equal(remapToTypeForMismatch("UUID", "CHAR(36)"), "UUID");
+    assert.equal(remapToTypeForMismatch("OBJECTID", "TEXT"), "OBJECTID");
+    assert.equal(remapToTypeForMismatch("OBJECTID", "CHAR(24)"), "OBJECTID");
+    assert.equal(remapToTypeForMismatch("MACADDR", "TEXT"), "MACADDR");
+    assert.equal(remapToTypeForMismatch("FLOAT", "DECIMAL(38,10)"), "DOUBLE");
+    assert.equal(remapToTypeForMismatch("DECIMAL(38,10)", "INTEGER"), "DECIMAL(38,10)");
+    assert.equal(remapToTypeForMismatch("TIMESTAMPTZ", "TIMESTAMP_NTZ"), "TIMESTAMPTZ");
+    assert.equal(remapToTypeForMismatch("VARCHAR", "NUMBER(38,0)"), "VARCHAR");
+  });
+});
 
 function basePreflight(over: Partial<PreflightResult> = {}): PreflightResult {
   return {

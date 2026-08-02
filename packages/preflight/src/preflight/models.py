@@ -65,6 +65,9 @@ class ColumnMapping:
     reasoning: str = ""
     requires_review: bool = False
     score_gap: float = 1.0
+    # Create-new / remap stamp — must survive Validate→probe→integrity.
+    target_type: str | None = None
+    create_new: bool = False
     # STRUCT/JSON Map policy — optional; gates may surface but write owns materialize.
     struct_policy: str | None = None
     struct_derived: bool = False

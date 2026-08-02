@@ -4,7 +4,8 @@
 
 :root {
   --df-header-height: 60px;
-  --df-viewport-h: 100dvh;
+  /* Prefer zoom-compensated layout height from tokens.css (fills laptop viewport). */
+  --df-viewport-h: var(--df-layout-viewport-h, 100dvh);
 }
 
 /* ─── Sidebar: nav scrolls, foot stays pinned ─── */

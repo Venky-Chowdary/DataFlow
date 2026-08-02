@@ -164,6 +164,8 @@ def _drop_mysql(cfg: dict[str, Any], table_name: str, schema: str | None) -> boo
     from connectors.mysql_conn import get_connection
 
     try:
+        # DDL purpose: short lock wait so full_refresh overwrite cannot hang a
+        # tiny demo behind a metadata lock from an idle Validate/probe session.
         conn = get_connection(
             host=cfg.get("host", "") or "127.0.0.1",
             port=int(cfg.get("port") or 3306),
@@ -172,6 +174,7 @@ def _drop_mysql(cfg: dict[str, Any], table_name: str, schema: str | None) -> boo
             password=cfg.get("password", ""),
             connection_string=cfg.get("connection_string", ""),
             ssl=bool(cfg.get("ssl")),
+            purpose="ddl",
         )
         conn.autocommit = True
         with conn.cursor() as cur:

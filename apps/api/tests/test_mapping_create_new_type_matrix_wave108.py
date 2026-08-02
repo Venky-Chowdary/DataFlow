@@ -1,0 +1,274 @@
+"""Real create-new type matrix — Mongo/PG specialties must not false-block Validate.
+
+Fixtures use realistic ObjectId hex, UUID, and INET values (not mocks-as-product).
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+_API_ROOT = Path(__file__).resolve().parents[1]
+if str(_API_ROOT) not in sys.path:
+    sys.path.insert(0, str(_API_ROOT))
+
+
+REAL_OBJECT_IDS = [
+    "507f1f77bcf86cd799439011",
+    "507f191e810c19729de860ea",
+    "64f0c2a1b2c3d4e5f6789012",
+]
+REAL_UUIDS = [
+    "550e8400-e29b-41d4-a716-446655440000",
+    "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+]
+REAL_IPS = ["192.168.1.1", "2001:db8::1", "10.0.0.42"]
+
+
+def test_objectid_create_new_mysql_stamps_logical_and_passes_strict():
+    from services.semantic_mapper import map_columns
+    from services.type_coercion_validator import (
+        coerce_blocks_transfer,
+        validate_mapping_coercions,
+    )
+    from services.type_system import (
+        ddl_type,
+        is_lossy_coercion,
+        specialty_carrier_would_collapse,
+    )
+
+    assert ddl_type("mysql", "OBJECTID") == "VARCHAR(24)"
+    assert specialty_carrier_would_collapse("OBJECTID", "VARCHAR(24)") is False
+    assert is_lossy_coercion("OBJECTID", "VARCHAR(24)") is False
+
+    mappings = map_columns(
+        source_columns=["_id"],
+        target_columns=[],
+        source_schemas=[{
+            "name": "_id",
+            "inferred_type": "OBJECTID",
+            "samples": REAL_OBJECT_IDS,
+        }],
+        destination_db_type="mysql",
+        destination_table_exists=False,
+    )
+    assert mappings[0]["create_new"] is True
+    assert mappings[0]["target_type"] == "OBJECTID"
+    assert "VARCHAR(24)" in mappings[0]["reasoning"]
+
+    issues = validate_mapping_coercions(
+        mappings=[{
+            "source": "_id",
+            "target": "id",
+            "confidence": 0.93,
+            "create_new": True,
+        }],
+        source_types={"_id": "OBJECTID"},
+        target_types={"id": "OBJECTID"},
+        validation_mode="strict",
+    )
+    assert coerce_blocks_transfer(issues) is False
+
+    # Physical wire after writer ddl_type also must not block.
+    issues_phys = validate_mapping_coercions(
+        mappings=[{"source": "_id", "target": "id", "confidence": 0.93}],
+        source_types={"_id": "OBJECTID"},
+        target_types={"id": "VARCHAR(24)"},
+        validation_mode="strict",
+    )
+    assert coerce_blocks_transfer(issues_phys) is False
+
+
+def test_objectid_bare_text_still_collapses():
+    from services.type_system import specialty_carrier_would_collapse
+
+    assert specialty_carrier_would_collapse("OBJECTID", "TEXT") is True
+    assert specialty_carrier_would_collapse("OBJECTID", "VARCHAR") is True
+
+
+def test_inet_create_new_off_engine_stamps_logical():
+    from services.semantic_mapper import map_columns
+    from services.type_coercion_validator import (
+        coerce_blocks_transfer,
+        validate_mapping_coercions,
+    )
+
+    mappings = map_columns(
+        source_columns=["ip"],
+        target_columns=[],
+        source_schemas=[{
+            "name": "ip",
+            "inferred_type": "INET",
+            "samples": REAL_IPS,
+        }],
+        destination_db_type="snowflake",
+        destination_table_exists=False,
+    )
+    assert mappings[0]["target_type"] == "INET"
+    issues = validate_mapping_coercions(
+        mappings=[{"source": "ip", "target": "ip", "confidence": 0.93}],
+        source_types={"ip": "INET"},
+        target_types={"ip": "INET"},
+        validation_mode="strict",
+    )
+    assert coerce_blocks_transfer(issues) is False
+
+
+def test_decimal_narrow_same_logical_blocks_g9_coercion():
+    from services.type_coercion_validator import (
+        coerce_blocks_transfer,
+        validate_mapping_coercions,
+    )
+
+    issues = validate_mapping_coercions(
+        mappings=[{"source": "amt", "target": "amt", "confidence": 0.99}],
+        source_types={"amt": "DECIMAL(38,10)"},
+        target_types={"amt": "DECIMAL(10,2)"},
+        validation_mode="strict",
+    )
+    assert coerce_blocks_transfer(issues) is True
+    assert issues[0]["lossy"] is True
+
+
+def test_float_to_decimal_remediation_not_bare_varchar():
+    from services.validation_assistant import _remap_to_type_for_mismatch
+
+    assert _remap_to_type_for_mismatch("FLOAT", "DECIMAL(38,10)") == "DOUBLE"
+    assert _remap_to_type_for_mismatch("OBJECTID", "VARCHAR") == "OBJECTID"
+    assert _remap_to_type_for_mismatch("UUID", "TEXT") == "UUID"
+
+
+def test_integrity_coercion_safety_objectid_create_new_real_rows():
+    from services.data_integrity import _check_coercion_safety
+
+    rows = [{"_id": oid, "name": f"user-{i}"} for i, oid in enumerate(REAL_OBJECT_IDS)]
+    report = _check_coercion_safety(
+        mappings=[{
+            "source": "_id",
+            "target": "id",
+            "confidence": 0.93,
+            "create_new": True,
+        }],
+        source_types={"_id": "OBJECTID"},
+        target_types={"id": "VARCHAR(24)"},
+        dest_kind="mysql",
+        validation_mode="strict",
+        rows=rows,
+    )
+    assert report["passed"] is True
+    assert report["blocks_transfer"] is False
+
+
+def test_uuid_mysql_create_new_still_solid_with_real_uuids():
+    from services.semantic_mapper import map_columns
+    from services.type_coercion_validator import (
+        coerce_blocks_transfer,
+        validate_mapping_coercions,
+    )
+
+    mappings = map_columns(
+        source_columns=["device_id"],
+        target_columns=[],
+        source_schemas=[{
+            "name": "device_id",
+            "inferred_type": "UUID",
+            "samples": REAL_UUIDS,
+        }],
+        destination_db_type="mysql",
+        destination_table_exists=False,
+    )
+    assert mappings[0]["target_type"] == "UUID"
+    issues = validate_mapping_coercions(
+        mappings=[{"source": "device_id", "target": "device_id", "confidence": 0.93}],
+        source_types={"device_id": "UUID"},
+        target_types={"device_id": "UUID"},
+        validation_mode="strict",
+    )
+    assert coerce_blocks_transfer(issues) is False
+
+
+def test_uuid_bigquery_create_new_stamps_string_and_warns_not_silent_green():
+    """BQ has no UUID type — Validate must warn polarity, not green UUID→UUID."""
+    from services.semantic_mapper import map_columns
+    from services.type_coercion_validator import (
+        coerce_blocks_transfer,
+        validate_mapping_coercions,
+    )
+    from services.type_system import create_new_mapping_target_type
+
+    assert create_new_mapping_target_type("UUID", "bigquery") == "STRING"
+    assert create_new_mapping_target_type("UUID", "databricks") == "STRING"
+    assert create_new_mapping_target_type("UUID", "sqlite") == "TEXT"
+
+    mappings = map_columns(
+        source_columns=["device_id"],
+        target_columns=[],
+        source_schemas=[{
+            "name": "device_id",
+            "inferred_type": "UUID",
+            "samples": REAL_UUIDS,
+        }],
+        destination_db_type="bigquery",
+        destination_table_exists=False,
+    )
+    assert mappings[0]["target_type"] == "STRING"
+
+    issues = validate_mapping_coercions(
+        mappings=[{
+            "source": "device_id",
+            "target": "device_id",
+            "confidence": 0.93,
+            "create_new": True,
+        }],
+        source_types={"device_id": "UUID"},
+        target_types={"device_id": "STRING"},
+        validation_mode="strict",
+    )
+    assert coerce_blocks_transfer(issues) is False
+    assert issues and issues[0]["severity"] == "warn"
+    assert issues[0]["lossy"] is True
+
+
+def test_create_new_stamped_target_type_authoritative_without_live_ddl():
+    """Missing live dest types must not invent UUID→UUID green for BQ create-new."""
+    from services.type_coercion_validator import (
+        coerce_blocks_transfer,
+        validate_mapping_coercions,
+    )
+    from services.type_system import resolve_mapping_target_type
+
+    mapping = {
+        "source": "device_id",
+        "target": "device_id",
+        "confidence": 0.93,
+        "create_new": True,
+        "target_type": "STRING",
+    }
+    assert resolve_mapping_target_type(
+        mapping, target_types={}, source_type="UUID"
+    ) == "STRING"
+
+    issues = validate_mapping_coercions(
+        mappings=[mapping],
+        source_types={"device_id": "UUID"},
+        target_types={},  # live DDL absent — stamped type must still warn
+        validation_mode="strict",
+    )
+    assert coerce_blocks_transfer(issues) is False
+    assert issues and issues[0]["severity"] == "warn"
+    assert issues[0]["target_type"] == "STRING"
+
+
+def test_existing_column_live_ddl_wins_over_stale_stamp():
+    from services.type_system import resolve_mapping_target_type
+
+    assert resolve_mapping_target_type(
+        {
+            "source": "amount",
+            "target": "amount",
+            "create_new": False,
+            "target_type": "VARCHAR",
+        },
+        target_types={"amount": "DECIMAL(18,2)"},
+        source_type="DECIMAL(18,2)",
+    ) == "DECIMAL(18,2)"

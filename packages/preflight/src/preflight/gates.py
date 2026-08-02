@@ -468,8 +468,61 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         # producing a wall of false coercion blocks.
         # Exception: fidelity_collapse / nested field mismatch always block.
         # nested→document blocks unless struct_policy acknowledges the path.
+        #
+        # Create-new UUID→bare STRING/TEXT (BigQuery/Databricks/SQLite): the
+        # engine has no native UUID — warn polarity (visible) instead of hard
+        # block or silent-green UUID→UUID while writers emit STRING.
+        uuid_string_create_new = False
+        if (
+            fidelity_collapse
+            and not field_shape_loss
+            and ctx.plan.destination.table_exists is False
+            and normalize_logical_type
+            and normalize_logical_type(source_col.inferred_type) == "uuid"
+        ):
+            try:
+                from services.type_system import (
+                    uuid_exact_wire_carrier,
+                    uuid_would_collapse,
+                )
+
+                uuid_string_create_new = bool(
+                    uuid_would_collapse(
+                        source_col.inferred_type, target.inferred_type
+                    )
+                    and not uuid_exact_wire_carrier(target.inferred_type)
+                )
+            except ImportError:
+                uuid_string_create_new = False
+
         probe = by_source.get(m.source) if value_aware else None
-        if fidelity_collapse or field_shape_loss:
+        if uuid_string_create_new:
+            warn_label = (
+                f"{label} — create-new stores UUID as destination STRING/TEXT "
+                "(no native UUID type; domain not enforced at destination)"
+            )
+            warnings.append(warn_label)
+            if probe is not None:
+                issues_detail.append({
+                    "source": m.source,
+                    "target": m.target,
+                    "source_type": source_col.inferred_type,
+                    "target_type": target.inferred_type,
+                    "severity": "warn",
+                    "fidelity_collapse": True,
+                    "uuid_string_create_new": True,
+                    "sampled": probe.get("sampled", 0),
+                    "failed": probe.get("failed", 0),
+                    "sentinel_nulls": probe.get("sentinel_nulls", 0),
+                    "sample_failures": probe.get("sample_failures", []),
+                    "suggested_fix": (
+                        "Acknowledge UUID→STRING polarity on this engine, or "
+                        "choose a destination with native UUID / CHAR(36)."
+                    ),
+                    "suggested_target_type": probe.get("suggested_target_type"),
+                    "suggested_transform": probe.get("suggested_transform"),
+                })
+        elif fidelity_collapse or field_shape_loss:
             issues.append(label)
             if probe is not None:
                 issues_detail.append({
@@ -536,9 +589,35 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             else:
                 warnings.append(label)
         elif value_aware:
-            # Report exists and covers this pair as clean (no entry ⇒ all values
-            # coerce): downgrade the declared-type mismatch to a warning.
-            warnings.append(label)
+            # Probe omits pure text sinks (no cast risk) — declared mismatch
+            # stays a warn. Typed sinks with samples but no by_source row are
+            # unproven: never invent "all values coerce" from absence.
+            tgt_l = (
+                normalize_logical_type(target.inferred_type)
+                if normalize_logical_type
+                else str(target.inferred_type or "").lower()
+            )
+            if tgt_l in {"string", "text", "json", "variant", "document"}:
+                warnings.append(label)
+            else:
+                mode = (ctx.plan.validation_mode or "strict").strip().lower()
+                unproven = label + " — unproven (no per-column coercion probe)"
+                if mode in {"balanced", "review"}:
+                    warnings.append(unproven)
+                else:
+                    issues.append(unproven)
+                issues_detail.append({
+                    "source": m.source,
+                    "target": m.target,
+                    "source_type": source_col.inferred_type,
+                    "target_type": target.inferred_type,
+                    "severity": "warn" if mode in {"balanced", "review"} else "block",
+                    "probe_unproven": True,
+                    "suggested_fix": (
+                        "Re-run Validate so every mapped column receives a "
+                        "coercion probe, or remap to a proven-compatible type."
+                    ),
+                })
         else:
             # No samples — strict/maximum fail-closed on declared lossy pairs;
             # balanced warns so operators can proceed after acknowledging risk.

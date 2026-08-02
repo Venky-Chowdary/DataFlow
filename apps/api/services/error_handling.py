@@ -60,7 +60,9 @@ RETRIABLE_EXCEPTIONS: set[str] = {
     "too many requests",
     "rate limit",
     "deadlock",
-    "lock wait timeout",
+    # Lock-wait is NOT retriable here: a metadata/row lock that already
+    # exhausted session lock_wait_timeout will not clear on a quick retry, and
+    # outer with_retry × long lock waits is what made 5-row demos hang minutes.
     "unable to acquire lock",
     "503",
     "502",
@@ -139,6 +141,11 @@ NON_RETRIABLE_PATTERNS: set[str] = {
     "no space left",
     "enospc",
     "tablespace is full",
+    # Contended DDL/DML — fail closed so operators see the lock, not a spinner.
+    "lock wait timeout",
+    "lock wait timeout exceeded",
+    "1205",  # InnoDB lock wait timeout
+    "metadata lock",
     # Source format — will not self-heal on retry without a new file.
     "json file must be an array",
     "json must be an array of objects",
@@ -151,6 +158,25 @@ NON_RETRIABLE_PATTERNS: set[str] = {
 # Operator-facing failure catalog. Only patterns we can map accurately.
 # `fix` must list *likely checks* — never a single guaranteed remedy.
 _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
+    (
+        (
+            "lock wait timeout",
+            "lock wait timeout exceeded",
+            "1205",
+            "metadata lock",
+        ),
+        {
+            "code": "destination_lock_timeout",
+            "category": "destination",
+            "confidence": "high",
+            "title": "Destination table is locked",
+            "fix": (
+                "Close other sessions on this MySQL table (Workbench, Validate probes, "
+                "stuck prior jobs), then re-run. DataFlow fails closed instead of waiting "
+                "minutes behind a metadata lock."
+            ),
+        },
+    ),
     (
         ("cdc_lease_conflict", "cdc lease conflict", "refuse concurrent consumer", "cdc resource"),
         {
@@ -520,16 +546,34 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
     if isinstance(error, Exception) and type(error).__name__ == "Overflow":
         text = f"decimal.overflow {text}"
     if isinstance(error, FullRefreshDropFailed):
+        lockish = any(
+            tok in raw.lower()
+            for tok in ("lock wait", "1205", "metadata lock", "try restarting transaction")
+        )
         return {
             "code": "full_refresh_drop_failed",
             "category": "destination",
-            "title": "Could not clear the destination for full refresh",
+            "title": (
+                "Destination table is locked — could not clear for full refresh"
+                if lockish
+                else "Could not clear the destination for full refresh"
+            ),
             "message": raw,
             "fix": (
-                f"Grant DROP (or DELETE) on destination table '{error.table_name}', "
-                "confirm no competing lock is holding it, then re-run. "
-                "DataFlow refused to append onto rows that should have been replaced — "
-                "continuing would have silently doubled the destination."
+                (
+                    f"Another session is holding a lock on '{error.table_name}' "
+                    "(common: an open Validate probe, MySQL Workbench, or a stuck "
+                    "prior job). Close those connections, then re-run. DataFlow "
+                    "refused to append onto uncleared rows — that would silently "
+                    "double the destination."
+                )
+                if lockish
+                else (
+                    f"Grant DROP (or DELETE) on destination table '{error.table_name}', "
+                    "confirm no competing lock is holding it, then re-run. "
+                    "DataFlow refused to append onto rows that should have been replaced — "
+                    "continuing would have silently doubled the destination."
+                )
             ),
             "raw": raw,
             "retriable": False,

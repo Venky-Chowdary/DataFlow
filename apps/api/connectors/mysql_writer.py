@@ -211,6 +211,7 @@ def _open_mysql(
     password: str,
     connection_string: str,
     ssl: bool,
+    purpose: str = "write",
 ):
     conn = get_connection(
         host=host,
@@ -220,6 +221,7 @@ def _open_mysql(
         password=password,
         connection_string=connection_string,
         ssl=ssl,
+        purpose=purpose,
     )
     conn.autocommit = False
     return conn
@@ -466,13 +468,18 @@ def write_mapped_rows(
     conn = None
     converted_rows: list[tuple] = []
 
-    def _reconnect():
+    # CREATE/ALTER opens with purpose="setup" (short lock wait) so contended
+    # metadata locks fail fast. After setup we reconnect with purpose="write"
+    # for the proxy-friendly INSERT budget. DROP uses purpose="ddl" in
+    # table_manager separately.
+    def _reconnect(*, purpose: str = "write"):
         nonlocal conn, cur
         close_quietly(conn)
         conn = _open_mysql(
             host=host, port=port, database=database,
             username=username, password=password,
             connection_string=connection_string, ssl=ssl,
+            purpose=purpose,
         )
         cur = conn.cursor()
 
@@ -583,6 +590,7 @@ def write_mapped_rows(
             host=host, port=port, database=database,
             username=username, password=password,
             connection_string=connection_string, ssl=ssl,
+            purpose="setup",
         )
         cur = conn.cursor()
         try:
@@ -603,7 +611,10 @@ def write_mapped_rows(
                     ):
                         raise
                     time.sleep(reconnect_backoff_seconds(setup_attempt))
-                    _reconnect()
+                    _reconnect(purpose="setup")
+
+            # Setup used short lock waits; INSERT/UPSERT needs write I/O budget.
+            _reconnect(purpose="write")
 
             # Defensive: if setup skipped conversion somehow, coerce with mapping types.
             if not converted_rows and mapped_rows:

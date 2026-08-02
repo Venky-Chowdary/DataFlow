@@ -27,6 +27,7 @@ import {
   isEncodingIntegritySignal,
   partitionCoercionColumns,
   partitionExplainIssues,
+  remapToTypeForMismatch,
 } from "../../lib/validateIssueGrouping";
 import { BadDataFixDrawer, type BadDataIssue } from "./BadDataFixDrawer";
 import { Gate8ProofCard, type Gate8Reconciliation } from "./Gate8ProofCard";
@@ -674,7 +675,7 @@ export function ValidateDashboard({
   const runId = preflight?.run_id;
 
   const typeMismatchColumns = useMemo(() => {
-    const found: Array<{ source: string; target: string }> = [];
+    const found: Array<{ source: string; target: string; sourceType?: string; targetType?: string; toType: string }> = [];
     const seen = new Set<string>();
     const texts: string[] = [];
     for (const b of preflight?.blockers || []) {
@@ -689,14 +690,22 @@ export function ValidateDashboard({
     for (const g of preflight?.gates || []) {
       if (g.status === "block") texts.push(g.message || "");
     }
-    const re = /([A-Za-z_][\w]*)\s*\([^)]+\)\s*→\s*([A-Za-z_][\w]*)\s*\([^)]+\)/g;
+    const re = /([A-Za-z_][\w]*)\s*\(([^)]+)\)\s*→\s*([A-Za-z_][\w]*)\s*\(([^)]+)\)/g;
     for (const text of texts) {
       let m: RegExpExecArray | null;
       while ((m = re.exec(text))) {
-        const key = `${m[1]}→${m[2]}`;
+        const key = `${m[1]}→${m[3]}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        found.push({ source: m[1], target: m[2] });
+        const sourceType = (m[2] || "").trim();
+        const targetType = (m[4] || "").trim();
+        found.push({
+          source: m[1],
+          target: m[3],
+          sourceType,
+          targetType,
+          toType: remapToTypeForMismatch(sourceType, targetType),
+        });
       }
     }
     return found;
@@ -705,7 +714,7 @@ export function ValidateDashboard({
   const isTypeMismatchBlock = typeMismatchColumns.length > 0
     || Boolean(
       preflight?.blockers.some((b) =>
-        /invalid (decimal|integer|boolean)|cannot be cast|does not safely become|lossy type/i.test(b.message),
+        /invalid (decimal|integer|boolean)|cannot be cast|does not safely become|lossy type|lossy coercion/i.test(b.message),
       ),
     );
   const isPrivilegeBlock = Boolean(
@@ -1534,7 +1543,7 @@ export function ValidateDashboard({
                     : typeMismatchColumns.slice(0, 4).map((c) => ({
                       source: c.source,
                       target: c.target,
-                      toType: "VARCHAR",
+                      toType: c.toType,
                     }));
                   return remapCols.map((col) => (
                     <Button
@@ -2649,14 +2658,14 @@ export function ValidateDashboard({
                             onClick={() =>
                               onApplyAction?.({
                                 kind: "change_target_type",
-                                label: `Remap ${col.source} → VARCHAR`,
+                                label: `Remap ${col.source} → ${col.toType}`,
                                 column: col.source,
                                 target: col.target,
-                                to_type: "VARCHAR",
+                                to_type: col.toType,
                               })
                             }
                           >
-                            Remap {col.source} → VARCHAR
+                            Remap {col.source} → {col.toType}
                           </Button>
                         ))}
                       </div>

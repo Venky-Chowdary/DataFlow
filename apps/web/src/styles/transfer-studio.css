@@ -1153,6 +1153,9 @@
   background: #fafbfc;
   padding: 16px;
   overflow: hidden;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .df2-page-transfer-studio .df2-structure-preview.is-empty {
@@ -1955,7 +1958,11 @@ th.df2-type-string .df2-type-badge {
 
 .df2-page-transfer-studio .df2-source-aside {
   gap: 8px;
-  padding: 0;
+  padding: 12px 14px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  box-sizing: border-box;
 }
 
 .df2-page-transfer-studio .df2-source-aside-head {
@@ -2042,6 +2049,7 @@ th.df2-type-string .df2-type-badge {
 
 .df2-source-step .df2-transfer-step-secondary {
   min-height: 0;
+  min-width: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -2049,19 +2057,44 @@ th.df2-type-string .df2-type-badge {
 }
 
 /* Detected structure card fills remaining height on large screens */
-.df2-source-step .df2-transfer-step-secondary > .df2-structure-preview {
+.df2-source-step .df2-transfer-step-secondary > .df2-structure-preview,
+.df2-source-step .df2-transfer-step-secondary > .df2-source-aside {
   flex: 1 1 0;
   min-height: 0;
+  min-width: 0;
   height: 100%;
   margin-top: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  box-sizing: border-box;
 }
 
-.df2-source-step .df2-structure-preview-head,
+.df2-source-step .df2-structure-preview-head {
+  flex-shrink: 0;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.df2-source-step .df2-structure-preview-head > div:first-child {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+
+.df2-source-step .df2-structure-preview-head-actions {
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 100%;
+}
+
+.df2-source-step .df2-structure-field-block,
 .df2-source-step .df2-structure-field-strip {
   flex-shrink: 0;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .df2-source-step .df2-structure-table-wrap {
@@ -5036,17 +5069,28 @@ th.df2-type-string .df2-type-badge {
 
 /* SOURCE — "Detected structure" field strip declutter.
    Wrap the field chips into a calm, capped, scrollable block instead of one
-   long horizontally-scrolling colourful ribbon. */
+   long horizontally-scrolling colourful ribbon. Keep chips inside the card
+   border (min-width:0 + box-sizing) so nested cards never overflow the pane. */
+.df2-structure-field-block {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
 .df2-structure-field-strip {
+  display: flex;
   flex-wrap: wrap !important;
-  overflow-x: visible !important;
+  overflow-x: hidden !important;
   overflow-y: auto;
   max-height: 118px;
   gap: 6px !important;
   padding: 2px 2px 6px !important;
   align-content: flex-start;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 .df2-structure-field-chip {
+  flex: 0 1 auto;
   flex-direction: row !important;
   align-items: center;
   gap: 6px !important;
@@ -5054,7 +5098,10 @@ th.df2-type-string .df2-type-badge {
   background: #f8fafc !important;
   border: 1px solid #e6ebf1 !important;
   border-radius: 7px !important;
-  max-width: 220px;
+  max-width: min(220px, 100%);
+  min-width: 0;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 .df2-structure-field-chip:hover {
   transform: none !important;
@@ -6464,9 +6511,27 @@ th.df2-type-string .df2-type-badge {
   line-height: 1.45;
 }
 .df2-vd-blocker-actions {
-  display: grid;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 8px;
   margin-top: 4px;
+}
+/* Never stretch Fix CTAs to 200–300px+ full-bleed widths */
+.df2-vd-blocker-actions > .df2-btn,
+.df2-vd-fix-actions > .df2-btn,
+.df2-vd-remediate-bar .df2-btn,
+.df2-vd-assist-actions .df2-btn {
+  flex: 0 0 auto !important;
+  width: auto !important;
+  min-width: 0 !important;
+  max-width: min(280px, 100%) !important;
+  height: 32px !important;
+  min-height: 32px !important;
+  padding: 0 12px !important;
+  font-size: 12.5px !important;
+  white-space: nowrap;
+  box-sizing: border-box;
 }
 .df2-validate-rail-issue {
   display: block;
@@ -6888,9 +6953,22 @@ button.df2-vd-assist-toggle:focus-visible {
   gap: 8px;
   flex-shrink: 0;
 }
-.df2-vd-assist-head-actions .df2-btn {
+.df2-vd-assist-head-actions .df2-btn,
+.df2-vd-cell-preview-actions .df2-btn,
+.df2-vd-map-proof-card-head .df2-btn {
   pointer-events: auto;
+  flex: 0 0 auto !important;
+  width: auto !important;
+  min-width: 0 !important;
+  max-width: min(280px, 100%) !important;
+  height: 32px !important;
+  min-height: 32px !important;
+  padding: 0 12px !important;
+  font-size: 12.5px !important;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-sizing: border-box;
 }
 .df2-vd-assist-panel {
   display: flex;
@@ -7084,19 +7162,22 @@ button.df2-vd-assist-toggle:focus-visible {
 }
 .df2-validate-rail-primary-fix {
   margin-top: 0;
-  width: auto;
-  max-width: 100%;
+  width: auto !important;
+  max-width: min(220px, 100%) !important;
+  flex: 0 0 auto !important;
 }
 
 /* Validate bottom bar — compact enterprise buttons (never full-bleed) */
 .df2-validate-rail-actions .df2-btn {
-  flex: 0 0 auto;
-  width: auto;
-  max-width: 100%;
+  flex: 0 0 auto !important;
+  width: auto !important;
+  min-width: 0 !important;
+  max-width: min(220px, 100%) !important;
+  height: 36px !important;
+  min-height: 36px !important;
+  padding: 0 14px !important;
+  font-size: 12.5px !important;
   white-space: nowrap;
-}
-.df2-validate-rail-actions .df2-btn-primary {
-  min-width: 0;
 }
 .df2-vd-remediate-bar .df2-vd-cell-preview-hint {
   margin: 10px 0 0;

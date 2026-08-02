@@ -3143,7 +3143,8 @@
 .df2-validate-rail-primary-fix.df2-btn,
 .df2-validate-rail-primary-fix {
   width: auto !important;
-  max-width: 100%;
+  max-width: min(220px, 100%) !important;
+  flex: 0 0 auto !important;
   align-self: center;
   margin-top: 0;
 }
@@ -4459,8 +4460,11 @@
   flex: 0 0 auto !important;
   width: auto !important;
   min-width: 0 !important;
-  max-width: 100% !important;
+  /* Never stretch Fix/Execute to full rail width (was max-width: 100%) */
+  max-width: min(220px, 100%) !important;
   white-space: nowrap !important;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .df2-validate-rail-explain {
@@ -4563,10 +4567,17 @@
 }
 
 .df2-run-ready-actions .df2-btn {
+  flex: 0 0 auto !important;
+  width: auto !important;
+  min-width: 0 !important;
+  max-width: min(220px, 100%) !important;
   height: 36px !important;
   min-height: 36px !important;
-  padding: 0 12px !important;
-  border-radius: 9px !important;
+  padding: 0 14px !important;
+  border-radius: var(--df-radius-md, 8px) !important;
+  font-size: 12.5px !important;
+  font-weight: 600 !important;
+  white-space: nowrap !important;
 }
 
 /* Starting transfer */

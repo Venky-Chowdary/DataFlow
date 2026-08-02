@@ -92,12 +92,13 @@ def samples_coerce_mapping(
 
 
 def _target_type_for(mapping: dict, dest_types: dict[str, str], source_types: dict[str, str]) -> str:
-    tgt = mapping.get("target", "")
-    return (
-        dest_types.get(tgt)
-        or mapping.get("target_type")
-        or source_types.get(mapping.get("source", ""))
-        or "VARCHAR"
+    from services.type_system import resolve_mapping_target_type
+
+    src = str(mapping.get("source") or "")
+    return resolve_mapping_target_type(
+        mapping,
+        target_types=dest_types,
+        source_type=str(source_types.get(src) or ""),
     )
 
 

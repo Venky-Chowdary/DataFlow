@@ -187,25 +187,31 @@ def apply_postgres_session_guards(conn: Any) -> None:
             logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
-def apply_mysql_session_guards(conn: Any) -> None:
+def apply_mysql_session_guards(
+    conn: Any,
+    *,
+    lock_wait_seconds: int = 120,
+) -> None:
     """Raise MySQL session I/O / wait timeouts and enable fail-closed sql_mode.
 
     ``wait_timeout`` / ``interactive_timeout`` are raised so long-running transfers
-    are not killed.  ``lock_wait_timeout`` / ``innodb_lock_wait_timeout`` are set
+    are not killed.  ``lock_wait_timeout`` / ``innodb_lock_wait_timeout`` default
     to 2 minutes so a contended metadata lock or row lock fails fast instead of
-    hanging the transfer indefinitely.
+    hanging the transfer indefinitely. DDL/demo callers may pass a lower
+    ``lock_wait_seconds`` (e.g. 30) so a 5-row overwrite cannot sit for minutes.
 
     STRICT_TRANS_TABLES (+ related modes) prevent silent truncation / invalid-date
     coercion that would otherwise look like a successful write with data loss.
     """
+    lock_s = max(5, min(int(lock_wait_seconds or 120), 600))
     try:
         with conn.cursor() as cur:
             cur.execute("SET SESSION wait_timeout = 28800")
             cur.execute("SET SESSION interactive_timeout = 28800")
             cur.execute("SET SESSION net_read_timeout = 600")
             cur.execute("SET SESSION net_write_timeout = 600")
-            cur.execute("SET SESSION lock_wait_timeout = 120")
-            cur.execute("SET SESSION innodb_lock_wait_timeout = 120")
+            cur.execute(f"SET SESSION lock_wait_timeout = {lock_s}")
+            cur.execute(f"SET SESSION innodb_lock_wait_timeout = {lock_s}")
             _ensure_mysql_strict_sql_mode(cur)
     except Exception as exc:
         logger.warning("Exception suppressed: %s", exc, exc_info=exc)

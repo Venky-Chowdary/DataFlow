@@ -100,6 +100,26 @@ def test_g3_float_to_decimal_not_sample_soft_passed():
     assert any("float→decimal" in i.lower() or "ieee" in i.lower() for i in (result.details or {}).get("issues", []))
 
 
+def test_g3_typed_sink_missing_probe_is_unproven_not_soft_green():
+    """Samples exist but typed column has no by_source row — fail-closed in strict."""
+
+    class _Ctx(PreflightContext):
+        def coercion_report(self):
+            return {"sampled_rows": 3, "by_source": {}}
+
+    plan = _ctx(
+        {"amount": "VARCHAR"},
+        {"amount": "INTEGER"},
+        [("amount", "amount")],
+    ).plan
+    result = gate_g3_schema_contract(_Ctx(plan=plan))
+    assert result.status.value == "block"
+    issues = (result.details or {}).get("issues", [])
+    assert any("unproven" in i.lower() for i in issues)
+    details = (result.details or {}).get("issues_detail") or []
+    assert any(d.get("probe_unproven") for d in details)
+
+
 def test_g3_decimal_to_float_not_sample_soft_passed():
     """DECIMAL→FLOAT is fidelity collapse — never soft-pass on clean head samples."""
 

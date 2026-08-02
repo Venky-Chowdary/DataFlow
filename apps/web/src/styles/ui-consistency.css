@@ -271,14 +271,18 @@
  * "Fix …" control from becoming a page-width slab.
  */
 .df2-validate-rail-actions .df2-btn,
+.df2-run-ready-actions .df2-btn,
 .df2-wizard-footer .df2-btn,
 .df2-map-footer-actions .df2-btn,
 .df2-card-footer .df2-btn,
 .df2-toolbar .df2-btn,
-.df2-page-head-actions .df2-btn {
+.df2-page-head-actions .df2-btn,
+.df2-vd-fix-actions .df2-btn,
+.df2-vd-remediate-bar .df2-btn {
   flex: 0 0 auto;
   width: auto;
-  max-width: 100%;
+  min-width: 0;
+  max-width: min(220px, 100%);
   white-space: nowrap;
 }
 .df2-validate-rail-actions .df2-btn.df2-btn-block,

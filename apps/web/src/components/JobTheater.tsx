@@ -774,7 +774,12 @@ export function JobTheaterView({
               )}
               {stalled && isRunning && !reconciling && (
                 <span className="df2-theater-v3-chunk is-working">
-                  <Spinner size="sm" label="" /> Writing large batch…
+                  <Spinner size="sm" label="" />{" "}
+                  {processed === 0 && total > 0 && total <= 500
+                    ? "Waiting on destination (connect / DDL)…"
+                    : processed === 0
+                      ? "Waiting on destination…"
+                      : "Writing large batch…"}
                 </span>
               )}
               {stalled && reconciling && (

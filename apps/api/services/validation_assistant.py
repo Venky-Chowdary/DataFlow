@@ -49,15 +49,50 @@ def _coercion_column_fixes(report: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _parse_type_mismatch_columns(text: str) -> list[tuple[str, str]]:
     """Extract (source, target) from messages like ``population (VARCHAR) → population (NUMBER)``."""
+    return [(src, tgt) for src, _st, tgt, _tt in _parse_type_mismatch_pairs(text)]
+
+
+def _parse_type_mismatch_pairs(text: str) -> list[tuple[str, str, str, str]]:
+    """Extract (source, source_type, target, target_type) from mismatch messages."""
     import re
 
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, str, str]] = []
     for m in re.finditer(
-        r"([A-Za-z_][\w]*)\s*\([^)]+\)\s*→\s*([A-Za-z_][\w]*)\s*\([^)]+\)",
+        r"([A-Za-z_][\w]*)\s*\(([^)]+)\)\s*→\s*([A-Za-z_][\w]*)\s*\(([^)]+)\)",
         text or "",
     ):
-        out.append((m.group(1), m.group(2)))
+        out.append(
+            (m.group(1), m.group(2).strip(), m.group(3), m.group(4).strip())
+        )
     return out
+
+
+def _remap_to_type_for_mismatch(source_type: str, target_type: str) -> str:
+    """Choose a one-click target type that can actually clear the gate."""
+    from services.type_system import (
+        normalize_logical_type,
+        specialty_carrier_base,
+    )
+
+    src_l = normalize_logical_type(source_type)
+    tgt_l = normalize_logical_type(target_type)
+    specialty = specialty_carrier_base(source_type)
+    # Bare VARCHAR/TEXT is the *problem* for UUID / ObjectId create-new, not the fix.
+    if src_l == "uuid" and tgt_l in {"string", "text", "json"}:
+        return "UUID"
+    if specialty and tgt_l in {"string", "text", "json"}:
+        return specialty
+    # Numeric / temporal mismatches: preserve source family — never invent VARCHAR.
+    if src_l == "float" and tgt_l in {"decimal", "integer"}:
+        return "DOUBLE"
+    if src_l == "decimal" and tgt_l in {"integer", "float"}:
+        return source_type.strip() or "DECIMAL"
+    if src_l in {"datetime", "date", "time"} and tgt_l in {"datetime", "date", "time", "string", "text"}:
+        return source_type.strip() or src_l.upper()
+    # TEXT/VARCHAR → NUMBER: keep string carrier (do not "fix" by casting).
+    if src_l in {"string", "text"} and tgt_l in {"integer", "decimal", "float"}:
+        return "VARCHAR"
+    return "VARCHAR"
 
 
 def _is_encoding_blocker(text: str) -> bool:
@@ -121,6 +156,7 @@ def _is_type_mismatch_blocker(text: str) -> bool:
             "cannot be cast",
             "does not safely become",
             "lossy type",
+            "lossy coercion",
             "unparseable",
         )
     )
@@ -209,19 +245,31 @@ def _suggested_actions(
 
     # Declared-type / dry-run type mismatches → Widen/remap, never Strip-first.
     if _is_type_mismatch_blocker(blocker_text):
-        for src, tgt in _parse_type_mismatch_columns(blocker_text):
-            key = ("change_target_type", src, "VARCHAR")
+        pairs = _parse_type_mismatch_pairs(blocker_text)
+        if not pairs:
+            for src, tgt in _parse_type_mismatch_columns(blocker_text):
+                pairs.append((src, "", tgt, ""))
+        for src, src_type, tgt, tgt_type in pairs:
+            to_type = _remap_to_type_for_mismatch(src_type, tgt_type)
+            key = ("change_target_type", src, to_type)
             if key not in seen:
                 seen.add(key)
+                if to_type.upper() == "UUID":
+                    label = (
+                        f"Keep '{src}' as UUID — create-new writes CHAR(36)/UUID "
+                        f"(bare VARCHAR/TEXT is not a fix; Strip/Quarantine cannot help)"
+                    )
+                else:
+                    label = (
+                        f"Remap '{src}' off typed {tgt or tgt_type or 'column'} → {to_type} "
+                        "(Strip/Quarantine cannot fix type mismatches)"
+                    )
                 actions.append({
                     "kind": "change_target_type",
                     "column": src,
                     "target": tgt,
-                    "to_type": "VARCHAR",
-                    "label": (
-                        f"Remap '{src}' off typed {tgt} → VARCHAR "
-                        "(Strip/Quarantine cannot fix type mismatches)"
-                    ),
+                    "to_type": to_type,
+                    "label": label,
                     "requires_ddl": True,
                 })
         if not any(a.get("kind") == "change_target_type" for a in actions):

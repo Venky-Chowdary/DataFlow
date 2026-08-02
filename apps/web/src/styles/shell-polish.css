@@ -1311,11 +1311,14 @@ textarea.df2-pilot-composer textarea {
   to { transform: rotate(360deg); }
 }
 
-/* ─── Fixed shell: sidebar never scrolls, only main content scrolls ─── */
+/* ─── Fixed shell: sidebar never scrolls, only main content scrolls ───
+   Heights use zoom-compensated layout viewport (see tokens.css). Raw 100vh
+   under `zoom: 0.8` left a blank strip at the bottom of laptop browsers. */
 @media (min-width: 1025px) {
   .df2-app {
-    min-height: 100vh;
-    height: 100vh;
+    min-height: var(--df-layout-viewport-h, 100dvh);
+    height: var(--df-layout-viewport-h, 100dvh);
+    max-height: var(--df-layout-viewport-h, 100dvh);
     overflow: hidden;
   }
 
@@ -1323,8 +1326,9 @@ textarea.df2-pilot-composer textarea {
     position: fixed !important;
     left: 0;
     top: 0;
-    height: 100vh !important;
-    max-height: 100vh !important;
+    /* Fixed boxes resolve % against the viewport — use zoom-compensated height. */
+    height: var(--df-layout-viewport-h, 100dvh) !important;
+    max-height: var(--df-layout-viewport-h, 100dvh) !important;
     overflow: hidden !important;
     z-index: 50;
   }
@@ -1343,8 +1347,8 @@ textarea.df2-pilot-composer textarea {
 
   .df2-app .df2-main {
     margin-left: var(--df-sidebar-width, 260px);
-    height: 100vh;
-    max-height: 100vh;
+    height: var(--df-layout-viewport-h, 100dvh);
+    max-height: var(--df-layout-viewport-h, 100dvh);
     overflow-y: auto;
     overflow-x: hidden;
     -webkit-overflow-scrolling: touch;
@@ -2861,8 +2865,10 @@ textarea.df2-pilot-composer textarea {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
   margin-bottom: 12px;
+  min-width: 0;
 }
 
 .df2-structure-preview-head h4 {
@@ -2881,8 +2887,11 @@ textarea.df2-pilot-composer textarea {
 .df2-structure-preview-head-actions {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  max-width: 100%;
+  min-width: 0;
 }
 
 /* Table / JSON segmented toggle — matches the enterprise pill-filter language */
@@ -5551,8 +5560,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-app {
-  min-height: 100vh;
-  min-height: 100dvh;
+  min-height: var(--df-layout-viewport-h, 100dvh);
   overflow: hidden;
 }
 

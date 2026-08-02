@@ -2205,7 +2205,21 @@ class UniversalTransferEngine:
                             drop_primary=should_drop_full_refresh,
                         )
                     if should_drop_full_refresh:
+                        mongo.update_job_status(
+                            job_id,
+                            "running",
+                            phase="writing",
+                            message=(
+                                "Preparing destination — clearing table for full refresh…"
+                            ),
+                        )
                         _drop_destination_table(request.destination)
+                        mongo.update_job_status(
+                            job_id,
+                            "running",
+                            phase="writing",
+                            message="Connecting to destination and creating table…",
+                        )
                     return write_destination_database(
                         request.destination,
                         records,
@@ -2927,7 +2941,25 @@ class UniversalTransferEngine:
                     or not is_streaming
                     or not _checkpoint_has_progress(checkpoint)
                 ):
+                    mongo.update_job_status(
+                        job_id,
+                        "running",
+                        phase="writing",
+                        progress_pct=compute_transfer_progress_pct(
+                            phase="writing", rows_processed=0, total_rows=total_rows
+                        )
+                        or 5,
+                        message=(
+                            "Preparing destination — clearing table for full refresh…"
+                        ),
+                    )
                     _drop_destination_table(request.destination)
+                    mongo.update_job_status(
+                        job_id,
+                        "running",
+                        phase="writing",
+                        message="Connecting to destination and creating table…",
+                    )
 
             effective_sync = resolve_effective_sync_mode(
                 request.sync_mode,
@@ -3492,7 +3524,25 @@ class UniversalTransferEngine:
                     or not is_streaming
                     or not _checkpoint_has_progress(checkpoint)
                 ):
+                    mongo.update_job_status(
+                        job_id,
+                        "running",
+                        phase="writing",
+                        progress_pct=compute_transfer_progress_pct(
+                            phase="writing", rows_processed=0, total_rows=total_rows
+                        )
+                        or 5,
+                        message=(
+                            "Preparing destination — clearing table for full refresh…"
+                        ),
+                    )
                     _drop_destination_table(request.destination)
+                    mongo.update_job_status(
+                        job_id,
+                        "running",
+                        phase="writing",
+                        message="Connecting to destination and creating table…",
+                    )
 
             rows_written, ddl_log, dest_summary, _ = stream_file_to_database(
                 content,

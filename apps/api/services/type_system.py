@@ -355,7 +355,8 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_DATE: "DATE",
         LOGICAL_DATETIME: "TIMESTAMP_TZ",
         LOGICAL_TIME: "TIME",
-        LOGICAL_UUID: "VARCHAR",
+        # Width-safe carrier — bare VARCHAR collapses UUID polarity in preflight.
+        LOGICAL_UUID: "VARCHAR(36)",
         LOGICAL_JSON: "VARIANT",
         LOGICAL_ARRAY: "VARIANT",
         LOGICAL_BINARY: "BINARY",
@@ -369,6 +370,9 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_DATE: "DATE",
         LOGICAL_DATETIME: "TIMESTAMP",
         LOGICAL_TIME: "TIME",
+        # BigQuery has no UUID type; STRING holds the value but drops polarity.
+        # create_new_mapping_target_type stamps physical STRING so Validate warns
+        # (never silent-green UUID→UUID while writers emit STRING).
         LOGICAL_UUID: "STRING",
         LOGICAL_JSON: "JSON",
         LOGICAL_ARRAY: "JSON",
@@ -1887,6 +1891,18 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
         if db == "databricks":
             return "VOID"
         return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT, DEFAULT_DDL.get(db, "TEXT"))
+    # Logical UUID → dialect-native UUID DDL (MySQL CHAR(36), PG UUID, …).
+    # Exact CHAR(36)/VARCHAR(36) wires are preserved as-is — never promote a
+    # plain VARCHAR(36) text column to PostgreSQL UUID (invalid for non-UUID
+    # values). Also never collapse CHAR(36) through STRING→TEXT.
+    if normalize_logical_type(inferred) == LOGICAL_UUID:
+        types_early = DDL_TYPES.get(db) or {}
+        native_uuid = types_early.get(LOGICAL_UUID)
+        if native_uuid:
+            return native_uuid
+        return "VARCHAR(36)"
+    if uuid_exact_wire_carrier(inferred):
+        return strip_identity_qualifier(inferred).strip()
     # MongoDB ObjectId — 12-byte identity; VARCHAR(24) hex on relational sinks.
     if base_early in {"OBJECTID", "OBJECT_ID"}:
         if db == "mongodb":
@@ -3739,12 +3755,36 @@ def specialty_carrier_base(inferred: str | None) -> str | None:
     return None
 
 
+def specialty_wire_preserves_value(source_specialty: str, target_type: str) -> bool:
+    """True when target is the industry-standard wire for a specialty carrier.
+
+    Mongo ObjectId → ``CHAR/VARCHAR(24)`` hex or ``BINARY(12)`` (common RDBMS
+    practice). IP families → ``VARCHAR(45)`` (IPv6). Bare TEXT/STRING still
+    collapses polarity and must surface in preflight.
+    """
+    raw = strip_identity_qualifier(target_type).strip()
+    if not raw:
+        return False
+    upper = raw.upper()
+    spec = (source_specialty or "").upper()
+    if spec == "OBJECTID":
+        if upper in {"BINARY(12)", "VARBINARY(12)"}:
+            return True
+        m = re.match(r"^(?:N?VAR)?CHAR(?:ACTER)?\s*\(\s*(\d+)\s*\)$", upper)
+        return bool(m and int(m.group(1)) >= 24)
+    if spec in {"INET", "CIDR", "IPV4", "IPV6", "IP", "MACADDR", "MACADDR8"}:
+        m = re.match(r"^(?:N?VAR)?CHAR(?:ACTER)?\s*\(\s*(\d+)\s*\)$", upper)
+        return bool(m and int(m.group(1)) >= 45)
+    return False
+
+
 def specialty_carrier_would_collapse(source_type: str, target_type: str) -> bool:
     """True when a native specialty carrier would collapse to opaque string/text.
 
     Airbyte maps inet/hstore/pg_lsn/geometric → string. DataFlow preserves natives
-    on PG create-new; mapping to VARCHAR/TEXT/STRING invents document polarity and
-    must surface in preflight (never silent green).
+    on PG create-new; mapping to bare VARCHAR/TEXT/STRING invents document polarity
+    and must surface in preflight (never silent green). Width-safe create-new
+    wires (ObjectId→VARCHAR(24)) are not a collapse.
     """
     src = specialty_carrier_base(source_type)
     if src is None:
@@ -3753,24 +3793,147 @@ def specialty_carrier_would_collapse(source_type: str, target_type: str) -> bool
     if tgt is not None:
         # Same specialty family OK; distinct specialty (INET→CIDR) is separate.
         return False
+    if specialty_wire_preserves_value(src, target_type):
+        return False
     tgt_l = normalize_logical_type(target_type)
     # Opaque string sinks — specialty validation algorithms would not run on dest.
     return tgt_l in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON}
 
 
+def resolve_mapping_target_type(
+    mapping: dict,
+    *,
+    target_types: dict[str, str] | None = None,
+    source_type: str = "",
+) -> str:
+    """Resolve the DDL type a mapping row should validate/write against.
+
+    Create-new: stamped ``mapping["target_type"]`` is authoritative (writer
+    intent) — never invent UUID→UUID green when the map stamped STRING.
+    Existing columns: live destination type wins, then stamped, then source.
+    """
+    types = target_types or {}
+    tgt = str(mapping.get("target") or "").strip()
+    stamped = str(mapping.get("target_type") or "").strip()
+    live = ""
+    if tgt and tgt in types:
+        live = str(types.get(tgt) or "").strip()
+    elif tgt:
+        lower_map = {str(k).lower(): v for k, v in types.items()}
+        live = str(lower_map.get(tgt.lower(), "") or "").strip()
+    src = (
+        (source_type or "").strip()
+        or str(mapping.get("source_type") or "").strip()
+        or "VARCHAR"
+    )
+    if mapping.get("create_new"):
+        return stamped or live or src
+    return live or stamped or src
+
+
+def create_new_mapping_target_type(src_type: str, dest_db_type: str = "") -> str:
+    """Target type stamped on create-new mappings for Validate + writers.
+
+    Keep UUID as logical when the destination emits a native UUID or exact
+    36-char wire (MySQL ``CHAR(36)``, Snowflake ``VARCHAR(36)``). On engines
+    whose only store is bare ``STRING``/``TEXT`` (BigQuery, Databricks, SQLite),
+    stamp the physical type so Validate surfaces polarity loss as a warn —
+    never silent-green UUID→UUID while writers emit STRING.
+    """
+    if normalize_logical_type(src_type) == LOGICAL_UUID:
+        db_uuid = (dest_db_type or "").strip()
+        if not db_uuid:
+            return "UUID"
+        physical_uuid = ddl_type(db_uuid, src_type)
+        if (
+            normalize_logical_type(physical_uuid) == LOGICAL_UUID
+            or uuid_exact_wire_carrier(physical_uuid)
+        ):
+            return "UUID"
+        return physical_uuid
+    specialty = specialty_carrier_base(src_type)
+    db = (dest_db_type or "").strip()
+    if specialty:
+        if db:
+            physical = ddl_type(db, src_type)
+            # Dest keeps a native specialty token (PG→PG INET) — stamp that.
+            if specialty_carrier_base(physical) is not None:
+                return physical
+            # Off-engine wire (ObjectId→VARCHAR(24), INET→VARCHAR/TEXT) — stamp
+            # logical specialty so Validate does not false-block create-new.
+            # Writers still emit ``physical`` via ddl_type at CREATE time.
+            phys_l = normalize_logical_type(physical)
+            if (
+                specialty_wire_preserves_value(specialty, physical)
+                or phys_l in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON}
+            ):
+                return specialty
+            return physical
+        return specialty
+    if db:
+        return ddl_type(db, src_type)
+    return (src_type or "VARCHAR").strip() or "VARCHAR"
+
+
+def uuid_exact_wire_carrier(target_type: str | None) -> bool:
+    """True only for exact 36-char UUID string wires (not VARCHAR(50)+)."""
+    raw = strip_identity_qualifier(target_type).strip()
+    if not raw:
+        return False
+    upper = raw.upper()
+    if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
+        return True
+    m = re.match(
+        r"^(?:N?VAR)?CHAR(?:ACTER)?\s*\(\s*(\d+)\s*\)$",
+        upper,
+    )
+    if m and int(m.group(1)) == 36:
+        return True
+    m = re.match(r"^VARCHAR2\s*\(\s*(\d+)\s*\)$", upper)
+    return bool(m and int(m.group(1)) == 36)
+
+
+def uuid_capacity_string_carrier(target_type: str | None) -> bool:
+    """True when the physical type can hold a canonical UUID without truncation.
+
+    MySQL/Oracle/Redshift create-new emit ``CHAR(36)`` / ``VARCHAR(36)`` /
+    ``VARCHAR2(36)`` for UUID. Those are the dialect-native wire — not an
+    opaque domain collapse. Bare ``VARCHAR`` / ``TEXT`` / ``STRING`` still
+    collapse (lost UUID polarity) and must surface in preflight.
+
+    Widths ``> 36`` also preserve the value (no truncation) for collapse
+    checks, but :func:`ddl_type` must not rewrite them to UUID DDL — see
+    :func:`uuid_exact_wire_carrier`.
+    """
+    if uuid_exact_wire_carrier(target_type):
+        return True
+    raw = strip_identity_qualifier(target_type).strip()
+    if not raw:
+        return False
+    upper = raw.upper()
+    m = re.match(
+        r"^(?:N?VAR)?CHAR(?:ACTER)?\s*\(\s*(\d+)\s*\)$",
+        upper,
+    )
+    if m and int(m.group(1)) > 36:
+        return True
+    m = re.match(r"^VARCHAR2\s*\(\s*(\d+)\s*\)$", upper)
+    return bool(m and int(m.group(1)) > 36)
+
+
 def uuid_would_collapse(source_type: str, target_type: str) -> bool:
     """True when UUID polarity collapses to opaque string/text.
 
-    Top-level UUID→VARCHAR is common on Snowflake/Databricks; nested UUID→string
-    is the Snowflake structured-type compatibility mode (pg_lake / Iceberg).
-    Both are valid sinks but must surface in preflight — never silent green.
+    Top-level UUID→bare VARCHAR/TEXT/STRING is common on Snowflake/Databricks
+    and must surface in preflight — never silent green. Dialect-native
+    ``CHAR(36)`` / ``VARCHAR(36)`` carriers (MySQL create-new) preserve the
+    value *and* the 36-char contract, so they are not a collapse.
     """
     if normalize_logical_type(source_type) != LOGICAL_UUID:
         return False
     if normalize_logical_type(target_type) == LOGICAL_UUID:
         return False
-    tgt_u = strip_identity_qualifier(target_type).upper().strip()
-    if tgt_u in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
+    if uuid_capacity_string_carrier(target_type):
         return False
     tgt_l = normalize_logical_type(target_type)
     return tgt_l in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON}

@@ -2,6 +2,10 @@
  * Validate storytelling helpers — present root causes clearly without changing
  * engine gate outcomes. Duplicate identity keys often fail G9 + G6 + G8; ISO
  * timestamp bind notes are warnings, not blockers.
+ *
+ * ``remapToTypeForMismatch`` mirrors backend
+ * ``validation_assistant._remap_to_type_for_mismatch`` so one-click Fix CTAs
+ * do not invent bare VARCHAR for UUID/ObjectId/DECIMAL/temporal blockers.
  */
 import { gateLabel } from "./preflightGates.js";
 import type {
@@ -18,6 +22,40 @@ const DUPLICATE_GATE_IDS = new Set([
   "g6_ddl",
   "g8_reconciliation",
 ]);
+
+/** Mirror apps/api/services/validation_assistant._remap_to_type_for_mismatch. */
+export function remapToTypeForMismatch(sourceType: string, targetType: string): string {
+  const src = (sourceType || "").trim();
+  const tgt = (targetType || "").trim();
+  const srcU = src.toUpperCase();
+  const tgtU = tgt.toUpperCase();
+  // Include CHAR(n) / NCHAR — backend normalize_logical_type maps these to string.
+  const stringSink = /^(N?VAR)?CHAR|TEXT|STRING|JSON|LONGTEXT|CLOB|NVARCHAR|VARCHAR2/.test(tgtU);
+  if ((srcU.includes("UUID") || srcU.includes("GUID") || srcU.includes("UNIQUEIDENTIFIER")) && stringSink) {
+    return "UUID";
+  }
+  if (srcU.includes("OBJECTID") && stringSink) return "OBJECTID";
+  const specialty = srcU.match(
+    /^(INET|CIDR|IPV4|IPV6|IP|MACADDR8?|HSTORE|LTREE|PG_LSN|OBJECTID)\b/,
+  );
+  if (specialty && stringSink) return specialty[1];
+  if (/FLOAT|DOUBLE|REAL/.test(srcU) && /DECIMAL|NUMBER|NUMERIC|INT/.test(tgtU)) {
+    return "DOUBLE";
+  }
+  if (/DECIMAL|NUMERIC|NUMBER/.test(srcU) && /INT|FLOAT|DOUBLE|REAL/.test(tgtU)) {
+    return src || "DECIMAL";
+  }
+  if (
+    /TIMESTAMP|DATETIME|DATE|TIME/.test(srcU)
+    && /TIMESTAMP|DATETIME|DATE|TIME|VARCHAR|TEXT|STRING|CHAR/.test(tgtU)
+  ) {
+    return src || "TIMESTAMP";
+  }
+  if (/VARCHAR|TEXT|STRING|CHAR/.test(srcU) && /INT|DECIMAL|NUMBER|FLOAT|DOUBLE/.test(tgtU)) {
+    return "VARCHAR";
+  }
+  return "VARCHAR";
+}
 
 const DUPLICATE_RE =
   /duplicate\s+(?:key|id|target\s+key)|keys?\s+repeat|primary\s+key\s+candidate.*duplicate|expect_column_unique/i;

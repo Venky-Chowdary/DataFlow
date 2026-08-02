@@ -250,9 +250,20 @@ body,
  * Laptop workspace density — app-level scale so Chrome 100% zoom feels like
  * the ~80% browser zoom operators preferred. Scales px + rem (unlike rem-only).
  * Landing / login sit outside `.df2-app` and stay full size.
+ *
+ * CRITICAL: CSS `zoom` shrinks the element's *visual* size relative to the
+ * viewport. A shell sized to 100vh at zoom 0.8 only paints ~80vh and leaves a
+ * blank strip at the bottom (and often the right). Layout width/height MUST be
+ * inflated by 1/scale so the post-zoom visual exactly fills the viewport.
  */
 :root {
   --df-ui-scale: 1;
+  /* Layout viewport used by the zoomed shell + fit pages (pre-zoom units).
+     Prefer % width over 100vw to avoid scrollbar-induced horizontal spill. */
+  --df-layout-viewport-h: calc(100dvh / var(--df-ui-scale));
+  --df-layout-viewport-w: calc(100% / var(--df-ui-scale));
+  /* Alias consumed by transfer studio / column workbench fit math. */
+  --df-viewport-h: var(--df-layout-viewport-h);
 }
 
 @media (max-width: 1680px) {
@@ -268,12 +279,49 @@ body,
   }
 }
 
-.df2-app {
-  zoom: var(--df-ui-scale);
+/* Lock document scroll only when the workspace shell is mounted — landing
+   pages outside `.df2-app` must keep normal document scrolling. */
+body:has(.df2-app) {
+  overflow: hidden;
+  height: 100%;
+  max-height: 100%;
 }
 
-/* Firefox has no zoom — approximate with root type + slightly denser controls */
+body:has(.df2-app) #root {
+  height: 100%;
+  max-height: 100%;
+  overflow: hidden;
+}
+
+.df2-app {
+  zoom: var(--df-ui-scale);
+  width: var(--df-layout-viewport-w);
+  max-width: var(--df-layout-viewport-w);
+  height: var(--df-layout-viewport-h);
+  min-height: var(--df-layout-viewport-h);
+  max-height: var(--df-layout-viewport-h);
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+/* Firefox has no zoom — approximate with root type + slightly denser controls.
+   No layout inflation: font-size density does not leave a blank viewport strip. */
 @supports not (zoom: 1) {
+  :root {
+    --df-layout-viewport-h: 100dvh;
+    --df-layout-viewport-w: 100%;
+    --df-viewport-h: 100dvh;
+  }
+
+  .df2-app {
+    zoom: unset;
+    width: 100%;
+    max-width: none;
+    height: 100%;
+    min-height: 100dvh;
+    max-height: none;
+  }
+
   @media (max-width: 1680px) {
     .df2-app {
       font-size: 85%;

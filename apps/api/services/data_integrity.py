@@ -107,8 +107,13 @@ def _check_coercion_safety(
         from services.type_system import is_precision_collapse_coercion
 
         src_t = str(source_types.get(src) or "")
-        tgt_name = str((mapping or {}).get("target") or "")
-        tgt_t = str(target_types.get(tgt_name) or "")
+        from services.type_system import resolve_mapping_target_type
+
+        tgt_t = resolve_mapping_target_type(
+            mapping or {"target": issue.get("target")},
+            target_types=target_types,
+            source_type=src_t,
+        )
         if mapping and is_precision_collapse_coercion(src_t, tgt_t):
             hardened.append(issue)
             continue

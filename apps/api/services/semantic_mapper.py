@@ -1265,7 +1265,7 @@ def map_columns(
     destination_table_exists: bool | None = None,
 ) -> list[dict]:
     from services.semantic_analyzer import analyze_column
-    from services.type_system import ddl_type
+    from services.type_system import create_new_mapping_target_type, ddl_type
 
     floor = max(0.55, threshold - 0.3)
     src_roles: dict[str, str] = {}
@@ -1302,6 +1302,7 @@ def map_columns(
         for src in source_columns:
             src_type = src_types.get(src, "VARCHAR")
             dest_native = ddl_type(dest_db, src_type) if dest_db else src_type
+            map_target_type = create_new_mapping_target_type(src_type, dest_db)
             if confirmed_missing:
                 out.append(
                     {
@@ -1314,7 +1315,7 @@ def map_columns(
                         ),
                         "user_override": False,
                         "source_type": src_type,
-                        "target_type": dest_native,
+                        "target_type": map_target_type,
                         "assignment_strategy": "identity_passthrough",
                         "create_new": True,
                     }
@@ -1491,6 +1492,7 @@ def map_columns(
                 )
                 continue
             dest_native = ddl_type(dest_db, src_type) if dest_db else src_type
+            map_target_type = create_new_mapping_target_type(src_type, dest_db)
             # Prefer the original source name for ADD COLUMN (_id stays _id).
             # Semantic form alone collapses _id → id, then id_text — a name that
             # operators did not approve and that often never gets DDL.
@@ -1509,12 +1511,12 @@ def map_columns(
                     "target": candidate,
                     "confidence": IDENTITY_PASSTHROUGH_CONFIDENCE,
                     "reasoning": (
-                        "No type-compatible destination column — map to a new text field "
+                        "No type-compatible destination column — map to a new field "
                         f"(create/ADD as {dest_native}); do not coerce into incompatible DDL"
                     ),
                     "user_override": False,
                     "source_type": src_type,
-                    "target_type": dest_native,
+                    "target_type": map_target_type,
                     "assignment_strategy": "create_compatible_new",
                     "create_new": True,
                     "alternatives": alternatives,

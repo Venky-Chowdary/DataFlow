@@ -43,12 +43,18 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(css, /@media \(max-width: 1440px\)/);
     assert.match(css, /wizard-label-short \{\s*display: inline !important;/s);
     assert.match(css, /validate-rail-primary-fix[\s\S]*width: auto !important/);
+    assert.match(
+      css,
+      /validate-rail-actions \.df2-btn[\s\S]*max-width:\s*min\(220px,\s*100%\)\s*!important/,
+    );
   });
 
-  it("tokens apply laptop UI scale (~80%) at 100% browser zoom", () => {
+  it("tokens apply laptop UI scale (~80%) and compensate zoom viewport fill", () => {
     const css = readFileSync(join(webRoot, "styles/tokens.css"), "utf8");
     assert.match(css, /--df-ui-scale:\s*0\.8/);
-    assert.match(css, /\.df2-app \{\s*zoom: var\(--df-ui-scale\)/s);
+    assert.match(css, /\.df2-app \{[\s\S]*zoom: var\(--df-ui-scale\)/);
+    assert.match(css, /--df-layout-viewport-h:\s*calc\(100dvh \/ var\(--df-ui-scale\)\)/);
+    assert.match(css, /height: var\(--df-layout-viewport-h\)/);
     assert.match(css, /@media \(max-width: 1512px\)/);
   });
 
