@@ -218,8 +218,11 @@ export function TransferMapStep({
 
   return (
     <div className="df2-transfer-step-panel df2-map-step-panel">
-      <div className="df2-card-head df2-map-step-head">
-        <div>
+      <div
+        className="df2-card-head df2-map-step-head"
+        title={`${columnMappings.length} mappings · ${approvedCount} ready${mappingReviewCount > 0 ? ` · ${mappingReviewCount} need review` : ""}`}
+      >
+        <div className="df2-map-step-head-copy">
           <h3 className="df2-card-title">Map columns</h3>
           <p className="df2-card-sub">
             {columnMappings.length} mappings · {approvedCount} ready
@@ -238,11 +241,20 @@ export function TransferMapStep({
                       : ""}
             {streamNames.length > 1 ? ` · ${streamNames.length} streams` : ""}
           </p>
+          <div className="df2-map-step-head-compact" aria-hidden>
+            <span>{columnMappings.length} map</span>
+            {mappingReviewCount > 0 && (
+              <span className="is-warn">{mappingReviewCount} review</span>
+            )}
+            {mappingReviewCount === 0 && (
+              <span className="is-ok">{approvedCount} ready</span>
+            )}
+          </div>
         </div>
         <div className="df2-map-step-head-actions">
           {(effectiveProof.summary?.cdc_detected || (effectiveProof.sync_mode || "").toLowerCase().includes("cdc")) && (
             <span className="df2-badge df2-badge-info df2-badge-xs" title="Change-stream / CDC route — at-least-once upsert by default">
-              CDC · at-least-once
+              CDC
             </span>
           )}
           {destDisplayType && (
@@ -256,7 +268,8 @@ export function TransferMapStep({
             onClick={() => setProofOpen(true)}
             title="Inspect how this map works — confidence evidence, transforms, fidelity risks"
           >
-            <DtIcon name="sparkle" size={14} /> Mapping proof
+            <DtIcon name="sparkle" size={14} />
+            <span className="df2-map-btn-label">Proof</span>
           </button>
           <button
             type="button"
@@ -264,7 +277,8 @@ export function TransferMapStep({
             onClick={() => setMapDialogOpen(true)}
             title="Open full mapping table in a dialog"
           >
-            <DtIcon name="expand" size={14} /> Expand mapping table
+            <DtIcon name="expand" size={14} />
+            <span className="df2-map-btn-label">Expand</span>
           </button>
         </div>
       </div>
@@ -463,6 +477,7 @@ export function TransferMapStep({
       </div>
 
       <div className="df2-wizard-footer df2-map-footer">
+        <button type="button" className="df2-btn" onClick={onBack}>← Back</button>
         <div className="df2-map-footer-status" aria-live="polite">
           <span>
             <strong>Mapping:</strong>{" "}
@@ -480,7 +495,6 @@ export function TransferMapStep({
           </span>
         </div>
         <div className="df2-map-footer-actions">
-          <button type="button" className="df2-btn" onClick={onBack}>← Back</button>
           <button type="button" className="df2-btn df2-btn-primary" onClick={onContinue}>
             Continue to Validate →
           </button>

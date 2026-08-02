@@ -49,7 +49,37 @@ def _to_dynamo_value(value: Any, source_type: str) -> Any:
     """Convert transform-engine values to DynamoDB-serializable native types."""
     if value is None:
         return None
+    # Reader envelopes: {"_df_ddb_set": "SS"|"NS"|"BS", "v": [...]} (also accept "items").
+    if isinstance(value, dict) and value.get("_df_ddb_set") in {"SS", "NS", "BS"}:
+        kind = value["_df_ddb_set"]
+        items = value.get("v")
+        if items is None:
+            items = value.get("items") or []
+        if kind == "SS":
+            return {str(x) for x in items}
+        if kind == "NS":
+            return {Decimal(str(x)) for x in items}
+        if kind == "BS":
+            from connectors.sql_bind import coerce_binary_wire
+
+            return {coerce_binary_wire(x) if not isinstance(x, (bytes, bytearray)) else bytes(x) for x in items}
+    if isinstance(value, str) and value.startswith("{") and "_df_ddb_set" in value:
+        try:
+            parsed = json.loads(value, parse_float=Decimal)
+            if isinstance(parsed, dict) and parsed.get("_df_ddb_set"):
+                return _to_dynamo_value(parsed, source_type)
+        except Exception:
+            pass
     upper = source_type.upper()
+    if upper in {"BOOLEAN", "BOOL", "BIT"}:
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"true", "1", "t", "yes", "y"}:
+            return True
+        if text in {"false", "0", "f", "no", "n"}:
+            return False
+        return bool(value)
     # Advertise numeric DDL as DynamoDB N — never silently store typed numbers as S.
     if upper in {
         "DECIMAL", "NUMERIC", "NUMBER", "INTEGER", "BIGINT", "SMALLINT",
@@ -59,8 +89,8 @@ def _to_dynamo_value(value: Any, source_type: str) -> Any:
             return Decimal(str(value))
         except Exception:
             return value
-    if upper in {"JSON", "OBJECT", "ARRAY", "VARIANT"}:
-        if isinstance(value, (dict, list)):
+    if upper in {"JSON", "OBJECT", "ARRAY", "VARIANT", "SET"}:
+        if isinstance(value, (dict, list, set)):
             return value
         if isinstance(value, str):
             try:
@@ -82,7 +112,9 @@ def _to_attr(value: Any, source_type: str) -> dict:
     from boto3.dynamodb.types import TypeSerializer
 
     ser = TypeSerializer()
-    return ser.serialize(_to_dynamo_value(value, source_type))
+    native = _to_dynamo_value(value, source_type)
+    # TypeSerializer turns set[str] → SS, set[Decimal] → NS, set[bytes] → BS.
+    return ser.serialize(native)
 
 
 def write_mapped_rows(

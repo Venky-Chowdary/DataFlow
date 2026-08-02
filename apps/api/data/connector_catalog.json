@@ -307,8 +307,8 @@
       "id": "dynamodb",
       "name": "DynamoDB",
       "category": "database",
-      "status": "beta",
-      "description": "AWS DynamoDB source and destination \u2014 table sync with credential test"
+      "status": "live",
+      "description": "AWS DynamoDB source and destination \u2014 KeySchema-aware map, typed writes, cloud object-store routes"
     },
     {
       "id": "documentdb",
@@ -623,7 +623,7 @@
       "name": "Salesforce",
       "category": "saas",
       "status": "live",
-      "description": "Salesforce SaaS application sync"
+      "description": "Salesforce source/destination via Composite Collections (≤200/req). Host must be org instance URL; paste Bearer access token."
     },
     {
       "id": "hubspot",

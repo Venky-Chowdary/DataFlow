@@ -802,6 +802,14 @@ def _write_batch(
             kwargs["conflict_columns"] = conflict_columns
             kwargs["sync_mode"] = sync_mode
             kwargs["file_batch_idx"] = chunk_idx
+        if dest_type == "dynamodb":
+            # Create-table needs HASH[/RANGE] from conflict_columns; without
+            # them Dynamo invents nothing and refuses, or (worse) operators
+            # get a half-configured table mid-demo.
+            kwargs["write_mode"] = write_mode
+            kwargs["conflict_columns"] = conflict_columns
+            kwargs["sync_mode"] = sync_mode
+            kwargs["job_id"] = job_id or ""
         if dest_type in ("s3", "gcs", "adls"):
             # Multi-chunk object-store writes must receive chunk index + total so
             # writers emit part-* keys instead of overwriting a fixed object.
@@ -1173,6 +1181,21 @@ def stream_database_transfer(
         PHASE_READ, time.perf_counter() - _probe_started, rows=len(probe.rows or [])
     )
     columns = probe.headers
+    if not columns and src_type == "dynamodb":
+        # Empty or key-only Dynamo tables still have a KeySchema — seed from
+        # describe so Map/Validate can proceed instead of aborting the demo.
+        try:
+            from connectors.dynamodb_reader import describe_table_schema
+
+            key_names, key_types = describe_table_schema(src_cfg, table)
+            if key_names:
+                columns = list(key_names)
+                for name, lt in (key_types or {}).items():
+                    schema.setdefault(name, lt)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "DynamoDB empty-probe KeySchema seed failed for %s: %s", table, exc
+            )
     if not columns:
         raise ValueError(f"Source table `{table}` has no columns or is empty")
 

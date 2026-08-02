@@ -2053,6 +2053,55 @@ th.df2-type-string .df2-type-badge {
   padding: 24px 16px !important;
 }
 
+/* After upload: compact file row (no giant replace dropzone) */
+.df2-upload-result-compact {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid #99f6e4;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #f0fdfa 0%, #fff 100%);
+}
+.df2-upload-result-compact .df2-upload-result-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-width: 0;
+}
+
+.df2-dest-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px 12px;
+  margin-bottom: 8px;
+}
+.df2-dest-toolbar .df2-dest-mode-field {
+  flex: 1 1 220px;
+  margin: 0;
+  min-width: 0;
+}
+
+.df2-wizard-label-short {
+  display: none;
+}
+
+.df2-map-step-head-compact {
+  display: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  font-size: 12px;
+  font-weight: 650;
+  color: #475569;
+}
+.df2-map-step-head-compact .is-warn { color: #b45309; }
+.df2-map-step-head-compact .is-ok { color: #0f766e; }
+
 /* Step 3 — destination: connection-first; advanced lives in a right drawer */
 .df2-dest-sync-summary {
   display: flex;
@@ -6951,8 +7000,12 @@ button.df2-vd-assist-toggle:focus-visible {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
+}
+/* Back is first child — left-aligned like Source/Dest */
+.df2-map-footer > .df2-btn:first-child {
+  margin-right: 0;
+  flex-shrink: 0;
 }
 .df2-map-footer-status {
   display: flex;
@@ -6961,6 +7014,7 @@ button.df2-vd-assist-toggle:focus-visible {
   font-size: 12.5px;
   color: #475569;
   min-width: 0;
+  flex: 1 1 160px;
 }
 .df2-map-footer-status strong {
   color: #0f172a;
@@ -7469,24 +7523,19 @@ button.df2-vd-assist-toggle:focus-visible {
   opacity: 0.7;
 }
 
-@media (max-width: 1280px) {
+@media (max-width: 1366px) {
+  /* Validate: dashboard scrolls; actions stick as a bottom bar (like other steps) */
   .df2-transfer-studio-body.is-validate-step {
-    grid-template-columns: 1fr !important;
+    display: flex !important;
+    flex-direction: column !important;
+    grid-template-columns: none !important;
     overflow: hidden !important;
   }
 
-  .df2-transfer-studio-body.is-validate-step .df2-validate-rail {
-    height: auto !important;
-    max-height: min(36vh, 320px);
-    overflow-y: auto !important;
-  }
-
-  /* Keep main panel height-bound so Validate host can scroll when needed */
   .df2-transfer-studio-body.is-validate-step .df2-transfer-main-panel {
+    flex: 1 1 auto !important;
     min-height: 0 !important;
     max-height: none !important;
-    height: auto !important;
-    flex: 1 1 auto !important;
     overflow: hidden !important;
     display: flex !important;
     flex-direction: column !important;
@@ -7494,9 +7543,47 @@ button.df2-vd-assist-toggle:focus-visible {
 
   .df2-transfer-studio-body.is-validate-step .df2-validate-dashboard-host {
     flex: 1 1 auto !important;
-    min-height: min(52vh, 520px) !important;
-    max-height: min(58vh, 640px) !important;
+    min-height: 0 !important;
+    max-height: none !important;
     overflow-y: auto !important;
+  }
+
+  .df2-transfer-studio-body.is-validate-step .df2-validate-rail {
+    flex: 0 0 auto !important;
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+    padding: 8px 10px !important;
+    border-radius: 0 0 10px 10px;
+    border-top: 1px solid #e2e8f0;
+    gap: 6px;
+  }
+
+  /* Duplicate readiness scorecard hides — keep launch / CDC / sticky actions */
+  .df2-transfer-studio-body.is-validate-step .df2-validate-rail-scorecard {
+    display: none;
+  }
+
+  .df2-transfer-studio-body.is-validate-step
+    .df2-validate-rail-scroll:not(:has(.df2-validate-launch)):not(:has([aria-label="CDC retention"])) {
+    display: none;
+  }
+
+  .df2-transfer-studio-body.is-validate-step .df2-validate-rail-actions {
+    padding-top: 0;
+    border-top: none;
+    background: transparent;
+    flex-wrap: nowrap;
+    gap: 6px;
+  }
+
+  .df2-transfer-studio-body.is-validate-step .df2-validate-rail-explain,
+  .df2-transfer-studio-body.is-validate-step .df2-validate-rail-contract-hint {
+    display: none;
+  }
+
+  .df2-transfer-studio-body.is-validate-step .df2-validate-rail-actions .df2-btn {
+    white-space: nowrap;
   }
 }
 

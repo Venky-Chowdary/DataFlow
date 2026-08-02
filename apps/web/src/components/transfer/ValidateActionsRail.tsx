@@ -94,7 +94,7 @@ export function ValidateActionsRail({
         ) : null}
 
         {preflighting && (
-          <div className="df2-validate-rail-panel df2-validate-status live">
+          <div className="df2-validate-rail-panel df2-validate-status df2-validate-rail-scorecard live">
             <div className="df2-validate-rail-score">
               <strong>…</strong>
               <span>validating</span>
@@ -104,7 +104,7 @@ export function ValidateActionsRail({
         )}
 
         {preflight && !preflighting && (
-          <div className={`df2-validate-rail-panel df2-validate-status${passed ? " passed" : " blocked"}`}>
+          <div className={`df2-validate-rail-panel df2-validate-status df2-validate-rail-scorecard${passed ? " passed" : " blocked"}`}>
             <div className="df2-validate-rail-score">
               <strong>{preflight.readiness_score}%</strong>
               <span>readiness</span>
@@ -251,14 +251,16 @@ export function ValidateActionsRail({
                 ? (executeBlockedReason || "Execution blocked")
                 : !passed
                   ? `Blocked: ${firstBlockerMessage || "Resolve failed checks and re-run preflight"}${firstBlockerFix ? ` — Fix: ${firstBlockerFix}` : ""}`
-                  : undefined
+                  : rowCount != null
+                    ? `Execute transfer · ${rowCount.toLocaleString()} rows`
+                    : "Execute transfer"
             }
             leadingIcon={<DtIcon name="arrow-right" size={16} />}
           >
             {executeBlocked
               ? "Execute (blocked)"
               : passed
-                ? `Execute transfer${rowCount != null ? ` · ${rowCount.toLocaleString()} rows` : ""}`
+                ? "Execute"
                 : "Execute (blocked)"}
           </Button>
         )}

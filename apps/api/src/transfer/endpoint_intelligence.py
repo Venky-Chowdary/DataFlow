@@ -591,7 +591,10 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 read_all_paginated,
             )
 
-            table = endpoint.database or endpoint.table
+            # Prefer table (object name) over database (often the AWS region).
+            # Using database-first made Map/Validate sample the wrong Dynamo
+            # table whenever operators put region in the database field.
+            table = endpoint.table or endpoint.collection or endpoint.database
             if table:
                 try:
                     names, schema_map = describe_table_schema(cfg, table)

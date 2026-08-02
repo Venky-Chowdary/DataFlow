@@ -9782,11 +9782,12 @@
 /* Laptop / desktop density — keep grids readable, never cramped */
 @media (min-width: 1024px) and (max-width: 1366px) {
   :root {
-    --df-page-gutter: 14px;
-    --df-table-row-height: 38px;
-    --df-table-cell-pad-y: 8px;
-    --df-table-cell-pad-x: 10px;
-    --df-card-pad: 12px;
+    --df-page-gutter: 12px;
+    --df-table-row-height: 32px;
+    --df-table-cell-pad-y: 4px;
+    --df-table-cell-pad-x: 8px;
+    --df-card-pad: 10px;
+    --df-stepper-node: 26px;
   }
 
   .df2-content {
@@ -9795,97 +9796,116 @@
 
   /* ── Transfer Studio: reclaim vertical space on 13–14" ── */
   .df2-page-transfer-studio .df2-transfer-studio-chrome {
-    gap: 6px;
-    padding: 8px 12px;
-    border-radius: 10px;
+    gap: 4px;
+    padding: 4px 10px;
+    border-radius: 8px;
   }
 
   .df2-page-transfer-studio .df2-wizard-progress {
-    display: none; /* track already shows step state */
+    display: none;
   }
 
   .df2-page-transfer-studio .df2-wizard-studio {
-    gap: 4px;
+    gap: 2px;
   }
 
   .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-step {
-    padding: 4px 8px;
-    gap: 6px;
+    padding: 2px 6px;
+    gap: 4px;
   }
 
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-num {
+    width: var(--df-stepper-node);
+    height: var(--df-stepper-node);
+    font-size: 11px;
+  }
+
+  /* Full labels → short labels on laptop */
   .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label {
-    font-size: 12px;
+    display: none;
+  }
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label-short {
+    display: inline;
+    font-size: 11px;
+    font-weight: 650;
+    letter-spacing: 0.01em;
   }
 
   .df2-page-transfer-studio .df2-route-bar-meta {
-    display: none; /* icon + short label only — full path is in the form */
+    display: none;
   }
 
   .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-head {
-    padding: 8px 12px !important;
-  }
-
-  .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-head .df2-card-sub {
-    display: none; /* titles stay; long subcopy moves into tooltips / forms */
+    display: none !important; /* wizard already names the step */
   }
 
   .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-body {
-    padding: 10px 12px !important;
+    padding: 8px 10px !important;
   }
 
-  /* Source kind: icon + label only — desc lives in title= */
+  /* Source kind: icon + label only */
   .df2-page-transfer-studio .df2-source-kind-desc,
   .df2-page-transfer-studio .df2-source-kind-hint {
     display: none;
   }
 
   .df2-page-transfer-studio .df2-source-kind-tile {
-    padding: 8px 10px;
-    gap: 8px;
+    padding: 6px 8px;
+    gap: 6px;
     border-width: 1.5px;
-    border-radius: 10px;
+    border-radius: 8px;
   }
 
   .df2-page-transfer-studio .df2-source-kind-icon {
-    width: 28px;
-    height: 28px;
+    width: 24px;
+    height: 24px;
+  }
+
+  .df2-page-transfer-studio .df2-source-ocr-toggle {
+    min-height: 28px;
+    margin-bottom: 6px !important;
+  }
+  .df2-page-transfer-studio .df2-source-ocr-toggle small {
+    display: none;
   }
 
   .df2-page-transfer-studio .df2-upload.df2-upload-studio {
-    min-height: 120px !important;
-    padding: 16px 14px !important;
+    min-height: 88px !important;
+    padding: 12px 12px !important;
   }
 
   .df2-page-transfer-studio .df2-upload-icon {
-    width: 40px;
-    height: 40px;
+    width: 32px;
+    height: 32px;
   }
 
-  /* Source aside: collapse the 3-step profiling cards into a thin strip */
+  .df2-page-transfer-studio .df2-upload-formats {
+    display: none;
+  }
+
   .df2-page-transfer-studio .df2-source-aside-steps {
     display: none;
   }
 
   .df2-page-transfer-studio .df2-structure-preview {
-    padding: 10px;
+    padding: 8px;
     min-height: 0;
   }
 
   .df2-page-transfer-studio .df2-transfer-step-secondary .df2-structure-preview {
-    min-height: 160px;
+    min-height: 120px;
   }
 
-  /* Destination connectors: icon + name; meta stays in title= */
   .df2-page-transfer-studio .df2-dest-connector-grid {
-    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-    gap: 6px;
+    grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+    gap: 5px;
   }
 
   .df2-page-transfer-studio .df2-dest-connector-card {
     flex-direction: row;
     align-items: center;
-    gap: 8px;
-    padding: 8px 10px;
+    gap: 6px;
+    padding: 6px 8px;
   }
 
   .df2-page-transfer-studio .df2-dest-connector-card-meta,
@@ -9894,30 +9914,91 @@
   }
 
   .df2-page-transfer-studio .df2-dest-picker-head {
-    margin-bottom: 6px;
+    margin-bottom: 4px;
   }
 
   .df2-page-transfer-studio .df2-dest-sync-summary {
+    padding: 6px 8px;
+  }
+
+  /* Map: reclaim height so ≥1 mapping row is visible */
+  .df2-page-transfer-studio .df2-map-step-panel > .df2-map-step-head {
+    padding: 4px 8px !important;
+    min-height: 0;
+    gap: 6px;
+  }
+  .df2-page-transfer-studio .df2-map-step-panel .df2-card-title,
+  .df2-page-transfer-studio .df2-map-step-panel .df2-card-sub {
+    display: none !important;
+  }
+  .df2-page-transfer-studio .df2-map-step-head-compact {
+    display: flex !important;
+  }
+  .df2-page-transfer-studio .df2-map-identity-chip {
+    padding: 6px 8px;
+    margin: 0 0 6px;
+    gap: 8px;
+    align-items: center;
+  }
+  .df2-page-transfer-studio .df2-map-identity-chip-kicker,
+  .df2-page-transfer-studio .df2-map-identity-chip-hint,
+  .df2-page-transfer-studio .df2-map-identity-suggest {
+    display: none;
+  }
+  .df2-page-transfer-studio .df2-map-identity-chip-meta {
+    gap: 6px 10px;
+    font-size: 11.5px;
+  }
+  .df2-page-transfer-studio .df2-map-step-workspace {
+    grid-template-columns: minmax(0, 1fr) minmax(200px, 24%);
+    gap: 6px;
+  }
+  .df2-page-transfer-studio .df2-column-review-table {
+    --df-table-row-height: 32px;
+  }
+  .df2-page-transfer-studio .df2-column-review-table th {
+    padding: 4px 8px !important;
+  }
+  .df2-page-transfer-studio .df2-column-review-table td {
+    padding: 2px 8px !important;
+  }
+  .df2-page-transfer-studio .df2-map-footer-status {
+    display: none; /* status lives in compact head */
+  }
+  .df2-page-transfer-studio .df2-map-btn-label {
+    display: none;
+  }
+
+  /* Validate: ring fits integer %; sticky bottom actions */
+  .df2-page-transfer-studio .df2-vd-hero {
+    gap: 8px;
     padding: 8px 10px;
   }
-
-  /* Validate: smaller hero ring — proof still visible */
-  .df2-page-transfer-studio .df2-vd-hero {
-    gap: 12px;
-    padding: 12px;
+  .df2-page-transfer-studio .df2-vd-hero-head h3 {
+    font-size: 14px;
   }
-
   .df2-page-transfer-studio .df2-vd-hero-ring {
-    width: 52px;
-    height: 52px;
+    width: 48px;
+    height: 48px;
     flex-shrink: 0;
   }
-
+  .df2-page-transfer-studio .df2-vd-hero-ring-label strong {
+    font-size: 12px;
+  }
+  .df2-page-transfer-studio .df2-vd-hero-ring-label strong small {
+    font-size: 8px;
+  }
+  .df2-page-transfer-studio .df2-vd-hero-ring-label span {
+    display: none; /* READY label overflows 48px ring */
+  }
   .df2-page-transfer-studio .df2-vd-hero-counts {
-    margin-top: 6px;
+    margin-top: 4px;
+  }
+  .df2-page-transfer-studio .df2-vd {
+    gap: 10px;
+    padding: 10px;
   }
 
-  /* Result: denser metrics; secondary proof cards stay but tighter */
   .df2-page-transfer-studio .df2-result-metrics {
     gap: 6px;
   }
@@ -9934,7 +10015,6 @@
     border-radius: 10px;
   }
 
-  /* Jobs detail: compact the summary band — identity + key metrics only */
   .df2-jobs-v3-summary {
     padding: 10px 12px;
     gap: 10px;
@@ -9954,24 +10034,30 @@
   }
 
   .df2-jobs-v3-summary-route span {
-    display: none; /* "Source" / "Destination" labels — icons + names remain */
+    display: none;
+  }
+
+  /* Query / connectors: denser page chrome without summary strip */
+  .df2-page-query .df2-card-head,
+  .df2-page-connectors .df2-page-shell-head {
+    padding-bottom: 6px;
   }
 }
 
 /* Short laptop viewports (13–14" at 800–900px tall) — reclaim height first */
 @media (max-height: 900px) and (min-width: 1024px) {
   .df2-page-transfer-studio .df2-transfer-studio-chrome {
-    gap: 4px;
-    padding: 6px 10px;
+    gap: 2px;
+    padding: 3px 8px;
   }
 
   .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-step.active {
-    transform: none; /* scale glow eats vertical rhythm */
+    transform: none;
   }
 
   .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-step.active .df2-wizard-num {
     animation: none;
-    box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14);
+    box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.14);
   }
 
   .df2-page-transfer-studio .df2-source-kind-hint,
@@ -9980,17 +10066,33 @@
   }
 
   .df2-page-transfer-studio .df2-upload.df2-upload-studio {
-    min-height: 100px !important;
-    padding: 12px 12px !important;
+    min-height: 72px !important;
+    padding: 10px !important;
   }
 
-  .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-head .df2-card-sub {
-    display: none;
+  .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-head {
+    display: none !important;
   }
 
   .df2-page-transfer-studio .df2-vd-hero-ring {
     width: 44px;
     height: 44px;
+  }
+
+  .df2-page-transfer-studio .df2-vd-hero-ring-label strong {
+    font-size: 11px;
+  }
+
+  .df2-page-transfer-studio .df2-map-identity-chip {
+    padding: 4px 8px;
+    margin-bottom: 4px;
+  }
+
+  .df2-page-transfer-studio .df2-map-step-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .df2-page-transfer-studio .df2-mapping-intelligence {
+    display: none; /* intelligence available via Expand / Proof */
   }
 }
 

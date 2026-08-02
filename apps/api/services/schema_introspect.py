@@ -3411,6 +3411,7 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
     try:
         from connectors.dynamodb_reader import (
             DDB_NULL_SENTINEL,
+            describe_key_schema,
             describe_table_schema,
             estimate_item_count,
             list_tables,
@@ -3423,8 +3424,15 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
             "username": kwargs.get("username") or "",
             "password": kwargs.get("password") or "",
             "connection_string": kwargs.get("connection_string") or "",
+            "endpoint_url": kwargs.get("endpoint_url") or "",
+            "region": kwargs.get("region") or "",
         }
         names, types = describe_table_schema(cfg, table)
+        key_schema = []
+        try:
+            key_schema = describe_key_schema(cfg, table)
+        except Exception:
+            logger.debug("DynamoDB key schema describe failed for %s", table, exc_info=True)
         # Sample real items — union every attribute (sparse keys) + native types.
         try:
             from connectors.dynamodb_reader import read_table_batch
@@ -3457,8 +3465,16 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
         except Exception:
             logger.warning("DynamoDB sample inference failed for %s", table, exc_info=True)
 
+        pk_names = [k["name"] for k in key_schema if k.get("name")]
+        key_roles = {k["name"]: k.get("key_type", "HASH") for k in key_schema}
         columns = [
-            {"name": name, "inferred_type": types.get(name, "TEXT"), "nullable": True}
+            {
+                "name": name,
+                "inferred_type": types.get(name, "TEXT"),
+                "nullable": name not in pk_names,
+                "is_primary_key": name in pk_names,
+                "dynamo_key_type": key_roles.get(name),
+            }
             for name in names
         ]
         tables = [table]
@@ -3477,6 +3493,8 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
             "columns": columns,
             "schema": table,
             "row_estimate": row_estimate,
+            "primary_key_columns": pk_names,
+            "dynamo_key_schema": key_schema,
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}
@@ -4008,9 +4026,35 @@ def _introspect_salesforce(**kwargs: Any) -> dict[str, Any]:
                 "nullable": bool(f.get("nillable", True)),
                 "data_type": f.get("type") or "string",
                 "label": f.get("label") or "",
+                "is_primary_key": f.get("name") == "Id" or bool(f.get("externalId")),
+                "updateable": bool(f.get("updateable", True)),
+                "createable": bool(f.get("createable", True)),
+                "calculated": bool(f.get("calculated", False)),
+                "externalId": bool(f.get("externalId", False)),
+                "idLookup": bool(f.get("idLookup", False)),
             }
         )
-    return {"ok": True, "columns": columns, "tables": tables, "schema": table}
+    pk_cols = ["Id"] if any(c.get("name") == "Id" for c in columns) else []
+    unique_keys: list[dict[str, Any]] = []
+    for c in columns:
+        if c.get("externalId") or (c.get("idLookup") and c.get("name") != "Id"):
+            unique_keys.append(
+                {
+                    "name": f"sf_ext_{c['name']}",
+                    "columns": [str(c["name"])],
+                    "primary": False,
+                    "enforced": True,
+                    "external_id": bool(c.get("externalId")),
+                }
+            )
+    return {
+        "ok": True,
+        "columns": columns,
+        "tables": tables,
+        "schema": table,
+        "primary_key_columns": pk_cols,
+        "unique_keys": unique_keys,
+    }
 
 
 def _thin_saas_logical_to_carrier(logical: str) -> str:

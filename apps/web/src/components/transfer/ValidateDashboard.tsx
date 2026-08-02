@@ -1243,7 +1243,10 @@ export function ValidateDashboard({
             />
           </svg>
           <div className="df2-vd-hero-ring-label">
-            <strong>{running ? formatElapsed(elapsedMs) : readiness}<small>{running ? "" : "%"}</small></strong>
+            <strong>
+              {running ? formatElapsed(elapsedMs) : Math.round(Number(readiness) || 0)}
+              <small>{running ? "" : "%"}</small>
+            </strong>
             <span>{heroReadyLabel}</span>
           </div>
         </div>

@@ -567,10 +567,19 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_merge": True,
         "requires_schema": False,
         "supports_binary": False,
-        "pagination": "bulk_api",
-        "rate_limit_notes": "Bulk API 2.0 breaks large ingest into batches. Monitor daily API limits.",
-        "common_issues": ["Long-running bulk jobs can fail if the daily limit is exceeded.", "External IDs are required for upsert."],
-        "recommended_batch_size": 10000,
+        # Honest transport: Composite sObject Collections (max 200), not Bulk 2.0.
+        "pagination": "composite_collections",
+        "rate_limit_notes": (
+            "Writes use Composite sObject Collections (≤200 records/request). "
+            "Paste a Bearer access token and set Host to the org instance URL "
+            "(*.my.salesforce.com), not login.salesforce.com. Monitor daily API limits."
+        ),
+        "common_issues": [
+            "External IDs are required for upsert.",
+            "Formula / non-updateable fields are skipped on write.",
+            "Source reads currently buffer in-process (cap ~100k); use smaller objects for demos.",
+        ],
+        "recommended_batch_size": 200,
     },
     "servicenow": {
         "transfer_ready": True,

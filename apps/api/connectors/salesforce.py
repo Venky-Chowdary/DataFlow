@@ -46,7 +46,15 @@ def test_salesforce(
     access_token = token(api_key, connection_string, username, password)
     if not access_token:
         return False, "Salesforce access token is required. Paste it in the API key field or connection string."
-    url = f"{base_url(host, DEFAULT_HOST)}/services/data/{API_VERSION}/limits"
+    resolved = base_url(host, DEFAULT_HOST)
+    host_l = (host or "").strip().lower()
+    if not host_l or "login.salesforce.com" in host_l or "test.salesforce.com" in host_l:
+        return (
+            False,
+            "Set Host to your Salesforce instance URL (e.g. https://yourorg.my.salesforce.com). "
+            "login.salesforce.com / test.salesforce.com cannot serve REST data APIs.",
+        )
+    url = f"{resolved}/services/data/{API_VERSION}/limits"
     try:
         r = request(method="GET", url=url, token=access_token, timeout=20)
         r.raise_for_status()
@@ -64,7 +72,14 @@ def _access(cfg: dict[str, Any]) -> tuple[str, str]:
     )
     if not access_token:
         raise ValueError("Salesforce access token is required")
-    return access_token, base_url(cfg.get("host", ""), DEFAULT_HOST)
+    host = str(cfg.get("host") or "")
+    host_l = host.strip().lower()
+    if not host_l or "login.salesforce.com" in host_l or "test.salesforce.com" in host_l:
+        raise ValueError(
+            "Salesforce Host must be the org instance URL "
+            "(https://yourorg.my.salesforce.com), not login.salesforce.com"
+        )
+    return access_token, base_url(host, DEFAULT_HOST)
 
 
 def list_sobjects(cfg: dict[str, Any]) -> list[str]:
@@ -99,6 +114,9 @@ def describe_sobject(cfg: dict[str, Any], sobject: str) -> list[dict[str, Any]]:
     r.raise_for_status()
     fields: list[dict[str, Any]] = []
     for f in r.json().get("fields") or []:
+        # Preserve write-safety + picklist metadata. Stripping these made live
+        # Map/Validate invent writable formula fields and lose ENUM domains —
+        # both are demo-breakers against a real Salesforce org.
         fields.append(
             {
                 "name": f.get("name") or "",
@@ -108,6 +126,23 @@ def describe_sobject(cfg: dict[str, Any], sobject: str) -> list[dict[str, Any]]:
                 "precision": f.get("precision"),
                 "scale": f.get("scale"),
                 "label": f.get("label") or "",
+                "updateable": bool(f.get("updateable", True)),
+                "createable": bool(f.get("createable", True)),
+                "calculated": bool(f.get("calculated", False)),
+                "externalId": bool(f.get("externalId", False)),
+                "idLookup": bool(f.get("idLookup", False)),
+                "unique": bool(f.get("unique", False)),
+                "referenceTo": list(f.get("referenceTo") or []),
+                "compoundFieldName": f.get("compoundFieldName") or "",
+                "picklistValues": [
+                    {
+                        "value": pv.get("value"),
+                        "label": pv.get("label"),
+                        "active": bool(pv.get("active", True)),
+                    }
+                    for pv in (f.get("picklistValues") or [])
+                    if isinstance(pv, dict) and pv.get("value") is not None
+                ],
             }
         )
     return [f for f in fields if f.get("name")]

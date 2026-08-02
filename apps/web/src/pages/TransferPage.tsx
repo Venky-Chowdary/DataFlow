@@ -4352,17 +4352,6 @@ export function TransferPage({
 
       {step === STEP_SOURCE && (
       <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-source-step">
-        <div className="df2-card-head">
-          <div>
-            <h3 className="df2-card-title">Source</h3>
-            <p
-              className="df2-card-sub"
-              title="Upload a file or pick a saved connector, then name the table or collection. For CDC / incremental multi-stream, comma-separate several names."
-            >
-              File, database, or cloud — then choose what to read.
-            </p>
-          </div>
-        </div>
         <div className="df2-card-body">
           <div className="df2-transfer-step-split">
             <div className="df2-transfer-step-primary">
@@ -4397,7 +4386,18 @@ export function TransferPage({
                   </div>
                 </div>
               )}
-              <label className="df2-policy-toggle" style={{ marginBottom: 10 }} onClick={(e) => e.stopPropagation()}>
+              <label
+                className="df2-policy-toggle df2-source-ocr-toggle"
+                style={{ marginBottom: 8 }}
+                onClick={(e) => e.stopPropagation()}
+                title={
+                  ocrStatus?.available === false
+                    ? `OCR not ready: ${ocrStatus.message || "install tesseract + pypdfium2/Pillow/pytesseract"}`
+                    : ocrStatus?.available
+                      ? "Tesseract is available — OCR scanned PDFs when no text layer exists"
+                      : "OCR scanned PDFs when no text layer exists (requires Tesseract on the API host)"
+                }
+              >
                 <input
                   type="checkbox"
                   checked={enableOcr}
@@ -4415,8 +4415,26 @@ export function TransferPage({
                   </small>
                 </span>
               </label>
+              {file && parsed ? (
+                <div className="df2-upload-result df2-upload-result-compact">
+                  <div className="df2-upload-result-main">
+                    <span className="df2-badge df2-badge-live"><DtIcon name="check" size={14} /> {file.name}</span>
+                    <span className="df2-upload-result-meta">
+                      {formatFileSize(file.size)} · {parsed.row_count.toLocaleString()} rows · {parsed.columns.length} columns
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="df2-btn df2-btn-sm"
+                    onClick={() => fileInputRef.current?.click()}
+                    title="Replace source file"
+                  >
+                    <DtIcon name="upload" size={14} /> Replace
+                  </button>
+                </div>
+              ) : (
               <div
-                className={`df2-upload df2-upload-studio ${dragOver ? "drag-over" : ""} ${uploading ? "is-loading" : ""} ${parsed ? "has-file" : ""}`}
+                className={`df2-upload df2-upload-studio ${dragOver ? "drag-over" : ""} ${uploading ? "is-loading" : ""}`}
                 onClick={() => !uploading && fileInputRef.current?.click()}
                 onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
                 onDragLeave={() => setDragOver(false)}
@@ -4429,7 +4447,7 @@ export function TransferPage({
                   {uploading || analyzing ? <Spinner /> : <DtIcon name="upload" size={22} />}
                 </div>
                 <p className="df2-upload-title">
-                  {uploading ? "Profiling source file…" : parsed ? "Replace source file" : "Drop your data file here"}
+                  {uploading ? "Profiling source file…" : "Drop your data file here"}
                 </p>
                 <p className="df2-upload-hint">
                   {uploading ? "Parsing schema and sampling rows" : "or click to browse · max 250 MB"}
@@ -4440,6 +4458,7 @@ export function TransferPage({
                   ))}
                 </div>
               </div>
+              )}
               {!parsed && !uploading && (
                 <div className="df2-upload-sample-row">
                   <span className="df2-label-hint">New to DataFlow?</span>
@@ -4450,14 +4469,6 @@ export function TransferPage({
               )}
               {file && parsed && (
                 <>
-                  <div className="df2-upload-result">
-                    <div className="df2-upload-result-main">
-                      <span className="df2-badge df2-badge-live"><DtIcon name="check" size={14} /> {file.name}</span>
-                      <span className="df2-upload-result-meta">
-                        {formatFileSize(file.size)} · {parsed.row_count.toLocaleString()} rows · {parsed.columns.length} columns
-                      </span>
-                    </div>
-                  </div>
                   {["pdf", "docx", "html", "htm"].includes((parsed.file_type || "").toLowerCase()) && (
                     <p className="df2-label-hint" role="status">
                       Document source: {parsed.row_count.toLocaleString()} text chunk(s) with page/heading
@@ -4697,43 +4708,35 @@ export function TransferPage({
 
       {step === STEP_DESTINATION && (
       <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-dest-step">
-        <div className="df2-card-head">
-          <div>
-            <h3 className="df2-card-title">Destination</h3>
-            <p
-              className="df2-card-sub"
-              title="Pick a saved connector, then set database and table. Schema loads before mapping."
-            >
-              Connector, then database and table.
-            </p>
-          </div>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => setAdvancedOpen(true)}
-            leadingIcon={<DtIcon name="settings" size={14} />}
-          >
-            Advanced settings
-          </Button>
-        </div>
         <div className="df2-card-body">
-          <div className="df2-field">
-            <label className="df2-label">Destination Mode</label>
-            <FilterBar ariaLabel="Destination mode">
-              <FilterTabs
-                ariaLabel="Destination mode"
-                value={destKindMode}
-                onChange={(mode) => {
-                  setDestKindMode(mode);
-                  resetRouteForDestinationChange();
-                  if (mode === "file_export") void loadTransferPlan();
-                }}
-                items={[
-                  { id: "database", label: "Database / Warehouse" },
-                  { id: "file_export", label: "File Export" },
-                ]}
-              />
-            </FilterBar>
+          <div className="df2-dest-toolbar">
+            <div className="df2-field df2-dest-mode-field">
+              <label className="df2-label">Destination Mode</label>
+              <FilterBar ariaLabel="Destination mode">
+                <FilterTabs
+                  ariaLabel="Destination mode"
+                  value={destKindMode}
+                  onChange={(mode) => {
+                    setDestKindMode(mode);
+                    resetRouteForDestinationChange();
+                    if (mode === "file_export") void loadTransferPlan();
+                  }}
+                  items={[
+                    { id: "database", label: "Database / Warehouse" },
+                    { id: "file_export", label: "File Export" },
+                  ]}
+                />
+              </FilterBar>
+            </div>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setAdvancedOpen(true)}
+              leadingIcon={<DtIcon name="settings" size={14} />}
+              title="Sync mode, primary key, cursor, and write policies"
+            >
+              Advanced
+            </Button>
           </div>
 
           {destKindMode === "file_export" ? (

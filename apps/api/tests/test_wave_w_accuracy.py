@@ -210,9 +210,10 @@ def test_weaviate_batch_object_errors_fail_strict():
 def test_salesforce_query_more_incomplete_cursor_fail_closed():
     import connectors.salesforce as salesforce
 
+    instance = "https://example.my.salesforce.com"
     responses.add(
         responses.GET,
-        "https://login.salesforce.com/services/data/v58.0/sobjects/Account/describe",
+        f"{instance}/services/data/v58.0/sobjects/Account/describe",
         json={
             "fields": [
                 {"name": "Id", "type": "id"},
@@ -223,7 +224,7 @@ def test_salesforce_query_more_incomplete_cursor_fail_closed():
     )
     responses.add(
         responses.GET,
-        "https://login.salesforce.com/services/data/v58.0/query",
+        f"{instance}/services/data/v58.0/query",
         json={
             "totalSize": 2,
             "done": False,
@@ -233,7 +234,10 @@ def test_salesforce_query_more_incomplete_cursor_fail_closed():
         status=200,
     )
     with pytest.raises(RuntimeError, match="incomplete page"):
-        salesforce.read_object(cfg={"api_key": "fake-token"}, limit=500)
+        salesforce.read_object(
+            cfg={"host": instance, "api_key": "fake-token"},
+            limit=500,
+        )
 
 
 def test_reject_on_strict_policy_helper():
