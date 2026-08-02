@@ -4,16 +4,12 @@ import { ConnectorIcon } from "../app/brand-icons";
 import {
   AlgorithmCinemaBand,
   MappingCinema,
-  ProductSurfaceStrip,
   ProofCinema,
 } from "../components/landing/AlgorithmCinema";
-import { ComparisonSection } from "../components/landing/ComparisonSection";
 import { TrustSection } from "../components/landing/TrustSection";
 import { TestimonialSection } from "../components/landing/TestimonialSection";
 import { LandingHeroFlow } from "../components/landing/LandingHeroFlow";
-import { LandingInfraRibbon } from "../components/landing/LandingInfraRibbon";
 import { fetchCatalogStats } from "../lib/api";
-import { useInView } from "../hooks/useInView";
 import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
 import type { PublicRoute } from "../lib/publicNavigation";
 
@@ -23,10 +19,58 @@ export interface LandingHomeProps {
   onNavigate: (route: PublicRoute) => void;
 }
 
-const MARQUEE_IDS = [
-  "postgresql", "snowflake", "mysql", "mongodb", "bigquery", "redshift",
-  "s3", "json", "csv", "dynamodb", "elasticsearch", "redis",
-  "salesforce", "kafka",
+const STACK_IDS = [
+  "postgresql",
+  "snowflake",
+  "bigquery",
+  "redshift",
+  "mongodb",
+  "mysql",
+  "kafka",
+  "salesforce",
+  "s3",
+];
+
+const SURFACES: {
+  id: string;
+  label: string;
+  title: string;
+  body: string;
+  route: PublicRoute;
+  cta: string;
+}[] = [
+  {
+    id: "studio",
+    label: "Studio",
+    title: "Transfer Studio plans every load",
+    body: "Connect source and destination, review semantic maps with confidence scores, pass eight preflight gates, then write with quarantine. The same path Pilot and MCP reuse — no silent shortcut.",
+    route: "product-transfer",
+    cta: "Open Transfer Studio",
+  },
+  {
+    id: "theater",
+    label: "Theater",
+    title: "Job Theater proves what ran",
+    body: "Live phases, quarantine samples with reasons, and checksum reconcile reports. If a job finished, you can show the proof — not just a green status.",
+    route: "product-jobs",
+    cta: "See Job Theater",
+  },
+  {
+    id: "pipelines",
+    label: "Pipelines",
+    title: "Schedules that still run gates",
+    body: "Watermark incremental, upsert, append, or overwrite — every tick is a real job. Schema drift blocks the next run until you review the diff.",
+    route: "product-pipelines",
+    cta: "Explore Pipelines",
+  },
+  {
+    id: "mcp",
+    label: "MCP",
+    title: "Agents inherit the same gates",
+    body: "MCP tools never receive raw destination passwords. Agents map, preflight, and reconcile under workspace RBAC — the same engine as the UI.",
+    route: "product-mcp",
+    cta: "Read MCP docs",
+  },
 ];
 
 function Reveal({ children, className = "" }: { children: ReactNode; className?: string }) {
@@ -38,349 +82,351 @@ function Reveal({ children, className = "" }: { children: ReactNode; className?:
   );
 }
 
-function KnowledgeField() {
-  const { ref, inView } = useInView<HTMLDivElement>("80px 0px");
-  const [step, setStep] = useState(0);
-  const items = [
-    {
-      label: "Use when",
-      rule: "Source amount fields map to payment_amount",
-      status: "pending" as const,
-    },
-    {
-      label: "Approved mapping",
-      rule: "order_amt → payment_amount (96% confidence)",
-      status: "ok" as const,
-    },
-    {
-      label: "Rejected alias",
-      rule: "order_id should never map to email",
-      status: "no" as const,
-    },
-  ];
-
-  useEffect(() => {
-    if (!inView) return;
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      setStep(1);
-      return;
-    }
-    const id = window.setInterval(() => setStep((s) => (s + 1) % 3), 2800);
-    return () => window.clearInterval(id);
-  }, [inView]);
-
-  const current = items[step];
+function SurfaceTabs({ onNavigate, onGetStarted }: Pick<LandingHomeProps, "onNavigate" | "onGetStarted">) {
+  const [active, setActive] = useState(SURFACES[0].id);
+  const current = SURFACES.find((s) => s.id === active) ?? SURFACES[0];
 
   return (
-    <div className="lp-knowledge-field" ref={ref} key={step}>
-      <span className="lp-knowledge-field-label">{current.label}</span>
-      <p className="lp-knowledge-field-rule">{current.rule}</p>
-      <div className="lp-knowledge-field-actions">
-        {current.status === "pending" ? (
-          <>
-            <button type="button" className="lp-knowledge-btn lp-knowledge-btn--ok">Accept</button>
-            <button type="button" className="lp-knowledge-btn lp-knowledge-btn--no">Reject</button>
-          </>
-        ) : current.status === "ok" ? (
-          <span className="lp-knowledge-tag is-ok">Accepted into synonym dictionary</span>
-        ) : (
-          <span className="lp-knowledge-tag is-no">Blocked from future auto-maps</span>
-        )}
-      </div>
-    </div>
-  );
-}
+    <section className="lp-home-surfaces" id="product" aria-label="Product surfaces">
+      <div className="lp-home-surfaces-inner">
+        <Reveal className="lp-home-section-head">
+          <p className="lp-section-kicker">For operators &amp; agents</p>
+          <h2>Your control plane. Our governed engine.</h2>
+          <p>
+            Use Transfer Studio, Job Theater, Pipelines, or MCP. DataFlow manages mapping, gates,
+            quarantine, and proof underneath every surface.
+          </p>
+        </Reveal>
 
-function ConnectorMarqueeBand() {
-  const { ref, inView } = useInView<HTMLDivElement>("60px 0px");
-  const track = [...MARQUEE_IDS, ...MARQUEE_IDS];
-  return (
-    <div className={`lp-marquee ${inView ? "is-running" : ""}`} ref={ref} aria-hidden>
-      <div className="lp-marquee-track">
-        {track.map((id, i) => (
-          <span key={`${id}-${i}`} className="lp-marquee-item">
-            <ConnectorIcon id={id} size={28} />
-          </span>
-        ))}
-      </div>
-      <div className="lp-marquee-track lp-marquee-track--reverse">
-        {track.map((id, i) => (
-          <span key={`b-${id}-${i}`} className="lp-marquee-item">
-            <ConnectorIcon id={id} size={28} />
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function OutcomesBand({
-  uniqueDrivers,
-  catalogTiles: _catalogTiles,
-}: {
-  uniqueDrivers: number | null;
-  catalogTiles: number | null;
-}) {
-  const driverLabel = uniqueDrivers != null ? `${uniqueDrivers} transfer-ready drivers` : "Transfer-ready drivers";
-
-  return (
-    <section className="lp-outcomes-rail" id="outcomes" aria-label="Outcomes">
-      <Reveal>
-        <div className="lp-outcomes-rail-inner">
-          <p className="lp-outcomes-rail-eyebrow">Enforced on every run</p>
-          <ul className="lp-outcomes-rail-list">
-            <li><strong>8</strong><span>preflight gates before write</span></li>
-            <li><strong>{driverLabel}</strong><span>unique drivers, not alias inflation</span></li>
-            <li><strong>Every job</strong><span>row-count + checksum reconcile</span></li>
-            <li><strong>0</strong><span>silently dropped rows — quarantine surfaces them</span></li>
-          </ul>
+        <div className="lp-home-tabs" role="tablist" aria-label="Product surfaces">
+          {SURFACES.map((s) => (
+            <button
+              key={s.id}
+              type="button"
+              role="tab"
+              aria-selected={s.id === active}
+              className={`lp-home-tab ${s.id === active ? "is-active" : ""}`}
+              onClick={() => setActive(s.id)}
+            >
+              {s.label}
+            </button>
+          ))}
         </div>
-      </Reveal>
+
+        <div className="lp-home-tab-panel" role="tabpanel">
+          <div className="lp-home-tab-copy">
+            <h3>{current.title}</h3>
+            <p>{current.body}</p>
+            <div className="lp-home-tab-actions">
+              <button
+                type="button"
+                className="lp-btn lp-btn--brand"
+                onClick={() => (current.id === "studio" ? onGetStarted() : onNavigate(current.route))}
+              >
+                {current.cta}
+              </button>
+              <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate(current.route)}>
+                Learn more →
+              </button>
+            </div>
+          </div>
+          <div className="lp-home-tab-visual" aria-hidden>
+            <div className="lp-home-tab-card">
+              <header>
+                <span className="lp-home-tab-dot" />
+                {current.label}
+              </header>
+              <strong>{current.title}</strong>
+              <ul>
+                <li>Semantic map</li>
+                <li>G1–G8 preflight</li>
+                <li>Quarantine + checksum</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
     </section>
   );
 }
 
-/** Home marketing body — chrome (nav/footer) lives in MarketingChrome. */
+/** Home — Airbyte-class composition, DataFlow product truth. */
 export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: LandingHomeProps) {
   const [liveDrivers, setLiveDrivers] = useState<number | null>(null);
-  const [catalogTiles, setCatalogTiles] = useState<number | null>(null);
 
   useEffect(() => {
     fetchCatalogStats()
       .then((s) => {
         setLiveDrivers(s.unique_drivers ?? s.transfer_live ?? s.live);
-        setCatalogTiles(s.catalog_tiles ?? s.transfer_live_tiles ?? null);
       })
-      .catch(() => {
-        setLiveDrivers(null);
-        setCatalogTiles(null);
-      });
+      .catch(() => setLiveDrivers(null));
   }, []);
+
+  const driverLabel =
+    liveDrivers != null ? `${liveDrivers} transfer-ready drivers` : "Transfer-ready drivers";
 
   return (
     <>
-      <section className="lp-hero lp-hero--immersive lp-hero--bleed">
-        <div className="lp-hero-immersive-grid">
+      {/* 1) Hero — short headline, one job, one visual */}
+      <section className="lp-hero lp-hero--home">
+        <div className="lp-hero-home-grid">
           <div className="lp-hero-copy">
-            <span className="lp-hero-eyebrow">
+            <p className="lp-hero-eyebrow">
               <span className="lp-hero-eyebrow-dot" aria-hidden />
-              Universal data movement, proven end-to-end
-            </span>
+              Universal data movement with proof
+            </p>
             <h1 className="lp-hero-title">
-              <span className="lp-hero-title-line">Move any schema</span>
-              <span className="lp-hero-title-b lp-hero-title-line">anywhere.</span>
+              Move any schema
+              <br />
+              <span className="lp-hero-title-b">anywhere — proven.</span>
             </h1>
             <p className="lp-hero-sub">
-              Semantic mapping earns a confidence score on every column — no string-match guessing.
-              Eight preflight gates fail-fast before write, quarantine isolates bad rows with reasons,
-              and checksum reconciliation proves every load. Transfer Studio, Pipelines, Pilot, and MCP
-              share one governed engine — never a silent shortcut.
-              {liveDrivers != null ? ` ${liveDrivers} unique transfer-ready drivers today.` : ""}
+              Connect once. Semantic mapping, eight preflight gates, quarantine, and checksum
+              reconcile run on every load — in Transfer Studio, Pipelines, Pilot, and MCP.
             </p>
-
             <div className="lp-hero-cta">
               <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
-                Try DataFlow
+                Try DataFlow free
                 <DtIcon name="arrow-right" size={16} />
               </button>
-              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("help")}>
-                Read the docs
+              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("contact")}>
+                Talk to sales
               </button>
             </div>
-
-            <ul className="lp-hero-proof-line" aria-label="Platform highlights">
-              <li>8 preflight gates</li>
-              <li>Checksum proof</li>
-              <li>{liveDrivers != null ? `${liveDrivers} unique drivers` : "Transfer-ready drivers"}</li>
-            </ul>
+            <p className="lp-hero-meta">
+              {driverLabel}
+              <span aria-hidden>·</span>
+              Catalog tiles labelled honestly
+              <span aria-hidden>·</span>
+              0 silent drops by design
+            </p>
           </div>
-
           <div className="lp-hero-visual lp-hero-visual--stage">
             <LandingHeroFlow />
           </div>
         </div>
       </section>
 
-      <section className="lp-logos lp-logos--float lp-band--center" aria-label="Trusted stacks">
-        <h5>Works with the stacks you already run</h5>
-        <div className="lp-logos-float-row">
-          {[
-            "postgresql",
-            "snowflake",
-            "bigquery",
-            "redshift",
-            "mongodb",
-            "mysql",
-            "kafka",
-            "salesforce",
-            "s3",
-          ].map((id) => (
-            <span key={id} className="lp-logo-float" title={id}>
-              <ConnectorIcon id={id} size={40} />
+      {/* 2) Stack strip */}
+      <section className="lp-home-stack" aria-label="Works with your stack">
+        <p className="lp-home-stack-label">Works with the stacks you already run</p>
+        <div className="lp-home-stack-row">
+          {STACK_IDS.map((id) => (
+            <span key={id} className="lp-home-stack-item" title={id}>
+              <ConnectorIcon id={id} size={28} />
               <em>{id}</em>
             </span>
           ))}
         </div>
       </section>
 
-      <OutcomesBand uniqueDrivers={liveDrivers} catalogTiles={catalogTiles} />
-
-      <section className="lp-section lp-section-platform lp-band--full" id="platform">
-        <Reveal>
-          <div className="lp-section-head lp-band-copy--center">
-            <p className="lp-section-kicker">Platform</p>
-            <h2>From source to proof in four steps</h2>
-            <p>The same governed path in Transfer Studio, Data Pilot, MCP, and scheduled pipelines.</p>
-          </div>
-        </Reveal>
-        <LandingInfraRibbon />
-      </section>
-
-      <section className="lp-surface-strip-band" id="product">
-        <div className="lp-surface-strip-inner">
-          <Reveal className="lp-surface-strip-copy">
-            <p className="lp-section-kicker">Product</p>
-            <h2>Every surface. One governed engine.</h2>
-            <p>Transfer Studio plans the load; Job Theater proves it. Pipelines, Query, Pilot, and MCP reuse the same path — pick a surface to see the chapter.</p>
+      {/* 3) Problem — Airbyte-style pain list, our product framing */}
+      <section className="lp-home-problem" id="why">
+        <div className="lp-home-problem-inner">
+          <Reveal className="lp-home-section-head">
+            <p className="lp-section-kicker">Why pipelines fail operators</p>
+            <h2>Sync status is not proof.</h2>
+            <p>
+              Most ELT tools celebrate “job complete.” Operators still cannot answer: did every row
+              land, did types coerce safely, and what was silently dropped?
+            </p>
           </Reveal>
-          <Reveal>
-            <ProductSurfaceStrip<PublicRoute> onNavigate={onNavigate} />
-          </Reveal>
+          <ol className="lp-home-pain-list">
+            <li>
+              <span className="lp-home-pain-num">01</span>
+              <div>
+                <h3>String-match mapping</h3>
+                <p>
+                  <code>order_amt</code> and <code>payment_amount</code> miss each other. Bad aliases
+                  write garbage until someone notices in a dashboard.
+                </p>
+              </div>
+            </li>
+            <li>
+              <span className="lp-home-pain-num">02</span>
+              <div>
+                <h3>Best-effort coercion</h3>
+                <p>
+                  Currency strings land in NUMERIC columns as nulls or truncated values — no
+                  quarantine, no reason, no replay path.
+                </p>
+              </div>
+            </li>
+            <li>
+              <span className="lp-home-pain-num">03</span>
+              <div>
+                <h3>No reconcile artifact</h3>
+                <p>
+                  Green status without row-count and checksum proof. Finance and compliance cannot
+                  archive the load.
+                </p>
+              </div>
+            </li>
+          </ol>
         </div>
       </section>
 
+      {/* 4) Architecture — numbered path */}
+      <section className="lp-home-arch" id="platform">
+        <div className="lp-home-arch-inner">
+          <Reveal className="lp-home-section-head">
+            <p className="lp-section-kicker">The architecture</p>
+            <h2>One governed layer between source and destination.</h2>
+            <p>
+              DataFlow connects your systems, maps with roles and type fit, fails-fast before write,
+              and proves every load — for humans and agents.
+            </p>
+          </Reveal>
+          <ol className="lp-home-arch-steps">
+            <li>
+              <span>01</span>
+              <strong>Map</strong>
+              <p>Semantic roles, synonyms, and continuous confidence — not name equality.</p>
+            </li>
+            <li>
+              <span>02</span>
+              <strong>Preflight G1–G8</strong>
+              <p>Fail-fast before write. Dry-run isolates coerce failures into quarantine.</p>
+            </li>
+            <li>
+              <span>03</span>
+              <strong>Write + prove</strong>
+              <p>Quarantine surfaces bad rows. Checksum + counts prove the clean set.</p>
+            </li>
+          </ol>
+          <div className="lp-home-arch-cta">
+            <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
+              Meet Transfer Studio
+            </button>
+            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("product-transfer")}>
+              See the algorithms →
+            </button>
+          </div>
+        </div>
+      </section>
+
+      {/* 5) Product surfaces — tabbed like Airbyte CLI/SDK/API/MCP */}
+      <SurfaceTabs onNavigate={onNavigate} onGetStarted={onGetStarted} />
+
+      {/* 6) One cinema — mapping as the product story */}
       <Reveal>
         <AlgorithmCinemaBand
-          kicker="Mapping"
-          title="Semantic mapping — roles, synonyms, type fit"
-          lead="Watch every source column earn a continuous confidence score. Format, role, and type compatibility outrank string similarity — and ambiguous edges wait for review before they can pin into workspace synonyms."
+          kicker="Semantic mapping"
+          title="Every column earns a confidence score"
+          lead="Format, role, and type compatibility outrank string similarity. Ambiguous edges wait for review before they pin into workspace synonyms."
         >
           <MappingCinema />
         </AlgorithmCinemaBand>
       </Reveal>
 
+      {/* 7) Proof cinema — second dark band only */}
       <Reveal>
         <AlgorithmCinemaBand
-          kicker="Proof"
-          title="Checksum + row-count reconcile flashes MATCH"
-          lead="Success is never “status = complete.” The engine hashes mapped source rows, reads the destination sample, compares, and only then flashes MATCH — with quarantine counts surfaced alongside so nothing is silently dropped."
+          kicker="Runtime proof"
+          title="Checksum reconcile flashes MATCH"
+          lead="Success is never status alone. The engine hashes mapped source rows, reads the destination, and only then flashes MATCH — with quarantine counts surfaced."
+          compact
         >
           <ProofCinema />
         </AlgorithmCinemaBand>
       </Reveal>
 
-      <section className="lp-story-band" id="usecases">
-        <div className="lp-story-band-inner">
-          <Reveal className="lp-story-band-head">
+      {/* 8) Use cases */}
+      <section className="lp-home-usecases" id="usecases">
+        <div className="lp-home-usecases-inner">
+          <Reveal className="lp-home-section-head">
+            <p className="lp-section-kicker">Use cases</p>
             <h2>What operators run</h2>
-            <p>Three story arcs — migration, recurring sync, warehouse loading — each with the same eight gates and reconciliation guarantees.</p>
+            <p>Migration, recurring sync, and warehouse loading — same eight gates every time.</p>
           </Reveal>
-
-          <Reveal>
-            <article className="lp-story-row">
-              <span className="lp-story-row-tag">Migration</span>
-              <div className="lp-story-row-copy">
-                <h3>Cross-schema cutover with dual-run proof</h3>
-                <p>Profile both sides, propose role-aware maps, pilot a subset for checksum confidence, then cutover with quarantine keeping bad rows visible instead of dropped.</p>
-              </div>
-              <div className="lp-story-row-actions">
-                <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("solution-migrations")}>
-                  Read the migration path →
-                </button>
-              </div>
+          <div className="lp-home-usecase-list">
+            <article className="lp-home-usecase">
+              <span>Migration</span>
+              <h3>Cross-schema cutover with dual-run proof</h3>
+              <p>Pilot a subset for checksum confidence, then cutover with quarantine visible.</p>
+              <button type="button" className="lp-btn lp-btn--ghost" onClick={() => onNavigate("solution-migrations")}>
+                Migration path →
+              </button>
             </article>
-            <article className="lp-story-row">
-              <span className="lp-story-row-tag">Sync</span>
-              <div className="lp-story-row-copy">
-                <h3>Recurring sync that still runs preflight</h3>
-                <p>Every tick is a real job in Job Theater — watermark incremental, upsert, append, or overwrite — with schema drift blocking the next tick until you review the diff.</p>
-              </div>
-              <div className="lp-story-row-actions">
-                <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("solution-sync")}>
-                  Read the sync path →
-                </button>
-              </div>
+            <article className="lp-home-usecase">
+              <span>Sync</span>
+              <h3>Recurring sync that still runs preflight</h3>
+              <p>Every tick is a real job. Drift blocks the next run until you review.</p>
+              <button type="button" className="lp-btn lp-btn--ghost" onClick={() => onNavigate("solution-sync")}>
+                Sync path →
+              </button>
             </article>
-            <article className="lp-story-row">
-              <span className="lp-story-row-tag">Warehouse</span>
-              <div className="lp-story-row-copy">
-                <h3>Bulk warehouse loads finance can archive</h3>
-                <p>Snowflake, BigQuery, and Redshift with destination probes, capacity checks, and reconciliation reports — the numbers analytics and finance teams need to sign off.</p>
-              </div>
-              <div className="lp-story-row-actions">
-                <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("solution-warehouse")}>
-                  Read the warehouse path →
-                </button>
-              </div>
+            <article className="lp-home-usecase">
+              <span>Warehouse</span>
+              <h3>Bulk loads finance can archive</h3>
+              <p>Snowflake, BigQuery, Redshift with capacity probes and reconcile reports.</p>
+              <button type="button" className="lp-btn lp-btn--ghost" onClick={() => onNavigate("solution-warehouse")}>
+                Warehouse path →
+              </button>
             </article>
-          </Reveal>
+          </div>
         </div>
       </section>
 
-      <ComparisonSection />
-      <TestimonialSection onNavigate={onNavigate} />
-
-      <Reveal>
-        <AlgorithmCinemaBand
-          kicker="Together"
-          title="Learns your schemas and mapping corrections"
-          lead="Every accepted or rejected mapping updates the workspace synonym dictionary. Data Pilot can propose additions from failed jobs — humans still confirm, gates still run."
-        >
-          <div className="lp-cinema-stage" aria-label="Knowledge field animation">
-            <KnowledgeField />
-          </div>
-        </AlgorithmCinemaBand>
-      </Reveal>
-
-      <section className="lp-connectors-callout" id="tools">
-        <div className="lp-connectors-callout-inner">
-          <Reveal className="lp-connectors-callout-copy">
+      {/* 9) Connectors honesty */}
+      <section className="lp-home-connectors" id="tools">
+        <div className="lp-home-connectors-inner">
+          <Reveal className="lp-home-section-head">
             <p className="lp-section-kicker">Connectors</p>
-            <h2>Hundreds of systems — with honest labels</h2>
+            <h2>Hundreds of systems. Honest labels.</h2>
             <p>
-              Native transfer drivers plus SQLAlchemy generics and file formats (CSV, JSON, Parquet). We
-              publish two counts: catalog tiles you can browse, and unique <strong>transfer-ready</strong>
-              drivers with production evidence.
+              Catalog tiles are not the same as transfer-ready drivers. We publish both — and every
+              production path still runs mapping, gates, quarantine, and proof.
+              {liveDrivers != null ? ` ${liveDrivers} unique transfer-ready drivers today.` : ""}
             </p>
           </Reveal>
-          <Reveal>
-            <ConnectorMarqueeBand />
-          </Reveal>
-          <Reveal>
-            <p className="lp-connectors-callout-honesty">
-              Catalog count ≠ transfer-live. Only routes that carry <code>TRANSFER_READY</code>
-              &nbsp;evidence get the transfer-ready badge — every other tile is labelled Planned so
-              operators know exactly what they can run today.
-            </p>
-          </Reveal>
-          <Reveal className="lp-connectors-callout-actions">
+          <div className="lp-home-connectors-grid" aria-hidden>
+            {STACK_IDS.map((id) => (
+              <span key={id} className="lp-home-connectors-tile">
+                <ConnectorIcon id={id} size={32} />
+                <em>{id}</em>
+              </span>
+            ))}
+          </div>
+          <p className="lp-home-connectors-note">
+            Only routes with <code>TRANSFER_READY</code> evidence get the transfer-ready badge. Everything
+            else is labelled Planned.
+          </p>
+          <div className="lp-home-arch-cta">
             <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("integrations")}>
-              Browse the connector catalog
+              Browse connectors
             </button>
             <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("help")}>
-              Read the driver docs
+              Driver docs
             </button>
-          </Reveal>
+          </div>
         </div>
       </section>
 
+      <TestimonialSection onNavigate={onNavigate} />
       <TrustSection />
 
-      <section className="lp-section" id="enterprise">
-        <div className="lp-enterprise">
-          <div>
-            <h3>Need DataFlow for your enterprise?</h3>
-            <p>
-              DataFlow Enterprise adds workspace RBAC, SSO, audit trails, tenant controls, and the
-              same governed transfer engine your team already trusts.
-            </p>
+      {/* 10) Final CTA — Airbyte-style close */}
+      <section className="lp-home-final">
+        <div className="lp-home-final-inner">
+          <h2>Ship a governed transfer today</h2>
+          <p>
+            Start free on the same engine enterprises use for SSO, BYOK, and audit — semantic mapping,
+            eight gates, quarantine, and checksum proof included.
+          </p>
+          <div className="lp-hero-cta">
+            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
+              Try DataFlow free
+            </button>
+            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("pricing")}>
+              See pricing
+            </button>
+            <button type="button" className="lp-btn lp-btn--ghost lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("enterprise")}>
+              Enterprise
+            </button>
           </div>
-          <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("enterprise")}>
-            Learn about DataFlow Enterprise
-          </button>
         </div>
       </section>
-
     </>
   );
 }

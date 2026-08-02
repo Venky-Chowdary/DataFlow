@@ -105,7 +105,7 @@
 }
 
 .lp-nav-shell {
-  max-width: min(1080px, calc(100% - clamp(28px, 5vw, 64px)));
+  max-width: min(1280px, calc(100% - clamp(20px, 3vw, 40px)));
   margin: 0 auto;
   width: 100%;
 }
@@ -2228,15 +2228,32 @@
   }
 }
 
-@media (max-width: 1024px) {
+/* Design canvas breakpoints — hide CTAs before they collide with Pricing */
+@media (max-width: 1280px) {
   .lp-nav-action-secondary {
-    display: none;
+    display: none !important;
   }
 }
 
-@media (max-width: 960px) {
+@media (max-width: 1180px) {
+  .lp-nav-links .lp-nav-link {
+    padding: 8px 8px;
+    font-size: 13.5px;
+  }
+
+  .lp-nav-actions .lp-nav-action-login {
+    display: none !important;
+  }
+}
+
+@media (max-width: 1100px) {
   .lp-nav-links {
     display: none;
+  }
+
+  .lp-nav-toggle {
+    display: grid;
+    flex-shrink: 0;
   }
 
   .lp-nav-links.is-open {
@@ -2259,23 +2276,6 @@
     flex: 0 0 auto;
   }
 
-  .lp-nav-actions .lp-nav-action-login {
-    display: none;
-  }
-
-  .lp-nav-toggle {
-    display: grid;
-    flex-shrink: 0;
-  }
-
-  .lp-nav-inner {
-    position: relative;
-  }
-
-  .lp-nav-pill {
-    flex-wrap: wrap;
-  }
-
   .lp-nav-dropdown {
     position: static;
     box-shadow: none;
@@ -2286,6 +2286,26 @@
 
   .lp-nav-item.is-open .lp-nav-dropdown {
     display: grid;
+  }
+
+  .lp-nav-mobile-ctas {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--lp-line);
+  }
+}
+
+@media (max-width: 960px) {
+  /* Nav collapse already handled at 1100px — keep pill from wrapping */
+  .lp-nav-pill {
+    flex-wrap: nowrap;
+  }
+
+  .lp-nav-inner {
+    position: relative;
   }
 }
 
@@ -6460,14 +6480,19 @@
 
 .lp-nav.is-top .lp-nav-surface.lp-nav-bar,
 .lp-nav.is-bar .lp-nav-bar {
-  width: min(1240px, calc(100% - clamp(24px, 5vw, 64px))) !important;
-  margin: 0 auto !important;
+  width: 100% !important;
+  max-width: none !important;
+  margin: 0 !important;
   min-height: 64px !important;
-  padding: 0 !important;
+  padding: 0 4px !important;
   border: 0 !important;
   border-radius: 0 !important;
   background: transparent !important;
   box-shadow: none !important;
+  display: flex !important;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
 }
 
 /* --- On scroll: restore oval floating pill --- */
@@ -6485,8 +6510,9 @@
   align-items: center;
   gap: 10px;
   min-height: 52px !important;
-  width: min(1120px, calc(100% - 24px)) !important;
-  margin: 0 auto !important;
+  width: 100% !important;
+  max-width: none !important;
+  margin: 0 !important;
   padding: 6px 8px 6px 14px !important;
   border: 1px solid var(--lp-line, #e6e9ee) !important;
   border-radius: 999px !important;
@@ -6496,6 +6522,7 @@
     0 1px 0 rgba(255, 255, 255, 0.85) inset,
     0 10px 36px rgba(15, 23, 42, 0.12) !important;
   transition: box-shadow 220ms ease, transform 220ms ease;
+  min-width: 0;
 }
 
 .lp-nav.is-pill .lp-nav-jump.is-visible {

@@ -157,15 +157,15 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
         tone="ink"
         motion="pricing"
         kicker="Pricing"
-        title="Priced by proof, not seat inflation."
-        lead="Every plan runs the same governed engine — semantic mapping, eight preflight gates, quarantine, and checksum reconcile. You choose scope: solo pilot, shared team, or regulated enterprise."
+        title="Pricing that scales with proof"
+        lead="Flexible plans whether you are piloting a route or running regulated pipelines. Every tier includes semantic mapping, eight gates, quarantine, and checksum reconcile."
         actions={
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
-              Start free
+              Start for free
             </button>
             <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("contact")}>
-              Get a quote
+              Talk to sales
             </button>
           </div>
         }
@@ -1057,15 +1057,15 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
       <MarketingHeroBand
         tone="ink"
         kicker="Connectors"
-        title="Hundreds of systems, honest labels"
-        lead="Catalog tiles are not the same as transfer-ready drivers. DataFlow publishes both — and every production path still runs semantic mapping, eight gates, quarantine, and checksum proof."
+        title="Hundreds of connectors for pipelines and agents"
+        lead="Every source, every destination — with honest transfer-ready labels. Catalog tiles are not the same as production drivers. Every route still runs mapping, eight gates, quarantine, and proof."
         actions={
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
-              Connect a system
+              Try DataFlow free
             </button>
             <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("help")}>
-              Driver docs
+              Check out the docs
             </button>
           </div>
         }

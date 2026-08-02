@@ -82,6 +82,21 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
         <span className="lp-ambient-grid" />
       </div>
 
+      <a
+        className="lp-announce"
+        href={link("product-mcp")}
+        onClick={(e) => {
+          e.preventDefault();
+          go("product-mcp");
+        }}
+      >
+        <span className="lp-announce-tag">New</span>
+        MCP for agents — governed transfers from Cursor &amp; Claude. Same eight gates.
+        <span className="lp-announce-cta" aria-hidden>
+          Learn more →
+        </span>
+      </a>
+
       <header
         ref={navRef}
         className={`lp-nav ${scrolled ? "is-scrolled is-pill" : "is-top is-bar"}`}
@@ -249,14 +264,14 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
 
             <div className="lp-nav-end">
               <div className="lp-nav-actions">
-                <button type="button" className="lp-btn lp-btn--outline lp-nav-action-secondary" onClick={() => go("contact")}>
-                  Contact sales
-                </button>
                 <button type="button" className="lp-btn lp-btn--ghost lp-nav-action-login" onClick={onLogin}>
                   Log in
                 </button>
                 <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
                   Get started
+                </button>
+                <button type="button" className="lp-btn lp-btn--outline lp-nav-action-secondary" onClick={() => go("contact")}>
+                  Contact sales
                 </button>
               </div>
               <button
