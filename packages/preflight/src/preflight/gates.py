@@ -1665,7 +1665,10 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
         for row_idx, row in enumerate(sample_rows, start=1):
             for m in ctx.plan.mappings:
                 tname = str(m.transform or "").lower().strip()
-                # Identity / rename-only: raw must equal transformed after write-path bind.
+                # Identity / rename-only: serialized source wire must equal mapped
+                # cell after destination bind. Use cell_to_string for arrays/objects
+                # (same as mapped_rows) — never Python repr. Identity transforms must
+                # not strip whitespace (that false-failed Mongo long-text samples).
                 if tname in {"", "none", "identity", "passthrough", "string", "varchar", "text"}:
                     raw = row.get(m.source, "")
                     got = mapped_rows[row_idx - 1].get(m.target)
@@ -1681,8 +1684,9 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                     try:
                         from services.reconciliation import fingerprint_for_reconcile
 
+                        wire = _serialize_for_write(raw)
                         left = fingerprint_for_reconcile(
-                            raw, ddl_type=ddl or "VARCHAR", engine=dest_eng, transform=None
+                            wire, ddl_type=ddl or "VARCHAR", engine=dest_eng, transform=None
                         )
                         right = fingerprint_for_reconcile(
                             got, ddl_type=ddl or "VARCHAR", engine=dest_eng, transform=None

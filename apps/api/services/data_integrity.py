@@ -992,6 +992,10 @@ def _check_mapping_confidence(
     issues: list[str] = []
     warnings: list[str] = []
     for m in mappings:
+        # Align with G4: operator override / risk ack already cleared Map confidence.
+        # Re-blocking here made Validate contradict "All mappings meet confidence floor".
+        if m.get("user_override") or m.get("risk_acknowledged") or m.get("riskAcknowledged"):
+            continue
         conf = float(m.get("confidence", 0))
         if conf < floor:
             msg = f"{m.get('source')}→{m.get('target')}: confidence {conf:.0%} < {floor:.0%}"

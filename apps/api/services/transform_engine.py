@@ -771,8 +771,15 @@ def _parse_time(value: str) -> str | None:
 KNOWN_TRANSFORMS = frozenset({
     "decimal", "integer", "boolean", "date", "datetime", "time", "json", "binary",
     "trim", "trim_id", "uuid", "upper", "lower", "hash_pii", "mask_pii", "none", "identity",
+    # Logical-type aliases Studio / DDL inference sometimes stamp as the transform id.
+    "passthrough", "string", "varchar", "text",
     "phone", "email", "url", "iban", "currency", "percentage", "postal", "base64",
     "strip_controls", "normalize_unicode",
+})
+
+#: Rename-only transforms — must not mutate wire (no strip). Trim is opt-in.
+_IDENTITY_TRANSFORMS = frozenset({
+    "none", "identity", "passthrough", "string", "varchar", "text",
 })
 
 
@@ -1036,6 +1043,12 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
     if text == "":
         return None, None
 
+    # Identity aliases must preserve exact wire (incl. leading/trailing whitespace).
+    # Silent strip previously false-failed Gate-8 ("identity transform altered value")
+    # on Mongo/long-text samples and silently mutated VARCHAR payloads at write.
+    if transform_l in _IDENTITY_TRANSFORMS:
+        return raw_s, None
+
     # Null/missing sentinels for typed transforms are treated as None.
     # Exception: NaN / ±Infinity are NOT SQL null for JSON/vector — reject as
     # non-finite (never invent JSON null / empty embedding).
@@ -1124,9 +1137,6 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         if parsed is None:
             return None, f"Invalid UUID: {text!r}"
         return parsed, None
-
-    if transform in {"none", "identity"}:
-        return text, None
 
     if transform == "upper":
         return text.upper(), None

@@ -160,11 +160,19 @@ def build_preflight_proof_bundle(
         blockers.append("Row-level reconciliation proof failed")
 
     # Align with G4: Map confidence_threshold is the floor (no soft −0.3 band).
-    # Proof bundle must not disagree with the gate that unlocks Execute.
+    # Proof bundle must not disagree with the gate that unlocks Execute —
+    # skip operator-cleared mappings (user_override / risk_acknowledged).
     effective_threshold = max(0.55, float(confidence_threshold or 0.85))
-    confidences = [float(m.get("confidence", 0)) for m in mappings if m.get("confidence") is not None]
-    min_confidence = round(min(confidences) if confidences else 0.0, 3)
-    if min_confidence < effective_threshold:
+    confidences = [
+        float(m.get("confidence", 0))
+        for m in mappings
+        if m.get("confidence") is not None
+        and not m.get("user_override")
+        and not m.get("risk_acknowledged")
+        and not m.get("riskAcknowledged")
+    ]
+    min_confidence = round(min(confidences) if confidences else 1.0, 3)
+    if confidences and min_confidence < effective_threshold:
         blockers.append("Semantic mapping confidence too low")
 
     decision = "approve"

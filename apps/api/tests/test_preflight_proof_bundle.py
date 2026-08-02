@@ -140,6 +140,37 @@ def test_build_preflight_proof_bundle_requires_review_when_mapping_confidence_is
 
     assert bundle["passed"] is False
     assert bundle["transfer_decision"]["decision"] == "review"
+    assert "Semantic mapping confidence too low" in bundle["transfer_decision"]["blockers"]
+
+
+def test_proof_bundle_skips_confidence_when_operator_override_cleared_g4() -> None:
+    bundle = build_preflight_proof_bundle(
+        columns=["id", "companyNumEmployees"],
+        sample_rows=[{"id": "1", "companyNumEmployees": "1000"}],
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 0.99},
+            {
+                "source": "companyNumEmployees",
+                "target": "company_number_employees",
+                "confidence": 0.82,
+                "user_override": True,
+            },
+        ],
+        source_schemas=[
+            {"name": "id", "inferred_type": "INTEGER", "samples": ["1"]},
+            {
+                "name": "companyNumEmployees",
+                "inferred_type": "INTEGER",
+                "samples": ["1000"],
+            },
+        ],
+        source_records=[{"id": "1", "companyNumEmployees": "1000"}],
+        target_records=[{"id": "1", "company_number_employees": "1000"}],
+        primary_key="id",
+        confidence_threshold=0.85,
+    )
+    assert "Semantic mapping confidence too low" not in bundle["transfer_decision"]["blockers"]
+    assert bundle["transfer_decision"]["decision"] == "approve"
 
 
 def test_apply_policy_gates_uses_proof_bundle_decision() -> None:
