@@ -77,22 +77,38 @@ export function buildStreamContracts(input: BuildStreamContractsInput & {
 export function streamContractsNeedReview(input: {
   streamNames: string[];
   sourceColumns: string[];
+  /** Per-stream columns when schemas diverge — falls back to sourceColumns. */
+  sourceColumnsByStream?: Record<string, string[]>;
   requiresCursor: boolean;
   requiresPrimaryKey: boolean;
   defaultCursor: string;
   defaultPrimaryKey: string;
   streamFields: Record<string, StreamFieldContract>;
 }): boolean {
-  if (!input.sourceColumns.length) return false;
+  const anyColumns =
+    input.sourceColumns.length > 0
+    || Object.values(input.sourceColumnsByStream || {}).some((c) => c.length > 0);
+  if (!anyColumns) return false;
   for (const name of input.streamNames) {
+    const cols = input.sourceColumnsByStream?.[name]?.length
+      ? input.sourceColumnsByStream[name]
+      : input.sourceColumns;
+    if (!cols.length) return true; // stream selected but schema not loaded
     const fields = resolveStreamFields(
       name,
       input.streamFields,
       input.defaultCursor,
       input.defaultPrimaryKey,
     );
-    if (input.requiresCursor && !fields.cursorField) return true;
-    if (input.requiresPrimaryKey && !fields.primaryKeyField) return true;
+    if (input.requiresCursor && (!fields.cursorField || !cols.includes(fields.cursorField))) {
+      return true;
+    }
+    if (
+      input.requiresPrimaryKey
+      && (!fields.primaryKeyField || !cols.includes(fields.primaryKeyField))
+    ) {
+      return true;
+    }
   }
   return false;
 }

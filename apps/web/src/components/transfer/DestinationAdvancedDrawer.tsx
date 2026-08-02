@@ -69,6 +69,9 @@ interface DestinationAdvancedDrawerProps {
   defaultPrimaryKey: string;
   sourceColumns: string[];
   sourceSchema: Record<string, string>;
+  /** Per-stream columns when multi-stream schemas diverge. */
+  sourceColumnsByStream?: Record<string, string[]>;
+  sourceSchemaByStream?: Record<string, Record<string, string>>;
   syncModeLabel: string;
   schemaPolicyLabel: string;
   requiresCursor: boolean;
@@ -177,6 +180,8 @@ export function DestinationAdvancedDrawer({
   defaultPrimaryKey,
   sourceColumns,
   sourceSchema,
+  sourceColumnsByStream = {},
+  sourceSchemaByStream = {},
   syncModeLabel,
   schemaPolicyLabel,
   requiresCursor,
@@ -210,6 +215,7 @@ export function DestinationAdvancedDrawer({
   showCdcRowFilter = false,
   writeViaStaging = false,
   onWriteViaStagingChange,
+  writeViaStagingSupported = true,
   showVectorOptions = false,
   vectorContentColumn = "",
   vectorEmbeddingColumn = "",
@@ -731,10 +737,16 @@ export function DestinationAdvancedDrawer({
                     defaultCursor,
                     defaultPrimaryKey,
                   );
+                  const streamCols = sourceColumnsByStream[streamName]?.length
+                    ? sourceColumnsByStream[streamName]
+                    : sourceColumns;
+                  const streamSchema = sourceSchemaByStream[streamName] && Object.keys(sourceSchemaByStream[streamName]).length
+                    ? sourceSchemaByStream[streamName]
+                    : sourceSchema;
                   const rowNeeds =
-                    sourceColumns.length > 0
-                    && ((requiresCursor && !fields.cursorField)
-                      || (requiresPrimaryKey && !fields.primaryKeyField));
+                    streamCols.length > 0
+                    && ((requiresCursor && (!fields.cursorField || !streamCols.includes(fields.cursorField)))
+                      || (requiresPrimaryKey && (!fields.primaryKeyField || !streamCols.includes(fields.primaryKeyField))));
                   return (
                     <tr key={streamName}>
                       <td>
@@ -743,7 +755,7 @@ export function DestinationAdvancedDrawer({
                           <span>
                             <strong>{streamName}</strong>
                             <small>
-                              {sourceColumns.length ? `${sourceColumns.length} fields` : "No schema loaded"}
+                              {streamCols.length ? `${streamCols.length} fields` : "No schema loaded"}
                             </small>
                           </span>
                         </label>
@@ -752,15 +764,17 @@ export function DestinationAdvancedDrawer({
                       <td>
                         <select
                           className="df2-input df2-select df2-stream-select"
-                          value={requiresCursor ? fields.cursorField : ""}
-                          disabled={!requiresCursor || sourceColumns.length === 0}
+                          value={requiresCursor && fields.cursorField && streamCols.includes(fields.cursorField)
+                            ? fields.cursorField
+                            : ""}
+                          disabled={!requiresCursor || streamCols.length === 0}
                           onChange={(e) => onStreamCursorChange(streamName, e.target.value)}
                           aria-label={`Cursor field for ${streamName}`}
                         >
                           <option value="">{requiresCursor ? "Select cursor" : "Not required"}</option>
-                          {sourceColumns.map((col) => (
+                          {streamCols.map((col) => (
                             <option key={col} value={col}>
-                              {col}{sourceSchema[col] ? ` · ${sourceSchema[col]}` : ""}
+                              {col}{streamSchema[col] ? ` · ${streamSchema[col]}` : ""}
                             </option>
                           ))}
                         </select>
@@ -768,17 +782,19 @@ export function DestinationAdvancedDrawer({
                       <td>
                         <select
                           className="df2-input df2-select df2-stream-select"
-                          value={fields.primaryKeyField}
-                          disabled={sourceColumns.length === 0}
+                          value={fields.primaryKeyField && streamCols.includes(fields.primaryKeyField)
+                            ? fields.primaryKeyField
+                            : ""}
+                          disabled={streamCols.length === 0}
                           onChange={(e) => onStreamPrimaryKeyChange(streamName, e.target.value)}
                           aria-label={`Primary key for ${streamName}`}
                         >
                           <option value="">
                             {requiresPrimaryKey ? "Select key" : "Optional (append)"}
                           </option>
-                          {sourceColumns.map((col) => (
+                          {streamCols.map((col) => (
                             <option key={col} value={col}>
-                              {col}{sourceSchema[col] ? ` · ${sourceSchema[col]}` : ""}
+                              {col}{streamSchema[col] ? ` · ${streamSchema[col]}` : ""}
                             </option>
                           ))}
                         </select>
@@ -786,7 +802,7 @@ export function DestinationAdvancedDrawer({
                       <td>{schemaPolicyLabel}</td>
                       <td>
                         <span className={`df2-badge ${rowNeeds ? "df2-badge-run" : "df2-badge-live"}`}>
-                          {sourceColumns.length ? (rowNeeds ? "Needs contract" : "Valid") : "Pending"}
+                          {streamCols.length ? (rowNeeds ? "Needs contract" : "Valid") : "Pending"}
                         </span>
                       </td>
                     </tr>

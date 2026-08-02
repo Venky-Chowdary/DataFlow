@@ -68,6 +68,7 @@ import {
 } from "../lib/dialectDefaults";
 import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, isTransferLiveType, resolveDriverType, setTransferLiveDrivers } from "../lib/connectorTypes";
 import {
+  availableSyncModes,
   DATE_LOCALES,
   SCHEMA_POLICIES,
   SYNC_MODES,
@@ -838,12 +839,50 @@ export function TransferPage({
   const multiStreamUnsupportedMode =
     isMultiStreamSource && (syncMode === "scd2" || syncMode === "mirror");
   const advancedStreamNames = isMultiStreamSource ? multiStreamNames : [sourceStreamName];
+  const routeSyncModes = useMemo(
+    () =>
+      availableSyncModes({
+        destDriver: destDriverType || destType || "",
+        sourceDriver: resolveDriverType(sourceConnector?.type || "") || "",
+        sourceKind,
+        isMultiStream: isMultiStreamSource,
+      }),
+    [destDriverType, destType, sourceConnector?.type, sourceKind, isMultiStreamSource],
+  );
+  // Client deploy: never leave an engine-unsupported mode selected after route change.
+  useEffect(() => {
+    if (!routeSyncModes.some((m) => m.id === syncMode)) {
+      const fallback =
+        routeSyncModes.find((m) => m.id === "full_refresh_append")?.id
+        || routeSyncModes[0]?.id
+        || "full_refresh_append";
+      setSyncMode(fallback as SyncModeId);
+    }
+  }, [routeSyncModes, syncMode]);
   const mapStreamsDiverge = useMemo(() => {
     const ok = streamPreviews.filter((s) => s.status === "ok" && (s.columns?.length ?? 0) > 0);
     if (ok.length < 2) return false;
     const sig = (cols: string[]) => [...cols].map((c) => c.toLowerCase()).sort().join("|");
     const first = sig(ok[0].columns || []);
     return ok.some((s) => sig(s.columns || []) !== first);
+  }, [streamPreviews]);
+  const sourceColumnsByStream = useMemo(() => {
+    const out: Record<string, string[]> = {};
+    for (const preview of streamPreviews) {
+      if (preview.status === "ok" && preview.columns?.length) {
+        out[preview.name] = preview.columns;
+      }
+    }
+    return out;
+  }, [streamPreviews]);
+  const sourceSchemaByStream = useMemo(() => {
+    const out: Record<string, Record<string, string>> = {};
+    for (const preview of streamPreviews) {
+      if (preview.status === "ok" && preview.schema && Object.keys(preview.schema).length) {
+        out[preview.name] = preview.schema;
+      }
+    }
+    return out;
   }, [streamPreviews]);
   const streamContracts = buildStreamContracts({
     streamNames: advancedStreamNames,
@@ -867,13 +906,17 @@ export function TransferPage({
   const streamNeedsReview = streamContractsNeedReview({
     streamNames: advancedStreamNames,
     sourceColumns: currentSourceColumns,
+    sourceColumnsByStream,
     requiresCursor,
     requiresPrimaryKey,
     defaultCursor: cursorField,
     defaultPrimaryKey: primaryKeyField,
     streamFields,
   });
-  const syncModeLabel = SYNC_MODES.find((m) => m.id === syncMode)?.label ?? syncMode;
+  const syncModeLabel =
+    routeSyncModes.find((m) => m.id === syncMode)?.label
+    ?? SYNC_MODES.find((m) => m.id === syncMode)?.label
+    ?? syncMode;
   const schemaPolicyLabel = SCHEMA_POLICIES.find((p) => p.id === schemaPolicy)?.label ?? schemaPolicy;
 
   const uniqueKeySuggestions = useMemo(
@@ -3120,6 +3163,30 @@ export function TransferPage({
       explainDestinationGap();
       return;
     }
+    if (writeViaStaging && !writeViaStagingSupported) {
+      toast({
+        title: "Staging not supported",
+        message: "Write via staging requires a SQL table destination. Turn it off in Advanced, or pick a SQL sink.",
+        tone: "error",
+      });
+      return;
+    }
+    if (multiStreamUnsupportedMode) {
+      toast({
+        title: "Sync mode not supported",
+        message: "SCD2 and Mirror are not available for multi-stream transfers. Switch to full refresh, incremental, or CDC.",
+        tone: "error",
+      });
+      return;
+    }
+    if (!routeSyncModes.some((m) => m.id === syncMode)) {
+      toast({
+        title: "Sync mode not supported",
+        message: "This sync mode is not available for the current source and destination. Open Advanced and pick a supported mode.",
+        tone: "error",
+      });
+      return;
+    }
     setPreflighting(true);
     setStep(STEP_VALIDATE);
     setPreflight(null);
@@ -3337,6 +3404,9 @@ export function TransferPage({
           schema_drift_acknowledged: ackSchemaDrift,
           acknowledgment_actor: ackActor || undefined,
           acknowledgment_reason: ackReason || undefined,
+          write_via_staging: writeViaStaging,
+          source_kind: sourceKind,
+          source_type: resolveDriverType(sourceConnector?.type || "") || undefined,
         });
       } catch (apiErr) {
         if (sourceKind === "file" && destKindMode === "file_export" && parsed) {
@@ -5873,7 +5943,7 @@ export function TransferPage({
       <DestinationAdvancedDrawer
         open={advancedOpen}
         onClose={() => setAdvancedOpen(false)}
-        syncModes={SYNC_MODES}
+        syncModes={routeSyncModes}
         schemaPolicies={SCHEMA_POLICIES}
         validationModes={VALIDATION_MODES}
         dateLocales={DATE_LOCALES}
@@ -5888,6 +5958,8 @@ export function TransferPage({
         defaultPrimaryKey={primaryKeyField}
         sourceColumns={currentSourceColumns}
         sourceSchema={currentSourceSchema}
+        sourceColumnsByStream={sourceColumnsByStream}
+        sourceSchemaByStream={sourceSchemaByStream}
         syncModeLabel={syncModeLabel}
         schemaPolicyLabel={schemaPolicyLabel}
         requiresCursor={requiresCursor}

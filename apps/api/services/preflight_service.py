@@ -317,6 +317,39 @@ def confidence_threshold_for_mode(validation_mode: str | None) -> float:
     )
 
 
+# Destinations that honor SCD2 / mirror streaming paths (must match Studio gating).
+_SQL_HISTORY_SYNC_DESTS = frozenset({
+    "postgresql",
+    "mysql",
+    "sqlite",
+    "snowflake",
+    "bigquery",
+    "redshift",
+    "generic_sql",
+    "sqlserver",
+    "mssql",
+    "oracle",
+    "duckdb",
+})
+
+# Sources that can drive CDC (log / change-stream) in production.
+_CDC_CAPABLE_SOURCES = frozenset({
+    "postgresql",
+    "mysql",
+    "sqlserver",
+    "mssql",
+    "oracle",
+    "mongodb",
+    "azure_sql_database",
+    "microsoft_sql_server",
+    "amazon_rds_sql_server",
+    "amazon_rds_postgresql",
+    "amazon_rds_mysql",
+    "amazon_aurora_postgresql",
+    "amazon_aurora_mysql",
+})
+
+
 def run_transfer_policy_gates(
     *,
     sync_mode: str = "full_refresh_overwrite",
@@ -325,12 +358,20 @@ def run_transfer_policy_gates(
     stream_contracts: list[dict[str, Any]] | None = None,
     backfill_new_fields: bool = False,
     source_columns: list[str] | None = None,
+    dest_type: str | None = None,
+    source_type: str | None = None,
+    source_kind: str = "file",
+    write_via_staging: bool = False,
 ) -> list[dict[str, Any]]:
     """Validate enterprise run policy that sits above source/destination probes."""
     contracts = [c for c in stream_contracts or [] if c.get("selected", True)]
     sync = (sync_mode or "full_refresh_overwrite").lower()
     schema = (schema_policy or "manual_review").lower()
     validation = (validation_mode or "strict").lower()
+    dest = (dest_type or "").strip().lower()
+    src = (source_type or "").strip().lower()
+    kind = (source_kind or "file").strip().lower()
+    multi_stream = len(contracts) > 1
     requires_cursor = sync in {"incremental_append", "incremental_deduped", "cdc"}
     requires_primary_key = sync in {
         "upsert",
@@ -374,6 +415,26 @@ def run_transfer_policy_gates(
 
     gates: list[dict[str, Any]] = []
     sync_issues: list[str] = []
+    if sync in {"scd2", "mirror"}:
+        if multi_stream:
+            sync_issues.append(
+                f"{sync.upper()} is not supported for multi-stream transfers"
+            )
+        elif not dest:
+            sync_issues.append(
+                f"{sync.upper()} requires a SQL table destination"
+            )
+        elif dest not in _SQL_HISTORY_SYNC_DESTS:
+            sync_issues.append(
+                f"{sync.upper()} requires a SQL table destination (not '{dest}')"
+            )
+    if sync == "cdc":
+        if kind in {"file", "cloud"}:
+            sync_issues.append("CDC requires a database source (not file/cloud)")
+        elif src and src not in _CDC_CAPABLE_SOURCES:
+            sync_issues.append(
+                f"CDC is not supported for source type '{src}'"
+            )
     if missing_cursor:
         sync_issues.append(f"Missing cursor field for {', '.join(missing_cursor[:5])}")
     if missing_primary_key:
@@ -493,6 +554,56 @@ def run_transfer_policy_gates(
             },
         }
     )
+
+    staging_issues: list[str] = []
+    if write_via_staging:
+        try:
+            from services.pre_ingestion_staging import dest_supports_staging
+
+            if not dest:
+                staging_issues.append(
+                    "write_via_staging requires a SQL destination type"
+                )
+            elif not dest_supports_staging(dest):
+                staging_issues.append(
+                    f"write_via_staging is not supported for destination '{dest}' "
+                    "(SQL table destinations only)"
+                )
+        except Exception:
+            staging_issues.append(
+                "write_via_staging could not be verified for this destination"
+            )
+    if staging_issues:
+        gates.append(
+            {
+                "id": "g12_staging_policy",
+                "status": GateStatus.BLOCK.value,
+                "message": "Write-via-staging not supported for this route",
+                "duration_ms": 0,
+                "details": {
+                    "issues": staging_issues,
+                    "write_via_staging": True,
+                    "dest_type": dest or None,
+                },
+            }
+        )
+    else:
+        gates.append(
+            {
+                "id": "g12_staging_policy",
+                "status": GateStatus.PASS.value,
+                "message": (
+                    "Write-via-staging enabled for SQL destination"
+                    if write_via_staging
+                    else "Direct write (staging off)"
+                ),
+                "duration_ms": 0,
+                "details": {
+                    "write_via_staging": bool(write_via_staging),
+                    "dest_type": dest or None,
+                },
+            }
+        )
 
     return gates
 

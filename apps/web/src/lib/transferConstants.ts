@@ -69,6 +69,64 @@ export const VALIDATION_MODES: { id: ValidationModeId; label: string; threshold:
 /** Fallback when the schedules API does not return sync_modes — never invent "incremental". */
 export const DEFAULT_SYNC_MODE_IDS: SyncModeId[] = SYNC_MODES.map((m) => m.id);
 
+/** Destinations that honor SCD2 / mirror streaming paths in the engine. */
+export const SQL_HISTORY_SYNC_DESTS = new Set([
+  "postgresql",
+  "mysql",
+  "sqlite",
+  "snowflake",
+  "bigquery",
+  "redshift",
+  "generic_sql",
+  "sqlserver",
+  "mssql",
+  "oracle",
+  "duckdb",
+]);
+
+/** Sources that can drive CDC (log / change-stream) in production. */
+export const CDC_CAPABLE_SOURCES = new Set([
+  "postgresql",
+  "mysql",
+  "sqlserver",
+  "mssql",
+  "oracle",
+  "mongodb",
+  "azure_sql_database",
+  "microsoft_sql_server",
+  "amazon_rds_sql_server",
+  "amazon_rds_postgresql",
+  "amazon_rds_mysql",
+  "amazon_aurora_postgresql",
+  "amazon_aurora_mysql",
+]);
+
+/**
+ * Sync modes the operator may pick for this route — hide engine-unsupported
+ * combinations so client deploy cannot select a mode that fails at Execute.
+ */
+export function availableSyncModes(opts: {
+  destDriver: string;
+  sourceDriver: string;
+  sourceKind: "file" | "database" | "cloud" | string;
+  isMultiStream: boolean;
+}): { id: SyncModeId; label: string; detail: string }[] {
+  const dest = (opts.destDriver || "").toLowerCase();
+  const src = (opts.sourceDriver || "").toLowerCase();
+  const fileish = opts.sourceKind === "file" || opts.sourceKind === "cloud";
+  return SYNC_MODES.filter((mode) => {
+    if (mode.id === "scd2" || mode.id === "mirror") {
+      if (opts.isMultiStream) return false;
+      if (!dest || !SQL_HISTORY_SYNC_DESTS.has(dest)) return false;
+    }
+    if (mode.id === "cdc") {
+      if (fileish) return false;
+      if (src && !CDC_CAPABLE_SOURCES.has(src)) return false;
+    }
+    return true;
+  });
+}
+
 export const SYNC_MODE_META: Record<string, { label: string; detail: string }> = Object.fromEntries(
   SYNC_MODES.map((m) => [m.id, { label: m.label, detail: m.detail }]),
 );

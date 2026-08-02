@@ -315,6 +315,10 @@ export async function runPreflight(payload: {
   acknowledgment_actor?: string;
   /** Why the exception was accepted. */
   acknowledgment_reason?: string;
+  /** Pre-ingestion staging (SQL destinations only). */
+  write_via_staging?: boolean;
+  source_kind?: string;
+  source_type?: string;
 }): Promise<import("./types").PreflightResult> {
   const res = await apiFetch(`${API_BASE}/preflight/run`, {
     method: "POST",

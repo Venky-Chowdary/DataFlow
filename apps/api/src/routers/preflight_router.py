@@ -86,6 +86,8 @@ class PreflightRequest(BaseModel):
     # Optional acknowledgment trail (who / why). Timestamp is stamped server-side.
     acknowledgment_actor: str = ""
     acknowledgment_reason: str = ""
+    # Pre-ingestion staging (SQL destinations only) — Validate must fail closed.
+    write_via_staging: bool = False
 
 
 def _schema_default(db_type: str) -> str:
@@ -304,6 +306,11 @@ async def run_preflight(body: PreflightRequest):
             stream_contracts=body.stream_contracts,
             backfill_new_fields=body.backfill_new_fields,
             source_columns=body.columns,
+            dest_type=body.dest_type
+            or (dest_meta.get("db_type") if isinstance(dest_meta, dict) else None),
+            source_type=body.source_type,
+            source_kind=body.source_kind or ("database" if body.source_connector_id else "file"),
+            write_via_staging=bool(body.write_via_staging),
         ),
         validation_mode=body.validation_mode,
     )
