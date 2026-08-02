@@ -189,7 +189,7 @@ export function PipelineDetailDrawer({
     <Drawer
       open={open}
       onClose={onClose}
-      width={620}
+      size="lg"
       ariaLabel={`${sched.name} pipeline details`}
       icon={<DtIcon name="activity" size={22} />}
       title={sched.name}

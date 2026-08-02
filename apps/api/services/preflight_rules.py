@@ -518,13 +518,26 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         "examples": ["A new 'status' column appeared in the source."],
     },
     {
-        "keywords": ["replacement character", "encoding", "format-control character"],
+        # Do NOT match bare "encoding" — column names like encoding_id would
+        # steal type-mismatch CTAs into Fix bad data (Strip cannot cast types).
+        "keywords": [
+            "replacement character",
+            "format-control character",
+            "format-control",
+            "encoding anomaly",
+            "character encoding",
+            "u+200b",
+            "zero-width",
+        ],
         "gate": "g5_dry_run",
         "why": "The sample contains replacement characters or invisible format/control characters (zero-width spaces, null bytes, etc.) that warehouses often reject.",
         "fix": "Open Fix bad data and choose Strip control characters (applies strip_controls), or quarantine affected rows. In balanced mode this is a warning; strict mode blocks until sanitized.",
         "examples": [
             "Zero-width space U+200B in a MongoDB string field.",
             "Null byte U+0000 in a scraped HTML description (also breaks Postgres COPY).",
+        ],
+        "suggested_actions": [
+            {"kind": "open_bad_data_fix", "label": "Fix bad data…"},
         ],
     },
     {
@@ -576,16 +589,33 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
 # Helpers
 # ═══════════════════════════════════════════════════════════════════════════
 def _match_issue(message: str) -> dict[str, Any] | None:
-    """Return the first catalog entry that matches the issue message."""
+    """Return the best catalog entry for the issue message.
+
+    Prefer the longest keyword match so specific remediations (encoding → Fix
+    bad data) beat broad gate summaries (dry-run / integrity failed → Map).
+    """
     lower = message.lower()
+    best: dict[str, Any] | None = None
+    best_score = -1
     for entry in ISSUE_CATALOG:
+        score = -1
         for kw in entry.get("keywords", []):
-            if kw.lower() in lower:
-                return entry
+            k = kw.lower()
+            if k in lower:
+                score = max(score, len(k))
         pattern = entry.get("pattern")
         if pattern and re.search(pattern, message, re.IGNORECASE):
-            return entry
-    return None
+            # Pattern matches are moderately specific; don't beat long keywords.
+            score = max(score, 24)
+        if score < 0:
+            continue
+        # Prefer remediations with a concrete CTA over broad gate summaries.
+        if entry.get("suggested_actions"):
+            score += 100
+        if score > best_score:
+            best_score = score
+            best = entry
+    return best if best_score >= 0 else None
 
 
 def explain_issue(
@@ -611,15 +641,28 @@ def explain_issue(
         ),
         "examples": entry.get("examples", []),
         "severity": entry.get("severity", "warning"),
-        "suggested_actions": [],
+        "suggested_actions": entry.get("suggested_actions", []),
     }
 
 
 def explain_gate(gate_id: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return the rule for a gate failure."""
+    # Prefer issue-catalog match so encoding/nulls beat generic gate CTAs.
+    issue_match = explain_issue(message, dest_kind="", validation_mode="balanced")
+    if issue_match.get("suggested_actions"):
+        rule = PREFLIGHT_GATE_RULES.get(gate_id) or {}
+        return {
+            "gate": gate_id or issue_match.get("gate", "general"),
+            "title": rule.get("title") or issue_match.get("gate", "Issue"),
+            "category": rule.get("category", "hard"),
+            "why": issue_match.get("why") or rule.get("why", ""),
+            "fix": issue_match.get("fix") or rule.get("fix", ""),
+            "examples": issue_match.get("examples") or rule.get("examples", []),
+            "suggested_actions": issue_match["suggested_actions"],
+        }
     rule = PREFLIGHT_GATE_RULES.get(gate_id)
     if not rule:
-        return explain_issue(message, dest_kind="", validation_mode="balanced")
+        return issue_match
     return {
         "gate": gate_id,
         "title": rule["title"],
@@ -641,15 +684,47 @@ def enrich_blockers(
     enriched: list[dict[str, Any]] = []
     for b in blockers:
         gate_id = b.get("id") or b.get("gate") or "general"
-        guidance = explain_gate(gate_id, b.get("message", ""), b.get("details"))
-        # Also explain nested issues if present
         details = b.get("details") or {}
+        # Fold only encoding-integrity nested lines into the gate blob.
+        # Never concatenate bare column names like encoding_id (type mismatch)
+        # or they steal Fix-bad-data over review_mappings (+100 encoding score).
+        _ENC_NESTED = (
+            "format-control",
+            "replacement character",
+            "encoding anomaly",
+            "character encoding",
+            "u+200b",
+            "zero-width",
+        )
+        nested_bits: list[str] = []
+        for key in ("issues", "errors", "issue_texts", "warnings"):
+            raw = details.get(key)
+            items = raw if isinstance(raw, list) else ([raw] if isinstance(raw, str) else [])
+            for item in items[:12]:
+                text = str(item)
+                low = text.lower()
+                if any(tok in low for tok in _ENC_NESTED):
+                    nested_bits.append(text)
+        message_blob = " ".join([str(b.get("message") or ""), *nested_bits]).strip()
+        guidance = explain_gate(gate_id, message_blob or str(b.get("message") or ""), details)
         nested = details.get("issues") or details.get("errors") or []
         if nested and isinstance(nested, list):
             guidance["details"] = [
                 explain_issue(str(item), dest_kind=dest_kind, validation_mode=validation_mode)
                 for item in nested
             ]
+            # Promote nested encoding CTAs onto the blocker when gate-level was generic.
+            if not guidance.get("suggested_actions") or all(
+                (a or {}).get("kind") == "review_mappings"
+                for a in (guidance.get("suggested_actions") or [])
+            ):
+                for nested_g in guidance["details"]:
+                    nested_actions = nested_g.get("suggested_actions") or []
+                    if any((a or {}).get("kind") == "open_bad_data_fix" for a in nested_actions):
+                        guidance["suggested_actions"] = nested_actions
+                        guidance["why"] = nested_g.get("why") or guidance.get("why")
+                        guidance["fix"] = nested_g.get("fix") or guidance.get("fix")
+                        break
         enriched.append({**b, "guidance": guidance})
     return enriched
 

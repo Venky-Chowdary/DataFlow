@@ -48,7 +48,8 @@ def test_save_and_get_preflight_run(isolated_store):
     assert loaded is not None
     assert loaded["passed"] is False
     assert loaded["source_label"] == "mongodb"
-    assert any(r["kind"] == "normalize_control_chars" for r in loaded["suggested_remediations"])
+    assert any(r["kind"] == "open_bad_data_fix" for r in loaded["suggested_remediations"])
+    assert not any(r["kind"] == "normalize_control_chars" for r in loaded["suggested_remediations"])
 
 
 def test_list_preflight_runs(isolated_store):

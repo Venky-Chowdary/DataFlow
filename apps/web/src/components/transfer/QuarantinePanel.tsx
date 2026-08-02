@@ -399,7 +399,7 @@ export function QuarantinePanel({
           <strong>Next step</strong>
           {isPreflight ? (
             <p>
-              Caught in Validate before write. Open Validate → apply <em>Strip controls</em> or fix
+              Caught in Validate before write. Open Validate → <em>Fix bad data…</em> or fix
               mappings, then re-run. Replay is for write-time rejects only.
             </p>
           ) : durableLost ? (
@@ -574,7 +574,7 @@ export function QuarantinePanel({
                     : "No row-level findings were stored for this job yet."}
                 </p>
                 <p>
-                  What to do next: open <strong>Validate</strong> for Strip controls / Quarantine / Fix bad data,
+                  What to do next: open <strong>Validate</strong> → <strong>Fix bad data…</strong>,
                   confirm the API build includes write-time quarantine persistence, then re-run the transfer.
                 </p>
               </div>

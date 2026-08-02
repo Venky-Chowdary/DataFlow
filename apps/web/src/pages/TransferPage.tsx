@@ -112,7 +112,11 @@ import { runLocalFileExport } from "../lib/localFileExport";
 import { runLocalPreflight } from "../lib/localPreflight";
 import { readJobEventLog } from "../lib/jobEventLog";
 import { schemaIntrospectionFailureMessage } from "../lib/preflightMessages";
-import { buildDisplayBlockers, findDuplicateKeyRoot } from "../lib/validateIssueGrouping";
+import {
+  buildDisplayBlockers,
+  findDuplicateKeyRoot,
+  isEncodingIntegritySignal,
+} from "../lib/validateIssueGrouping";
 import { suggestUniqueKeyCandidates } from "../lib/uniqueKeySuggestions";
 import {
   buildStreamContracts,
@@ -263,6 +267,8 @@ export function TransferPage({
   const [sourceCollection, setSourceCollection] = useState("");
   const [cloudPath, setCloudPath] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  /** Shared Fix-bad-data drawer open state (Validate dashboard + rail Fix CTA). */
+  const [badDataFixOpen, setBadDataFixOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [parsed, setParsed] = useState<ParsedUpload | null>(null);
   /** Opt-in Tesseract OCR for scanned/image-only PDFs. */
@@ -869,6 +875,11 @@ export function TransferPage({
       tone: "info",
     });
   }, [toast]);
+
+  // Fix-bad-data is Validate-only — close if the operator leaves the step.
+  useEffect(() => {
+    if (step !== STEP_VALIDATE && badDataFixOpen) setBadDataFixOpen(false);
+  }, [step, badDataFixOpen]);
 
   const applyPrimaryKeySuggestion = useCallback(
     (column: string) => {
@@ -2745,7 +2756,7 @@ export function TransferPage({
       openIdentitySettings();
       return;
     }
-    const encodingOnly = /format-control|replacement character|encoding|strip_controls/i.test(dryMsg)
+    const encodingOnly = isEncodingIntegritySignal(dryMsg)
       && !/\([A-Z_]+\)\s*→\s*\w+\s*\([A-Z_]+\)/i.test(dryMsg)
       && !/confidence\s+\d+%\s*</i.test(dryMsg);
     const looksLikeBadMapping =
@@ -2895,17 +2906,20 @@ export function TransferPage({
         void executePreflight(next);
         break;
       }
-      case "normalize_control_chars": {
-        void stripControlCharsAndRerun();
-        break;
-      }
-      case "quarantine_and_rerun": {
-        void stripControlCharsAndRerun("balanced");
-        break;
-      }
+      case "normalize_control_chars":
       case "open_bad_data_fix":
-        // ValidateDashboard opens the drawer; keep as no-op fallback.
+        setStep(STEP_VALIDATE);
+        setBadDataFixOpen(true);
         break;
+      case "quarantine_and_rerun": {
+        if (duplicateKeyRoot) {
+          openIdentitySettings();
+          break;
+        }
+        setStep(STEP_VALIDATE);
+        setBadDataFixOpen(true);
+        break;
+      }
       case "add_transform": {
         const uiTransform = action.transform
           ? (ENGINE_TO_UI_TRANSFORM[action.transform] || engineTransformToUi(action.transform) || (action.transform as MappingTransform))
@@ -2996,10 +3010,10 @@ export function TransferPage({
         });
         break;
       case "check_connection":
-        setStep(STEP_DESTINATION);
+        window.location.hash = "#/connectors";
         toast({
-          title: "Opened connection settings",
-          message: "Check the source/destination connection, then re-run preflight.",
+          title: "Opened Connectors",
+          message: "Fix credentials, Test until green, then return to Validate and Re-run.",
           tone: "info",
         });
         break;
@@ -3366,6 +3380,15 @@ export function TransferPage({
     }
     if (!preflight) return { onPrimaryFix: undefined, primaryFixLabel: undefined };
     const firstBlocker = buildDisplayBlockers(preflight, syncMode)[0];
+    const blockerBlob = `${firstBlocker?.message || ""} ${firstBlocker?.impact || ""} ${JSON.stringify(firstBlocker?.source?.details || {})}`;
+    // Encoding beats generic gate-rulebook review_mappings so rail matches dashboard.
+    // Never match bare "encoding" — column names like encoding_id must stay on Map.
+    if (isEncodingIntegritySignal(blockerBlob)) {
+      return {
+        onPrimaryFix: () => setBadDataFixOpen(true),
+        primaryFixLabel: "Fix bad data…",
+      };
+    }
     const action = firstBlocker?.suggested_actions?.[0];
     if (!action) return { onPrimaryFix: undefined, primaryFixLabel: undefined };
 
@@ -3374,18 +3397,30 @@ export function TransferPage({
       case "change_target_type":
       case "add_transform":
       case "map_column":
+        return { onPrimaryFix: () => setStep(STEP_MAP), primaryFixLabel: action.label };
       case "normalize_control_chars":
       case "open_bad_data_fix":
-        return { onPrimaryFix: () => setStep(STEP_MAP), primaryFixLabel: action.label };
+        return {
+          onPrimaryFix: () => setBadDataFixOpen(true),
+          primaryFixLabel: "Fix bad data…",
+        };
       case "rerun_mapping":
-        return { onPrimaryFix: () => executePreflight(), primaryFixLabel: action.label };
+        return {
+          onPrimaryFix: () => {
+            setStep(STEP_MAP);
+            toast({
+              title: "Opened Map",
+              message: "Re-run mapping to accept schema changes, then return to Validate.",
+              tone: "info",
+            });
+          },
+          primaryFixLabel: action.label,
+        };
       case "quarantine_and_rerun":
         // Never offer Quarantine as the primary Fix when identity duplicates
         // are in the gate text — Strip/balanced cannot make Execute safe.
         if (
-          /duplicate (primary )?key|keys repeat|identity-key|source probe/i.test(
-            `${firstBlocker?.message || ""} ${firstBlocker?.impact || ""} ${JSON.stringify(firstBlocker?.source?.details || {})}`,
-          )
+          /duplicate (primary )?key|keys repeat|identity-key|source probe/i.test(blockerBlob)
         ) {
           return {
             onPrimaryFix: openIdentitySettings,
@@ -3393,17 +3428,22 @@ export function TransferPage({
           };
         }
         return {
-          onPrimaryFix: () => void quarantineAndRerun(),
-          primaryFixLabel: action.label,
+          onPrimaryFix: () => setBadDataFixOpen(true),
+          primaryFixLabel: "Fix bad data…",
         };
       case "check_connection":
-        return { onPrimaryFix: () => setStep(STEP_SOURCE), primaryFixLabel: action.label };
+        return {
+          onPrimaryFix: () => {
+            window.location.hash = "#/connectors";
+          },
+          primaryFixLabel: "Fix connector credentials",
+        };
       case "fix_source_keys":
         return { onPrimaryFix: openIdentitySettings, primaryFixLabel: action.label };
       default:
         return { onPrimaryFix: undefined, primaryFixLabel: undefined };
     }
-  }, [duplicateKeyRoot, openIdentitySettings, preflight, syncMode, executePreflight, quarantineAndRerun]);
+  }, [duplicateKeyRoot, openIdentitySettings, preflight, syncMode, toast]);
 
   const executeTransfer = async () => {
     if (multiStreamUnsupportedMode) {
@@ -3612,6 +3652,10 @@ export function TransferPage({
       if (data.job_id && (data as { async?: boolean }).async) {
         setRunStartupProgress(40);
         setActiveJobId(data.job_id);
+        setTransferLaunch({
+          jobId: data.job_id,
+          rows: Number(sourceRowEstimate ?? parsed?.row_count ?? 0),
+        });
         setTransferring(false);
         toast({
           title: "Transfer started",
@@ -4009,20 +4053,27 @@ export function TransferPage({
     const handler = async (action: StudioAction) => {
       switch (action.kind) {
         case "normalize_control_chars":
-          setStep(STEP_VALIDATE);
-          await stripControlCharsAndRerun();
-          break;
-        case "quarantine_and_rerun":
-          setStep(STEP_VALIDATE);
-          await quarantineAndRerun();
-          break;
         case "open_bad_data_fix":
           setStep(STEP_VALIDATE);
+          setBadDataFixOpen(true);
           toast({
             title: "Fix bad data",
             message: action.run_id
-              ? `Opened Validate for run ${action.run_id}. Use Fix bad data on the Dry-run gate.`
-              : "Opened Validate — use Fix bad data on the blocked Dry-run gate.",
+              ? `Opened Fix bad data for run ${action.run_id}. Choose Strip or Quarantine, then re-run Validate.`
+              : "Opened Fix bad data — choose Strip or Quarantine, then re-run Validate.",
+            tone: "info",
+          });
+          break;
+        case "quarantine_and_rerun":
+          if (duplicateKeyRoot) {
+            openIdentitySettings();
+            break;
+          }
+          setStep(STEP_VALIDATE);
+          setBadDataFixOpen(true);
+          toast({
+            title: "Fix bad data",
+            message: "Opened Fix bad data — choose Strip or Quarantine, then re-run Validate.",
             tone: "info",
           });
           break;
@@ -5413,6 +5464,8 @@ export function TransferPage({
               (m) => m.transform === "strip_controls",
             )}
             onQuarantineAndRerun={quarantineAndRerun}
+            badDataFixOpen={badDataFixOpen}
+            onBadDataFixOpenChange={setBadDataFixOpen}
             cellPreview={cellPreview}
             onReviewMappings={(opts) => {
               if (opts?.focusSource) {

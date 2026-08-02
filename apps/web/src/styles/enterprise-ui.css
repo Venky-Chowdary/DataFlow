@@ -3144,8 +3144,8 @@
 .df2-validate-rail-primary-fix {
   width: auto !important;
   max-width: 100%;
-  align-self: flex-start;
-  margin-top: 8px;
+  align-self: center;
+  margin-top: 0;
 }
 
 .df2-topbar {
@@ -4452,9 +4452,15 @@
 .df2-validate-rail-actions .df2-btn {
   height: var(--df-btn-height, 36px) !important;
   min-height: var(--df-btn-height, 36px) !important;
-  padding: 0 12px !important;
+  padding: 0 14px !important;
   border-radius: var(--df-radius-md, 8px) !important;
   font-size: 12.5px !important;
+  font-weight: 600 !important;
+  flex: 0 0 auto !important;
+  width: auto !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  white-space: nowrap !important;
 }
 
 .df2-validate-rail-explain {
@@ -4466,6 +4472,10 @@
   white-space: normal;
   overflow: visible;
   text-overflow: unset;
+}
+
+.df2-validate-rail-explain.is-ok {
+  color: #475569;
 }
 
 /* Run ready — compact banner + pinned actions */

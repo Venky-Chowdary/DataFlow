@@ -507,7 +507,10 @@ def pg_type(inferred: str, engine: str = "postgresql") -> str:
 
 
 def _copy_text_value(value: Any) -> str:
-    if value is None:
+    from services.value_serializer import is_missing_sentinel
+
+    # Dense COPY: absent schemaless fields → SQL NULL (never bind sentinel text).
+    if value is None or is_missing_sentinel(value):
         return "\\N"
     if isinstance(value, bool):
         return "t" if value else "f"
@@ -817,6 +820,10 @@ def write_mapped_rows(
 
     mapped_rows = [_coerce_bind_row(row) for row in mapped_rows]
     sparse_rows = [_coerce_bind_row(row) for row in sparse_rows]
+    # Dense INSERT/COPY: absent schemaless fields → SQL NULL (sparse keeps sentinel).
+    from connectors.writer_common import materialize_missing_as_null_for_dense_write
+
+    mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
 
     rejected_rows = _rejected_row_count(
         data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows

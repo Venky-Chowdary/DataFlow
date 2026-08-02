@@ -1281,7 +1281,7 @@ export function JobTheaterView({
               </strong>
               <p>
                 {isFailed
-                  ? "Exact columns, sample values, reasons, and policies are listed below. Export CSV saves the file to your downloads. Use Validate for Strip / Quarantine / Fix bad data."
+                  ? "Exact columns, sample values, reasons, and policies are listed below. Export CSV saves the file to your downloads. Use Validate → Fix bad data… for Strip or Quarantine."
                   : "Review the quarantine details below and export them for remediation."}
               </p>
             </div>

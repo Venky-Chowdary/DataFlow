@@ -101,7 +101,7 @@ export function ContractDetailDrawer({
     <Drawer
       open={open}
       onClose={onClose}
-      width={620}
+      size="lg"
       ariaLabel={`${c.name} contract details`}
       icon={<DtIcon name="shield" size={22} />}
       title={c.name}

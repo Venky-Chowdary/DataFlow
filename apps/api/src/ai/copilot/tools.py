@@ -996,20 +996,9 @@ class DataPilotTools:
             for d in quarantine[:8]
         ]
         remediations: list[dict[str, str]] = []
-        err = str(job.get("error") or "").lower()
         status = str(job.get("status") or "").lower()
-        q_blob = " ".join(str(s.get("reason") or "") for s in samples).lower()
         if status in {"failed", "cancelled"} or job.get("rejected_rows") or quarantine:
-            if "format-control" in err or "encoding" in err or "control" in err or "format-control" in q_blob:
-                remediations.append({
-                    "kind": "normalize_control_chars",
-                    "label": "Strip control characters and re-run validation",
-                })
-                remediations.append({
-                    "kind": "quarantine_and_rerun",
-                    "label": "Apply strip_controls + balanced quarantine posture",
-                })
-            remediations.append({"kind": "open_bad_data_fix", "label": "Open Fix bad data"})
+            remediations.append({"kind": "open_bad_data_fix", "label": "Fix bad data…"})
             remediations.append({"kind": "rerun_preflight", "label": "Re-run Validate in Transfer Studio"})
             remediations.append({"kind": "review_mappings", "label": "Review column mappings"})
         req = job.get("transfer_request") or {}
@@ -1145,9 +1134,9 @@ class DataPilotTools:
                 error=f"Unknown remediation kind '{kind}'. Use one of: {', '.join(sorted(allowed))}",
             )
         labels = {
-            "normalize_control_chars": "Strip control characters & re-run validation",
-            "open_bad_data_fix": "Open Fix bad data dialog",
-            "quarantine_and_rerun": "Quarantine bad cells & re-run (balanced)",
+            "normalize_control_chars": "Fix bad data…",
+            "open_bad_data_fix": "Fix bad data…",
+            "quarantine_and_rerun": "Fix bad data…",
             "review_mappings": "Open Map step to review mappings",
             "rerun_preflight": "Re-run Validate",
         }

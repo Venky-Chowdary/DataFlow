@@ -39,7 +39,7 @@ interface TransferResultDashboardProps {
   onNewTransfer?: () => void;
   onViewJobs?: () => void;
   onSchedule?: () => void;
-  /** Jump back to Validate so Strip / Quarantine / Fix bad data stay reachable from Run. */
+  /** Jump back to Validate so Fix bad data (Strip / Quarantine) stays reachable from Run. */
   onOpenValidate?: () => void;
   /** Resume from durable checkpoint (same API as Jobs). */
   onResume?: () => void;

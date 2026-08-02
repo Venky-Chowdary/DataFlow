@@ -20,7 +20,11 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "redis": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "s3": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "elasticsearch": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
-    "redshift": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
+    # Redshift RW exists but is not PRODUCTION_SKU-proven — Planned until SKU.
+    "redshift": {
+        "test": True, "read": True, "write": True, "introspect": True, "preflight": True,
+        "certified": False,
+    },
     "pgvector": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
     "qdrant": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
     "weaviate": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
@@ -132,35 +136,38 @@ CATALOG_ID_ALIASES: dict[str, str] = {
 # Suggested lists — only connectors users can configure today
 SUGGESTED_SOURCES = [
     "postgresql", "mongodb", "mysql", "sqlserver", "oracle",
-    "snowflake", "bigquery", "redshift",
+    "snowflake", "bigquery",
     "csv___tsv", "json", "jsonl", "excel", "parquet",
     "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
     "sftp",
-    "salesforce", "hubspot", "stripe", "shopify", "zendesk", "notion", "airtable",
+    "salesforce", "hubspot",
 ]
 
 # Catalog entry ids that map to implemented drivers — blocks false "Full transfer" on aliases.
 # Hosted twins (RDS/Neon/Atlas/…) share the same duplex driver and are transfer-ready
 # under the same evidence bar — counting them is honest; inventing rest_api SaaS is not.
+# Only SKU-proven / certified duplex brands. Uncertified SaaS writers
+# (stripe/shopify/airtable/zendesk/notion) stay out — certified:False in
+# _DRIVER_CAPS until they earn PRODUCTION_SKU. Redshift is declared RW but
+# not yet in PRODUCTION_SKU, so it is demoted from this frozenset.
 _TRANSFER_READY_CORE = frozenset({
     "postgresql", "mysql", "mongodb", "sqlserver", "sql_server", "oracle",
-    "snowflake", "bigquery", "redshift",
+    "snowflake", "bigquery",
     "dynamodb", "amazon_s3", "s3", "gcs", "google_cloud_storage", "adls",
     "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage",
     "redis", "elasticsearch", "sqlite", "generic_sql",
     "iceberg", "apache_iceberg", "kafka", "apache_kafka",
-    "salesforce", "hubspot", "stripe", "airtable", "shopify", "zendesk", "notion",
+    "salesforce", "hubspot",
     "csv___tsv", "json", "jsonl", "ndjson", "excel", "parquet",
     "sftp", "email",
     "pgvector", "qdrant", "weaviate", "pinecone", "milvus",
 })
 
 _TRANSFER_READY_HOSTED_TWINS = frozenset({
-    # Enterprise SQL / cloud managed
+    # Enterprise SQL / cloud managed (SKU-backed drivers only)
     "postgresql_rds", "mysql_rds", "postgresql_cloud_sql", "mysql_cloud_sql",
     "postgresql_azure", "mysql_azure", "postgresql_supabase", "postgresql_neon",
     "amazon_rds_oracle", "oracle_autonomous_warehouse",
-    "amazon_redshift", "redshift_serverless",
     "google_bigquery", "bigquery_us", "bigquery_eu",
     "snowflake_aws", "snowflake_azure", "snowflake_gcp",
     "amazon_dynamodb",
@@ -181,7 +188,7 @@ TRANSFER_READY_CATALOG_IDS = _TRANSFER_READY_CORE | _TRANSFER_READY_HOSTED_TWINS
 
 SUGGESTED_DESTINATIONS = [
     "postgresql", "mongodb", "mysql", "sqlserver", "oracle",
-    "snowflake", "bigquery", "redshift",
+    "snowflake", "bigquery",
     "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
     "iceberg", "kafka", "salesforce", "hubspot",
     "sftp", "email",
@@ -794,6 +801,25 @@ def dest_ready(caps: dict[str, bool]) -> bool:
     return bool(caps.get("write") and (caps.get("read") or caps.get("dest_only")) and transfer_ready(caps))
 
 
+def _driver_install_hint(driver: str) -> str:
+    """Operator-facing package hint when a certified driver fails to load."""
+    return {
+        "sqlserver": "install pymssql, or pyodbc with unixODBC (libodbc)",
+        "oracle": "install oracledb (or cx_Oracle)",
+        "postgresql": "install psycopg2-binary",
+        "mysql": "install pymysql",
+        "mongodb": "install pymongo",
+        "snowflake": "install snowflake-connector-python (and fakesnow for local demos)",
+        "s3": "install boto3; ensure Python pyexpat/libexpat load (Homebrew expat mismatch breaks S3 XML)",
+        "bigquery": "install google-cloud-bigquery",
+        "dynamodb": "install boto3",
+        "redis": "install redis",
+        "elasticsearch": "install elasticsearch",
+        "kafka": "install confluent-kafka or kafka-python",
+        "salesforce": "install requests (Salesforce REST)",
+    }.get(driver, f"install the runtime package for driver {driver!r}")
+
+
 def endpoint_allowed_for_role(catalog_id: str, role: str) -> tuple[bool, str]:
     """Hard gate so Planned / wrong-role catalog IDs cannot run transfers.
 
@@ -815,6 +841,43 @@ def endpoint_allowed_for_role(catalog_id: str, role: str) -> tuple[bool, str]:
         if role_norm == "destination" and (caps.get("file_export") or caps.get("write")):
             return True, "supported"
         return False, f"{cid} cannot be used as a transfer {role_norm}"
+
+    driver = resolve_driver_type(cid)
+    # Certified duplex drivers with missing packages are not "Planned product" —
+    # they are environment gaps (demo machines without pymssql/unixODBC, etc.).
+    base_caps = _DRIVER_CAPS.get(driver)
+    if (
+        base_caps
+        and transfer_ready(base_caps)
+        and driver in TRANSFER_READY_CATALOG_IDS
+        and not driver_available(driver, cid)
+        and not _is_uncertified_driver_alias(cid, driver)
+    ):
+        return False, (
+            f"{cid} is Certified but its driver package is not loadable here — "
+            f"{_driver_install_hint(driver)}. "
+            "This is an environment gap, not a Planned connector."
+        )
+    # Object stores need a working pyexpat (botocore XML). Fail closed before Execute.
+    if driver in {"s3", "gcs", "adls"}:
+        try:
+            from services.runtime_checks import (
+                python_xml_runtime_ok,
+                python_xml_runtime_skip_reason,
+            )
+        except Exception:
+            python_xml_runtime_ok = None  # type: ignore[assignment]
+            python_xml_runtime_skip_reason = None  # type: ignore[assignment]
+        if python_xml_runtime_ok is not None and not python_xml_runtime_ok():
+            reason = (
+                python_xml_runtime_skip_reason()
+                if python_xml_runtime_skip_reason is not None
+                else "Python XML runtime (pyexpat) is broken"
+            )
+            return False, (
+                f"{cid} is Certified but {reason} "
+                "This is an environment gap, not a Planned connector."
+            )
 
     row = enrich_catalog_entry(
         {

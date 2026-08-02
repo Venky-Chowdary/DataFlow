@@ -452,6 +452,27 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
             ),
         },
     ),
+    (
+        (
+            "no module named expat",
+            "pyexpat",
+            "xml_setalloctrackeractivationthreshold",
+            "simplexmltreebuilder",
+        ),
+        {
+            "code": "python_xml_runtime_broken",
+            "category": "runtime",
+            "confidence": "high",
+            "title": "Python XML runtime (pyexpat) cannot load",
+            "fix": (
+                "S3/GCS/ADLS clients need a working pyexpat (botocore parses XML). "
+                "On macOS Homebrew Python, a libexpat mismatch is common — reinstall "
+                "python@3.12 + expat, or run with DYLD_LIBRARY_PATH pointing at "
+                "Homebrew's libexpat before starting the API. This is an environment "
+                "gap, not a DataFlow mapping/schema failure."
+            ),
+        },
+    ),
 )
 
 

@@ -6704,6 +6704,15 @@ th.df2-type-string .df2-type-badge {
   line-height: 1.5;
   color: #64748b;
 }
+.df2-bad-data-footer .df2-btn {
+  height: var(--df-btn-height, 36px);
+  min-height: var(--df-btn-height, 36px);
+  padding: 0 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .df2-bad-data-footer {
   display: flex;
   flex-wrap: wrap;
@@ -7074,7 +7083,7 @@ button.df2-vd-assist-toggle:focus-visible {
   margin-left: auto;
 }
 .df2-validate-rail-primary-fix {
-  margin-top: 8px;
+  margin-top: 0;
   width: auto;
   max-width: 100%;
 }

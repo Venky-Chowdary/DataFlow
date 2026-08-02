@@ -3066,6 +3066,29 @@ def row_has_missing_sentinel(row: tuple | list) -> bool:
     return any(is_missing_sentinel(v) for v in row)
 
 
+def materialize_missing_as_null_for_dense_write(
+    mapped_rows: list[tuple],
+) -> list[tuple]:
+    """Dense INSERT/COPY/MERGE stage: absent fields → SQL NULL (never bind sentinel).
+
+    Sparse CDC upsert must keep ``DF_MISSING`` and omit columns from SET.
+    Full-refresh / create-new / dense bulk loads union a schemaless schema —
+    missing keys are SQL NULL, not the literal ``__DF_MISSING__`` string
+    (Snowflake BOOL / Postgres BOOLEAN reject that string).
+    """
+    from services.value_serializer import is_missing_sentinel
+
+    if not mapped_rows or not any(row_has_missing_sentinel(r) for r in mapped_rows):
+        return mapped_rows
+    out: list[tuple] = []
+    for row in mapped_rows:
+        if not row_has_missing_sentinel(row):
+            out.append(row)
+            continue
+        out.append(tuple(None if is_missing_sentinel(v) else v for v in row))
+    return out
+
+
 def split_dense_sparse_rows(
     mapped_rows: list[tuple],
 ) -> tuple[list[tuple], list[tuple]]:

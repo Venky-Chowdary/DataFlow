@@ -94,6 +94,18 @@ function textBlob(message: string, details?: Record<string, unknown> | null): st
   return parts.join(" ");
 }
 
+/**
+ * True when the text describes format-control / character-encoding integrity
+ * failures — not when a column is merely named ``encoding_id``.
+ * Keep in sync with ``preflight_rules`` encoding keywords (no bare "encoding").
+ */
+export const ENCODING_INTEGRITY_RE =
+  /format-control(?:\s+character)?|replacement character|encoding anomaly|character encoding|U\+200B|zero-width|strip_controls/i;
+
+export function isEncodingIntegritySignal(text: string): boolean {
+  return ENCODING_INTEGRITY_RE.test(text || "");
+}
+
 export function isDuplicateIdentitySignal(
   message: string,
   details?: Record<string, unknown> | null,

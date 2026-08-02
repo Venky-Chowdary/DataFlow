@@ -568,10 +568,14 @@ def write_mapped_rows(
         # Bind using physical types so ISO Z never hits a DATETIME column as TEXT.
         physical = _fetch_mysql_column_types(cursor, table_name, identity=_identity)
         target_types = _apply_physical_temporal_types(target_cols, target_types, physical)
-        converted_rows = [
-            tuple(_to_mysql_value(v, target_types[i]) for i, v in enumerate(row))
-            for row in mapped_rows
-        ]
+        from connectors.writer_common import materialize_missing_as_null_for_dense_write
+
+        converted_rows = materialize_missing_as_null_for_dense_write(
+            [
+                tuple(_to_mysql_value(v, target_types[i]) for i, v in enumerate(row))
+                for row in mapped_rows
+            ]
+        )
         conn.commit()
 
     try:
@@ -603,10 +607,16 @@ def write_mapped_rows(
 
             # Defensive: if setup skipped conversion somehow, coerce with mapping types.
             if not converted_rows and mapped_rows:
-                converted_rows = [
-                    tuple(_to_mysql_value(v, target_types[i]) for i, v in enumerate(row))
-                    for row in mapped_rows
-                ]
+                from connectors.writer_common import materialize_missing_as_null_for_dense_write
+
+                converted_rows = materialize_missing_as_null_for_dense_write(
+                    [
+                        tuple(
+                            _to_mysql_value(v, target_types[i]) for i, v in enumerate(row)
+                        )
+                        for row in mapped_rows
+                    ]
+                )
 
             rows_skipped = 0
             sparse_written = 0

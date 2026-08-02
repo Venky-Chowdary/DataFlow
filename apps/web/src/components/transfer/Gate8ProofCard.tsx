@@ -21,10 +21,14 @@ interface Gate8ProofCardProps {
   compact?: boolean;
   /** Closed-loop: open Map / Validate when reconcile fails. */
   onOpenValidate?: () => void;
-  /** Closed-loop: jump to quarantine findings. */
+  /** Override default “Open Validate / Map” label when already on Validate. */
+  onOpenValidateLabel?: string;
+  /** Closed-loop: jump to quarantine findings (inspect only — never mutate). */
   onOpenQuarantine?: () => void;
-  /** Closed-loop: re-run the transfer. */
+  /** Closed-loop: re-run Validate (or transfer when wired from Jobs). */
   onRerun?: () => void;
+  /** Override default “Re-run transfer” label (Validate uses Re-run Validate). */
+  onRerunLabel?: string;
 }
 
 function shortChecksum(value?: string): string {
@@ -173,8 +177,10 @@ export function Gate8ProofCard({
   className = "",
   compact = false,
   onOpenValidate,
+  onOpenValidateLabel = "Open Validate / Map",
   onOpenQuarantine,
   onRerun,
+  onRerunLabel = "Re-run transfer",
 }: Gate8ProofCardProps) {
   const preWrite = isGate8PreWriteSimulation(report);
   const sampleVerified = !preWrite && isGate8SampleVerified(report);
@@ -441,17 +447,17 @@ export function Gate8ProofCard({
           <div className="df2-gate8-proof-next-actions">
             {!passed && !preWrite && onOpenValidate && (
               <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={onOpenValidate}>
-                Open Validate / Map
+                {onOpenValidateLabel}
               </button>
             )}
             {!passed && !preWrite && onOpenQuarantine && (
               <button type="button" className="df2-btn df2-btn-sm" onClick={onOpenQuarantine}>
-                Inspect quarantine
+                Inspect sample cells
               </button>
             )}
             {!passed && !preWrite && onRerun && (
               <button type="button" className="df2-btn df2-btn-sm" onClick={onRerun}>
-                Re-run transfer
+                {onRerunLabel}
               </button>
             )}
             <button

@@ -236,21 +236,15 @@ def _suggested_actions(
             })
 
     if _is_encoding_blocker(blocker_lower):
-        if not any(a.get("kind") == "normalize_control_chars" for a in actions):
-            actions.append({
-                "kind": "normalize_control_chars",
-                "transform": "strip_controls",
-                "label": "Strip control characters & re-run",
-            })
-        if not any(a.get("kind") == "quarantine_and_rerun" for a in actions):
-            actions.append({
-                "kind": "quarantine_and_rerun",
-                "label": "Quarantine bad cells & re-run",
-            })
+        # One CTA only — Strip / Quarantine live inside Fix bad data drawer.
+        actions = [
+            a for a in actions
+            if a.get("kind") not in {"normalize_control_chars", "quarantine_and_rerun"}
+        ]
         if not any(a.get("kind") == "open_bad_data_fix" for a in actions):
             actions.append({
                 "kind": "open_bad_data_fix",
-                "label": "Open Fix bad data dialog",
+                "label": "Fix bad data…",
             })
     elif "g8_reconciliation" in gate_ids or "identity transform" in blocker_lower or "identity mapping" in blocker_lower:
         if not any(a.get("kind") == "review_mappings" for a in actions):
@@ -270,13 +264,8 @@ def _suggested_actions(
                     "kind": "review_mappings",
                     "label": "Review mappings",
                 })
-            if "integrity" in blocker_lower and not any(a.get("kind") == "open_bad_data_fix" for a in actions):
-                # Only offer Fix bad data when the text still looks integrity-related
-                # but not encoding (e.g. required nulls) — drawer may still help.
-                actions.append({
-                    "kind": "open_bad_data_fix",
-                    "label": "Inspect integrity findings",
-                })
+            # Never open the encoding-centric Fix-bad-data drawer for nulls /
+            # required-field integrity — Strip/Quarantine cannot invent values.
     if "g4_mapping_confidence" in gate_ids:
         if not any(a.get("kind") == "review_mappings" for a in actions):
             actions.append({"kind": "review_mappings", "label": "Review and approve low-confidence mappings"})

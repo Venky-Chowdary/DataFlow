@@ -114,6 +114,7 @@ from connectors.writer_common import (
     quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
+    materialize_missing_as_null_for_dense_write,
     split_dense_sparse_rows,
     transform_error_policy,
 )
@@ -4006,6 +4007,8 @@ def write_mapped_rows(
     rows_for_checksum: list[tuple] = list(mapped_rows)
     if write_mode == "upsert" and conflict_columns:
         mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
+    # Dense INSERT/MERGE: absent schemaless fields → SQL NULL (sparse keeps sentinel).
+    mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
 
     if transform_errors and policy == "fail":
         return WriteResult(

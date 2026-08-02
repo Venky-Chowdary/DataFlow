@@ -225,9 +225,14 @@ def _bind_rows_for_snowflake(
 
     Production volume uses COPY (≥ COPY_THRESHOLD); without this, BOOLEAN/VARIANT
     bind only on the small JSON INSERT path and Mongo ``\"true\"`` wire drifts.
+
+    Dense load only — callers must route sparse CDC rows to omit-from-SET upsert.
+    ``DF_MISSING`` becomes SQL NULL so BOOL/NUMBER never see the sentinel string.
     """
     from connectors.sql_bind import normalize_sql_bind_value
+    from connectors.writer_common import materialize_missing_as_null_for_dense_write
 
+    mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
     bound: list[tuple] = []
     for row in mapped_rows:
         converted: list[Any] = []

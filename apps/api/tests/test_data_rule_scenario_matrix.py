@@ -443,8 +443,10 @@ def build_scenarios() -> list[Scenario]:
                     dest=dest,
                     dest_family=_family(dest),
                     mode=mode,
-                    expect="pass" if mode == "balanced" else "block",
-                    note="A sole user_id is the natural identity candidate",
+                    # Duplicate identity always blocks — balanced softens encoding/
+                    # confidence, not silent duplicate-key writes (enterprise proof bar).
+                    expect="block",
+                    note="Sole user_id is the identity candidate; duplicates must block Execute",
                     runner="identity_duplicate",
                 )
             )

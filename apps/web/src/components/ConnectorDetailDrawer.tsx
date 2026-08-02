@@ -67,7 +67,7 @@ export function ConnectorDetailDrawer({
     <Drawer
       open={open}
       onClose={onClose}
-      width={620}
+      size="lg"
       ariaLabel={`${c.name} connection details`}
       icon={<ConnectorIcon id={c.type} size={22} />}
       title={c.name}

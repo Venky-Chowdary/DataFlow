@@ -22,8 +22,8 @@ interface BadDataFixDrawerProps {
 
 /**
  * Operator remediation for sample-level integrity failures (format-control chars,
- * encoding anomalies). Mirrors warehouse ETL practice: sanitize, quarantine, or
- * explain — never silent drop.
+ * encoding anomalies). Single place for Strip / Quarantine / Explain — Validate
+ * surfaces one “Fix bad data…” opener that lands here.
  */
 export function BadDataFixDrawer({
   open,
@@ -40,7 +40,7 @@ export function BadDataFixDrawer({
     <Drawer
       open={open}
       onClose={onClose}
-      width={520}
+      size="lg"
       title="Fix bad data"
       subtitle="Sanitize or quarantine before write — nothing is silently dropped."
       icon={<DtIcon name="shield" size={18} />}
@@ -105,11 +105,9 @@ export function BadDataFixDrawer({
             <h4><DtIcon name="layers" size={14} /> Strip control characters</h4>
             <p>
               Applies <code>strip_controls</code> to every mapped column, removes format/control chars on
-              write, then re-runs validation. Recommended for MongoDB → warehouse routes.
+              write, then re-runs validation. Recommended for MongoDB → warehouse routes. Use the primary
+              action in the footer.
             </p>
-            <Button variant="primary" onClick={onStripControls} disabled={applying}>
-              Strip controls &amp; re-run
-            </Button>
           </article>
           <article>
             <h4><DtIcon name="alert" size={14} /> Quarantine &amp; continue</h4>

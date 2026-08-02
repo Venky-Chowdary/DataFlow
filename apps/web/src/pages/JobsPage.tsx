@@ -1489,7 +1489,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Gate-8 reconcile"
           subtitle="Source vs destination row counts and content fingerprints"
           icon={<DtIcon name="shield" size={18} />}
-          size="xl"
+          size="lg"
         >
           <Gate8ProofCard
             report={recon}
@@ -1521,7 +1521,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               : `${jobPreflight.passed_count}/${jobPreflight.total_gates} gates · ${jobPreflight.readiness_score}% readiness`
           }
           icon={<DtIcon name="gate" size={18} />}
-          size="xl"
+          size="lg"
         >
           <div className="df2-drawer-facts" style={{ marginBottom: 14 }}>
             <div className="df2-drawer-fact">
@@ -1581,7 +1581,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Writer & throughput"
           subtitle="Destination write path, batching, and prior-load comparison"
           icon={<DtIcon name="speed" size={18} />}
-          size="xl"
+          size="lg"
         >
           <dl className="df2-jobs-v3-summary-dl">
             {writerRps != null && (
@@ -1680,7 +1680,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Run metadata"
           subtitle={jobRouteLabel(liveJob)}
           icon={<DtIcon name="activity" size={18} />}
-          size="xl"
+          size="lg"
         >
           <dl className="df2-jobs-v3-summary-dl df2-jobs-operator-meta">
             {triggeredBy && (
@@ -1778,7 +1778,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Phase timeline"
           subtitle="Job phase history for this run"
           icon={<DtIcon name="clock" size={18} />}
-          size="xl"
+          size="lg"
         >
           <JobTimeline entries={timelineEntries} />
         </Drawer>
@@ -1791,7 +1791,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Column map"
           subtitle={`${mappingCount.toLocaleString()} columns`}
           icon={<DtIcon name="connectors" size={18} />}
-          size="xl"
+          size="lg"
         >
           {mappingCount > 0 ? (
             <div className="df2-jobs-v3-mappings is-drawer">
@@ -1870,7 +1870,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Event log"
           subtitle={`${eventLog.length.toLocaleString()} durable operator events`}
           icon={<DtIcon name="activity" size={18} />}
-          size="xl"
+          size="lg"
         >
           <JobLogTable lines={eventLog} empty="No events yet" />
         </Drawer>
@@ -1883,7 +1883,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="DDL & stream log"
           subtitle={`${ddlLog.length.toLocaleString()} schema / stream lines`}
           icon={<DtIcon name="code" size={18} />}
-          size="xl"
+          size="lg"
         >
           <JobLogTable lines={ddlLog.map(String)} empty="No DDL lines" />
         </Drawer>
@@ -1896,7 +1896,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Pipeline explanation"
           subtitle="Plain-language summary from the transfer engine"
           icon={<DtIcon name="book" size={18} />}
-          size="xl"
+          size="lg"
         >
           <JobExplanationView text={liveJob.explanation} />
         </Drawer>
@@ -1909,7 +1909,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="CDC stream health"
           subtitle={`${liveJob.streams.length} stream(s)`}
           icon={<DtIcon name="zap" size={18} />}
-          size="xl"
+          size="lg"
         >
           <table className="df2-table df2-jobs-cdc-table">
             <thead>
@@ -1955,7 +1955,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               : "Inspect findings, propose repair, or promote / replay"
           }
           icon={<DtIcon name="alert" size={18} />}
-          size="full"
+          size="lg"
         >
           <QuarantinePanel
             jobId={selectedId}

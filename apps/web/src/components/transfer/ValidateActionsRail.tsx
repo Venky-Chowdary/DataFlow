@@ -220,11 +220,15 @@ export function ValidateActionsRail({
 
         {blocked && onPrimaryFix && primaryFixLabel && (
           <Button
-            size="sm"
             variant="primary"
             className="df2-validate-rail-primary-fix"
             onClick={onPrimaryFix}
-            leadingIcon={<DtIcon name="settings" size={14} />}
+            leadingIcon={
+              <DtIcon
+                name={/bad data|strip|quarantine/i.test(primaryFixLabel) ? "shield" : "settings"}
+                size={16}
+              />
+            }
             title={primaryFixLabel}
           >
             {primaryFixLabel.length > 28
@@ -268,45 +272,34 @@ export function ValidateActionsRail({
                 : "Execute (blocked)"}
           </Button>
         )}
+        {preflight && onSaveAsContract && (
+          <Button
+            onClick={onSaveAsContract}
+            loading={savingContract}
+            loadingLabel="Saving…"
+            disabled={savingContract || preflighting}
+            leadingIcon={<DtIcon name="shield" size={16} />}
+            title="Save mappings + gates as a draft data contract under Contracts"
+          >
+            Save as contract
+          </Button>
+        )}
+
         {passed && !transferLaunch && !executeBlocked && (
-          <p className="df2-validate-rail-explain">
-            Execute starts the write. You stay on Validate until you choose to run.
+          <p className="df2-validate-rail-explain is-ok">
+            Execute starts the write and opens Run / Job Theater for live progress.
           </p>
         )}
-        {!passed && preflight && !transferLaunch && (
-          <p className="df2-validate-rail-explain" role="alert">
-            Fix the blocked gate above on Validate, then Re-run. Execute stays disabled until
-            preflight passes — nothing is written yet.
-            {firstBlockerMessage ? ` Blocker: ${firstBlockerMessage}` : ""}
+        {blocked && !transferLaunch && (
+          <p className="df2-validate-rail-explain" role="alert" title={firstBlockerMessage || undefined}>
+            {firstBlockerMessage
+              ? `Blocked: ${firstBlockerMessage}`
+              : "Resolve the failed gate, then Re-run. Execute stays disabled until preflight passes."}
           </p>
         )}
         {executeBlocked && executeBlockedReason && (
           <p className="df2-validate-rail-explain" role="alert">
             {executeBlockedReason}
-          </p>
-        )}
-
-        {preflight && onSaveAsContract && (
-          <>
-            <Button
-              onClick={onSaveAsContract}
-              loading={savingContract}
-              loadingLabel="Saving…"
-              disabled={savingContract || preflighting}
-              leadingIcon={<DtIcon name="shield" size={16} />}
-              title="Save mappings + gates as a draft data contract under Contracts"
-            >
-              Save as contract
-            </Button>
-            <p className="df2-validate-rail-contract-hint">
-              Saves a draft schema agreement to <strong>Contracts</strong> (sidebar). Works even while Validate is blocked.
-            </p>
-          </>
-        )}
-
-        {blocked && firstBlockerMessage && (
-          <p className="df2-validate-rail-explain" title={firstBlockerMessage}>
-            Blocked: {firstBlockerMessage}
           </p>
         )}
       </div>

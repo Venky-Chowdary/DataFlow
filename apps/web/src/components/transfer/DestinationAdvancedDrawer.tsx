@@ -239,7 +239,7 @@ export function DestinationAdvancedDrawer({
     <Drawer
       open={open}
       onClose={onClose}
-      width={640}
+      size="lg"
       side="right"
       ariaLabel="Advanced sync and schema settings"
       icon={<DtIcon name="settings" size={20} />}

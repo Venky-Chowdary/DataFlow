@@ -54,7 +54,8 @@ def test_destination_auth_suggests_check_connection_not_strip():
     assert "quarantine_and_rerun" not in kinds
 
 
-def test_encoding_blocker_still_suggests_strip_quarantine():
+def test_encoding_blocker_suggests_single_fix_bad_data_cta():
+    """Strip/Quarantine live inside the drawer — UI must not stack three encoding buttons."""
     actions = _suggested_actions(
         [{
             "id": "g5_dry_run",
@@ -64,8 +65,10 @@ def test_encoding_blocker_still_suggests_strip_quarantine():
         [],
     )
     kinds = [a["kind"] for a in actions]
-    assert "normalize_control_chars" in kinds
-    assert "quarantine_and_rerun" in kinds
+    assert kinds.count("open_bad_data_fix") == 1
+    assert "normalize_control_chars" not in kinds
+    assert "quarantine_and_rerun" not in kinds
+    assert next(a for a in actions if a["kind"] == "open_bad_data_fix")["label"] == "Fix bad data…"
 
 
 def test_explain_type_mismatch_narrative_mentions_remap():

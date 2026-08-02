@@ -758,7 +758,7 @@ export function MappingProofDrawer({
         title="Mapping proof"
         subtitle="Exactly how columns match — confidence evidence, transforms, and fidelity risks"
         icon={<DtIcon name="sparkle" size={18} />}
-        width={720}
+        size="lg"
         ariaLabel="Mapping proof"
         footer={footer}
         className="df2-map-proof-drawer"

@@ -3288,9 +3288,16 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     if value is None:
         # Distinct from empty string — SQL/Dynamo NULL must not checksum as "".
         return _NULL_SENTINEL
+    # Dense write materializes absent schemaless fields as SQL NULL; fingerprint
+    # must match. Sparse CDC sample_compare skips DF_MISSING columns (omit-from-SET).
+    from services.value_serializer import is_missing_sentinel
+
+    if is_missing_sentinel(value):
+        return _NULL_SENTINEL
     if isinstance(value, str) and value.strip().lower() in {
         "__df_sql_null__",
         "__df_ddb_null__",
+        "__df_missing__",
     }:
         return _NULL_SENTINEL
     # Oracle write-location: '' is stored/read as NULL — equate before other paths.

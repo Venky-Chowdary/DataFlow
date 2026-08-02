@@ -28,7 +28,8 @@ from services.type_system import decimal_needs_scientific_wire
 SQL_NULL_SENTINEL = "__DF_SQL_NULL__"
 
 # Document field absent (Mongo/Dynamo schemaless) — distinct from explicit null.
-# Writers must omit the key rather than write NULL when this sentinel appears.
+# Sparse CDC upsert: omit the key from SET (never wipe destination with NULL).
+# Dense INSERT/COPY/full-refresh: materialize as SQL NULL (union schema).
 DF_MISSING_SENTINEL = "__DF_MISSING__"
 
 

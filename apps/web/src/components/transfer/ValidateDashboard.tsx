@@ -24,6 +24,7 @@ import {
   buildExecutiveSummary,
   findDuplicateKeyRoot,
   isDeclaredFidelityCollapse,
+  isEncodingIntegritySignal,
   partitionCoercionColumns,
   partitionExplainIssues,
 } from "../../lib/validateIssueGrouping";
@@ -223,6 +224,12 @@ interface ValidateDashboardProps {
   seedRepairProposalId?: string | null;
   /** Clear seed after the drawer has opened (or failed). */
   onSeedRepairConsumed?: () => void;
+  /**
+   * Controlled Fix-bad-data drawer (rail / Studio actions). When omitted, the
+   * dashboard owns open state internally.
+   */
+  badDataFixOpen?: boolean;
+  onBadDataFixOpenChange?: (open: boolean) => void;
 }
 
 /** Plain-language report of what a Validate remediation button just did. */
@@ -245,7 +252,7 @@ function extractBadDataIssues(preflight: PreflightResult | null): BadDataIssue[]
   const pushFrom = (items: unknown[]) => {
     for (const item of items) {
       if (typeof item === "string") {
-        if (/format-control|replacement character|encoding|control/i.test(item)) {
+        if (isEncodingIntegritySignal(item)) {
           out.push({ message: item });
         }
         continue;
@@ -254,7 +261,7 @@ function extractBadDataIssues(preflight: PreflightResult | null): BadDataIssue[]
         const row = item as Record<string, unknown>;
         const message = String(row.message ?? row.error ?? "");
         if (!message && !row.chars) continue;
-        if (message && !/format-control|replacement|encoding|control/i.test(message) && !row.chars) {
+        if (message && !isEncodingIntegritySignal(message) && !row.chars) {
           continue;
         }
         out.push({
@@ -272,7 +279,7 @@ function extractBadDataIssues(preflight: PreflightResult | null): BadDataIssue[]
     if (Array.isArray(details.errors)) pushFrom(details.errors);
     if (Array.isArray(details.issues)) pushFrom(details.issues);
     if (Array.isArray(details.encoding_issues)) pushFrom(details.encoding_issues);
-    if (/format-control|replacement character/i.test(b.message)) {
+    if (isEncodingIntegritySignal(b.message)) {
       out.push({ message: b.message });
     }
   }
@@ -308,11 +315,36 @@ const ACTION_ICON: Record<string, string> = {
   review_mappings: "layers",
   rerun_mapping: "transfer",
   check_connection: "server",
-  normalize_control_chars: "layers",
+  normalize_control_chars: "shield",
   quarantine_and_rerun: "shield",
   open_bad_data_fix: "shield",
   fix_source_keys: "settings",
 };
+
+/** Encoding remediations collapse to one Fix-bad-data CTA (drawer owns Strip/Quarantine). */
+const ENCODING_ACTION_KINDS = new Set([
+  "normalize_control_chars",
+  "quarantine_and_rerun",
+  "open_bad_data_fix",
+]);
+
+function collapseEncodingSuggestedActions(
+  actions: ValidationSuggestedAction[],
+): ValidationSuggestedAction[] {
+  let sawEncoding = false;
+  const out: ValidationSuggestedAction[] = [];
+  for (const action of actions) {
+    if (ENCODING_ACTION_KINDS.has(action.kind)) {
+      if (!sawEncoding) {
+        sawEncoding = true;
+        out.push({ kind: "open_bad_data_fix", label: "Fix bad data…" });
+      }
+      continue;
+    }
+    out.push(action);
+  }
+  return out;
+}
 
 /** Per-column value-aware coercion table with expandable offending-value rows. */
 function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
@@ -609,6 +641,8 @@ export function ValidateDashboard({
   repairJobId = "",
   seedRepairProposalId = null,
   onSeedRepairConsumed,
+  badDataFixOpen,
+  onBadDataFixOpenChange,
 }: ValidateDashboardProps) {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [revealCount, setRevealCount] = useState(0);
@@ -618,7 +652,13 @@ export function ValidateDashboard({
   const [repairProposal, setRepairProposal] = useState<RepairProposal | null>(null);
   const [repairBusy, setRepairBusy] = useState(false);
   const [explainError, setExplainError] = useState<string | null>(null);
-  const [badDataOpen, setBadDataOpen] = useState(false);
+  const [internalBadDataOpen, setInternalBadDataOpen] = useState(false);
+  const badDataControlled = typeof onBadDataFixOpenChange === "function";
+  const badDataOpen = badDataControlled ? Boolean(badDataFixOpen) : internalBadDataOpen;
+  const setBadDataOpen = (open: boolean) => {
+    if (badDataControlled) onBadDataFixOpenChange?.(open);
+    else setInternalBadDataOpen(open);
+  };
   const [remediating, setRemediating] = useState(false);
   const [assistExpanded, setAssistExpanded] = useState(true);
   const [revealCellPii, setRevealCellPii] = useState(false);
@@ -715,8 +755,8 @@ export function ValidateDashboard({
     ].slice(0, 8));
   };
   const encodingBlocks = Boolean(
-    preflight?.blockers.some((b) => /format-control|replacement character|encoding/i.test(b.message))
-    || preflight?.gates.some((g) => g.status === "block" && /format-control|replacement|encoding/i.test(g.message)),
+    preflight?.blockers.some((b) => isEncodingIntegritySignal(b.message))
+    || preflight?.gates.some((g) => g.status === "block" && isEncodingIntegritySignal(g.message)),
   );
   const showEncodingRemediation = !isTypeMismatchBlock && !isConnectionBlock && !isPrivilegeBlock && (hasEncodingIssue || encodingBlocks);
   // Auto-open the Fix bad data drawer when dry-run is blocked by encoding/control chars.
@@ -1125,18 +1165,26 @@ export function ValidateDashboard({
           result.steps,
         );
       } else {
-        // Handler navigated to Map (type mismatch) — no strip applied.
+        // Handler redirected — identity → Advanced, type mismatch → Map.
         pendingVerifyRef.current = false;
+        const identityRedirect = Boolean(duplicateRoot);
         pushRemediation(
           "Quarantine + strip controls",
-          flagged.length
-            ? `Could not auto-fix flagged columns (${flagged.slice(0, 6).join(", ")}). Remap types on Map instead.`
-            : "Blocked by a type/mapping issue — quarantine cannot change column types. Open Map to remap.",
-          "Redirected to Map",
-          [
-            "Quarantine/Strip only sanitize encoding (U+200B / control chars).",
-            "Wrong target types (e.g. text → NUMBER) must be remapped on Map, then Validate again.",
-          ],
+          identityRedirect
+            ? "Duplicate identity keys cannot be quarantined. Open Destination → Advanced to change primary key or sync mode."
+            : flagged.length
+              ? `Could not auto-fix flagged columns (${flagged.slice(0, 6).join(", ")}). Remap types on Map instead.`
+              : "Blocked by a type/mapping issue — quarantine cannot change column types. Open Map to remap.",
+          identityRedirect ? "Redirected to identity settings" : "Redirected to Map",
+          identityRedirect
+            ? [
+                "Quarantine/Strip only sanitize encoding (U+200B / control chars).",
+                "Duplicate keys need a unique primary key or a sync mode that does not require uniqueness.",
+              ]
+            : [
+                "Quarantine/Strip only sanitize encoding (U+200B / control chars).",
+                "Wrong target types (e.g. text → NUMBER) must be remapped on Map, then Validate again.",
+              ],
         );
       }
       setBadDataOpen(false);
@@ -1168,11 +1216,9 @@ export function ValidateDashboard({
   };
 
   const handleSuggestedAction = (action: ValidationSuggestedAction) => {
-    if (action.kind === "normalize_control_chars") {
-      if (onStripControlChars) {
-        void runStrip();
-        return;
-      }
+    // Encoding remediations share one surface — BadDataFixDrawer — so Strip /
+    // Quarantine are not duplicated next to every “Fix bad data…” opener.
+    if (action.kind === "normalize_control_chars" || action.kind === "open_bad_data_fix") {
       setBadDataOpen(true);
       return;
     }
@@ -1182,14 +1228,6 @@ export function ValidateDashboard({
         onOpenIdentitySettings();
         return;
       }
-      if (onQuarantineAndRerun) {
-        void runQuarantine();
-        return;
-      }
-      setBadDataOpen(true);
-      return;
-    }
-    if (action.kind === "open_bad_data_fix") {
       setBadDataOpen(true);
       return;
     }
@@ -1358,7 +1396,7 @@ export function ValidateDashboard({
           {!running && preflight?.passed && !stripControlsApplied && onStripControlChars && (
             <p className="df2-vd-hero-engine-meta" role="status">
               Text mappings do not yet include <code>strip_controls</code>. If a prior job failed on
-              U+200B / format-control characters, click <strong>Strip controls &amp; re-run</strong> before
+              U+200B / format-control characters, open <strong>Fix bad data…</strong> and strip before
               Execute — green Validate on a clean preview is not the same as sanitizing the full load.
             </p>
           )}
@@ -1483,26 +1521,42 @@ export function ValidateDashboard({
                     Re-test &amp; re-validate
                   </Button>
                 )}
-                {isTypeMismatchBlock && typeMismatchColumns.slice(0, 4).map((col) => (
-                  <Button
-                    key={`${col.source}-${col.target}`}
-                    size="sm"
-                    variant="primary"
-                    disabled={remediating || !onApplyAction}
-                    leadingIcon={<DtIcon name="layers" size={14} />}
-                    onClick={() =>
-                      onApplyAction?.({
-                        kind: "change_target_type",
-                        label: `Remap ${col.source} → VARCHAR`,
-                        column: col.source,
-                        target: col.target,
-                        to_type: "VARCHAR",
-                      })
-                    }
-                  >
-                    Remap {col.source} → VARCHAR
-                  </Button>
-                ))}
+                {isTypeMismatchBlock && (() => {
+                  const coercionBlocks = (preflight?.coercion_report?.columns ?? [])
+                    .filter((c) => c.severity === "block" && c.suggested_target_type)
+                    .slice(0, 4);
+                  const remapCols = coercionBlocks.length > 0
+                    ? coercionBlocks.map((c) => ({
+                      source: c.source,
+                      target: c.target,
+                      toType: c.suggested_target_type || "VARCHAR",
+                    }))
+                    : typeMismatchColumns.slice(0, 4).map((c) => ({
+                      source: c.source,
+                      target: c.target,
+                      toType: "VARCHAR",
+                    }));
+                  return remapCols.map((col) => (
+                    <Button
+                      key={`${col.source}-${col.target}`}
+                      size="sm"
+                      variant="primary"
+                      disabled={remediating || !onApplyAction}
+                      leadingIcon={<DtIcon name="layers" size={14} />}
+                      onClick={() =>
+                        onApplyAction?.({
+                          kind: "change_target_type",
+                          label: `Remap ${col.source} → ${col.toType}`,
+                          column: col.source,
+                          target: col.target,
+                          to_type: col.toType,
+                        })
+                      }
+                    >
+                      Remap {col.source} → {col.toType}
+                    </Button>
+                  ));
+                })()}
                 {isTypeMismatchBlock && onReviewMappings && (
                   <Button
                     size="sm"
@@ -1514,32 +1568,10 @@ export function ValidateDashboard({
                     Open Map
                   </Button>
                 )}
-                {showEncodingRemediation && onStripControlChars && (
-                  <Button
-                    size="sm"
-                    variant="primary"
-                    disabled={remediating}
-                    leadingIcon={<DtIcon name="layers" size={14} />}
-                    onClick={() => void runStrip()}
-                  >
-                    Strip controls &amp; re-run
-                  </Button>
-                )}
-                {showEncodingRemediation && onQuarantineAndRerun && (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    disabled={remediating}
-                    leadingIcon={<DtIcon name="shield" size={14} />}
-                    onClick={() => void runQuarantine()}
-                  >
-                    Quarantine &amp; re-run
-                  </Button>
-                )}
                 {showEncodingRemediation && (
                   <Button
                     size="sm"
-                    variant="ghost"
+                    variant="primary"
                     disabled={remediating}
                     leadingIcon={<DtIcon name="shield" size={14} />}
                     onClick={() => setBadDataOpen(true)}
@@ -1575,7 +1607,7 @@ export function ValidateDashboard({
               : isTypeMismatchBlock
               ? "Type mismatch — Remap/Widen below. Strip/Quarantine cannot change column types."
               : showEncodingRemediation
-                ? "Strip controls removes format-control characters, then re-validates. Quarantine keeps unfit cells out of the destination (never silent drop)."
+                ? "Open Fix bad data to strip format-control characters or quarantine unfit cells (never silent drop), then re-validate."
                 : "Use the action above for this root cause, then Re-run Validate."}
           </p>
         </div>
@@ -1716,28 +1748,6 @@ export function ValidateDashboard({
               ))}
             </ul>
             <div className="df2-vd-cell-preview-actions">
-              {onStripControlChars && showEncodingRemediation && (
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => void runStrip()}
-                  disabled={remediating}
-                  leadingIcon={<DtIcon name="layers" size={14} />}
-                >
-                  Strip controls &amp; re-run
-                </Button>
-              )}
-              {onQuarantineAndRerun && showEncodingRemediation && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => void runQuarantine()}
-                  disabled={remediating}
-                  leadingIcon={<DtIcon name="shield" size={14} />}
-                >
-                  Quarantine &amp; re-check
-                </Button>
-              )}
               {onRunPreflight && !preflight && !running && (
                 <Button
                   size="sm"
@@ -1963,44 +1973,6 @@ export function ValidateDashboard({
                 </div>
               )}
 
-              {(hasEncodingIssue || encodingBlocks) && (
-                <div className="df2-vd-assist-actions df2-vd-assist-remediate">
-                  <span className="df2-vd-assist-actions-title">Bad data remediation</span>
-                  <div className="df2-vd-chip-row">
-                    <button
-                      type="button"
-                      className="df2-vd-chip kind-open_bad_data_fix"
-                      onClick={() => setBadDataOpen(true)}
-                    >
-                      <DtIcon name="shield" size={13} />
-                      Fix bad data…
-                    </button>
-                    {onStripControlChars && (
-                      <button
-                        type="button"
-                        className="df2-vd-chip kind-normalize_control_chars"
-                        onClick={() => void runStrip()}
-                        disabled={remediating}
-                      >
-                        <DtIcon name="layers" size={13} />
-                        Strip controls &amp; re-run
-                      </button>
-                    )}
-                    {onQuarantineAndRerun && !duplicateRoot && (
-                      <button
-                        type="button"
-                        className="df2-vd-chip kind-quarantine_and_rerun"
-                        onClick={() => void runQuarantine()}
-                        disabled={remediating}
-                      >
-                        <DtIcon name="shield" size={13} />
-                        Quarantine &amp; re-run
-                      </button>
-                    )}
-                  </div>
-                </div>
-              )}
-
               {explaining && !explain && (
                 <div className="df2-vd-assist-loading">
                   <Spinner size="sm" label="" /> Reviewing gates, columns, and offending values…
@@ -2198,16 +2170,20 @@ export function ValidateDashboard({
                     <div className="df2-vd-assist-actions">
                       <span className="df2-vd-assist-actions-title">Suggested fixes</span>
                       <div className="df2-vd-fix-actions">
-                        {explain.suggested_actions
-                          .filter((action) =>
+                        {collapseEncodingSuggestedActions(
+                          explain.suggested_actions.filter((action) =>
                             action.kind !== "open_mapping_proof"
                             && action.kind !== "mapping_proof"
                             // Identity CTAs already live in Suggested fixes bar + rail.
                             && !(duplicateRoot && (
                               action.kind === "fix_source_keys"
                               || action.kind === "quarantine_and_rerun"
+                              || action.kind === "review_mappings"
                             ))
-                          )
+                            // Encoding CTAs already live in the top Suggested fixes bar.
+                            && !(showEncodingRemediation && ENCODING_ACTION_KINDS.has(action.kind)),
+                          ),
+                        )
                           .map((action, i) => (
                           <Button
                             key={`${action.kind}-${action.column ?? ""}-${i}`}
@@ -2413,15 +2389,19 @@ export function ValidateDashboard({
             report={reconciliation as Gate8Reconciliation}
             className="df2-vd-gate8"
             compact
-            onOpenValidate={onReviewMappings ? () => onReviewMappings() : undefined}
+            onOpenValidate={
+              onReviewMappings
+                ? () => onReviewMappings()
+                : undefined
+            }
+            onOpenValidateLabel="Open Map"
             onOpenQuarantine={
               cellPreview && (cellPreview.quarantine_count > 0 || cellPreview.coerce_count > 0)
                 ? () => document.getElementById("df2-vd-cell-preview")?.scrollIntoView({ behavior: "smooth", block: "start" })
-                : onQuarantineAndRerun
-                  ? () => { void onQuarantineAndRerun(); }
-                  : undefined
+                : undefined
             }
             onRerun={onRunPreflight ? () => { void onRunPreflight(); } : undefined}
+            onRerunLabel="Re-run Validate"
           />
         </div>
       )}
@@ -2652,18 +2632,7 @@ export function ValidateDashboard({
                       )}
                     </div>
                   )}
-                  {(encodingBlocks || hasEncodingIssue) && (b.id.includes("dry_run") || /format-control|replacement character/i.test(b.message)) && (
-                    <div className="df2-vd-blocker-actions df2-vd-fix-actions">
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        leadingIcon={<DtIcon name="shield" size={14} />}
-                        onClick={() => setBadDataOpen(true)}
-                      >
-                        Fix bad data…
-                      </Button>
-                    </div>
-                  )}
+                  {/* Encoding Fix CTA lives in the Suggested fixes bar + rail only. */}
                   {isTypeMismatchBlock && b.id.includes("dry_run") && typeMismatchColumns.length > 0 && (
                     <div className="df2-vd-blocker-actions">
                       <span className="df2-vd-assist-actions-title">

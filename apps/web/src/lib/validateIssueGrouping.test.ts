@@ -10,6 +10,7 @@ import {
   findDuplicateKeyRoot,
   groupIsoNormalizeIssues,
   isDeclaredFidelityCollapse,
+  isEncodingIntegritySignal,
   isIsoNormalizeCoercion,
   partitionCoercionColumns,
   partitionExplainIssues,
@@ -302,5 +303,24 @@ describe("buildExecutiveSummary", () => {
     assert.equal(summary!.title, "Review before Execute");
     assert.match(summary!.subtitle, /review-grade/i);
     assert.ok(!/Execute unlocked/i.test(summary!.subtitle));
+  });
+});
+
+describe("isEncodingIntegritySignal", () => {
+  it("matches format-control / U+200B integrity failures", () => {
+    assert.equal(
+      isEncodingIntegritySignal("format-control character detected (U+200B)"),
+      true,
+    );
+    assert.equal(isEncodingIntegritySignal("zero-width space in description"), true);
+  });
+
+  it("does not steal type-mismatch CTAs for encoding_id columns", () => {
+    assert.equal(
+      isEncodingIntegritySignal(
+        "Dry-run failed: encoding_id (VARCHAR) → encoding_id (NUMBER(38,0))",
+      ),
+      false,
+    );
   });
 });

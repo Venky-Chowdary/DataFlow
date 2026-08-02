@@ -44,7 +44,12 @@ from services.type_system import (
     is_precision_collapse_coercion,
     normalize_logical_type,
 )
-from services.value_serializer import cell_to_string
+from services.value_serializer import (
+    DF_MISSING_SENTINEL,
+    SQL_NULL_SENTINEL,
+    cell_to_string,
+    is_missing_sentinel,
+)
 
 _TEXTUAL_LOGICALS = {"string", "text"}
 _STRUCTURAL_LOGICALS = {"json", "array", "struct", "map"}
@@ -311,7 +316,22 @@ def analyze_coercion(
         use_binary_wire = tgt_logical == "binary" and dest_l in _uuid_binary_dests
 
         for idx, row in enumerate(rows):
-            cell = cell_to_string(row.get(src))
+            raw_cell = row.get(src, DF_MISSING_SENTINEL)
+            # Sparse schemaless docs (Mongo/Dynamo): absent / SQL-null sentinels
+            # are real NULLs at write — never cast failures or silent-loss blocks.
+            if is_missing_sentinel(raw_cell) or raw_cell in {
+                DF_MISSING_SENTINEL,
+                SQL_NULL_SENTINEL,
+                "__df_ddb_null__",
+            }:
+                nulls += 1
+                observed_values.append("")
+                continue
+            cell = cell_to_string(raw_cell)
+            if cell.strip() in {"", DF_MISSING_SENTINEL, SQL_NULL_SENTINEL, "__df_ddb_null__"}:
+                nulls += 1
+                observed_values.append(cell)
+                continue
             observed_values.append(cell)
             converted, err = apply_transform(cell, transform)
             if err:
@@ -326,6 +346,11 @@ def analyze_coercion(
                     sentinel_nulls += 1
                     if len(sentinel_examples) < SAMPLE_FAILURE_LIMIT:
                         sentinel_examples.append({"row": idx, "value": cell[:120]})
+            elif is_missing_sentinel(converted) or str(converted) in {
+                DF_MISSING_SENTINEL,
+                SQL_NULL_SENTINEL,
+            }:
+                nulls += 1
             else:
                 # Destination-wire probe: transform-engine ISO-Z ≠ SQL/warehouse bind.
                 if use_wire and wire_check_fn is not None:
