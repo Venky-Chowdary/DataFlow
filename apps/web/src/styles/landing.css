@@ -34,7 +34,7 @@
   --lp-shadow-sm: var(--df-shadow-sm, 0 1px 2px rgba(15, 23, 42, 0.05));
   --lp-shadow-md: var(--df-shadow-md, 0 12px 32px rgba(15, 23, 42, 0.08));
   --lp-shadow-lg: var(--df-shadow-lg, 0 24px 64px rgba(15, 23, 42, 0.12));
-  --lp-grad-brand: linear-gradient(135deg, #14b8a6, #0d9488);
+  --lp-grad-brand: var(--df-brand-gradient, linear-gradient(135deg, #14b8a6, #0d9488));
   --lp-grad-ink: linear-gradient(180deg, #0f2744, #07111f);
   --lp-grad-surface: linear-gradient(180deg, #ffffff, #f8fafc);
   --lp-hairline: color-mix(in srgb, var(--lp-accent) 28%, var(--lp-line));

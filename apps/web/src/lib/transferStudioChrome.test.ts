@@ -42,10 +42,10 @@ describe("Transfer Studio chrome contracts", () => {
     const css = readFileSync(join(webRoot, "styles/enterprise-ui.css"), "utf8");
     assert.match(css, /@media \(max-width: 1440px\)/);
     assert.match(css, /wizard-label-short \{\s*display: inline !important;/s);
-    assert.match(css, /validate-rail-primary-fix[\s\S]*width: auto !important/);
+    assert.match(css, /validate-rail-primary-fix[\s\S]*width: 100% !important/);
     assert.match(
       css,
-      /validate-rail-actions \.df2-btn[\s\S]*max-width:\s*min\(220px,\s*100%\)\s*!important/,
+      /validate-rail-actions \{\s*[\s\S]*flex-direction: column !important/,
     );
   });
 
@@ -70,7 +70,22 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(css, /@container studio-chrome \(max-width: 900px\)/);
     assert.match(css, /@media \(max-width: 1280px\)/);
     assert.match(css, /df2-transfer-studio-chrome-row[\s\S]*flex-direction: column/);
-    assert.match(css, /validate-rail-primary-fix[\s\S]*width: auto/);
+    assert.match(css, /validate-rail-primary-fix[\s\S]*width:\s*100%/);
+  });
+
+  it("ValidateActionsRail labels review-grade passes as review, not ready", () => {
+    const src = readFileSync(join(webRoot, "components/transfer/ValidateActionsRail.tsx"), "utf8");
+    assert.match(src, /reviewGrade/);
+    assert.match(src, /scoreLabel = reviewGrade \? "review"/);
+    assert.match(src, /executeDisabled[\s\S]*reviewGrade/);
+    assert.match(src, /Execute \(review\)/);
+    assert.match(src, /Review-grade result/);
+    assert.doesNotMatch(src, /span>\{passed \? "ready" : "blocked"\}/);
+  });
+
+  it("ValidateDashboard surfaces review subtitle when passed", () => {
+    const src = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
+    assert.match(src, /decision === "review"[\s\S]*executiveSummary\?\.subtitle/);
   });
 
   it("source-probe duplicate signal is recognized for Fix routing", () => {

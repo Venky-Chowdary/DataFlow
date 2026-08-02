@@ -516,32 +516,44 @@
   }
 }
 
+/* Edge Pilot peek — restrained; topbar already has Pilot. Hide under xl. */
 .df2-copilot-edge-open {
   position: fixed;
   top: 50%;
   right: 0;
-  z-index: 40;
-  transform: translateY(-50%);
+  z-index: var(--df-z-sticky, 20);
+  transform: translateY(-50%) translateX(calc(100% - 10px));
   display: inline-flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
-  padding: 14px 8px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  gap: 4px;
+  padding: 10px 6px;
+  border: 1px solid var(--df-border);
   border-right: none;
-  border-radius: 10px 0 0 10px;
-  background: #0f766e;
+  border-radius: var(--df-radius-md) 0 0 var(--df-radius-md);
+  background: var(--df-brand-deep);
   color: #fff;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   cursor: pointer;
-  box-shadow: -4px 0 16px rgba(15, 23, 42, 0.12);
+  box-shadow: none;
+  opacity: 0.72;
+  transition: transform var(--df-dur-fast) var(--df-ease), opacity var(--df-dur-fast) var(--df-ease);
 }
 
-.df2-copilot-edge-open:hover {
-  background: #0d9488;
+.df2-copilot-edge-open:hover,
+.df2-copilot-edge-open:focus-visible {
+  transform: translateY(-50%) translateX(0);
+  opacity: 1;
+  background: var(--df-brand);
+}
+
+@media (max-width: 1279px) {
+  .df2-copilot-edge-open {
+    display: none !important;
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -1240,7 +1252,7 @@
 .df2-jobs-v3-summary-metrics article.is-metric-rows { border-left-color: #0f766e; background: #f0fdfa; }
 .df2-jobs-v3-summary-metrics article.is-metric-progress { border-left-color: #2563eb; background: #eff6ff; }
 .df2-jobs-v3-summary-metrics article.is-metric-columns { border-left-color: #475569; background: #f8fafc; }
-.df2-jobs-v3-summary-metrics article.is-metric-mode { border-left-color: #7c3aed; background: #f5f3ff; }
+.df2-jobs-v3-summary-metrics article.is-metric-mode { border-left-color: var(--df-brand-hover); background: var(--df-brand-muted); }
 .df2-jobs-v3-summary-metrics article.is-metric-quarantine { border-left-color: #94a3b8; background: #f8fafc; }
 .df2-jobs-v3-summary-metrics article.is-metric-quarantine.is-warn { border-left-color: #d97706; background: #fffbeb; }
 .df2-jobs-v3-summary-metrics article.is-metric-coerced { border-left-color: #94a3b8; background: #f8fafc; }
@@ -3139,14 +3151,15 @@
   overflow: hidden;
 }
 
-/* Validate Fix — compact control, never full-bleed in scorecard */
+/* Validate Fix — primary CTA fills the action column (rail is actions-first) */
 .df2-validate-rail-primary-fix.df2-btn,
 .df2-validate-rail-primary-fix {
-  width: auto !important;
-  max-width: min(220px, 100%) !important;
+  width: 100% !important;
+  max-width: 100% !important;
   flex: 0 0 auto !important;
-  align-self: center;
+  align-self: stretch;
   margin-top: 0;
+  justify-content: center;
 }
 
 .df2-topbar {
@@ -4432,25 +4445,34 @@
 .df2-validate-rail-actions {
   flex: 0 0 auto !important;
   display: flex !important;
-  flex-direction: row !important;
-  flex-wrap: wrap !important;
-  align-items: center !important;
-  justify-content: flex-end !important;
+  flex-direction: column !important;
+  flex-wrap: nowrap !important;
+  align-items: stretch !important;
+  justify-content: flex-start !important;
   gap: 8px !important;
   margin-top: 0 !important;
   padding: 10px 0 0 !important;
-  border-top: 1px solid #e2e8f0 !important;
-  background: #fafbfc !important;
+  border-top: 1px solid var(--df-border, #e2e8f0) !important;
+  background: var(--df-surface-muted, #fafbfc) !important;
   position: relative !important;
   bottom: auto !important;
   z-index: 2;
 }
 
-.df2-validate-rail-actions > button:first-child {
-  margin-right: auto;
+.df2-validate-rail-actions-row {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 8px !important;
+  align-items: center !important;
 }
 
-.df2-validate-rail-actions .df2-btn {
+.df2-validate-rail-actions-row > .df2-btn {
+  flex: 1 1 auto !important;
+  width: auto !important;
+  max-width: min(220px, 100%) !important;
+}
+
+.df2-validate-rail-actions > .df2-btn {
   height: var(--df-btn-height, 36px) !important;
   min-height: var(--df-btn-height, 36px) !important;
   padding: 0 14px !important;
@@ -4458,13 +4480,13 @@
   font-size: 12.5px !important;
   font-weight: 600 !important;
   flex: 0 0 auto !important;
-  width: auto !important;
+  width: 100% !important;
   min-width: 0 !important;
-  /* Never stretch Fix/Execute to full rail width (was max-width: 100%) */
-  max-width: min(220px, 100%) !important;
+  max-width: 100% !important;
   white-space: nowrap !important;
   overflow: hidden;
   text-overflow: ellipsis;
+  justify-content: center !important;
 }
 
 .df2-validate-rail-explain {

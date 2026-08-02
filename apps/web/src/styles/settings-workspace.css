@@ -27,11 +27,11 @@
   flex-direction: column;
   gap: 6px;
   width: 100%;
-  min-width: 272px;
+  min-width: 0;
   padding: 14px;
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: var(--df-radius-card, 12px);
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: none;
   overflow: visible;
 }
@@ -61,14 +61,41 @@
 }
 
 .df2-page-settings .df2-settings-nav button.active {
-  background: #f0fdfa;
-  color: #0f766e;
-  border-color: #99f6e4;
+  background: var(--df-brand-muted);
+  color: var(--df-brand-deep);
+  border-color: var(--df-brand-soft);
 }
 
 .df2-page-settings .df2-settings-nav button:hover:not(.active) {
-  background: #f8fafc;
-  color: #334155;
+  background: var(--df-surface-muted);
+  color: var(--df-navy-700);
+}
+
+@media (max-width: 1023px) {
+  .df2-page-settings .df2-settings-layout {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+
+  .df2-page-settings .df2-settings-nav {
+    position: static;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    gap: 8px;
+    padding: 10px;
+  }
+
+  .df2-page-settings .df2-settings-nav button {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: max-content;
+  }
+
+  .df2-page-settings .df2-settings-nav button .df2-settings-nav-desc {
+    display: none;
+  }
 }
 
 .df2-page-settings .df2-settings-content,
@@ -123,20 +150,20 @@
 .df2-page-settings .df2-label {
   font-size: 13px;
   font-weight: 600;
-  color: #334155;
+  color: var(--df-navy-700);
 }
 
 .df2-page-settings .df2-input,
 .df2-page-settings select.df2-input,
 .df2-page-settings select.df2-select {
   width: 100%;
-  min-height: 42px;
+  min-height: var(--df-control-height);
   padding: 10px 12px;
   box-sizing: border-box;
-  border: 1px solid var(--df-border, #e2e8f0);
-  border-radius: 8px;
-  background: #fff;
-  color: #0f172a;
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+  background: var(--df-surface);
+  color: var(--df-text-primary);
   font-size: 14px;
   line-height: 1.4;
 }
@@ -144,14 +171,14 @@
 .df2-page-settings .df2-input:focus,
 .df2-page-settings select.df2-input:focus,
 .df2-page-settings select.df2-select:focus {
-  outline: 2px solid rgba(15, 118, 110, 0.28);
+  outline: 2px solid var(--df-brand-ring);
   outline-offset: 0;
-  border-color: #0f766e;
+  border-color: var(--df-brand-hover);
 }
 
 .df2-page-settings .df2-input:disabled {
-  background: #f8fafc;
-  color: #94a3b8;
+  background: var(--df-surface-muted);
+  color: var(--df-text-tertiary);
 }
 
 .df2-page-settings .df2-stack--tight {

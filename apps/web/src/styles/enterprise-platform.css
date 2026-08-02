@@ -6,33 +6,14 @@
  */
 
 
-:root {
-  --df-content-max: none;
-  --df-page-gutter: clamp(16px, 2.5vw, 32px);
-  --df-surface-canvas: #f8fafc;
-  --df-surface-panel: #ffffff;
-  --df-ink-primary: #0f172a;
-  --df-ink-secondary: #475569;
-  --df-ink-muted: #94a3b8;
-  --df-line: #e2e8f0;
-  --df-line-strong: #cbd5e1;
-  --df-brand: #0f766e;
-  --df-brand-hover: #115e59;
-  --df-brand-subtle: #f0fdfa;
-  --df-focus: rgba(15, 118, 110, 0.2);
-  color-scheme: light;
-}
-
-/* ─── Force light theme (fixes invisible UI from conflicting styles) ─── */
-
+/* Tokens owned by tokens.css — do not redefine --df-* here. */
 html {
   color-scheme: light;
-  background: #f8fafc;
 }
 
 html, body, #root {
-  background: #f8fafc !important;
-  color: #0f172a !important;
+  background: var(--df-bg-canvas);
+  color: var(--df-text-primary);
 }
 
 .df2-app,
@@ -41,8 +22,8 @@ html, body, #root {
 .df2-content-inner,
 .df2-page,
 .landing-page {
-  background: #f8fafc;
-  color: #0f172a;
+  background: var(--df-bg-canvas);
+  color: var(--df-text-primary);
 }
 
 .df2-content-inner.is-booting {
@@ -54,30 +35,30 @@ html, body, #root {
 .df2-card,
 .df2-stat,
 .df2-login-card {
-  background: #ffffff;
-  color: #0f172a;
+  background: var(--df-surface);
+  color: var(--df-text-primary);
 }
 
 .df2-btn {
-  color: #334155;
-  background: #ffffff;
-  border-color: #e2e8f0;
+  color: var(--df-navy-700);
+  background: var(--df-surface);
+  border-color: var(--df-border);
 }
 
 .df2-btn-ghost {
   background: transparent;
-  color: #475569;
+  color: var(--df-text-secondary);
 }
 
 .df2-input,
 .df2-select {
-  background: #ffffff !important;
-  color: #0f172a !important;
-  border-color: #e2e8f0 !important;
+  background: var(--df-surface);
+  color: var(--df-text-primary);
+  border-color: var(--df-border);
 }
 
 .df2-label {
-  color: #475569 !important;
+  color: var(--df-text-secondary);
 }
 
 /* ─── Full-width canvas ─── */
@@ -677,7 +658,7 @@ body {
   }
 }
 
-@media (max-width: 1024px) {
+@media (max-width: 1023px) {
   .df2-catalog-layout {
     grid-template-columns: 1fr;
   }
@@ -1902,16 +1883,7 @@ body {
    Smooth ease-out curves, stagger reveals, micro-interactions, unified surfaces
    ───────────────────────────────────────────────────────────── */
 
-:root {
-  --df-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-  --df-ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --df-ease-smooth: cubic-bezier(0.4, 0, 0.2, 1);
-  --df-duration-fast: 140ms;
-  --df-duration-base: 220ms;
-  --df-duration-slow: 420ms;
-  --df-duration-page: 520ms;
-  --df-blur-glass: 12px;
-}
+/* Motion tokens live in tokens.css */
 
 /* ─── Keyframes ─── */
 

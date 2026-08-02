@@ -1586,7 +1586,7 @@
 }
 
 /* Tablet / small laptop */
-@media (max-width: 1024px) {
+@media (max-width: 1023px) {
   .df2-transfer-studio-body {
     grid-template-columns: 1fr;
   }
@@ -1686,7 +1686,7 @@ th.df2-type-temporal .df2-type-badge {
 .df2-structure-field-chip.df2-type-json .df2-type-badge,
 .df2-type-json .df2-type-badge,
 th.df2-type-json .df2-type-badge {
-  background: #f5f3ff;
+  background: var(--df-brand-muted);
   color: #5b21b6;
   border-color: #ddd6fe;
 }
@@ -4039,17 +4039,17 @@ th.df2-type-string .df2-type-badge {
   margin-bottom: 2px;
 }
 
-/* Validate right rail */
+/* Validate right rail — actions-first, no duplicate proof dump */
 .df2-validate-rail {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   padding: 12px;
-  border: 1px solid #e2e8f0;
-  border-radius: 12px;
-  background: #fafbfc;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: var(--df-radius-panel, 12px);
+  background: var(--df-surface-muted, #fafbfc);
   min-height: 0;
-  overflow-y: auto;
+  overflow: hidden;
 }
 
 .df2-validate-rail-runid {
@@ -4078,6 +4078,11 @@ th.df2-type-string .df2-type-badge {
 .df2-validate-rail-panel.passed {
   border-color: #a7f3d0;
   background: #ecfdf5;
+}
+
+.df2-validate-rail-panel.review {
+  border-color: #fcd34d;
+  background: #fffbeb;
 }
 
 .df2-validate-rail-panel.live {
@@ -4116,6 +4121,14 @@ th.df2-type-string .df2-type-badge {
 
 .df2-validate-rail-panel.passed .df2-validate-rail-outcome {
   color: #0f766e;
+}
+
+.df2-validate-rail-panel.review .df2-validate-rail-outcome {
+  color: #92400e;
+}
+
+.df2-validate-rail-panel.review .df2-validate-rail-score strong {
+  color: #b45309;
 }
 
 .df2-validate-rail-metrics {
@@ -4183,19 +4196,62 @@ th.df2-type-string .df2-type-badge {
 
 .df2-validate-rail-actions {
   display: flex;
-  flex-direction: row;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: flex-end;
+  flex-direction: column;
+  align-items: stretch;
   gap: 8px;
   position: relative;
   padding-top: 12px;
-  background: #fafbfc;
-  border-top: 1px solid #e2e8f0;
+  margin-top: auto;
+  background: var(--df-surface-muted, #fafbfc);
+  border-top: 1px solid var(--df-border, #e2e8f0);
+  flex-shrink: 0;
 }
 
-.df2-validate-rail-actions > button:first-child {
-  margin-right: auto;
+.df2-validate-rail-actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.df2-validate-rail-actions-row > .df2-btn {
+  flex: 1 1 auto;
+}
+
+.df2-validate-rail-actions > .df2-btn {
+  width: 100%;
+  max-width: 100%;
+  justify-content: center;
+}
+
+.df2-validate-rail-compact {
+  padding: 12px 14px;
+}
+
+.df2-validate-rail-compact .df2-validate-rail-score {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.df2-validate-rail-compact .df2-validate-rail-score strong {
+  font-size: 22px;
+  display: inline;
+}
+
+.df2-validate-rail-top-blocker {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--df-text-secondary, #475569);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.df2-validate-rail-top-blocker strong {
+  color: var(--df-text-primary, #0f172a);
 }
 
 .df2-validate-rail-contract-hint {
@@ -5788,15 +5844,15 @@ th.df2-type-string .df2-type-badge {
   color: #64748b;
 }
 
-/* Hero */
+/* Hero — one decision surface; proof detail lives in gate cards below */
 .df2-vd-hero {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 14px;
-  padding: 12px 14px;
-  border: 1px solid #e2e8f0;
-  border-radius: 12px;
-  background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+  padding: 14px 16px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: var(--df-radius-panel, 12px);
+  background: var(--df-surface, #fff);
 }
 .df2-vd-approve .df2-vd-hero,
 .df2-vd-live .df2-vd-hero { border-color: #99f6e4; }
@@ -5879,7 +5935,7 @@ th.df2-type-string .df2-type-badge {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin: 12px 0 10px;
+  margin: 8px 0 6px;
 }
 .df2-vd-count {
   display: inline-flex;
@@ -5906,11 +5962,45 @@ th.df2-type-string .df2-type-badge {
   color: #64748b;
 }
 .df2-vd-exec-summary {
-  margin-top: 12px;
-  padding: 12px 14px;
-  border-radius: 12px;
-  border: 1px solid #fecaca;
-  background: #fef2f2;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: var(--df-radius-md, 8px);
+  border: 1px solid var(--df-danger-border, #fecaca);
+  background: var(--df-danger-bg, #fef2f2);
+}
+.df2-vd-proof-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.df2-vd-proof-chip {
+  font-size: 11px;
+  font-weight: 650;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--df-border);
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+}
+.df2-vd-assist-remediate,
+.df2-vd-remediate-bar {
+  margin-top: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md, 8px);
+  background: var(--df-brand-muted, #f0fdfa);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+.df2-vd-assist-actions-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--df-text-tertiary);
 }
 .df2-vd-exec-summary-sub {
   margin: 0;
@@ -7162,9 +7252,10 @@ button.df2-vd-assist-toggle:focus-visible {
 }
 .df2-validate-rail-primary-fix {
   margin-top: 0;
-  width: auto !important;
-  max-width: min(220px, 100%) !important;
+  width: 100% !important;
+  max-width: 100% !important;
   flex: 0 0 auto !important;
+  justify-content: center;
 }
 
 /* Validate bottom bar — compact enterprise buttons (never full-bleed) */
@@ -7338,7 +7429,7 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-vd-chip:disabled { opacity: 0.55; cursor: default; }
 .df2-vd-chip.kind-check_connection .dt-nav-icon,
 .df2-vd-chip.kind-review_mappings .dt-nav-icon,
-.df2-vd-chip.kind-rerun_mapping .dt-nav-icon { color: #7c3aed; }
+.df2-vd-chip.kind-rerun_mapping .dt-nav-icon { color: var(--df-brand-hover); }
 
 .df2-vd-assist-clean {
   display: flex;

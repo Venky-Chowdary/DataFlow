@@ -2,24 +2,9 @@
    UI consistency — unified tiles, cards, spacing
    ═══════════════════════════════════════════════════════════ */
 
-:root {
-  --df-tile-min-h: 72px;
-  /* Density nudges only — pad/radius stay on tokens.css */
-  --df-page-section-gap: 12px;
-  --df-grid-gap: 10px;
-}
+/* Density tokens owned by tokens.css — component density rules only. */
 
 @media (min-width: 1024px) and (max-width: 1366px) {
-  :root {
-    --df-tile-min-h: 64px;
-    --df-card-pad: 12px;
-    --df-card-head-pad: 10px 12px;
-    --df-card-footer-pad: 10px 12px;
-    --df-page-section-gap: 10px;
-    --df-grid-gap: 8px;
-    --df-stepper-node: 24px;
-  }
-
   .df2-app .df2-settings-nav-desc {
     display: none;
   }
@@ -34,13 +19,13 @@
   }
 
   .df2-app .df2-metric-glass {
-    min-height: 64px;
+    min-height: var(--df-tile-min-h, 64px);
     padding: 8px 10px;
   }
 
   .df2-app .df2-xform-card {
     padding: 10px 12px;
-    border-radius: 10px;
+    border-radius: var(--df-radius-card);
   }
 
   .df2-app .df2-xform-card-head h3 {

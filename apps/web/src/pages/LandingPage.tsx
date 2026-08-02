@@ -176,8 +176,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               Universal data movement with proof
             </p>
             <h1 className="lp-hero-title">
-              Move any schema
-              <br />
+              <span className="lp-hero-title-a">Move any schema</span>
               <span className="lp-hero-title-b">anywhere — proven.</span>
             </h1>
             <p className="lp-hero-sub">

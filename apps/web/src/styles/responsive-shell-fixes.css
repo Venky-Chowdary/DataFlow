@@ -2,14 +2,10 @@
    Responsive shell fixes — sidebar, pilot, transfer studio
    ═══════════════════════════════════════════════════════════ */
 
-:root {
-  --df-header-height: 60px;
-  /* Real viewport height — density tokens handle laptop scale (no CSS zoom). */
-  --df-viewport-h: var(--df-layout-viewport-h, 100dvh);
-}
+/* Header / viewport tokens owned by tokens.css */
 
 /* ─── Sidebar: nav scrolls, foot stays pinned ─── */
-@media (min-width: 1025px) {
+@media (min-width: 1024px) {
   .df2-app .df2-sidebar {
     display: flex !important;
     flex-direction: column !important;
@@ -457,7 +453,7 @@
   }
 }
 
-@media (max-width: 1024px) {
+@media (max-width: 1023px) {
   .df2-pilot-body {
     flex-direction: column;
   }

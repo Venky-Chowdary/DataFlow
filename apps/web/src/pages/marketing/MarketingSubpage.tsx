@@ -649,7 +649,7 @@ function ContactPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
   return (
     <div className="lp-mkt-page lp-mkt-page-rich lp-page-contact">
       <MarketingHeroBand
-        tone="ink"
+        tone="light"
         motion="contact"
         kicker="Contact sales"
         title="Build a pilot that fits your stack"
@@ -659,7 +659,7 @@ function ContactPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("pricing")}>
               See pricing
             </button>
-            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("enterprise")}>
+            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("enterprise")}>
               Enterprise overview
             </button>
           </div>

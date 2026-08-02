@@ -107,9 +107,23 @@ function DocsSpaceShell({
   onNavigate: (route: PublicRoute) => void;
   children: ReactNode;
 }) {
+  const activeLabel = activeId === "help" ? "Space home" : getHelpDoc(activeId).title;
+
   return (
     <div className="docs-space">
-      <DocsSpaceSidebar activeId={activeId} onNavigate={onNavigate} />
+      <div className="docs-space-nav-mobile">
+        <details>
+          <summary>
+            <DtIcon name="book" size={16} />
+            <span>Browse docs</span>
+            <em>{activeLabel}</em>
+          </summary>
+          <DocsSpaceSidebar activeId={activeId} onNavigate={onNavigate} />
+        </details>
+      </div>
+      <div className="docs-space-nav-desktop">
+        <DocsSpaceSidebar activeId={activeId} onNavigate={onNavigate} />
+      </div>
       <div className="docs-space-main">{children}</div>
     </div>
   );
@@ -127,7 +141,7 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
         <h1>DataFlow product documentation</h1>
         <p className="docs-article-lead">
           Operations runbooks with screenshots captured inside the signed-in workspace. Pick a page
-          from the left — each feature is its own Confluence-style article.
+          from the sidebar — each feature is its own article.
         </p>
         <form className="docs-search docs-search--inline" role="search" onSubmit={(e) => e.preventDefault()}>
           <DtIcon name="search" size={18} />
@@ -165,18 +179,29 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
         <h2>Start here</h2>
         <p>
           Follow the same path operators use: connect systems, map schemas, pass eight preflight
-          gates, write with quarantine, and prove the load in Job Theater. Use the left sidebar for
-          every article in this space — we do not duplicate the tree as a card wall.
+          gates, write with quarantine, and prove the load in Job Theater. Pick a guide below or
+          browse the docs sidebar.
         </p>
-        <div className="docs-featured-actions">
-          <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("help-getting-started")}>
-            Introduction guide
+        <div className="docs-featured-grid" aria-label="Start here guides">
+          <button type="button" className="docs-featured-card" onClick={() => onNavigate("help-getting-started")}>
+            <span>01</span>
+            <strong>Introduction</strong>
+            <em>Platform model, workspaces, and the governed transfer path.</em>
           </button>
-          <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("help-transfer-studio")}>
-            Transfer Studio
+          <button type="button" className="docs-featured-card" onClick={() => onNavigate("help-transfer-studio")}>
+            <span>02</span>
+            <strong>Transfer Studio</strong>
+            <em>Connect, map, preflight, write, and quarantine in one flow.</em>
           </button>
-          <button type="button" className="lp-btn lp-btn--outline" onClick={onGetStarted}>
-            Open the app
+          <button type="button" className="docs-featured-card" onClick={() => onNavigate("help-job-theater")}>
+            <span>03</span>
+            <strong>Job Theater</strong>
+            <em>Live phases, quarantine samples, and checksum proof.</em>
+          </button>
+          <button type="button" className="docs-featured-card" onClick={onGetStarted}>
+            <span>04</span>
+            <strong>Open the app</strong>
+            <em>Run a governed transfer in your workspace.</em>
           </button>
         </div>
       </section>

@@ -1347,32 +1347,23 @@ export function ValidateDashboard({
                   </ul>
                 </div>
               )}
-              <p className="df2-vd-readiness-caption">{executiveSummary.readinessCaption}</p>
             </div>
-          )}
-          {!running && preflight?.passed && executiveSummary && (
-            <p className="df2-vd-readiness-caption">{executiveSummary.readinessCaption}</p>
           )}
 
           {!running && preflight && (qualityGrade || confidenceBand) && (
             <div className="df2-vd-proof-chips" aria-label="Proof grade">
               {qualityGrade && qualityGrade !== "not_profiled" ? (
                 <span className={`df2-vd-proof-chip grade-${qualityGrade}`} title="Overall proof quality grade from the engine">
-                  Quality grade · {qualityGrade}
+                  Quality · {qualityGrade}
                 </span>
               ) : qualityNotProfiled ? (
                 <span className="df2-vd-proof-chip grade-review" title="Sample quality was not calculated for this run">
-                  Data quality · not profiled
+                  Quality · not profiled
                 </span>
               ) : null}
               {confidenceBand ? (
                 <span className={`df2-vd-proof-chip band-${confidenceBand}`} title="Mapping / evidence confidence band">
                   Confidence · {confidenceBand}
-                </span>
-              ) : null}
-              {typeof quality === "number" && quality > 0 ? (
-                <span className="df2-vd-proof-chip is-score" title="Numeric quality score (0–1)">
-                  Score · {(quality * 100).toFixed(0)}%
                 </span>
               ) : null}
               {typeof semantic === "number" && semantic > 0 ? (
@@ -1383,30 +1374,36 @@ export function ValidateDashboard({
             </div>
           )}
 
-          <p className="df2-vd-hero-summary">
-            {running
-              ? "Real preflight is evaluating source, destination, schema, mapping confidence, dry-run sample, DDL, capacity, and reconcile plan. Progress is wall-clock time — not a fake step animation."
-              : proof?.evidence_summary ?? "Every rule below runs before a single row is written. Nothing transfers until the gates you require pass."}
-          </p>
-
           {running && (
-            <div className="df2-vd-progress is-indeterminate" role="status" aria-live="polite">
-              <span className="df2-vd-progress-fill" style={{ width: "40%" }} />
-            </div>
+            <>
+              <p className="df2-vd-hero-summary">
+                Evaluating source, destination, schema, mapping, dry-run, DDL, capacity, and reconcile.
+              </p>
+              <div className="df2-vd-progress is-indeterminate" role="status" aria-live="polite">
+                <span className="df2-vd-progress-fill" style={{ width: "40%" }} />
+              </div>
+            </>
+          )}
+          {!running && preflight?.passed && (
+            <p className="df2-vd-hero-summary">
+              {decision === "review"
+                ? (executiveSummary?.subtitle
+                  ?? "Checks passed · review-grade — confirm API Validate before Execute")
+                : (executiveSummary?.readinessCaption
+                  ?? "All required gates passed. Review the cards below, then Execute.")}
+            </p>
           )}
           {!running && preflight && engineMsTotal > 0 && (
             <p className="df2-vd-hero-engine-meta">
-              Engine reported {formatDuration(engineMsTotal)} across {preflight.gates.length} gates
+              {formatDuration(engineMsTotal)} · {preflight.gates.length} gates
               {sampleScanned != null && sampleScanned > 0
-                ? ` · dry-run sampled ${sampleScanned.toLocaleString()} preview rows (must cover the same integrity window Execute uses; full table proven after write in Job Theater)`
-                : " · dry-run uses the Transfer Studio preview sample, not the full table"}
+                ? ` · ${sampleScanned.toLocaleString()} preview rows`
+                : " · preview sample"}
             </p>
           )}
           {!running && preflight?.passed && !stripControlsApplied && onStripControlChars && (
             <p className="df2-vd-hero-engine-meta" role="status">
-              Text mappings do not yet include <code>strip_controls</code>. If a prior job failed on
-              U+200B / format-control characters, open <strong>Fix bad data…</strong> and strip before
-              Execute — green Validate on a clean preview is not the same as sanitizing the full load.
+              Tip: strip format-control characters via <strong>Fix bad data…</strong> before Execute if a prior job failed on U+200B.
             </p>
           )}
         </div>
@@ -1606,19 +1603,6 @@ export function ValidateDashboard({
               </>
             )}
           </div>
-          <p className="df2-vd-cell-preview-hint">
-            {duplicateRoot
-              ? `Duplicate values on ${duplicateRoot.primaryKey || "the identity column"} block Execute. Pick a unique primary key or a sync mode that does not require uniqueness, clean the source, then Re-run Validate. Mapping proof is evidence only — it does not remove duplicates.`
-              : isPrivilegeBlock
-              ? "Write privilege is denied (or CREATE is missing). Grant the privilege named in the G2 gate on the destination — then Re-validate."
-              : isConnectionBlock
-              ? "Authentication failed. Fix the connector, Test until it passes, then return here and Re-validate."
-              : isTypeMismatchBlock
-              ? "Type mismatch — Remap/Widen below. Strip/Quarantine cannot change column types."
-              : showEncodingRemediation
-                ? "Open Fix bad data to strip format-control characters or quarantine unfit cells (never silent drop), then re-validate."
-                : "Use the action above for this root cause, then Re-run Validate."}
-          </p>
         </div>
       )}
 

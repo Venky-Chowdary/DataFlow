@@ -29,6 +29,11 @@ interface ValidateActionsRailProps {
   onSaveAsContract?: () => void;
 }
 
+/**
+ * Validate step action rail — actions first, minimal status.
+ * Detailed blockers / proof chips live in ValidateDashboard (left column).
+ * Do not re-render the same gates, metrics, and captions here.
+ */
 export function ValidateActionsRail({
   preflight,
   preflighting,
@@ -52,14 +57,12 @@ export function ValidateActionsRail({
   const passed = preflight?.passed;
   const blocked = preflight && !preflight.passed && !preflighting;
   const mappingBlocked = preflight?.blockers.some((b) => b.id.includes("mapping"));
-  const proofDecision = preflight?.proof_bundle?.transfer_decision?.decision || "approve";
-  const proofReason = preflight?.proof_bundle?.transfer_decision?.reason || "No blocking issues detected";
-  const executeDisabled = transferring || !passed || executeBlocked;
-  const confidenceBand = preflight?.proof_bundle?.confidence_band?.toUpperCase() || "MEDIUM";
-  const qualityGrade = preflight?.proof_bundle?.quality_grade
-    ? preflight.proof_bundle.quality_grade.toUpperCase().replace(/_/g, " ")
-    : "NOT PROFILED";
-  const proofWarnings = preflight?.proof_bundle?.transfer_decision?.warnings || [];
+  const decision = preflight?.proof_bundle?.transfer_decision?.decision
+    ?? (passed ? "approve" : preflight ? "review" : "pending");
+  const reviewGrade = Boolean(passed && decision === "review");
+  const scoreLabel = reviewGrade ? "review" : passed ? "ready" : "blocked";
+  const scoreTone = reviewGrade ? "review" : passed ? "passed" : "blocked";
+  const executeDisabled = transferring || !passed || reviewGrade || executeBlocked;
   const executiveSummary = useMemo(() => buildExecutiveSummary(preflight), [preflight]);
   const displayBlockers = useMemo(
     () => (preflight ? buildDisplayBlockers(preflight) : []),
@@ -67,7 +70,6 @@ export function ValidateActionsRail({
   );
   const firstBlocker = displayBlockers[0];
   const firstBlockerMessage = firstBlocker?.impact || firstBlocker?.message;
-  const firstBlockerFix = firstBlocker?.fix;
 
   return (
     <aside className="df2-validate-rail" aria-label="Validation actions">
@@ -99,28 +101,26 @@ export function ValidateActionsRail({
               <strong>…</strong>
               <span>validating</span>
             </div>
-            <p>Safety gates are running. Actions unlock when checks finish.</p>
+            <p>Gates running — actions unlock when checks finish.</p>
           </div>
         )}
 
         {preflight && !preflighting && (
-          <div className={`df2-validate-rail-panel df2-validate-status df2-validate-rail-scorecard${passed ? " passed" : " blocked"}`}>
+          <div
+            className={`df2-validate-rail-panel df2-validate-status df2-validate-rail-scorecard df2-validate-rail-compact ${scoreTone}`}
+          >
             <div className="df2-validate-rail-score">
               <strong>{preflight.readiness_score}%</strong>
-              <span>readiness</span>
+              <span>{scoreLabel}</span>
             </div>
-            <p>
-              <strong>{preflight.passed_count}/{preflight.total_gates}</strong> checks · {proofDecision.toUpperCase()}
+            <p className="df2-validate-rail-outcome">
+              {executiveSummary?.railLine
+                ?? `${preflight.passed_count}/${preflight.total_gates} gates · ${passed ? "PASS" : "BLOCK"}`}
             </p>
-            {executiveSummary && (
-              <p className="df2-validate-rail-outcome">{executiveSummary.railLine}</p>
-            )}
-            {executiveSummary?.readinessCaption && (
-              <p className="df2-validate-rail-hint">{executiveSummary.readinessCaption}</p>
-            )}
-            {passed && (
-              <p className="df2-validate-rail-hint">
-                Review every gate card — rules, duration, and blockers — then Execute.
+            {blocked && firstBlocker && (
+              <p className="df2-validate-rail-top-blocker" title={firstBlockerMessage || undefined}>
+                <strong>{firstBlocker.title}</strong>
+                {firstBlockerMessage ? ` · ${firstBlockerMessage}` : null}
               </p>
             )}
             {preflight.run_id && (
@@ -128,95 +128,27 @@ export function ValidateActionsRail({
                 Run <code>{preflight.run_id}</code>
               </p>
             )}
-
-            {(preflight.proof_bundle || displayBlockers.length > 0) && (
-              <div className="df2-validate-rail-details-body">
-                {preflight.proof_bundle && (
-                  <div className="df2-validate-rail-metrics">
-                    <span className="df2-validate-rail-metric">
-                      <small>Confidence</small>
-                      <strong>{confidenceBand}</strong>
-                    </span>
-                    <span className="df2-validate-rail-metric">
-                      <small>Quality</small>
-                      <strong>{qualityGrade}</strong>
-                    </span>
-                    <span className="df2-validate-rail-metric">
-                      <small>Semantic</small>
-                      <strong>{preflight.proof_bundle.semantic_mapping_score?.toFixed(2) ?? "—"}</strong>
-                    </span>
-                    <span className="df2-validate-rail-metric">
-                      <small>Compliance</small>
-                      <strong>{preflight.proof_bundle.compliance?.risk_score?.toFixed(2) ?? "—"}</strong>
-                    </span>
-                  </div>
-                )}
-                {displayBlockers.length > 0 && (
-                  <ul className="df2-validate-rail-blockers">
-                    {displayBlockers.slice(0, 4).map((item) => (
-                      <li key={item.key}>
-                        <strong>{item.title}</strong>
-                        {item.impact || item.message}
-                        {item.gateChips && item.gateChips.length > 0 && (
-                          <span className="df2-validate-rail-issue">
-                            Affects: {item.gateChips.map((c) => c.label).join(" · ")}
-                          </span>
-                        )}
-                        {item.kind === "blocker" && item.source && Array.isArray(item.source.details?.issue_texts) && (
-                          (item.source.details.issue_texts as string[]).slice(0, 2).map((issue) => (
-                            <span key={issue} className="df2-validate-rail-issue">{issue}</span>
-                          ))
-                        )}
-                        {item.fix && !onPrimaryFix && (
-                          <span className="df2-validate-rail-fix">Fix: {item.fix}</span>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                {proofDecision === "review" && (proofWarnings.length > 0 || proofReason) && (
-                  <div className="df2-validate-rail-review">
-                    <strong><DtIcon name="shield" size={14} /> Review required</strong>
-                    <p>{proofReason}</p>
-                    {proofWarnings.length > 0 && (
-                      <ul>
-                        {proofWarnings.map((w, i) => (
-                          <li key={i}>{w}</li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
           </div>
         )}
       </div>
 
       <div className="df2-validate-rail-actions">
-        <Button onClick={onBack} leadingIcon={<DtIcon name="chevron-left" size={16} />}>
-          Back
-        </Button>
-
-        {!preflight && !preflighting && (
-          <Button
-            variant="primary"
-            onClick={onRunPreflight}
-            leadingIcon={<DtIcon name="gate" size={16} />}
-          >
-            Run preflight
+        <div className="df2-validate-rail-actions-row">
+          <Button onClick={onBack} leadingIcon={<DtIcon name="chevron-left" size={16} />}>
+            Back
           </Button>
-        )}
 
-        {blocked && (
-          <Button
-            onClick={onRunPreflight}
-            loading={preflighting}
-            leadingIcon={<DtIcon name="gate" size={16} />}
-          >
-            Re-run
-          </Button>
-        )}
+          {(blocked || (!preflight && !preflighting)) && (
+            <Button
+              variant={!preflight ? "primary" : "secondary"}
+              onClick={onRunPreflight}
+              loading={preflighting}
+              leadingIcon={<DtIcon name="gate" size={16} />}
+            >
+              {!preflight ? "Run preflight" : "Re-run"}
+            </Button>
+          )}
+        </div>
 
         {blocked && onPrimaryFix && primaryFixLabel && (
           <Button
@@ -225,14 +157,14 @@ export function ValidateActionsRail({
             onClick={onPrimaryFix}
             leadingIcon={
               <DtIcon
-                name={/bad data|strip|quarantine/i.test(primaryFixLabel) ? "shield" : "settings"}
+                name={/bad data|strip|quarantine|map/i.test(primaryFixLabel) ? (/map/i.test(primaryFixLabel) ? "layers" : "shield") : "settings"}
                 size={16}
               />
             }
             title={primaryFixLabel}
           >
-            {primaryFixLabel.length > 28
-              ? `${primaryFixLabel.slice(0, 26)}…`
+            {primaryFixLabel.length > 32
+              ? `${primaryFixLabel.slice(0, 30)}…`
               : primaryFixLabel}
           </Button>
         )}
@@ -249,7 +181,7 @@ export function ValidateActionsRail({
 
         {preflight && !transferLaunch && (
           <Button
-            variant={blocked && onPrimaryFix ? "secondary" : "primary"}
+            variant={blocked || reviewGrade ? "secondary" : "primary"}
             onClick={onExecute}
             loading={transferring}
             loadingLabel="Starting…"
@@ -257,21 +189,24 @@ export function ValidateActionsRail({
             title={
               executeBlocked
                 ? (executeBlockedReason || "Execution blocked")
-                : !passed
-                  ? `Blocked: ${firstBlockerMessage || "Resolve failed checks and re-run preflight"}${firstBlockerFix ? ` — Fix: ${firstBlockerFix}` : ""}`
-                  : rowCount != null
-                    ? `Execute transfer · ${rowCount.toLocaleString()} rows`
-                    : "Execute transfer"
+                : reviewGrade
+                  ? "Review-grade / local preflight — confirm API Validate before Execute"
+                  : !passed
+                    ? `Blocked: ${firstBlockerMessage || "Resolve failed checks and re-run preflight"}`
+                    : rowCount != null
+                      ? `Execute transfer · ${rowCount.toLocaleString()} rows`
+                      : "Execute transfer"
             }
             leadingIcon={<DtIcon name="arrow-right" size={16} />}
           >
-            {executeBlocked
+            {executeBlocked || !passed
               ? "Execute (blocked)"
-              : passed
-                ? "Execute"
-                : "Execute (blocked)"}
+              : reviewGrade
+                ? "Execute (review)"
+                : "Execute"}
           </Button>
         )}
+
         {preflight && onSaveAsContract && (
           <Button
             onClick={onSaveAsContract}
@@ -285,16 +220,14 @@ export function ValidateActionsRail({
           </Button>
         )}
 
-        {passed && !transferLaunch && !executeBlocked && (
-          <p className="df2-validate-rail-explain is-ok">
-            Execute starts the write and opens Run / Job Theater for live progress.
+        {reviewGrade && !transferLaunch && !executeBlocked && (
+          <p className="df2-validate-rail-explain" role="status">
+            Review-grade result — re-run API Validate before Execute unlocks the write.
           </p>
         )}
-        {blocked && !transferLaunch && (
-          <p className="df2-validate-rail-explain" role="alert" title={firstBlockerMessage || undefined}>
-            {firstBlockerMessage
-              ? `Blocked: ${firstBlockerMessage}`
-              : "Resolve the failed gate, then Re-run. Execute stays disabled until preflight passes."}
+        {passed && !reviewGrade && !transferLaunch && !executeBlocked && (
+          <p className="df2-validate-rail-explain is-ok">
+            Execute starts the write and opens Job Theater for live progress.
           </p>
         )}
         {executeBlocked && executeBlockedReason && (

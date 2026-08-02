@@ -278,7 +278,7 @@ function AppShell({
 
   useEffect(() => {
     const onResize = () => {
-      if (window.innerWidth >= 1024) setMobileNavOpen(false);
+      if (window.innerWidth >= 1024) setMobileNavOpen(false); // matches --df-bp-lg / CSS 1023 overlay shell
       if (window.innerWidth < 1280) setCopilotOpen(false);
     };
     window.addEventListener("resize", onResize);

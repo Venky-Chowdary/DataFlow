@@ -1,3 +1,9 @@
+/*
+ * Storybook / package-local tokens only.
+ * Production app tokens live in apps/web/src/styles/tokens.css and are NOT
+ * imported from this package at runtime. Do not sync conflicting palettes
+ * into the live Vite app without an explicit migration.
+ */
 :root {
   /* Precision Data — plan palette (no generic AI blues) */
   --df-navy-900: #060d18;

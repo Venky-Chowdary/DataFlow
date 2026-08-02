@@ -111,7 +111,7 @@
 }
 
 .df2-pipeline-hub-connector.right {
-  background: linear-gradient(90deg, #0f766e, #6366f1);
+  background: linear-gradient(90deg, #0f766e, var(--df-brand));
 }
 
 .df2-pipeline-hub-inner {

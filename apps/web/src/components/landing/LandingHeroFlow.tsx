@@ -25,10 +25,10 @@ export function LandingHeroFlow() {
     let t0 = performance.now();
 
     type Packet = { t: number; lane: number; speed: number };
-    const packets: Packet[] = Array.from({ length: 8 }, (_, i) => ({
+    const packets: Packet[] = Array.from({ length: 6 }, (_, i) => ({
       t: Math.random(),
-      lane: i % 3,
-      speed: 0.1 + Math.random() * 0.14,
+      lane: i % 2,
+      speed: 0.1 + Math.random() * 0.12,
     }));
 
     const resize = () => {
@@ -45,8 +45,6 @@ export function LandingHeroFlow() {
     const ro = new ResizeObserver(resize);
     ro.observe(wrap);
 
-    const pathY = (lane: number, h: number) => h * (0.38 + lane * 0.12);
-
     const tick = (now: number) => {
       if (!running) return;
       if (!inViewRef.current) {
@@ -58,17 +56,18 @@ export function LandingHeroFlow() {
       ctx.clearRect(0, 0, width, height);
 
       const elapsed = (now - t0) / 1000;
+      const yMid = height * 0.42;
       const x0 = width * 0.18;
       const x1 = width * 0.5;
       const x2 = width * 0.82;
 
-      for (let lane = 0; lane < 3; lane++) {
-        const y = pathY(lane, height);
+      for (let lane = 0; lane < 2; lane++) {
+        const y = yMid + (lane === 0 ? -10 : 10);
         ctx.beginPath();
         ctx.moveTo(x0, y);
-        ctx.bezierCurveTo(x0 + width * 0.12, y - 18, x1 - width * 0.1, y + 18, x1, y);
-        ctx.bezierCurveTo(x1 + width * 0.1, y - 14, x2 - width * 0.1, y + 14, x2, y);
-        ctx.strokeStyle = "rgba(13, 148, 136, 0.16)";
+        ctx.bezierCurveTo(x0 + width * 0.1, y - 8, x1 - width * 0.08, y + 8, x1, y);
+        ctx.bezierCurveTo(x1 + width * 0.08, y - 8, x2 - width * 0.1, y + 8, x2, y);
+        ctx.strokeStyle = "rgba(13, 148, 136, 0.18)";
         ctx.lineWidth = 1.5;
         ctx.stroke();
       }
@@ -78,28 +77,28 @@ export function LandingHeroFlow() {
           p.t += p.speed * 0.016;
           if (p.t > 1.15) p.t = -0.05;
           const u = Math.min(1, Math.max(0, p.t));
-          const yBase = pathY(p.lane, height);
-          const bob = Math.sin((u + elapsed * 0.4) * Math.PI * 2) * 5;
+          const yBase = yMid + (p.lane === 0 ? -10 : 10);
+          const bob = Math.sin((u + elapsed * 0.4) * Math.PI * 2) * 4;
           let x: number;
           let y: number;
           if (u < 0.5) {
             const s = u / 0.5;
             x = x0 + (x1 - x0) * s;
-            y = yBase + bob - Math.sin(s * Math.PI) * 14;
+            y = yBase + bob - Math.sin(s * Math.PI) * 10;
           } else {
             const s = (u - 0.5) / 0.5;
             x = x1 + (x2 - x1) * s;
-            y = yBase + bob - Math.sin(s * Math.PI) * 10;
+            y = yBase + bob - Math.sin(s * Math.PI) * 8;
           }
 
-          ctx.fillStyle = "rgba(15, 118, 110, 0.22)";
+          ctx.fillStyle = "rgba(15, 118, 110, 0.2)";
           ctx.beginPath();
-          ctx.arc(x, y, 8, 0, Math.PI * 2);
+          ctx.arc(x, y, 7, 0, Math.PI * 2);
           ctx.fill();
 
           ctx.fillStyle = "#0f766e";
           ctx.beginPath();
-          ctx.arc(x, y, 2.8, 0, Math.PI * 2);
+          ctx.arc(x, y, 2.6, 0, Math.PI * 2);
           ctx.fill();
         }
       }
@@ -120,46 +119,57 @@ export function LandingHeroFlow() {
       <div className="lp-hero-flow-stage">
         <canvas className="lp-hero-flow-canvas" ref={canvasRef} />
 
-        <article className="lp-hero-flow-card lp-hero-flow-card--source">
-          <header>
-            <span className="lp-hero-flow-dot is-src" />
-            Source
-          </header>
-          <strong>PostgreSQL</strong>
-          <p>orders · 12.4k rows</p>
-          <ul>
-            <li>order_amt</li>
-            <li>cust_email</li>
-            <li>cust_id</li>
-          </ul>
-        </article>
+        <div className="lp-hero-flow-rail">
+          <article className="lp-hero-flow-card lp-hero-flow-card--source">
+            <header>
+              <span className="lp-hero-flow-dot is-src" />
+              Source
+            </header>
+            <strong>PostgreSQL</strong>
+            <p>orders · 12.4k rows</p>
+            <ul>
+              <li>order_amt</li>
+              <li>cust_email</li>
+              <li>cust_id</li>
+            </ul>
+          </article>
 
-        <article className="lp-hero-flow-card lp-hero-flow-card--engine">
-          <header>
-            <span className="lp-hero-flow-dot is-eng" />
-            Governed engine
-          </header>
-          <strong>Map · Preflight · Prove</strong>
-          <div className="lp-hero-flow-meters">
-            <div><span>Semantic map</span><em>96%</em></div>
-            <div><span>Preflight</span><em>8 / 8</em></div>
-            <div><span>Checksum</span><em>match</em></div>
-          </div>
-        </article>
+          <article className="lp-hero-flow-card lp-hero-flow-card--engine">
+            <header>
+              <span className="lp-hero-flow-dot is-eng" />
+              Governed engine
+            </header>
+            <strong>Map · Preflight · Prove</strong>
+            <div className="lp-hero-flow-meters">
+              <div>
+                <span>Semantic map</span>
+                <em>96%</em>
+              </div>
+              <div>
+                <span>Preflight</span>
+                <em>8 / 8</em>
+              </div>
+              <div>
+                <span>Checksum</span>
+                <em>match</em>
+              </div>
+            </div>
+          </article>
 
-        <article className="lp-hero-flow-card lp-hero-flow-card--dest">
-          <header>
-            <span className="lp-hero-flow-dot is-dst" />
-            Destination
-          </header>
-          <strong>Snowflake</strong>
-          <p>ANALYTICS.ORDERS</p>
-          <ul>
-            <li>payment_amount</li>
-            <li>email</li>
-            <li>customer_key</li>
-          </ul>
-        </article>
+          <article className="lp-hero-flow-card lp-hero-flow-card--dest">
+            <header>
+              <span className="lp-hero-flow-dot is-dst" />
+              Destination
+            </header>
+            <strong>Snowflake</strong>
+            <p>ANALYTICS.ORDERS</p>
+            <ul>
+              <li>payment_amount</li>
+              <li>email</li>
+              <li>customer_key</li>
+            </ul>
+          </article>
+        </div>
       </div>
     </div>
   );

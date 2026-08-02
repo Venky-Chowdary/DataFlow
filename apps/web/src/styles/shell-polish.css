@@ -35,7 +35,7 @@
 }
 
 /* ─── Collapsible nav (brand + footer stay readable) ─── */
-@media (min-width: 1025px) {
+@media (min-width: 1024px) {
   /* !important needed to beat the base `.df2-app .df2-sidebar { width: … !important }` rule below */
   .df2-app.df2-sidebar-nav-compact .df2-sidebar {
     width: var(--df-sidebar-compact-w, 88px) !important;
@@ -197,7 +197,7 @@
 }
 
 /* Legacy collapsed class — map to nav-compact behavior without hiding brand */
-@media (min-width: 1025px) {
+@media (min-width: 1024px) {
   .df2-app.df2-sidebar-collapsed .df2-sidebar {
     width: var(--df-sidebar-compact-w, 220px);
     min-width: var(--df-sidebar-compact-w, 220px);
@@ -237,7 +237,7 @@
   flex-shrink: 0;
 }
 
-@media (min-width: 1025px) {
+@media (min-width: 1024px) {
   .df2-sidebar-collapse-btn {
     display: inline-flex;
   }
@@ -281,7 +281,7 @@
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #0d9488, #6366f1);
+  background: linear-gradient(135deg, #0d9488, var(--df-brand));
   color: #fff;
   font-size: 13px;
   font-weight: 700;
@@ -1314,7 +1314,7 @@ textarea.df2-pilot-composer textarea {
 /* ─── Fixed shell: sidebar never scrolls, only main content scrolls ───
    Sidebar space is reserved with padding (not main margin-left) so flex
    children never spill past the right edge at 100% browser zoom. */
-@media (min-width: 1025px) {
+@media (min-width: 1024px) {
   .df2-app {
     overflow: hidden;
     height: 100%;
@@ -1813,7 +1813,7 @@ textarea.df2-pilot-composer textarea {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, #0f766e, #6366f1) !important;
+  background: linear-gradient(90deg, #0f766e, var(--df-brand)) !important;
   transition: width 0.4s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -2477,7 +2477,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-rail-meter > div {
   height: 100%;
-  background: linear-gradient(90deg, #0f766e, #6366f1);
+  background: linear-gradient(90deg, #0f766e, var(--df-brand));
   border-radius: inherit;
   transition: width 0.4s ease;
 }
@@ -2582,7 +2582,7 @@ textarea.df2-pilot-composer textarea {
 
 /* Panel-in only on first paint — not every navigation (see responsive-shell-fixes.css) */
 
-@media (max-width: 1024px) {
+@media (max-width: 1023px) {
   .df2-assurance-rail,
   .df2-intelligence-rail {
     order: -1;
@@ -2624,7 +2624,7 @@ textarea.df2-pilot-composer textarea {
   margin-bottom: 20px;
 }
 
-@media (max-width: 1024px) {
+@media (max-width: 1023px) {
   .df2-transfer-command {
     grid-template-columns: 1fr;
   }
@@ -2788,7 +2788,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-map-line-medium .df2-map-line-path {
-  stroke: #6366f1;
+  stroke: var(--df-brand);
 }
 
 .df2-map-line-low .df2-map-line-path {
@@ -4986,7 +4986,7 @@ textarea.df2-pilot-composer textarea {
   width: 100%;
   height: 2px;
   border-radius: 999px;
-  background: linear-gradient(90deg, #0f766e, #6366f1);
+  background: linear-gradient(90deg, #0f766e, var(--df-brand));
   opacity: 0.45;
 }
 
@@ -5870,7 +5870,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df-brand-loader-orbit--2 {
-  background: #6366f1;
+  background: var(--df-brand);
   box-shadow: 0 0 10px rgba(99, 102, 241, 0.7);
   animation: df-brand-orbit 2.6s linear infinite reverse;
   width: 5px;
@@ -5946,7 +5946,7 @@ textarea.df2-pilot-composer textarea {
   height: 100%;
   width: 40%;
   border-radius: inherit;
-  background: linear-gradient(90deg, #0f766e, #14b8a6, #6366f1);
+  background: linear-gradient(90deg, #0f766e, #14b8a6, var(--df-brand));
   animation: df-boot-progress 1.4s ease-in-out infinite;
 }
 
@@ -6078,7 +6078,7 @@ textarea.df2-pilot-composer textarea {
   flex-shrink: 0;
 }
 
-@media (max-width: 1024px) {
+@media (max-width: 1023px) {
   .df2-page-fit .df2-jobs-layout {
     grid-template-columns: 1fr;
   }
