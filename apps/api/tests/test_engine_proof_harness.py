@@ -101,7 +101,7 @@ FIDELITY_RECORDS = [
         "id": "5",
         "name": "",
         "amount": "0",
-        "active": "yes",
+        "active": "true",
         "created_at": "2024-03-01T00:00:00+00:00",
         "payload": "[]",
         "note": "empty-name",

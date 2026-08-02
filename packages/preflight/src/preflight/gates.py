@@ -565,31 +565,41 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 objectid_text_polarity = False
 
         if uuid_string_create_new:
-            warn_label = (
+            # ObjectId→TEXT parity: domain polarity needs Accept risk — never
+            # soft-pass create-new UUID→STRING while Map CTA stays silent.
+            risk_ack = bool(getattr(m, "risk_acknowledged", False))
+            uuid_label = (
                 f"{label} — create-new stores UUID as destination STRING/TEXT "
                 "(no native UUID type; domain not enforced at destination)"
             )
-            warnings.append(warn_label)
-            if probe is not None:
-                issues_detail.append({
-                    "source": m.source,
-                    "target": m.target,
-                    "source_type": source_col.inferred_type,
-                    "target_type": target.inferred_type,
-                    "severity": "warn",
-                    "fidelity_collapse": True,
-                    "uuid_string_create_new": True,
-                    "sampled": probe.get("sampled", 0),
-                    "failed": probe.get("failed", 0),
-                    "sentinel_nulls": probe.get("sentinel_nulls", 0),
-                    "sample_failures": probe.get("sample_failures", []),
-                    "suggested_fix": (
-                        "Acknowledge UUID→STRING polarity on this engine, or "
-                        "choose a destination with native UUID / CHAR(36)."
-                    ),
-                    "suggested_target_type": probe.get("suggested_target_type"),
-                    "suggested_transform": probe.get("suggested_transform"),
-                })
+            detail = {
+                "source": m.source,
+                "target": m.target,
+                "column": m.source,
+                "source_type": source_col.inferred_type,
+                "target_type": target.inferred_type,
+                "severity": "warn" if risk_ack else "block",
+                "fidelity_collapse": True,
+                "uuid_string_create_new": True,
+                "risk_acknowledged": risk_ack,
+                "reason": uuid_label,
+                "message": uuid_label,
+                "sampled": (probe or {}).get("sampled", 0) if probe else 0,
+                "failed": (probe or {}).get("failed", 0) if probe else 0,
+                "sentinel_nulls": (probe or {}).get("sentinel_nulls", 0) if probe else 0,
+                "sample_failures": (probe or {}).get("sample_failures", []) if probe else [],
+                "suggested_fix": (
+                    "Accept risk on Map for UUID→STRING polarity, or choose a "
+                    "destination with native UUID / CHAR(36)."
+                ),
+                "suggested_target_type": (probe or {}).get("suggested_target_type") if probe else None,
+                "suggested_transform": (probe or {}).get("suggested_transform") if probe else None,
+            }
+            issues_detail.append(detail)
+            if risk_ack:
+                warnings.append(uuid_label + " (risk acknowledged)")
+            else:
+                issues.append(uuid_label + " — accept risk or remap to CHAR(36)/UUID")
         elif objectid_text_polarity:
             risk_ack = bool(getattr(m, "risk_acknowledged", False))
             oid_label = (

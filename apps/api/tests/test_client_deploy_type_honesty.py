@@ -150,3 +150,54 @@ def test_json_scalar_wrap_is_warn_not_silent_ok():
     assert col["json_scalar_wraps"] >= 1
     assert col["severity"] == "warn"
     assert "Accept risk" in (col.get("suggested_fix") or "")
+
+
+def test_timetz_preserves_offset_and_refuses_naive_utc_invent():
+    from datetime import time, timezone, timedelta
+    import pytest
+    from connectors.sql_temporal import coerce_sql_temporal
+    from services.transform_engine import apply_transform
+
+    val, err = apply_transform("15:30:00+05:30", "time")
+    assert err is None
+    assert val is not None
+    assert "+05:30" in val or "+0530" in val.replace(":", "")
+
+    from connectors.sql_temporal import sql_base_type
+
+    assert sql_base_type("TIMETZ") == "TIMETZ"
+    tm = coerce_sql_temporal("15:30:00+05:30", "TIMETZ")
+    assert isinstance(tm, time), tm
+    assert tm.tzinfo is not None
+    assert tm.hour == 15 and tm.minute == 30
+    # Must not become 15:30 UTC (offset strip + invent).
+    assert tm.utcoffset() == timedelta(hours=5, minutes=30)
+
+    with pytest.raises(ValueError, match="refuses naive"):
+        coerce_sql_temporal("15:30:00", "TIMETZ")
+
+
+def test_boolean_refuses_informal_yes_invent():
+    from services.transform_engine import apply_transform
+    from services.type_system import boolean_value_fits, is_lossy_coercion
+    from connectors.sql_bind import coerce_boolean_wire
+
+    val, err = apply_transform("yes", "boolean")
+    assert val is None and err is not None
+    assert boolean_value_fits("yes") is False
+    # Bind must not invent TRUE from yes (pass-through for quarantine).
+    assert coerce_boolean_wire("yes") == "yes"
+    assert coerce_boolean_wire("true") is True
+
+
+def test_binary_to_text_is_lossy_not_preserve():
+    from services.mapping_proof import mapping_fidelity
+    from services.type_system import is_lossy_coercion
+
+    assert is_lossy_coercion("BYTEA", "TEXT") is True
+    verdict = mapping_fidelity(
+        {"source": "blob", "target": "blob_text", "transform": "none"},
+        declared_source_type="BYTEA",
+        declared_target_type="TEXT",
+    )
+    assert verdict["verdict"] == "lossy_cast"

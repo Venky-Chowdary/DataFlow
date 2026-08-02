@@ -14,8 +14,10 @@ import json
 import re
 from typing import Any
 
-_TRUE_TOKENS = frozenset({"true", "t", "yes", "y", "1", "on"})
-_FALSE_TOKENS = frozenset({"false", "f", "no", "n", "0", "off"})
+# Canonical boolean wire only — SSOT with type_system / transform_engine.
+# Informal yes/on/y invents truth; quarantine or operator transform owns those.
+_TRUE_TOKENS = frozenset({"true", "t", "1"})
+_FALSE_TOKENS = frozenset({"false", "f", "0"})
 
 
 def coerce_inet_wire(value: Any) -> Any:

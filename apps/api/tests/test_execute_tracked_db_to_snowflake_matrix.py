@@ -175,7 +175,7 @@ def test_mongodb_to_snowflake_messy_docs_with_preflight_and_roundtrip():
          "tags": ["vip", "beta"], "score": 10, "active": True,
          "created": datetime(2024, 1, 1, tzinfo=timezone.utc), "balance": Decimal128("100.50")},
         {"id": 2, "name": "bob", "profile": {"age": "unknown"}, "tags": "single",
-         "score": "N/A", "active": "yes", "created": "2024-06-01", "extra": "surprise"},
+         "score": "N/A", "active": "true", "created": "2024-06-01", "extra": "surprise"},
         {"id": 3, "name": None, "profile": None, "tags": [], "score": 3.14,
          "nested_array": [{"k": 1}, {"k": 2}]},
     ])

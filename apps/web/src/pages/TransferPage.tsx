@@ -3312,7 +3312,10 @@ export function TransferPage({
         try {
           await syncTransferPlanMappings(planId, mappings);
           const pf = await preflightTransferPlan(planId);
-          if (pf.passed) {
+          // Never stamp plan approved on review-grade / soft-pass — Execute
+          // unlock requires decision===approve (same bar as Validate rail).
+          const decision = pf.proof_bundle?.transfer_decision?.decision;
+          if (pf.passed && decision === "approve") {
             await approveTransferPlan(planId);
           }
           setPreflight(pf);
@@ -3324,7 +3327,6 @@ export function TransferPage({
               tone: "warning",
             });
           } else {
-            const decision = pf.proof_bundle?.transfer_decision?.decision;
             // Stay on Validate — never claim "Ready" on review-grade.
             toast({
               title: decision === "approve" ? "Preflight passed" : "Review-grade preflight",

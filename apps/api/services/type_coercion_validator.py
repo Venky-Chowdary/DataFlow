@@ -80,7 +80,9 @@ def validate_mapping_coercions(
         elif type_locked and precision_collapse:
             severity = "block"
         elif uuid_string_create_new:
-            severity = "warn"
+            risk_ack = bool(m.get("risk_acknowledged") or m.get("riskAcknowledged"))
+            # ObjectId→TEXT parity: create-new UUID→STRING needs Accept risk.
+            severity = "warn" if risk_ack or balanced else "block"
         elif lossy:
             risk_ack = bool(m.get("risk_acknowledged") or m.get("riskAcknowledged"))
             # Balanced Map-time advisory matches G3 posture; Validate still

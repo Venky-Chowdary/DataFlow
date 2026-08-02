@@ -46,15 +46,19 @@ def sql_base_type(source_type: str) -> str:
     # silently strip offsets (enterprise fidelity failure).
     if "WITH LOCAL TIME ZONE" in upper or upper.startswith("TIMESTAMP_LTZ"):
         return "TIMESTAMPTZ"
+    # TIMETZ before TIMESTAMPTZ — ``TIMETZ``.startswith("TIME") is true but
+    # ``TIME\b`` does not match, so TIMETZ was mis-routed to TIMESTAMPTZ and
+    # naive UTC invent ran on time-of-day wires.
+    if upper.startswith("TIMETZ") or re.match(r"^TIME\s+WITH\s+TIME\s+ZONE\b", upper):
+        return "TIMETZ"
     if (
         re.search(r"\bWITH TIME ZONE\b", upper)
         or upper.startswith("TIMESTAMPTZ")
-        or upper.startswith("TIMETZ")
         or upper == "DATETIMEOFFSET"
         or upper.startswith("DATETIMEOFFSET")
     ):
         if re.match(r"^TIME\b", upper) and not upper.startswith("TIMESTAMP"):
-            return "TIME WITH TIME ZONE"
+            return "TIMETZ"
         return "TIMESTAMPTZ"
     if re.search(r"\bWITHOUT TIME ZONE\b", upper) or "TIMESTAMP_NTZ" in upper:
         if re.match(r"^TIME\b", upper) and not upper.startswith("TIMESTAMP"):
@@ -228,28 +232,47 @@ def coerce_sql_temporal(value: Any, source_type: str) -> Any:
         return parsed if parsed is not None else value
     if base in {"TIME", "TIME WITH TIME ZONE", "TIME WITHOUT TIME ZONE", "TIMETZ"}:
         aware = base in {"TIME WITH TIME ZONE", "TIMETZ"}
-        if isinstance(value, time):
-            if aware and value.tzinfo is None:
-                return value.replace(tzinfo=timezone.utc)
-            if not aware and value.tzinfo is not None:
-                return value.replace(tzinfo=None)
-            return value
-        parsed = parse_sql_datetime(value, aware_utc=aware)
-        if parsed is not None:
-            tm = parsed.timetz() if aware else parsed.time()
+
+        def _timetz_or_refuse(tm: time) -> time:
+            if aware and tm.tzinfo is None:
+                raise ValueError(
+                    "TIMETZ refuses naive wall-clock (would invent UTC). "
+                    "Provide an offset/Z, or map to TIME without time zone."
+                )
+            if not aware and tm.tzinfo is not None:
+                # Keep civil clock digits — do not UTC-shift then strip.
+                return tm.replace(tzinfo=None)
             return tm
-        if isinstance(value, str):
-            text = value.strip()
+
+        def _parse_time_wire(raw: Any) -> time | None:
+            if isinstance(raw, time):
+                return raw
+            if not isinstance(raw, str):
+                return None
+            text = raw.strip()
+            if not text:
+                return None
+            iso = text[:-1] + "+00:00" if text.upper().endswith("Z") else text
             try:
-                tm = time.fromisoformat(text.replace("Z", "+00:00"))
-                if aware and tm.tzinfo is None:
-                    return tm.replace(tzinfo=timezone.utc)
-                if not aware and tm.tzinfo is not None:
-                    return tm.replace(tzinfo=None)
-                return tm
+                return time.fromisoformat(iso)
             except ValueError:
-                return value
-        return value
+                pass
+            # Offset time that fromisoformat rejected — attach dummy date.
+            if input_has_timezone(text):
+                try:
+                    body = text[:-1] + "+00:00" if text.upper().endswith("Z") else text
+                    dt = datetime.fromisoformat(f"1970-01-01T{body}")
+                    return dt.timetz()
+                except ValueError:
+                    return None
+            # AM/PM / odd forms via datetime parse (naive wall-clock).
+            parsed = parse_sql_datetime(text, wall_clock=True)
+            return parsed.time() if parsed is not None else None
+
+        tm = _parse_time_wire(value)
+        if tm is None:
+            return value
+        return _timetz_or_refuse(tm)
     return value
 
 

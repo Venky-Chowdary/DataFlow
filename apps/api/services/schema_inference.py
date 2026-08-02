@@ -29,10 +29,7 @@ from typing import Any
 
 from services.transform_engine import (
     NULL_SENTINELS,
-    _STRICT_BOOL_FALSE,
-    _STRICT_BOOL_TRUE,
     _active_date_locale,
-    _parse_boolean,
     _parse_date,
     _parse_datetime,
     _parse_decimal,
@@ -45,8 +42,11 @@ LOGICAL_TYPES = frozenset({
     "INTERVAL", "GEOGRAPHY", "VECTOR",
 })
 
-# Tokens that may become BOOLEAN only when the field name looks like a flag.
-_BOOLEAN_STRINGS = _STRICT_BOOL_TRUE | _STRICT_BOOL_FALSE
+# Informal tokens for *type detection* on flag-shaped names only.
+# Write path (transform_engine / sql_bind) stays canonical — yes/on do not invent TRUE.
+_INFORMAL_BOOL_TRUE = frozenset({"true", "t", "yes", "y", "1", "on"})
+_INFORMAL_BOOL_FALSE = frozenset({"false", "f", "no", "n", "0", "off"})
+_BOOLEAN_STRINGS = _INFORMAL_BOOL_TRUE | _INFORMAL_BOOL_FALSE
 
 # Status / lifecycle vocabulary — never treat as boolean literals.
 _STATUS_ENUM_TOKENS = frozenset({
@@ -451,10 +451,10 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
     if _looks_like_binary_payload(s, field_name=field_name):
         return "BINARY"
 
-    boolean_parsed = _parse_boolean(s)
-    if boolean_parsed is not None:
+    low = s.strip().lower()
+    if low in _BOOLEAN_STRINGS:
         # Defer 0/1 disambiguation to infer_type (field name known).
-        if s in {"0", "1"}:
+        if low in {"0", "1"}:
             return "INTEGER"
         return "BOOLEAN"
 

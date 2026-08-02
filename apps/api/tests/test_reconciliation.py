@@ -214,7 +214,9 @@ def test_normalize_cell_preserves_booleans_and_text():
     assert normalize_cell("inactive") == "inactive"
     assert normalize_cell("disabled") == "disabled"
     assert normalize_cell("true") == "1"
-    assert normalize_cell("yes") == "1"
+    # Informal yes is not a canonical boolean wire token — keep literal.
+    assert normalize_cell("yes") == "yes"
+    assert normalize_cell("true") == "1"
     assert normalize_cell("false") == "0"
 
 

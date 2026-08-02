@@ -50,9 +50,15 @@ def test_status_words_are_not_boolean_literals(token: str) -> None:
     assert _parse_boolean(token) is None
 
 
-@pytest.mark.parametrize("token,expected", [("true", True), ("false", False), ("yes", True), ("no", False)])
+@pytest.mark.parametrize("token,expected", [("true", True), ("false", False), ("1", True), ("0", False)])
 def test_classic_booleans(token: str, expected: bool) -> None:
     assert _parse_boolean(token) is expected
+
+
+@pytest.mark.parametrize("token", ["yes", "no", "on", "off", "y", "n"])
+def test_informal_booleans_are_not_write_path_tokens(token: str) -> None:
+    """Schema inference may detect flags; write path refuses inventing TRUE/FALSE."""
+    assert _parse_boolean(token) is None
 
 
 @pytest.mark.parametrize(

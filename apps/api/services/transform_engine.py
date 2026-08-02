@@ -611,12 +611,12 @@ def _parse_integer(value: str) -> int | None:
         return None
 
 
-# Strict boolean tokens only. Words like "active"/"inactive"/"enabled" are
-# status *enums* in real datasets (Mongo sessions, CRM, auth) — treating them
-# as booleans caused new Snowflake tables to CREATE status BOOLEAN, then
-# hard-fail on values like "invalidated".
-_STRICT_BOOL_TRUE = frozenset({"true", "t", "yes", "y", "1", "on"})
-_STRICT_BOOL_FALSE = frozenset({"false", "f", "no", "n", "0", "off"})
+# Canonical boolean wire only (SSOT with type_system.boolean_value_fits).
+# Informal "yes"/"on"/"y" invents truth (Airbyte-class); refuse — operator
+# must remap or transform. Schema inference keeps a wider informal set for
+# flag-name detection only.
+_STRICT_BOOL_TRUE = frozenset({"true", "t", "1"})
+_STRICT_BOOL_FALSE = frozenset({"false", "f", "0"})
 
 
 def _parse_boolean(value: str) -> bool | None:
@@ -740,16 +740,35 @@ def _parse_time(value: str) -> str | None:
     """Parse a time string and return a canonical ISO 8601 time.
 
     Accepts 24-hour and 12-hour forms, with optional microseconds, time-zone
-    offsets, and AM/PM markers.
+    offsets, and AM/PM markers. Offset / ``Z`` polarity is preserved — never
+    strip then re-invent UTC on TIMETZ binds (silent clock corruption).
     """
+    from datetime import time as time_cls
+
     text = value.strip()
     if not text:
         return None
-    text = text.upper().replace("Z", "+0000")
+    # Prefer fromisoformat so ``15:30:00+05:30`` keeps tzinfo.
+    iso_text = text
+    if iso_text.upper().endswith("Z"):
+        iso_text = iso_text[:-1] + "+00:00"
+    elif iso_text.upper().endswith(" UTC"):
+        iso_text = iso_text[:-4].strip() + "+00:00"
+    try:
+        tm = time_cls.fromisoformat(iso_text)
+        return tm.isoformat()
+    except ValueError:
+        pass
+    # strptime fallback — keep tzinfo via timetz() when %z matched.
+    stamped = text.upper().replace("Z", "+0000")
+    # ``+05:30`` → ``+0530`` for %z on older parsers.
+    if len(stamped) >= 6 and stamped[-3] == ":" and stamped[-6] in "+-":
+        stamped = stamped[:-3] + stamped[-2:]
     for fmt in TIME_PATTERNS:
         try:
-            parsed = datetime.strptime(text, fmt)
-            return parsed.time().isoformat()
+            parsed = datetime.strptime(stamped, fmt)
+            tm = parsed.timetz() if parsed.tzinfo is not None else parsed.time()
+            return tm.isoformat()
         except ValueError:
             continue
     return None
@@ -958,6 +977,11 @@ def infer_transform_for_mapping(
     if src in {"json", "array"}:
         return "json"
     if src == "binary":
+        # Binary→text sinks must not force base64 rewrite as identity.
+        # Keep bytes as identity payload; Map/G3 treat domain polarity via
+        # Accept risk (hex/base64 mutate is not "preserve").
+        if tgt in {"string", "text", "json", "unknown"} or not destination_type:
+            return "none"
         return "binary"
     if src == "datetime":
         return "datetime"

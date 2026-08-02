@@ -5003,19 +5003,12 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         (LOGICAL_TIME, LOGICAL_STRING),
         (LOGICAL_TIME, LOGICAL_TEXT),
         (LOGICAL_TIME, LOGICAL_JSON),
-        # uuid renderings
+        # uuid renderings (domain still collapses via uuid_would_collapse above)
         (LOGICAL_UUID, LOGICAL_STRING),
         (LOGICAL_UUID, LOGICAL_TEXT),
         (LOGICAL_UUID, LOGICAL_JSON),
-        # binary ↔ text reversible (base64)
-        (LOGICAL_BINARY, LOGICAL_STRING),
-        (LOGICAL_BINARY, LOGICAL_TEXT),
-        (LOGICAL_BINARY, LOGICAL_JSON),
-        (LOGICAL_STRING, LOGICAL_BINARY),
-        (LOGICAL_TEXT, LOGICAL_BINARY),
-        (LOGICAL_UUID, LOGICAL_BINARY),
-        (LOGICAL_JSON, LOGICAL_BINARY),
-        (LOGICAL_ARRAY, LOGICAL_BINARY),
+        # binary ↔ text/JSON is NOT reversible without an encoding policy
+        # (hex vs base64 mutate). Treated lossy so Map requires Accept risk.
         # Specialty → lossless text / JSON (never invent a fake numeric cast)
         (LOGICAL_INTERVAL, LOGICAL_STRING),
         (LOGICAL_INTERVAL, LOGICAL_TEXT),
