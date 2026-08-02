@@ -555,7 +555,7 @@ class PostgreSqlChangeStreamCdc:
             "off",
         }:
             return
-        if self.phase == "snapshot":
+        if getattr(self, "phase", None) == "snapshot":
             # The initial dump hands off to streaming at the LSN captured inside
             # its REPEATABLE READ transaction. The slot has to retain WAL from
             # that point, and an idle dump has nothing to release anyway.

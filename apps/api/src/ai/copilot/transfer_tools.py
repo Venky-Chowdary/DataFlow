@@ -66,7 +66,9 @@ _OVERWRITE_PHRASES = (
     "replace",
     "truncate",
     "wipe",
-    "full refresh",
+    # "full refresh" alone is NOT destructive — operators say that for a
+    # reload-append. Only the explicit overwrite form authorises a wipe.
+    "full refresh overwrite",
     "full_refresh_overwrite",
 )
 _UPSERT_PHRASES = ("upsert", "merge", "dedupe", "deduplicate", "incremental upsert", "incremental_upsert")

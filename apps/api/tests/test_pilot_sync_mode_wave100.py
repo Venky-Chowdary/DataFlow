@@ -19,8 +19,13 @@ class TestPilotSyncModeDoesNotWipeOnSubstring:
         assert normalize_sync_mode("full refresh") == "full_refresh_append"
 
     def test_upsert_phrase_canonicalises(self) -> None:
-        # Canonical alias table maps incremental_upsert → incremental_deduped.
-        assert normalize_sync_mode("incremental upsert") == "incremental_deduped"
+        # Pilot keeps the historical spelling; the engine aliases it onto
+        # incremental_deduped. Both layers must agree it is an upsert, not a wipe.
+        from services.sync_cursor import normalize_sync_mode as canonical
+
+        got = normalize_sync_mode("incremental upsert")
+        assert got == "incremental_upsert"
+        assert canonical(got) == "incremental_deduped"
 
     def test_cdc_phrase(self) -> None:
         assert normalize_sync_mode("cdc") in {"cdc", "cdc_incremental"}

@@ -805,6 +805,7 @@ def _reader_with(state: dict, **attrs):
     reader.output_plugin = "test_decoding"
     reader.consistent_point_lsn = state["confirmed"]
     reader.source_key = "src-key"
+    reader.phase = "streaming"
     reader._last_heartbeat_at = None
     reader._pending_ack_lsn = None
     reader._lease = type("L", (), {"acquired": False})()
