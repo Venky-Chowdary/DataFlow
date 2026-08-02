@@ -1493,7 +1493,7 @@ async def transfer_data(
                 connection_string=dest_connection_string,
                 warehouse=dest_warehouse,
             ),
-            skip_preflight=skip_preflight.lower() in ("true", "1", "yes"),
+            skip_preflight=False,
             source_filename=file.filename or "upload.csv",
             source_content=content,
             sync_mode=sync_mode,

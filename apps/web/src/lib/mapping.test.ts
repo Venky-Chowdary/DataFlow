@@ -496,6 +496,8 @@ describe("destination schema honesty", () => {
     assert.equal(existing[0].existsInDestination, true);
     assert.equal(existing[0].createNew, undefined);
     assert.ok(existing[0].confidence >= 0.95);
+    // Bootstrap must not invent Approve — fidelity pipeline stamps first.
+    assert.equal(existing[0].approved, false);
   });
 
   it("intentional omit is first-class Map policy", () => {

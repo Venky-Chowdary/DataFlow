@@ -1394,7 +1394,8 @@ def map_columns(
             from services.type_system import is_lossy_coercion
             lossy_pair = is_lossy_coercion(src_type, tgt_type)
         except Exception:
-            lossy_pair = False
+            # Fail closed — unknown type authority must not green-path remaps.
+            lossy_pair = True
         if lossy_pair:
             # Exact-name must not exempt DECIMAL→INTEGER / DATETIME→DATE remaps.
             requires_review = True
@@ -1466,6 +1467,15 @@ def map_columns(
                 runner_up = alternatives[1]["confidence"] if len(alternatives) > 1 else 0.0
                 score_gap = round(max(winner - runner_up, 0.0), 3)
                 requires_review = near_ratio < 0.85
+                near_tgt_type = tgt_types.get(near_tgt, "VARCHAR")
+                try:
+                    from services.type_system import is_lossy_coercion
+                    near_lossy = is_lossy_coercion(src_type, near_tgt_type)
+                except Exception:
+                    near_lossy = True
+                if near_lossy:
+                    requires_review = True
+                    near_score = min(float(near_score), 0.84)
                 mappings.append(
                     {
                         "source": source,
@@ -1479,12 +1489,15 @@ def map_columns(
                         "reasoning": (
                             f"Near-form match to existing destination "
                             f"(similarity={near_ratio:.2f}); prefer over inventing a column"
+                            + (" · lossy type pair" if near_lossy else "")
                         ),
                         "user_override": False,
                         "assignment_strategy": "near_form_existing",
                         "alternatives": alternatives,
                         "score_gap": score_gap,
                         "requires_review": requires_review,
+                        "source_type": src_type,
+                        "target_type": near_tgt_type,
                     }
                 )
                 continue
@@ -1494,20 +1507,32 @@ def map_columns(
             # with review instead of inventing (avoids ph_number when phone exists).
             if near_tgt and near_ratio >= 0.50:
                 used_targets.add(near_tgt)
+                near_tgt_type = tgt_types.get(near_tgt, "VARCHAR")
+                try:
+                    from services.type_system import is_lossy_coercion
+                    near_lossy = is_lossy_coercion(src_type, near_tgt_type)
+                except Exception:
+                    near_lossy = True
                 mappings.append(
                     {
                         "source": source,
                         "target": near_tgt,
-                        "confidence": round(min(0.55 + near_ratio * 0.35, 0.88), 3),
+                        "confidence": round(
+                            min(0.55 + near_ratio * 0.35, 0.84 if near_lossy else 0.88),
+                            3,
+                        ),
                         "reasoning": (
                             f"Sub-threshold score but near existing column "
                             f"(similarity={near_ratio:.2f}) — review before create-new"
+                            + (" · lossy type pair" if near_lossy else "")
                         ),
                         "user_override": False,
                         "assignment_strategy": "near_form_review",
                         "alternatives": alternatives,
                         "score_gap": 0.0,
                         "requires_review": True,
+                        "source_type": src_type,
+                        "target_type": near_tgt_type,
                     }
                 )
                 continue
@@ -1560,12 +1585,13 @@ def map_columns(
         tgt_type = tgt_types.get(best_target, "VARCHAR") if best_target else "VARCHAR"
         try:
             from services.type_system import is_lossy_coercion
-            if best_target and is_lossy_coercion(src_type, tgt_type):
-                requires_review = True
-                best_score = min(float(best_score), 0.84)
-                best_reason = f"{best_reason} · lossy type pair"
+            lossy_pair = bool(best_target and is_lossy_coercion(src_type, tgt_type))
         except Exception:
-            pass
+            lossy_pair = bool(best_target)
+        if lossy_pair:
+            requires_review = True
+            best_score = min(float(best_score), 0.84)
+            best_reason = f"{best_reason} · lossy type pair"
         mappings.append(
             {
                 "source": source,
@@ -1581,6 +1607,8 @@ def map_columns(
                 "alternatives": alternatives,
                 "score_gap": score_gap,
                 "requires_review": requires_review,
+                "source_type": src_type,
+                "target_type": tgt_type,
             }
         )
 

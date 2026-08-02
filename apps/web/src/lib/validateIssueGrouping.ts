@@ -450,11 +450,14 @@ export function buildExecutiveSummary(
 
   if (preflight.passed) {
     const decision = preflight.proof_bundle?.transfer_decision?.decision;
-    if (decision === "review") {
+    // Missing decision must never claim Execute unlocked (align with rail / isGovernedExecuteReady).
+    if (decision !== "approve") {
       return {
         title: "Review before Execute",
-        subtitle: `${passed}/${total} checks passed · review-grade / local preflight — confirm API Validate before Execute`,
-        untilLines: ["Confirm API preflight (not browser-local only)"],
+        subtitle: `${passed}/${total} checks passed · ${
+          decision === "review" ? "review-grade / local preflight" : "awaiting transfer decision"
+        } — confirm API Validate before Execute`,
+        untilLines: ["Confirm API preflight with decision approve (not browser-local only)"],
         rootCauseCount: 0,
         readinessCaption,
         railLine: "Review-grade — Execute not fully unlocked",

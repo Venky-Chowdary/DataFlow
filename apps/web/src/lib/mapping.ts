@@ -824,7 +824,8 @@ export function mappingsFromAnalysis(
       confidence: conf,
       inferredType: inferred,
       sample: sampleVal != null ? String(sampleVal) : undefined,
-      approved: conf >= 0.9 && !col.is_pii && !specialty && !structish && !arrayish && !pendingDest,
+      // Never invent Approve from confidence — pipeline fidelity must stamp first.
+      approved: false,
       isPii: col.is_pii,
       reason: specialty
         ? `${inferred} — identity payload (no invented cast/dim)`
@@ -845,7 +846,7 @@ export function mappingsFromAnalysis(
             ? "parse_json"
             : "none",
       engineTransform: structish || arrayish ? "json" : undefined,
-      requiresReview: specialty || structish || arrayish || pendingDest || undefined,
+      requiresReview: specialty || structish || arrayish || pendingDest || conf < 0.9 || undefined,
       structPolicy: structish || arrayish ? "store_as_json" : undefined,
       existsInDestination,
       createNew: createNew || undefined,
@@ -904,7 +905,8 @@ export function buildPreflightMappings(
               : safe.confidence
         ),
         reason: safe.reason || "User reviewed",
-        user_override: safe.approved && !enumBool,
+        // user_override only after explicit Approve / Accept risk — never confidence bootstrap.
+        user_override: Boolean(safe.riskAcknowledged) || (safe.approved && !enumBool && !mappingRequiresRiskAck(safe)),
         transform: omitted ? "omit" : uiTransformToEngine(safe.transform, safe.engineTransform),
         intentional_omit: omitted || undefined,
         target_type: omitted
@@ -940,7 +942,8 @@ export function buildPreflightMappings(
       target,
       confidence: boostIdentityConfidence(col.column_name, target, col.confidence, true),
       reason: col.semantic_type || col.inferred_type || "Semantic match",
-      user_override: col.confidence >= 0.9,
+      user_override: false,
+      requires_review: true,
       create_new: true,
       assignment_strategy: "create_compatible_new",
       source_type: col.inferred_type || col.semantic_type,
@@ -1028,9 +1031,12 @@ export function editableFromPipelineMappings(
             ? "store_as_json"
             : undefined;
     const engineFidelity = (m.fidelity || "").trim().toLowerCase();
-    const lossyFidelity = engineFidelity === "lossy_cast" || Boolean(m.type_narrowing);
+    const lossyFidelity =
+      engineFidelity === "lossy_cast"
+      || engineFidelity === "mutate"
+      || Boolean(m.type_narrowing);
     // Fail-closed: exact-name identity must still clear confidence + fidelity.
-    // Never auto-approve lossy/narrowing pairs — clients stress-test type remaps.
+    // Never auto-approve lossy/mutate/narrowing — clients stress-test type remaps.
     const autoApproved =
       !requiresReview
       && !specialty
@@ -1038,6 +1044,7 @@ export function editableFromPipelineMappings(
       && !arrayish
       && !pendingDest
       && !lossyFidelity
+      && !m.struct_derived
       && conf >= threshold;
     const base: EditableMapping = {
       source: m.source,

@@ -181,7 +181,7 @@ export function TransferMapStep({
 
   const mappingFooterLabel = mappingReviewCount > 0
     ? `${mappingReviewCount} need review`
-    : `${columnMappings.length} ready`;
+    : `${approvedCount} ready`;
 
   return (
     <div className="df2-transfer-step-panel df2-map-step-panel">

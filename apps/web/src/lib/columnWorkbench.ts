@@ -21,16 +21,6 @@ export interface IndexedMapping {
   index: number;
 }
 
-export function mappingTier(
-  m: EditableMapping,
-  threshold: number,
-): MappingTier {
-  if (m.approved) return "ok";
-  if (m.confidence >= threshold) return "ok";
-  if (m.confidence >= threshold - 0.1) return "warn";
-  return "block";
-}
-
 function mappingNeedsRiskAck(m: EditableMapping): boolean {
   const fidelity = (m.fidelity || "").toLowerCase();
   if (fidelity === "lossy_cast" || fidelity === "mutate" || m.typeNarrowing) return true;
@@ -44,6 +34,16 @@ function mappingNeedsRiskAck(m: EditableMapping): boolean {
     return true;
   }
   return false;
+}
+
+export function mappingTier(
+  m: EditableMapping,
+  threshold: number,
+): MappingTier {
+  if (mappingNeedsRiskAck(m) && !m.riskAcknowledged) return "block";
+  if (m.approved || (m.confidence >= threshold && !m.requiresReview)) return "ok";
+  if (m.confidence >= threshold - 0.1) return "warn";
+  return "block";
 }
 
 export function isMappingReady(m: EditableMapping, threshold: number): boolean {

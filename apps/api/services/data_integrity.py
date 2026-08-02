@@ -117,6 +117,16 @@ def _check_coercion_safety(
         if mapping and is_precision_collapse_coercion(src_t, tgt_t):
             hardened.append(issue)
             continue
+        from services.type_system import is_lossy_coercion
+
+        risk_ack = bool(
+            mapping
+            and (mapping.get("risk_acknowledged") or mapping.get("riskAcknowledged"))
+        )
+        # Match G3: declared lossy cannot be sample-cleared without risk ack.
+        if mapping and is_lossy_coercion(src_t, tgt_t) and not risk_ack:
+            hardened.append(issue)
+            continue
         if mapping and samples_coerce_mapping(
             mapping,
             source_types=source_types,

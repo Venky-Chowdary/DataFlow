@@ -289,15 +289,16 @@ def evaluate_ddl_compatibility(
                 f"— precision clamps on {dest_kind}"
             )
         if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type):
-            # Sample-aware soft-pass only for textual→typed coercions that the
-            # write path can prove. Declared IEEE/precision collapses
-            # (float→decimal, float→integer, decimal→integer, VARCHAR width,
-            # UNSIGNED→signed) stay hard issues even when a head sample coerces.
+            # Align with G3: declared lossy never soft-passes on head samples
+            # without explicit Map risk_acknowledged.
             src_logical = normalize_logical_type(src_type)
             tgt_logical = normalize_logical_type(tgt_type)
             precision_collapse = is_precision_collapse_coercion(src_type, tgt_type)
+            risk_ack = bool(
+                m.get("risk_acknowledged") or m.get("riskAcknowledged")
+            )
             sample_ok = False
-            if sample_rows and not precision_collapse:
+            if sample_rows and not precision_collapse and risk_ack:
                 from services.coercion_probe import samples_coerce_mapping
 
                 sample_ok = samples_coerce_mapping(

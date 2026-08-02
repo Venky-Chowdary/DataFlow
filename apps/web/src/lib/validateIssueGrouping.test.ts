@@ -301,6 +301,20 @@ describe("buildExecutiveSummary", () => {
     assert.match(summary!.readinessCaption, /10\/13 gates/);
   });
 
+  it("does not claim Execute unlocked when transfer_decision is missing", () => {
+    const summary = buildExecutiveSummary({
+      passed: true,
+      passed_count: 8,
+      total_gates: 8,
+      gates: [],
+      blockers: [],
+      run_id: "pf_api_1",
+    } as any);
+    assert.ok(summary);
+    assert.ok(!/Execute unlocked/i.test(summary!.subtitle));
+    assert.match(summary!.title, /Review/i);
+  });
+
   it("does not claim Execute unlocked for review-grade passed preflight", () => {
     const pf = basePreflight({
       passed: true,

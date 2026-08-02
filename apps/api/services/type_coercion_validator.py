@@ -31,10 +31,9 @@ def validate_mapping_coercions(
     confidence or whether the coercion is usually lossy. This prevents silent
     data loss from schema drift.
 
-    Under ``strict`` / ``maximum``, lossy coercions always block. Under
-    ``balanced`` / ``review``, declared lossy pairs warn (mirrors G3) so Map and
-    Validate agree — value-level sentinel NULL loss is still enforced by
-    ``coercion_probe`` during preflight.
+    Declared lossy coercions always block unless ``risk_acknowledged`` is set
+    (aligned with G3). Balanced/review may only soften non-lossy declared
+    mismatches below the confidence floor.
 
     Same-logical pairs still run precision-collapse checks (DECIMAL/VARCHAR/TZ
     narrowing) — an early ``continue`` used to green G9 while G3/G6 blocked.
@@ -83,7 +82,8 @@ def validate_mapping_coercions(
         elif uuid_string_create_new:
             severity = "warn"
         elif lossy:
-            severity = "warn" if balanced else "block"
+            risk_ack = bool(m.get("risk_acknowledged") or m.get("riskAcknowledged"))
+            severity = "warn" if risk_ack and balanced else "block"
         elif src_logical == tgt_logical:
             # Unreachable when precision_collapse is False (continued above).
             continue

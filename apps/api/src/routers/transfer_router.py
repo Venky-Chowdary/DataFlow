@@ -603,7 +603,8 @@ async def execute_transfer_json(
         destination=dst,
         mappings=list(body.mappings or []),
         column_types=dict(body.column_types or {}),
-        skip_preflight=bool(body.skip_preflight),
+        # Public execute never honors client skip_preflight (enterprise fail-closed).
+        skip_preflight=False,
         sync_mode=body.sync_mode or "full_refresh_overwrite",
         schema_policy=body.schema_policy or "manual_review",
         validation_mode=body.validation_mode or "strict",
@@ -903,7 +904,7 @@ async def run_universal_transfer(
     request_obj = TransferRequest(
         source=source,
         destination=destination,
-        skip_preflight=skip_preflight.lower() in ("true", "1", "yes"),
+        skip_preflight=False,
         source_filename=filename,
         source_content=content,
         sync_mode=sync_mode,

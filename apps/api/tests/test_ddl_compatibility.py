@@ -26,13 +26,37 @@ def test_passes_compatible_mapping():
     assert issues == []
 
 
-def test_varchar_to_number_passes_when_samples_coerce():
+def test_varchar_to_number_blocks_without_risk_ack_even_when_samples_coerce():
+    """Head samples cannot soft-pass declared lossy without Map risk acknowledgment."""
     ok, issues = evaluate_ddl_compatibility(
         mappings=[{
             "source": "population",
             "target": "population",
             "confidence": 0.93,
             "target_type": "NUMBER(38,0)",
+        }],
+        source_schema={"population": "VARCHAR"},
+        target_schema={"population": "NUMBER(38,0)"},
+        table_exists=True,
+        dest_connected=True,
+        dest_db_type="snowflake",
+        sample_rows=[
+            {"population": "331002651"},
+            {"population": "1402112000"},
+        ],
+    )
+    assert not ok
+    assert any("Lossy type coercion" in i for i in issues)
+
+
+def test_varchar_to_number_passes_when_samples_coerce_and_risk_acked():
+    ok, issues = evaluate_ddl_compatibility(
+        mappings=[{
+            "source": "population",
+            "target": "population",
+            "confidence": 0.93,
+            "target_type": "NUMBER(38,0)",
+            "risk_acknowledged": True,
         }],
         source_schema={"population": "VARCHAR"},
         target_schema={"population": "NUMBER(38,0)"},
