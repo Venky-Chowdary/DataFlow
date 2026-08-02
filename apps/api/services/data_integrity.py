@@ -1266,6 +1266,22 @@ def run_integrity_audit(
             _check_mapping_confidence(mappings, confidence_min=cfg["confidence"], validation_mode=validation_mode)
         )
 
+    # Mongo majority typing can keep INTEGER while a few TEXT sentinels remain —
+    # warn (never silent) so Validate honesty matches write-time quarantine risk.
+    mix_warnings = [
+        f"{s.get('name')}: {s.get('type_mix_warning')}"
+        for s in source_schemas
+        if s.get("type_mix_warning") and s.get("name")
+    ]
+    if mix_warnings:
+        checks.append({
+            "check": "mongo_type_mix",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+            "warnings": mix_warnings[:12],
+        })
+
     if rows and source_columns:
         checks.append(_check_sample_quality(source_columns, rows, source_types, validation_mode, dest_kind=dest_kind))
 

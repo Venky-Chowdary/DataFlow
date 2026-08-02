@@ -5481,6 +5481,7 @@ export function TransferPage({
             destType={destKindMode === "file_export" ? exportFormat : destType}
             validationMode={validationMode}
             syncMode={syncMode}
+            writeViaStaging={writeViaStaging}
             onApplyAction={applySuggestedAction}
             onStripControlChars={stripControlCharsAndRerun}
             stripControlsApplied={columnMappings.some(
@@ -5706,6 +5707,9 @@ export function TransferPage({
                 {isGovernedExecuteReady
                   ? "Execute now to start governed transfer with live theater progress and reconciliation evidence."
                   : "Re-open Validate to confirm API preflight (decision approve) before treating this run as cleared."}
+                {writeViaStaging
+                  ? " Staging is on — rows land in {table}_df_staging first; only clean rows promote to primary."
+                  : ""}
               </p>
             </div>
             <EmptyState

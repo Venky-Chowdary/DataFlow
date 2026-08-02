@@ -153,6 +153,31 @@ def test_g3_declared_lossy_not_sample_soft_passed_without_risk_ack():
     assert result_ack.status.value == "pass"
 
 
+def test_g3_objectid_to_text_accept_risk_clears_block():
+    """ObjectId→TEXT is domain polarity — Accept risk unlocks; hex values stay."""
+    plan = _ctx(
+        {"_id": "OBJECTID"},
+        {"user_id": "TEXT"},
+        [("_id", "user_id")],
+    ).plan
+    plan.destination.table_exists = True
+    plan.destination.db_type = "postgresql"
+    blocked = gate_g3_schema_contract(PreflightContext(plan=plan, sample_rows=[
+        {"_id": "507f1f77bcf86cd799439011"},
+    ]))
+    assert blocked.status.value == "block"
+    blob = str((blocked.details or {}).get("issues", [])) + blocked.message
+    assert "ObjectId" in blob or "accept risk" in blob.lower()
+
+    plan.mappings[0].risk_acknowledged = True
+    cleared = gate_g3_schema_contract(PreflightContext(plan=plan, sample_rows=[
+        {"_id": "507f1f77bcf86cd799439011"},
+    ]))
+    assert cleared.status.value == "pass"
+    warns = (cleared.details or {}).get("warnings", []) or []
+    assert any("ObjectId" in str(w) for w in warns)
+
+
 def test_g3_decimal_to_float_not_sample_soft_passed():
     """DECIMAL→FLOAT is fidelity collapse — never soft-pass on clean head samples."""
 

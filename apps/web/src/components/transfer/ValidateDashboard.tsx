@@ -165,6 +165,8 @@ interface ValidateDashboardProps {
   validationMode?: string;
   /** Current sync mode — duplicate-key copy must not tell append operators to "switch to append". */
   syncMode?: string;
+  /** Destination Advanced: write via `{table}_df_staging` then promote. */
+  writeViaStaging?: boolean;
   /** Apply a one-click AI suggestion to the Studio (change type, add transform, navigate). */
   onApplyAction?: (action: ValidationSuggestedAction) => void;
   /** Apply strip_controls across mappings and re-run preflight. Returns what changed. */
@@ -623,6 +625,7 @@ export function ValidateDashboard({
   destType,
   validationMode,
   syncMode,
+  writeViaStaging = false,
   onApplyAction,
   onStripControlChars,
   stripControlsApplied = false,
@@ -1342,7 +1345,24 @@ export function ValidateDashboard({
 
           <div className="df2-vd-hero-counts">
             <span className="df2-vd-count ok"><strong>{passedCount}</strong> passed</span>
-            <span className="df2-vd-count block"><strong>{blockedCount}</strong> blocked</span>
+            <span
+              className="df2-vd-count block"
+              title={
+                displayBlockers.length > 0 && displayBlockers.length !== blockedCount
+                  ? `${displayBlockers.length} root cause(s) · ${blockedCount} gate check(s)`
+                  : undefined
+              }
+            >
+              <strong>{displayBlockers.length > 0 ? displayBlockers.length : blockedCount}</strong>
+              {displayBlockers.length > 0 && displayBlockers.length !== blockedCount
+                ? " issues"
+                : " blocked"}
+            </span>
+            {displayBlockers.length > 0 && displayBlockers.length !== blockedCount && (
+              <span className="df2-vd-count skip" title="Individual gate checks that share a root cause">
+                <strong>{blockedCount}</strong> gate checks
+              </span>
+            )}
             <span className="df2-vd-count skip"><strong>{skippedCount}</strong> skipped</span>
             <span className="df2-vd-count total"><strong>{totalGates}</strong> total rules</span>
           </div>
@@ -1880,6 +1900,18 @@ export function ValidateDashboard({
               </Button>
             )}
           </div>
+          {writeViaStaging && (
+            <div className="df2-vd-sync-contract" role="status">
+              <DtIcon name="shield" size={14} />
+              <div>
+                <strong>Staging on · promote clean rows</strong>
+                <p>
+                  Writes land in <code>{"{table}_df_staging"}</code> first; only clean rows promote to the primary table.
+                  Bad rows stay in staging + DLQ — Validate does not prove the final table until Execute finishes promote.
+                </p>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

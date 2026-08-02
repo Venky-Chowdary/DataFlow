@@ -545,6 +545,25 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 uuid_string_create_new = False
 
         probe = by_source.get(m.source) if value_aware else None
+        # ObjectId→bare TEXT/VARCHAR: hex wire is value-lossless; domain polarity
+        # still needs Accept risk (not a silent hard-block on existing PG TEXT).
+        objectid_text_polarity = False
+        if fidelity_collapse and not field_shape_loss:
+            try:
+                from services.type_system import (
+                    specialty_carrier_base,
+                    specialty_carrier_would_collapse,
+                )
+
+                objectid_text_polarity = bool(
+                    specialty_carrier_would_collapse(
+                        source_col.inferred_type, target.inferred_type
+                    )
+                    and specialty_carrier_base(source_col.inferred_type) == "OBJECTID"
+                )
+            except ImportError:
+                objectid_text_polarity = False
+
         if uuid_string_create_new:
             warn_label = (
                 f"{label} — create-new stores UUID as destination STRING/TEXT "
@@ -571,6 +590,39 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     "suggested_target_type": probe.get("suggested_target_type"),
                     "suggested_transform": probe.get("suggested_transform"),
                 })
+        elif objectid_text_polarity:
+            risk_ack = bool(getattr(m, "risk_acknowledged", False))
+            oid_label = (
+                f"{label} — ObjectId→TEXT keeps hex values; ObjectId domain "
+                "is not enforced at destination"
+            )
+            detail = {
+                "source": m.source,
+                "target": m.target,
+                "column": m.source,
+                "source_type": source_col.inferred_type,
+                "target_type": target.inferred_type,
+                "severity": "warn" if risk_ack else "block",
+                "fidelity_collapse": True,
+                "objectid_text_polarity": True,
+                "risk_acknowledged": risk_ack,
+                "reason": oid_label,
+                "message": oid_label,
+                "sampled": (probe or {}).get("sampled", 0) if probe else 0,
+                "failed": (probe or {}).get("failed", 0) if probe else 0,
+                "sentinel_nulls": (probe or {}).get("sentinel_nulls", 0) if probe else 0,
+                "sample_failures": (probe or {}).get("sample_failures", []) if probe else [],
+                "suggested_fix": (
+                    "Accept risk on Map for ObjectId→TEXT, or remap to VARCHAR(24) / BINARY(12)."
+                ),
+                "suggested_target_type": "VARCHAR(24)",
+                "suggested_transform": None,
+            }
+            issues_detail.append(detail)
+            if risk_ack:
+                warnings.append(oid_label + " (risk acknowledged)")
+            else:
+                issues.append(oid_label + " — accept risk or remap to VARCHAR(24)")
         elif fidelity_collapse or field_shape_loss:
             issues.append(label)
             # Always emit structured detail so Inspect Quarantine can show

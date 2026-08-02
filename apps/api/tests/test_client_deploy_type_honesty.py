@@ -72,6 +72,34 @@ def test_g6_does_not_require_optional_unmapped_fk_ids():
     assert not any("unmapped" in i.lower() for i in issues)
 
 
+def test_mongo_majority_emits_type_mix_warning():
+    from services.schema_introspect import _finalize_mongodb_type_with_note
+
+    chosen, note = _finalize_mongodb_type_with_note({"INTEGER": 49, "TEXT": 1})
+    assert chosen == "INTEGER"
+    assert note and "TEXT sentinel" in note
+
+
+def test_g9_surfaces_mongo_type_mix_as_warning_not_block():
+    from services.data_integrity import run_integrity_audit
+
+    report = run_integrity_audit(
+        source_columns=["age"],
+        mappings=[{"source": "age", "target": "age", "confidence": 0.99}],
+        source_schemas=[{
+            "name": "age",
+            "inferred_type": "INTEGER",
+            "type_mix_warning": "1 TEXT sentinel(s) among 50 samples — majority INTEGER",
+        }],
+        sample_rows=[{"age": "30"}],
+        validation_mode="strict",
+    )
+    mix = next((c for c in report["checks"] if c["check"] == "mongo_type_mix"), None)
+    assert mix is not None
+    assert mix["blocks_transfer"] is False
+    assert mix["warnings"]
+
+
 def test_g6_blocks_unmapped_composite_pk_id():
     ok, issues = evaluate_ddl_compatibility(
         mappings=[{"source": "id", "target": "id", "confidence": 0.99}],

@@ -3293,22 +3293,30 @@ def _widen_mongodb_type(current: str, observed: str) -> str:
 
 def _finalize_mongodb_type(type_counts: dict[str, int]) -> str:
     """Majority-vote Mongo field type — one TEXT sentinel must not demote 49 ints."""
+    chosen, _note = _finalize_mongodb_type_with_note(type_counts)
+    return chosen
+
+
+def _finalize_mongodb_type_with_note(
+    type_counts: dict[str, int],
+) -> tuple[str, str | None]:
+    """Return (majority type, optional mix warning for Validate honesty)."""
     counts = {str(k).upper(): int(v) for k, v in (type_counts or {}).items() if v and k}
     total = sum(counts.values())
     if total <= 0:
-        return "TEXT"
+        return "TEXT", None
 
     structural = {k: counts[k] for k in _STRUCTURAL_TYPES if counts.get(k, 0) > 0}
     if structural:
         # Sticky: any nested observation keeps a semi-structured type.
         if "OBJECT" in structural and "ARRAY" in structural:
-            return "JSON"
-        return max(structural, key=lambda k: (structural[k], _MONGO_TYPE_ORDER.get(k, 0)))
+            return "JSON", None
+        return max(structural, key=lambda k: (structural[k], _MONGO_TYPE_ORDER.get(k, 0))), None
 
     text_n = counts.get("TEXT", 0) + counts.get("VARCHAR", 0)
     typed = {k: v for k, v in counts.items() if k not in _TEXTUAL_TYPES}
     if not typed:
-        return "TEXT"
+        return "TEXT", None
 
     # Promote INTEGER+DECIMAL → DECIMAL, DATE+TIMESTAMP → TIMESTAMP.
     if "DECIMAL" in typed and "INTEGER" in typed:
@@ -3318,11 +3326,22 @@ def _finalize_mongodb_type(type_counts: dict[str, int]) -> str:
 
     best = max(typed, key=lambda k: (typed[k], _MONGO_TYPE_ORDER.get(k, 0)))
     typed_share = sum(typed.values()) / total
+    mix_note: str | None = None
     if typed_share >= _MONGO_TYPED_MAJORITY:
-        return best
+        if text_n > 0:
+            mix_note = (
+                f"{text_n} TEXT sentinel(s) among {total} samples — majority {best}; "
+                "outlier rows may quarantine at write"
+            )
+        return best, mix_note
     if text_n / total >= (1.0 - _MONGO_TYPED_MAJORITY):
-        return "TEXT"
-    return best
+        return "TEXT", None
+    if text_n > 0:
+        mix_note = (
+            f"Mixed Mongo types ({text_n} TEXT / majority {best}) — "
+            "outlier rows may quarantine at write"
+        )
+    return best, mix_note
 
 
 def _introspect_mongodb(**kwargs) -> dict[str, Any]:
@@ -3377,7 +3396,10 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
         for col in columns.values():
             counts = col.pop("type_counts", {}) or {}
             if counts:
-                col["inferred_type"] = _finalize_mongodb_type(counts)
+                inferred, mix_note = _finalize_mongodb_type_with_note(counts)
+                col["inferred_type"] = inferred
+                if mix_note:
+                    col["type_mix_warning"] = mix_note
             elif not col.get("inferred_type"):
                 col["inferred_type"] = "TEXT"
             # Re-infer from samples only when majority vote stayed textual / weak —
