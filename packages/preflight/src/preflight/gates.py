@@ -725,6 +725,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             # explicit Map risk acknowledgment (Fivetran/Airbyte still sample-
             # bound; we refuse silent truncation on clean heads).
             force_block = bool(lossy and not risk_ack)
+            json_wraps = int(probe.get("json_scalar_wraps") or 0)
             detail = {
                 "source": m.source,
                 "target": m.target,
@@ -734,12 +735,18 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 "sampled": probe.get("sampled", 0),
                 "failed": probe.get("failed", 0),
                 "sentinel_nulls": probe.get("sentinel_nulls", 0),
+                "json_scalar_wraps": json_wraps,
                 "sample_failures": probe.get("sample_failures", []),
                 "suggested_fix": probe.get("suggested_fix", "")
                 or (
                     "Accept loss risk on Map, widen the destination type, or remap"
                     if force_block
-                    else ""
+                    else (
+                        "Accept risk on Map if wrapping bare scalars as JSON strings "
+                        "is intentional, or emit real JSON objects/arrays upstream."
+                        if json_wraps
+                        else ""
+                    )
                 ),
                 "suggested_target_type": probe.get("suggested_target_type"),
                 "suggested_transform": probe.get("suggested_transform"),
@@ -753,6 +760,15 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 )
             elif severity == "block":
                 issues.append(label)
+            elif json_wraps:
+                wrap_label = (
+                    label
+                    + " — bare scalar(s) wrapped as JSON string (domain change)"
+                )
+                if risk_ack:
+                    warnings.append(wrap_label + " (risk acknowledged)")
+                else:
+                    warnings.append(wrap_label + " — Accept risk if intentional")
             else:
                 warnings.append(label)
         elif value_aware:

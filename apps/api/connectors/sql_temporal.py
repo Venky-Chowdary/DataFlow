@@ -65,23 +65,57 @@ def sql_base_type(source_type: str) -> str:
     return upper
 
 
-def parse_sql_datetime(value: Any, *, aware_utc: bool = False) -> datetime | None:
+def input_has_timezone(value: Any) -> bool:
+    """True when the wire/value carries an explicit offset or Z (not invented)."""
+    if isinstance(value, datetime):
+        return value.tzinfo is not None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        # Epoch seconds are instants by definition.
+        return True
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text:
+        return False
+    if text.endswith(("Z", "z")) or text.upper().endswith(" UTC"):
+        return True
+    if text.isdigit() or (text[0] in "+-" and text[1:].isdigit()):
+        return True
+    # Trailing ±HH:MM / ±HHMM after a datetime body.
+    return bool(re.search(r"[+-]\d{2}:?\d{2}$", text))
+
+
+def parse_sql_datetime(
+    value: Any,
+    *,
+    aware_utc: bool = False,
+    wall_clock: bool = False,
+) -> datetime | None:
     """Parse ISO-8601 / common CSV timestamps.
 
-    Default returns **naive UTC** (MySQL DATETIME / TIMESTAMP without TZ).
-    When ``aware_utc=True`` (Postgres TIMESTAMPTZ), keep ``tzinfo=UTC`` so the
-    driver does not reinterpret naive values in the session time zone.
+    Default returns **naive UTC** (MySQL DATETIME / TIMESTAMP without TZ) —
+    offset wires are converted to UTC then stripped.
+    When ``aware_utc=True`` (Postgres TIMESTAMPTZ), keep ``tzinfo=UTC``.
+    When ``wall_clock=True`` (Snowflake NTZ / BQ DATETIME), keep civil digits
+    and strip tzinfo **without** ``astimezone(UTC)`` so Validate/Accept-risk
+    owns TZ→NTZ polarity instead of the bind silently rewriting the clock.
     """
     if value is None:
         return None
     if isinstance(value, datetime):
         dt = value
         if dt.tzinfo is not None:
+            if wall_clock:
+                return dt.replace(tzinfo=None)
             dt = dt.astimezone(timezone.utc)
             return dt if aware_utc else dt.replace(tzinfo=None)
+        if wall_clock:
+            return dt
         return dt.replace(tzinfo=timezone.utc) if aware_utc else dt
     if isinstance(value, date) and not isinstance(value, datetime):
         dt = datetime.combine(value, time.min)
+        if wall_clock:
+            return dt
         return dt.replace(tzinfo=timezone.utc) if aware_utc else dt
     # Unix epoch seconds / millis as int/float (Stripe / HubSpot / SaaS wire).
     if isinstance(value, bool):
@@ -92,6 +126,8 @@ def parse_sql_datetime(value: Any, *, aware_utc: bool = False) -> datetime | Non
             if abs(raw) >= 10**12:
                 raw //= 1000  # epoch millis
             dt = datetime.fromtimestamp(raw, tz=timezone.utc)
+            if wall_clock:
+                return dt.replace(tzinfo=None)
             return dt if aware_utc else dt.replace(tzinfo=None)
         except (OverflowError, OSError, ValueError):
             return None
@@ -107,6 +143,8 @@ def parse_sql_datetime(value: Any, *, aware_utc: bool = False) -> datetime | Non
             if abs(raw) >= 10**12:
                 raw = raw // 1000
             dt = datetime.fromtimestamp(raw, tz=timezone.utc)
+            if wall_clock:
+                return dt.replace(tzinfo=None)
             return dt if aware_utc else dt.replace(tzinfo=None)
         except (OverflowError, OSError, ValueError):
             pass
@@ -132,8 +170,12 @@ def parse_sql_datetime(value: Any, *, aware_utc: bool = False) -> datetime | Non
         else:
             return None
     if dt.tzinfo is not None:
+        if wall_clock:
+            return dt.replace(tzinfo=None)
         dt = dt.astimezone(timezone.utc)
         return dt if aware_utc else dt.replace(tzinfo=None)
+    if wall_clock:
+        return dt
     return dt.replace(tzinfo=timezone.utc) if aware_utc else dt
 
 

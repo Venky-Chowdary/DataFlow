@@ -368,7 +368,9 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_DECIMAL: "BIGNUMERIC",
         LOGICAL_BOOLEAN: "BOOL",
         LOGICAL_DATE: "DATE",
-        LOGICAL_DATETIME: "TIMESTAMP",
+        # Wall-clock DATETIME — bare logical datetime must not invent UTC as TIMESTAMP.
+        # Explicit TIMESTAMPTZ / instant carriers still map to TIMESTAMP via ddl_type().
+        LOGICAL_DATETIME: "DATETIME",
         LOGICAL_TIME: "TIME",
         # BigQuery has no UUID type; STRING holds the value but drops polarity.
         # create_new_mapping_target_type stamps physical STRING so Validate warns

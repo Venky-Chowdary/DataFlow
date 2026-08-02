@@ -523,9 +523,12 @@ export interface CoercionColumn {
   failed: number;
   wire_normalize?: number;
   wire_failures?: number;
+  /** Bare scalars wrapped as JSON string literals (domain change — Accept risk). */
+  json_scalar_wraps?: number;
   sample_failures: CoercionSampleFailure[];
   sentinel_examples?: { row: number; value: string }[];
   wire_examples?: { row: number; value: string; wire_form?: string | null; reason?: string }[];
+  wrap_examples?: { row: number; value: string; wire_form?: string | null; reason?: string }[];
   sample_wire_form?: string | null;
   severity: "ok" | "warn" | "block";
   /** Declared type path collapses fidelity even when preview samples coerce. */

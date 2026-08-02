@@ -295,6 +295,8 @@ export function isIsoNormalizeIssue(issue: ValidationIssue): boolean {
 
 export function isIsoNormalizeCoercion(col: CoercionColumn): boolean {
   if (col.severity === "block") return false;
+  // JSON scalar wraps are a domain change — never bury under "normalize, no loss".
+  if ((col.json_scalar_wraps ?? 0) > 0) return false;
   if ((col.wire_normalize ?? 0) > 0 && col.failed === 0) return true;
   const fix = col.suggested_fix || "";
   return /ISO timestamps?/i.test(fix) && /normaliz/i.test(fix);

@@ -112,3 +112,41 @@ def test_g6_blocks_unmapped_composite_pk_id():
     )
     assert ok is False
     assert any("primary-key" in i.lower() and "tenant_id" in i for i in issues)
+
+
+def test_bq_timestamp_naive_fails_closed():
+    from connectors.warehouse_temporal import format_bigquery_bind
+    from services.type_system import ddl_type
+    import pytest
+
+    # Create-new bare datetime → DATETIME (wall-clock), not TIMESTAMP invent.
+    assert ddl_type("bigquery", "datetime") == "DATETIME"
+    assert ddl_type("bigquery", "TIMESTAMPTZ") == "TIMESTAMP"
+
+    with pytest.raises(ValueError, match="refuses naive"):
+        format_bigquery_bind("2024-01-05T10:30:00", "TIMESTAMP")
+
+
+def test_sf_ntz_preserves_offset_wall_clock():
+    from connectors.warehouse_temporal import format_snowflake_bind
+
+    assert format_snowflake_bind("2024-01-05T10:30:00+05:30", "TIMESTAMP_NTZ") == (
+        "2024-01-05 10:30:00"
+    )
+
+
+def test_json_scalar_wrap_is_warn_not_silent_ok():
+    from services.coercion_probe import analyze_coercion
+
+    report = analyze_coercion(
+        sample_rows=[{"payload": "plain-text"}],
+        mappings=[{"source": "payload", "target": "payload"}],
+        source_types={"payload": "TEXT"},
+        dest_types={"payload": "VARIANT"},
+        dest_db_type="snowflake",
+    )
+    col = report["by_source"]["payload"]
+    assert col["failed"] == 0
+    assert col["json_scalar_wraps"] >= 1
+    assert col["severity"] == "warn"
+    assert "Accept risk" in (col.get("suggested_fix") or "")

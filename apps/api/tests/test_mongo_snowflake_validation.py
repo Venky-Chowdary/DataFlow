@@ -105,7 +105,7 @@ def test_probe_hard_failure_reports_row_value_reason():
 def test_probe_bare_scalar_into_variant_wraps_losslessly():
     """MongoDB field that is an array in one doc and a scalar in another:
     the scalar is losslessly wrapped as JSON so it loads into VARIANT — no
-    false hard-block (item 1 auto-wrap)."""
+    false hard-block, but warn (domain change) so operators Accept risk."""
     report = analyze_coercion(
         sample_rows=[{"tags": '["a","b"]'}, {"tags": "single"}, {"tags": ""}],
         mappings=[{"source": "tags", "target": "tags"}],
@@ -117,7 +117,8 @@ def test_probe_bare_scalar_into_variant_wraps_losslessly():
     # Column is analyzed (TEXT→VARIANT coercion) but every value now coerces.
     assert col is not None
     assert col["failed"] == 0
-    assert col["severity"] == "ok"
+    assert col.get("json_scalar_wraps", 0) >= 1
+    assert col["severity"] == "warn"
     assert report["has_blocking_failures"] is False
 
 

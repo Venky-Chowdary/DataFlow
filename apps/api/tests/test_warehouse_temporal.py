@@ -100,3 +100,43 @@ def test_coercion_probe_bigquery_iso_z():
     assert report["columns"]
     col = report["columns"][0]
     assert col.get("wire_normalize", 0) >= 1 or col.get("sample_wire_form")
+
+
+def test_snowflake_ntz_keeps_offset_wall_clock():
+    """Offset wire → NTZ must not UTC-shift then strip (invents a new local time)."""
+    got = format_snowflake_bind("2024-08-09T12:00:00-05:00", "TIMESTAMP_NTZ")
+    assert got == "2024-08-09 12:00:00"
+    assert "17:00" not in got
+
+
+def test_bigquery_timestamp_refuses_naive_utc_invent():
+    import pytest
+
+    with pytest.raises(ValueError, match="refuses naive"):
+        format_bigquery_bind("2024-08-09 01:58:42", "TIMESTAMP")
+
+
+def test_bigquery_wire_check_blocks_naive_timestamp():
+    check = wire_check_warehouse("2024-08-09 01:58:42", "TIMESTAMP", engine="bigquery")
+    assert check["ok"] is False
+    assert "naive" in (check.get("reason") or "").lower()
+
+
+def test_bigquery_datetime_keeps_offset_wall_clock():
+    got = format_bigquery_bind("2024-08-09T12:00:00-05:00", "DATETIME")
+    assert got == "2024-08-09T12:00:00"
+
+
+def test_coercion_probe_bigquery_naive_timestamp_blocks():
+    report = analyze_coercion(
+        sample_rows=[{"ts": "2024-08-09 01:58:42"}],
+        mappings=[{"source": "ts", "target": "ts", "confidence": 0.99}],
+        source_types={"ts": "VARCHAR"},
+        dest_types={"ts": "TIMESTAMP"},
+        dest_db_type="bigquery",
+    )
+    col = report["by_source"].get("ts")
+    assert col is not None
+    assert col["failed"] >= 1
+    assert col["severity"] == "block"
+    assert report["has_blocking_failures"] is True

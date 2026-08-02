@@ -454,9 +454,11 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
               const hasDetail =
                 col.sample_failures.length > 0
                 || (col.wire_examples?.length ?? 0) > 0
+                || (col.wrap_examples?.length ?? 0) > 0
                 || Boolean(col.suggested_fix);
               const wireHint = col.sample_wire_form
                 || col.wire_examples?.[0]?.wire_form
+                || col.wrap_examples?.[0]?.wire_form
                 || null;
               return (
                 <Fragment key={key}>
@@ -507,6 +509,7 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
                         />
                         {SEVERITY_LABEL[col.severity] ?? col.severity}
                         {(col.wire_normalize ?? 0) > 0 ? " · normalize" : ""}
+                        {(col.json_scalar_wraps ?? 0) > 0 ? " · JSON wrap" : ""}
                         {(col.wire_failures ?? 0) > 0 ? ` · ${col.wire_failures} wire fail` : ""}
                       </span>
                     </td>
@@ -573,6 +576,31 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
                               <tbody>
                                 {(col.wire_examples ?? []).map((f, i) => (
                                   <tr key={`w-${f.row}-${i}`}>
+                                    <td className="df2-vd-num">{f.row}</td>
+                                    <td><code>{f.value}</code></td>
+                                    <td><code>{f.wire_form ?? "—"}</code></td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                        {(col.wrap_examples?.length ?? 0) > 0 && (
+                          <div className="df2-vd-coerce-samples">
+                            <span className="df2-vd-coerce-samples-title">
+                              Bare scalar → JSON string wrap (domain change — Accept risk if intentional)
+                            </span>
+                            <table>
+                              <thead>
+                                <tr>
+                                  <th className="df2-vd-num">Row</th>
+                                  <th>Raw</th>
+                                  <th>Wire form</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {(col.wrap_examples ?? []).map((f, i) => (
+                                  <tr key={`j-${f.row}-${i}`}>
                                     <td className="df2-vd-num">{f.row}</td>
                                     <td><code>{f.value}</code></td>
                                     <td><code>{f.wire_form ?? "—"}</code></td>

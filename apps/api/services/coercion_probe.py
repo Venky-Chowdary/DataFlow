@@ -33,6 +33,7 @@ CoercionColumn shape::
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from services.transform_engine import apply_transform
@@ -125,6 +126,27 @@ def _looks_structural(values: list[str]) -> bool:
         if s[:1] in ("{", "[") and s[-1:] in ("}", "]"):
             return True
     return False
+
+
+def _is_json_scalar_wrap(cell: str, converted: Any) -> bool:
+    """True when a non-JSON bare scalar was wrapped as a JSON string literal.
+
+    Value digits are preserved, but the domain changes (TEXT ``hi`` → JSON
+    ``\"hi\"``). Validate must warn so operators Accept risk intentionally —
+    never green-light as a clean structural pass.
+    """
+    text = (cell or "").strip()
+    if not text or converted is None:
+        return False
+    try:
+        json.loads(text)
+        return False
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+    try:
+        return str(converted) == json.dumps(text, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return False
 
 
 def _build_suggestion(
@@ -232,9 +254,11 @@ def analyze_coercion(
         ok = nulls = sentinel_nulls = failed = 0
         wire_normalize = 0
         wire_failures = 0
+        json_scalar_wraps = 0
         sample_failures: list[dict[str, Any]] = []
         sentinel_examples: list[dict[str, Any]] = []
         wire_examples: list[dict[str, Any]] = []
+        wrap_examples: list[dict[str, Any]] = []
         raw_failure_values: list[str] = []
         observed_values: list[str] = []
         sample_wire_form: str | None = None
@@ -353,6 +377,21 @@ def analyze_coercion(
             }:
                 nulls += 1
             else:
+                # Domain change: bare scalar → JSON string literal (VARIANT/JSON).
+                if tgt_logical in _STRUCTURAL_LOGICALS and _is_json_scalar_wrap(
+                    cell, converted
+                ):
+                    json_scalar_wraps += 1
+                    if len(wrap_examples) < SAMPLE_FAILURE_LIMIT:
+                        wrap_examples.append({
+                            "row": idx,
+                            "value": cell[:120],
+                            "wire_form": str(converted)[:120],
+                            "reason": (
+                                "Bare scalar wrapped as JSON string literal "
+                                "(domain change — Accept risk if intentional)"
+                            ),
+                        })
                 # Destination-wire probe: transform-engine ISO-Z ≠ SQL/warehouse bind.
                 if use_wire and wire_check_fn is not None:
                     probe_val = converted if converted is not None else cell
@@ -430,6 +469,7 @@ def analyze_coercion(
             failed == 0
             and sentinel_nulls == 0
             and wire_normalize == 0
+            and json_scalar_wraps == 0
             and not coercion_required
             and not structural_pair
         ):
@@ -440,7 +480,7 @@ def analyze_coercion(
         elif sentinel_nulls and strict_null_loss:
             # Non-null → NULL is potential data loss; never green-light under strict.
             severity = "block"
-        elif sentinel_nulls or wire_normalize:
+        elif sentinel_nulls or wire_normalize or json_scalar_wraps:
             severity = "warn"
         else:
             severity = "ok"
@@ -480,6 +520,15 @@ def analyze_coercion(
                 f"value(s) use ISO timestamps (e.g. {example.get('value', '…')!r}). "
                 f"DataFlow will normalize to {example.get('wire_form') or 'YYYY-MM-DD HH:MM:SS'} "
                 f"at write time for destination SQL/warehouse temporal bind."
+            )
+        if json_scalar_wraps and not fix:
+            example = wrap_examples[0] if wrap_examples else {}
+            fix = (
+                f"Column '{src}' → {tgt_type}: {json_scalar_wraps} of {len(rows)} sampled "
+                f"value(s) are bare scalars wrapped as JSON string literals "
+                f"(e.g. {example.get('value', '…')!r} → {example.get('wire_form', '…')!r}). "
+                f"Values load, but the domain changes — Accept risk on Map if intentional, "
+                f"or emit real JSON objects/arrays upstream."
             )
 
         tgt_name = str(m.get("target", src) or src)
@@ -579,9 +628,11 @@ def analyze_coercion(
             "failed": failed,
             "wire_normalize": wire_normalize,
             "wire_failures": wire_failures,
+            "json_scalar_wraps": json_scalar_wraps,
             "sample_failures": sample_failures,
             "sentinel_examples": sentinel_examples,
             "wire_examples": wire_examples,
+            "wrap_examples": wrap_examples,
             "sample_wire_form": sample_wire_form,
             "severity": severity,
             "fidelity_collapse": fidelity_collapse,
