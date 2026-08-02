@@ -551,9 +551,22 @@
   flex: 1 1 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
+  grid-template-columns: minmax(220px, 28%) minmax(0, 1fr);
   gap: 12px;
   overflow: hidden;
+}
+
+@media (max-width: 1280px) {
+  .df2-page-jobs .df2-jobs-v3-layout {
+    grid-template-columns: minmax(200px, 32%) minmax(0, 1fr);
+    gap: 10px;
+  }
+}
+
+@media (max-width: 900px) {
+  .df2-page-jobs .df2-jobs-v3-layout {
+    grid-template-columns: 1fr;
+  }
 }
 
 .df2-jobs-v3-list {
@@ -1188,15 +1201,13 @@
 
 .df2-jobs-v3-summary-metrics {
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: stretch;
-  gap: 4px;
+  gap: 6px;
   flex: 0 0 auto;
   width: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: visible;
   padding-bottom: 0;
-  scrollbar-width: thin;
 }
 
 .df2-jobs-v3-summary-metrics article {
@@ -1205,14 +1216,25 @@
   align-items: flex-start;
   justify-content: center;
   gap: 1px;
-  flex: 1 1 0;
-  min-width: 0;
-  padding: 5px 7px;
+  flex: 1 1 88px;
+  min-width: 72px;
+  max-width: 160px;
+  padding: 6px 8px;
   border: 1px solid var(--df-border, #e5e7eb);
   border-radius: 7px;
   background: #f8fafc;
   border-left-width: 3px;
   border-left-color: #94a3b8;
+}
+
+.df2-jobs-v3-summary-metrics article strong {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1.25;
 }
 
 .df2-jobs-v3-summary-metrics article.is-metric-rows { border-left-color: #0f766e; background: #f0fdfa; }
@@ -2438,6 +2460,21 @@
   background: #f0fdfa;
 }
 
+@media (max-width: 1280px) {
+  .df2-pipeline-rows-head,
+  .df2-pipeline-row {
+    grid-template-columns: auto auto minmax(0, 1.6fr) 100px 90px 40px;
+    gap: 10px;
+  }
+  .df2-pipeline-row-cadence,
+  .df2-pipeline-row-sync {
+    display: none;
+  }
+  .df2-pipeline-rows-head-name {
+    grid-column: 1 / 4;
+  }
+}
+
 @media (max-width: 900px) {
   .df2-pipeline-rows-head { display: none; }
   .df2-pipeline-row {
@@ -2897,9 +2934,9 @@
   opacity: 0.65;
 }
 
-.dt-toast-timer--error { animation-duration: var(--df-toast-duration-error, 8000ms); background: var(--df-danger); }
+.dt-toast-timer--error { animation-duration: var(--df-toast-duration-error, 16000ms); background: var(--df-danger); }
+.dt-toast-timer--warning { animation-duration: var(--df-toast-duration-warning, 10000ms); background: var(--df-warning); }
 .dt-toast-timer--success { background: var(--df-success); }
-.dt-toast-timer--warning { background: var(--df-warning); }
 .dt-toast-timer--info { background: var(--df-brand); }
 
 @keyframes df-eu-toast-in {
@@ -2924,7 +2961,14 @@
 
 @media (max-width: 640px) {
   .lp-value-strip { margin-bottom: 32px; padding: 0 16px; }
-  .df2-pipe-card-actions .df2-btn { flex: 1 1 100%; }
+  .df2-pipe-card-actions {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .df2-pipe-card-actions .df2-btn {
+    flex: 0 0 auto;
+    width: auto;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -3052,9 +3096,9 @@
   padding-top: 4px;
 }
 
-/* Transfer wizard: never show short + full labels together */
+/* Transfer wizard: short labels off by default; media queries may enable them */
 .df2-wizard-label-short {
-  display: none !important;
+  display: none;
 }
 
 .df2-wizard-studio .df2-wizard-item,
@@ -3066,6 +3110,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  max-width: 7.5rem;
 }
 
 .df2-transfer-studio-chrome {
@@ -3073,7 +3118,34 @@
   z-index: var(--df-z-sticky, 20);
   flex-shrink: 0;
   isolation: isolate;
+  overflow: visible;
+}
+
+/* Route bar never fights the stepper — truncate, don't expand */
+.df2-page-transfer-studio .df2-route-bar {
+  flex: 0 1 220px;
+  min-width: 0;
+  max-width: 240px;
   overflow: hidden;
+}
+.df2-page-transfer-studio .df2-route-bar-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.df2-page-transfer-studio .df2-wizard-studio {
+  flex: 1 1 420px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* Validate Fix — compact control, never full-bleed in scorecard */
+.df2-validate-rail-primary-fix.df2-btn,
+.df2-validate-rail-primary-fix {
+  width: auto !important;
+  max-width: 100%;
+  align-self: flex-start;
+  margin-top: 8px;
 }
 
 .df2-topbar {
@@ -4378,10 +4450,10 @@
 }
 
 .df2-validate-rail-actions .df2-btn {
-  height: 36px !important;
-  min-height: 36px !important;
+  height: var(--df-btn-height, 36px) !important;
+  min-height: var(--df-btn-height, 36px) !important;
   padding: 0 12px !important;
-  border-radius: 9px !important;
+  border-radius: var(--df-radius-md, 8px) !important;
   font-size: 12.5px !important;
 }
 
@@ -4389,10 +4461,11 @@
   flex: 1 0 100%;
   margin: 0;
   font-size: 11.5px;
+  line-height: 1.4;
   color: #b91c1c;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
 }
 
 /* Run ready — compact banner + pinned actions */
@@ -9779,34 +9852,10 @@
   background: #fffbeb !important;
 }
 
-/* Laptop / desktop density — keep grids readable, never cramped */
-@media (min-width: 1024px) and (max-width: 1366px) {
-  :root {
-    --df-page-gutter: 12px;
-    --df-table-row-height: 32px;
-    --df-table-cell-pad-y: 4px;
-    --df-table-cell-pad-x: 8px;
-    --df-card-pad: 10px;
-    --df-stepper-node: 26px;
-  }
-
-  .df2-content {
-    padding: var(--df-page-gutter);
-  }
-
-  /* ── Transfer Studio: reclaim vertical space on 13–14" ── */
-  .df2-page-transfer-studio .df2-transfer-studio-chrome {
-    gap: 4px;
-    padding: 4px 10px;
-    border-radius: 8px;
-  }
-
+/* Short stepper labels before route bar overlaps (tablet / 14" / split view) */
+@media (max-width: 1440px) {
   .df2-page-transfer-studio .df2-wizard-progress {
     display: none;
-  }
-
-  .df2-page-transfer-studio .df2-wizard-studio {
-    gap: 2px;
   }
 
   .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-step {
@@ -9815,24 +9864,54 @@
   }
 
   .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-num {
-    width: var(--df-stepper-node);
-    height: var(--df-stepper-node);
+    width: var(--df-stepper-node, 22px);
+    height: var(--df-stepper-node, 22px);
     font-size: 11px;
   }
 
-  /* Full labels → short labels on laptop */
   .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label {
-    display: none;
+    display: none !important;
   }
   .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label-short {
-    display: inline;
+    display: inline !important;
     font-size: 11px;
     font-weight: 650;
     letter-spacing: 0.01em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 4.5rem;
   }
 
   .df2-page-transfer-studio .df2-route-bar-meta {
     display: none;
+  }
+}
+
+/* Laptop / desktop density — keep grids readable, never cramped */
+@media (min-width: 1024px) and (max-width: 1366px) {
+  :root {
+    --df-page-gutter: 12px;
+    --df-table-row-height: 32px;
+    --df-table-cell-pad-y: 4px;
+    --df-table-cell-pad-x: 8px;
+    --df-card-pad: 10px;
+    --df-stepper-node: 22px;
+  }
+
+  .df2-content {
+    padding: var(--df-page-gutter);
+  }
+
+  /* ── Transfer Studio: reclaim vertical space on 13–14" ── */
+  .df2-page-transfer-studio .df2-transfer-studio-chrome {
+    gap: 2px;
+    padding: 2px 8px;
+    border-radius: 8px;
+  }
+
+  .df2-page-transfer-studio .df2-wizard-studio {
+    gap: 2px;
   }
 
   .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-head {

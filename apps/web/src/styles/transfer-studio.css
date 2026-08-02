@@ -652,7 +652,7 @@
   --df-studio-rail-w: clamp(220px, 20vw, 280px);
   --df-studio-gap: clamp(12px, 1.5vw, 18px);
   --df-studio-panel-min-h: clamp(380px, 58vh, 620px);
-  --df-stepper-node: clamp(34px, 3.2vw, 42px);
+  --df-stepper-node: clamp(26px, 2.4vw, 32px);
   padding-bottom: clamp(16px, 2.5vh, 32px);
 }
 
@@ -684,26 +684,40 @@
 .df2-transfer-studio-chrome {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: clamp(12px, 1.5vw, 16px) clamp(14px, 2vw, 20px);
+  gap: 8px;
+  padding: clamp(10px, 1.2vw, 14px) clamp(12px, 1.6vw, 18px);
   border: 1px solid #e2e8f0;
-  border-radius: 14px;
+  border-radius: var(--df-radius-card, 10px);
   background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
   box-shadow: 0 2px 12px rgba(15, 23, 42, 0.05);
   animation: df2-studio-rise 0.35s ease-out both;
+  /* Content-box width ignores sidebar — stack before stepper + route fight */
+  container-type: inline-size;
+  container-name: studio-chrome;
+  overflow: visible;
 }
 
 .df2-transfer-studio-chrome-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 10px;
   min-width: 0;
+  flex-wrap: wrap;
 }
 
 .df2-transfer-studio-chrome .df2-wizard-studio {
-  flex: 1;
+  flex: 1 1 420px;
   min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.df2-transfer-studio-chrome .df2-route-bar {
+  flex: 0 1 220px;
+  min-width: 0;
+  max-width: 240px;
+  overflow: hidden;
 }
 
 /* Studio stepper — proportional to viewport */
@@ -883,9 +897,9 @@
   background: #fff;
   font-size: 12px;
   min-width: 0;
-  max-width: min(560px, 52vw);
+  max-width: 240px;
   flex-shrink: 1;
-  overflow: visible;
+  overflow: hidden;
 }
 
 .df2-route-bar-live {
@@ -1522,13 +1536,46 @@
   }
 }
 
-/* Only stack chrome when the band truly cannot hold stepper + route */
-@media (max-width: 1100px) {
+/* Stack when chrome content box is tight (sidebar-aware via container) */
+@container studio-chrome (max-width: 900px) {
   .df2-transfer-studio-chrome-row {
     flex-direction: column;
     align-items: stretch;
+    gap: 6px;
   }
 
+  .df2-transfer-studio-chrome .df2-route-bar {
+    max-width: none;
+    width: 100%;
+    flex: 0 0 auto;
+  }
+
+  .df2-transfer-studio-chrome .df2-wizard-studio {
+    flex-basis: auto;
+    max-width: none;
+  }
+}
+
+/* Viewport fallback when container queries unsupported / very narrow */
+@media (max-width: 1280px) {
+  .df2-transfer-studio-chrome-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+
+  .df2-transfer-studio-chrome .df2-route-bar {
+    max-width: none;
+    width: 100%;
+    flex: 0 0 auto;
+  }
+
+  .df2-transfer-studio-chrome .df2-wizard-studio {
+    max-width: none;
+  }
+}
+
+@media (max-width: 1100px) {
   .df2-route-bar {
     max-width: none;
     width: 100%;
@@ -7027,8 +7074,20 @@ button.df2-vd-assist-toggle:focus-visible {
   margin-left: auto;
 }
 .df2-validate-rail-primary-fix {
-  margin-top: 10px;
-  width: 100%;
+  margin-top: 8px;
+  width: auto;
+  max-width: 100%;
+}
+
+/* Validate bottom bar — compact enterprise buttons (never full-bleed) */
+.df2-validate-rail-actions .df2-btn {
+  flex: 0 0 auto;
+  width: auto;
+  max-width: 100%;
+  white-space: nowrap;
+}
+.df2-validate-rail-actions .df2-btn-primary {
+  min-width: 0;
 }
 .df2-vd-remediate-bar .df2-vd-cell-preview-hint {
   margin: 10px 0 0;

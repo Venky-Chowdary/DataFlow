@@ -465,7 +465,8 @@
   color: var(--df-text-secondary, #64748b);
 }
 
-.df2-wizard-step.active .df2-wizard-num {
+/* Default wizard only — studio/compact own their own active glow */
+.df2-wizard:not(.df2-wizard-studio):not(.df2-wizard-compact) .df2-wizard-step.active .df2-wizard-num {
   animation: df2-pulse-ring 2s ease-in-out infinite;
 }
 
@@ -822,14 +823,7 @@ select.df2-select {
   color: #0f766e !important;
 }
 
-/* ─── Toast polish — z-index/animation owned by enterprise-ui.css ─── */
-.dt-toast-title {
-  color: var(--df-text-primary, #0f172a) !important;
-}
-
-.dt-toast-message {
-  color: var(--df-text-secondary, #64748b) !important;
-}
+/* Toast colors owned by dataflow-ui / enterprise-ui — no !important fights */
 
 .df2-hub-node:hover {
   transform: translate(-50%, -50%) scale(1.06);

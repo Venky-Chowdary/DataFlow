@@ -1177,6 +1177,11 @@ export function ValidateDashboard({
       return;
     }
     if (action.kind === "quarantine_and_rerun") {
+      // Identity duplicates survive Quarantine — route to Destination → Advanced.
+      if (duplicateRoot && onOpenIdentitySettings) {
+        onOpenIdentitySettings();
+        return;
+      }
       if (onQuarantineAndRerun) {
         void runQuarantine();
         return;
@@ -1394,18 +1399,11 @@ export function ValidateDashboard({
                     disabled={remediating}
                     leadingIcon={<DtIcon name="settings" size={14} />}
                     onClick={onOpenIdentitySettings}
+                    title={duplicateRoot.fixHint}
                   >
-                    {(() => {
-                      const appendLike = /append|overwrite/.test((syncMode || "").toLowerCase());
-                      if (appendLike) {
-                        return duplicateRoot.primaryKey
-                          ? `Re-run Validate (append · ${duplicateRoot.primaryKey} dupes are warnings)`
-                          : "Re-run Validate (append does not require unique keys)";
-                      }
-                      return duplicateRoot.primaryKey
-                        ? `Change primary key (${duplicateRoot.primaryKey}) or sync mode`
-                        : "Change primary key or sync mode";
-                    })()}
+                    {duplicateRoot.primaryKey
+                      ? `Fix identity (${duplicateRoot.primaryKey})`
+                      : "Fix identity / sync mode"}
                   </Button>
                 )}
                 {uniqueKeySuggestions && uniqueKeySuggestions.length > 0 && onApplyPrimaryKey && (
@@ -1988,7 +1986,7 @@ export function ValidateDashboard({
                         Strip controls &amp; re-run
                       </button>
                     )}
-                    {onQuarantineAndRerun && (
+                    {onQuarantineAndRerun && !duplicateRoot && (
                       <button
                         type="button"
                         className="df2-vd-chip kind-quarantine_and_rerun"
@@ -2205,7 +2203,10 @@ export function ValidateDashboard({
                             action.kind !== "open_mapping_proof"
                             && action.kind !== "mapping_proof"
                             // Identity CTAs already live in Suggested fixes bar + rail.
-                            && !(duplicateRoot && action.kind === "fix_source_keys")
+                            && !(duplicateRoot && (
+                              action.kind === "fix_source_keys"
+                              || action.kind === "quarantine_and_rerun"
+                            ))
                           )
                           .map((action, i) => (
                           <Button
@@ -2528,12 +2529,11 @@ export function ValidateDashboard({
                           variant="primary"
                           leadingIcon={<DtIcon name="settings" size={14} />}
                           onClick={onOpenIdentitySettings}
+                          title={item.fix || duplicateRoot?.fixHint}
                         >
-                          {/append|overwrite/.test((syncMode || "").toLowerCase())
-                            ? "Open Advanced · then Re-run Validate"
-                            : duplicateRoot?.primaryKey
-                              ? `Change primary key (${duplicateRoot.primaryKey})`
-                              : "Change primary key or sync mode"}
+                          {duplicateRoot?.primaryKey
+                            ? `Fix identity (${duplicateRoot.primaryKey})`
+                            : "Fix identity / sync mode"}
                         </Button>
                       )}
                     </div>

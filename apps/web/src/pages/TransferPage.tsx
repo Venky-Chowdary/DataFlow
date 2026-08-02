@@ -2724,6 +2724,27 @@ export function TransferPage({
     // quarantine/strip — send the operator back to Map with a clear reason.
     const dry = preflight?.gates?.find((g) => /dry_run|integrity/i.test(g.id));
     const dryMsg = `${dry?.message || ""} ${JSON.stringify(dry?.details || {})}`;
+    const allGateText = (preflight?.gates ?? [])
+      .map((g) => `${g.message || ""} ${JSON.stringify(g.details || {})}`)
+      .join(" ");
+    const blockerText = (preflight?.blockers ?? []).map((b) => b.message || "").join(" ");
+    const integrityText = `${dryMsg} ${allGateText} ${blockerText}`;
+    // Duplicate identity keys survive Strip/Quarantine/balanced — write-time DQ
+    // still fails. Never switch to balanced and falsely enable Execute.
+    if (
+      duplicateKeyRoot
+      || /duplicate (primary )?key|keys repeat|identity-key|source probe/i.test(integrityText)
+    ) {
+      toast({
+        title: "Cannot quarantine duplicate identity keys",
+        message:
+          "Strip/Quarantine only sanitize encoding. Open Destination → Advanced and set Primary key "
+          + "to a column that is unique in the source, or use append without that PK / dedupe upstream — then Re-run Validate.",
+        tone: "warning",
+      });
+      openIdentitySettings();
+      return;
+    }
     const encodingOnly = /format-control|replacement character|encoding|strip_controls/i.test(dryMsg)
       && !/\([A-Z_]+\)\s*→\s*\w+\s*\([A-Z_]+\)/i.test(dryMsg)
       && !/confidence\s+\d+%\s*</i.test(dryMsg);
@@ -3359,6 +3380,18 @@ export function TransferPage({
       case "rerun_mapping":
         return { onPrimaryFix: () => executePreflight(), primaryFixLabel: action.label };
       case "quarantine_and_rerun":
+        // Never offer Quarantine as the primary Fix when identity duplicates
+        // are in the gate text — Strip/balanced cannot make Execute safe.
+        if (
+          /duplicate (primary )?key|keys repeat|identity-key|source probe/i.test(
+            `${firstBlocker?.message || ""} ${firstBlocker?.impact || ""} ${JSON.stringify(firstBlocker?.source?.details || {})}`,
+          )
+        ) {
+          return {
+            onPrimaryFix: openIdentitySettings,
+            primaryFixLabel: "Fix identity / sync mode",
+          };
+        }
         return {
           onPrimaryFix: () => void quarantineAndRerun(),
           primaryFixLabel: action.label,
@@ -4406,12 +4439,11 @@ export function TransferPage({
                 <span>
                   <strong>OCR scanned PDFs</strong>
                   <small>
-                    When a PDF has no text layer, render pages and run Tesseract before chunking.
                     {ocrStatus?.available === false
-                      ? ` Not ready on this host: ${ocrStatus.message || "install tesseract + pypdfium2/Pillow/pytesseract"}.`
+                      ? "Not ready on this host — hover for install steps."
                       : ocrStatus?.available
-                        ? " Tesseract is available on this API host."
-                        : " Requires system Tesseract on the API host."}
+                        ? "Tesseract ready — used when a PDF has no text layer."
+                        : "Optional · runs Tesseract when a PDF has no text layer."}
                   </small>
                 </span>
               </label>

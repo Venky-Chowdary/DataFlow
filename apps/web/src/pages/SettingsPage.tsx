@@ -4,7 +4,6 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { SectionLoader } from "../components/LoadingState";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageFrame } from "../components/ui/PageFrame";
-import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
@@ -325,10 +324,6 @@ export function SettingsPage() {
     URL.revokeObjectURL(url);
   };
 
-  const enabledSsoCount = ssoConfigs
-    ? Object.values(ssoConfigs).filter((c) => c?.enabled).length
-    : 0;
-
   return (
     <PageShell
       wide
@@ -337,23 +332,6 @@ export function SettingsPage() {
       description="Workspace security, SSO, team access, and audit controls."
     >
       <PageFrame className="df2-settings-workspace">
-        <PageContextBar
-          ariaLabel="Workspace settings summary"
-          stats={[
-            { label: "Organization", value: orgName || "—", icon: "settings", title: "Workspace name applied across the platform" },
-            {
-              label: "SSO",
-              value: enabledSsoCount > 0 ? `${enabledSsoCount} active` : "Not set",
-              icon: "gate",
-              tone: enabledSsoCount > 0 ? "ok" : "warn",
-              title: enabledSsoCount > 0 ? "Identity providers enabled for sign-in" : "No single sign-on provider configured",
-            },
-            { label: "AI provider", value: modelCapabilities?.active_provider ?? "local", icon: "sparkle", tone: "muted", title: "Active model routing provider" },
-            { label: "Job retention", value: `${retention}d`, icon: "clock", tone: "muted", title: "Completed jobs are archived after this many days" },
-            { label: "Timezone", value: timezone, icon: "activity", tone: "muted" },
-          ]}
-        />
-
         <div className="df2-settings-layout">
           <nav className="df2-settings-nav" role="tablist" aria-label="Settings sections">
             {TABS.map((t) => (

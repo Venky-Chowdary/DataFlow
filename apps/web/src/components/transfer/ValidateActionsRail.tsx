@@ -120,7 +120,7 @@ export function ValidateActionsRail({
             )}
             {passed && (
               <p className="df2-validate-rail-hint">
-                Review every gate card on the left — rules, duration, and blockers — then Execute.
+                Review every gate card — rules, duration, and blockers — then Execute.
               </p>
             )}
             {preflight.run_id && (
@@ -174,17 +174,6 @@ export function ValidateActionsRail({
                     ))}
                   </ul>
                 )}
-                {blocked && onPrimaryFix && primaryFixLabel && (
-                  <Button
-                    size="sm"
-                    variant="primary"
-                    className="df2-validate-rail-primary-fix"
-                    onClick={onPrimaryFix}
-                    leadingIcon={<DtIcon name="settings" size={14} />}
-                  >
-                    {primaryFixLabel}
-                  </Button>
-                )}
                 {proofDecision === "review" && (proofWarnings.length > 0 || proofReason) && (
                   <div className="df2-validate-rail-review">
                     <strong><DtIcon name="shield" size={14} /> Review required</strong>
@@ -229,9 +218,24 @@ export function ValidateActionsRail({
           </Button>
         )}
 
+        {blocked && onPrimaryFix && primaryFixLabel && (
+          <Button
+            size="sm"
+            variant="primary"
+            className="df2-validate-rail-primary-fix"
+            onClick={onPrimaryFix}
+            leadingIcon={<DtIcon name="settings" size={14} />}
+            title={primaryFixLabel}
+          >
+            {primaryFixLabel.length > 28
+              ? `${primaryFixLabel.slice(0, 26)}…`
+              : primaryFixLabel}
+          </Button>
+        )}
+
         {blocked && mappingBlocked && mappingReviewCount > 0 && (
           <Button
-            variant="primary"
+            variant={onPrimaryFix ? "secondary" : "primary"}
             onClick={onApproveMappings}
             leadingIcon={<DtIcon name="check" size={16} />}
           >
@@ -241,7 +245,7 @@ export function ValidateActionsRail({
 
         {preflight && !transferLaunch && (
           <Button
-            variant="primary"
+            variant={blocked && onPrimaryFix ? "secondary" : "primary"}
             onClick={onExecute}
             loading={transferring}
             loadingLabel="Starting…"

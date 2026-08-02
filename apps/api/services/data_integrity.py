@@ -774,6 +774,21 @@ def _check_duplicate_keys(
             "primary_key": None,
         }
 
+    # Source-side probe is authoritative: it scans the full table, not just the
+    # preview sample. Must run BEFORE the append/no-enforce early return —
+    # Quarantine→balanced must not green Validate when write-time DQ will fail.
+    probe_authoritative = False
+    if primary_key:
+        findings = source_duplicate_findings or []
+        if findings:
+            sample = ", ".join(
+                f"{f.get('value')}×{f.get('count', 1)}" for f in findings[:3]
+            )
+            issues.append(
+                f"{primary_key}: duplicate key values from source probe ({sample})"
+            )
+            probe_authoritative = True
+
     if not enforce_identity and not issues:
         return {
             "check": "duplicate_keys",
@@ -784,18 +799,6 @@ def _check_duplicate_keys(
             "primary_key": primary_key,
             "dest_kind": dest_kind,
         }
-
-    # Source-side probe is authoritative: it scans the full table, not just the
-    # preview sample, so duplicates that would fail the write batch are caught on Validate.
-    if enforce_identity and primary_key:
-        findings = source_duplicate_findings or []
-        if findings:
-            sample = ", ".join(
-                f"{f.get('value')}×{f.get('count', 1)}" for f in findings[:3]
-            )
-            issues.append(
-                f"{primary_key}: duplicate key values from source probe ({sample})"
-            )
 
     # Single-column sample identity — skip when the only covering constraint is
     # composite (same code under different orgs must not false-fail).
@@ -870,14 +873,33 @@ def _check_duplicate_keys(
     issues = deduped
     blocks = len(issues) > 0
     mode = (validation_mode or "").strip().lower()
+    # Full-table probe found duplicates → always block. Quarantine/Strip/balanced
+    # remediations must not enable Execute when the write batch will fail DQ.
+    if probe_authoritative and blocks:
+        return {
+            "check": "duplicate_keys",
+            "passed": False,
+            "blocks_transfer": True,
+            "issues": issues[:15],
+            "warnings": advisory_warnings,
+            "primary_key": primary_key,
+            "dest_kind": dest_kind,
+            "note": (
+                "Source-table probe found duplicate identity keys — Validate cannot "
+                "pass until Primary key is a unique column, sync mode allows non-unique "
+                "rows without that PK, or the source is deduped. Strip/Quarantine cannot fix this."
+            ),
+        }
     if blocks and mode == "balanced":
-        # Balanced may warn-only for append-like routes where duplicates can be
-        # legal. Upsert/CDC/mirror/SCD2/overwrite/schemaless still fail-closed —
-        # Studio "strip+rerun balanced" must not green-light PK collisions.
+        # Balanced may warn-only for append-like routes where sample-only
+        # duplicates can be legal. Upsert/CDC/mirror/SCD2/overwrite/schemaless
+        # still fail-closed — Studio "strip+rerun balanced" must not green-light
+        # PK collisions that write-time DQ will refuse.
         must_block = (
             schemaless
             or sync_requires_unique_identity(sync, dest_kind=dest_kind)
             or _is_overwrite_like(sync)
+            or not _is_append_like(sync)
         )
         if must_block:
             return {

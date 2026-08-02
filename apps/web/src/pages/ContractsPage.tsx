@@ -5,7 +5,6 @@ import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
-import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { SectionLoader } from "../components/LoadingState";
 import { DtIcon } from "../components/DtIcon";
@@ -236,15 +235,6 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
           />
         ) : (
           <>
-            <PageContextBar
-              ariaLabel="Contracts summary"
-              stats={[
-                { label: "Contracts", value: contracts.length, icon: "shield" },
-                { label: "Signed", value: signed, icon: "check", tone: signed > 0 ? "ok" : "muted" },
-                { label: "Draft", value: drafts, icon: "file", tone: "muted" },
-                { label: "Broken", value: broken, icon: "alert", tone: broken > 0 ? "danger" : "muted" },
-              ]}
-            />
             <PageToolbar
               searchValue={query}
               onSearchChange={setQuery}

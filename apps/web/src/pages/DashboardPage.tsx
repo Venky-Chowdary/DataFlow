@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
 import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
-import { fetchCatalogStats, fetchOpsDlq, fetchOpsFreshness, fetchUsageSummary } from "../lib/api";
+import { fetchCatalogStats, fetchOpsDlq, fetchOpsFreshness } from "../lib/api";
 import { formatRelativeTime } from "../lib/connectionWorkbench";
 import {
   buildStatusDistribution,
@@ -19,7 +19,6 @@ import {
 } from "../components/overview/OverviewCharts";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
-import { PageContextBar } from "../components/ui/PageContextBar";
 import { ProgressCell } from "../components/ui/ProgressCell";
 import { CopyIdChip } from "../components/ui/CopyIdChip";
 import { FreshnessSloPanel } from "../components/overview/FreshnessSloPanel";
@@ -78,7 +77,6 @@ export function DashboardPage({
     unique_drivers?: number;
     catalog_tiles?: number;
   } | null>(null);
-  const [usageRows, setUsageRows] = useState<number | null>(null);
   const [opsLagSeconds, setOpsLagSeconds] = useState<number | null>(null);
   const [dlqCount, setDlqCount] = useState<number | null>(null);
   const [freshness, setFreshness] = useState<{
@@ -110,9 +108,6 @@ export function DashboardPage({
         catalog_tiles: s.catalog_tiles ?? s.transfer_live_tiles,
       }))
       .catch(() => setCatalogStats(null));
-    fetchUsageSummary(30)
-      .then((u) => setUsageRows(u.totals?.rows_written ?? u.rows_written ?? 0))
-      .catch(() => setUsageRows(null));
     fetchOpsFreshness(60)
       .then((f) => {
         setOpsLagSeconds(f.worst_lag_seconds);
@@ -160,13 +155,6 @@ export function DashboardPage({
     [connectors, jobs, schedules],
   );
   const routeCount = topology.edges.length;
-
-  const lastActivityAt = useMemo(() => {
-    const times = jobs
-      .map((j) => new Date(j.created_at).getTime())
-      .filter((t) => Number.isFinite(t) && t > 0);
-    return times.length ? Math.max(...times) : null;
-  }, [jobs]);
 
   const healthScore = useMemo(() => {
     if (connectors.length === 0 && jobs.length === 0) return null;
@@ -250,69 +238,6 @@ export function DashboardPage({
           onOpenPipeline={onOpenPipeline}
           onOpenJob={onOpenJob}
         />
-        <PageContextBar
-          ariaLabel="Live workspace status"
-          stats={[
-            {
-              label: "Running",
-              value: running.length,
-              icon: "activity",
-              tone: running.length > 0 ? "warn" : "muted",
-              title: running.length > 0 ? "Transfers in progress right now" : "No transfers running",
-            },
-            { label: "Completed", value: completed.length, icon: "check", tone: completed.length > 0 ? "ok" : "muted" },
-            {
-              label: "Failed",
-              value: failed.length,
-              icon: "alert",
-              tone: failed.length > 0 ? "danger" : "muted",
-              title: failed.length > 0 ? "Failed transfers — review in Job Theater" : "No failed transfers",
-            },
-            { label: "Active routes", value: routeCount, icon: "transfer", tone: "muted", title: "Distinct source → destination routes in the data plane" },
-            {
-              label: "Last activity",
-              value: lastActivityAt ? formatRelativeTime(new Date(lastActivityAt).toISOString()) : "—",
-              icon: "clock",
-              tone: "muted",
-              title: "Most recent transfer job",
-            },
-            ...(usageRows != null && usageRows > 0
-              ? [{
-                  label: "Usage (30d)",
-                  value: usageRows.toLocaleString(),
-                  icon: "trend",
-                  tone: "ok" as const,
-                  title: "Metered rows written in the last 30 days",
-                }]
-              : []),
-            ...(cdcLagSeconds != null
-              ? [{
-                  label: "CDC lag",
-                  value: `${cdcLagSeconds.toFixed(1)}s`,
-                  icon: "activity",
-                  tone: cdcLagSeconds > 60 ? ("warn" as const) : ("muted" as const),
-                  title: "Worst pipeline freshness lag (ops + recent CDC jobs)",
-                }]
-              : []),
-            ...(dlqCount != null && dlqCount > 0
-              ? [{
-                  label: "DLQ events",
-                  value: dlqCount,
-                  icon: "alert",
-                  tone: "warn" as const,
-                  title: "Quarantine dead-letter events — replay from Job Theater",
-                }]
-              : []),
-          ]}
-          actions={
-            onOpenJobs && jobs.length > 0 ? (
-              <button type="button" className="df2-btn df2-btn-sm" onClick={onOpenJobs}>
-                <DtIcon name="jobs" size={14} /> Job Theater
-              </button>
-            ) : undefined
-          }
-        />
-
         <section className="df2-overview-v3-kpis" aria-label="Key metrics">
           <MetricGlassTile
             label="Rows moved"

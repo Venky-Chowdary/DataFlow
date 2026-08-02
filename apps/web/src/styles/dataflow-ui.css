@@ -490,9 +490,10 @@ body {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  height: 36px;
+  height: var(--df-btn-height, 36px);
+  min-height: var(--df-btn-height, 36px);
   padding: 0 14px;
-  border-radius: 8px;
+  border-radius: var(--df-radius-md, 8px);
   border: 1px solid #e2e8f0;
   background: #fff;
   color: #334155;
@@ -532,7 +533,8 @@ body {
 .df2-btn-ghost:hover { background: #f1f5f9; }
 
 .df2-btn-sm {
-  height: 32px;
+  height: var(--df-btn-height-sm, 30px);
+  min-height: var(--df-btn-height-sm, 30px);
   padding: 0 10px;
   font-size: 12px;
 }
@@ -3207,8 +3209,15 @@ body {
 
 .df2-stream-table {
   width: 100%;
-  min-width: 760px;
+  min-width: 0;
   border-collapse: collapse;
+}
+
+@media (max-width: 1280px) {
+  .df2-stream-table th:nth-child(n+5),
+  .df2-stream-table td:nth-child(n+5) {
+    display: none;
+  }
 }
 
 .df2-stream-table th,

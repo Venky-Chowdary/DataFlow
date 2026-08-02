@@ -5,13 +5,10 @@ import { SectionLoader } from "../components/LoadingState";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { FilterBar } from "../components/ui/FilterBar";
 import { PageFrame } from "../components/ui/PageFrame";
-import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import { API_BASE } from "../lib/types";
 import { fetchMcpManifest, fetchMcpLogs, fetchMcpStatus } from "../lib/api";
-import { formatRelativeTime } from "../lib/connectionWorkbench";
-
 const INTEGRATIONS = [
   {
     id: "cursor",
@@ -119,7 +116,6 @@ export function McpPage() {
   const filteredLogs = logFilter === "all" ? logs : logs.filter((l) => l.status === logFilter);
   const okCount = logs.filter((l) => l.status === "ok").length;
   const errCount = logs.filter((l) => l.status === "error").length;
-  const lastActivityTs = logs.reduce((max, l) => (l.ts > max ? l.ts : max), 0);
 
   return (
     <PageShell
@@ -168,28 +164,6 @@ export function McpPage() {
               </button>
             </div>
           </section>
-
-          <PageContextBar
-            ariaLabel="MCP server summary"
-            stats={[
-              { label: "Tools available", value: tools.length, icon: "zap", title: "transfers · connectors · preflight · jobs" },
-              { label: "Invocations", value: logs.length, icon: "activity", tone: "muted", title: "Recent tool calls logged" },
-              {
-                label: "Errors",
-                value: errCount,
-                icon: "alert",
-                tone: errCount > 0 ? "danger" : "ok",
-                title: `${okCount} succeeded · ${errCount} failed`,
-              },
-              {
-                label: "Last activity",
-                value: lastActivityTs > 0 ? formatRelativeTime(new Date(lastActivityTs).toISOString()) : "—",
-                icon: "clock",
-                tone: "muted",
-              },
-              { label: "Agent mode", value: String(status?.agent_mode ?? "local"), icon: "sparkle", tone: "muted" },
-            ]}
-          />
 
           <div className="df2-mcp-layout">
             <div className="df2-mcp-panel df2-mcp-panel--integrations">

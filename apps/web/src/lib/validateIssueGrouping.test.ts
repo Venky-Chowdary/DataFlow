@@ -99,6 +99,32 @@ describe("findDuplicateKeyRoot", () => {
     assert.equal(display[1].kind, "blocker");
     assert.match(display[1].title, /mapping/i);
   });
+
+  it("append sync hint points at PK clear / unique column — not false green", () => {
+    const pf = basePreflight({
+      gates: [
+        {
+          id: "g9_data_integrity",
+          status: "block",
+          message: "id: duplicate key values from source probe (a×4)",
+          duration_ms: 1,
+          details: { primary_key: "id", issue_texts: ["id: duplicate key values from source probe (a×4)"] },
+        },
+      ],
+      blockers: [
+        {
+          id: "g9_data_integrity",
+          message: "id: duplicate key values from source probe (a×4)",
+          details: { primary_key: "id" },
+        },
+      ],
+    });
+    const root = findDuplicateKeyRoot(pf, "full_refresh_append");
+    assert.ok(root);
+    assert.match(root!.fixHint, /Primary key/i);
+    assert.match(root!.fixHint, /unique column|dedupe/i);
+    assert.doesNotMatch(root!.fixHint, /Re-run Validate after the API picks up/i);
+  });
 });
 
 describe("ISO normalize grouping", () => {

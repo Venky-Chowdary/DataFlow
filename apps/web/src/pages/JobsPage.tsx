@@ -9,7 +9,6 @@ import { Button } from "../components/ui/Button";
 import { CopyIdChip } from "../components/ui/CopyIdChip";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
-import { PageContextBar } from "../components/ui/PageContextBar";
 import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageToolbar } from "../components/ui/PageToolbar";
@@ -236,17 +235,6 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     quarantine: jobs.filter((j) => j.status === "completed_with_quarantine").length,
     failed: jobs.filter((j) => j.status === "failed").length,
   }), [jobs]);
-
-  const rowsMoved = useMemo(
-    () =>
-      jobs
-        .filter((j) => isJobSuccess(j.status))
-        .reduce((sum, j) => sum + (j.records_processed || 0), 0),
-    [jobs],
-  );
-  const successRate = counts.all
-    ? Math.round((counts.completed / counts.all) * 100)
-    : null;
 
   const filtered = useMemo(() => {
     let list = jobs;
@@ -668,32 +656,6 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           />
         ) : (
           <>
-            <PageContextBar
-              ariaLabel="Jobs summary"
-              stats={[
-                { label: "Total jobs", value: counts.all, icon: "jobs" },
-                { label: "Rows moved", value: rowsMoved.toLocaleString(), icon: "layers", tone: "muted", title: "Records from completed jobs only (failed/cancelled runs are excluded so the total does not jump when a retry fails)" },
-                {
-                  label: "Success rate",
-                  value: successRate != null ? `${successRate}%` : "—",
-                  icon: "check",
-                  tone: successRate != null && successRate >= 90 ? "ok" : successRate != null ? "warn" : "muted",
-                  title: `${counts.completed} of ${counts.all} jobs completed`,
-                },
-                {
-                  label: "Running",
-                  value: counts.running,
-                  icon: "activity",
-                  tone: counts.running > 0 ? "warn" : "muted",
-                },
-                {
-                  label: "Failed",
-                  value: counts.failed,
-                  icon: "alert",
-                  tone: counts.failed > 0 ? "danger" : "muted",
-                },
-              ]}
-            />
             <PageToolbar
               searchValue={jobSearch}
               onSearchChange={setJobSearch}
@@ -886,8 +848,24 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                         <strong>{mappingCount || "—"}</strong>
                         <span>Columns</span>
                       </article>
-                      <article className="is-metric-mode">
-                        <strong>{liveJob.operation || liveJob.transfer_request?.sync_mode || "transfer"}</strong>
+                      <article
+                        className="is-metric-mode"
+                        title={liveJob.operation || liveJob.transfer_request?.sync_mode || "transfer"}
+                      >
+                        <strong>
+                          {(() => {
+                            const mode = String(liveJob.operation || liveJob.transfer_request?.sync_mode || "transfer");
+                            const short: Record<string, string> = {
+                              full_refresh_overwrite: "overwrite",
+                              full_refresh_append: "append",
+                              incremental_append: "incr append",
+                              incremental_upsert: "upsert",
+                              cdc: "CDC",
+                              migration: "migration",
+                            };
+                            return short[mode.toLowerCase()] || (mode.length > 12 ? `${mode.slice(0, 10)}…` : mode);
+                          })()}
+                        </strong>
                         <span>Mode</span>
                       </article>
                       <article className={`is-metric-quarantine${rejectedCount > 0 ? " is-warn" : ""}`}>

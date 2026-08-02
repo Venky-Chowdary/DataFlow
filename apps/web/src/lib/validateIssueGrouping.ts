@@ -208,15 +208,13 @@ export function findDuplicateKeyRoot(
   const sync = (syncMode || "").toLowerCase();
   const appendLike =
     sync.includes("append")
-    || sync === "full_refresh_overwrite"
-    || sync === "overwrite"
-    || sync === "full_refresh";
+    && !sync.includes("upsert")
+    && !/overwrite|cdc|mirror|scd/.test(sync);
   const fixHint = appendLike
     ? (
-      "You already chose append/overwrite — uniqueness is not required for this sync mode. "
-      + "Re-run Validate after the API picks up the latest gates. If it still blocks, the destination "
-      + "table may enforce a real PRIMARY KEY on this column: clean duplicate source rows, or pick a "
-      + "different identity column in Destination → Advanced."
+      "Append sync can keep duplicate source rows only when that column is not the destination "
+      + "PRIMARY KEY. If Validate or Execute still blocks, open Destination → Advanced and clear "
+      + "Primary key (or pick a unique column), or dedupe the source."
     )
     : (
       "Open Destination → Advanced and set Primary key to a unique column "

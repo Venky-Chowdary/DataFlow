@@ -3,11 +3,57 @@
    ═══════════════════════════════════════════════════════════ */
 
 :root {
-  --df-tile-min-h: 88px;
-  --df-card-head-pad: 16px 20px;
-  --df-card-pad: 20px;
-  --df-page-section-gap: 16px;
-  --df-grid-gap: 14px;
+  --df-tile-min-h: 72px;
+  /* Density nudges only — pad/radius stay on tokens.css */
+  --df-page-section-gap: 12px;
+  --df-grid-gap: 10px;
+}
+
+@media (min-width: 1024px) and (max-width: 1366px) {
+  :root {
+    --df-tile-min-h: 64px;
+    --df-card-pad: 12px;
+    --df-card-head-pad: 10px 12px;
+    --df-card-footer-pad: 10px 12px;
+    --df-page-section-gap: 10px;
+    --df-grid-gap: 8px;
+    --df-stepper-node: 24px;
+  }
+
+  .df2-app .df2-settings-nav-desc {
+    display: none;
+  }
+
+  .df2-app .df2-settings-nav-item {
+    padding: 8px 10px;
+    gap: 8px;
+  }
+
+  .df2-app .df2-overview-v3-kpis {
+    gap: 8px;
+  }
+
+  .df2-app .df2-metric-glass {
+    min-height: 64px;
+    padding: 8px 10px;
+  }
+
+  .df2-app .df2-xform-card {
+    padding: 10px 12px;
+    border-radius: 10px;
+  }
+
+  .df2-app .df2-xform-card-head h3 {
+    font-size: 14px;
+  }
+
+  .df2-app .df2-mcp-endpoint-card {
+    padding: 10px 12px;
+  }
+
+  .df2-app .df2-jobs-v3-summary {
+    padding: 8px 10px;
+  }
 }
 
 /* Form controls — consistent sizing, no border clip */
@@ -171,6 +217,29 @@
 .df2-btn-block {
   width: 100%;
   justify-content: center;
+}
+
+/*
+ * Enterprise action chrome — footers / rails never stretch a single primary
+ * button full-bleed unless `.df2-btn-block` is explicit. Prevents the Validate
+ * "Fix …" control from becoming a page-width slab.
+ */
+.df2-validate-rail-actions .df2-btn,
+.df2-wizard-footer .df2-btn,
+.df2-map-footer-actions .df2-btn,
+.df2-card-footer .df2-btn,
+.df2-toolbar .df2-btn,
+.df2-page-head-actions .df2-btn {
+  flex: 0 0 auto;
+  width: auto;
+  max-width: 100%;
+  white-space: nowrap;
+}
+.df2-validate-rail-actions .df2-btn.df2-btn-block,
+.df2-wizard-footer .df2-btn.df2-btn-block,
+.df2-card-footer .df2-btn.df2-btn-block {
+  flex: 1 1 auto;
+  width: 100%;
 }
 
 /* Pilot inside app shell — fill content area */

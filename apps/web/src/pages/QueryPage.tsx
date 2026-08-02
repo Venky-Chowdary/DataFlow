@@ -130,12 +130,6 @@ export function QueryPage({ connectors }: QueryPageProps) {
         ) : (
         <>
         <div className="df2-query-form df2-card">
-          <div className="df2-card-head">
-            <div>
-              <h2 className="df2-card-title">Run a query</h2>
-              <p className="df2-card-sub">Safe, read-only SQL or MongoDB — export results when ready.</p>
-            </div>
-          </div>
           <div className="df2-card-body">
           <div className="df2-form-row df2-query-meta">
             <div className="df2-field-flex">
@@ -172,9 +166,8 @@ export function QueryPage({ connectors }: QueryPageProps) {
               connectorType={selected?.type}
               placeholder={queryPlaceholder}
               disabled={queryLoading || exportLoading}
-              height="22rem"
+              height="14rem"
             />
-            <p className="df2-label-hint">SQL mode supports SELECT, CTEs (WITH), EXPLAIN, SHOW, and subqueries. MongoDB mode accepts a JSON filter or an aggregate pipeline array.</p>
           </div>
 
           <div className="df2-query-actions">

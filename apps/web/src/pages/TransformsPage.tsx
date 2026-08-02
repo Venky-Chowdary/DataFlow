@@ -5,7 +5,6 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageSection } from "../components/ui/PageSection";
 import { PageShell } from "../components/ui/PageShell";
-import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
@@ -82,7 +81,7 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
     try {
       setProjects(await fetchTransformProjects());
     } catch (err) {
-      toast({ title: err instanceof Error ? err.message : "Could not load transformation projects", tone: "error" });
+      toast({ title: err instanceof Error ? err.message : "Could not load transforms", tone: "error" });
     } finally {
       setLoading(false);
     }
@@ -138,7 +137,7 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
   const removeModel = (index: number) => {
     if (!editing) return;
     if (editing.models.length <= 1) {
-      toast({ title: "A project needs at least one model.", tone: "warning" });
+      toast({ title: "A transform needs at least one model.", tone: "warning" });
       return;
     }
     setEditing({ ...editing, models: editing.models.filter((_, i) => i !== index) });
@@ -172,7 +171,7 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
   const handleSave = async () => {
     if (!editing) return;
     if (!editing.name.trim()) {
-      toast({ title: "Give the project a name.", tone: "warning" });
+      toast({ title: "Give the transform a name.", tone: "warning" });
       return;
     }
     if (!editing.destination_connector_id) {
@@ -193,15 +192,15 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
       };
       if (editing.id) {
         await updateTransformProject(editing.id, body);
-        toast({ title: "Transformation project updated.", tone: "success" });
+        toast({ title: "Transform updated.", tone: "success" });
       } else {
         await createTransformProject(body);
-        toast({ title: "Transformation project created.", tone: "success" });
+        toast({ title: "Transform created.", tone: "success" });
       }
       setEditing(null);
       await load();
     } catch (err) {
-      toast({ title: err instanceof Error ? err.message : "Could not save project", tone: "error" });
+      toast({ title: err instanceof Error ? err.message : "Could not save transform", tone: "error" });
     } finally {
       setSaving(false);
     }
@@ -209,7 +208,7 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
 
   const handleDelete = async (project: TransformProject) => {
     const ok = await confirm({
-      title: "Delete transformation project?",
+      title: "Delete transform?",
       message: `“${project.name}” and its ${project.models.length} model(s) will be removed. Landed tables are unaffected.`,
       confirmLabel: "Delete",
       tone: "danger",
@@ -217,11 +216,11 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
     if (!ok) return;
     try {
       await deleteTransformProject(project.id);
-      toast({ title: "Project deleted.", tone: "success" });
+      toast({ title: "Transform deleted.", tone: "success" });
       if (editing?.id === project.id) setEditing(null);
       await load();
     } catch (err) {
-      toast({ title: err instanceof Error ? err.message : "Could not delete project", tone: "error" });
+      toast({ title: err instanceof Error ? err.message : "Could not delete transform", tone: "error" });
     }
   };
 
@@ -256,34 +255,16 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
     }
   };
 
-  const activeCount = projects.filter((p) => p.enabled && p.run_after_transfer).length;
-  const modelCount = projects.reduce((n, p) => n + p.models.length, 0);
-
   return (
     <PageShell
-      title="Transformations"
-      description="Post-load SQL models that run at the destination after a transfer lands — views, tables, incremental rollups, and data tests."
-      actions={
-        !editing ? (
-          <Button variant="primary" leadingIcon={<DtIcon name="plus" size={14} />} onClick={openCreate}>
-            New project
-          </Button>
-        ) : null
-      }
+      title="Transforms"
+      description="Post-load SQL models that run at the destination after a transfer lands."
     >
       <PageFrame>
-        <PageContextBar
-          stats={[
-            { label: "Projects", value: projects.length, icon: "layers" },
-            { label: "Auto-run", value: activeCount, icon: "activity" },
-            { label: "Models", value: modelCount, icon: "code" },
-          ]}
-        />
-
         {editing ? (
           <PageSection
-            title={editing.id ? "Edit project" : "New project"}
-            subtitle="Models are SELECT statements. The runner wraps them in CREATE VIEW / CREATE TABLE / incremental MERGE so the materialization you declare is the one that runs."
+            title={editing.id ? "Edit transform" : "New transform"}
+            subtitle="SELECT models · runner materializes VIEW / TABLE / incremental MERGE."
             actions={
               <>
                 <Button variant="ghost" onClick={() => setEditing(null)} disabled={saving}>
@@ -303,7 +284,7 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
                   loading={saving}
                   disabled={previewing}
                 >
-                  Save project
+                  Save transform
                 </Button>
               </>
             }
@@ -418,24 +399,29 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
             <PageToolbar
               searchValue={search}
               onSearchChange={setSearch}
-              searchPlaceholder="Search projects or models…"
+              searchPlaceholder="Search transforms or models…"
+              actions={
+                <Button variant="primary" size="sm" leadingIcon={<DtIcon name="plus" size={14} />} onClick={openCreate}>
+                  New transform
+                </Button>
+              }
             />
 
             {loading ? (
-              <SectionLoader title="Loading transformations" hint="Fetching post-load SQL projects…" />
+              <SectionLoader title="Loading transforms" hint="Fetching post-load SQL models…" />
             ) : filtered.length === 0 ? (
               <EmptyState
                 icon="layers"
-                title={projects.length === 0 ? "No transformation projects yet" : "No matches"}
+                title={projects.length === 0 ? "No transforms yet" : "No matches"}
                 description={
                   projects.length === 0
-                    ? "Define SQL models that run at the destination after a transfer lands — the same capability Airbyte and Fivetran hand off to dbt."
+                    ? "After a transfer lands, define SQL models (views, tables, incremental rollups) that run at the destination warehouse."
                     : "Try a different search."
                 }
                 action={
                   projects.length === 0 ? (
                     <Button variant="primary" leadingIcon={<DtIcon name="plus" size={14} />} onClick={openCreate}>
-                      Create the first project
+                      New transform
                     </Button>
                   ) : undefined
                 }
