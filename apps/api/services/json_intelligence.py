@@ -157,7 +157,7 @@ def apply_struct_policies_to_row(
         depth = STRUCT_FLATTEN_DEPTH if norm == STRUCT_POLICY_FLATTEN_TOP_LEVEL else DEFAULT_FLATTEN_DEPTH
         flat = flatten_struct_field(out[col], parent_key=col, max_depth=depth)
         for k, v in flat.items():
-            if k == col:
+            if k == col or k.startswith("__flatten_"):
                 continue
             if k not in out or out.get(k) is None:
                 # Serialize nested leftovers for the string matrix.
@@ -390,6 +390,12 @@ def flatten_document(
                 if name not in out or out.get(name) is None:
                     out[name] = value
                     added += 1
+                elif out.get(name) != value:
+                    # Underscore-path collision (literal geo_lat vs nested geo.lat).
+                    # Keep first value; stamp sidecar so Map/Validate can fail closed.
+                    collisions = out.setdefault("__flatten_collisions__", [])
+                    if isinstance(collisions, list) and name not in collisions:
+                        collisions.append(name)
 
     for key, value in doc.items():
         if isinstance(value, dict):

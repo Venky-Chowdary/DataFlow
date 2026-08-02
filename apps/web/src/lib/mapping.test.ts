@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  acknowledgeMappingRisk,
   applyDestTypeChange,
   applyStructPolicyChange,
   applyTransformChange,
@@ -72,6 +73,69 @@ describe("transform SSOT round-trip", () => {
     assert.equal(next.transform, "cast_number");
     assert.equal(next.engineTransform, "decimal");
     assert.equal(next.approved, false);
+  });
+});
+
+describe("fail-closed Map approve", () => {
+  it("does not auto-approve exact-name lossy_cast pairs", () => {
+    const editable = editableFromPipelineMappings(
+      [
+        {
+          source: "amount",
+          target: "amount",
+          confidence: 0.99,
+          source_type: "DECIMAL",
+          target_type: "INTEGER",
+          fidelity: "lossy_cast",
+          fidelity_reason: "precision collapse",
+          type_narrowing: true,
+          requires_review: false,
+        },
+      ],
+      [],
+      ["amount"],
+      0.85,
+      { amount: "INTEGER" },
+    );
+    assert.equal(editable[0].approved, false);
+    assert.equal(editable[0].requiresReview, true);
+  });
+
+  it("approveMappingHonestly refuses lossy_cast even when operator Approve-all runs", () => {
+    const next = approveMappingsHonestly([
+      {
+        source: "amount",
+        target: "amount",
+        confidence: 0.99,
+        approved: false,
+        fidelity: "lossy_cast",
+        typeNarrowing: true,
+        inferredType: "DECIMAL",
+        destType: "INTEGER",
+      },
+    ]);
+    assert.equal(next[0].approved, false);
+    assert.equal(next[0].requiresReview, true);
+  });
+
+  it("acknowledgeMappingRisk stamps risk_acknowledged for G4", () => {
+    const next = acknowledgeMappingRisk({
+      source: "amount",
+      target: "amount",
+      confidence: 0.99,
+      approved: false,
+      fidelity: "lossy_cast",
+      typeNarrowing: true,
+      inferredType: "DECIMAL",
+      destType: "INTEGER",
+      fidelityReason: "precision collapse",
+    });
+    assert.equal(next.approved, true);
+    assert.equal(next.riskAcknowledged, true);
+    assert.equal(next.requiresReview, false);
+    const pf = buildPreflightMappings([], [next]);
+    assert.equal(pf[0].risk_acknowledged, true);
+    assert.equal(pf[0].fidelity, "lossy_cast");
   });
 });
 
@@ -210,6 +274,25 @@ describe("STRUCT Map policy", () => {
     assert.ok(sources.includes("addr_city"));
     assert.ok(sources.includes("addr_geo_lat"));
     assert.ok(sources.includes("addr_geo_lon"));
+  });
+
+  it("fails closed when flatten underscore paths collide", () => {
+    const base: EditableMapping[] = [{
+      source: "addr",
+      target: "addr",
+      confidence: 0.9,
+      approved: false,
+      inferredType: "JSON",
+      destType: "JSONB",
+      // literal geo_lat and nested geo.lat both flatten to geo_lat
+      sample: '{"geo_lat":1,"geo":{"lat":2}}',
+      structPolicy: "store_as_json",
+      transform: "parse_json",
+    }];
+    const next = applyStructPolicyChange(base, 0, "flatten_deep");
+    assert.equal(next[0].requiresReview, true);
+    assert.match(next[0].reason || "", /collision/i);
+    assert.ok(!next.some((m) => m.source === "addr_geo_lat" && m.structDerived));
   });
 
   it("array explode synthesizes _elem child", () => {

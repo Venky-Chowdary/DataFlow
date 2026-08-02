@@ -761,11 +761,16 @@ def run_file_preflight(
         )
         for c in columns
     ]
+    from services.mapping_constraints import is_intentional_omit, write_mappings
+
     dest_types = destination_column_types or {}
     dest_nulls = destination_column_nullability or {}
+    write_maps = write_mappings(mappings)
     dest_cols = []
-    for m in mappings:
-        tgt = m["target"]
+    for m in write_maps:
+        tgt = m.get("target") or ""
+        if not tgt:
+            continue
         inferred = dest_types.get(
             tgt,
             m.get("target_type") or column_types.get(m["source"], "VARCHAR"),
@@ -787,7 +792,7 @@ def run_file_preflight(
     plan_mappings = [
         ColumnMapping(
             source=m["source"],
-            target=m["target"],
+            target=m.get("target") or "",
             confidence=float(m.get("confidence", 0.0)),
             transform=m.get("transform"),
             user_override=bool(m.get("user_override", False)),
@@ -801,6 +806,12 @@ def run_file_preflight(
                 m.get("struct_derived") or m.get("structDerived", False)
             ),
             struct_parent=m.get("struct_parent") or m.get("structParent"),
+            fidelity=(m.get("fidelity") or None),
+            type_narrowing=bool(m.get("type_narrowing") or m.get("typeNarrowing", False)),
+            risk_acknowledged=bool(
+                m.get("risk_acknowledged") or m.get("riskAcknowledged", False)
+            ),
+            intentional_omit=is_intentional_omit(m),
         )
         for m in mappings
     ]
@@ -849,7 +860,7 @@ def run_file_preflight(
 
     target_cols = list(drift_dest_types.keys())
     ddl_compatible, ddl_issues = evaluate_ddl_compatibility(
-        mappings=mappings,
+        mappings=write_maps,
         source_schema=column_types,
         target_schema=ddl_dest_types,
         sample_rows=sample_rows,
@@ -868,7 +879,7 @@ def run_file_preflight(
     drift = detect_schema_drift(
         source_columns=columns,
         source_schema=column_types,
-        target_columns=target_cols or [m["target"] for m in mappings],
+        target_columns=target_cols or [m["target"] for m in write_maps if m.get("target")],
         target_schema=drift_dest_types,
         mappings=mappings,
         destination_db_type=destination_db_type,

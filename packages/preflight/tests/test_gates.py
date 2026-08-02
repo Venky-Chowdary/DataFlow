@@ -126,6 +126,43 @@ def test_g4_allows_ambiguous_with_override():
     assert result.passed
 
 
+def test_g4_blocks_lossy_even_with_user_override():
+    """Bare Approve/user_override must not clear lossy_cast without risk_acknowledged."""
+    plan = _happy_plan()
+    plan.mappings[0].fidelity = "lossy_cast"
+    plan.mappings[0].type_narrowing = True
+    plan.mappings[0].user_override = True
+    plan.mappings[0].requires_review = False
+    result = PreflightEngine().run(_happy_ctx(plan))
+    assert not result.passed
+    assert any(b.gate_id.value == "g4_mapping_confidence" for b in result.blockers)
+
+
+def test_g4_allows_lossy_with_risk_acknowledged():
+    plan = _happy_plan()
+    plan.mappings[0].fidelity = "lossy_cast"
+    plan.mappings[0].type_narrowing = True
+    plan.mappings[0].risk_acknowledged = True
+    plan.mappings[0].user_override = True
+    result = PreflightEngine().run(_happy_ctx(plan))
+    assert result.passed
+
+
+def test_g4_skips_intentional_omit_from_confidence():
+    plan = _happy_plan()
+    plan.mappings.append(
+        ColumnMapping(
+            source="SSN",
+            target="",
+            confidence=0.0,
+            transform="omit",
+            intentional_omit=True,
+        )
+    )
+    result = PreflightEngine().run(_happy_ctx(plan))
+    assert result.passed
+
+
 def test_fail_fast_stops_at_first_blocker():
     plan = _happy_plan()
     plan.source.parseable = False

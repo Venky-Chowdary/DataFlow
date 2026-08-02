@@ -96,6 +96,11 @@ export interface EditableMapping {
   fidelityReason?: string;
   /** True when the type path itself narrows (independent of transform). */
   typeNarrowing?: boolean;
+  /**
+   * Operator explicitly accepted precision/type loss for this row.
+   * Required by G4 for lossy_cast / typeNarrowing — bare Approve is not enough.
+   */
+  riskAcknowledged?: boolean;
 }
 
 const STATUS_ENUM_TOKENS = new Set([
@@ -272,18 +277,49 @@ export function inferLogicalFromSample(sample?: string): string {
   return "VARCHAR";
 }
 
+export function isLossyMapping(m: EditableMapping): boolean {
+  return (m.fidelity || "").toLowerCase() === "lossy_cast" || Boolean(m.typeNarrowing);
+}
+
 /** True when Approve-all must leave this row for operator review. */
 export function mappingRequiresManualApproval(m: EditableMapping): boolean {
+  if (isIntentionalOmit(m)) return false;
   if (isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m)) return true;
   if (isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType)) return true;
   if (m.transform === "identity_specialty") return true;
   if (m.structPolicy === "flatten_top_level_keys" || m.structPolicy === "flatten_deep" || m.structPolicy === "explode_rows" || m.structDerived) return true;
+  if (isLossyMapping(m) && !m.riskAcknowledged) return true;
   return false;
 }
 
 /**
+ * Explicit operator acceptance of precision/type loss — unlocks G4 risk_acknowledged.
+ * Distinct from Approve: clients can prove intentional loss was never silent.
+ */
+export function acknowledgeMappingRisk(m: EditableMapping): EditableMapping {
+  if (!isLossyMapping(m)) {
+    return approveMappingHonestly(m);
+  }
+  return {
+    ...m,
+    riskAcknowledged: true,
+    approved: true,
+    requiresReview: false,
+    reason: [
+      m.reason,
+      m.fidelityReason,
+      "Operator acknowledged type/precision loss risk",
+    ]
+      .filter(Boolean)
+      .join(" · "),
+  };
+}
+
+/**
  * Single honesty path for Approve / Approve-all (Map panel + Validate CTA).
- * Never auto-approves specialty identity, STRUCT flatten children, or existing DDL conflicts.
+ * Never auto-approves specialty identity, STRUCT flatten children, lossy casts,
+ * type narrowing, or existing DDL conflicts — fail closed on fidelity risk.
+ * Lossy rows require {@link acknowledgeMappingRisk}, not bare Approve.
  */
 export function approveMappingHonestly(m: EditableMapping): EditableMapping {
   if (isExistingEnumBooleanConflict(m)) {
@@ -304,6 +340,12 @@ export function approveMappingHonestly(m: EditableMapping): EditableMapping {
     };
   }
   if (m.structPolicy === "flatten_top_level_keys" || m.structPolicy === "flatten_deep" || m.structPolicy === "explode_rows" || m.structDerived) {
+    return { ...m, approved: false, requiresReview: true };
+  }
+  if (isLossyMapping(m)) {
+    if (m.riskAcknowledged) {
+      return { ...m, approved: true, requiresReview: false };
+    }
     return { ...m, approved: false, requiresReview: true };
   }
   return { ...m, approved: true, requiresReview: false };
@@ -340,32 +382,59 @@ export function topLevelKeysFromSample(sample?: string, maxKeys = 32): string[] 
   }
 }
 
-/** Deep-promotable leaf paths (depth≤2) for flatten_deep — mirrors backend caps. */
+/**
+ * Deep-promotable leaf paths (depth≤2) for flatten_deep — mirrors backend caps.
+ * Returns flattened column suffixes using `_` (backend SSOT). Collisions between
+ * a literal key `geo_lat` and nested `geo.lat` are detected separately.
+ */
 export function deepKeysFromSample(sample?: string, maxKeys = 64): string[] {
+  return deepKeyPathsFromSample(sample, maxKeys).map((p) => p.flat);
+}
+
+/** JSON path segments + flattened suffix for collision-safe Map synthesis. */
+export function deepKeyPathsFromSample(
+  sample?: string,
+  maxKeys = 64,
+): Array<{ flat: string; path: string[] }> {
   if (!sample) return [];
   const trimmed = sample.trim();
   if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return [];
   try {
     const parsed = JSON.parse(trimmed) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
-    const keys: string[] = [];
-    const walk = (obj: Record<string, unknown>, prefix: string, depth: number) => {
+    const keys: Array<{ flat: string; path: string[] }> = [];
+    const walk = (obj: Record<string, unknown>, path: string[], depth: number) => {
       for (const [key, value] of Object.entries(obj)) {
         const name = String(key).trim();
         if (!name) continue;
-        const path = prefix ? `${prefix}_${name}` : name;
+        const nextPath = [...path, name];
         if (value !== null && typeof value === "object" && !Array.isArray(value) && depth < 2) {
-          walk(value as Record<string, unknown>, path, depth + 1);
+          walk(value as Record<string, unknown>, nextPath, depth + 1);
         } else {
-          keys.push(path);
+          keys.push({ flat: nextPath.join("_"), path: nextPath });
         }
         if (keys.length >= maxKeys) return;
       }
     };
-    walk(parsed as Record<string, unknown>, "", 1);
+    walk(parsed as Record<string, unknown>, [], 1);
     return keys;
   } catch {
     return [];
+  }
+}
+
+function childSampleFromPath(sample: string | undefined, path: string[]): string | undefined {
+  if (!sample || !path.length) return undefined;
+  try {
+    let cur: unknown = JSON.parse(sample.trim());
+    for (const part of path) {
+      if (!cur || typeof cur !== "object" || Array.isArray(cur)) return undefined;
+      cur = (cur as Record<string, unknown>)[part];
+    }
+    if (cur == null) return undefined;
+    return typeof cur === "string" ? cur : JSON.stringify(cur);
+  } catch {
+    return undefined;
   }
 }
 
@@ -374,20 +443,16 @@ function childSampleFromParent(sample: string | undefined, key: string): string 
   try {
     const parsed = JSON.parse(sample.trim()) as Record<string, unknown>;
     if (!parsed || typeof parsed !== "object") return undefined;
-    // Support deep path keys like geo_lat from flatten_deep.
-    if (key.includes("_") && !(key in parsed)) {
-      const parts = key.split("_");
-      let cur: unknown = parsed;
-      for (const part of parts) {
-        if (!cur || typeof cur !== "object" || Array.isArray(cur)) return undefined;
-        cur = (cur as Record<string, unknown>)[part];
-      }
-      if (cur == null) return undefined;
-      return typeof cur === "string" ? cur : JSON.stringify(cur);
+    if (key in parsed) {
+      const v = parsed[key];
+      if (v == null) return undefined;
+      return typeof v === "string" ? v : JSON.stringify(v);
     }
-    const v = parsed[key];
-    if (v == null) return undefined;
-    return typeof v === "string" ? v : JSON.stringify(v);
+    // Deep path keys like geo_lat — prefer exact segment walk when unambiguous.
+    if (key.includes("_")) {
+      return childSampleFromPath(sample, key.split("_"));
+    }
+    return undefined;
   } catch {
     return undefined;
   }
@@ -463,11 +528,11 @@ export function applyStructPolicyChange(
     return next;
   }
 
-  const keys =
+  const keyPaths =
     policy === "flatten_deep"
-      ? deepKeysFromSample(parent.sample)
-      : topLevelKeysFromSample(parent.sample);
-  if (!keys.length) {
+      ? deepKeyPathsFromSample(parent.sample)
+      : topLevelKeysFromSample(parent.sample).map((k) => ({ flat: k, path: [k] }));
+  if (!keyPaths.length) {
     next[parentIdx] = {
       ...nextParent,
       reason:
@@ -478,15 +543,54 @@ export function applyStructPolicyChange(
     return next;
   }
 
+  // Detect underscore-path collisions (literal geo_lat vs nested geo.lat → geo_lat).
+  const flatOwners = new Map<string, string[][]>();
+  for (const kp of keyPaths) {
+    const owners = flatOwners.get(kp.flat) || [];
+    owners.push(kp.path);
+    flatOwners.set(kp.flat, owners);
+  }
+  const collisionFlats = new Set(
+    [...flatOwners.entries()].filter(([, owners]) => owners.length > 1).map(([flat]) => flat),
+  );
+  if (collisionFlats.size) {
+    next[parentIdx] = {
+      ...nextParent,
+      approved: false,
+      requiresReview: true,
+      reason: [
+        nextParent.reason,
+        `Flatten path collision on ${[...collisionFlats].join(", ")} — keep as JSON or rename source keys`,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    };
+  }
+
   const existingSources = new Set(next.map((m) => m.source));
   const children: EditableMapping[] = [];
-  for (const key of keys) {
-    const source = `${parent.source}_${key}`;
-    if (existingSources.has(source)) continue;
-    const sample = childSampleFromParent(parent.sample, key);
+  for (const kp of keyPaths) {
+    if (collisionFlats.has(kp.flat)) continue; // fail-closed: do not invent ambiguous columns
+    const source = `${parent.source}_${kp.flat}`;
+    if (existingSources.has(source)) {
+      next[parentIdx] = {
+        ...next[parentIdx],
+        approved: false,
+        requiresReview: true,
+        reason: [
+          next[parentIdx].reason,
+          `Flatten target ${source} already exists — choose store-as-JSON or remap`,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      };
+      continue;
+    }
+    const sample = childSampleFromPath(parent.sample, kp.path);
     const childType = inferLogicalFromSample(sample);
     const specialty = isSpecialtyLogicalType(childType);
     const structish = isStructLogicalType(childType) || isArrayLogicalType(childType);
+    const dotted = kp.path.join(".");
     children.push({
       source,
       target: normalizeMappingTarget(source),
@@ -496,7 +600,7 @@ export function applyStructPolicyChange(
       sample,
       approved: false,
       requiresReview: true,
-      reason: `Flattened from ${parent.source}.${key} (${childType})`,
+      reason: `Flattened from ${parent.source}.${dotted} (${childType})`,
       transform: specialty ? "identity_specialty" : structish ? "parse_json" : "none",
       engineTransform: structish ? "json" : undefined,
       structDerived: true,
@@ -605,7 +709,7 @@ export function applyDestTypeChange(m: EditableMapping, nextDestType: string): E
       requiresReview: true,
     };
   }
-  return { ...m, destType: nextDestType, approved: false };
+  return { ...m, destType: nextDestType, approved: false, riskAcknowledged: false };
 }
 
 export function isIntentionalOmit(m: EditableMapping): boolean {
@@ -621,6 +725,7 @@ export function applyTransformChange(m: EditableMapping, next: MappingTransform)
       target: "",
       approved: true,
       requiresReview: false,
+      riskAcknowledged: false,
       reason: "Intentionally omitted from transfer",
     };
   }
@@ -633,6 +738,7 @@ export function applyTransformChange(m: EditableMapping, next: MappingTransform)
     target: restoring && !String(m.target || "").trim() ? m.source : m.target,
     reason: restoring && m.reason === "Intentionally omitted from transfer" ? undefined : m.reason,
     approved: false,
+    riskAcknowledged: false,
   };
 }
 
@@ -798,6 +904,9 @@ export function buildPreflightMappings(
         struct_policy: omitted ? undefined : safe.structPolicy,
         struct_derived: safe.structDerived || undefined,
         struct_parent: safe.structParent,
+        fidelity: omitted ? undefined : safe.fidelity,
+        type_narrowing: omitted ? undefined : Boolean(safe.typeNarrowing) || undefined,
+        risk_acknowledged: omitted ? undefined : Boolean(safe.riskAcknowledged) || undefined,
       };
     });
   }
@@ -875,7 +984,6 @@ export function editableFromPipelineMappings(
       pendingDest,
     );
     const requiresReview = Boolean(m.requires_review) || pendingDest;
-    const identityMatch = normalizeMappingTarget(m.source) === m.target.toLowerCase();
     const sourceType = m.source_type;
     const destType = liveDestType || m.target_type || m.source_type;
     const specialty = isSpecialtyLogicalType(sourceType) || isSpecialtyLogicalType(destType);
@@ -899,6 +1007,17 @@ export function editableFromPipelineMappings(
             ? "store_as_json"
             : undefined;
     const engineFidelity = (m.fidelity || "").trim().toLowerCase();
+    const lossyFidelity = engineFidelity === "lossy_cast" || Boolean(m.type_narrowing);
+    // Fail-closed: exact-name identity must still clear confidence + fidelity.
+    // Never auto-approve lossy/narrowing pairs — clients stress-test type remaps.
+    const autoApproved =
+      !requiresReview
+      && !specialty
+      && !structish
+      && !arrayish
+      && !pendingDest
+      && !lossyFidelity
+      && conf >= threshold;
     const base: EditableMapping = {
       source: m.source,
       target: m.target,
@@ -906,13 +1025,7 @@ export function editableFromPipelineMappings(
       inferredType: sourceType,
       destType,
       sample: sampleVal != null ? String(sampleVal) : undefined,
-      approved:
-        !requiresReview
-        && !specialty
-        && !structish
-        && !arrayish
-        && !pendingDest
-        && (conf >= threshold || (identityMatch && !rowCreateNew)),
+      approved: autoApproved,
       isPii: m.is_pii,
       reason: specialty && !(m.reasoning || "").toLowerCase().includes("identity")
         ? [m.reasoning, `${sourceType || destType} — identity payload (dim/SRID not rewritten)`].filter(Boolean).join(" · ")
@@ -922,7 +1035,7 @@ export function editableFromPipelineMappings(
             ? "ARRAY — serialize as JSON/list or explode rows (Map policy)"
             : m.reasoning,
       existsInDestination: existsInDest,
-      requiresReview: requiresReview || specialty || structish || arrayish,
+      requiresReview: requiresReview || specialty || structish || arrayish || lossyFidelity || conf < threshold,
       scoreGap: m.score_gap,
       transform: uiTf === "none" && (structish || arrayish) ? "parse_json" : uiTf,
       engineTransform: engineTf || (structish || arrayish ? "json" : undefined),

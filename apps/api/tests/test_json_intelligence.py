@@ -124,6 +124,17 @@ def test_flatten_deep_promotes_nested_keys():
     assert new_rows[0][new_headers.index("addr_geo_lat")] in (30, "30")
 
 
+def test_flatten_documents_stamps_underscore_path_collisions():
+    """Literal geo_lat vs nested geo.lat must not silently drop a value."""
+    from services.json_intelligence import flatten_document
+
+    doc = {"geo_lat": 1, "geo": {"lat": 2}}
+    flat = flatten_document(doc, max_depth=2)
+    assert flat.get("geo_lat") == 1
+    collisions = flat.get("__flatten_collisions__") or []
+    assert "geo_lat" in collisions
+
+
 def test_explode_rows_duplicates_parent():
     from services.json_intelligence import ARRAY_POLICY_EXPLODE
 

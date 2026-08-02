@@ -872,7 +872,11 @@ def _near_target_by_form(
 
 
 def _type_compat_penalty(src_type: str, tgt_type: str) -> float:
-    """Reduce score for incompatible type pairs using the canonical type-system rules."""
+    """Reduce score for incompatible type pairs using the canonical type-system rules.
+
+    Lossy pairs must not clear Map auto-approve / G4 after an Exact-name boost —
+    demote hard enough that calibrated confidence stays ≤0.84.
+    """
     from services.type_system import is_lossy_coercion, normalize_logical_type
 
     if not src_type or not tgt_type:
@@ -881,12 +885,14 @@ def _type_compat_penalty(src_type: str, tgt_type: str) -> float:
         src = normalize_logical_type(src_type)
         tgt = normalize_logical_type(tgt_type)
         if src == "binary" and tgt != "binary":
-            return 0.4
+            return 0.8
         if src in ("json", "array") and tgt in ("integer", "decimal", "boolean", "date", "datetime", "time", "binary", "uuid"):
-            return 0.35
-        if src in ("decimal",) and tgt == "integer":
-            return 0.15
-        return 0.25
+            return 0.7
+        if src in ("decimal", "float", "double") and tgt == "integer":
+            return 0.55
+        if src in ("datetime", "timestamp") and tgt == "date":
+            return 0.5
+        return 0.5
     return 0.0
 
 def _type_aware_boost(src_type: str, tgt_type: str) -> float:
@@ -1382,6 +1388,18 @@ def map_columns(
         runner_up = alternatives[1]["confidence"] if len(alternatives) > 1 else 0.0
         score_gap = round(max(winner - runner_up, 0.0), 3)
         requires_review = score_gap < 0.08 and not reason.startswith("Exact")
+        src_type = src_types.get(source, "VARCHAR")
+        tgt_type = tgt_types.get(target, "VARCHAR")
+        try:
+            from services.type_system import is_lossy_coercion
+            lossy_pair = is_lossy_coercion(src_type, tgt_type)
+        except Exception:
+            lossy_pair = False
+        if lossy_pair:
+            # Exact-name must not exempt DECIMAL→INTEGER / DATETIME→DATE remaps.
+            requires_review = True
+            score = min(float(score), 0.84)
+            reason = f"{reason} · lossy type pair"
         assigned_sources.add(source)
         used_targets.add(target)
         mappings.append(
@@ -1397,6 +1415,8 @@ def map_columns(
                 "alternatives": alternatives,
                 "score_gap": score_gap,
                 "requires_review": requires_review,
+                "source_type": src_type,
+                "target_type": tgt_type,
             }
         )
 
@@ -1536,6 +1556,16 @@ def map_columns(
         runner_up = alternatives[1]["confidence"] if len(alternatives) > 1 else 0.0
         score_gap = round(max(winner - runner_up, 0.0), 3)
         requires_review = score_gap < 0.08 and not best_reason.startswith("Exact")
+        src_type = src_types.get(source, "VARCHAR")
+        tgt_type = tgt_types.get(best_target, "VARCHAR") if best_target else "VARCHAR"
+        try:
+            from services.type_system import is_lossy_coercion
+            if best_target and is_lossy_coercion(src_type, tgt_type):
+                requires_review = True
+                best_score = min(float(best_score), 0.84)
+                best_reason = f"{best_reason} · lossy type pair"
+        except Exception:
+            pass
         mappings.append(
             {
                 "source": source,

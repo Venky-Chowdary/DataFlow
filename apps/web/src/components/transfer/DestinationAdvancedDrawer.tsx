@@ -247,7 +247,7 @@ export function DestinationAdvancedDrawer({
       subtitle="Sync mode, schema drift policy, validation, and per-stream contracts"
       headerExtra={
         <span className={`df2-badge ${streamNeedsReview ? "df2-badge-run" : "df2-badge-live"}`}>
-          {sourceColumns.length ? (streamNeedsReview ? "Review required" : "Ready") : "Waiting for schema"}
+          {sourceColumns.length ? (streamNeedsReview ? "Review required" : "Fields set") : "Waiting for schema"}
         </span>
       }
       footer={

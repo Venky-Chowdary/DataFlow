@@ -35,10 +35,16 @@ export function isMappingReady(m: EditableMapping, threshold: number): boolean {
   if (m.transform === "omit" || m.engineTransform === "omit") {
     return Boolean(m.approved);
   }
+  const lossy =
+    (m.fidelity || "").toLowerCase() === "lossy_cast" || Boolean(m.typeNarrowing);
+  if (lossy && !m.riskAcknowledged) return false;
   return m.approved || (!m.requiresReview && m.confidence >= threshold);
 }
 
 export function needsMappingReview(m: EditableMapping, threshold: number): boolean {
+  const lossy =
+    (m.fidelity || "").toLowerCase() === "lossy_cast" || Boolean(m.typeNarrowing);
+  if (lossy && !m.riskAcknowledged) return true;
   return !m.approved && (m.requiresReview || m.confidence < threshold);
 }
 

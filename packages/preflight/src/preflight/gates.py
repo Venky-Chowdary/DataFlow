@@ -287,6 +287,8 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
     issues_detail: list[dict] = []
 
     for m in ctx.plan.mappings:
+        if _is_intentional_omit_mapping(m) or not m.target:
+            continue
         target = dest_by_name.get(m.target.lower())
         if not target:
             continue
@@ -787,20 +789,34 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
     )
 
 
+def _is_intentional_omit_mapping(m: Any) -> bool:
+    if getattr(m, "intentional_omit", False):
+        return True
+    raw = str(getattr(m, "transform", None) or "").strip().lower()
+    return raw in {"omit", "intentional_omit", "drop", "exclude"}
+
+
+def _is_lossy_mapping(m: Any) -> bool:
+    fidelity = str(getattr(m, "fidelity", None) or "").strip().lower()
+    if fidelity == "lossy_cast":
+        return True
+    return bool(getattr(m, "type_narrowing", False))
+
+
 def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     threshold = ctx.plan.confidence_threshold
-    # Mapping candidates below the floor (used by the semantic mapper) are too
-    # weak to keep, but values between the floor and the user threshold are
-    # accepted by G4 so G5's data-integrity audit can apply the stricter check.
-    confidence_floor = max(0.55, threshold - 0.3)
+    # Client fail-closed: Map threshold is the G4 floor. Soft band (threshold−0.3)
+    # previously let low-confidence exact-name remaps pass into Execute.
+    confidence_floor = max(0.55, float(threshold or 0.85))
+    active = [m for m in ctx.plan.mappings if not _is_intentional_omit_mapping(m)]
     g4_scope = evidence_scope(
         kind="mapping_confidence",
-        columns=len(ctx.plan.mappings),
+        columns=len(active),
         coverage="full_schema",
         note="All mapped columns · confidence classes (not a row scan)",
     )
-    mapped_targets = {m.target.lower() for m in ctx.plan.mappings}
+    mapped_targets = {m.target.lower() for m in active if m.target}
     unmapped_required = [
         r for r in ctx.plan.required_targets if r.lower() not in mapped_targets
     ]
@@ -812,10 +828,27 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
             _with_scope({"unmapped": unmapped_required}, g4_scope),
         )
 
+    # Lossy / narrowing cannot clear via bare user_override — need risk_acknowledged.
+    lossy_unacked = [
+        m
+        for m in active
+        if _is_lossy_mapping(m) and not getattr(m, "risk_acknowledged", False)
+    ]
+    if lossy_unacked:
+        names = [f"{m.source}→{m.target}" for m in lossy_unacked]
+        return _block(
+            GateId.G4_MAPPING_CONFIDENCE,
+            f"{len(lossy_unacked)} lossy/narrowing mapping(s) require explicit risk acknowledgment",
+            start,
+            _with_scope({"lossy_unacknowledged": names}, g4_scope),
+        )
+
     low_confidence = [
         m
-        for m in ctx.plan.mappings
-        if m.confidence < confidence_floor and not m.user_override
+        for m in active
+        if m.confidence < confidence_floor
+        and not m.user_override
+        and not _is_lossy_mapping(m)
     ]
     if low_confidence:
         names = [f"{m.source}→{m.target} ({m.confidence:.2f})" for m in low_confidence]
@@ -828,8 +861,10 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
 
     ambiguous = [
         m
-        for m in ctx.plan.mappings
-        if m.requires_review and not m.user_override
+        for m in active
+        if m.requires_review
+        and not m.user_override
+        and not _is_lossy_mapping(m)
     ]
     if ambiguous:
         names = [
@@ -844,7 +879,7 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
         )
     return _pass(
         GateId.G4_MAPPING_CONFIDENCE,
-        f"All {len(ctx.plan.mappings)} mappings meet confidence floor",
+        f"All {len(active)} mappings meet confidence floor",
         start,
         _with_scope({}, g4_scope),
     )
@@ -1379,6 +1414,8 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
     for row_idx, row in enumerate(sample_rows, start=1):
         mapped: dict[str, Any] = {}
         for m in ctx.plan.mappings:
+            if _is_intentional_omit_mapping(m) or not m.target:
+                continue
             raw = row.get(m.source, "")
             raw_s = _serialize_for_write(raw)
             if m.transform and str(m.transform).lower().strip() in _NON_DETERMINISTIC:

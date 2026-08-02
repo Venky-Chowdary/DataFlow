@@ -72,6 +72,12 @@ class ColumnMapping:
     struct_policy: str | None = None
     struct_derived: bool = False
     struct_parent: str | None = None
+    # Fidelity stamps from Map / mapping_fidelity — G4 fail-closed on lossy.
+    fidelity: str | None = None
+    type_narrowing: bool = False
+    # Explicit operator acknowledgment of lossy / narrowing risk (not bare Approve).
+    risk_acknowledged: bool = False
+    intentional_omit: bool = False
 
 
 @dataclass

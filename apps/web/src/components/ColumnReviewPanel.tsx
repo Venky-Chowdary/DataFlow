@@ -8,6 +8,7 @@ import {
   STRUCT_POLICIES,
   applyDestTypeChange,
   applyStructPolicyChange,
+  acknowledgeMappingRisk,
   applyTransformChange,
   approveMappingHonestly,
   approveMappingsHonestly,
@@ -18,6 +19,7 @@ import {
   isEnumToBooleanConflict,
   isExistingEnumBooleanConflict,
   isIntentionalOmit,
+  isLossyMapping,
   isSpecialtyLogicalType,
   isStructLogicalType,
   pipelineTransformChip,
@@ -201,7 +203,11 @@ export function ColumnReviewPanel({
   const approveOne = (index: number) => {
     const m = mappings[index];
     if (!m) return;
-    updateMapping(index, approveMappingHonestly(m));
+    // Lossy/narrowing needs explicit risk ack — bare Approve must not clear G4.
+    updateMapping(
+      index,
+      isLossyMapping(m) ? acknowledgeMappingRisk(m) : approveMappingHonestly(m),
+    );
   };
 
   const eligibleApproveCount = countApproveEligible(mappings);
@@ -556,8 +562,21 @@ export function ColumnReviewPanel({
                         </span>
                       )}
                       {m.isPii && <span className="df2-badge df2-badge-run df2-badge-xs">PII</span>}
-                      {m.requiresReview && !m.approved && !omitted && (
+                      {m.requiresReview && !m.approved && !omitted && !isLossyMapping(m) && (
                         <span className="df2-badge df2-badge-run df2-badge-xs">ambiguous</span>
+                      )}
+                      {isLossyMapping(m) && !m.riskAcknowledged && !omitted && (
+                        <span
+                          className="df2-badge df2-badge-run df2-badge-xs"
+                          title={m.fidelityReason || "Type/precision loss — accept risk before Validate"}
+                        >
+                          lossy
+                        </span>
+                      )}
+                      {m.riskAcknowledged && isLossyMapping(m) && !omitted && (
+                        <span className="df2-badge df2-badge-warn df2-badge-xs" title="Operator accepted type/precision loss">
+                          risk accepted
+                        </span>
                       )}
                       {(m.semanticRole === "string_enum" || isEnumToBooleanConflict(m)) && !omitted && (
                         <span className="df2-badge df2-badge-warn df2-badge-xs" title="Status/lifecycle labels — not true/false">
@@ -735,14 +754,21 @@ export function ColumnReviewPanel({
                     {omitted ? (
                       <span className="df2-badge df2-badge-muted df2-badge-xs">Omitted</span>
                     ) : ready ? (
-                      <span className="df2-badge df2-badge-live df2-badge-xs">Ready</span>
+                      <span className="df2-badge df2-badge-live df2-badge-xs">
+                        {m.riskAcknowledged && isLossyMapping(m) ? "Risk accepted" : "Ready"}
+                      </span>
                     ) : (
                       <button
                         type="button"
                         className="df2-btn df2-btn-sm"
                         onClick={() => approveOne(index)}
+                        title={
+                          isLossyMapping(m)
+                            ? m.fidelityReason || "Accept type/precision loss for this column"
+                            : undefined
+                        }
                       >
-                        Approve
+                        {isLossyMapping(m) ? "Accept loss risk" : "Approve"}
                       </button>
                     )}
                   </td>

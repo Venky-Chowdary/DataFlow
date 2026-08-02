@@ -91,12 +91,21 @@ import {
   ENGINE_TO_UI_TRANSFORM,
   engineTransformToUi,
   isEnumToBooleanConflict,
+  isLossyMapping,
   uiTransformToEngine,
   widenMappingToVarchar,
   mappingsFromAnalysis,
   type EditableMapping,
   type MappingTransform,
 } from "../lib/mapping";
+
+/** Remediations must not clear lossy/narrowing without Accept loss risk. */
+function sealRemediationApproval(m: EditableMapping): EditableMapping {
+  if (isLossyMapping(m) && !m.riskAcknowledged) {
+    return { ...m, approved: false, requiresReview: true };
+  }
+  return m;
+}
 import {
   Connector,
   EnhancedAnalysis,
@@ -2700,11 +2709,15 @@ export function TransferPage({
     const changed: string[] = [];
     const next = columnMappings.map((m) => {
       if (m.transform && typed.has(m.transform)) {
-        return { ...m, approved: true };
+        return sealRemediationApproval({ ...m, approved: true });
       }
       const label = m.target ? `${m.source} → ${m.target}` : m.source;
       changed.push(label);
-      return { ...m, transform: "strip_controls" as MappingTransform, approved: true };
+      return sealRemediationApproval({
+        ...m,
+        transform: "strip_controls" as MappingTransform,
+        approved: true,
+      });
     });
     const mode = modeOverride ?? validationMode;
     setColumnMappings(next);
@@ -2815,7 +2828,12 @@ export function TransferPage({
           if (!matches(m)) return m;
           hit = true;
           if (!m.existsInDestination) {
-            return { ...m, destType: action.to_type, approved: true, requiresReview: false };
+            return sealRemediationApproval({
+              ...m,
+              destType: action.to_type,
+              approved: true,
+              requiresReview: false,
+            });
           }
           // Existing DDL cannot be widened by mapping alone — remappoint to a free text
           // column, or invent a new VARCHAR target (ADD / create on write).
@@ -2828,7 +2846,7 @@ export function TransferPage({
             usedTargets.delete(m.target.toLowerCase());
             usedTargets.add(freeText.toLowerCase());
             remapped = true;
-            return {
+            return sealRemediationApproval({
               ...m,
               target: freeText,
               destType: destSchemaMap[freeText] || action.to_type,
@@ -2841,7 +2859,7 @@ export function TransferPage({
               ]
                 .filter(Boolean)
                 .join(" · "),
-            };
+            });
           }
           // Prefer original source name for ADD COLUMN (_id stays _id).
           // Stripping underscores first produced id_text beside DECIMAL id and
@@ -2866,7 +2884,7 @@ export function TransferPage({
           usedTargets.delete(m.target.toLowerCase());
           usedTargets.add(candidate.toLowerCase());
           remapped = true;
-          return {
+          return sealRemediationApproval({
             ...m,
             target: candidate,
             destType: action.to_type,
@@ -2885,7 +2903,7 @@ export function TransferPage({
             ]
               .filter(Boolean)
               .join(" · "),
-          };
+          });
         });
         setColumnMappings(next);
         if (!hit) {
@@ -2937,7 +2955,13 @@ export function TransferPage({
         const next = columnMappings.map((m) => {
           if (matches(m)) {
             hit = true;
-            return { ...m, transform: uiTransform, approved: true, requiresReview: false };
+            return sealRemediationApproval({
+              ...m,
+              transform: uiTransform,
+              approved: true,
+              requiresReview: false,
+              riskAcknowledged: false,
+            });
           }
           return m;
         });
@@ -2967,7 +2991,7 @@ export function TransferPage({
         const next = columnMappings.map((m) => {
           if (!matches(m)) return m;
           hit = true;
-          return {
+          return sealRemediationApproval({
             ...m,
             target: dest,
             destType: destSchemaMap[dest] || m.destType,
@@ -2975,7 +2999,7 @@ export function TransferPage({
             approved: true,
             requiresReview: false,
             reason: [m.reason, `Remapped → ${dest}`].filter(Boolean).join(" · "),
-          };
+          });
         });
         setColumnMappings(next);
         toast({
@@ -3218,11 +3242,14 @@ export function TransferPage({
               tone: "warning",
             });
           } else {
-            // Stay on Validate so operators can review every gate/rule before Execute.
+            const decision = pf.proof_bundle?.transfer_decision?.decision;
+            // Stay on Validate — never claim "Ready" on review-grade.
             toast({
-              title: "Ready to transfer",
-              message: `All ${pf.total_gates} checks passed. Review the gate cards, then Execute when ready.`,
-              tone: "success",
+              title: decision === "approve" ? "Preflight passed" : "Review-grade preflight",
+              message: decision === "approve"
+                ? `All ${pf.total_gates} API checks passed. Review gate cards, then Execute when ready.`
+                : "Checks completed with review-grade decision — re-run or fix blockers before Execute unlocks.",
+              tone: decision === "approve" ? "success" : "warning",
             });
           }
           return;
@@ -3327,11 +3354,23 @@ export function TransferPage({
           tone: "warning",
         });
       } else {
-        toast({
-          title: "Ready to transfer",
-          message: `All ${pf.total_gates} checks passed. Review the gate cards and rules below, then Execute when ready.`,
-          tone: "success",
-        });
+        const isLocal = String(pf.run_id || "").startsWith("pf_local_");
+        const decision = pf.proof_bundle?.transfer_decision?.decision;
+        if (isLocal || decision === "review") {
+          toast({
+            title: isLocal ? "Validated locally" : "Review-grade preflight",
+            message: isLocal
+              ? "Browser preview gates only — re-run Validate when the API responds. Execute stays locked until API approve."
+              : "API returned review-grade — fix blockers or acknowledge policy, then re-run before Execute.",
+            tone: "warning",
+          });
+        } else {
+          toast({
+            title: "Preflight passed",
+            message: `All ${pf.total_gates} API checks passed. Review the gate cards, then Execute when ready.`,
+            tone: "success",
+          });
+        }
       }
     } catch (e) {
       if (sourceKind === "file" && destKindMode === "file_export" && parsed) {
@@ -3471,8 +3510,16 @@ export function TransferPage({
       setStep(STEP_DESTINATION);
       return;
     }
-    if (destKindMode === "database" && !preflight?.passed) {
-      toast({ title: "Preflight required", message: "Run and pass preflight gates before writing to a database.", tone: "warning" });
+    const decision = preflight?.proof_bundle?.transfer_decision?.decision;
+    const localPf = String(preflight?.run_id || "").startsWith("pf_local_");
+    if (!preflight?.passed || decision !== "approve" || localPf) {
+      toast({
+        title: localPf || decision === "review" ? "API Validate required" : "Preflight required",
+        message: localPf || decision === "review"
+          ? "Browser/local or review-grade results cannot unlock Execute. Re-run Validate until API decision is approve."
+          : "Run and pass API preflight gates (decision: approve) before writing.",
+        tone: "warning",
+      });
       setStep(STEP_VALIDATE);
       return;
     }
@@ -3491,7 +3538,7 @@ export function TransferPage({
       return;
     }
 
-    const enforcePreflight = destKindMode === "database";
+    const enforcePreflight = true;
 
     setTransferring(true);
     setStep(STEP_RUN);
@@ -3914,10 +3961,14 @@ export function TransferPage({
     }
   }, [validateContractKey, validatedContractKey, preflight]);
 
-  const canExecute =
-    destKindMode === "file_export"
-      ? canConfigureDest
-      : Boolean(preflight?.passed && validatedContractKey === validateContractKey);
+  /** API-approved preflight only — local/review-grade never unlocks Execute. */
+  const isGovernedExecuteReady = Boolean(
+    preflight?.passed
+    && validatedContractKey === validateContractKey
+    && preflight.proof_bundle?.transfer_decision?.decision === "approve"
+    && !String(preflight.run_id || "").startsWith("pf_local_"),
+  );
+  const canExecute = Boolean(canConfigureDest && isGovernedExecuteReady);
 
   const destinationLabel = destKindMode === "file_export"
     ? exportFormat.toUpperCase()
@@ -5413,27 +5464,33 @@ export function TransferPage({
                     || (Array.isArray(hit.transforms) && hit.transforms[0]?.type)
                     || existing?.transform;
                   const nextType = hit.destination_type || hit.target_type || existing?.destType || "";
-                  bySource.set(src, {
-                    source: src,
-                    target: String(hit.destination || existing?.target || src),
-                    confidence: existing?.confidence ?? 1,
-                    destType: String(nextType),
-                    // Operator already approved the repair proposal — stay on Validate
-                    // and re-run preflight (same path as one-click type/transform fixes).
-                    approved: true,
-                    requiresReview: false,
-                    transform: (xf as EditableMapping["transform"]) || existing?.transform,
-                    reason: [
-                      existing?.reason,
-                      `Repair applied (${hit.destination_type || hit.transform || "update"})`,
-                    ].filter(Boolean).join(" · "),
-                    sample: existing?.sample,
-                    inferredType: existing?.inferredType,
-                    isPii: existing?.isPii,
-                    existsInDestination: existing?.existsInDestination,
-                    createNew: existing?.createNew,
-                    assignmentStrategy: existing?.assignmentStrategy,
-                  });
+                  bySource.set(
+                    src,
+                    sealRemediationApproval({
+                      source: src,
+                      target: String(hit.destination || existing?.target || src),
+                      confidence: existing?.confidence ?? 1,
+                      destType: String(nextType),
+                      // Operator approved the repair proposal — still fail-closed on lossy.
+                      approved: true,
+                      requiresReview: false,
+                      transform: (xf as EditableMapping["transform"]) || existing?.transform,
+                      reason: [
+                        existing?.reason,
+                        `Repair applied (${hit.destination_type || hit.transform || "update"})`,
+                      ].filter(Boolean).join(" · "),
+                      sample: existing?.sample,
+                      inferredType: existing?.inferredType,
+                      isPii: existing?.isPii,
+                      existsInDestination: existing?.existsInDestination,
+                      createNew: existing?.createNew,
+                      assignmentStrategy: existing?.assignmentStrategy,
+                      fidelity: existing?.fidelity,
+                      fidelityReason: existing?.fidelityReason,
+                      typeNarrowing: existing?.typeNarrowing,
+                      riskAcknowledged: existing?.riskAcknowledged,
+                    }),
+                  );
                 }
                 const next = [...bySource.values()];
                 queueMicrotask(() => void executePreflight(next));
@@ -5561,15 +5618,11 @@ export function TransferPage({
             </div>
             <EmptyState
               icon="transfer"
-              title={
-                preflight?.passed && preflight?.proof_bundle?.transfer_decision?.decision !== "review"
-                  ? "Ready to transfer"
-                  : "Confirm Validate before write"
-              }
+              title={isGovernedExecuteReady ? "Ready to transfer" : "Confirm Validate before write"}
               description={
-                preflight?.passed && preflight?.proof_bundle?.transfer_decision?.decision !== "review"
-                  ? "Preflight passed on Validate. Re-open gate cards anytime, or execute here to start the write."
-                  : "This Run step is available, but preflight is missing or review-grade. Prefer Validate → API pass before Execute."
+                isGovernedExecuteReady
+                  ? "API preflight approved on Validate. Re-open gate cards anytime, or execute here to start the write."
+                  : "Execute stays locked until API Validate returns decision approve (local/review-grade cannot unlock)."
               }
             />
           </div>
@@ -5587,9 +5640,11 @@ export function TransferPage({
               </span>
               <span>
                 <strong>Preflight</strong>{" "}
-                {preflight
-                  ? `${preflight.passed_count}/${preflight.total_gates} checks`
-                  : "not proven"}
+                {isGovernedExecuteReady
+                  ? "API approved"
+                  : preflight
+                    ? `${preflight.passed_count}/${preflight.total_gates} · not approved`
+                    : "not proven"}
               </span>
             </div>
             <div className="df2-run-footer-actions">
@@ -5597,11 +5652,13 @@ export function TransferPage({
                 type="button"
                 className="df2-btn df2-btn-primary"
                 onClick={() => void executeTransfer()}
-                disabled={multiStreamUnsupportedMode}
+                disabled={!canExecute || multiStreamUnsupportedMode}
                 title={
                   multiStreamUnsupportedMode
                     ? "Multi-stream SCD2/mirror is not supported — switch mode or select a single stream"
-                    : undefined
+                    : !canExecute
+                      ? "Requires API Validate with decision approve"
+                      : undefined
                 }
               >
                 <DtIcon name="transfer" size={16} /> Execute Transfer
