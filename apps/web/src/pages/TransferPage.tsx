@@ -521,6 +521,17 @@ export function TransferPage({
     destDriverType === "pinecone" ||
     destDriverType === "milvus";
 
+  const writeViaStagingSupported = [
+    "postgresql", "mysql", "sqlite", "sqlserver", "mssql", "oracle",
+    "snowflake", "redshift", "bigquery", "duckdb", "generic_sql",
+  ].includes(destDriverType);
+
+  useEffect(() => {
+    if (!writeViaStagingSupported && writeViaStaging) {
+      setWriteViaStaging(false);
+    }
+  }, [writeViaStagingSupported, writeViaStaging]);
+
   const applyVectorRoutingPlan = (plan: VectorRoutingPlan) => {
     if (plan.content_column) setVectorContentColumn(plan.content_column);
     if (plan.embedding_column) setVectorEmbeddingColumn(plan.embedding_column);
@@ -5286,9 +5297,13 @@ export function TransferPage({
             </div>
             <div className="df2-dest-sync-summary-actions">
               <span className={`df2-badge ${streamNeedsReview ? "df2-badge-run" : "df2-badge-live"}`}>
-                {currentSourceColumns.length
-                  ? (streamNeedsReview ? "Sync contract incomplete" : "Identity fields set")
-                  : "Waiting for schema"}
+                {!currentSourceColumns.length
+                  ? "Waiting for schema"
+                  : streamNeedsReview
+                    ? "Sync contract incomplete"
+                    : requiresPrimaryKey || requiresCursor
+                      ? "Identity fields set"
+                      : "Sync mode ready"}
               </span>
             </div>
             {(syncMode === "scd2" || syncMode === "mirror") && requiresPrimaryKey && !primaryKeyField && (
@@ -5903,6 +5918,7 @@ export function TransferPage({
         }
         writeViaStaging={writeViaStaging}
         onWriteViaStagingChange={setWriteViaStaging}
+        writeViaStagingSupported={writeViaStagingSupported}
         showVectorOptions={
           destDriverType === "pgvector" ||
           destDriverType === "qdrant" ||

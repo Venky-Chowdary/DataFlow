@@ -45,8 +45,8 @@ export const SCHEMA_POLICIES: { id: SchemaPolicyId; label: string; detail: strin
   },
   {
     id: "propagate_all",
-    label: "Propagate everything",
-    detail: "Auto-add columns like Propagate columns; incompatible type changes still need review.",
+    label: "Propagate columns (all streams)",
+    detail: "Same additive ADD COLUMN behavior as Propagate columns (not type auto-rewrite). Incompatible type changes still need review.",
   },
   {
     id: "pause_on_change",

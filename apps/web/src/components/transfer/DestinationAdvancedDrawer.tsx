@@ -111,6 +111,8 @@ interface DestinationAdvancedDrawerProps {
   /** Stage into `{table}_df_staging`, promote only clean rows to primary. */
   writeViaStaging?: boolean;
   onWriteViaStagingChange?: (value: boolean) => void;
+  /** False for Mongo/files/SaaS — hide/disable staging toggle so Execute cannot fail after Validate. */
+  writeViaStagingSupported?: boolean;
   /** Show vector destination embedding controls (pgvector / Qdrant / Weaviate / Pinecone / Milvus). */
   showVectorOptions?: boolean;
   vectorContentColumn?: string;
@@ -247,9 +249,13 @@ export function DestinationAdvancedDrawer({
       subtitle="Sync mode, schema drift policy, validation, and per-stream contracts"
       headerExtra={
         <span className={`df2-badge ${streamNeedsReview ? "df2-badge-run" : "df2-badge-live"}`}>
-          {sourceColumns.length
-            ? (streamNeedsReview ? "Sync contract incomplete" : "Identity fields set")
-            : "Waiting for schema"}
+          {!sourceColumns.length
+            ? "Waiting for schema"
+            : streamNeedsReview
+              ? "Sync contract incomplete"
+              : requiresPrimaryKey || requiresCursor
+                ? "Identity fields set"
+                : "Sync mode ready"}
         </span>
       }
       footer={
@@ -480,18 +486,19 @@ export function DestinationAdvancedDrawer({
             </span>
           </label>
           {onWriteViaStagingChange && (
-            <label className="df2-policy-toggle">
+            <label className={`df2-policy-toggle${writeViaStagingSupported === false ? " is-disabled" : ""}`}>
               <input
                 type="checkbox"
-                checked={writeViaStaging}
+                checked={Boolean(writeViaStaging) && writeViaStagingSupported !== false}
+                disabled={writeViaStagingSupported === false}
                 onChange={(e) => onWriteViaStagingChange(e.target.checked)}
               />
               <span>
                 <strong>Write via staging</strong>
                 <small>
-                  Load into <code>{"{table}_df_staging"}</code> first, then promote only clean rows to
-                  primary. Bad rows stay off primary (DLQ + staging). Strict validation blocks promote
-                  entirely. SQL destinations only.
+                  {writeViaStagingSupported === false
+                    ? "Unavailable for this destination — SQL engines only (PostgreSQL, MySQL, Snowflake, BigQuery, …)."
+                    : "Load into {table}_df_staging first, then promote only clean rows. Bad rows stay off primary (DLQ + staging). Strict validation blocks promote entirely."}
                 </small>
               </span>
             </label>
