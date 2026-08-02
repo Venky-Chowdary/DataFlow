@@ -1160,10 +1160,10 @@ export function mappingHealthSummary(
       (m) => !m.approved && (m.requiresReview || m.confidence < threshold),
     ).length;
     headline = `${reviewCount} mapping(s) need review`;
-    detail = `Approve or fix low-confidence / specialty rows (threshold ${(threshold * 100).toFixed(0)}%).`;
+    detail = `Accept risk on lossy/specialty rows, or Approve eligible rows only (threshold ${(threshold * 100).toFixed(0)}%).`;
   } else if (specialtyIdentity > 0) {
     headline = `${specialtyIdentity} specialty type(s) use identity`;
-    detail = "VECTOR / INTERVAL / GEOGRAPHY travel as identity payloads — dimensions/SRID are not rewritten.";
+    detail = "VECTOR / INTERVAL / GEOGRAPHY travel as identity payloads — Accept risk required before Validate clears G4.";
   } else if (intentionalOmit > 0) {
     headline = `${intentionalOmit} column(s) intentionally omitted`;
     detail = `${ready - intentionalOmit} columns transfer · ${intentionalOmit} excluded by Map policy.`;

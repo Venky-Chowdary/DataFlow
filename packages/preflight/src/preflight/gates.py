@@ -716,16 +716,19 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     ),
                 })
         else:
-            # No samples — declared lossy always blocks unless risk_acknowledged.
-            # Balanced may warn only for non-lossy declared mismatches.
+            # No samples — declared lossy blocks unless risk_acknowledged.
+            # Accept risk must not fall through to a hard block (operator CTA broken).
             risk_ack = bool(getattr(m, "risk_acknowledged", False))
             mode = (ctx.plan.validation_mode or "strict").strip().lower()
-            if lossy and not risk_ack:
+            if lossy and risk_ack:
+                warnings.append(label + " — declared lossy; risk acknowledged (no samples)")
+            elif lossy and not risk_ack:
                 issues.append(label + " — declared lossy; accept risk or remap")
-            elif mode in {"balanced", "review"} and not lossy:
+            elif mode in {"balanced", "review"}:
                 warnings.append(label + " (declared; no samples — balanced warn)")
             else:
-                issues.append(label)
+                # Non-lossy declared mismatch without samples — still fail-closed in strict.
+                issues.append(label + " — no samples to prove coercion")
 
     # Destination NOT NULL contract (Airbyte required-field class): existing
     # typed columns that refuse NULL must not receive nullable sources / empty samples.

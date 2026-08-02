@@ -386,23 +386,10 @@ def _parse_datetime_worker(value: str, date_locale: str) -> str | None:
     text = value.strip()
     if not _DATE_LIKE_RE.search(text):
         return None
-    # Fail closed on ambiguous MDY/DMY — silent US-default corrupts EU dates.
-    # Exception: ambiguous timestamps that also carry a time-of-day are far more
-    # likely to be day-first event data (EU/IN/AU convention) than a US date with
-    # a time; default to DMY so real-world logistics/banking fixtures parse.
+    # Fail closed on ambiguous MDY/DMY — including timestamps with a time-of-day.
+    # Inventing DMY for "06/05/2024 14:30" while AM/PM paths fell through to MDY
+    # silently corrupted calendars across US/EU/IN feeds. Require date_locale.
     if _is_ambiguous_mdy_dmy(text, date_locale):
-        if re.search(r"[ T]\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?\b", text):
-            dayfirst_patterns = (
-                [p for p in DATETIME_PATTERNS if p.startswith("%d")]
-                + [p for p in DATETIME_PATTERNS if p.startswith("%Y")]
-                + [p for p in DATETIME_PATTERNS if p.startswith("%m")]
-            )
-            for fmt in dayfirst_patterns:
-                try:
-                    parsed = datetime.strptime(text, fmt)
-                    return _to_utc_z(parsed)
-                except ValueError:
-                    continue
         return None
     if _EPOCH_MS_RE.match(text):
         ms = int(text)
@@ -858,6 +845,22 @@ def _samples_prefer_boolean_over_integer(samples: list[str] | None) -> bool:
     return (bool_ok / checked) >= 0.9 and (int_ok / checked) < 0.5
 
 
+def _samples_look_temporal(source_samples: list[str] | None) -> bool:
+    """True when most non-empty samples look date/time-like (not status/enum text)."""
+    if not source_samples:
+        return False
+    hits = 0
+    checked = 0
+    for raw in source_samples[:25]:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        checked += 1
+        if _DATE_LIKE_RE.search(text):
+            hits += 1
+    return checked >= 2 and (hits / checked) >= 0.8
+
+
 def infer_transform_for_mapping(
     source_col: str,
     target_col: str,
@@ -881,6 +884,8 @@ def infer_transform_for_mapping(
     tgt_name = target_col.lower()
 
     semantic = detect_semantic_type(source_col, source_samples)
+    samples_temporal = _samples_look_temporal(source_samples)
+    src_temporal = src in {"datetime", "date", "timestamp", "time"}
 
     # Zero-scale DECIMAL/NUMBER targets (e.g. Snowflake NUMBER(38,0)) are integer
     # carriers, so an integer source should be coerced with the integer transform.
@@ -915,16 +920,24 @@ def infer_transform_for_mapping(
         if tgt == "binary":
             return "binary"
         if tgt == "datetime":
-            return "datetime"
+            # Never force a date cast on non-temporal VARCHAR (status → posted_date).
+            # Let G3/G5 declare the type mismatch instead of lucky-parse corruption.
+            if src_temporal or samples_temporal:
+                return "datetime"
+            return "none"
         if tgt == "date":
             # Narrowing a datetime into a date-only column drops the time of day.
             # Only do it when the destination genuinely cannot hold a time;
             # document stores map both logical types onto one instant carrier.
             if src == "datetime" and temporal_carrier_holds_time(destination_db_type):
                 return "datetime"
-            return "date"
+            if src_temporal or samples_temporal:
+                return "date"
+            return "none"
         if tgt == "time":
-            return "time"
+            if src_temporal or samples_temporal:
+                return "time"
+            return "none"
         if tgt == "uuid":
             return "uuid"
         if tgt == "vector":

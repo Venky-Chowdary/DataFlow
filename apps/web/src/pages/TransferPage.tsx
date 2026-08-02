@@ -405,6 +405,9 @@ export function TransferPage({
   const mappingReviewCount = columnMappings.filter((m) =>
     needsMappingReview(m, confidenceThreshold),
   ).length;
+  const riskAckPendingCount = columnMappings.filter(
+    (m) => mappingRequiresRiskAck(m) && !m.riskAcknowledged,
+  ).length;
   const duplicateKeyRoot = useMemo(
     () => findDuplicateKeyRoot(preflight, syncMode),
     [preflight, syncMode],
@@ -5597,6 +5600,7 @@ export function TransferPage({
             preflighting={preflighting}
             transferring={transferring}
             mappingReviewCount={mappingReviewCount}
+            riskAckPendingCount={riskAckPendingCount}
             rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
             transferLaunch={transferLaunch}
             savingContract={savingContract}
@@ -5633,6 +5637,7 @@ export function TransferPage({
             onBack={() => setStep(STEP_MAP)}
             onRunPreflight={() => void executePreflight()}
             onApproveMappings={() => void approveAllAndPreflight()}
+            onOpenMapForRisk={() => setStep(STEP_MAP)}
             onExecute={() => void executeTransfer()}
             onOpenJobTheater={openJobTheater}
             onSaveAsContract={() => void handleSaveAsContract()}
@@ -5658,15 +5663,14 @@ export function TransferPage({
             <div className="df2-run-readiness" aria-label="Run readiness summary">
               <div className="df2-run-readiness-head">
                 {(() => {
-                  const decision = preflight?.proof_bundle?.transfer_decision?.decision;
-                  const apiCleared = Boolean(preflight?.passed) && decision !== "review" && decision !== "block";
-                  if (apiCleared) {
+                  if (isGovernedExecuteReady) {
                     return (
                       <span className="df2-badge df2-badge-live">
-                        <DtIcon name="check" size={12} /> Preflight passed
+                        <DtIcon name="check" size={12} /> Preflight approved
                       </span>
                     );
                   }
+                  const decision = preflight?.proof_bundle?.transfer_decision?.decision;
                   if (preflight?.passed && decision === "review") {
                     return (
                       <span className="df2-badge df2-badge-warn">
@@ -5699,9 +5703,9 @@ export function TransferPage({
                 <strong>{mapDestRouteLabel}</strong>
               </div>
               <p>
-                {preflight?.passed && preflight?.proof_bundle?.transfer_decision?.decision !== "review"
+                {isGovernedExecuteReady
                   ? "Execute now to start governed transfer with live theater progress and reconciliation evidence."
-                  : "Re-open Validate to confirm API preflight before treating this run as fully cleared."}
+                  : "Re-open Validate to confirm API preflight (decision approve) before treating this run as cleared."}
               </p>
             </div>
             <EmptyState

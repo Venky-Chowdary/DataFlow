@@ -405,17 +405,29 @@ def evaluate_ddl_compatibility(
     # compatibility; G9 audits source values (duplicates, nulls, precision).
 
     if not schemaless and table_exists is True and target_schema:
+        # Only enforced identity columns — optional FK *_id must not false-block
+        # partial maps on wide warehouse schemas (client deploy confusion).
         mapped_targets = {str(m.get("target")).lower() for m in mappings if m.get("target")}
-        required_unmapped = [
-            c
-            for c in target_schema
-            if c.lower().endswith("_id") and c.lower() not in mapped_targets and c.lower() not in {"id", "_id"}
-        ]
-        if required_unmapped[:3]:
-            issues.append(
-                f"{len(required_unmapped)} identifier column(s) in destination are unmapped: "
-                f"{', '.join(required_unmapped[:3])}"
-            )
+        pk_set = {
+            str(c).strip().lower()
+            for c in (destination_pk_columns or [])
+            if str(c).strip()
+        }
+        if contract_primary_key and str(contract_primary_key).strip():
+            pk_set.add(str(contract_primary_key).strip().lower())
+        if pk_set:
+            required_unmapped = [
+                c
+                for c in target_schema
+                if c.lower() in pk_set
+                and c.lower() not in mapped_targets
+                and c.lower() not in {"id", "_id"}
+            ]
+            if required_unmapped[:3]:
+                issues.append(
+                    f"{len(required_unmapped)} primary-key column(s) in destination are unmapped: "
+                    f"{', '.join(required_unmapped[:3])}"
+                )
 
     # Keep issues visible even when dest is disconnected — G2 still blocks connectivity,
     # but operators must see schema hazards immediately rather than a false clean G6.

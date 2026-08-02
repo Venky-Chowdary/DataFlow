@@ -832,41 +832,51 @@ export function ValidateDashboard({
     verifiedRunRef.current = runKey;
     pendingVerifyRef.current = false;
     const dry = preflight.gates?.find((g) => /dry_run|integrity/i.test(g.id));
-    // Execute unlock requires full preflight.passed — a single dry-run/integrity pass
-    // is progress, not clearance.
-    const fullyCleared = Boolean(preflight.passed);
+    // Execute unlock requires decision=approve — passed/review-grade must not greenwash.
+    const decision = preflight.proof_bundle?.transfer_decision?.decision;
+    const executeUnlocked =
+      Boolean(preflight.passed)
+      && decision === "approve"
+      && !String(preflight.run_id || "").startsWith("pf_local_");
+    const reviewGrade = Boolean(preflight.passed) && decision !== "approve";
     const dryPass = dry?.status === "pass";
-    const outcome = fullyCleared
-      ? "Preflight passed — Execute unlocked; Gate-8 post-write proof still pending"
-      : dryPass
-        ? "Dry-run/integrity improved — still blocked by other gates"
-        : "Still blocked — remap columns on Map";
+    const outcome = executeUnlocked
+      ? "Preflight approved — Execute unlocked; Gate-8 post-write proof still pending"
+      : reviewGrade
+        ? "Review-grade preflight — Execute stays locked until decision is approve"
+        : dryPass
+          ? "Dry-run/integrity improved — still blocked by other gates"
+          : "Still blocked — remap columns on Map";
     const op = lastOpRef.current;
     const resultSteps: string[] = [];
     if (op?.steps?.length) {
       resultSteps.push(...op.steps);
     }
-    if (fullyCleared) {
+    if (executeUnlocked) {
       resultSteps.push(
         `Re-validation: ${preflight.passed_count ?? 0}/${preflight.total_gates ?? 0} gates passed.`,
         op?.kind === "strip_controls" || op?.kind === "quarantine_strip"
           ? "Jobs quarantine stays empty unless cells still fail during Execute — Strip cleaned them before write."
-          : "Execute is unlocked when all gates pass.",
+          : "Execute is unlocked (decision approve).",
       );
     } else {
       resultSteps.push(
-        `Still blocked: ${preflight.passed_count ?? 0}/${preflight.total_gates ?? 0} gates passed` +
-          (dryPass ? " (dry-run/integrity ok)." : `. ${dry?.message || "see Validation rules"}.`),
+        reviewGrade
+          ? `Review-grade: ${preflight.passed_count ?? 0}/${preflight.total_gates ?? 0} gates passed — complete acknowledgments or Map fixes.`
+          : `Still blocked: ${preflight.passed_count ?? 0}/${preflight.total_gates ?? 0} gates passed` +
+            (dryPass ? " (dry-run/integrity ok)." : `. ${dry?.message || "see Validation rules"}.`),
         "Quarantine/Strip cannot fix wrong column type mappings — use Map.",
       );
     }
-    const detail = fullyCleared
+    const detail = executeUnlocked
       ? (op
         ? `${op.title} succeeded. ${op.columnsChanged.length} mapping(s) now use strip_controls.`
-        : "All gates passed — Execute unlocked.")
-      : dryPass
-        ? `Dry-run/integrity passes, but preflight is not fully clear (${preflight.passed_count ?? 0}/${preflight.total_gates ?? 0}). Execute stays locked.`
-        : `Dry-run still blocked: ${dry?.message || "see Validation rules"}.`;
+        : "All gates approved — Execute unlocked.")
+      : reviewGrade
+        ? `Gates cleared at review-grade (${preflight.passed_count ?? 0}/${preflight.total_gates ?? 0}). Execute stays locked until decision approve.`
+        : dryPass
+          ? `Dry-run/integrity passes, but preflight is not fully clear (${preflight.passed_count ?? 0}/${preflight.total_gates ?? 0}). Execute stays locked.`
+          : `Dry-run still blocked: ${dry?.message || "see Validation rules"}.`;
     setRemediationLog((prev) => {
       const next = prev.map((row, idx) =>
         idx === 0 && /waiting for re-validation/i.test(row.outcome)
@@ -1684,9 +1694,11 @@ export function ValidateDashboard({
             <p className="df2-vd-cell-preview-hint">
               {coerceOnly ? (
                 <>
-                  This is <strong>not a failed validation</strong> and not silent data loss.
-                  Coerce means a value will be converted to fit the destination type
-                  (example: boolean <code>false</code> written into a text column becomes the string <code>&quot;false&quot;</code>).
+                  This is <strong>not a failed validation</strong>.
+                  Coerce means a value is converted to fit the destination type
+                  (example: boolean <code>false</code> → text <code>&quot;false&quot;</code>).
+                  Type-fit coercions keep the value; if a cell shows <strong>NULL</strong> or
+                  fidelity collapse in the table below, that is <strong>not</strong> full fidelity — review before Execute.
                   {!preflight && (
                     <> The ring shows 0% ready because you have not run preflight yet — use <strong>Run preflight</strong> to score the gates.</>
                   )}

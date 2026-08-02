@@ -10,6 +10,8 @@ interface ValidateActionsRailProps {
   preflighting: boolean;
   transferring: boolean;
   mappingReviewCount: number;
+  /** Lossy/specialty rows still needing Accept risk — Approve-all cannot clear these. */
+  riskAckPendingCount?: number;
   rowCount?: number;
   transferLaunch?: { jobId: string; rows: number } | null;
   savingContract?: boolean;
@@ -24,6 +26,8 @@ interface ValidateActionsRailProps {
   onBack: () => void;
   onRunPreflight: () => void;
   onApproveMappings: () => void;
+  /** Open Map filtered to Accept-risk rows. */
+  onOpenMapForRisk?: () => void;
   onExecute: () => void;
   onOpenJobTheater: () => void;
   onSaveAsContract?: () => void;
@@ -38,6 +42,7 @@ export function ValidateActionsRail({
   preflighting,
   transferring,
   mappingReviewCount,
+  riskAckPendingCount = 0,
   rowCount,
   transferLaunch,
   savingContract,
@@ -49,6 +54,7 @@ export function ValidateActionsRail({
   onBack,
   onRunPreflight,
   onApproveMappings,
+  onOpenMapForRisk,
   onExecute,
   onOpenJobTheater,
   onSaveAsContract,
@@ -161,7 +167,18 @@ export function ValidateActionsRail({
                 </Button>
               )}
 
-              {blocked && mappingBlocked && mappingReviewCount > 0 && (
+              {blocked && riskAckPendingCount > 0 && (
+                <Button
+                  variant="secondary"
+                  onClick={onOpenMapForRisk || onBack}
+                  leadingIcon={<DtIcon name="shield" size={16} />}
+                  title="Accept risk on Map — Approve-all cannot clear lossy/specialty rows"
+                >
+                  Accept risk on Map
+                </Button>
+              )}
+
+              {blocked && mappingBlocked && mappingReviewCount > 0 && riskAckPendingCount === 0 && (
                 <Button
                   variant="secondary"
                   onClick={onApproveMappings}

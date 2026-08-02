@@ -1,4 +1,4 @@
-import type { EditableMapping } from "./mapping";
+import { mappingRequiresRiskAck, type EditableMapping } from "./mapping";
 
 export type ColumnFilter =
   | "all"
@@ -21,26 +21,11 @@ export interface IndexedMapping {
   index: number;
 }
 
-function mappingNeedsRiskAck(m: EditableMapping): boolean {
-  const fidelity = (m.fidelity || "").toLowerCase();
-  if (fidelity === "lossy_cast" || fidelity === "mutate" || m.typeNarrowing) return true;
-  if (m.transform === "identity_specialty") return true;
-  if (
-    m.structPolicy === "flatten_top_level_keys"
-    || m.structPolicy === "flatten_deep"
-    || m.structPolicy === "explode_rows"
-    || m.structDerived
-  ) {
-    return true;
-  }
-  return false;
-}
-
 export function mappingTier(
   m: EditableMapping,
   threshold: number,
 ): MappingTier {
-  if (mappingNeedsRiskAck(m) && !m.riskAcknowledged) return "block";
+  if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) return "block";
   if (m.approved || (m.confidence >= threshold && !m.requiresReview)) return "ok";
   if (m.confidence >= threshold - 0.1) return "warn";
   return "block";
@@ -50,12 +35,12 @@ export function isMappingReady(m: EditableMapping, threshold: number): boolean {
   if (m.transform === "omit" || m.engineTransform === "omit") {
     return Boolean(m.approved);
   }
-  if (mappingNeedsRiskAck(m) && !m.riskAcknowledged) return false;
+  if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) return false;
   return m.approved || (!m.requiresReview && m.confidence >= threshold);
 }
 
 export function needsMappingReview(m: EditableMapping, threshold: number): boolean {
-  if (mappingNeedsRiskAck(m) && !m.riskAcknowledged) return true;
+  if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) return true;
   return !m.approved && (m.requiresReview || m.confidence < threshold);
 }
 

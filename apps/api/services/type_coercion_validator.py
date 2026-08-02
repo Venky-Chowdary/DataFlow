@@ -83,7 +83,12 @@ def validate_mapping_coercions(
             severity = "warn"
         elif lossy:
             risk_ack = bool(m.get("risk_acknowledged") or m.get("riskAcknowledged"))
-            severity = "warn" if risk_ack and balanced else "block"
+            # Balanced Map-time advisory matches G3 posture; Validate still
+            # fail-fasts via sample/risk gates. Strict: Accept risk → warn.
+            if risk_ack or balanced:
+                severity = "warn"
+            else:
+                severity = "block"
         elif src_logical == tgt_logical:
             # Unreachable when precision_collapse is False (continued above).
             continue
