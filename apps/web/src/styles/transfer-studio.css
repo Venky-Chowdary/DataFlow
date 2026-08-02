@@ -1096,17 +1096,40 @@
 .df2-page-transfer-studio .df2-source-kind-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  gap: 8px;
 }
 
 .df2-page-transfer-studio .df2-source-kind-tile {
-  padding: 14px 12px;
-  min-height: 96px;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  min-height: 0;
 }
 
 .df2-page-transfer-studio .df2-source-kind-icon {
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  flex-shrink: 0;
+}
+
+.df2-page-transfer-studio .df2-source-kind-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.df2-page-transfer-studio .df2-source-kind-tile strong {
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.df2-page-transfer-studio .df2-source-kind-desc {
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 11px;
 }
 
 /* Structure preview fills secondary pane */
@@ -1499,8 +1522,8 @@
   }
 }
 
-/* Standard desktop / 16" MacBook */
-@media (max-width: 1280px) {
+/* Only stack chrome when the band truly cannot hold stepper + route */
+@media (max-width: 1100px) {
   .df2-transfer-studio-chrome-row {
     flex-direction: column;
     align-items: stretch;

@@ -50,19 +50,22 @@ export function SourceKindTiles({ value, onChange }: SourceKindTilesProps) {
             role="radio"
             aria-checked={value === opt.id}
             className={`df2-source-kind-tile ${value === opt.id ? "active" : ""}`}
+            title={`${opt.label} — ${opt.desc}`}
             onClick={() => onChange(opt.id)}
           >
-            <span className="df2-source-kind-icon">
-              <DtIcon name={opt.icon} size={22} />
+            <span className="df2-source-kind-icon" aria-hidden>
+              <DtIcon name={opt.icon} size={20} />
             </span>
-            <strong>{opt.label}</strong>
-            <span>{opt.desc}</span>
+            <span className="df2-source-kind-copy">
+              <strong>{opt.label}</strong>
+              <span className="df2-source-kind-desc">{opt.desc}</span>
+            </span>
           </button>
         ))}
       </div>
-      <p className="df2-source-kind-hint">
+      <p className="df2-source-kind-hint" title={active.mindset}>
         <DtIcon name="sparkle" size={14} />
-        {active.mindset}
+        <span>{active.mindset}</span>
       </p>
     </div>
   );

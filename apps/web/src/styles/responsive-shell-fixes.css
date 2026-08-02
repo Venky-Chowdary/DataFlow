@@ -378,32 +378,41 @@
   overflow: visible;
 }
 
-/* ─── Transfer Studio: 12–14" laptops ─── */
+/* ─── Transfer Studio: 12–16" laptops ───
+   Keep the source/dest 50/50 split side-by-side on typical laptop widths.
+   Stacking at 1440px was the density killer on 13–14" screens — the preview
+   dropped below the form and forced page scroll. Only stack when the pane
+   truly cannot hold two columns (~1100px). */
 @media (max-width: 1440px) {
   .df2-page-transfer-studio {
-    --df-studio-rail-w: clamp(200px, 18vw, 240px);
-    --df-studio-panel-min-h: clamp(260px, 42vh, 480px);
+    --df-studio-rail-w: clamp(180px, 16vw, 220px);
+    --df-studio-panel-min-h: clamp(240px, 40vh, 440px);
+    --df-studio-gap: 10px;
   }
 
   .df2-transfer-studio-body {
     grid-template-columns: minmax(0, 1fr) var(--df-studio-rail-w);
   }
 
+  /* Tighter split — still two columns on 13–14" */
   .df2-transfer-step-split {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+    gap: 12px;
+  }
+
+  .df2-transfer-step-primary,
+  .df2-transfer-step-secondary {
+    gap: 10px;
   }
 
   .df2-transfer-step-secondary {
-    border-left: none;
-    padding-left: 0;
-    border-top: 1px solid #f1f5f9;
-    padding-top: 16px;
+    padding-left: 12px;
   }
 }
 
 @media (max-width: 1280px) {
   .df2-page-transfer-studio {
-    --df-studio-panel-min-h: clamp(240px, 38vh, 420px);
+    --df-studio-panel-min-h: clamp(220px, 36vh, 400px);
   }
 
   .df2-transfer-studio-body {
@@ -430,6 +439,20 @@
 
   .df2-transfer-studio-body:not(.is-map-step) .df2-transfer-main-panel {
     min-height: auto;
+  }
+}
+
+/* Narrow laptop / small window — only then stack primary over secondary */
+@media (max-width: 1100px) {
+  .df2-transfer-step-split {
+    grid-template-columns: 1fr;
+  }
+
+  .df2-transfer-step-secondary {
+    border-left: none;
+    padding-left: 0;
+    border-top: 1px solid #f1f5f9;
+    padding-top: 12px;
   }
 }
 

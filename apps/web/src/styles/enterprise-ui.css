@@ -9782,15 +9782,215 @@
 /* Laptop / desktop density — keep grids readable, never cramped */
 @media (min-width: 1024px) and (max-width: 1366px) {
   :root {
-    --df-page-gutter: 18px;
-    --df-table-row-height: 40px;
-    --df-table-cell-pad-y: 9px;
-    --df-table-cell-pad-x: 12px;
-    --df-card-pad: 14px;
+    --df-page-gutter: 14px;
+    --df-table-row-height: 38px;
+    --df-table-cell-pad-y: 8px;
+    --df-table-cell-pad-x: 10px;
+    --df-card-pad: 12px;
   }
 
   .df2-content {
     padding: var(--df-page-gutter);
+  }
+
+  /* ── Transfer Studio: reclaim vertical space on 13–14" ── */
+  .df2-page-transfer-studio .df2-transfer-studio-chrome {
+    gap: 6px;
+    padding: 8px 12px;
+    border-radius: 10px;
+  }
+
+  .df2-page-transfer-studio .df2-wizard-progress {
+    display: none; /* track already shows step state */
+  }
+
+  .df2-page-transfer-studio .df2-wizard-studio {
+    gap: 4px;
+  }
+
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-step {
+    padding: 4px 8px;
+    gap: 6px;
+  }
+
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label {
+    font-size: 12px;
+  }
+
+  .df2-page-transfer-studio .df2-route-bar-meta {
+    display: none; /* icon + short label only — full path is in the form */
+  }
+
+  .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-head {
+    padding: 8px 12px !important;
+  }
+
+  .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-head .df2-card-sub {
+    display: none; /* titles stay; long subcopy moves into tooltips / forms */
+  }
+
+  .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-body {
+    padding: 10px 12px !important;
+  }
+
+  /* Source kind: icon + label only — desc lives in title= */
+  .df2-page-transfer-studio .df2-source-kind-desc,
+  .df2-page-transfer-studio .df2-source-kind-hint {
+    display: none;
+  }
+
+  .df2-page-transfer-studio .df2-source-kind-tile {
+    padding: 8px 10px;
+    gap: 8px;
+    border-width: 1.5px;
+    border-radius: 10px;
+  }
+
+  .df2-page-transfer-studio .df2-source-kind-icon {
+    width: 28px;
+    height: 28px;
+  }
+
+  .df2-page-transfer-studio .df2-upload.df2-upload-studio {
+    min-height: 120px !important;
+    padding: 16px 14px !important;
+  }
+
+  .df2-page-transfer-studio .df2-upload-icon {
+    width: 40px;
+    height: 40px;
+  }
+
+  /* Source aside: collapse the 3-step profiling cards into a thin strip */
+  .df2-page-transfer-studio .df2-source-aside-steps {
+    display: none;
+  }
+
+  .df2-page-transfer-studio .df2-structure-preview {
+    padding: 10px;
+    min-height: 0;
+  }
+
+  .df2-page-transfer-studio .df2-transfer-step-secondary .df2-structure-preview {
+    min-height: 160px;
+  }
+
+  /* Destination connectors: icon + name; meta stays in title= */
+  .df2-page-transfer-studio .df2-dest-connector-grid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 6px;
+  }
+
+  .df2-page-transfer-studio .df2-dest-connector-card {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+  }
+
+  .df2-page-transfer-studio .df2-dest-connector-card-meta,
+  .df2-page-transfer-studio .df2-dest-connector-card-status {
+    display: none;
+  }
+
+  .df2-page-transfer-studio .df2-dest-picker-head {
+    margin-bottom: 6px;
+  }
+
+  .df2-page-transfer-studio .df2-dest-sync-summary {
+    padding: 8px 10px;
+  }
+
+  /* Validate: smaller hero ring — proof still visible */
+  .df2-page-transfer-studio .df2-vd-hero {
+    gap: 12px;
+    padding: 12px;
+  }
+
+  .df2-page-transfer-studio .df2-vd-hero-ring {
+    width: 52px;
+    height: 52px;
+    flex-shrink: 0;
+  }
+
+  .df2-page-transfer-studio .df2-vd-hero-counts {
+    margin-top: 6px;
+  }
+
+  /* Result: denser metrics; secondary proof cards stay but tighter */
+  .df2-page-transfer-studio .df2-result-metrics {
+    gap: 6px;
+  }
+
+  .df2-page-transfer-studio .df2-result-metric {
+    padding: 8px 10px;
+  }
+
+  .df2-page-transfer-studio .df2-result-phases,
+  .df2-page-transfer-studio .df2-result-transforms,
+  .df2-page-transfer-studio .df2-result-reuse,
+  .df2-page-transfer-studio .df2-result-replay {
+    padding: 8px 10px;
+    border-radius: 10px;
+  }
+
+  /* Jobs detail: compact the summary band — identity + key metrics only */
+  .df2-jobs-v3-summary {
+    padding: 10px 12px;
+    gap: 10px;
+  }
+
+  .df2-jobs-v3-summary-metrics {
+    grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
+    gap: 6px;
+  }
+
+  .df2-jobs-v3-summary-metrics article {
+    padding: 6px 8px;
+  }
+
+  .df2-jobs-v3-summary-metrics article strong {
+    font-size: 14px;
+  }
+
+  .df2-jobs-v3-summary-route span {
+    display: none; /* "Source" / "Destination" labels — icons + names remain */
+  }
+}
+
+/* Short laptop viewports (13–14" at 800–900px tall) — reclaim height first */
+@media (max-height: 900px) and (min-width: 1024px) {
+  .df2-page-transfer-studio .df2-transfer-studio-chrome {
+    gap: 4px;
+    padding: 6px 10px;
+  }
+
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-step.active {
+    transform: none; /* scale glow eats vertical rhythm */
+  }
+
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-step.active .df2-wizard-num {
+    animation: none;
+    box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14);
+  }
+
+  .df2-page-transfer-studio .df2-source-kind-hint,
+  .df2-page-transfer-studio .df2-source-aside-steps {
+    display: none;
+  }
+
+  .df2-page-transfer-studio .df2-upload.df2-upload-studio {
+    min-height: 100px !important;
+    padding: 12px 12px !important;
+  }
+
+  .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-head .df2-card-sub {
+    display: none;
+  }
+
+  .df2-page-transfer-studio .df2-vd-hero-ring {
+    width: 44px;
+    height: 44px;
   }
 }
 

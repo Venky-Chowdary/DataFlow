@@ -922,6 +922,13 @@ select.df2-select {
   transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
 }
 
+.df2-source-kind-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
 .df2-source-kind-tile:hover {
   transform: translateY(-2px);
   border-color: #99f6e4;
@@ -951,7 +958,7 @@ select.df2-select {
   color: var(--df-text-primary, #0f172a);
 }
 
-.df2-source-kind-tile span:last-child {
+.df2-source-kind-desc {
   font-size: 12px;
   color: var(--df-text-muted, #64748b);
   line-height: 1.4;
@@ -2807,7 +2814,9 @@ textarea.df2-pilot-composer textarea {
   gap: 12px;
 }
 
-@media (max-width: 900px) {
+/* Only collapse kind tiles on true phone widths — a 13" split pane is ~600px
+   wide and must keep the three icon tiles on one row. */
+@media (max-width: 640px) {
   .df2-source-kind-grid {
     grid-template-columns: 1fr;
   }

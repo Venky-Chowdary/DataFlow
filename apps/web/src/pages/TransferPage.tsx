@@ -4355,9 +4355,11 @@ export function TransferPage({
         <div className="df2-card-head">
           <div>
             <h3 className="df2-card-title">Source</h3>
-            <p className="df2-card-sub">
-              Upload a file or pick a saved connector, then name the table or collection to read.
-              For CDC / incremental multi-stream, comma-separate several names.
+            <p
+              className="df2-card-sub"
+              title="Upload a file or pick a saved connector, then name the table or collection. For CDC / incremental multi-stream, comma-separate several names."
+            >
+              File, database, or cloud — then choose what to read.
             </p>
           </div>
         </div>
@@ -4698,7 +4700,12 @@ export function TransferPage({
         <div className="df2-card-head">
           <div>
             <h3 className="df2-card-title">Destination</h3>
-            <p className="df2-card-sub">Pick a saved connector, then set database & table — schema loads before mapping.</p>
+            <p
+              className="df2-card-sub"
+              title="Pick a saved connector, then set database and table. Schema loads before mapping."
+            >
+              Connector, then database and table.
+            </p>
           </div>
           <Button
             size="sm"
