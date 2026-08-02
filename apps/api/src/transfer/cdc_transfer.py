@@ -611,6 +611,8 @@ def _apply_change_batch(
             write_mode="upsert",
             conflict_columns=pk_target_cols or None,
             backfill_new_fields=backfill_new_fields,
+            job_id=job_id,
+            sync_mode="cdc",
         )
         rows, last_checksum, dest_summary = with_retry(
             write_op,
@@ -638,6 +640,8 @@ def _apply_change_batch(
             write_mode="upsert",
             conflict_columns=pk_target_cols or None,
             backfill_new_fields=backfill_new_fields,
+            job_id=job_id,
+            sync_mode="cdc",
         )
         rows, last_checksum, dest_summary = with_retry(
             write_op,

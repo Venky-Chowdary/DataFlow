@@ -960,6 +960,10 @@ def stream_file_to_database(
             error_policy=stream_error_policy,
             job_id=job_id,
             skip_preflight=skip_preflight,
+            # Object-store purge vs append-run isolation keys off this. Omitting
+            # it left overwrite jobs on the append path so stale part-* objects
+            # survived and Gate-8 aggregated mixed generations.
+            sync_mode=effective_sync,
         )
         batch_written, last_checksum, dest_summary = with_retry(
             write_op,

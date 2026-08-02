@@ -1864,7 +1864,56 @@ th.df2-type-string .df2-type-badge {
 
 .df2-transfer-studio-shell.is-transfer-studio-active .df2-transfer-studio-chrome {
   flex-shrink: 0;
-  padding: 10px 14px;
+  padding: 8px 12px;
+  gap: 6px;
+  border-radius: 10px;
+  box-shadow: 0 1px 6px rgba(15, 23, 42, 0.04);
+}
+
+/* Compact, even card rhythm — no oversized surfaces inside the studio */
+.df2-page-transfer-studio .df2-transfer-step-panel {
+  border-radius: 10px;
+  box-shadow: 0 1px 6px rgba(15, 23, 42, 0.04);
+}
+
+.df2-page-transfer-studio .df2-field {
+  gap: 4px;
+}
+
+.df2-page-transfer-studio .df2-label {
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #64748b;
+  font-weight: 650;
+}
+
+.df2-page-transfer-studio .df2-dest-sync-summary,
+.df2-page-transfer-studio .df2-run-readiness,
+.df2-page-transfer-studio .df2-plan-callout {
+  padding: 8px 10px;
+  border-radius: 8px;
+}
+
+.df2-page-transfer-studio .df2-wizard-footer,
+.df2-page-transfer-studio .df2-studio-actions {
+  padding: 8px 12px !important;
+  gap: 8px;
+}
+
+.df2-page-transfer-studio .df2-filter-bar {
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.df2-page-transfer-studio .df2-source-aside {
+  gap: 8px;
+  padding: 0;
+}
+
+.df2-page-transfer-studio .df2-source-aside-head {
+  padding: 0 0 6px;
+  margin-bottom: 0;
 }
 
 .df2-content-inner.is-transfer-studio-view .df2-page-transfer-studio {

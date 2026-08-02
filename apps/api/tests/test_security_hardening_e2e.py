@@ -111,6 +111,7 @@ def test_file_stream_forwards_object_store_kwargs_to_write_batch() -> None:
     def _fake_write_batch(dest_type, dest, cfg, *args, **kwargs):
         captured["dest_type"] = dest_type
         captured["cfg"] = dict(cfg)
+        captured["kwargs"] = dict(kwargs)
         return 2, "chk", {"type": dest_type, "checksum": "chk"}
 
     content = _csv_bytes(_sample_rows())
@@ -149,6 +150,9 @@ def test_file_stream_forwards_object_store_kwargs_to_write_batch() -> None:
     assert captured["cfg"]["endpoint_url"] == "http://127.0.0.1:9000"
     assert captured["cfg"]["path_style"] is True
     assert captured["cfg"]["region"] == "us-east-1"
+    # Overwrite must reach the object-store layout resolver — empty sync_mode
+    # previously took the append path and left stale part-* generations behind.
+    assert captured["kwargs"].get("sync_mode") == "full_refresh_overwrite"
     # file_stream may replace writer checksum with a source fingerprint digest
     assert isinstance(summary.get("checksum"), str) and summary["checksum"]
 
