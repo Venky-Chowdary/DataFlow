@@ -1274,8 +1274,13 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                   }
                                   onClick={() => void handleRetry()}
                                   disabled={retrying}
+                                  title="Starts a new job and re-reads the source from the beginning. Use Resume to continue from the last committed batch."
                                 >
-                                  {retrying ? <ButtonLoader label="Retrying…" /> : <><DtIcon name="transfer" size={16} /> Retry from start</>}
+                                  {retrying
+                                    ? <ButtonLoader label="Retrying…" />
+                                    : (
+                                      <><DtIcon name="transfer" size={16} /> Retry from start</>
+                                    )}
                                 </button>
                                 {onStartTransfer && (
                                   <button

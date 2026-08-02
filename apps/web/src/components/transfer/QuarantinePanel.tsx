@@ -420,15 +420,18 @@ export function QuarantinePanel({
               ) : null}
               . Edit bad cells if needed
               {hasStripSuggestion ? ", apply suggested strip transforms," : ","} then{" "}
-              <strong>Promote / Replay</strong> — good rows already on the destination stay put.
-              Promoted DLQ rows are stamped <code>_df_promoted_at</code>.
+              <strong>Promote / Replay</strong> upserts the <em>stored</em> quarantine payload
+              (optionally edited) — it does <strong>not</strong> re-extract from the live source.
+              Good rows already on the destination stay put. Promoted DLQ rows are stamped{" "}
+              <code>_df_promoted_at</code>.
             </p>
           ) : (
             <p>
               Each table row is one <strong>bad cell finding</strong> (source row # + column + value + reason).
               If the job says 30 quarantined, you should see up to 30 findings here (or Export CSV for the full set).
               Good rows already on the destination stay put — fix mappings / types, then{" "}
-              <strong>Promote / Replay</strong> only the quarantined rows (or re-run after Map fixes).
+              <strong>Promote / Replay</strong> only the stored quarantine scraps (not a fresh source extract),
+              or re-run after Map fixes.
               {destDlq?.table ? <> Destination DLQ table: <code>{destDlq.table}</code>.</> : null}
             </p>
           )}

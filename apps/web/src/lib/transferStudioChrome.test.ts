@@ -45,6 +45,13 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(css, /validate-rail-primary-fix[\s\S]*width: auto !important/);
   });
 
+  it("tokens apply laptop UI scale (~80%) at 100% browser zoom", () => {
+    const css = readFileSync(join(webRoot, "styles/tokens.css"), "utf8");
+    assert.match(css, /--df-ui-scale:\s*0\.8/);
+    assert.match(css, /\.df2-app \{\s*zoom: var\(--df-ui-scale\)/s);
+    assert.match(css, /@media \(max-width: 1512px\)/);
+  });
+
   it("transfer-studio stacks chrome via container query + 1280 fallback", () => {
     const css = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
     assert.match(css, /container-type:\s*inline-size/);

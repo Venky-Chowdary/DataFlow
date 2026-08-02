@@ -201,6 +201,57 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
     }
 
 
+_SECRET_ENDPOINT_KEYS = (
+    "password",
+    "connection_string",
+    "api_key",
+    "service_account",
+    "private_key",
+    "secret_access_key",
+    "access_key_secret",
+    "token",
+    "refresh_token",
+    "client_secret",
+)
+
+
+def _mask_endpoint_secrets(ep: dict | None) -> dict:
+    """Return a copy of an endpoint dict with secret fields masked for API responses."""
+    import copy
+    import re
+
+    out = copy.deepcopy(ep or {})
+    for key in _SECRET_ENDPOINT_KEYS:
+        if out.get(key):
+            if key == "connection_string" and isinstance(out[key], str):
+                out[key] = re.sub(r":([^:@/]+)@", ":****@", out[key])
+            else:
+                out[key] = "****"
+    extra = out.get("extra")
+    if isinstance(extra, dict):
+        for key in list(extra.keys()):
+            lk = str(key).lower()
+            if any(s in lk for s in ("password", "secret", "token", "private_key", "api_key")):
+                if extra.get(key):
+                    extra[key] = "****"
+    return out
+
+
+def sanitize_job_for_api(job: dict) -> dict:
+    """Strip plaintext connector secrets from a job document before returning to clients."""
+    import copy
+
+    out = copy.deepcopy(job or {})
+    tr = out.get("transfer_request")
+    if isinstance(tr, dict):
+        if isinstance(tr.get("source"), dict):
+            tr["source"] = _mask_endpoint_secrets(tr["source"])
+        if isinstance(tr.get("destination"), dict):
+            tr["destination"] = _mask_endpoint_secrets(tr["destination"])
+        out["transfer_request"] = tr
+    return out
+
+
 def transfer_request_from_dict(data: dict) -> TransferRequest:
     src = data.get("source") or {}
     dst = data.get("destination") or {}

@@ -423,7 +423,7 @@ async def list_connectors(
 
 
 def _can_access_job(request: Request, job: dict) -> bool:
-    """True if the actor may see or mutate this job.
+    """True if the actor may *read* this job.
 
     Must stay aligned with ``list_jobs``: unscoped/global jobs (empty
     ``workspace_id``) are returned by the list endpoint for the default
@@ -435,6 +435,15 @@ def _can_access_job(request: Request, job: dict) -> bool:
         # Global / legacy jobs — same visibility as list_jobs for "".
         return True
     return can_read_workspace(workspace_id, _actor_email(request))
+
+
+def _can_mutate_job(request: Request, job: dict) -> bool:
+    """True if the actor may resume / retry / replay / export this job."""
+    workspace_id = (job.get("workspace_id") or "").strip()
+    if not workspace_id:
+        # Legacy unscoped jobs: still require an authenticated actor (router RBAC).
+        return bool(_actor_email(request))
+    return can_write_workspace(workspace_id, _actor_email(request))
 
 
 @router.get("/jobs")
@@ -470,6 +479,8 @@ async def list_transfer_jobs(
 async def get_transfer_job(job_id: str, request: Request):
     """Get a specific transfer job"""
     try:
+        from ..transfer.models import sanitize_job_for_api
+
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id)
 
@@ -479,7 +490,7 @@ async def get_transfer_job(job_id: str, request: Request):
         for key in ("created_at", "updated_at", "started_at", "completed_at"):
             if job.get(key) and hasattr(job[key], "isoformat"):
                 job[key] = job[key].isoformat()
-        return job
+        return sanitize_job_for_api(job)
     except HTTPException:
         raise
     except Exception as e:
@@ -517,13 +528,17 @@ async def patch_transfer_job(job_id: str, request: Request):
             if mongo.is_job_name_taken(name, workspace_id=workspace_id, exclude_job_id=job_id):
                 raise HTTPException(status_code=409, detail="This name already exists")
 
+        if not _can_mutate_job(request, job):
+            raise HTTPException(status_code=403, detail="Workspace write access required")
         if not mongo.update_job_fields(job_id, {"name": name, "name_key": _job_name_key(name)}):
             raise HTTPException(status_code=500, detail="Failed to update job")
+        from ..transfer.models import sanitize_job_for_api
+
         updated = mongo.get_job(job_id) or {**job, "name": name}
         for key in ("created_at", "updated_at", "started_at", "completed_at"):
             if updated.get(key) and hasattr(updated[key], "isoformat"):
                 updated[key] = updated[key].isoformat()
-        return updated
+        return sanitize_job_for_api(updated)
     except HTTPException:
         raise
     except Exception as e:
@@ -532,7 +547,10 @@ async def patch_transfer_job(job_id: str, request: Request):
 
 @router.post("/jobs/{job_id}/retry")
 async def retry_transfer_job(job_id: str, background_tasks: BackgroundTasks, request: Request):
-    """Re-run a failed database migration using stored job configuration."""
+    """Re-run a failed transfer from the beginning as a new job (no checkpoint).
+
+    Use ``/resume`` to continue the *same* job from its last committed batch.
+    """
     try:
         from ..transfer.background import run_transfer_async
         from ..transfer.engine import get_transfer_engine
@@ -542,6 +560,8 @@ async def retry_transfer_job(job_id: str, background_tasks: BackgroundTasks, req
         job = mongo.get_job(job_id)
         if not job or not _can_access_job(request, job):
             raise HTTPException(status_code=404, detail="Job not found")
+        if not _can_mutate_job(request, job):
+            raise HTTPException(status_code=403, detail="Workspace write access required")
 
         payload = job.get("transfer_request")
         if not payload:
@@ -555,19 +575,26 @@ async def retry_transfer_job(job_id: str, background_tasks: BackgroundTasks, req
                 detail="File uploads must be re-submitted from Transfer Studio.",
             )
 
-        request = transfer_request_from_dict(payload)
+        xfer_req = transfer_request_from_dict(payload)
         engine = get_transfer_engine()
-        new_job_id = engine._create_pending_job(request)
-        mongo.update_job_status(new_job_id, "pending", retry_of=job_id, message=f"Retry of job {job_id}")
+        new_job_id = engine._create_pending_job(xfer_req)
+        mongo.update_job_status(
+            new_job_id,
+            "pending",
+            retry_of=job_id,
+            message=f"Retry from start of job {job_id} (no checkpoint)",
+        )
 
-        background_tasks.add_task(run_transfer_async, new_job_id, request, resume=True, resume_from_job_id=job_id)
+        # From-zero: do not copy parent checkpoint / resume_from_job_id.
+        background_tasks.add_task(run_transfer_async, new_job_id, xfer_req, resume=False)
         return {
             "success": True,
             "async": True,
             "job_id": new_job_id,
             "retry_of": job_id,
             "status": "running",
-            "message": "Retry started — stream progress on the new job.",
+            "resume": False,
+            "message": "Retry from start — new job, source re-read from the beginning (at-least-once upsert).",
         }
     except HTTPException:
         raise
@@ -586,6 +613,8 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
         job = mongo.get_job(job_id)
         if not job or not _can_access_job(request, job):
             raise HTTPException(status_code=404, detail="Job not found")
+        if not _can_mutate_job(request, job):
+            raise HTTPException(status_code=403, detail="Workspace write access required")
 
         payload = job.get("transfer_request")
         if not payload:
@@ -599,7 +628,7 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
                 detail="File uploads must be re-submitted from Transfer Studio.",
             )
 
-        request = transfer_request_from_dict(payload)
+        xfer_req = transfer_request_from_dict(payload)
         # Resume is the one sanctioned exit from a terminal status, and it must
         # also drop any stale cancel request or the resumed run would abort at
         # its first checkpoint.
@@ -610,13 +639,14 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
             message=f"Resume requested for job {job_id}",
             allow_terminal_exit=True,
         )
-        background_tasks.add_task(run_transfer_async, job_id, request, resume=True)
+        background_tasks.add_task(run_transfer_async, job_id, xfer_req, resume=True)
         return {
             "success": True,
             "async": True,
             "job_id": job_id,
             "status": "running",
-            "message": "Resume started — stream progress on the job.",
+            "resume": True,
+            "message": "Resume started from last committed checkpoint (at-least-once upsert).",
         }
     except HTTPException:
         raise
@@ -632,6 +662,8 @@ async def cancel_transfer_job(job_id: str, request: Request):
         job = mongo.get_job(job_id)
         if not job or not _can_access_job(request, job):
             raise HTTPException(status_code=404, detail="Job not found")
+        if not _can_mutate_job(request, job):
+            raise HTTPException(status_code=403, detail="Workspace write access required")
         if job.get("status") in ("completed", "completed_with_quarantine", "failed", "cancelled"):
             return {"success": True, "job_id": job_id, "status": job.get("status"), "message": "Job already terminal"}
         # Durable intent flag first, status second. The flag is what the worker
@@ -668,6 +700,8 @@ async def stream_transfer_job(job_id: str, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
     async def event_generator():
+        from ..transfer.models import sanitize_job_for_api
+
         mongo = get_mongodb_service()
         while True:
             job = mongo.get_job(job_id)
@@ -677,8 +711,9 @@ async def stream_transfer_job(job_id: str, request: Request):
             for key in ("created_at", "updated_at", "started_at", "completed_at"):
                 if job.get(key) and hasattr(job[key], "isoformat"):
                     job[key] = job[key].isoformat()
-            yield f"data: {json.dumps(job, default=json_default)}\n\n"
-            if job.get("status") in ("completed", "completed_with_quarantine", "failed", "cancelled"):
+            safe = sanitize_job_for_api(job)
+            yield f"data: {json.dumps(safe, default=json_default)}\n\n"
+            if safe.get("status") in ("completed", "completed_with_quarantine", "failed", "cancelled"):
                 break
             await asyncio.sleep(0.4)
 
@@ -769,12 +804,20 @@ async def export_job_quarantine(job_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Job not found")
     if not _can_access_job(request, job):
         raise HTTPException(status_code=403, detail="Workspace access denied")
+    if not _can_mutate_job(request, job):
+        raise HTTPException(status_code=403, detail="Workspace write access required")
 
     from services.quarantine_from_preflight import merge_job_quarantine
+    from services.pii_guard import redact_destination_summary
 
     details = merge_job_quarantine(job)
     if not details:
         return {"success": True, "row_count": 0, "download_url": "", "filename": ""}
+
+    # Export only redacted samples — never cleartext PII from dual-stamped scraps.
+    mappings = (job.get("transfer_request") or {}).get("mappings") or []
+    redacted = redact_destination_summary({"rejected_details": details}, mappings)
+    details = redacted.get("rejected_details") or details
 
     from services.format_converter import convert_rows
 
@@ -964,6 +1007,8 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         raise HTTPException(status_code=404, detail="Job not found")
     if not _can_access_job(request, job):
         raise HTTPException(status_code=403, detail="Workspace access denied")
+    if not _can_mutate_job(request, job):
+        raise HTTPException(status_code=403, detail="Workspace write access required")
 
     payload = job.get("transfer_request")
     if not payload:
@@ -976,6 +1021,16 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     details = body.rows if body.rows else list(stored_details)
     if not details:
         raise HTTPException(status_code=400, detail="No quarantine rows to replay")
+    rejected_rows = int(job.get("rejected_rows") or job.get("destination_summary", {}).get("rejected_rows") or 0)
+    if rejected_rows > 0 and len(details) < rejected_rows:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Quarantine sample is incomplete ({len(details)} of {rejected_rows} rejects). "
+                "Export the destination DLQ / full findings, or re-run so all rejects are persisted — "
+                "partial replay would leave remaining rejects behind."
+            ),
+        )
 
     records, columns = _quarantine_details_to_records(details, body.transform_overrides)
     if not records:

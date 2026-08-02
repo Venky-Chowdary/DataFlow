@@ -8737,8 +8737,10 @@
 }
 
 .df2-app .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio) {
-  padding: 0 !important;
+  /* Keep a paint gutter so card borders are not clipped under laptop zoom */
+  padding: 4px 12px 12px !important;
   background: #fff;
+  box-sizing: border-box;
 }
 
 .df2-app .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio) > .df2-screen-panel {

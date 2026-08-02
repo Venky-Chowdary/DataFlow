@@ -487,10 +487,7 @@ function AppShell({
         </nav>
 
         <div className="df2-sidebar-foot">
-          <button type="button" className="df2-sidebar-cta" onClick={openFreshTransfer}>
-            <DtIcon name="transfer" size={16} />
-            <span className="df2-sidebar-collapse-label">New transfer</span>
-          </button>
+          {/* New transfer lives in the topbar only — one CTA, one place. */}
           <div className="df2-sidebar-user">
             <button
               type="button"

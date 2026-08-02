@@ -246,6 +246,52 @@ body,
   -moz-osx-font-smoothing: grayscale;
 }
 
+/*
+ * Laptop workspace density — app-level scale so Chrome 100% zoom feels like
+ * the ~80% browser zoom operators preferred. Scales px + rem (unlike rem-only).
+ * Landing / login sit outside `.df2-app` and stay full size.
+ */
+:root {
+  --df-ui-scale: 1;
+}
+
+@media (max-width: 1680px) {
+  :root {
+    --df-ui-scale: 0.85;
+  }
+}
+
+/* 13–15" CSS widths (MacBook / typical laptop at 100% OS scaling) */
+@media (max-width: 1512px) {
+  :root {
+    --df-ui-scale: 0.8;
+  }
+}
+
+.df2-app {
+  zoom: var(--df-ui-scale);
+}
+
+/* Firefox has no zoom — approximate with root type + slightly denser controls */
+@supports not (zoom: 1) {
+  @media (max-width: 1680px) {
+    .df2-app {
+      font-size: 85%;
+      --df-btn-height: 32px;
+      --df-control-height: 32px;
+      --df-header-height: 48px;
+      --df-sidebar-width: 220px;
+      --df-page-gutter: 12px;
+      --df-card-pad: 12px;
+    }
+  }
+  @media (max-width: 1512px) {
+    .df2-app {
+      font-size: 80%;
+    }
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;

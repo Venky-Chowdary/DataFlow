@@ -173,6 +173,13 @@ def redact_destination_summary(
             values = nd.get("values")
             if isinstance(values, dict):
                 nd["values"] = mask_record(values, sensitive)
+            # Dual-stamped Wave 32/34 payloads — must mask both shapes for Theater/export.
+            source_values = nd.get("source_values")
+            if isinstance(source_values, dict):
+                nd["source_values"] = mask_record(source_values, sensitive)
+            target_values = nd.get("target_values")
+            if isinstance(target_values, dict):
+                nd["target_values"] = mask_record(target_values, sensitive)
             redacted_details.append(nd)
         out["rejected_details"] = redacted_details
 
