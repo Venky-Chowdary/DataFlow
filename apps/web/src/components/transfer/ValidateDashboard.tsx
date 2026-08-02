@@ -1015,9 +1015,17 @@ export function ValidateDashboard({
   const dryGate = preflight?.gates?.find((g) => /dry_run|integrity/i.test(g.id));
   const sampleScanned = Number(dryGate?.details?.sample_rows_scanned ?? dryGate?.details?.sample_size ?? 0) || null;
   const engineMsTotal = (preflight?.gates ?? []).reduce((sum, g) => sum + (Number(g.duration_ms) || 0), 0);
-  const appendLikeSync = /append/i.test(syncMode || "");
-  const upsertLikeSync = /incremental|dedup|upsert|cdc|change_stream/i.test(syncMode || "")
-    && !appendLikeSync;
+  // Exact Studio sync ids — avoid /append/i matching accidental substrings.
+  const appendLikeSync = [
+    "full_refresh_append",
+    "incremental_append",
+  ].includes(syncMode || "");
+  const upsertLikeSync = [
+    "incremental_deduped",
+    "cdc",
+    "scd2",
+    "mirror",
+  ].includes(syncMode || "");
   const syncMeta = syncMode ? SYNC_MODE_META[syncMode] : null;
   const heroReadyLabel = running
     ? "elapsed"
@@ -1871,8 +1879,17 @@ export function ValidateDashboard({
           />
           <MetricChip
             value={(1 - complianceRisk) * 100}
-            label="Compliance"
-            tone={complianceRisk > 0.4 ? "review" : "approve"}
+            label={
+              proof?.compliance?.requires_review && decision !== "approve"
+                ? "Compliance review"
+                : "Compliance"
+            }
+            tone={
+              (proof?.compliance?.requires_review && decision !== "approve")
+              || complianceRisk > 0.4
+                ? "review"
+                : "approve"
+            }
           />
         </div>
       )}
@@ -2279,9 +2296,15 @@ export function ValidateDashboard({
                       </div>
                     </div>
                   )}
-                  {explain.suggested_actions.length === 0 && explain.passed && (
+                  {explain.suggested_actions.length === 0 && explain.passed && decision === "approve" && (
                     <p className="df2-vd-assist-clean">
-                      <DtIcon name="check" size={13} /> No fixes needed — all gates passed.
+                      <DtIcon name="check" size={13} /> No fixes needed — preflight approved for Execute.
+                    </p>
+                  )}
+                  {explain.suggested_actions.length === 0 && explain.passed && decision !== "approve" && (
+                    <p className="df2-vd-assist-clean">
+                      <DtIcon name="alert" size={13} /> Gates look clear at review-grade — complete
+                      acknowledgments or Map risk acceptance before Execute unlocks.
                     </p>
                   )}
                 </div>

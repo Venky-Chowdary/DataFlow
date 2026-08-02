@@ -378,9 +378,8 @@ def test_real_mongo_messy_docs_roundtrip_variant_queryable():
 def test_hex_mongo_id_does_not_map_onto_snowflake_number_id_when_samples_present():
     """Hex/ObjectId-like ``_id`` must not bind to existing Snowflake NUMBER ``id``.
 
-    Without samples the semantic form ``_id`` → ``id`` scores ~0.73 and lands on
-    NUMBER(38,0), which Validate correctly blocks. Introspect must attach samples
-    so the mapper invents a VARCHAR create-new column instead.
+    Client deploy: refuse the Map landmine even without samples (was ~0.73 onto
+    NUMBER). With samples the same create-new TEXT path must still win.
     """
     from services.semantic_mapper import map_columns
 
@@ -390,7 +389,6 @@ def test_hex_mongo_id_does_not_map_onto_snowflake_number_id_when_samples_present
         "d2909789b4ace07d724901b5ecfe1efeb3777638c9bb1c38a3e2eb1e7cb8e018",
         "72a198e224365b20ab46575aab687271181e1f7f844671de8c6de40b147e7356",
     ]
-    # Without samples: regression marker — semantic name match onto NUMBER wins.
     bare = map_columns(
         ["_id"],
         ["id"],
@@ -398,8 +396,8 @@ def test_hex_mongo_id_does_not_map_onto_snowflake_number_id_when_samples_present
         target_schemas=[{"name": "id", "inferred_type": "NUMBER(38,0)"}],
         destination_db_type="snowflake",
     )
-    assert bare[0]["target"] == "id"
-    assert not bare[0].get("create_new")
+    assert bare[0].get("create_new") is True
+    assert bare[0]["target"].lower() != "id"
 
     mapped = map_columns(
         ["_id"],
@@ -414,3 +412,17 @@ def test_hex_mongo_id_does_not_map_onto_snowflake_number_id_when_samples_present
     assert str(m.get("target_type", "")).upper() in {"VARCHAR", "TEXT", "STRING"}
     # Prefer a new text field over overwriting the incompatible NUMBER id.
     assert m["target"].lower() != "id"
+
+
+def test_objectid_does_not_map_onto_number_id_without_samples():
+    from services.semantic_mapper import map_columns
+
+    mapped = map_columns(
+        ["_id"],
+        ["id"],
+        source_schemas=[{"name": "_id", "inferred_type": "OBJECTID", "samples": []}],
+        target_schemas=[{"name": "id", "inferred_type": "INTEGER"}],
+        destination_db_type="postgresql",
+    )
+    assert mapped[0].get("create_new") is True
+    assert mapped[0]["target"].lower() != "id"

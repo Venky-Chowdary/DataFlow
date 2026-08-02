@@ -871,7 +871,27 @@ def _near_target_by_form(
     return best_tgt, best
 
 
-def _type_compat_penalty(src_type: str, tgt_type: str) -> float:
+def _identity_onto_numeric_landmine(source: str, src_type: str, tgt_type: str) -> bool:
+    """True when Mongo/document identity would land on a numeric warehouse PK.
+
+    Without samples the old mapper bound ``_id``→NUMBER ``id`` (~0.73). Hex
+    ObjectIds never fit INTEGER/NUMBER — refuse that Map landmine up front.
+    """
+    from services.type_system import normalize_logical_type, specialty_carrier_base
+
+    tgt = normalize_logical_type(tgt_type)
+    if tgt not in {"integer", "decimal", "float"}:
+        return False
+    if specialty_carrier_base(src_type) == "OBJECTID":
+        return True
+    src = normalize_logical_type(src_type)
+    if src not in {"string", "text", "unknown"}:
+        return False
+    form = _normalize(source).replace(" ", "")
+    return form in {"_id", "id", "objectid", "object_id", "oid", "mongo_id"}
+
+
+def _type_compat_penalty(src_type: str, tgt_type: str, *, source_name: str = "") -> float:
     """Reduce score for incompatible type pairs using the canonical type-system rules.
 
     Lossy pairs must not clear Map auto-approve / G4 after an Exact-name boost —
@@ -881,6 +901,9 @@ def _type_compat_penalty(src_type: str, tgt_type: str) -> float:
 
     if not src_type or not tgt_type:
         return 0.0
+    if source_name and _identity_onto_numeric_landmine(source_name, src_type, tgt_type):
+        # Stronger than generic lossy — must lose to create-new text path.
+        return 0.92
     if is_lossy_coercion(src_type, tgt_type):
         src = normalize_logical_type(src_type)
         tgt = normalize_logical_type(tgt_type)
@@ -972,9 +995,16 @@ def _score_pair(
     src_sem = _semantic_form(source)
     tgt_sem_raw = _semantic_form(target)
 
-    type_penalty = _type_compat_penalty(source_type, target_type)
+    type_penalty = _type_compat_penalty(source_type, target_type, source_name=source)
     type_boost = _type_aware_boost(source_type, target_type)
     sample_boost = _sample_consistency_boost(source_samples, source_type, target_type)
+    if (
+        sample_boost > -0.5
+        and _identity_onto_numeric_landmine(source, source_type, target_type)
+    ):
+        # No samples: still refuse ObjectId/text identity → NUMBER (Validate would
+        # only catch it later after Map already offered the landmine).
+        sample_boost = -0.90
 
     def _finish(score: float, reason: str) -> tuple[float, str]:
         adjusted = max(0.0, min(0.995, float(score) - type_penalty + type_boost + sample_boost))
@@ -1451,7 +1481,9 @@ def map_columns(
         near_tgt, near_ratio = _near_target_by_form(source, target_columns, used_targets=used_targets)
         if near_tgt:
             near_tgt_type = tgt_types.get(near_tgt, "VARCHAR")
-            near_penalty = _type_compat_penalty(src_type, near_tgt_type)
+            near_penalty = _type_compat_penalty(
+                src_type, near_tgt_type, source_name=source
+            )
             near_sample = _sample_consistency_boost(
                 src_samples.get(source), src_type, near_tgt_type,
             )

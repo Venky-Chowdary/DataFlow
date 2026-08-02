@@ -1704,8 +1704,23 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                     "remediation_kind": "fix_source_keys",
                 },
             )
-    except Exception:
-        pass
+    except Exception as exc:
+        # Never silent-pass uniqueness proof when the destination declared UNIQUE/PK.
+        if getattr(ctx.plan, "destination_unique_keys", None) or getattr(
+            ctx.plan, "destination_pk_columns", None
+        ):
+            return _block(
+                GateId.G8_RECONCILIATION,
+                "Dry-run reconciliation could not prove destination UNIQUE/PK constraints",
+                start,
+                {
+                    "issues": [f"UNIQUE probe error: {exc}"],
+                    "target_rows": len(mapped_rows),
+                    "rule_id": "g8_reconciliation.destination_unique_probe",
+                    "remediation_kind": "retry_validate",
+                    "note": str(exc)[:400],
+                },
+            )
 
     # Fingerprint: raw source cells vs write-path transformed values (not transform↔transform).
     if not nondeterministic:

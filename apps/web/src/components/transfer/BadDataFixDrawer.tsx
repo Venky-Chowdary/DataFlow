@@ -104,9 +104,9 @@ export function BadDataFixDrawer({
           <article>
             <h4><DtIcon name="layers" size={14} /> Strip control characters</h4>
             <p>
-              Applies <code>strip_controls</code> to every mapped column, removes format/control chars on
-              write, then re-runs validation. Recommended for MongoDB → warehouse routes. Use the primary
-              action in the footer.
+              Applies <code>strip_controls</code> on text mappings to remove format/control chars
+              (e.g. U+200B) on write, then re-runs validation. Does <strong>not</strong> fix duplicate
+              keys, wrong column types, or identity mismatches — use Map / Advanced for those.
             </p>
           </article>
           <article>
