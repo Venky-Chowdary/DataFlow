@@ -1130,6 +1130,11 @@ def normalize_logical_type(inferred: str | None) -> str:
         return LOGICAL_DECIMAL
     if key in {"uint64", "uint128", "uint256", "int128", "int256", "hugeint", "uhugeint"}:
         return LOGICAL_DECIMAL
+    # FLOAT/DECIMAL UNSIGNED must not fall through to LOGICAL_STRING.
+    if "unsigned" in key and re.search(r"\b(float|double|real)\b", key):
+        return LOGICAL_FLOAT
+    if "unsigned" in key and re.search(r"\b(decimal|numeric|number)\b", key):
+        return LOGICAL_DECIMAL
     return CANONICAL_TYPES.get(key, CANONICAL_TYPES.get(key.replace(" ", "_"), LOGICAL_STRING))
 
 
@@ -2966,13 +2971,35 @@ def decimal_precision_would_truncate(source_type: str | None, dest_db_type: str 
     return precision > _DECIMAL_CAPS[db][0]
 
 
+def vector_encoding_polarity(inferred: str | None) -> str | None:
+    """Return ``dense`` / ``half`` / ``sparse`` for vector carriers, else None."""
+    if normalize_logical_type(inferred) != LOGICAL_VECTOR:
+        return None
+    upper = strip_identity_qualifier(inferred).upper().replace(" ", "")
+    if upper.startswith("SPARSEVEC"):
+        return "sparse"
+    if upper.startswith("HALFVEC"):
+        return "half"
+    if upper.startswith("VECTOR") or "VECTOR(" in upper:
+        return "dense"
+    return "dense"
+
+
+def vector_encoding_would_collapse(source_type: str, target_type: str) -> bool:
+    """True when HALFVEC/SPARSEVEC ↔ dense VECTOR invents a different encoding."""
+    src = vector_encoding_polarity(source_type)
+    tgt = vector_encoding_polarity(target_type)
+    if src is None or tgt is None:
+        return False
+    return src != tgt
+
+
 def vector_dim_mismatch(source_type: str | None, target_type: str | None) -> bool:
-    """True when both sides declare a vector dimension and they differ.
+    """True when VECTOR dims differ, or known↔unknown invents/drops a width.
 
     Used by G3 / DDL compatibility to fail closed on embedding-width drift
-    (e.g. ``VECTOR(768)`` → ``VECTOR(FLOAT, 1536)``). Unknown dims on either
-    side return False — that case is handled by ``ddl_type`` falling back to
-    text rather than inventing a width.
+    (e.g. ``VECTOR(768)`` → ``VECTOR(FLOAT, 1536)``) and bare ``VECTOR`` →
+    ``VECTOR(1536)`` invent.
     """
     if normalize_logical_type(source_type) != LOGICAL_VECTOR:
         return False
@@ -2980,8 +3007,10 @@ def vector_dim_mismatch(source_type: str | None, target_type: str | None) -> boo
         return False
     src_dim = parse_vector_dimension(source_type)
     tgt_dim = parse_vector_dimension(target_type)
-    if src_dim is None or tgt_dim is None:
+    if src_dim is None and tgt_dim is None:
         return False
+    if src_dim is None or tgt_dim is None:
+        return True
     return src_dim != tgt_dim
 
 
@@ -3670,7 +3699,11 @@ def interval_family(inferred: str | None) -> str | None:
 
 
 def interval_family_would_collapse(source_type: str, target_type: str) -> bool:
-    """True when YEAR-MONTH ↔ DAY-SECOND polarity would be lost."""
+    """True when YEAR-MONTH ↔ DAY-SECOND polarity would be lost or invented.
+
+    Bare ``INTERVAL`` ↔ explicit YM/DS invents a family the operator never
+    declared — fail closed (Snowflake AIM / Oracle INTERVAL class).
+    """
     if normalize_logical_type(source_type) != LOGICAL_INTERVAL:
         return False
     if normalize_logical_type(target_type) != LOGICAL_INTERVAL:
@@ -3679,6 +3712,9 @@ def interval_family_would_collapse(source_type: str, target_type: str) -> bool:
     src_f = interval_family(source_type)
     tgt_f = interval_family(target_type)
     if src_f and tgt_f and src_f != tgt_f:
+        return True
+    # Unqualified ↔ qualified family invent/drop.
+    if (src_f is None) != (tgt_f is None):
         return True
     return False
 
@@ -3913,13 +3949,39 @@ def specialty_wire_preserves_value(source_specialty: str, target_type: str) -> b
     return False
 
 
+def specialty_domain_would_invent(source_type: str, target_type: str) -> bool:
+    """True when open string/json/scalar invents a native specialty domain.
+
+    ``TEXT→INET`` / ``TEXT→TSVECTOR`` / ``JSON→HSTORE`` look like free casts but
+    invent validation algorithms the source never had — Accept risk required.
+    CITEXT invent is handled by :func:`case_fold_polarity_invent`.
+    """
+    tgt = specialty_carrier_base(target_type)
+    if tgt is None or tgt == "CITEXT":
+        return False
+    if specialty_carrier_base(source_type) is not None:
+        return False
+    src_l = normalize_logical_type(source_type)
+    return src_l in {
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+        LOGICAL_JSON,
+        LOGICAL_INTEGER,
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+        LOGICAL_BOOLEAN,
+        LOGICAL_BINARY,
+    }
+
+
 def specialty_carrier_would_collapse(source_type: str, target_type: str) -> bool:
-    """True when a native specialty carrier would collapse to opaque string/text.
+    """True when a native specialty carrier would collapse to opaque/scalar sink.
 
     Airbyte maps inet/hstore/pg_lsn/geometric → string. DataFlow preserves natives
     on PG create-new; mapping to bare VARCHAR/TEXT/STRING invents document polarity
     and must surface in preflight (never silent green). Width-safe create-new
-    wires (ObjectId→VARCHAR(24)) are not a collapse.
+    wires (ObjectId→VARCHAR(24)) are not a collapse. OID→INTEGER invents a
+    numeric polarity the catalog OID domain did not declare.
     """
     src = specialty_carrier_base(source_type)
     if src is None:
@@ -3931,8 +3993,21 @@ def specialty_carrier_would_collapse(source_type: str, target_type: str) -> bool
     if specialty_wire_preserves_value(src, target_type):
         return False
     tgt_l = normalize_logical_type(target_type)
-    # Opaque string sinks — specialty validation algorithms would not run on dest.
-    return tgt_l in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON}
+    # Opaque / scalar sinks — specialty validation algorithms would not run.
+    return tgt_l in {
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+        LOGICAL_JSON,
+        LOGICAL_INTEGER,
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+        LOGICAL_BOOLEAN,
+        LOGICAL_UUID,
+        LOGICAL_DATE,
+        LOGICAL_DATETIME,
+        LOGICAL_TIME,
+        LOGICAL_BINARY,
+    }
 
 
 def resolve_mapping_target_type(
@@ -5071,6 +5146,12 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
         return True
     if float_mantissa_would_narrow(source_type, target_type):
         return True
+    if year_domain_would_collapse(source_type, target_type):
+        return True
+    if money_domain_would_collapse(source_type, target_type):
+        return True
+    if bitstring_opaque_bytes_collapse(source_type, target_type):
+        return True
     if enum_set_domain_would_reject(source_type, target_type):
         return True
     if enum_domain_would_collapse(source_type, target_type):
@@ -5081,6 +5162,8 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
         return True
     if specialty_carrier_would_collapse(source_type, target_type):
         return True
+    if specialty_domain_would_invent(source_type, target_type):
+        return True
     if specialty_polarity_mismatch(source_type, target_type):
         return True
     if case_fold_polarity_invent(source_type, target_type):
@@ -5088,6 +5171,8 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
     if date_to_tz_aware_invent(source_type, target_type):
         return True
     if vector_dim_mismatch(source_type, target_type):
+        return True
+    if vector_encoding_would_collapse(source_type, target_type):
         return True
     if rowversion_would_collapse_to_temporal(source_type, target_type):
         return True
@@ -5165,11 +5250,15 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
             return True
         if specialty_carrier_would_collapse(source_type, target_type):
             return True
+        if specialty_domain_would_invent(source_type, target_type):
+            return True
         if specialty_polarity_mismatch(source_type, target_type):
             return True
         if case_fold_polarity_invent(source_type, target_type):
             return True
         if vector_dim_mismatch(source_type, target_type):
+            return True
+        if vector_encoding_would_collapse(source_type, target_type):
             return True
         if rowversion_would_collapse_to_temporal(source_type, target_type):
             return True
@@ -5229,6 +5318,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         return True
     if specialty_carrier_would_collapse(source_type, target_type):
         return True
+    if specialty_domain_would_invent(source_type, target_type):
+        return True
     if specialty_polarity_mismatch(source_type, target_type):
         return True
     if case_fold_polarity_invent(source_type, target_type):
@@ -5236,6 +5327,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
     if date_to_tz_aware_invent(source_type, target_type):
         return True
     if vector_dim_mismatch(source_type, target_type):
+        return True
+    if vector_encoding_would_collapse(source_type, target_type):
         return True
     if rowversion_would_collapse_to_temporal(source_type, target_type):
         return True

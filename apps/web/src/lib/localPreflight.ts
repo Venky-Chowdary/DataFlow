@@ -1,4 +1,5 @@
 import type { EditableMapping } from "./mapping";
+import { mappingRequiresRiskAck } from "./mapping";
 import { GATE_CATALOG } from "./preflightGates";
 import type { PreflightGate, PreflightResult } from "./types";
 
@@ -131,24 +132,9 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
   }
 
   const activeMaps = input.mappings.filter((m) => m.transform !== "omit");
-  const riskUnacked = activeMaps.filter((m) => {
-    // Keep local G4 aligned with mappingRequiresRiskAck (specialty logical types too).
-    const fidelity = (m.fidelity || "").toLowerCase();
-    const specialtyType = /vector|halfvec|interval|geography|geometry|hierarchyid|rowversion|xml|inet|cidr|macaddr|hstore|citext|objectid|bit|tsvector|tsquery|money|uniqueidentifier|ltree|pg_lsn/i.test(
-      `${m.inferredType || ""} ${m.destType || ""}`,
-    );
-    const needsAck =
-      fidelity === "lossy_cast"
-      || fidelity === "mutate"
-      || Boolean(m.typeNarrowing)
-      || m.transform === "identity_specialty"
-      || specialtyType
-      || m.structDerived
-      || m.structPolicy === "flatten_top_level_keys"
-      || m.structPolicy === "flatten_deep"
-      || m.structPolicy === "explode_rows";
-    return needsAck && !m.riskAcknowledged;
-  });
+  const riskUnacked = activeMaps.filter(
+    (m) => mappingRequiresRiskAck(m) && !m.riskAcknowledged,
+  );
   const lowConfidence = activeMaps.filter(
     (m) => !m.approved && m.confidence < threshold && !m.riskAcknowledged,
   );

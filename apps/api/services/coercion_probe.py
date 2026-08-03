@@ -40,6 +40,7 @@ from services.transform_engine import apply_transform
 from services.transform_resolver import resolve_transform
 from services.type_system import (
     ddl_type,
+    is_lossy_coercion,
     is_nested_document_collapse,
     is_nested_shape_collapse,
     is_precision_collapse_coercion,
@@ -498,10 +499,11 @@ def analyze_coercion(
             dest_db_type=dest_db_type,
             structural=structural,
         )
-        # Head-sample coerce-ok must not hide IEEE/time/TZ fidelity collapse
-        # or nested STRUCT/MAP/ARRAY element contracts (G3 already blocks these).
+        # Head-sample coerce-ok must not hide IEEE/time/TZ/YEAR/MONEY/specialty
+        # fidelity collapse or nested STRUCT/MAP/ARRAY contracts.
         fidelity_collapse = bool(
             is_precision_collapse_coercion(src_type, tgt_type)
+            or is_lossy_coercion(src_type, tgt_type)
             or is_nested_shape_collapse(src_type, tgt_type)
         )
         if severity != "block" and fidelity_collapse:

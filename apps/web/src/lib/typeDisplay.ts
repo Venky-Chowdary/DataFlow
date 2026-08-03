@@ -108,7 +108,7 @@ export const POSTGRES_TYPE_OPTIONS: { value: string; label: string; family: Type
   { value: "VECTOR", label: "VECTOR — pgvector", family: "binary" },
   { value: "INTERVAL", label: "INTERVAL", family: "temporal" },
   { value: "GEOGRAPHY", label: "GEOGRAPHY / GEOMETRY", family: "spatial" },
-  { value: "INET", label: "INET — identity text", family: "string" },
+  { value: "INET", label: "INET — network address (Accept risk off-engine)", family: "string" },
   { value: "MONEY", label: "MONEY — prefer NUMERIC", family: "decimal" },
 ];
 

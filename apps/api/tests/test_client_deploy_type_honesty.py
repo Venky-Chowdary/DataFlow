@@ -278,6 +278,51 @@ def test_specialty_to_text_is_lossy_not_preserve():
     assert is_lossy_coercion("DECIMAL(19,4)", "MONEY") is True
 
 
+def test_g3_same_logical_and_specialty_invent_wave12():
+    from services.type_coercion_validator import (
+        coerce_blocks_transfer,
+        validate_mapping_coercions,
+    )
+    from services.type_system import (
+        interval_family_would_collapse,
+        is_lossy_coercion,
+        specialty_domain_would_invent,
+        vector_dim_mismatch,
+        vector_encoding_would_collapse,
+    )
+
+    # Map fidelity lossy must also surface in G3 coercion validator.
+    for src, tgt in (
+        ("YEAR", "SMALLINT"),
+        ("MONEY", "DECIMAL(19,4)"),
+        ("BIT(8)", "BYTEA"),
+        ("OID", "INTEGER"),
+        ("TEXT", "INET"),
+        ("TEXT", "TSVECTOR"),
+        ("VECTOR", "VECTOR(1536)"),
+        ("HALFVEC(3)", "VECTOR(3)"),
+        ("INTERVAL", "INTERVAL YEAR TO MONTH"),
+    ):
+        assert is_lossy_coercion(src, tgt) is True, (src, tgt)
+        issues = validate_mapping_coercions(
+            mappings=[{"source": "c", "target": "c", "confidence": 0.99}],
+            source_types={"c": src},
+            target_types={"c": tgt},
+            validation_mode="strict",
+        )
+        assert issues and issues[0]["lossy"] is True, (src, tgt, issues)
+
+    assert specialty_domain_would_invent("TEXT", "INET") is True
+    assert specialty_domain_would_invent("JSON", "HSTORE") is True
+    assert vector_dim_mismatch("VECTOR", "VECTOR(1536)") is True
+    assert vector_encoding_would_collapse("HALFVEC(3)", "VECTOR(3)") is True
+    assert interval_family_would_collapse("INTERVAL", "INTERVAL DAY TO SECOND") is True
+    from services.type_system import normalize_logical_type
+
+    assert normalize_logical_type("FLOAT UNSIGNED") == "float"
+    assert normalize_logical_type("DECIMAL(10,2) UNSIGNED") == "decimal"
+
+
 def test_integer_float_specialty_vector_honesty_wave11():
     from services.type_system import (
         case_fold_polarity_invent,
