@@ -2058,9 +2058,42 @@ def _summarize_knowledge_hit(text: str) -> str:
     return text[:280]
 
 
+def _looks_like_unsupported_mutation(lower: str) -> bool:
+    """True when the operator asked for delete / export / create-schedule we refuse.
+
+    These must never fall into RAG — synonym dumps look like we can do the action.
+    """
+    if any(
+        w in lower
+        for w in (
+            "export ", "export to", "download ", "download as",
+            "save as csv", "save as parquet", "to csv", "to parquet", "to excel",
+            "create a new schedule", "create schedule", "create a pipeline",
+            "new nightly", "build a cron", "cron pipeline",
+            "schedule this transfer", "schedule this nightly", "schedule it nightly",
+            "schedule nightly", "nightly schedule",
+        )
+    ):
+        return True
+    if re.search(
+        r"\b(?:delete|drop|destroy|remove)\b.+\b(?:connector|connection|schedule|pipeline)\b",
+        lower,
+    ):
+        return True
+    if re.search(r"\b(?:delete|drop|destroy)\b.+\b(?:table|collection)\b", lower):
+        return True
+    if re.search(r"\bremove\s+(?:the\s+)?[\w\s.-]+\s+connector\b", lower):
+        return True
+    if re.search(r"\bschedule\b.+\b(?:nightly|daily|hourly|every\s+\d+|cron)\b", lower):
+        return True
+    return False
+
+
 def _looks_like_domain_knowledge_query(lower: str) -> bool:
     """RAG fallback only for substantive domain questions — never chat fluff."""
     if _is_meta_pilot_question(lower):
+        return False
+    if _looks_like_unsupported_mutation(lower):
         return False
     if len(lower.strip()) < 16:
         return False
@@ -2073,7 +2106,7 @@ def _looks_like_domain_knowledge_query(lower: str) -> bool:
         w in lower
         for w in (
             "delete ", "drop ", "destroy ", "truncate ", "remove connector",
-            "export ", "download ", "create a new schedule", "create schedule",
+            "remove the ", "export ", "download ", "create a new schedule", "create schedule",
             "create a pipeline", "new nightly", "cron ",
         )
     ):
@@ -2470,8 +2503,8 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     # "how many jobs failed" must list jobs, not SELECT COUNT(*) FROM jobs.
     _platform_job_inventory = bool(
         re.search(
-            r"\b(?:how many\s+jobs|jobs?\s+failed|failed\s+jobs|job\s+failures|"
-            r"failed\s+transfers|how many\s+transfers\s+failed)\b",
+            r"\b(?:how many\s+jobs|jobs?\s+(?:that\s+)?failed|failed\s+jobs|job\s+failures|"
+            r"failed\s+transfers|how many\s+transfers\s+failed|jobs?\s+that\s+failed)\b",
             lower,
         )
     ) and not re.search(r"\bon\s+[a-z0-9]", lower)
@@ -2542,14 +2575,24 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     elif any(w in lower for w in ("why did this job fail", "why did the transfer fail", "job failed", "transfer failed", "analyze job")):
         planned.append(("list_jobs", {"limit": 5}))
 
-    if any(w in lower for w in ("strip control", "strip controls", "fix bad data", "format-control", "normalize control", "quarantine bad")):
-        kind = "normalize_control_chars"
-        if "quarantine" in lower:
+    if any(w in lower for w in (
+        "strip control", "strip controls", "fix bad data", "format-control",
+        "normalize control", "quarantine bad", "heal quarantine", "repair bad",
+        "repair quarantine", "fix quarantine", "open bad data",
+    )):
+        kind = "open_bad_data_fix"
+        if any(w in lower for w in ("strip control", "normalize control", "format-control")):
+            kind = "normalize_control_chars"
+        elif any(w in lower for w in ("quarantine", "heal quarantine")):
             kind = "quarantine_and_rerun"
-        elif "fix bad data" in lower or "open fix" in lower:
-            kind = "open_bad_data_fix"
         planned.append(("remediate_validation", {"kind": kind}))
         planned.append(("navigate", {"screen": "transfer"}))
+
+    # Mapping review — open Map step, don't invent column rewrites in chat.
+    if re.search(r"\b(?:fix|review|repair)\s+(?:the\s+)?(?:mapping|mappings|map)\b", lower):
+        if "remediate_validation" not in {n for n, _ in planned}:
+            planned.append(("remediate_validation", {"kind": "review_mappings"}))
+            planned.append(("navigate", {"screen": "transfer"}))
 
     if any(w in lower for w in ("new transfer", "start a transfer", "open transfer studio")) and not any(
         p[0] == "navigate" for p in planned
@@ -2658,6 +2701,17 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     if tables_on and "introspect_connector_schema" not in [p[0] for p in planned]:
         cname = tables_on.group(1).strip().strip("\"'")
         planned.append(("list_connector_objects", {"connector_name": cname}))
+    elif re.search(
+        r"\b(?:list|show)\s+tables\b|\bwhat\s+tables\s+(?:do\s+i\s+have|are\s+there)\b|"
+        r"\bmy\s+tables\b|\btables\s+do\s+i\s+have\b",
+        lower,
+    ) and "list_connector_objects" not in [p[0] for p in planned]:
+        # Bare inventory ask — list connectors so we can ask which one to expand.
+        planned.append(("list_connectors", {}))
+        planned = [
+            (n, a) for n, a in planned
+            if not (n == "navigate" and (a or {}).get("screen") == "connectors")
+        ]
 
     # Aggregations: "count of orders by status", "average price in products",
     # "top 5 regions by revenue", "revenue by month". Parsed structurally; the

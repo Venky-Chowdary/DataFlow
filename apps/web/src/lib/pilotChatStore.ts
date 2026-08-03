@@ -232,6 +232,63 @@ export function saveRailChat(
   });
 }
 
+/**
+ * Promote the FAB/rail conversation into the Pilot workspace so opening
+ * Data Pilot keeps the same session id, result ref, and message history.
+ * Returns null when the rail has nothing worth promoting.
+ */
+export function promoteRailChatToPilotSession(): {
+  sessions: PilotSession[];
+  activeId: string;
+} | null {
+  const rail = loadRailChat();
+  if (!rail) return null;
+  const meaningful = (rail.messages || []).filter(
+    (m) => m.role === "user" || (m.role === "assistant" && (m.text || "").length > 80),
+  );
+  if (meaningful.length === 0 && (rail.history || []).length === 0) return null;
+
+  const { sessions, activeId } = loadPilotWorkspace();
+  const existing = sessions.find((s) => s.id === rail.sessionId);
+  const titleFromUser =
+    (rail.messages || []).find((m) => m.role === "user")?.text?.slice(0, 48) || "Rail conversation";
+
+  if (existing) {
+    const merged: PilotSession = trimSession({
+      ...existing,
+      messages: rail.messages.length >= existing.messages.length ? rail.messages : existing.messages,
+      history: rail.history.length >= existing.history.length ? rail.history : existing.history,
+      lastResultId: rail.lastResultId || existing.lastResultId,
+      updatedAt: Date.now(),
+      title: existing.title === "New conversation" ? titleFromUser : existing.title,
+    });
+    const next = [merged, ...sessions.filter((s) => s.id !== merged.id)];
+    savePilotWorkspace(next, merged.id);
+    return { sessions: next, activeId: merged.id };
+  }
+
+  const promoted: PilotSession = trimSession({
+    id: rail.sessionId || crypto.randomUUID(),
+    title: titleFromUser,
+    messages: rail.messages || [],
+    history: rail.history || [],
+    toolLog: [],
+    lastResultId: rail.lastResultId,
+    updatedAt: Date.now(),
+  });
+  const next = [promoted, ...sessions.filter((s) => s.messages.length > 0 || s.id === activeId)];
+  savePilotWorkspace(next, promoted.id);
+  return { sessions: next, activeId: promoted.id };
+}
+
+export function clearRailChat() {
+  try {
+    localStorage.removeItem(RAIL_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
 export function loadSidebarNavCompact(): boolean {
   return localStorage.getItem(SIDEBAR_COMPACT_KEY) === "1";
 }

@@ -309,7 +309,7 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
             "I only run read-only actions and confirmed connector creates — "
             "deletes have to be done in the UI so they can't be triggered by a prompt."
         )
-    if any(w in lower for w in ("schedule", "pipeline", "cron", "every hour", "daily")):
+    if any(w in lower for w in ("schedule", "pipeline", "cron", "every hour", "daily", "nightly")):
         suggestions.append(
             'I can list and trigger existing pipelines: "show my pipelines" or '
             '"run schedule <name> now". Creating a new schedule still needs the UI.'
@@ -474,8 +474,14 @@ class DataPilotAgent:
 
         # Meta questions stay on the local agent — never RAG-dump ontology shards
         # and never race cloud LLMs for a "who are you" answer.
-        from .tools import _is_meta_pilot_question
+        from .tools import _is_meta_pilot_question, _looks_like_unsupported_mutation
         if _is_meta_pilot_question(lower_msg):
+            ctx = self.context_builder.build(data_context, message)
+            return self._local_agent(message, history, ctx, data_context)
+
+        # Delete / export / create-schedule paraphrases must refuse locally —
+        # never race cloud or RAG into a fluent "here's how to delete…" answer.
+        if _looks_like_unsupported_mutation(lower_msg):
             ctx = self.context_builder.build(data_context, message)
             return self._local_agent(message, history, ctx, data_context)
 
@@ -1492,7 +1498,13 @@ Respond as Data Pilot — grounded in tool results."""
                     "benchmarks": "Proofs",
                     "pilot": "Data Pilot",
                 }
-                parts.append(f"Opening **{labels.get(screen, screen)}** for you.")
+                # When Confirm is still required, do not claim we already opened the screen.
+                if turn.pending_actions:
+                    parts.append(
+                        f"After you Confirm, I'll take you to **{labels.get(screen, screen)}**."
+                    )
+                else:
+                    parts.append(f"Opening **{labels.get(screen, screen)}** for you.")
             elif tr.name in ("open_job", "open_schedule", "start_transfer_studio") and tr.success:
                 parts.append(f"{tr.output.get('label') or 'Opening that screen'} for you.")
             elif tr.name == "list_schedules" and tr.success:
@@ -1647,8 +1659,9 @@ Respond as Data Pilot — grounded in tool results."""
                 parts.append("\n".join(lines))
             elif tr.name == "remediate_validation" and tr.success:
                 parts.append(
-                    f"Proposed Studio remediation: **{tr.output.get('label')}**. "
-                    "Confirm to apply it in Transfer Studio (Validate step)."
+                    f"Proposed Studio remediation: **{tr.output.get('label')}**.\n"
+                    "Confirm opens **Fix bad data** in Transfer Studio — "
+                    "it does not rewrite quarantine rows inside this chat."
                 )
             elif tr.name in ("plan_transfer", "start_transfer") and tr.success:
                 parts.append(_render_transfer(tr.name, tr.output or {}))
@@ -1941,13 +1954,30 @@ Respond as Data Pilot — grounded in tool results."""
                 )
             elif tr.name == "list_connectors" and tr.success:
                 conns = tr.output.get("connectors", [])
+                ask_tables = any(
+                    w in (message or "").lower()
+                    for w in ("table", "tables", "collections", "objects")
+                )
                 if conns:
                     lines = [f"You have **{len(conns)} saved connector(s)**:"]
                     for c in conns:
-                        lines.append(f"• **{c.get('name')}** ({c.get('type')}) → {c.get('database', c.get('host', ''))}")
+                        lines.append(
+                            f"• **{c.get('name')}** ({c.get('type')}) → "
+                            f"{c.get('database', c.get('host', ''))}"
+                        )
+                    if ask_tables:
+                        names = [str(c.get("name") or "") for c in conns if c.get("name")]
+                        sample = names[0] if names else "Local Postgres"
+                        lines.append(
+                            f'To list tables, name the connector: '
+                            f'"list tables on {sample}".'
+                        )
                     parts.append("\n".join(lines))
                 else:
-                    parts.append("No connectors saved yet. Go to **Connectors** to add MongoDB, PostgreSQL, or Snowflake.")
+                    parts.append(
+                        "No connectors saved yet. Go to **Connectors** to add "
+                        "MongoDB, PostgreSQL, or Snowflake."
+                    )
             elif tr.name == "analyze_dataset" and tr.success:
                 parts.append(self._format_analysis(tr.output))
             elif tr.name == "search_data" and tr.success:
@@ -2163,14 +2193,30 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
                     "pii_count": len(o.get("pii_columns", [])),
                     "quality_score": o.get("quality_score", 0),
                 }
-            if tr.name in ("sample_connector_object", "run_query", "filter_result", "analyze_result") and tr.success:
+            if tr.name in (
+                "sample_connector_object",
+                "run_query",
+                "filter_result",
+                "analyze_result",
+                "aggregate_data",
+            ) and tr.success:
                 o = tr.output or {}
                 rid = o.get("result_id")
                 if rid:
                     return {
                         "dataset": o.get("table") or o.get("connector_name") or "pilot_result",
-                        "columns": len(o.get("columns") or (o.get("analysis") or {}).get("columns") or []),
-                        "rows": o.get("row_count") or o.get("match_count") or (o.get("analysis") or {}).get("row_count_sampled") or 0,
+                        "columns": len(
+                            o.get("columns")
+                            or (o.get("analysis") or {}).get("columns")
+                            or []
+                        ),
+                        "rows": (
+                            o.get("row_count")
+                            or o.get("match_count")
+                            or (o.get("analysis") or {}).get("row_count_sampled")
+                            or o.get("group_count")
+                            or 0
+                        ),
                         "pii_count": 0,
                         "quality_score": 0,
                         "last_result_id": rid,

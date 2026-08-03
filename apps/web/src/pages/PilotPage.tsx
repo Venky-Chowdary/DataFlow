@@ -33,9 +33,12 @@ import {
   extractPilotResultId,
   loadAsideOpen,
   loadPilotWorkspace,
+  loadRailChat,
   PilotSession,
+  promoteRailChatToPilotSession,
   saveAsideOpen,
   savePilotWorkspace,
+  saveRailChat,
 } from "../lib/pilotChatStore";
 
 interface PilotPageProps {
@@ -62,7 +65,10 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
   const { confirm } = useConfirm();
   const { activeData } = useActiveData();
   const { dispatchStudioAction } = useStudioActions();
-  const boot = useRef(loadPilotWorkspace());
+  const boot = useRef((() => {
+    // Bring FAB/rail continuity into the full Pilot page on first mount.
+    return promoteRailChatToPilotSession() || loadPilotWorkspace();
+  })());
   const [sessions, setSessions] = useState<PilotSession[]>(boot.current.sessions);
   const [activeId, setActiveId] = useState(boot.current.activeId);
   const [asideOpen, setAsideOpen] = useState(() => loadAsideOpen(true));
@@ -98,6 +104,17 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
   // Persist chats + active session across refresh.
   useEffect(() => {
     savePilotWorkspace(sessions, activeId);
+    // Keep FAB/rail in sync when it shares this session id (wave 35 handoff).
+    const active = sessions.find((s) => s.id === activeId);
+    const rail = loadRailChat();
+    if (active && rail && rail.sessionId === activeId) {
+      saveRailChat({
+        messages: active.messages,
+        history: active.history,
+        sessionId: active.id,
+        lastResultId: active.lastResultId,
+      });
+    }
   }, [sessions, activeId]);
 
   useEffect(() => {
@@ -138,18 +155,22 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
     setConfirmingId(action.id);
     try {
       if (action.type === "studio" || (action.kind && action.type !== "start_transfer" && action.type !== "create_connector")) {
-        onNavigate("transfer");
         dispatchStudioAction({
           kind: (action.kind || String(action.payload?.kind || "")) as string,
           label: action.label,
           run_id: action.run_id || (action.payload?.run_id as string | undefined),
         });
-        toast({ title: "Action confirmed", message: action.label || "Applied in Transfer Studio", tone: "success" });
+        onNavigate("transfer");
+        toast({
+          title: "Opening Fix bad data",
+          message: action.label || "Confirm opens Transfer Studio — apply the fix there.",
+          tone: "info",
+        });
       } else if (action.type === "run_schedule") {
         const sid = String(action.payload?.schedule_id || "");
         if (!sid) throw new Error("Missing schedule id");
-        onNavigate("schedules");
         const res = await runScheduleNow(sid);
+        onNavigate("schedules");
         toast({
           title: "Pipeline started",
           message: `Job ${res.job_id || "queued"}`,
@@ -247,7 +268,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
       ].slice(-20);
 
       const liveTools = (res.tools_used || []).filter((t) =>
-        ["sample_connector_object", "run_query", "filter_result"].includes(t.name),
+        ["sample_connector_object", "run_query", "filter_result", "aggregate_data"].includes(t.name),
       );
       const freshId =
         res.data_insight?.last_result_id

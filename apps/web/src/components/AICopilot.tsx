@@ -124,18 +124,22 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
     setConfirmingId(action.id);
     try {
       if (action.type === "studio" || (action.kind && action.type !== "start_transfer" && action.type !== "create_connector")) {
-        onNavigate?.("transfer");
         dispatchStudioAction({
           kind: (action.kind || String(action.payload?.kind || "")) as string,
           label: action.label,
           run_id: action.run_id || (action.payload?.run_id as string | undefined),
         });
-        toast({ title: "Action confirmed", message: action.label || "Applied in Transfer Studio", tone: "success" });
+        onNavigate?.("transfer");
+        toast({
+          title: "Opening Fix bad data",
+          message: action.label || "Confirm opens Transfer Studio — apply the fix there.",
+          tone: "info",
+        });
       } else if (action.type === "run_schedule") {
         const sid = String(action.payload?.schedule_id || "");
         if (!sid) throw new Error("Missing schedule id");
-        onNavigate?.("schedules");
         const res = await runScheduleNow(sid);
+        onNavigate?.("schedules");
         toast({
           title: "Pipeline started",
           message: `Job ${res.job_id || "queued"}`,
@@ -216,7 +220,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
       setHistory(newHistory.slice(-20));
 
       const liveTools = (res.tools_used || []).filter((t) =>
-        ["sample_connector_object", "run_query", "filter_result"].includes(t.name),
+        ["sample_connector_object", "run_query", "filter_result", "aggregate_data"].includes(t.name),
       );
       const freshId =
         res.data_insight?.last_result_id

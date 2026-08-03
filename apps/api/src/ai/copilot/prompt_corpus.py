@@ -258,6 +258,10 @@ def iter_prompt_corpus() -> list[PromptCase]:
         "quarantine bad rows",
         "strip control characters",
         "normalize control chars",
+        "heal quarantine",
+        "repair bad rows",
+        "fix the mapping",
+        "review the mappings",
     ):
         cases.append(_case(p, "remediate_validation", family="remediate"))
 
@@ -268,17 +272,23 @@ def iter_prompt_corpus() -> list[PromptCase]:
         "failed jobs",
         "failed transfers",
         "job failures",
+        "jobs that failed",
         "how many transfers failed",
         "show my jobs",
         "list jobs",
         "recent transfers",
+        "list tables",
+        "what tables do I have",
     ):
-        cases.append(_case(
-            p,
-            "list_jobs",
-            family="inventory",
-            must_not=("aggregate_data",),
-        ))
+        if "table" in p:
+            cases.append(_case(p, "list_connectors", "list_connector_objects", family="inventory"))
+        else:
+            cases.append(_case(
+                p,
+                "list_jobs",
+                family="jobs",
+                must_not=("aggregate_data", "run_query", "sample_connector_object"),
+            ))
     for p in (
         "how many connectors do I have",
         "how many connectors",
@@ -426,6 +436,8 @@ def iter_prompt_corpus() -> list[PromptCase]:
         "drop table orders",
         "create a new nightly schedule for orders",
         "build a cron pipeline every hour",
+        "remove the Warehouse connector",
+        "schedule this transfer nightly",
     ):
         cases.append(_case(
             p,
