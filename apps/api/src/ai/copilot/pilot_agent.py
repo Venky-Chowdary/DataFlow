@@ -562,6 +562,61 @@ class DataPilotAgent:
                 suggested_prompts=self._starter_prompts()[:3],
             )
 
+    def _run_local_recovery(
+        self,
+        turn: PilotTurn,
+        message: str,
+        data_context: dict | None,
+    ) -> None:
+        """OpenAI-style follow-up tools when the first plan fails closed.
+
+        Railway-class chatbots don't stop at \"connector not found\" — they list
+        what exists and tell the operator the next accurate step.
+        """
+        names = {tr.name for tr in turn.tool_results}
+        connector_miss = any(
+            (not tr.success)
+            and tr.error
+            and (
+                "no connector matched" in tr.error.lower()
+                or "which connector" in tr.error.lower()
+            )
+            for tr in turn.tool_results
+        )
+        if connector_miss and "list_connectors" not in names:
+            tr = self.tools.execute("list_connectors", {})
+            turn.tool_results.append(tr)
+            self._append_tool_actions(turn, tr)
+            if tr.success and not turn.needs_clarification:
+                conns = (tr.output or {}).get("connectors") or []
+                if conns:
+                    listed = ", ".join(
+                        f"**{c.get('name')}**" for c in conns[:6] if c.get("name")
+                    )
+                    turn.needs_clarification = (
+                        "Which saved connector should I use? "
+                        f"{listed}. Or say e.g. "
+                        '"create a postgres connector at host…".'
+                    )
+                else:
+                    turn.needs_clarification = (
+                        "No saved connectors yet. Add one under **Connectors**, or paste a "
+                        "connection URL and ask me to create it (Confirm required)."
+                    )
+
+        # Suggestions with no active dataset → list uploads so the operator can pick.
+        for tr in list(turn.tool_results):
+            if tr.name != "profile_quality_rules" or not tr.success:
+                continue
+            cols = int((tr.output or {}).get("column_count") or 0)
+            if cols > 0:
+                continue
+            if "list_datasets" not in {t.name for t in turn.tool_results}:
+                ds = self.tools.execute("list_datasets", {})
+                turn.tool_results.append(ds)
+                self._append_tool_actions(turn, ds)
+            break
+
     @staticmethod
     def _ollama_available_quick() -> bool:
         try:
@@ -578,6 +633,8 @@ class DataPilotAgent:
             if err and (
                 err.startswith("Which ")
                 or "did you mean" in err.lower()
+                or "no connector matched" in err.lower()
+                or "which connector" in err.lower()
                 or tr.name in ("run_schedule_now", "get_schedule", "open_schedule", "create_connector")
             ):
                 turn.needs_clarification = err
@@ -1090,6 +1147,7 @@ Respond as Data Pilot — grounded in tool results."""
             turn.tool_results.append(tr)
             self._append_tool_actions(turn, tr)
         self._commit_memory(planned, turn, data_context)
+        self._run_local_recovery(turn, message, data_context)
 
         # Ground answers in active session IDs when the user asks about failure/status
         # without pasting an ID (Jobs / Validate feed these into data_context).
@@ -1275,12 +1333,16 @@ Respond as Data Pilot — grounded in tool results."""
                     lines = ["Here are your **recent transfer jobs**:"]
                     for j in jobs[:5]:
                         lines.append(
-                            f"• `{j.get('id', '?')}` · {j.get('source', '?')} → {j.get('destination', '?')}: "
+                            f"• `{j.get('id', '?')}` · {j.get('source', '?')} -> "
+                            f"{j.get('destination', '?')}: "
                             f"**{j.get('status')}** ({j.get('records', 0):,} records)"
                         )
                     parts.append("\n".join(lines))
                 else:
-                    parts.append("No transfer jobs yet. Start one from **New Transfer**.")
+                    parts.append(
+                        "No transfer jobs yet. Ask me to **plan** or **start** a transfer "
+                        "(Confirm required), or open **Transfer Studio**."
+                    )
             elif tr.name == "get_job" and tr.success:
                 job = tr.output or {}
                 lines = [
@@ -1378,10 +1440,28 @@ Respond as Data Pilot — grounded in tool results."""
             elif tr.name == "profile_quality_rules" and tr.success:
                 o = tr.output or {}
                 rules = o.get("rules") or []
-                parts.append(
-                    f"Quality rules for **{o.get('dataset')}** ({o.get('column_count', 0)} columns):\n"
-                    + "\n".join(f"• {r}" for r in rules)
-                )
+                cols = int(o.get("column_count") or 0)
+                if cols <= 0:
+                    parts.append(
+                        "I can suggest quality gates, but there's **no active dataset** loaded yet.\n"
+                        "• Upload a CSV/JSON in **Transfer**, or\n"
+                        "• Ask me to **list datasets** / analyze a named upload, or\n"
+                        "• Sample a live table: "
+                        '"sample orders on <connector>"\n\n'
+                        "Enterprise rules I apply once data is in scope:\n"
+                        + "\n".join(f"• {r}" for r in rules[:6])
+                    )
+                else:
+                    pii = o.get("pii_candidates") or []
+                    extra = (
+                        f"\nPII-looking columns: {', '.join(f'`{c}`' for c in pii[:8])}"
+                        if pii else ""
+                    )
+                    parts.append(
+                        f"Quality suggestions for **{o.get('dataset')}** "
+                        f"({cols} columns):{extra}\n"
+                        + "\n".join(f"• {r}" for r in rules)
+                    )
             elif tr.name == "list_connector_objects" and tr.success:
                 o = tr.output or {}
                 objs = o.get("objects") or []
@@ -1730,10 +1810,21 @@ Respond as Data Pilot — grounded in tool results."""
                 lines.append(f"• {tr.error}")
             parts.append("\n".join(lines))
         elif failed and parts:
-            # Mixed success+failure: append the failure so users see what was wrong
-            clarify = [tr.error for tr in failed if tr.error and ("Which " in tr.error or "did you mean" in tr.error.lower())]
-            if clarify:
-                parts.append(clarify[0])
+            # Mixed success+failure: keep connector/clarification errors visible.
+            for tr in failed:
+                err = (tr.error or "").strip()
+                if not err:
+                    continue
+                low = err.lower()
+                if (
+                    err.startswith("Which ")
+                    or "did you mean" in low
+                    or "no connector matched" in low
+                    or "which connector" in low
+                ):
+                    if err not in "\n".join(parts):
+                        parts.insert(0, err)
+                    break
 
         if not parts:
             parts.append(_unmapped_intent_reply(message, ctx))

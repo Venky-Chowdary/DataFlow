@@ -82,10 +82,10 @@ def iter_prompt_corpus() -> list[PromptCase]:
     ):
         cases.append(_case(p, "describe_pilot", family="meta"))
 
-    # --- Navigation ---
+    # --- Navigation (screen change — not "show my X" content lists) ---
     for screen, labels in _SCREENS:
         for label in labels:
-            for verb in ("go to", "open", "show", "take me to", "navigate to"):
+            for verb in ("go to", "open", "take me to", "navigate to"):
                 cases.append(
                     _case(f"{verb} {label}", "navigate", family="navigate")
                 )

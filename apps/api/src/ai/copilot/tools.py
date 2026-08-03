@@ -1452,6 +1452,19 @@ class DataPilotTools:
             ],
             "pii_candidates": pii_candidates,
             "column_count": len(columns),
+            "has_dataset": bool(schema and columns),
+            "next_steps": (
+                [
+                    "Sample a live table to profile real null/type rates",
+                    "Say fix bad data to open Transfer Studio remediation (Confirm)",
+                    "Run Validate (9 gates) before Execute",
+                ]
+                if schema and columns
+                else [
+                    "Upload a file in Transfer or name a dataset to analyze",
+                    "Or: sample <table> on <connector>",
+                ]
+            ),
         })
 
     def _resolve_schedule(self, schedule_id: str = "", name: str = ""):
@@ -2281,13 +2294,19 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         q = setup.group(1).strip()
         role = "destination" if "destination" in lower else "source"
         planned.append(("search_connectors", {"query": q[:40], "role": role}))
-    elif any(w in lower for w in ("connectors", "connections")) and "go" not in lower and "open" not in lower:
+    elif any(w in lower for w in ("connectors", "connections")) and not any(
+        v in lower for v in ("go to", "take me", "navigate to", "open ")
+    ):
         if any(w in lower for w in ("search", "find", "source", "destination", "setup", "postgres", "snowflake", "shopify")):
             role = "destination" if "destination" in lower or "warehouse" in lower else "source" if "source" in lower else "all"
             q = re.sub(r".*(?:search|find|setup)\s+", "", lower).strip() or lower
             planned.append(("search_connectors", {"query": q[:40], "role": role}))
         else:
             planned.append(("list_connectors", {}))
+            planned = [
+                (n, a) for n, a in planned
+                if not (n == "navigate" and (a or {}).get("screen") == "connectors")
+            ]
 
     # Create / save connector from credentials pasted in chat
     from .connector_create import wants_create_connector
@@ -2297,11 +2316,19 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         planned.append(("create_connector", {"message": message}))
 
     # Pipelines / schedules
-    if any(w in lower for w in ("list schedules", "list pipelines", "my pipelines", "my schedules", "show pipelines", "show schedules")):
+    if any(w in lower for w in ("list schedules", "list pipelines", "my pipelines", "my schedules", "show pipelines", "show schedules", "show my pipelines", "show my schedules")):
         planned.append(("list_schedules", {"limit": 20}))
+        planned = [
+            (n, a) for n, a in planned
+            if not (n == "navigate" and (a or {}).get("screen") == "schedules")
+        ]
     elif any(w in lower for w in ("pipeline", "schedule")) and any(w in lower for w in ("list", "show", "what")):
-        if "run" not in lower:
+        if "run" not in lower and not any(v in lower for v in ("go to", "take me", "navigate to", "open ")):
             planned.append(("list_schedules", {"limit": 20}))
+            planned = [
+                (n, a) for n, a in planned
+                if not (n == "navigate" and (a or {}).get("screen") == "schedules")
+            ]
 
     run_sched = re.search(
         r"(?:run|trigger|execute)\s+(?:schedule|pipeline)\s+[\"']?([^\"'\n]+?)[\"']?(?:\s+now)?\s*$",
@@ -2322,10 +2349,42 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         planned.append(("run_schedule_now", {"name": name} if name else {}))
 
     if any(w in lower for w in ("contracts", "data contract")) and any(w in lower for w in ("list", "show", "what")):
-        planned.append(("list_contracts", {"limit": 50}))
+        # "show contracts" may also navigate — prefer list when asking for contents.
+        if not any(v in lower for v in ("go to", "take me", "navigate to", "open ")):
+            planned.append(("list_contracts", {"limit": 50}))
+            planned = [
+                (n, a) for n, a in planned
+                if not (n == "navigate" and (a or {}).get("screen") == "contracts")
+            ]
 
-    if any(w in lower for w in ("jobs", "transfers", "history")) and "dataset" not in lower and "go" not in lower:
+    # List jobs when the operator wants contents — not when they only want the screen.
+    _nav_only = any(v in lower for v in ("go to", "take me to", "navigate to", "open "))
+    if (not _nav_only) and (
+        any(
+            p in lower
+            for p in (
+                "list jobs",
+                "my jobs",
+                "show my jobs",
+                "show jobs",
+                "recent transfers",
+                "job history",
+                "show my transfers",
+                "list transfers",
+            )
+        )
+        or (
+            any(w in lower for w in ("jobs", "transfers", "history"))
+            and any(w in lower for w in ("list", "show", "recent", "my"))
+            and "dataset" not in lower
+        )
+    ):
         planned.append(("list_jobs", {"limit": 10}))
+        # Drop a competing navigate-to-jobs so the list is the primary answer.
+        planned = [
+            (n, a) for n, a in planned
+            if not (n == "navigate" and (a or {}).get("screen") == "jobs")
+        ]
 
     pf_match = re.search(r"\bpf_[a-f0-9]{8,}\b", lower)
     if pf_match or any(w in lower for w in ("preflight run", "validation run", "why did validate", "why validation failed")):
