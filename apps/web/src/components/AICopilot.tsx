@@ -7,6 +7,7 @@ import {
   copilotChat,
   fetchCopilotPrompts,
   formatPilotReachError,
+  runScheduleNow,
   CopilotAction,
   CopilotChatMessage,
   CopilotPendingAction,
@@ -17,9 +18,15 @@ import {
   isDestructiveTransfer,
   transferOverwriteMessage,
 } from "../lib/pilotConfirm";
+import { useStudioActions } from "../lib/StudioActionsContext";
 import { API_BASE, Screen } from "../lib/types";
 import { renderSafeMarkdown } from "../lib/safeMarkdown";
-import { loadRailChat, PilotMessage, saveRailChat } from "../lib/pilotChatStore";
+import {
+  extractPilotResultId,
+  loadRailChat,
+  PilotMessage,
+  saveRailChat,
+} from "../lib/pilotChatStore";
 
 interface Message extends PilotMessage {
   dataInsight?: {
@@ -55,12 +62,17 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
   const { activeData } = useActiveData();
   const { toast } = useToast();
   const { confirm } = useConfirm();
+  const { dispatchStudioAction } = useStudioActions();
   const [open, setOpen] = useState(variant === "rail");
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [prompts, setPrompts] = useState<string[]>([]);
   const restored = useRef(loadRailChat());
+  const [sessionId] = useState(() => restored.current?.sessionId || crypto.randomUUID());
+  const [lastResultId, setLastResultId] = useState<string | undefined>(
+    () => restored.current?.lastResultId,
+  );
   const [history, setHistory] = useState<CopilotChatMessage[]>(() => restored.current?.history ?? []);
   const [messages, setMessages] = useState<Message[]>(() => {
     const saved = restored.current?.messages;
@@ -77,9 +89,9 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
   useEffect(() => {
     // Persist rail chat so close/refresh does not wipe the conversation.
     if (messages.length > 1 || history.length > 0) {
-      saveRailChat({ messages, history });
+      saveRailChat({ messages, history, sessionId, lastResultId });
     }
-  }, [messages, history]);
+  }, [messages, history, sessionId, lastResultId]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -109,31 +121,29 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
 
   const confirmPending = async (msgIndex: number, action: CopilotPendingAction) => {
     if (confirmingId) return;
-    if (action.type !== "create_connector" && action.type !== "start_transfer") {
-      // Studio / schedule mutations belong on the full Pilot page where the
-      // surrounding workspace is ready. Send the operator there instead of
-      // silently dropping the approval.
-      onNavigate?.("pilot");
-      toast({
-        title: "Open Data Pilot to confirm",
-        message: action.label || action.type,
-        tone: "info",
-      });
-      return;
-    }
     setConfirmingId(action.id);
     try {
-      if (action.type === "start_transfer" && isDestructiveTransfer(action)) {
-        const ok = await confirm({
-          title: "Overwrite the destination?",
-          message: transferOverwriteMessage(action),
-          confirmLabel: "Overwrite & run",
-          tone: "danger",
+      if (action.type === "studio" || (action.kind && action.type !== "start_transfer" && action.type !== "create_connector")) {
+        onNavigate?.("transfer");
+        dispatchStudioAction({
+          kind: (action.kind || String(action.payload?.kind || "")) as string,
+          label: action.label,
+          run_id: action.run_id || (action.payload?.run_id as string | undefined),
         });
-        if (!ok) return;
-      }
-      const res = await confirmPilotPending(action);
-      if (res.kind === "create_connector") {
+        toast({ title: "Action confirmed", message: action.label || "Applied in Transfer Studio", tone: "success" });
+      } else if (action.type === "run_schedule") {
+        const sid = String(action.payload?.schedule_id || "");
+        if (!sid) throw new Error("Missing schedule id");
+        onNavigate?.("schedules");
+        const res = await runScheduleNow(sid);
+        toast({
+          title: "Pipeline started",
+          message: `Job ${res.job_id || "queued"}`,
+          tone: "success",
+        });
+      } else if (action.type === "create_connector") {
+        const res = await confirmPilotPending(action);
+        if (res.kind !== "create_connector") throw new Error("Unexpected confirm result");
         window.dispatchEvent(new CustomEvent("df2:connectors-changed"));
         onNavigate?.("connectors");
         toast({
@@ -141,13 +151,27 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
           message: `“${res.name}” (${res.type}) is ready in Connectors.`,
           tone: "success",
         });
-      } else {
+      } else if (action.type === "start_transfer") {
+        if (isDestructiveTransfer(action)) {
+          const ok = await confirm({
+            title: "Overwrite the destination?",
+            message: transferOverwriteMessage(action),
+            confirmLabel: "Overwrite & run",
+            tone: "danger",
+          });
+          if (!ok) return;
+        }
+        const res = await confirmPilotPending(action);
+        if (res.kind !== "start_transfer") throw new Error("Unexpected confirm result");
         toast({
           title: res.idempotent ? "Transfer already running" : "Transfer started",
           message: `${res.source} → ${res.destination}`,
           tone: "success",
         });
         onNavigate?.("jobs");
+      } else {
+        toast({ title: "Unknown action", message: action.type, tone: "error" });
+        return;
       }
       clearPending(msgIndex, action.id);
     } catch (error) {
@@ -169,13 +193,40 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
     setLoading(true);
 
     try {
-      const res = await copilotChat(q, history, activeData);
+      const pilotContext = {
+        name: activeData?.name || "pilot-rail",
+        columns: activeData?.columns || [],
+        row_count: activeData?.row_count ?? 0,
+        filename: activeData?.filename,
+        samples: activeData?.samples,
+        preflight_run_id: activeData?.preflight_run_id,
+        job_id: activeData?.job_id,
+        validation_status: activeData?.validation_status,
+        route: activeData?.route,
+        blockers: activeData?.blockers,
+        pilot_session_id: sessionId,
+        last_result_id: lastResultId,
+      };
+      const res = await copilotChat(q, history, pilotContext);
       const newHistory: CopilotChatMessage[] = [
         ...history,
         { role: "user", content: q },
         { role: "assistant", content: res.answer },
       ];
       setHistory(newHistory.slice(-20));
+
+      const liveTools = (res.tools_used || []).filter((t) =>
+        ["sample_connector_object", "run_query", "filter_result"].includes(t.name),
+      );
+      const freshId =
+        res.data_insight?.last_result_id
+        || extractPilotResultId(res.tools_used);
+      if (freshId) {
+        setLastResultId(freshId);
+      } else if (liveTools.length > 0 && liveTools.every((t) => !t.success)) {
+        setLastResultId(undefined);
+      }
+
       setMessages((m) => [
         ...m,
         {
@@ -184,6 +235,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
           actions: res.suggested_actions,
           pending_actions: res.pending_actions,
           dataInsight: res.data_insight,
+          tools_used: res.tools_used,
         },
       ]);
       // Stay on the Confirm card — never auto-navigate away from an approval.

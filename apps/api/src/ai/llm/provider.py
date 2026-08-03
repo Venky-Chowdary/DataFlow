@@ -429,8 +429,9 @@ MODEL_CAPABILITY_MATRIX = [
             "mapping_assignment",
         ],
         "best_for": (
-            "Primary Data Pilot brain — OpenAI-style tool planning/execution without "
-            "third-party APIs. Exact aggregates, schema, transfers-with-Confirm, job triage."
+            "Default Data Pilot engine — deterministic local tool planning/execution "
+            "(no third-party LLM). Exact aggregates, schema, transfers-with-Confirm, "
+            "job triage. Set DATAFLOW_PILOT_ENGINE=hybrid for optional cloud narration."
         ),
     },
 ]

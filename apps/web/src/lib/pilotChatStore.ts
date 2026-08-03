@@ -37,7 +37,36 @@ export interface PilotSession {
 export interface PilotRailState {
   messages: PilotMessage[];
   history: CopilotChatMessage[];
+  /** Stable id so follow-ups share working memory with the API. */
+  sessionId: string;
+  /** Last durable sample/query result ref (pr_…). */
+  lastResultId?: string;
   updatedAt: number;
+}
+
+/** Pull the newest pr_… result id from tool summaries (PilotPage + rail). */
+export function extractPilotResultId(
+  tools?: { name: string; success: boolean; summary: string }[],
+): string | undefined {
+  if (!tools?.length) return undefined;
+  for (let i = tools.length - 1; i >= 0; i -= 1) {
+    const t = tools[i];
+    if (!t.success) continue;
+    if (
+      ![
+        "sample_connector_object",
+        "run_query",
+        "filter_result",
+        "analyze_result",
+        "aggregate_data",
+      ].includes(t.name)
+    ) {
+      continue;
+    }
+    const m = /\b(pr_[a-f0-9]+)\b/i.exec(t.summary || "");
+    if (m) return m[1];
+  }
+  return undefined;
 }
 
 const SESSIONS_KEY = "df2.pilot.sessions.v1";
@@ -185,14 +214,20 @@ export function loadRailChat(): PilotRailState | null {
   return {
     messages: stored.messages.slice(-MAX_MESSAGES),
     history: (stored.history || []).slice(-MAX_HISTORY),
+    sessionId: stored.sessionId || crypto.randomUUID(),
+    lastResultId: stored.lastResultId,
     updatedAt: stored.updatedAt || Date.now(),
   };
 }
 
-export function saveRailChat(state: Pick<PilotRailState, "messages" | "history">) {
+export function saveRailChat(
+  state: Pick<PilotRailState, "messages" | "history" | "sessionId" | "lastResultId">,
+) {
   writeJson(RAIL_KEY, {
     messages: state.messages.map(redactMessage).slice(-MAX_MESSAGES),
     history: redactHistory(state.history).slice(-MAX_HISTORY),
+    sessionId: state.sessionId,
+    lastResultId: state.lastResultId,
     updatedAt: Date.now(),
   });
 }

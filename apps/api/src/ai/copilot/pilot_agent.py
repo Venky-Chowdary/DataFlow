@@ -931,6 +931,12 @@ class DataPilotAgent:
             if not tool_calls:
                 text = response.get("content", "").strip()
                 if text:
+                    self._commit_memory(
+                        [(tr.name, {}) for tr in turn.tool_results],
+                        turn,
+                        data_context,
+                    )
+                    self._run_local_recovery(turn, message, data_context)
                     return CopilotResponse(
                         answer=text,
                         intent=intent,
@@ -1172,6 +1178,7 @@ class DataPilotAgent:
                         turn,
                         data_context,
                     )
+                    self._run_local_recovery(turn, message, data_context)
                     return CopilotResponse(
                         answer=text,
                         intent=intent,
@@ -1224,6 +1231,7 @@ class DataPilotAgent:
                 turn,
                 data_context,
             )
+            self._run_local_recovery(turn, message, data_context)
             ctx = get_context_builder().build(data_context)
             insight = self._data_insight_from_turn(turn)
             answer = self._compose_local_answer(message, intent, turn, insight, ctx)
@@ -1248,6 +1256,7 @@ class DataPilotAgent:
             turn.tool_results.append(tr)
             self._append_tool_actions(turn, tr)
         self._commit_memory(planned, turn, data_context)
+        self._run_local_recovery(turn, message, data_context)
 
         tool_context = format_tool_results_for_llm(turn.tool_results)
         history_text = "\n".join(
@@ -1301,6 +1310,7 @@ Respond as Data Pilot in natural language. Ground your answer in tool results an
             turn.tool_results.append(tr)
             self._append_tool_actions(turn, tr)
         self._commit_memory(planned, turn, data_context)
+        self._run_local_recovery(turn, message, data_context)
 
         tool_context = format_tool_results_for_llm(turn.tool_results)
         history_text = "\n".join(
@@ -2025,9 +2035,13 @@ Respond as Data Pilot — grounded in tool results."""
                             lines.append(f"• {summary[:400]}")
                     parts.append("\n".join(lines))
                 else:
+                    hint = (tr.output.get("hint") or "").strip()
                     parts.append(
-                        "No solid knowledge match for that. Ask about a dataset, a job ID, "
-                        "or say **what can you do** for my capabilities."
+                        hint
+                        or (
+                            "No solid knowledge match for that. Ask about a dataset, a job ID, "
+                            "or say **what can you do** for my capabilities."
+                        )
                     )
 
         if insight and not any(tr.name == "analyze_dataset" for tr in turn.tool_results):

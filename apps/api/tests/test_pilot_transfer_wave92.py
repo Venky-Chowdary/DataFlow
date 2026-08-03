@@ -54,6 +54,14 @@ def _pg_reachable() -> bool:
          "events", "Mongo Prod", "Local Postgres", "", False),
         ("load orders from pg to wh, is that safe?",
          "orders", "pg", "wh", "", True),
+        ("please transfer all orders from Local Postgres to Warehouse",
+         "orders", "Local Postgres", "Warehouse", "", False),
+        ("transfer orders from Local Postgres to Warehouse now",
+         "orders", "Local Postgres", "Warehouse", "", False),
+        ("can you move orders from pg to wh?",
+         "orders", "pg", "wh", "", False),
+        ("transfer orders from Local Postgres to Warehouse please",
+         "orders", "Local Postgres", "Warehouse", "", False),
     ],
 )
 def test_transfer_intent_parses(message, table, src, dst, mode, plan_only):

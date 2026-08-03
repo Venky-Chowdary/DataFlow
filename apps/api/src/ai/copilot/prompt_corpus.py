@@ -200,6 +200,22 @@ def iter_prompt_corpus() -> list[PromptCase]:
                         "start_transfer", "plan_transfer",
                         family="transfer_start",
                     ))
+                # Natural / polite phrasings (wave 34) — must still route to transfer tools.
+                cases.append(_case(
+                    f"please transfer all {table} from {src} to {dst}",
+                    "start_transfer", "plan_transfer",
+                    family="transfer_start",
+                ))
+                cases.append(_case(
+                    f"transfer {table} from {src} to {dst} now",
+                    "start_transfer", "plan_transfer",
+                    family="transfer_start",
+                ))
+                cases.append(_case(
+                    f"can you move {table} from {src} to {dst}?",
+                    "start_transfer", "plan_transfer", "plan_transfer_route",
+                    family="transfer_start",
+                ))
 
     # --- Sync mode / capabilities / mapping assurance ---
     for p in (

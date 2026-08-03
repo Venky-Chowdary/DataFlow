@@ -30,6 +30,7 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import {
   createEmptySession,
+  extractPilotResultId,
   loadAsideOpen,
   loadPilotWorkspace,
   PilotSession,
@@ -39,22 +40,6 @@ import {
 
 interface PilotPageProps {
   onNavigate: (screen: Screen) => void;
-}
-
-function extractResultIdFromTools(
-  tools?: { name: string; success: boolean; summary: string }[],
-): string | undefined {
-  if (!tools?.length) return undefined;
-  for (let i = tools.length - 1; i >= 0; i -= 1) {
-    const t = tools[i];
-    if (!t.success) continue;
-    if (!["sample_connector_object", "run_query", "filter_result", "analyze_result", "aggregate_data"].includes(t.name)) {
-      continue;
-    }
-    const m = /\b(pr_[a-f0-9]+)\b/i.exec(t.summary || "");
-    if (m) return m[1];
-  }
-  return undefined;
 }
 
 const SCREEN_LABELS: Record<string, string> = {
@@ -266,7 +251,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
       );
       const freshId =
         res.data_insight?.last_result_id
-        || extractResultIdFromTools(res.tools_used);
+        || extractPilotResultId(res.tools_used);
       let nextResultId = session.lastResultId;
       if (freshId) {
         nextResultId = freshId;

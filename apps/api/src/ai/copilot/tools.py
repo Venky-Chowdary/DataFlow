@@ -1308,7 +1308,14 @@ class DataPilotTools:
                     continue
                 meta_type = str(d.metadata.get("type") or "").lower()
                 # Prefer real product/docs hits over synthetic catalog training docs.
-                if meta_type in {"synthetic_catalog", "catalog_schema", "generated_qna"} and score < 0.55:
+                if meta_type in {
+                    "synthetic_catalog",
+                    "catalog_schema",
+                    "generated_qna",
+                    "training",
+                    "ontology",
+                    "embedding_shard",
+                } and score < 0.62:
                     continue
                 if "650+" in text or "620+" in text:
                     # Catalog marketing counts are not transfer-ready evidence.
@@ -1326,7 +1333,21 @@ class DataPilotTools:
             return ToolResult(
                 name="search_knowledge",
                 success=True,
-                output={"query": query, "hits": hits, "count": len(hits)},
+                output={
+                    "query": query,
+                    "hits": hits,
+                    "count": len(hits),
+                    "empty": len(hits) == 0,
+                    "hint": (
+                        None
+                        if hits
+                        else (
+                            "No grounded product knowledge matched. Ask about a saved "
+                            "connector, table, job ID, or pf_ validation run — or say "
+                            "what can you do."
+                        )
+                    ),
+                },
             )
         except Exception as e:
             return ToolResult(name="search_knowledge", success=False, output=None, error=str(e))
@@ -2245,15 +2266,23 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
 # table is captured separately from the endpoints so the planner can introspect
 # a real object rather than pattern-matching the connector's name.
 _TRANSFER_VERBS = r"transfer|move|copy|sync|migrate|replicate|load|push|send|export"
+# Trailing politeness / urgency after the destination must not kill the match
+# ("…to Warehouse now", "…to wh please", "…to wh?").
+_TRANSFER_TRAIL = (
+    r"(?=(?:\s+(?:now|please|thanks|thank\s+you|for\s+me|asap|right\s+now)\b)"
+    r"|(?:\s*[,;?])"
+    r"|\s*$)"
+)
 _TRANSFER_RE = re.compile(
     rf"\b(?:{_TRANSFER_VERBS})\b"
-    r"(?:\s+(?:a|an|the))?"
+    r"(?:\s+(?:a|an|the|all|my|our|these|those))?"
     r"(?:\s+(?:transfer|copy|sync|data|rows|records|everything))?"
     r"(?:\s+(?:of|for))?"
     r"\s+(?P<table>[A-Za-z_][\w.$]*)"
     r"(?:\s+(?:table|collection|dataset))?"
     r"\s+(?:from|out\s+of)\s+(?P<src>.+?)"
-    r"\s+(?:to|into|onto|over\s+to|->)\s+(?P<dst>.+?)\s*$",
+    r"\s+(?:to|into|onto|over\s+to|->)\s+(?P<dst>.+?)"
+    rf"{_TRANSFER_TRAIL}",
     re.IGNORECASE,
 )
 # Trailing qualifiers that belong to the run, not to the destination's name.
@@ -2276,6 +2305,12 @@ def _strip_transfer_tail(dest: str) -> tuple[str, str]:
 
     # A trailing clause ("…to wh, is that safe?") is commentary, not a name.
     dest = re.split(r"[,;?]", dest, maxsplit=1)[0].strip()
+    dest = re.sub(
+        r"\s+(?:now|please|thanks|thank\s+you|for\s+me|asap|right\s+now)\s*$",
+        "",
+        dest,
+        flags=re.IGNORECASE,
+    ).strip()
     tail = _TRANSFER_TAIL_RE.search(dest)
     if not tail:
         return dest.strip(), ""
