@@ -245,6 +245,38 @@ def iter_prompt_corpus() -> list[PromptCase]:
     ):
         cases.append(_case(p, "remediate_validation", family="remediate"))
 
+    # --- Platform inventory (never warehouse table scans) ---
+    for p in (
+        "how many jobs failed",
+        "how many jobs do I have",
+        "failed jobs",
+        "failed transfers",
+        "job failures",
+        "how many transfers failed",
+        "show my jobs",
+        "list jobs",
+        "recent transfers",
+    ):
+        cases.append(_case(
+            p,
+            "list_jobs",
+            family="inventory",
+            must_not=("aggregate_data",),
+        ))
+    for p in (
+        "how many connectors do I have",
+        "how many connectors",
+        "connector count",
+        "show my connectors",
+        "list connectors",
+    ):
+        cases.append(_case(
+            p,
+            "list_connectors",
+            family="inventory",
+            must_not=("aggregate_data",),
+        ))
+
     # --- Quality / suggestions / knowledge ---
     for p in (
         "data quality on my uploads",

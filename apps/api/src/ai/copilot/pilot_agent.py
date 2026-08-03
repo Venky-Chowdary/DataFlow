@@ -574,13 +574,21 @@ class DataPilotAgent:
         what exists and tell the operator the next accurate step.
         """
         names = {tr.name for tr in turn.tool_results}
-        connector_miss = any(
-            (not tr.success)
-            and tr.error
-            and (
-                "no connector matched" in tr.error.lower()
-                or "which connector" in tr.error.lower()
+        def _is_connector_miss(err: str) -> bool:
+            low = (err or "").lower()
+            return any(
+                needle in low
+                for needle in (
+                    "no connector matched",
+                    "which connector",
+                    "connector not found",
+                    "connector not found in store",
+                    "name a saved connector",
+                )
             )
+
+        connector_miss = any(
+            (not tr.success) and tr.error and _is_connector_miss(tr.error)
             for tr in turn.tool_results
         )
         if connector_miss and "list_connectors" not in names:
@@ -602,6 +610,34 @@ class DataPilotAgent:
                     turn.needs_clarification = (
                         "No saved connectors yet. Add one under **Connectors**, or paste a "
                         "connection URL and ask me to create it (Confirm required)."
+                    )
+
+        # Dataset miss → list uploads so the operator can pick a real name.
+        dataset_miss = any(
+            (not tr.success)
+            and tr.error
+            and "dataset" in tr.error.lower()
+            and "not found" in tr.error.lower()
+            for tr in turn.tool_results
+        )
+        if dataset_miss and "list_datasets" not in names:
+            ds = self.tools.execute("list_datasets", {})
+            turn.tool_results.append(ds)
+            self._append_tool_actions(turn, ds)
+            if ds.success and not turn.needs_clarification:
+                datasets = (ds.output or {}).get("datasets") or []
+                if datasets:
+                    listed = ", ".join(
+                        f"**{d.get('name')}**" for d in datasets[:6] if d.get("name")
+                    )
+                    turn.needs_clarification = (
+                        "I couldn't find that dataset. Indexed uploads: "
+                        f"{listed}. Name one exactly, or upload in **New Transfer**."
+                    )
+                else:
+                    turn.needs_clarification = (
+                        "No uploaded datasets indexed yet. Upload a CSV/JSON in "
+                        "**New Transfer**, then ask me to analyze it."
                     )
 
         # Suggestions with no active dataset → list uploads so the operator can pick.
@@ -635,6 +671,8 @@ class DataPilotAgent:
                 or "did you mean" in err.lower()
                 or "no connector matched" in err.lower()
                 or "which connector" in err.lower()
+                or "connector not found" in err.lower()
+                or ("dataset" in err.lower() and "not found" in err.lower())
                 or tr.name in ("run_schedule_now", "get_schedule", "open_schedule", "create_connector")
             ):
                 turn.needs_clarification = err
@@ -1329,14 +1367,47 @@ Respond as Data Pilot — grounded in tool results."""
                     parts.append("\n".join(lines))
             elif tr.name == "list_jobs" and tr.success:
                 jobs = tr.output.get("jobs", [])
+                want_failures = any(
+                    w in (message or "").lower()
+                    for w in ("fail", "failed", "failure", "error", "broken")
+                )
+                failed = [
+                    j
+                    for j in jobs
+                    if str(j.get("status") or "").lower()
+                    in {"failed", "cancelled", "error"}
+                ]
                 if jobs:
-                    lines = ["Here are your **recent transfer jobs**:"]
-                    for j in jobs[:5]:
-                        lines.append(
-                            f"• `{j.get('id', '?')}` · {j.get('source', '?')} -> "
-                            f"{j.get('destination', '?')}: "
-                            f"**{j.get('status')}** ({j.get('records', 0):,} records)"
-                        )
+                    if want_failures:
+                        if failed:
+                            lines = [
+                                f"**{len(failed)}** of your last **{len(jobs)}** job(s) failed:"
+                            ]
+                            show = failed[:5]
+                        else:
+                            lines = [
+                                f"None of your last **{len(jobs)}** job(s) failed "
+                                "(in this window):"
+                            ]
+                            show = jobs[:5]
+                        for j in show:
+                            lines.append(
+                                f"• `{j.get('id', '?')}` · {j.get('source', '?')} -> "
+                                f"{j.get('destination', '?')}: "
+                                f"**{j.get('status')}** ({j.get('records', 0):,} records)"
+                            )
+                        if not failed:
+                            lines.append(
+                                "Open **Jobs** for full history, or paste a job id."
+                            )
+                    else:
+                        lines = ["Here are your **recent transfer jobs**:"]
+                        for j in jobs[:5]:
+                            lines.append(
+                                f"• `{j.get('id', '?')}` · {j.get('source', '?')} -> "
+                                f"{j.get('destination', '?')}: "
+                                f"**{j.get('status')}** ({j.get('records', 0):,} records)"
+                            )
                     parts.append("\n".join(lines))
                 else:
                     parts.append(
@@ -1821,10 +1892,15 @@ Respond as Data Pilot — grounded in tool results."""
                     or "did you mean" in low
                     or "no connector matched" in low
                     or "which connector" in low
+                    or "connector not found" in low
+                    or ("dataset" in low and "not found" in low)
                 ):
                     if err not in "\n".join(parts):
                         parts.insert(0, err)
                     break
+
+        if turn.needs_clarification and turn.needs_clarification not in "\n".join(parts):
+            parts.insert(0, turn.needs_clarification)
 
         if not parts:
             parts.append(_unmapped_intent_reply(message, ctx))
@@ -1833,9 +1909,16 @@ Respond as Data Pilot — grounded in tool results."""
 
     def _format_analysis(self, output: dict) -> str:
         name = output.get("dataset", "dataset").replace("sample_", "").replace("_", " ")
+        cols = output.get("columns") or []
+        rows = int(output.get("row_count") or 0)
+        if not cols and rows == 0:
+            return (
+                f"**{name}** has no columns or rows I can profile yet. "
+                "Re-upload the file in **New Transfer**, or name a different indexed dataset."
+            )
         lines = [
             f"**{name}** analysis:",
-            f"• {len(output.get('columns', []))} columns, {output.get('row_count', 0):,} rows",
+            f"• {len(cols)} columns, {rows:,} rows",
             f"• Quality score: **{output.get('quality_score', 0):.0f}%**",
         ]
         if output.get("pii_columns"):
@@ -1845,10 +1928,15 @@ Respond as Data Pilot — grounded in tool results."""
             lines.append("• Key columns:")
             for c in details:
                 pii = " · PII" if c.get("is_pii") else ""
-                lines.append(f"  - `{c['name']}` → {c.get('semantic_type', '?')}{pii}")
+                lines.append(f"  - `{c['name']}` -> {c.get('semantic_type', '?')}{pii}")
         preview = output.get("sample_preview", [])
         if preview:
             lines.append("• Sample row: " + ", ".join(f"{k}={v}" for k, v in list(preview[0].items())[:4]))
+        recs = output.get("recommendations") or []
+        if recs:
+            lines.append("• Suggestions:")
+            for r in recs[:4]:
+                lines.append(f"  - {r}")
         return "\n".join(lines)
 
     def _build_system_prompt(self, ctx: dict) -> str:

@@ -2117,10 +2117,38 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
         ]
     # A real aggregate answers the question; a 25-row sample or a regex-scraped
     # query on the same table is strictly worse noise beside it.
-    if "aggregate_data" in names:
+    # Explicit run_query (pasted SELECT / "run sql:") wins over NL aggregate.
+    if "aggregate_data" in names and "run_query" in names:
+        rq = next((a for n, a in planned if n == "run_query"), {}) or {}
+        q = (rq.get("query") or "").upper()
+        if any(
+            tok in q
+            for tok in (" GROUP BY ", " JOIN ", " UNION ", " HAVING ", " WITH ")
+        ) or q.lstrip().startswith(("SELECT", "WITH", "EXPLAIN", "SHOW", "PRAGMA")):
+            planned = [(n, a) for n, a in planned if n != "aggregate_data"]
+            names = {n for n, _ in planned}
+        else:
+            planned = [
+                (n, a) for n, a in planned
+                if n not in ("sample_connector_object", "run_query", "analyze_dataset")
+            ]
+            names = {n for n, _ in planned}
+    elif "aggregate_data" in names:
         planned = [
             (n, a) for n, a in planned
             if n not in ("sample_connector_object", "run_query", "analyze_dataset")
+        ]
+        names = {n for n, _ in planned}
+    # Platform inventory: "how many jobs failed" must not become COUNT(*) FROM jobs.
+    _inventory_tables = {"jobs", "job", "transfers", "transfer", "connectors", "connector"}
+    if "list_jobs" in names or "list_connectors" in names:
+        planned = [
+            (n, a)
+            for n, a in planned
+            if not (
+                n == "aggregate_data"
+                and str((a or {}).get("table") or "").strip().lower() in _inventory_tables
+            )
         ]
     # A concrete transfer already contains the mapping, gates and route, so the
     # generic advice tools beside it are redundant noise.
@@ -2359,8 +2387,18 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
 
     # List jobs when the operator wants contents — not when they only want the screen.
     _nav_only = any(v in lower for v in ("go to", "take me to", "navigate to", "open "))
+    # Platform inventory — DataFlow's own jobs/connectors, never warehouse tables.
+    # "how many jobs failed" must list jobs, not SELECT COUNT(*) FROM jobs.
+    _platform_job_inventory = bool(
+        re.search(
+            r"\b(?:how many\s+jobs|jobs?\s+failed|failed\s+jobs|job\s+failures|"
+            r"failed\s+transfers|how many\s+transfers\s+failed)\b",
+            lower,
+        )
+    ) and not re.search(r"\bon\s+[a-z0-9]", lower)
     if (not _nav_only) and (
-        any(
+        _platform_job_inventory
+        or any(
             p in lower
             for p in (
                 "list jobs",
@@ -2380,10 +2418,19 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         )
     ):
         planned.append(("list_jobs", {"limit": 10}))
-        # Drop a competing navigate-to-jobs so the list is the primary answer.
         planned = [
             (n, a) for n, a in planned
             if not (n == "navigate" and (a or {}).get("screen") == "jobs")
+        ]
+
+    _platform_connector_inventory = bool(
+        re.search(r"\b(?:how many\s+connectors|connector\s+count)\b", lower)
+    ) and not re.search(r"\bon\s+[a-z0-9]", lower)
+    if _platform_connector_inventory:
+        planned.append(("list_connectors", {}))
+        planned = [
+            (n, a) for n, a in planned
+            if not (n == "navigate" and (a or {}).get("screen") == "connectors")
         ]
 
     pf_match = re.search(r"\bpf_[a-f0-9]{8,}\b", lower)
@@ -2517,10 +2564,21 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     # Aggregations: "count of orders by status", "average price in products",
     # "top 5 regions by revenue", "revenue by month". Parsed structurally; the
     # tool then grounds every name in the live schema.
+    # Skip when the operator pasted / ran explicit SQL — that is run_query's job.
     from .aggregate_tools import parse_aggregation_request
 
+    _explicit_sql_intent = bool(
+        re.search(r"(?:run|execute)\s+(?:this\s+)?(?:sql|query)\b", lower)
+        or _SQL_SELECT_SHAPE.match(message.strip())
+        or _SQL_WITH_SHAPE.match(message.strip())
+    )
     agg = parse_aggregation_request(message)
-    if agg is not None and not agg.missing and "aggregate_data" not in [p[0] for p in planned]:
+    if (
+        agg is not None
+        and not agg.missing
+        and not _explicit_sql_intent
+        and "aggregate_data" not in [p[0] for p in planned]
+    ):
         planned.append(("aggregate_data", agg.as_tool_args()))
 
     # Sample / analyze live table data
@@ -2736,9 +2794,19 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     ]
     # "columns"/"schema" alone often mean live DB — only analyze uploaded data
     # when the user clearly asks to analyze / profile a dataset file.
-    if hint and any(s in lower for s in data_signals):
-        if not any(p[0] in _LIVE_SCHEMA_TOOLS for p in planned):
+    if any(s in lower for s in data_signals) and not any(p[0] in _LIVE_SCHEMA_TOOLS for p in planned):
+        if hint:
             planned.append(("analyze_dataset", {"dataset_name": hint}))
+        elif re.search(r"\banalyze\b", lower) and "analyze_dataset" not in [p[0] for p in planned]:
+            # Named dataset that the index doesn't know yet — still invoke so
+            # recovery can list indexed uploads instead of a dead-end reply.
+            m = re.search(
+                r"analyze\s+(?:the\s+)?(.+?)(?:\s+data(?:set)?)?\s*$",
+                lower,
+            )
+            name = (m.group(1) if m else "").strip(" \"'")
+            if name and name not in {"this", "that", "it", "my", "the"}:
+                planned.append(("analyze_dataset", {"dataset_name": name}))
 
     if not planned and _looks_like_domain_knowledge_query(lower):
         planned.append(("search_knowledge", {"query": message[:200]}))

@@ -357,15 +357,25 @@ def _default_port(db_type: str) -> int:
 
 
 def _normalize_sqlite_url(url: str) -> str:
-    """Ensure absolute SQLite file paths use four leading slashes.
+    """Ensure absolute SQLite file paths use the SQLAlchemy-correct slash count.
 
-    SQLAlchemy interprets ``sqlite:///path`` as relative and
-    ``sqlite:////absolute/path`` as absolute. Users often supply the former for
-    absolute paths, so this normalizes only when the path component is absolute.
+    SQLAlchemy rules:
+    * ``sqlite:///relative.db`` — relative path
+    * ``sqlite:////absolute/path.db`` — Unix absolute (four slashes)
+    * ``sqlite:///C:/windows/path.db`` — Windows drive absolute (three slashes)
+
+    Users often paste ``sqlite:///C:/…`` or ``sqlite:////var/…``; only Unix
+    absolute paths missing the fourth slash are rewritten. Windows drive
+    letters must keep three slashes — adding a fourth makes sqlite3 fail with
+    ``unable to open database file``.
     """
     if url.startswith("sqlite:///") and not url.startswith("sqlite:////"):
         path = url[len("sqlite:///") :]
-        if path and (path.startswith("/") or (len(path) > 1 and path[1] == ":")):
+        # Windows drive letter — already absolute with three slashes.
+        if len(path) >= 2 and path[1] == ":":
+            return url
+        # Unix absolute path written with three slashes → four.
+        if path.startswith("/"):
             return f"sqlite:////{path}"
     return url
 

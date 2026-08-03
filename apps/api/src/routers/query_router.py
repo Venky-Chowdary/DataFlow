@@ -27,10 +27,17 @@ _MONGODB_WRITE_STAGES = {"$out", "$merge"}
 
 
 def _is_safe_sql(raw_query: str) -> bool:
-    """Allow read and metadata queries; block any destructive or write SQL."""
-    import sqlparse
-    from sqlparse.sql import TokenList
-    from sqlparse.tokens import Comment, Keyword, Newline, Whitespace
+    """Allow read and metadata queries; block any destructive or write SQL.
+
+    Uses ``sqlparse`` when installed; otherwise a conservative regex fallback so
+    Data Pilot / query playground never hard-fail on a missing optional dep.
+    """
+    try:
+        import sqlparse
+        from sqlparse.sql import TokenList
+        from sqlparse.tokens import Comment, Keyword, Newline, Whitespace
+    except ImportError:
+        return _is_safe_sql_fallback(raw_query)
 
     parsed = sqlparse.parse(raw_query.strip())
     if not parsed or len(parsed) != 1:
@@ -73,6 +80,37 @@ def _is_safe_sql(raw_query: str) -> bool:
         return False
 
     return first_keyword in safe_starts
+
+
+def _is_safe_sql_fallback(raw_query: str) -> bool:
+    """Conservative read-only gate when sqlparse is unavailable."""
+    import re
+
+    text = (raw_query or "").strip()
+    if not text:
+        return False
+    # Reject multi-statement payloads.
+    stripped = re.sub(r"--[^\n]*", " ", text)
+    stripped = re.sub(r"/\*.*?\*/", " ", stripped, flags=re.S)
+    if ";" in stripped.rstrip().rstrip(";"):
+        return False
+    upper = stripped.upper()
+    if not re.match(
+        r"^\s*(SELECT|WITH|EXPLAIN|SHOW|DESCRIBE|DESC|ANALYZE|PRAGMA|VALUES)\b",
+        upper,
+    ):
+        return False
+    if re.search(
+        r"\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE|GRANT|REVOKE|"
+        r"EXEC|EXECUTE|MERGE|COPY|LOAD|REPLACE)\b",
+        upper,
+    ):
+        return False
+    if re.search(r"\bINTO\s+(OUTFILE|DUMPFILE)\b", upper) or re.search(
+        r"\bSELECT\b[\s\S]*\bINTO\b", upper
+    ):
+        return False
+    return True
 
 
 def _validate_mongodb_aggregate(pipeline: list[dict]) -> None:
