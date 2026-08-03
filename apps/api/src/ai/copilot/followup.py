@@ -112,6 +112,24 @@ def _words(text: str) -> list[str]:
 # --------------------------------------------------------------------------
 
 
+_FRESH_INTENT_RE = re.compile(
+    r"\b(?:how\s+many|count|sum|avg|average|total|top|bottom|select|show|list|"
+    r"sample|analyze|filter|group(?:ed)?\s+by|take\s+me|go\s+to|navigate|"
+    r"open|explain|what(?:'s|\s+is)|how\s+does|how\s+do|can\s+you|could\s+you|"
+    r"please|transfer|move|copy|sync|delete|export|create|schedule|"
+    r"fix|repair|heal|quarantine)\b",
+    re.I,
+)
+
+
+def looks_like_fresh_intent(message: str) -> bool:
+    """True when the user clearly started a new request (not a slot fill / typo)."""
+    reply = _clean(message)
+    if not reply:
+        return False
+    return bool(_FRESH_INTENT_RE.search(reply))
+
+
 def resolve_pending_answer(
     message: str,
     pending: PendingSlot | None,
@@ -129,15 +147,7 @@ def resolve_pending_answer(
         return None
     # A fresh analytics / imperative / navigate / explain sentence is never a
     # slot answer — even when short ("take me to jobs", "fix bad data").
-    if re.search(
-        r"\b(?:how\s+many|count|sum|avg|average|total|top|bottom|select|show|list|"
-        r"sample|analyze|filter|group(?:ed)?\s+by|take\s+me|go\s+to|navigate|"
-        r"open|explain|what(?:'s|\s+is)|how\s+does|how\s+do|can\s+you|could\s+you|"
-        r"please|transfer|move|copy|sync|delete|export|create|schedule|"
-        r"fix|repair|heal|quarantine)\b",
-        reply,
-        re.I,
-    ):
+    if looks_like_fresh_intent(reply):
         return None
 
     lower = reply.lower()

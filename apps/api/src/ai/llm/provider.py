@@ -521,7 +521,8 @@ def get_model_capabilities() -> dict:
         "guarantees": [
             "DATAFLOW_PILOT_ENGINE=auto (default): uses a real LLM when a valid API key works; otherwise local tools.",
             "Set DATAFLOW_PILOT_ENGINE=local to force the offline deterministic engine.",
-            "Set DATAFLOW_PILOT_ENGINE=hybrid for local tools + LLM narration (ChatGPT-quality prose over real tool results).",
+            "Set DATAFLOW_PILOT_ENGINE=hybrid for local tools + LLM narration (OpenAI or Anthropic) over real tool results.",
+            "Grounded tool results are executed once — native LLM loops do not re-run mutations or orphan Confirm acks.",
             "If OpenAI/Anthropic returns 401 invalid_api_key, Pilot falls back to local until you save a valid key in Settings.",
             "RAG and deterministic mapping continue when cloud providers are unavailable.",
             "Mutations (create connector / start transfer) always require operator Confirm.",

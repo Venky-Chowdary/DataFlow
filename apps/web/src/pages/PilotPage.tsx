@@ -17,6 +17,7 @@ import { useActiveData } from "../lib/DataContext";
 import {
   buildPilotDataContext,
   nextPilotResultId,
+  PILOT_SCREEN_LABELS,
   runPilotConfirm,
 } from "../lib/pilotChat";
 import { useStudioActions } from "../lib/StudioActionsContext";
@@ -42,21 +43,6 @@ import {
 interface PilotPageProps {
   onNavigate: (screen: Screen) => void;
 }
-
-const SCREEN_LABELS: Record<string, string> = {
-  dashboard: "Overview",
-  pilot: "Data Pilot",
-  transfer: "Transfer Studio",
-  connectors: "Connectors",
-  jobs: "Jobs",
-  settings: "Settings",
-  schedules: "Pipelines",
-  contracts: "Contracts",
-  query: "Query",
-  mcp: "MCP",
-  docs: "Docs",
-  benchmarks: "Proofs",
-};
 
 export function PilotPage({ onNavigate }: PilotPageProps) {
   const { toast } = useToast();
@@ -521,7 +507,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                     const screen = a.screen || a.route;
                     return screen ? (
                       <button key={j} type="button" className="df2-btn df2-btn-sm df2-mt-sm" onClick={() => onNavigate(screen as Screen)}>
-                        {a.label || `Open ${SCREEN_LABELS[screen] || screen}`}
+                        {a.label || `Open ${PILOT_SCREEN_LABELS[screen] || screen}`}
                       </button>
                     ) : null;
                   })}

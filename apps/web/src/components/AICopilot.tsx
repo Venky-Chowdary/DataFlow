@@ -15,6 +15,7 @@ import { useActiveData } from "../lib/DataContext";
 import {
   buildPilotDataContext,
   nextPilotResultId,
+  PILOT_SCREEN_LABELS,
   runPilotConfirm,
 } from "../lib/pilotChat";
 import { useStudioActions } from "../lib/StudioActionsContext";
@@ -46,15 +47,6 @@ interface AICopilotProps {
   variant?: "fab" | "rail";
   onClose?: () => void;
 }
-
-const SCREEN_LABELS: Record<string, string> = {
-  dashboard: "Overview",
-  pilot: "Data Pilot",
-  transfer: "Transfer Studio",
-  connectors: "Connectors",
-  jobs: "Jobs",
-  settings: "Settings",
-};
 
 export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotProps) {
   const { activeData } = useActiveData();
@@ -255,7 +247,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
               <div className="df2-copilot-actions">
                 {msg.actions.map((action, j) => {
                   const screen = action.screen || action.route;
-                  const label = action.label || (screen ? `Open ${SCREEN_LABELS[screen] || screen}` : "Action");
+                  const label = action.label || (screen ? `Open ${PILOT_SCREEN_LABELS[screen] || screen}` : "Action");
                   return (
                     <button
                       key={j}

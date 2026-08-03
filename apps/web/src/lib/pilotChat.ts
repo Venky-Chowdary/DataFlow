@@ -13,6 +13,22 @@ import {
 import { extractPilotResultId } from "./pilotChatStore";
 import type { ActiveDataContext, Screen } from "./types";
 
+/** Shared screen labels for Pilot page + rail action chips. */
+export const PILOT_SCREEN_LABELS: Record<string, string> = {
+  dashboard: "Overview",
+  pilot: "Data Pilot",
+  transfer: "Transfer Studio",
+  connectors: "Connectors",
+  jobs: "Jobs",
+  settings: "Settings",
+  schedules: "Pipelines",
+  contracts: "Contracts",
+  query: "Query",
+  mcp: "MCP",
+  docs: "Docs",
+  benchmarks: "Proofs",
+};
+
 export type ToastFn = (opts: {
   title: string;
   message: string;

@@ -29,10 +29,9 @@ from .tools import (
 )
 
 logger = logging.getLogger(__name__)
-# Per-provider hard cap. Client abort is 120s — keep total LLM attempts well under that
+# Per-provider hard cap. Client abort is 120s — keep native LLM attempts under that
 # so the local agent can always answer before the browser times out.
 _LLM_TURN_TIMEOUT_S = 20
-_LLM_TOTAL_BUDGET_S = 55
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pilot-llm")
 
 
@@ -538,13 +537,16 @@ class DataPilotAgent:
         if engine == "local":
             return local
 
-        system = self._build_system_prompt(ctx)
+        system = self._build_system_prompt(ctx, data_context)
 
-        # Product path for ChatGPT-quality: deterministic tools first, then LLM
-        # narration over grounded evidence. Native LLM tool loops are a bonus
-        # race for hard paraphrases — they must not invent facts without tools.
+        # Product path: deterministic tools once, then optional LLM narration.
+        # Never re-run mutating tools in a native LLM race (orphan Confirm acks).
         polished = self._polish_with_llm(message, history or [], local, system)
+        local_ok = sum(1 for t in (local.tools_used or []) if t.get("success"))
+        if local.pending_actions or local_ok > 0 or local.needs_clarification:
+            return polished
 
+        # Local had nothing grounded — allow a single native LLM tool loop for hard paraphrases.
         import time as _time
         from concurrent.futures import wait, FIRST_COMPLETED
 
@@ -557,7 +559,6 @@ class DataPilotAgent:
         except Exception:
             openai_ready = False
 
-        # Prefer a single primary cloud native tool loop (not three racing).
         if self.anthropic.is_available():
             llm_futs.append(
                 _executor.submit(
@@ -1042,7 +1043,7 @@ class DataPilotAgent:
         local: CopilotResponse,
         system: str,
     ) -> CopilotResponse:
-        """Narrate grounded local tool results with OpenAI when available.
+        """Narrate grounded local tool results with a cloud LLM when available.
 
         Tools stay deterministic (local). The LLM only rewrites the answer in
         natural ChatGPT-quality prose — never invents new facts.
@@ -1051,13 +1052,27 @@ class DataPilotAgent:
         ok = sum(1 for t in tools if t.get("success"))
         if ok == 0 and not local.pending_actions:
             return local
+
+        provider = None
+        method = "llm_polish"
         try:
-            from ..llm.provider import DataTransferOpenAIProvider
+            from ..llm.provider import (
+                DataTransferAnthropicProvider,
+                DataTransferOpenAIProvider,
+            )
 
             openai = DataTransferOpenAIProvider()
-            if not openai.is_available():
-                return local
+            if openai.is_available():
+                provider = openai
+                method = "openai_polish"
+            else:
+                anthropic = DataTransferAnthropicProvider()
+                if anthropic.is_available():
+                    provider = anthropic
+                    method = "anthropic_polish"
         except Exception:
+            return local
+        if provider is None:
             return local
 
         tool_bits = []
@@ -1091,7 +1106,7 @@ Draft answer:
 {local.answer}
 """
         try:
-            response = openai.generate(prompt, system=system, max_tokens=900)
+            response = provider.generate(prompt, system=system, max_tokens=900)
         except Exception:
             return local
         if not response.success or not (response.content or "").strip():
@@ -1104,8 +1119,8 @@ Draft answer:
             answer=polished,
             intent=local.intent,
             confidence=min(0.96, float(local.confidence or 0.9) + 0.03),
-            method="openai_polish",
-            reasoning="Local tools + OpenAI narration",
+            method=method,
+            reasoning=f"Local tools + {method.split('_')[0].title()} narration",
             suggested_actions=local.suggested_actions,
             pending_actions=local.pending_actions,
             needs_clarification=local.needs_clarification,
@@ -1129,6 +1144,7 @@ Draft answer:
         from .followup import (
             inherit_focus_slots,
             looks_like_followup,
+            looks_like_fresh_intent,
             resolve_followup,
             resolve_pending_answer,
         )
@@ -1147,9 +1163,11 @@ Draft answer:
             if answered:
                 memory.clear_pending(session_id)
                 return [answered]
-            # Fresh intents must not stay blocked behind a stale "which connector?"
-            # prompt — clear the slot and plan from scratch.
-            memory.clear_pending(session_id)
+            # Fresh intents clear the slot; typos / non-answers keep it open.
+            if looks_like_fresh_intent(message):
+                memory.clear_pending(session_id)
+            else:
+                return []
 
         planned = infer_tools_from_message(message)
         # Elliptical edits beat a fresh under-specified parse ("what about average
@@ -1469,6 +1487,30 @@ Respond as Data Pilot — grounded in tool results."""
         turn = PilotTurn()
 
         planned = self._plan_with_memory(message, data_context)
+        if not planned:
+            # Typo / non-answer while a clarification is open — re-ask, keep slot.
+            session_id = self._session_id(data_context)
+            if session_id:
+                from .working_memory import get_working_memory
+
+                pending = get_working_memory().get_pending(session_id)
+                if pending and pending.question:
+                    turn.needs_clarification = pending.question
+                    hint = ""
+                    if pending.candidates:
+                        shown = ", ".join(f"**{c}**" for c in pending.candidates[:6])
+                        hint = f"\n\nAvailable: {shown}."
+                    return CopilotResponse(
+                        answer=f"{pending.question}{hint}\n\nI didn't match that reply — try a name from the list, or ask a new question.".strip(),
+                        intent=intent,
+                        confidence=0.78,
+                        method="pilot_local_engine",
+                        reasoning="Re-ask open clarification",
+                        needs_clarification=pending.question,
+                        suggested_prompts=list(pending.candidates or [])[:4] or self._starter_prompts()[:3],
+                        tools_used=[],
+                    )
+
         for name, args in planned:
             tr = self.tools.execute(name, self._with_result_context(name, args, data_context))
             turn.tool_results.append(tr)
@@ -2264,17 +2306,42 @@ Respond as Data Pilot — grounded in tool results."""
                 lines.append(f"  - {r}")
         return "\n".join(lines)
 
-    def _build_system_prompt(self, ctx: dict) -> str:
+    def _build_system_prompt(self, ctx: dict, data_context: dict | None = None) -> str:
         tool_names = ", ".join(t["name"] for t in TOOL_DEFINITIONS)
+        session_bits: list[str] = []
+        try:
+            from .working_memory import get_working_memory
+
+            sid = self._session_id(data_context)
+            if sid:
+                memory = get_working_memory()
+                focus = memory.get_focus(sid)
+                pending = memory.get_pending(sid)
+                if focus and (focus.table or focus.connector_name or focus.result_id):
+                    session_bits.append(
+                        "Session focus: "
+                        f"connector={focus.connector_name or '?'}, "
+                        f"table={focus.table or '?'}, "
+                        f"result_id={focus.result_id or 'none'}."
+                    )
+                if pending and pending.question:
+                    session_bits.append(
+                        f"Open clarification: {pending.question} "
+                        f"(waiting for {pending.missing})."
+                    )
+        except Exception:
+            pass
+        session_block = ("\n".join(session_bits) + "\n") if session_bits else ""
         return f"""{DATA_PILOT_PERSONA}
 
 {self.context_builder.to_system_context(ctx)}
-
+{session_block}
 You are Data Pilot for DataFlow only — data knowledge, product capabilities, and in-app actions.
 Available tools (internal — never name these in user-facing answers): {tool_names}.
 Use tools for any factual claim about jobs, connectors, datasets, schedules, or capabilities.
 Never invent IDs or warehouse state. Never mention tool names, APIs, or internal method labels in replies — write in plain product language.
 For mutating actions (remediate, run schedule), propose and wait for UI confirm — do not claim they already ran.
+Respect session focus and open clarifications above — do not invent a different connector or table.
 Navigate to any screen when asked (including schedules/pipelines, contracts, query, docs, proofs)."""
 
     def _detect_intent(self, message: str) -> str:

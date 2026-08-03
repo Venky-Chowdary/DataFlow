@@ -59,6 +59,7 @@ class ModelCapabilitiesResponse(BaseModel):
     active_provider: str
     active_model: str
     agent_mode: str
+    pilot_engine: str = "local"
     fallback_order: list[str]
     providers: list[dict]
     guarantees: list[str]
