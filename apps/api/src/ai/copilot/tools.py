@@ -1154,9 +1154,9 @@ class DataPilotTools:
                 error=f"Unknown remediation kind '{kind}'. Use one of: {', '.join(sorted(allowed))}",
             )
         labels = {
-            "normalize_control_chars": "Fix bad data…",
+            "normalize_control_chars": "Normalize control characters…",
             "open_bad_data_fix": "Fix bad data…",
-            "quarantine_and_rerun": "Fix bad data…",
+            "quarantine_and_rerun": "Quarantine bad rows and re-run…",
             "review_mappings": "Open Map step to review mappings",
             "rerun_preflight": "Re-run Validate",
         }
@@ -1414,15 +1414,24 @@ class DataPilotTools:
         if "cdc" in w:
             mode = "Incremental CDC"
             reason = "Source changes should be read from a log stream and resumed from cursor state."
+        elif "upsert" in w or "merge" in w or (has_primary_key and "incremental" in w):
+            mode = "Incremental Upsert"
+            reason = (
+                "Primary key (or upsert/merge wording) lets destination rows be "
+                "updated in place without a full reload."
+            )
         elif has_cursor and has_primary_key and needs_history:
             mode = "Incremental Append + Deduped"
             reason = "Cursor and key allow efficient updates while preserving change history."
         elif has_cursor:
             mode = "Incremental Append"
             reason = "Cursor allows new records to be read without a full scan."
-        elif "snapshot" in w or "full" in w:
+        elif "snapshot" in w or "full" in w or "overwrite" in w:
             mode = "Full Refresh Overwrite"
             reason = "Snapshot workloads should replace the destination with the latest source state."
+        elif has_primary_key:
+            mode = "Incremental Upsert"
+            reason = "A primary key is enough to upsert; add a cursor later to avoid full scans."
         else:
             mode = "Full Refresh Append"
             reason = "Use append until cursor/key metadata is confirmed."
@@ -1430,8 +1439,8 @@ class DataPilotTools:
             "recommended_mode": mode,
             "reason": reason,
             "requires": {
-                "cursor": mode.startswith("Incremental"),
-                "primary_key": "Deduped" in mode,
+                "cursor": "Append" in mode or "CDC" in mode,
+                "primary_key": "Upsert" in mode or "Deduped" in mode,
                 "cdc_log_access": "CDC" in mode,
             },
         })
@@ -1440,6 +1449,16 @@ class DataPilotTools:
         schema = self.analyst.resolve_dataset(dataset_name) if dataset_name else None
         columns = schema.columns if schema else []
         pii_candidates = [c for c in columns if any(t in c.lower() for t in ("email", "phone", "ssn", "card", "name"))]
+        gate_ids: list[str] = []
+        try:
+            from preflight.gates import PREFLIGHT_GATES
+
+            gate_ids = [
+                gid.value if hasattr(gid, "value") else str(gid)
+                for gid, _ in PREFLIGHT_GATES
+            ]
+        except Exception:
+            gate_ids = []
         return ToolResult(name="profile_quality_rules", success=True, output={
             "dataset": schema.name if schema else dataset_name or "active dataset",
             "rules": [
@@ -1450,6 +1469,7 @@ class DataPilotTools:
                 "row rejection quarantine enabled for lossy coercions",
                 "post-write row count and checksum reconciliation",
             ],
+            "preflight_gates": gate_ids,
             "pii_candidates": pii_candidates,
             "column_count": len(columns),
             "has_dataset": bool(schema and columns),
@@ -1463,6 +1483,7 @@ class DataPilotTools:
                 else [
                     "Upload a file in Transfer or name a dataset to analyze",
                     "Or: sample <table> on <connector>",
+                    "Ask what quality gates do you have for the G1–G9 list",
                 ]
             ),
         })
@@ -2160,12 +2181,25 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
     # Job ID triage wins over generic list_jobs
     if "get_job" in names or "get_preflight_run" in names or "open_job" in names:
         planned = [(n, a) for n, a in planned if n != "list_jobs"]
-    # Explicit run / remediate shouldn't also dump unrelated lists
-    if "run_schedule_now" in names or "remediate_validation" in names or "create_connector" in names:
+    # Job / remediate: keep inventory lists for triage ("why did validate fail").
+    if "run_schedule_now" in names or "create_connector" in names:
         planned = [
             (n, a) for n, a in planned
-            if n not in ("list_schedules", "list_jobs", "search_knowledge", "analyze_dataset", "list_connectors", "search_connectors")
+            if n not in (
+                "list_schedules", "list_jobs", "search_knowledge",
+                "analyze_dataset", "list_connectors", "search_connectors",
+            )
         ]
+    elif "remediate_validation" in names:
+        planned = [
+            (n, a) for n, a in planned
+            if n not in (
+                "list_schedules", "search_knowledge",
+                "analyze_dataset", "list_connectors", "search_connectors",
+            )
+        ]
+        # list_jobs stays as companion for validate / job triage.
+        names = {n for n, _ in planned}
     # Cap to top-priority tools (navigate may accompany primary)
     ranked = sorted(
         planned,
@@ -2179,9 +2213,15 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
             primary_tier = pri
             keep.append((name, args))
             continue
-        # Allow companions within 25 points, plus navigate / RAG alongside quality.
+        # Allow companions within 25 points, plus navigate / RAG / triage lists.
         if (
-            name in ("navigate", "start_transfer_studio", "search_knowledge")
+            name in (
+                "navigate",
+                "start_transfer_studio",
+                "search_knowledge",
+                "list_jobs",
+                "list_datasets",
+            )
             or pri >= primary_tier - 25
         ):
             if len(keep) < 3:
@@ -2505,11 +2545,15 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     if any(w in lower for w in ("mapping algorithm", "mapping guarantee", "100% accuracy", "correct columns", "assurance", "how does mapping")):
         planned.append(("explain_mapping_assurance", {}))
 
-    if any(w in lower for w in ("sync mode", "cdc", "incremental", "dedupe", "full refresh")):
+    if any(w in lower for w in ("sync mode", "cdc", "incremental", "dedupe", "full refresh", "upsert", "merge")):
         planned.append(("recommend_sync_mode", {
-            "workload": message[:80],
+            "workload": message[:120],
             "has_cursor": "cursor" in lower or "updated_at" in lower or "timestamp" in lower,
-            "has_primary_key": "primary key" in lower or " id" in lower,
+            "has_primary_key": (
+                "primary key" in lower
+                or "primary_key" in lower
+                or bool(re.search(r"\bpk\b", lower))
+            ),
             "needs_history": "history" in lower or "audit" in lower,
         }))
 
@@ -2778,7 +2822,24 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
                 "dest_connector_name": map_m.group(3).strip(),
             }))
 
-    if any(w in lower for w in (
+    product_gate_ask = any(
+        w in lower
+        for w in (
+            "what quality gates",
+            "what are the quality",
+            "list quality gates",
+            "preflight gates",
+            "what gates",
+            "9 gates",
+            "nine gates",
+            "quality gates do you",
+            "what are your gates",
+        )
+    )
+    if product_gate_ask:
+        planned.append(("search_knowledge", {"query": "preflight quality gates G1-G9"}))
+        planned.append(("describe_pilot", {}))
+    elif any(w in lower for w in (
         "quality rules", "quality gates", "data quality", "profile rules",
         "suggest improvements", "suggestions for my data", "how can i improve",
         "data recommendations", "recommend fixes",

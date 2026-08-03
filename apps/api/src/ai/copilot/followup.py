@@ -309,6 +309,7 @@ def resolve_followup(
         connector_name=focus.connector_name,
         limit=focus.limit or 20,
         descending=focus.descending,
+        where=getattr(focus, "where", "") or "",
     )
 
     edited = False
@@ -425,6 +426,7 @@ def focus_from_tool_output(name: str, output: dict[str, Any]) -> dict[str, Any]:
             "column": str(output.get("column") or ""),
             "group_by": str(output.get("group_by") or ""),
             "grain": str(output.get("grain") or ""),
+            "where": str(output.get("where") or ""),
         }
         update = {k: v for k, v in update.items() if v not in ("", None, [])}
         update.update(authoritative)

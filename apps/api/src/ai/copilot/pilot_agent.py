@@ -696,6 +696,68 @@ class DataPilotAgent:
                 ds = self.tools.execute("list_datasets", {})
                 turn.tool_results.append(ds)
                 self._append_tool_actions(turn, ds)
+            # Live focus: sample the remembered table so suggestions aren't empty.
+            try:
+                from .working_memory import get_working_memory
+
+                sid = self._session_id(data_context)
+                focus = get_working_memory().get_focus(sid) if sid else None
+                if (
+                    focus
+                    and focus.table
+                    and "sample_connector_object" not in {t.name for t in turn.tool_results}
+                ):
+                    sample_args = {"table": focus.table, "limit": 50}
+                    if focus.connector_name:
+                        sample_args["connector_name"] = focus.connector_name
+                    elif focus.connector_id:
+                        sample_args["connector_id"] = focus.connector_id
+                    sample = self.tools.execute("sample_connector_object", sample_args)
+                    turn.tool_results.append(sample)
+                    self._append_tool_actions(turn, sample)
+            except Exception:
+                pass
+            break
+
+        # Uploaded-dataset compare miss → list datasets (and live tables if focused).
+        for tr in list(turn.tool_results):
+            if tr.name != "compare_datasets" or tr.success or not tr.error:
+                continue
+            if "not found" not in tr.error.lower():
+                continue
+            if "list_datasets" not in {t.name for t in turn.tool_results}:
+                ds = self.tools.execute("list_datasets", {})
+                turn.tool_results.append(ds)
+                self._append_tool_actions(turn, ds)
+            try:
+                from .working_memory import get_working_memory
+
+                sid = self._session_id(data_context)
+                focus = get_working_memory().get_focus(sid) if sid else None
+                if (
+                    focus
+                    and (focus.connector_name or focus.connector_id)
+                    and "list_connector_objects" not in {t.name for t in turn.tool_results}
+                ):
+                    args = {}
+                    if focus.connector_name:
+                        args["connector_name"] = focus.connector_name
+                    else:
+                        args["connector_id"] = focus.connector_id
+                    objs = self.tools.execute("list_connector_objects", args)
+                    turn.tool_results.append(objs)
+                    self._append_tool_actions(turn, objs)
+                    if objs.success and not turn.needs_clarification:
+                        names = (objs.output or {}).get("objects") or []
+                        listed = ", ".join(f"`{n}`" for n in names[:12] if n)
+                        turn.needs_clarification = (
+                            f"{tr.error} Those look like live tables — on "
+                            f"**{focus.connector_name or 'this connector'}** I see: "
+                            f"{listed or 'none'}. "
+                            'Try: "diff schema orders on PilotSQLite vs orders on Warehouse".'
+                        )
+            except Exception:
+                pass
             break
 
     @staticmethod
@@ -1593,6 +1655,13 @@ Respond as Data Pilot — grounded in tool results."""
                 rules = o.get("rules") or []
                 cols = int(o.get("column_count") or 0)
                 if cols <= 0:
+                    gates = o.get("preflight_gates") or []
+                    gate_line = (
+                        f"\n\nValidate runs **{len(gates)} preflight gates**: "
+                        + ", ".join(f"`{g}`" for g in gates[:9])
+                        if gates
+                        else "\n\nValidate runs **9 preflight gates** (G1–G9) before Execute."
+                    )
                     parts.append(
                         "I can suggest quality gates, but there's **no active dataset** loaded yet.\n"
                         "• Upload a CSV/JSON in **Transfer**, or\n"
@@ -1601,6 +1670,7 @@ Respond as Data Pilot — grounded in tool results."""
                         '"sample orders on <connector>"\n\n'
                         "Enterprise rules I apply once data is in scope:\n"
                         + "\n".join(f"• {r}" for r in rules[:6])
+                        + gate_line
                     )
                 else:
                     pii = o.get("pii_candidates") or []

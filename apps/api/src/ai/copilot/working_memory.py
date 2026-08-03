@@ -87,6 +87,7 @@ class PilotFocus:
     descending: bool = True
     result_id: str = ""
     tool: str = ""
+    where: str = ""
     updated_at: float = 0.0
 
     def has_target(self) -> bool:

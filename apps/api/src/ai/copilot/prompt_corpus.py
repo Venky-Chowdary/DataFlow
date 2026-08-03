@@ -333,12 +333,22 @@ def iter_prompt_corpus() -> list[PromptCase]:
         "suggest improvements for my data",
         "how can I improve data quality?",
         "recommend fixes for bad data quality",
-        "what are the quality gates?",
     ):
         cases.append(_case(
             p,
             "profile_quality_rules", "search_knowledge", "describe_pilot",
             family="quality",
+        ))
+    for p in (
+        "what quality gates do you have?",
+        "what are the quality gates?",
+        "list quality gates",
+        "what are the preflight gates?",
+    ):
+        cases.append(_case(
+            p,
+            "describe_pilot", "search_knowledge", "profile_quality_rules",
+            family="quality_gates",
         ))
 
     # --- Schedules run ---

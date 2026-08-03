@@ -998,6 +998,7 @@ def aggregate_connector_data(
         "column": measure_col or None,
         "group_by": dim_alias or None,
         "grain": grain or None,
+        "where": (where or "").strip() or None,
         "query": query_text,
         "truncated": truncated,
         "filters": _describe_predicates(predicates),
