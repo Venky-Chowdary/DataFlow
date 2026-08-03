@@ -611,7 +611,8 @@ _NATIVE_SPECIALTY_DDL: Final[dict[str, dict[str, str]]] = {
         LOGICAL_VECTOR: "NVARCHAR(MAX)",
     },
     "oracle": {
-        LOGICAL_INTERVAL: "INTERVAL DAY TO SECOND",
+        # Bare INTERVAL has no unqualified native — never invent DAY TO SECOND.
+        LOGICAL_INTERVAL: "VARCHAR2(64)",
         LOGICAL_GEOGRAPHY: "SDO_GEOMETRY",
         LOGICAL_VECTOR: "CLOB",
     },
@@ -1908,6 +1909,26 @@ def ddl_carrier_type(inferred: str | None) -> str:
 def _normalize_dest_db(db_type: str | None) -> str:
     """Canonical destination engine id for DDL / cap lookups."""
     db = (db_type or "").strip().lower()
+    # PostgreSQL family — DDL_TYPES / caps keyed only on ``postgresql``.
+    # Without this, create-new invents TEXT for NUMBER/DATE/BOOLEAN with soft-pass.
+    if db in {
+        "postgres",
+        "pg",
+        "postgresql",
+        "cockroachdb",
+        "cockroach",
+        "timescaledb",
+        "timescale",
+        "alloydb",
+        "yugabytedb",
+        "yugabyte",
+        "citus",
+        "supabase",
+        "greenplum",
+    }:
+        return "postgresql"
+    if db in {"mariadb", "tidb", "mysql2"}:
+        return "mysql"
     if db in {"spark", "delta", "delta_lake", "databricks_sql", "unity_catalog"}:
         return "databricks"
     if db in {"apache_iceberg", "iceberg_rest", "nessie"}:
@@ -2023,6 +2044,21 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
         if db in {"databricks", "spark", "iceberg", "delta", "hive"}:
             return DDL_TYPES.get(db, {}).get(LOGICAL_INTEGER, "BIGINT")
         return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT, DEFAULT_DDL.get(db, "TEXT"))
+    # Oracle LONG RAW — unbounded binary LOB (not fixed RAW).
+    if base_early == "LONG RAW" or base_early.replace(" ", "") == "LONGRAW":
+        if db == "oracle":
+            return "BLOB"
+        if db in {"postgresql", "postgres", "cockroachdb", "timescaledb", "alloydb", "yugabytedb", "citus", "supabase", "greenplum", "redshift"}:
+            return "BYTEA"
+        if db in {"mysql", "mariadb", "tidb"}:
+            return "LONGBLOB"
+        if db in {"sqlserver", "mssql"}:
+            return "VARBINARY(MAX)"
+        if db == "snowflake":
+            return "BINARY"
+        if db == "bigquery":
+            return "BYTES"
+        return DDL_TYPES.get(db, {}).get(LOGICAL_BINARY, "BYTEA")
     # IEEE half / float16 — stamp REAL/FLOAT32, never invent DOUBLE or TEXT.
     if base_early in {"HALF", "HALFFLOAT", "FLOAT16"}:
         types_h = DDL_TYPES.get(db) or {}
@@ -2648,9 +2684,12 @@ def _string_ddl_for_dest(db: str, inferred: str | None) -> str | None:
 
 
 def is_fixed_width_binary_carrier(inferred: str | None) -> bool:
-    """True for BINARY(n) / RAW(n) / FIXED(n) (not VARBINARY / VARBYTE / BYTES)."""
+    """True for BINARY(n) / RAW(n) / FIXED(n) (not VARBINARY / VARBYTE / BYTES / LONG RAW)."""
     upper = strip_identity_qualifier(inferred).upper()
     if not upper:
+        return False
+    # Oracle LONG RAW is an unbounded LOB — never treat as fixed RAW(n).
+    if re.search(r"\bLONG\s+RAW\b", upper) or upper.replace(" ", "") == "LONGRAW":
         return False
     if re.search(r"\b(?:VARBINARY|VARBYTE|BYTES|BYTEA|BLOB|IMAGE)\b", upper):
         return False
@@ -3479,6 +3518,37 @@ def is_timezone_polarity_loss(source_type: str, target_type: str) -> bool:
     return False
 
 
+def timezone_aware_would_collapse_to_string(
+    source_type: str, target_type: str
+) -> bool:
+    """True when offset-aware datetime/time collapses to open TEXT/STRING.
+
+    ``TIMESTAMPTZ→TEXT`` / ``DATETIMEOFFSET→STRING`` / ``TIMETZ→STRING`` look
+    like free serialization but drop the offset contract — Accept risk required.
+    """
+    dt = datetime_timezone_polarity(source_type)
+    tm = time_timezone_polarity(source_type)
+    if dt not in {"tz", "ltz"} and tm != "tz":
+        return False
+    tgt = normalize_logical_type(target_type)
+    return tgt in {LOGICAL_STRING, LOGICAL_TEXT}
+
+
+def is_long_raw_carrier(inferred: str | None) -> bool:
+    """True for Oracle ``LONG RAW`` unbounded binary LOB (not ``RAW(n)``)."""
+    upper = strip_identity_qualifier(inferred).upper()
+    return upper == "LONG RAW" or upper.replace(" ", "") == "LONGRAW"
+
+
+def long_raw_locator_would_collapse(source_type: str, target_type: str) -> bool:
+    """True when LONG RAW locator polarity would be lost into BYTEA/BLOB/BINARY."""
+    if not is_long_raw_carrier(source_type):
+        return False
+    if is_long_raw_carrier(target_type):
+        return False
+    return True
+
+
 def bitstring_opaque_bytes_collapse(source_type: str, target_type: str) -> bool:
     """True when BIT(n)/VARBIT ↔ BYTEA/BINARY invents a packing the operator never declared."""
     src_bit = is_bitstring_carrier(source_type)
@@ -3726,6 +3796,7 @@ _BINARY_WIDTH_RE = re.compile(
 )
 _UNBOUNDED_BINARY_RE = re.compile(
     r"(?:varbinary|binary)\s*\(\s*max\s*\)|"
+    r"\blong\s+raw\b|"
     r"^(?:bytea|blob|longblob|mediumblob|tinyblob|image|bytes|varbyte|binary)\b(?!\s*\()",
     re.I,
 )
@@ -4663,6 +4734,10 @@ def create_new_mapping_target_type(src_type: str, dest_db_type: str = "") -> str
         if not db_uuid:
             return "UUID"
         physical_uuid = ddl_type(db_uuid, src_type)
+        phys_base = strip_identity_qualifier(physical_uuid).upper()
+        # SQL Server native token — never stamp logical UUID while CREATE emits UNIQUEIDENTIFIER.
+        if phys_base in {"UNIQUEIDENTIFIER", "GUID"}:
+            return physical_uuid
         if (
             normalize_logical_type(physical_uuid) == LOGICAL_UUID
             or uuid_exact_wire_carrier(physical_uuid)
@@ -5902,6 +5977,10 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
         return True
     if time_timezone_polarity_loss(source_type, target_type):
         return True
+    if timezone_aware_would_collapse_to_string(source_type, target_type):
+        return True
+    if long_raw_locator_would_collapse(source_type, target_type):
+        return True
     if decimal_params_would_narrow(source_type, target_type):
         return True
     if string_width_would_narrow(source_type, target_type):
@@ -6020,6 +6099,10 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
             return True
         if time_timezone_polarity_loss(source_type, target_type):
             return True
+        if timezone_aware_would_collapse_to_string(source_type, target_type):
+            return True
+        if long_raw_locator_would_collapse(source_type, target_type):
+            return True
         if decimal_params_would_narrow(source_type, target_type):
             return True
         if string_width_would_narrow(source_type, target_type):
@@ -6115,6 +6198,10 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
     # Fielded STRUCT/MAP → opaque JSON/VARIANT is intentional on many warehouses
     # (Airbyte V2) but is still a field-DDL collapse — treat as lossy so G3 surfaces it.
     if is_nested_document_collapse(source_type, target_type):
+        return True
+    if timezone_aware_would_collapse_to_string(source_type, target_type):
+        return True
+    if long_raw_locator_would_collapse(source_type, target_type):
         return True
     if year_domain_would_collapse(source_type, target_type):
         return True

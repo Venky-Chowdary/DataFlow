@@ -405,6 +405,46 @@ def test_float_int_udt_invent_width_wave20():
     assert create_new_mapping_target_type("NVARCHAR(MAX)", "oracle") == "NCLOB"
 
 
+def test_dest_alias_tz_longraw_uuid_wave21():
+    """PG-family aliases, TZ→TEXT, LONG RAW, UNIQUEIDENTIFIER physical stamp."""
+    from services.type_system import (
+        create_new_mapping_target_type,
+        is_fixed_width_binary_carrier,
+        is_lossy_coercion,
+        is_unlimited_binary_carrier,
+        long_raw_locator_would_collapse,
+        timezone_aware_would_collapse_to_string,
+    )
+
+    # Dest alias miss used to invent TEXT with soft-pass.
+    assert create_new_mapping_target_type("NUMBER", "postgres") == "NUMERIC"
+    assert create_new_mapping_target_type("DATE", "cockroachdb") == "DATE"
+    assert create_new_mapping_target_type("BOOLEAN", "supabase") == "BOOLEAN"
+    assert create_new_mapping_target_type("INTEGER", "alloydb") == "INTEGER"
+
+    assert timezone_aware_would_collapse_to_string("TIMESTAMPTZ", "TEXT") is True
+    assert is_lossy_coercion("TIMESTAMPTZ", "TEXT") is True
+    assert is_lossy_coercion("DATETIMEOFFSET", "STRING") is True
+    assert is_lossy_coercion("TIMETZ", "STRING") is True
+    assert create_new_mapping_target_type("TIMETZ", "databricks") == "STRING"
+
+    assert is_fixed_width_binary_carrier("LONG RAW") is False
+    assert is_unlimited_binary_carrier("LONG RAW") is True
+    assert long_raw_locator_would_collapse("LONG RAW", "BINARY") is True
+    assert is_lossy_coercion("LONG RAW", "BINARY") is True
+    assert create_new_mapping_target_type("LONG RAW", "postgresql") == "BYTEA"
+    assert create_new_mapping_target_type("LONG RAW", "oracle") == "BLOB"
+
+    assert create_new_mapping_target_type("UNIQUEIDENTIFIER", "sqlserver") == "UNIQUEIDENTIFIER"
+    assert create_new_mapping_target_type("UNIQUEIDENTIFIER", "postgresql") == "UUID"
+
+    assert create_new_mapping_target_type("INTERVAL", "oracle") == "VARCHAR2(64)"
+    assert is_lossy_coercion("INTERVAL", "VARCHAR2(64)") is True
+    assert create_new_mapping_target_type("INTERVAL DAY TO SECOND", "oracle") == (
+        "INTERVAL DAY TO SECOND"
+    )
+
+
 def test_struct_int64_interval_identity_document_wave17():
     from services.type_system import (
         bfile_locator_would_collapse,

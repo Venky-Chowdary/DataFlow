@@ -224,8 +224,45 @@ export function declaredCarrierFidelityRisk(
   if (isOpenStringCarrier(src) && isDocumentCarrier(tgt)) return true;
   if (isTzAwareTemporal(src) && isNtzTemporal(tgt)) return true;
   if (isNtzTemporal(src) && isTzAwareTemporal(tgt)) return true;
+  // Offset-aware → open string drops the TZ contract (API SSOT).
+  if (isTzAwareTemporal(src) && isOpenStringCarrier(tgt)) return true;
+  if (/\b(timetz|time\s+with\s+time\s+zone)\b/i.test(src) && isOpenStringCarrier(tgt)) {
+    return true;
+  }
   if (/\bdate\b/.test(src.toLowerCase()) && isTzAwareTemporal(tgt)) return true;
   if (integerWidthWouldNarrow(src, tgt)) return true;
+  // MONEY / SMALLMONEY domain collapse.
+  if (
+    /\b(money|smallmoney|currency)\b/i.test(src)
+    && !/\b(money|smallmoney)\b/i.test(tgt)
+  ) {
+    return true;
+  }
+  // INTERVAL family invent/collapse (bare↔YM↔DS).
+  const intervalFamily = (t: string): string | null => {
+    const u = t.toUpperCase();
+    if (!/\bINTERVAL\b/.test(u)) return null;
+    if (/YEAR|MONTH/.test(u) && !/DAY|SECOND|HOUR|MINUTE/.test(u.replace(/YEAR|MONTH/g, ""))) {
+      return "ym";
+    }
+    if (/DAY|SECOND|HOUR|MINUTE/.test(u)) return "ds";
+    return "bare";
+  };
+  const sif = intervalFamily(src);
+  const tif = intervalFamily(tgt);
+  if (sif != null && tif != null && sif !== tif) return true;
+  if (sif != null && isOpenStringCarrier(tgt)) return true;
+  // GEOGRAPHY ↔ GEOMETRY polarity.
+  const geoPol = (t: string): string | null => {
+    if (/\bgeography\b/i.test(t)) return "geography";
+    if (/\bgeometry\b/i.test(t) || /\bsdo_geometry\b/i.test(t)) return "geometry";
+    return null;
+  };
+  const sg = geoPol(src);
+  const tg = geoPol(tgt);
+  if (sg != null && tg != null && sg !== tg) return true;
+  // LONG RAW locator collapse.
+  if (/\blong\s+raw\b/i.test(src) && !/\blong\s+raw\b/i.test(tgt)) return true;
   if (
     /\b(timestamp|datetime|timestamptz)\b/.test(src.toLowerCase())
     && /\bdate\b/.test(tgt.toLowerCase())
