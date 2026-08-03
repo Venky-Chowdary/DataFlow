@@ -83,6 +83,9 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "tinyint": LOGICAL_INTEGER,
     "serial": LOGICAL_INTEGER,
     "bigserial": LOGICAL_INTEGER,
+    "smallserial": LOGICAL_INTEGER,
+    # SQL Server IDENTITY(…) — integer identity carrier (not open STRING).
+    "identity": LOGICAL_INTEGER,
     "number": LOGICAL_DECIMAL,
     "numeric": LOGICAL_DECIMAL,
     "decimal": LOGICAL_DECIMAL,
@@ -214,6 +217,7 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "multilinestring": LOGICAL_GEOGRAPHY,
     "multipolygon": LOGICAL_GEOGRAPHY,
     "geometrycollection": LOGICAL_GEOGRAPHY,
+    "ring": LOGICAL_GEOGRAPHY,  # ClickHouse Ring → geometry subtype
     # Oracle Spatial / Esri ST_GEOMETRY — must not collapse to string.
     "sdo geometry": LOGICAL_GEOGRAPHY,
     "st geometry": LOGICAL_GEOGRAPHY,
@@ -1427,6 +1431,23 @@ def bignumeric_capacity_would_invent(source_type: str, target_type: str) -> bool
     return bool(tgt_big and not src_big)
 
 
+def decimal_fixed_point_would_collapse_to_text(
+    source_type: str, target_type: str
+) -> bool:
+    """True when fixed-point DECIMAL collapses to open TEXT/STRING.
+
+    Create-new may stamp TEXT when (p,s) exceeds the destination DECIMAL cap
+    (e.g. ClickHouse Decimal256→MySQL). That preserves digits as strings but
+    drops fixed-point polarity — Accept risk, never silent green.
+    """
+    if normalize_logical_type(source_type) != LOGICAL_DECIMAL:
+        return False
+    if is_decfloat_carrier(source_type):
+        return False
+    tgt = normalize_logical_type(target_type)
+    return tgt in {LOGICAL_STRING, LOGICAL_TEXT}
+
+
 def smalldatetime_domain_would_invent(source_type: str, target_type: str) -> bool:
     """True when SMALLDATETIME (minute accuracy) invents second-level TIMESTAMP.
 
@@ -2018,8 +2039,11 @@ def _normalize_dest_db(db_type: str | None) -> str:
         "yugabyte",
         "citus",
         "supabase",
+        "supabase_db",
         "greenplum",
+        "greenplum_cloud",
         "neon",
+        "neon_serverless",
         "azure_postgres",
         "aws_rds_postgres",
         "rds_postgres",
@@ -2030,11 +2054,20 @@ def _normalize_dest_db(db_type: str | None) -> str:
         "cloudsql_postgres",
         "gcp_cloud_sql_postgres",
         "cloud_sql_postgres",
+        "opengauss",
+        "open_gauss",
+        "kingbase",
+        "vastbase",
+        "hologres",
+        "tdsql",
+        "materialize",
+        "risingwave",
     }:
         return "postgresql"
     if db in {
         "mariadb",
         "tidb",
+        "tidb_cloud",
         "mysql2",
         "aurora_mysql",
         "aurora-mysql",
@@ -2045,6 +2078,17 @@ def _normalize_dest_db(db_type: str | None) -> str:
         "rds_mysql",
         "maria",
         "percona",
+        "doris",
+        "starrocks",
+        "oceanbase",
+        "selectdb",
+        # Product catalog wires these through mysql+pymysql (not PG wire).
+        "polardb",
+        "gaussdb",
+        "goldendb",
+        "vitess",
+        "planetscale",
+        "mysql_planetscale",
     }:
         return "mysql"
     if db in {
@@ -2073,6 +2117,10 @@ def _normalize_dest_db(db_type: str | None) -> str:
         "emr",
         "glue",
         "synapse_spark",
+        "flink",
+        "maxcompute",
+        "odps",
+        "databend",
     }:
         return "databricks"
     if db in {"apache_iceberg", "iceberg_rest", "nessie"}:
@@ -2083,16 +2131,20 @@ def _normalize_dest_db(db_type: str | None) -> str:
         return "dynamodb"
     if db in {"redis-kv", "redis_kv"}:
         return "redis"
-    if db in {"ch", "clickhouse_cloud"}:
+    if db in {"ch", "clickhouse_cloud", "bytehouse"}:
         return "clickhouse"
     if db in {"redshift", "redshift_serverless", "amazon_redshift"}:
         return "redshift"
     if db in {"snowflake", "snowflake_aws", "snowflake_azure", "snowflake_gcp"}:
         return "snowflake"
-    if db in {"athena", "amazon_athena", "aws_athena"}:
+    if db in {"athena", "amazon_athena", "aws_athena", "dremio"}:
         return "trino"
     if db in {"spanner", "google_spanner", "cloud_spanner"}:
         return "bigquery"
+    if db in {"duckdb", "motherduck"}:
+        return "duckdb"
+    if db in {"sqlite", "libsql", "turso"}:
+        return "sqlite"
     # Microsoft T-SQL family — one DDL SSOT (NVARCHAR / BIT / DATETIME2).
     if db in {
         "mssql",
@@ -2110,7 +2162,7 @@ def _normalize_dest_db(db_type: str | None) -> str:
         "fabric_warehouse",
     }:
         return "sqlserver"
-    # No dedicated DB2/Cassandra/Bigtable DDL map yet — generic SQL vs soft-pass TEXT.
+    # No dedicated DDL map yet — generic SQL rather than soft-pass TEXT.
     if db in {
         "db2",
         "ibm_db2",
@@ -2119,6 +2171,18 @@ def _normalize_dest_db(db_type: str | None) -> str:
         "cassandra",
         "bigtable",
         "google_bigtable",
+        "teradata",
+        "vertica",
+        "netezza",
+        "exasol",
+        "crate",
+        "cratedb",
+        "questdb",
+        "pinot",
+        "druid",
+        "kylin",
+        "beam",
+        "datafusion",
     }:
         return "generic_sql"
     return db
@@ -2220,6 +2284,27 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
         if db == "sqlserver":
             return "NVARCHAR(128)"
         return "VARCHAR(128)"
+    # SQL Server IDENTITY — preserve identity polarity on create-new (never TEXT).
+    if base_early == "IDENTITY" or base_early.startswith("IDENTITY("):
+        if db == "sqlserver":
+            return "INT IDENTITY(1,1)"
+        if db in {
+            "postgresql",
+            "postgres",
+            "cockroachdb",
+            "timescaledb",
+            "alloydb",
+            "yugabytedb",
+            "citus",
+            "supabase",
+            "greenplum",
+            "redshift",
+        }:
+            return "INTEGER GENERATED BY DEFAULT AS IDENTITY"
+        if db in {"mysql", "mariadb", "tidb"}:
+            return "INT AUTO_INCREMENT"
+        int_ddl = _integer_ddl_for_dest(db, "INTEGER")
+        return int_ddl or DDL_TYPES.get(db, {}).get(LOGICAL_INTEGER, "INTEGER")
     # Oracle LONG RAW — unbounded binary LOB (not fixed RAW).
     if base_early == "LONG RAW" or base_early.replace(" ", "") == "LONGRAW":
         if db == "oracle":
@@ -4615,6 +4700,7 @@ _GEOMETRY_KIND_TOKENS: Final[tuple[str, ...]] = (
     "LINESTRING",
     "POLYGON",
     "POINT",
+    "RING",  # ClickHouse Ring
     "CIRCLE",
     "BOX",
     "PATH",
@@ -4684,6 +4770,12 @@ _SPECIALTY_NATIVE_CARRIERS: Final[frozenset[str]] = frozenset(
         "PATH",
         "POLYGON",
         "CIRCLE",
+        "RING",  # ClickHouse / geo ring
+        "LINESTRING",
+        "MULTILINESTRING",
+        "MULTIPOINT",
+        "MULTIPOLYGON",
+        "GEOMETRYCOLLECTION",
         "PG_LSN",
         "OID",
         "TID",
@@ -5882,6 +5974,9 @@ def is_identity_column(inferred: str | None) -> bool:
         return True
     if "GENERATED BY DEFAULT" in upper or "AUTO_INCREMENT" in upper:
         return True
+    # SQL Server IDENTITY(1,1) — must match before strip_identity_qualifier removes it.
+    if re.search(r"\bIDENTITY\b", upper):
+        return True
     base = strip_identity_qualifier(inferred).upper()
     return base in {"SERIAL", "BIGSERIAL", "SMALLSERIAL"} or base.startswith("SERIAL")
 
@@ -6288,6 +6383,8 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
         return True
     if bignumeric_capacity_would_invent(source_type, target_type):
         return True
+    if decimal_fixed_point_would_collapse_to_text(source_type, target_type):
+        return True
     if smalldatetime_domain_would_invent(source_type, target_type):
         return True
     if decimal_params_would_narrow(source_type, target_type):
@@ -6420,6 +6517,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
             return True
         if bignumeric_capacity_would_invent(source_type, target_type):
             return True
+        if decimal_fixed_point_would_collapse_to_text(source_type, target_type):
+            return True
         if smalldatetime_domain_would_invent(source_type, target_type):
             return True
         if decimal_params_would_narrow(source_type, target_type):
@@ -6529,6 +6628,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
     if decfloat_domain_would_collapse(source_type, target_type):
         return True
     if bignumeric_capacity_would_invent(source_type, target_type):
+        return True
+    if decimal_fixed_point_would_collapse_to_text(source_type, target_type):
         return True
     if smalldatetime_domain_would_invent(source_type, target_type):
         return True
