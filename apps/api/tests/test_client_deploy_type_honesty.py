@@ -278,6 +278,43 @@ def test_specialty_to_text_is_lossy_not_preserve():
     assert is_lossy_coercion("DECIMAL(19,4)", "MONEY") is True
 
 
+def test_set_enum_collation_halfvec_struct_wave14():
+    from services.type_coercion_validator import validate_mapping_coercions
+    from services.type_system import (
+        create_new_mapping_target_type,
+        ddl_type,
+        is_lossy_coercion,
+        nested_struct_fields_incompatible,
+    )
+
+    assert is_lossy_coercion("SET('a','b')", "ENUM('a','b')") is True
+    assert is_lossy_coercion("ENUM('a')", "SET('a')") is True
+    assert is_lossy_coercion(
+        "VARCHAR(5) COLLATE utf8_general_ci",
+        "VARCHAR(5) COLLATE utf8_bin",
+    ) is True
+    assert is_lossy_coercion("CITEXT", "TEXT") is True
+    assert is_lossy_coercion("MONEY", "SMALLMONEY") is True
+
+    assert nested_struct_fields_incompatible("RECORD", "STRUCT<a:INT>") is True
+    assert is_lossy_coercion("RECORD", "STRUCT<a:INT>") is True
+
+    assert ddl_type("postgresql", "HALFVEC(3)") == "halfvec(3)"
+    assert create_new_mapping_target_type("HALFVEC(3)", "postgresql") == "halfvec(3)"
+    assert ddl_type("postgresql", "SPARSEVEC(8)") == "sparsevec(8)"
+
+    # UUID exact wire — Map/G3 SSOT (not false bounded truncate).
+    assert is_lossy_coercion("UUID", "CHAR(36)") is False
+    assert is_lossy_coercion("UNIQUEIDENTIFIER", "CHAR(36)") is False
+    issues = validate_mapping_coercions(
+        mappings=[{"source": "c", "target": "c", "confidence": 0.99}],
+        source_types={"c": "UNIQUEIDENTIFIER"},
+        target_types={"c": "CHAR(36)"},
+        validation_mode="strict",
+    )
+    assert issues == []
+
+
 def test_bounded_sink_lob_tier_national_srid_wave13():
     from services.type_system import (
         bounded_string_sink_would_truncate,

@@ -27,12 +27,27 @@ export function parseStringCarrierWidth(inferred: string | null | undefined): nu
  * Bare ``string`` / ``varchar`` stay unknown (no invented narrow), matching
  * ``type_system.is_unlimited_string_carrier`` (LOGICAL_TEXT only).
  */
+const MYSQL_TEXT_TIER_RANK: Record<string, number> = {
+  tinytext: 1,
+  text: 2,
+  mediumtext: 3,
+  longtext: 4,
+};
+
+function mysqlTextTierRank(inferred: string | null | undefined): number | null {
+  const token = (inferred || "").trim().toLowerCase().split(/\s+/)[0] || "";
+  return MYSQL_TEXT_TIER_RANK[token] ?? null;
+}
+
 export function isUnlimitedStringCarrier(inferred: string | null | undefined): boolean {
   const text = (inferred || "").trim();
   if (!text) return false;
   if (/\b(?:varchar|nvarchar|char)\s*\(\s*max\s*\)/i.test(text)) return true;
+  const token = text.toLowerCase().split(/\s+/)[0] || "";
+  // TINYTEXT is tight (255) — not an unlimited sink (API SSOT).
+  if (token === "tinytext") return false;
   if (
-    /^(?:text|ntext|clob|nclob|longtext|mediumtext|tinytext|long\s+varchar|json|jsonb)\b/i.test(
+    /^(?:text|ntext|clob|nclob|longtext|mediumtext|long\s+varchar|json|jsonb)\b/i.test(
       text,
     )
   ) {
@@ -44,16 +59,27 @@ export function isUnlimitedStringCarrier(inferred: string | null | undefined): b
 export function isStringFamily(inferred: string | null | undefined): boolean {
   const t = (inferred || "").trim().toLowerCase();
   if (!t) return false;
-  if (isUnlimitedStringCarrier(t)) return true;
+  if (isUnlimitedStringCarrier(t) || mysqlTextTierRank(t) != null) return true;
   return /\b(?:varchar|nvarchar|char|character|string|text|clob)\b/.test(t);
 }
 
 /** True when source string capacity exceeds destination VARCHAR(n). */
 export function stringWidthWouldNarrow(sourceType: string, targetType: string): boolean {
   if (!isStringFamily(sourceType) || !isStringFamily(targetType)) return false;
+  const srcRank = mysqlTextTierRank(sourceType);
+  const tgtRank = mysqlTextTierRank(targetType);
+  if (srcRank != null && tgtRank != null && srcRank > tgtRank) return true;
   if (isUnlimitedStringCarrier(targetType)) return false;
   const tgtW = parseStringCarrierWidth(targetType);
-  if (tgtW == null) return false;
+  if (tgtW == null) {
+    // TINYTEXT capacity = 255 when typmod absent.
+    if ((targetType || "").trim().toLowerCase().startsWith("tinytext")) {
+      if (isUnlimitedStringCarrier(sourceType)) return true;
+      const srcW = parseStringCarrierWidth(sourceType);
+      return srcW != null && srcW > 255;
+    }
+    return false;
+  }
   if (isUnlimitedStringCarrier(sourceType)) return true;
   const srcW = parseStringCarrierWidth(sourceType);
   if (srcW == null) return false;

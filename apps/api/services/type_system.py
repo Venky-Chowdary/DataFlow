@@ -879,10 +879,12 @@ def _vector_ddl_for_dest(db: str, inferred: str | None) -> str:
     Never invents a default dimension (historically Snowflake used 1536). When the
     dimension is unknown or exceeds the platform cap, fall back to the destination
     lossless text sink — CREATE TABLE must not invent a wrong embedding width.
+    PostgreSQL preserves HALFVEC/SPARSEVEC encoding (never invent dense vector).
     """
     fallback = DDL_TYPES.get(db, {}).get(LOGICAL_VECTOR, DEFAULT_DDL.get(db, "TEXT"))
     template = _VECTOR_PARAM_TEMPLATES.get(db)
-    if not template:
+    # Engines without native vector templates keep DDL_TYPES sink (ARRAY/STRING/…).
+    if not template and db != "postgresql":
         return fallback
 
     dim = parse_vector_dimension(inferred)
@@ -892,6 +894,17 @@ def _vector_ddl_for_dest(db: str, inferred: str | None) -> str:
     cap = _VECTOR_DIM_CAPS.get(db, 65535)
     if dim > cap:
         return DEFAULT_DDL.get(db, "TEXT")
+
+    enc = vector_encoding_polarity(inferred)
+    if db == "postgresql":
+        if enc == "half":
+            return f"halfvec({dim})"
+        if enc == "sparse":
+            return f"sparsevec({dim})"
+        return f"vector({dim})"
+
+    if not template:
+        return fallback
     return template.format(n=dim)
 
 
@@ -1368,9 +1381,19 @@ def is_nested_document_collapse(source_type: str, target_type: str) -> bool:
 
 
 def nested_struct_fields_incompatible(source_type: str, target_type: str) -> bool:
-    """True when both sides declare STRUCT fields and a required field/type is lost."""
+    """True when STRUCT field contracts are lost or inventively declared.
+
+    Opaque ``RECORD``/bare STRUCT → fielded ``STRUCT<a:INT>`` invents a schema
+    the source never proved — fail closed (Accept risk).
+    """
     src_fields = parse_struct_fields(source_type)
     tgt_fields = parse_struct_fields(target_type)
+    src_l = normalize_logical_type(source_type)
+    tgt_l = normalize_logical_type(target_type)
+    if src_l == LOGICAL_STRUCT and tgt_l == LOGICAL_STRUCT:
+        # Unfielded ↔ fielded invents or drops a field DDL contract.
+        if bool(src_fields) != bool(tgt_fields):
+            return True
     if not src_fields or not tgt_fields:
         return False
     tgt_by = {n.lower(): t for n, t in tgt_fields}
@@ -3238,17 +3261,22 @@ def year_domain_would_collapse(source_type: str, target_type: str) -> bool:
 
 
 def money_domain_would_collapse(source_type: str, target_type: str) -> bool:
-    """True when landing on/off named MONEY invents locale-dependent currency polarity.
+    """True when MONEY polarity or SMALLMONEY capacity would be lost/invented.
 
     ``DECIMAL(19,4)`` is a money-*scale* carrier but not locale MONEY — switching
-    onto ``MONEY``/``SMALLMONEY`` still needs Accept risk.
+    onto ``MONEY``/``SMALLMONEY`` still needs Accept risk. ``MONEY→SMALLMONEY``
+    narrows range (~±214k) — fail closed.
     """
     src_base = strip_identity_qualifier(source_type).upper().replace(" ", "")
     tgt_base = strip_identity_qualifier(target_type).upper().replace(" ", "")
     named = {"MONEY", "SMALLMONEY", "CURRENCY"}
     src_named = src_base in named
     tgt_named = tgt_base in named
-    return src_named != tgt_named
+    if src_named != tgt_named:
+        return True
+    if src_base == "MONEY" and tgt_base == "SMALLMONEY":
+        return True
+    return False
 
 
 def set_to_array_polarity_preserved(source_type: str, target_type: str) -> bool:
@@ -3388,6 +3416,11 @@ def bounded_string_sink_would_truncate(source_type: str, target_type: str) -> bo
     src_l = normalize_logical_type(source_type)
     if src_l in {LOGICAL_STRING, LOGICAL_TEXT}:
         return string_width_would_narrow(source_type, target_type)
+    # Exact UUID 36-char wire is the industry create-new sink — not truncate.
+    if normalize_logical_type(source_type) == LOGICAL_UUID and uuid_exact_wire_carrier(
+        target_type
+    ):
+        return False
     # Non-string → tight sink — fail closed (Accept risk).
     return True
 
@@ -3762,8 +3795,11 @@ def enum_set_domain_would_reject(source_type: str, target_type: str) -> bool:
         # Open/unknown source → closed ENUM/SET: unfit values only appear at
         # write (quarantine). Fail-closed so Map/G3 require Accept risk.
         return True
-    _src_kind, src_members = src
-    _tgt_kind, tgt_members = tgt
+    src_kind, src_members = src
+    tgt_kind, tgt_members = tgt
+    # SET↔ENUM rewrites multi-value vs single-label polarity — never preserve.
+    if src_kind != tgt_kind:
+        return True
     if not tgt_members:
         return True
     return not src_members.issubset(tgt_members)
@@ -5159,24 +5195,50 @@ def specialty_polarity_mismatch(source_type: str, target_type: str) -> bool:
 
 
 def case_fold_polarity_invent(source_type: str, target_type: str) -> bool:
-    """True when mapping invents case-insensitive equality (TEXT→CITEXT / CS→CI)."""
+    """True when mapping invents or drops case-fold equality polarity.
+
+    Covers TEXT→CITEXT / CS→CI invent and CI→CS / CITEXT→TEXT drop (unique
+    keys that collided under CI become distinct — or the reverse).
+    """
+    src_l = normalize_logical_type(source_type)
+    tgt_l = normalize_logical_type(target_type)
+    if src_l not in {LOGICAL_STRING, LOGICAL_TEXT} or tgt_l not in {
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+    }:
+        return False
     tgt_ci = is_case_insensitive_collation(target_type) or (
         specialty_carrier_base(target_type) == "CITEXT"
     )
-    if not tgt_ci:
-        return False
     src_ci = is_case_insensitive_collation(source_type) or (
         specialty_carrier_base(source_type) == "CITEXT"
     )
-    if src_ci:
+    # Only when at least one side declares CI/CS polarity (or CITEXT).
+    src_declares = bool(parse_collation(source_type)) or (
+        specialty_carrier_base(source_type) == "CITEXT"
+    )
+    tgt_declares = bool(parse_collation(target_type)) or (
+        specialty_carrier_base(target_type) == "CITEXT"
+    )
+    if not src_declares and not tgt_declares:
         return False
+    return src_ci != tgt_ci
+
+
+def accent_polarity_invent(source_type: str, target_type: str) -> bool:
+    """True when mapping invents accent-insensitive equality (AS→AI)."""
     src_l = normalize_logical_type(source_type)
     tgt_l = normalize_logical_type(target_type)
-    # CITEXT normalizes as string; also catch CS collation → CI collation.
-    return src_l in {LOGICAL_STRING, LOGICAL_TEXT} and tgt_l in {
+    if src_l not in {LOGICAL_STRING, LOGICAL_TEXT} or tgt_l not in {
         LOGICAL_STRING,
         LOGICAL_TEXT,
-    }
+    }:
+        return False
+    if not parse_collation(source_type) and not parse_collation(target_type):
+        return False
+    src_ai = is_accent_insensitive_collation(source_type)
+    tgt_ai = is_accent_insensitive_collation(target_type)
+    return src_ai != tgt_ai
 
 
 def date_to_tz_aware_invent(source_type: str, target_type: str) -> bool:
@@ -5275,6 +5337,8 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
         return True
     if case_fold_polarity_invent(source_type, target_type):
         return True
+    if accent_polarity_invent(source_type, target_type):
+        return True
     if date_to_tz_aware_invent(source_type, target_type):
         return True
     if vector_dim_mismatch(source_type, target_type):
@@ -5367,6 +5431,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
             return True
         if case_fold_polarity_invent(source_type, target_type):
             return True
+        if accent_polarity_invent(source_type, target_type):
+            return True
         if vector_dim_mismatch(source_type, target_type):
             return True
         if vector_encoding_would_collapse(source_type, target_type):
@@ -5438,6 +5504,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
     if specialty_polarity_mismatch(source_type, target_type):
         return True
     if case_fold_polarity_invent(source_type, target_type):
+        return True
+    if accent_polarity_invent(source_type, target_type):
         return True
     if date_to_tz_aware_invent(source_type, target_type):
         return True
@@ -5519,6 +5587,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         if date_to_tz_aware_invent(source_type, target_type):
             return True
         if case_fold_polarity_invent(source_type, target_type):
+            return True
+        if accent_polarity_invent(source_type, target_type):
             return True
         if national_charset_would_collapse(source_type, target_type):
             return True

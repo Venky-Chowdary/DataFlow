@@ -5558,6 +5558,7 @@ export function TransferPage({
                     || (Array.isArray(hit.transforms) && hit.transforms[0]?.type)
                     || existing?.transform;
                   const nextType = hit.destination_type || hit.target_type || existing?.destType || "";
+                  const typeChanged = Boolean(nextType) && nextType !== (existing?.destType || "");
                   bySource.set(
                     src,
                     sealRemediationApproval({
@@ -5579,10 +5580,11 @@ export function TransferPage({
                       existsInDestination: existing?.existsInDestination,
                       createNew: existing?.createNew,
                       assignmentStrategy: existing?.assignmentStrategy,
-                      fidelity: existing?.fidelity,
-                      fidelityReason: existing?.fidelityReason,
-                      typeNarrowing: existing?.typeNarrowing,
-                      riskAcknowledged: existing?.riskAcknowledged,
+                      // Dest-type repair must not reuse stale preserve / Accept risk.
+                      fidelity: typeChanged ? undefined : existing?.fidelity,
+                      fidelityReason: typeChanged ? undefined : existing?.fidelityReason,
+                      typeNarrowing: typeChanged ? undefined : existing?.typeNarrowing,
+                      riskAcknowledged: typeChanged ? false : existing?.riskAcknowledged,
                     }),
                   );
                 }

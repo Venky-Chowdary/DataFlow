@@ -732,7 +732,16 @@ export function applyDestTypeChange(m: EditableMapping, nextDestType: string): E
       requiresReview: true,
     };
   }
-  return { ...m, destType: nextDestType, approved: false, riskAcknowledged: false };
+  return {
+    ...m,
+    destType: nextDestType,
+    approved: false,
+    riskAcknowledged: false,
+    // Stale engine fidelity must not greenwash the new dest type until re-stamp.
+    fidelity: undefined,
+    fidelityReason: undefined,
+    typeNarrowing: undefined,
+  };
 }
 
 export function isIntentionalOmit(m: EditableMapping): boolean {
