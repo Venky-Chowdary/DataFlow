@@ -492,7 +492,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         field_shape_loss = bool(nested_collapse and not document_collapse)
         if document_collapse:
             label = (
-                f"{label} — nested→document (STRUCT/MAP field DDL not preserved; "
+                f"{label} — nested→document (STRUCT/MAP/ARRAY field DDL not preserved; "
                 "Airbyte-style JSON/VARIANT path)"
             )
         elif field_shape_loss:

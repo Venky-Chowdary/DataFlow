@@ -339,9 +339,16 @@ def _deterministic_narrative(
     passed: bool,
     issues: list[dict[str, Any]],
     column_fixes: list[dict[str, Any]],
+    *,
+    decision: str = "",
 ) -> str:
-    if passed:
+    if passed and decision == "approve":
         return "All preflight gates passed. This transfer is safe to run."
+    if passed:
+        return (
+            "Checks cleared with a review-grade decision — not production-approved. "
+            "Re-run Validate or acknowledge remaining polarity risks before Execute unlocks."
+        )
     lines: list[str] = []
     hard_issues = [i for i in issues if i.get("severity") != "warning"]
     warn_issues = [i for i in issues if i.get("severity") == "warning"]
@@ -462,6 +469,9 @@ def explain_validation(
         and optionally ``coercion_report``).
     """
     passed = bool(preflight.get("passed"))
+    proof = preflight.get("proof_bundle") or {}
+    transfer_decision = proof.get("transfer_decision") or {}
+    decision = str(transfer_decision.get("decision") or "").strip().lower()
     blockers = preflight.get("blockers") or []
     coercion_report = preflight.get("coercion_report") or {}
 
@@ -518,17 +528,24 @@ def explain_validation(
             })
 
     actions = _suggested_actions(blockers, column_fixes)
-    deterministic = _deterministic_narrative(passed, issues, column_fixes)
+    deterministic = _deterministic_narrative(
+        passed, issues, column_fixes, decision=decision,
+    )
 
     narrative, provider = deterministic, "deterministic"
     if not passed and use_llm:
         narrative, provider = _llm_narrative(deterministic, issues)
 
     hard_count = sum(1 for i in issues if i["severity"] != "warning")
+    approved = passed and decision == "approve"
     summary = (
         "Validation passed — safe to run."
-        if passed
-        else f"Validation blocked: {hard_count} issue(s), {len(column_fixes)} column(s) need attention."
+        if approved
+        else (
+            "Validation review-grade — not safe to run until decision is approve."
+            if passed
+            else f"Validation blocked: {hard_count} issue(s), {len(column_fixes)} column(s) need attention."
+        )
     )
 
     return {

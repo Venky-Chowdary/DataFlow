@@ -40,12 +40,14 @@ def test_bq_array_struct_dtype_strings_not_text():
     assert normalize_logical_type("ARRAY<INTEGER>") == "array"
     assert normalize_logical_type("STRUCT<a:INTEGER>") == "struct"
 
-    # Lakehouse engines keep nested DDL; PG uses document path (honest collapse).
+    # Lakehouse engines keep nested DDL; PG typed arrays → native T[] (wave 7).
+    # STRUCT on PG still collapses to JSONB (never invent STRUCT).
     assert ddl_type("bigquery", "ARRAY<STRING>") == "ARRAY<STRING>"
     assert ddl_type("snowflake", "ARRAY<STRING>").upper().startswith("ARRAY")
-    assert ddl_type("postgresql", "ARRAY<STRING>") == "JSONB"
+    assert ddl_type("postgresql", "ARRAY<STRING>") == "TEXT[]"
     assert ddl_type("postgresql", "STRUCT<a:INTEGER>") == "JSONB"
     assert is_nested_document_collapse("STRUCT<a:INTEGER>", "JSON") is True
+    assert is_nested_document_collapse("ARRAY<INTEGER>", "JSONB") is True
 
 
 def test_bq_range_not_timestamptz_substring_trap():

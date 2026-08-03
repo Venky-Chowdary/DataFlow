@@ -201,3 +201,31 @@ def test_binary_to_text_is_lossy_not_preserve():
         declared_target_type="TEXT",
     )
     assert verdict["verdict"] == "lossy_cast"
+
+
+def test_bare_datetime_create_new_is_wall_clock_not_tz_invent():
+    from services.type_system import ddl_type
+
+    assert ddl_type("postgresql", "datetime") == "TIMESTAMP"
+    assert ddl_type("redshift", "datetime") == "TIMESTAMP"
+    assert ddl_type("snowflake", "datetime") == "TIMESTAMP_NTZ"
+    assert ddl_type("oracle", "datetime") == "TIMESTAMP"
+    # Explicit aware carriers still land on TZ-aware DDL.
+    assert ddl_type("postgresql", "TIMESTAMPTZ") == "TIMESTAMPTZ"
+
+
+def test_array_to_json_is_document_collapse_not_preserve():
+    from services.type_system import (
+        is_lossy_coercion,
+        is_nested_document_collapse,
+        normalize_logical_type,
+        ddl_type,
+        parse_array_element,
+    )
+
+    assert is_nested_document_collapse("ARRAY<INTEGER>", "JSONB") is True
+    assert is_lossy_coercion("ARRAY<INTEGER>", "JSONB") is True
+    assert normalize_logical_type("INTEGER[]") == "array"
+    assert parse_array_element("INTEGER[]") == "INTEGER"
+    assert ddl_type("postgresql", "ARRAY<INTEGER>") == "BIGINT[]"
+    assert ddl_type("postgresql", "INTEGER[]") == "BIGINT[]"

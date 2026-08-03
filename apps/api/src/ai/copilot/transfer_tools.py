@@ -366,7 +366,15 @@ def plan_transfer(
             "quality_issues": (mapping.get("quality_issues") or [])[:10],
             "coercion_issues": (mapping.get("coercion_issues") or [])[:10],
             "preflight": preflight,
-            "safe_to_start": bool(preflight.get("passed")),
+            # Align with Execute unlock — passed alone must not invent safe_to_start.
+            "safe_to_start": bool(
+                preflight.get("passed")
+                and (
+                    (preflight.get("proof_bundle") or {})
+                    .get("transfer_decision") or {}
+                ).get("decision")
+                == "approve"
+            ),
         },
     )
 

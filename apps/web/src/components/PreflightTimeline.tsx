@@ -95,7 +95,8 @@ export function PreflightTimeline({
   const skipCount = (result.gates || []).filter((g) => g.status === "skip").length;
 
   const proof = result.proof_bundle;
-  const decision = proof?.transfer_decision?.decision ?? (result.passed ? "approve" : "review");
+  // Missing decision must never invent approve from passed (review-grade greenwash).
+  const decision = proof?.transfer_decision?.decision ?? "review";
   const decisionLabel = decision.toUpperCase();
   const decisionTone = decision === "block" ? "#dc2626" : decision === "review" ? "#f59e0b" : "#16a34a";
   const stateClass = result.passed ? "passed" : result.blockers.length ? "blocked" : "";

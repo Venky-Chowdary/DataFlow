@@ -297,10 +297,13 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_DECIMAL: "NUMERIC",
         LOGICAL_BOOLEAN: "BOOLEAN",
         LOGICAL_DATE: "DATE",
-        LOGICAL_DATETIME: "TIMESTAMPTZ",
+        # Wall-clock TIMESTAMP — bare datetime must not invent TIMESTAMPTZ/UTC.
+        # Explicit TIMESTAMPTZ / TIMESTAMP WITH TIME ZONE still map via polarity.
+        LOGICAL_DATETIME: "TIMESTAMP",
         LOGICAL_TIME: "TIME",
         LOGICAL_UUID: "UUID",
         LOGICAL_JSON: "JSONB",
+        # Bare ARRAY → JSONB document; typed ARRAY<T> / T[] → native T[] via nested DDL.
         LOGICAL_ARRAY: "JSONB",
         LOGICAL_BINARY: "BYTEA",
     },
@@ -339,7 +342,8 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_DECIMAL: "NUMBER(38,10)",
         LOGICAL_BOOLEAN: "NUMBER(1)",
         LOGICAL_DATE: "DATE",
-        LOGICAL_DATETIME: "TIMESTAMP WITH TIME ZONE",
+        # Wall-clock TIMESTAMP — bare datetime must not invent WITH TIME ZONE.
+        LOGICAL_DATETIME: "TIMESTAMP",
         LOGICAL_TIME: "VARCHAR2(32)",
         LOGICAL_UUID: "VARCHAR2(36)",
         LOGICAL_JSON: "CLOB",
@@ -353,7 +357,8 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_DECIMAL: "NUMBER(38,10)",
         LOGICAL_BOOLEAN: "BOOLEAN",
         LOGICAL_DATE: "DATE",
-        LOGICAL_DATETIME: "TIMESTAMP_TZ",
+        # Wall-clock NTZ — bare datetime must not invent TIMESTAMP_TZ.
+        LOGICAL_DATETIME: "TIMESTAMP_NTZ",
         LOGICAL_TIME: "TIME",
         # Width-safe carrier — bare VARCHAR collapses UUID polarity in preflight.
         LOGICAL_UUID: "VARCHAR(36)",
@@ -401,8 +406,8 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_DECIMAL: "DECIMAL(38,15)",
         LOGICAL_BOOLEAN: "BOOLEAN",
         LOGICAL_DATE: "DATE",
-        # Ambiguous datetime → TIMESTAMPTZ (matches PG; explicit NTZ stays TIMESTAMP).
-        LOGICAL_DATETIME: "TIMESTAMPTZ",
+        # Wall-clock TIMESTAMP — bare datetime must not invent TIMESTAMPTZ.
+        LOGICAL_DATETIME: "TIMESTAMP",
         LOGICAL_TIME: "TIME",
         LOGICAL_UUID: "VARCHAR(36)",
         LOGICAL_JSON: "SUPER",
@@ -1036,6 +1041,8 @@ def normalize_logical_type(inferred: str | None) -> str:
         or upper.startswith("LIST<")
         or upper.startswith("ARRAY(")
         or upper.startswith("LIST(")
+        # Postgres / DuckDB postfix: INTEGER[], TEXT[][], etc.
+        or re.match(r"^[A-Z][A-Z0-9_ ]*(\[\s*\])+$", upper)
     ):
         return LOGICAL_ARRAY
     if (
@@ -1136,6 +1143,20 @@ _NESTED_DDL_ENGINES: Final[frozenset[str]] = frozenset({
     "snowflake",
 })
 
+# Engines with native T[] arrays but no STRUCT invent on create-new.
+_ARRAY_NATIVE_ENGINES: Final[frozenset[str]] = frozenset({
+    "postgresql",
+    "postgres",
+    "redshift",
+    "timescaledb",
+    "cockroachdb",
+    "alloydb",
+    "yugabytedb",
+    "citus",
+    "supabase",
+    "greenplum",
+})
+
 
 def _leaf_ddl_for_nested(db: str, leaf: str) -> str:
     """Map a nested leaf logical carrier to destination-native leaf DDL."""
@@ -1152,7 +1173,7 @@ def _leaf_ddl_for_nested(db: str, leaf: str) -> str:
 
 
 def _format_array_ddl(db: str, element_ddl: str) -> str:
-    if db == "duckdb":
+    if db == "duckdb" or db in _ARRAY_NATIVE_ENGINES:
         return f"{element_ddl}[]"
     if db == "clickhouse":
         return f"Array({element_ddl})"
@@ -1273,7 +1294,7 @@ def parse_map_key_value(inferred: str | None) -> tuple[str, str] | None:
 
 
 def parse_array_element(inferred: str | None) -> str | None:
-    """Parse ``ARRAY<T>`` / ``LIST<T>`` / Snowflake ``ARRAY(T)`` element type."""
+    """Parse ``ARRAY<T>`` / ``LIST<T>`` / Snowflake ``ARRAY(T)`` / ``T[]`` element type."""
     raw = (inferred or "").strip()
     upper = raw.upper()
     if (upper.startswith("ARRAY<") or upper.startswith("LIST<")) and raw.endswith(">"):
@@ -1281,6 +1302,11 @@ def parse_array_element(inferred: str | None) -> str | None:
         return inner or None
     if (upper.startswith("ARRAY(") or upper.startswith("LIST(")) and raw.endswith(")"):
         inner = raw[raw.index("(") + 1 : -1].strip()
+        return inner or None
+    # Postfix T[] / T[][] — peel one dimension (PG / DuckDB wire).
+    m = re.match(r"^(.+?)\s*\[\s*\]\s*$", raw, flags=re.IGNORECASE)
+    if m:
+        inner = m.group(1).strip()
         return inner or None
     return None
 
@@ -1321,14 +1347,15 @@ def is_opaque_document_logical(inferred: str | None) -> bool:
 
 
 def is_nested_document_collapse(source_type: str, target_type: str) -> bool:
-    """True when fielded STRUCT/MAP collapses into an opaque JSON/VARIANT document.
+    """True when STRUCT/MAP/ARRAY collapses into an opaque JSON/VARIANT document.
 
     Airbyte Destinations V2 often stores objects as JSON — that is valid but is
-    **not** field-level DDL fidelity. Operators must see it (G3 warn/block).
+    **not** field/element DDL fidelity. Operators must see it (G3 warn/block).
+    ARRAY→JSON was previously silent-green while STRUCT→JSON hard-blocked.
     """
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
-    if src not in {LOGICAL_STRUCT, LOGICAL_MAP}:
+    if src not in {LOGICAL_STRUCT, LOGICAL_MAP, LOGICAL_ARRAY}:
         return False
     return tgt == LOGICAL_JSON
 
@@ -1366,7 +1393,7 @@ def nested_struct_fields_incompatible(source_type: str, target_type: str) -> boo
         (LOGICAL_TEXT, LOGICAL_STRING),
         (LOGICAL_STRUCT, LOGICAL_JSON),  # nested document path — flagged separately
         (LOGICAL_MAP, LOGICAL_JSON),
-        (LOGICAL_ARRAY, LOGICAL_JSON),
+        # ARRAY→JSON is document collapse (is_nested_document_collapse), not a safe leaf.
     }
     for name, src_t in src_fields:
         tgt_t = tgt_by.get(name.lower())
@@ -1427,9 +1454,9 @@ def nested_array_elements_incompatible(source_type: str, target_type: str) -> bo
         (LOGICAL_DATE, LOGICAL_TEXT),
         (LOGICAL_STRING, LOGICAL_TEXT),
         (LOGICAL_TEXT, LOGICAL_STRING),
-        (LOGICAL_ARRAY, LOGICAL_JSON),
         (LOGICAL_STRUCT, LOGICAL_JSON),
         (LOGICAL_MAP, LOGICAL_JSON),
+        # ARRAY→JSON element collapse is not a safe widening.
     }
     return (s_l, t_l) not in safe_el
 
@@ -1470,20 +1497,28 @@ def _nested_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     """Emit native ARRAY/STRUCT/MAP DDL when source declares nested carriers.
 
     Engines without nested support return None so callers fall back to base maps
-    (JSON/SUPER/TEXT) — never invent a STRUCT on PostgreSQL.
+    (JSON/SUPER/TEXT) — never invent a STRUCT on PostgreSQL. Typed arrays on
+    PG-family still emit native ``T[]`` (never silent JSONB invent).
     """
-    if db not in _NESTED_DDL_ENGINES:
-        return None
     raw = (inferred or "").strip()
     if not raw:
         return None
     upper = raw.upper()
 
     array_el = parse_array_element(raw)
-    if array_el is not None:
-        nested_inner = _nested_ddl_for_dest(db, array_el)
+    if array_el is not None and (
+        db in _NESTED_DDL_ENGINES or db in _ARRAY_NATIVE_ENGINES
+    ):
+        # Recurse only on full nested engines; PG-family keeps scalar leaves.
+        nested_inner = (
+            _nested_ddl_for_dest(db, array_el) if db in _NESTED_DDL_ENGINES else None
+        )
         element = nested_inner if nested_inner else _leaf_ddl_for_nested(db, array_el)
         return _format_array_ddl(db, element)
+
+    if db not in _NESTED_DDL_ENGINES:
+        return None
+
     if upper in {"ARRAY", "LIST"}:
         return DDL_TYPES.get(db, {}).get(LOGICAL_ARRAY, DEFAULT_DDL.get(db, "TEXT"))
 
@@ -2835,9 +2870,10 @@ def _datetime_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     Snowflake ``TIMESTAMP_LTZ`` vs ``TIMESTAMP_TZ`` polarity is preserved
     (Openflow maps PG timestamptz→LTZ; Airbyte #80914).
     """
-    # Do NOT treat bare TIMESTAMP / DATETIME as NTZ — those are ambiguous
-    # logical aliases and must fall through to the destination platform
-    # default (e.g. PostgreSQL TIMESTAMPTZ) so greenfield create-new stays honest.
+    # Bare TIMESTAMP / DATETIME are ambiguous — fall through to the destination
+    # platform default, which is wall-clock NTZ (TIMESTAMP / TIMESTAMP_NTZ /
+    # DATETIME). Explicit TIMESTAMPTZ / WITH TIME ZONE keep aware polarity.
+    # Inventing TIMESTAMPTZ from bare datetime silently relocates civil times.
     polarity = datetime_timezone_polarity(inferred)
     fsp = parse_temporal_fractional_precision(inferred)
     base: str | None = None
@@ -4969,7 +5005,7 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         (LOGICAL_JSON, LOGICAL_JSON),
         (LOGICAL_ARRAY, LOGICAL_STRING),
         (LOGICAL_ARRAY, LOGICAL_TEXT),
-        (LOGICAL_ARRAY, LOGICAL_JSON),
+        # ARRAY→JSON is document collapse (lossy) — not allow-listed.
         (LOGICAL_ARRAY, LOGICAL_ARRAY),
         (LOGICAL_JSON, LOGICAL_ARRAY),
         # numeric widening and text renderings
