@@ -354,6 +354,40 @@ def introspect_endpoint(
             # table_exists=True for missing tables via _mark_table_listed_if_present.
             out["table_exists"] = False
             _attach_db_sample(out, endpoint)
+            return out
+        # No table typed — list objects so Pilot / Destination pickers can choose.
+        if fmt == "sqlite":
+            try:
+                from connectors.sqlite import test_sqlite
+
+                cfg = resolve_connector_config(endpoint)
+                probe = test_sqlite(
+                    host=str(cfg.get("host") or ""),
+                    port=int(cfg.get("port") or 0),
+                    database=str(cfg.get("database") or ""),
+                    username=str(cfg.get("username") or ""),
+                    password=str(cfg.get("password") or ""),
+                    schema=str(cfg.get("schema") or ""),
+                    connection_string=str(cfg.get("connection_string") or ""),
+                    ssl=bool(cfg.get("ssl")),
+                )
+                tables = [
+                    t for t in (probe.tables or [])
+                    if t and not str(t).startswith("(")
+                ]
+                out["objects"] = [{"name": t, "type": "table"} for t in tables]
+                out["message"] = probe.message or f"SQLite connected — {len(tables)} tables"
+                out["connected"] = bool(probe.ok)
+                if not probe.ok and probe.error:
+                    out["message"] = probe.error
+            except Exception as exc:
+                out["message"] = f"SQLite object list failed: {exc}"
+            return out
+        # Other SQLAlchemy engines: attempt reflection listing when no table typed.
+        try:
+            _attach_db_sample(out, endpoint)
+        except Exception:
+            pass
         return out
 
     out["message"] = f"Introspection for `{fmt}` not yet implemented"

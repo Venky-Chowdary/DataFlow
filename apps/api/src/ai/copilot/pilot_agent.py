@@ -640,6 +640,44 @@ class DataPilotAgent:
                         "**New Transfer**, then ask me to analyze it."
                     )
 
+        # Aggregate missing table → list objects on the named connector.
+        for tr in list(turn.tool_results):
+            if tr.name != "aggregate_data" or tr.success or not tr.error:
+                continue
+            if "which table" not in tr.error.lower():
+                continue
+            if "list_connector_objects" in {t.name for t in turn.tool_results}:
+                break
+            # Prefer connector from the failed tool args if present in error/output.
+            cname = ""
+            # Recover from sibling planned args via clarification text bold name.
+            import re as _re
+
+            m = _re.search(r"on \*\*([^*]+)\*\*", tr.error or "")
+            if m:
+                cname = m.group(1).strip()
+            if not cname:
+                # Fall back: ask list_connectors if we cannot scope.
+                continue
+            objs = self.tools.execute("list_connector_objects", {"connector_name": cname})
+            turn.tool_results.append(objs)
+            self._append_tool_actions(turn, objs)
+            if objs.success and not turn.needs_clarification:
+                rows = (objs.output or {}).get("objects") or (objs.output or {}).get("tables") or []
+                table_names = []
+                for o in rows[:12]:
+                    if isinstance(o, dict) and (o.get("name") or o.get("table")):
+                        table_names.append(str(o.get("name") or o.get("table")))
+                    elif isinstance(o, str):
+                        table_names.append(o)
+                if table_names:
+                    turn.needs_clarification = (
+                        f"Which table on **{cname}**? "
+                        + ", ".join(f"`{n}`" for n in table_names)
+                        + '. Say e.g. "from orders".'
+                    )
+            break
+
         # Suggestions with no active dataset → list uploads so the operator can pick.
         for tr in list(turn.tool_results):
             if tr.name != "profile_quality_rules" or not tr.success:
@@ -1558,7 +1596,7 @@ Respond as Data Pilot — grounded in tool results."""
                 for c in cols[:40]:
                     null = "NULL" if c.get("nullable", True) else "NOT NULL"
                     lines.append(
-                        f"• `{c.get('name')}` → **{c.get('inferred_type')}**"
+                        f"• `{c.get('name')}` -> **{c.get('inferred_type')}**"
                         + (f" ({c.get('data_type')})" if c.get("data_type") else "")
                         + f" · {null}"
                     )

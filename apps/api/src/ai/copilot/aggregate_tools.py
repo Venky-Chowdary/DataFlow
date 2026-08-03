@@ -392,11 +392,35 @@ def _finish_request(
         # Platform inventory question — let the jobs/connectors routes answer it.
         return None
 
+    # "connector count" / bare "how many" with only a platform noun as measure.
+    if (
+        not req.table
+        and not req.connector_name
+        and (req.column or "").lower() in _PLATFORM_NOUNS
+    ):
+        return None
+    # Bare metric with no subject at all ("how many", "count") — still allow
+    # when a connector was named; otherwise leave to inventory / unmapped.
+    if (
+        not req.table
+        and not req.column
+        and not req.group_by
+        and not req.connector_name
+        and req.metric in {"count", "sum", "avg"}
+    ):
+        return None
+
     needs_column = _METRICS[req.metric][1]
     if needs_column and not req.column:
         req.missing.append("column")
     if not req.table:
         req.missing.append("table")
+    # Spoken plurals ("by regions") → singular stem for schema resolve.
+    if req.group_by and " " not in req.group_by.strip():
+        req.group_by = _singular(req.group_by.strip())
+    if req.column and " " not in req.column.strip():
+        # Keep as spoken; resolve_name singularizes against live columns.
+        pass
     return req
 
 
@@ -657,13 +681,62 @@ def aggregate_connector_data(
             ),
         )
 
+    conn, err = _safe_connector(connector_id, connector_name, tool)
+    if err:
+        return err
+
     table = (table or "").strip()
     if not table:
-        return _tool_result(
-            tool,
-            success=False,
-            error='Which table? Example: "count of orders by status on Local Postgres".',
-        )
+        # Railway-class: don't dead-end — list real tables and auto-pick if unique.
+        try:
+            from .schema_tools import list_connector_objects
+
+            listed = list_connector_objects(
+                connector_id=str(conn.get("id") or conn.get("_id") or ""),
+                connector_name=str(conn.get("name") or connector_name or ""),
+            )
+            objs = []
+            if listed.success and isinstance(listed.output, dict):
+                objs = listed.output.get("objects") or listed.output.get("tables") or []
+            names = []
+            for o in objs:
+                if isinstance(o, dict):
+                    n = o.get("name") or o.get("table") or o.get("id")
+                    if n:
+                        names.append(str(n))
+                elif isinstance(o, str):
+                    names.append(o)
+            if len(names) == 1:
+                table = names[0]
+            elif names:
+                shown = ", ".join(f"`{n}`" for n in names[:12])
+                more = f" (+{len(names) - 12} more)" if len(names) > 12 else ""
+                return _tool_result(
+                    tool,
+                    success=False,
+                    error=(
+                        f"Which table on **{conn.get('name') or 'this connector'}**? "
+                        f"{shown}{more}. "
+                        'Example: "sum amount by region from orders on '
+                        f'{conn.get("name") or "PilotSQLite"}".'
+                    ),
+                )
+            else:
+                return _tool_result(
+                    tool,
+                    success=False,
+                    error=(
+                        'Which table? Example: "count of orders by status on '
+                        f'{conn.get("name") or "Local Postgres"}".'
+                    ),
+                )
+        except Exception:
+            return _tool_result(
+                tool,
+                success=False,
+                error='Which table? Example: "count of orders by status on Local Postgres".',
+            )
+
     if not _SAFE_IDENT.match(table):
         return _tool_result(
             tool,
@@ -673,10 +746,6 @@ def aggregate_connector_data(
                 "(letters, numbers, underscore, optional schema.table)."
             ),
         )
-
-    conn, err = _safe_connector(connector_id, connector_name, tool)
-    if err:
-        return err
 
     ctype = str(conn.get("type") or conn.get("format") or "").lower()
     cid = str(conn.get("id") or conn.get("_id") or "")

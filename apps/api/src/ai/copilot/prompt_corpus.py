@@ -277,6 +277,25 @@ def iter_prompt_corpus() -> list[PromptCase]:
             must_not=("aggregate_data",),
         ))
 
+    # --- Elliptical aggregates (table omitted; connector named) ---
+    for metric, col, dim in (
+        ("sum", "amount", "region"),
+        ("average", "price", "status"),
+        ("total", "revenue", "month"),
+        ("sum", "qty", "category"),
+    ):
+        for conn in _CONNECTORS[:3]:
+            cases.append(_case(
+                f"{metric} {col} by {dim} on {conn}",
+                "aggregate_data",
+                family="aggregate_elliptical",
+            ))
+            cases.append(_case(
+                f"top 5 {dim}s by {col} on {conn}",
+                "aggregate_data",
+                family="aggregate_elliptical",
+            ))
+
     # --- Quality / suggestions / knowledge ---
     for p in (
         "data quality on my uploads",

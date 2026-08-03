@@ -2081,13 +2081,13 @@ _TOOL_PRIORITY: dict[str, int] = {
     "recommend_sync_mode": 44,
     "inspect_schema_policy": 42,
     "profile_quality_rules": 40,
+    "search_knowledge": 22,
     "navigate": 35,
     "start_transfer_studio": 34,
     "list_datasets": 30,
     "compare_datasets": 25,
     "analyze_dataset": 20,
     "search_data": 15,
-    "search_knowledge": 10,
     "describe_pilot": 5,
 }
 
@@ -2139,17 +2139,11 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
             if n not in ("sample_connector_object", "run_query", "analyze_dataset")
         ]
         names = {n for n, _ in planned}
-    # Platform inventory: "how many jobs failed" must not become COUNT(*) FROM jobs.
-    _inventory_tables = {"jobs", "job", "transfers", "transfer", "connectors", "connector"}
+    # Platform inventory: "how many jobs failed" / "connector count" must not
+    # become COUNT(*) — drop aggregate entirely beside inventory lists.
     if "list_jobs" in names or "list_connectors" in names:
-        planned = [
-            (n, a)
-            for n, a in planned
-            if not (
-                n == "aggregate_data"
-                and str((a or {}).get("table") or "").strip().lower() in _inventory_tables
-            )
-        ]
+        planned = [(n, a) for n, a in planned if n != "aggregate_data"]
+        names = {n for n, _ in planned}
     # A concrete transfer already contains the mapping, gates and route, so the
     # generic advice tools beside it are redundant noise.
     if names & {"start_transfer", "plan_transfer"}:
@@ -2185,8 +2179,11 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
             primary_tier = pri
             keep.append((name, args))
             continue
-        # Allow companions within 25 points, plus navigate/start_transfer
-        if name in ("navigate", "start_transfer_studio") or pri >= primary_tier - 25:
+        # Allow companions within 25 points, plus navigate / RAG alongside quality.
+        if (
+            name in ("navigate", "start_transfer_studio", "search_knowledge")
+            or pri >= primary_tier - 25
+        ):
             if len(keep) < 3:
                 keep.append((name, args))
     # Preserve original relative order among kept
@@ -2575,10 +2572,11 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     agg = parse_aggregation_request(message)
     if (
         agg is not None
-        and not agg.missing
         and not _explicit_sql_intent
         and "aggregate_data" not in [p[0] for p in planned]
     ):
+        # Incomplete slots (missing table/column) still plan — the tool + recovery
+        # clarify or auto-pick a unique table. Silent [] is a chatbot dead-end.
         planned.append(("aggregate_data", agg.as_tool_args()))
 
     # Sample / analyze live table data
