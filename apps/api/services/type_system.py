@@ -259,9 +259,13 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "hierarchyid": LOGICAL_STRING,  # carrier HIERARCHYID kept via ddl_type early path
     "nclob": LOGICAL_TEXT,
     "bfile": LOGICAL_BINARY,
-    # Bare "long" is the lakehouse/Java 64-bit integer (Iceberg/Spark). Oracle's
-    # deprecated LONG text LOB is rare; prefer integer fidelity for universal transfers.
+    # Bare "long" is ambiguous: Spark/Iceberg INT64 vs Oracle text LOB.
+    # Logical stays integer for lakehouse; Oracle LONG invent is fail-closed via
+    # oracle_long_numeric_invent + ddl_type text stamp off-Oracle relational.
     "long": LOGICAL_INTEGER,
+    "half": LOGICAL_FLOAT,
+    "halffloat": LOGICAL_FLOAT,
+    "float16": LOGICAL_FLOAT,
     "fixed": LOGICAL_DECIMAL,  # MySQL FIXED synonym for DECIMAL
     "bit varying": LOGICAL_BINARY,
     "varbit": LOGICAL_BINARY,
@@ -2011,9 +2015,28 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
         if db == "mongodb":
             return "objectId"
         return "VARCHAR(24)"
-    # Oracle LONG is a deprecated text LOB — never invent NUMBER(38,0) from LONG.
-    if base_early == "LONG" and db == "oracle":
-        return "CLOB"
+    # Oracle LONG is a deprecated text LOB — never invent NUMBER/BIGINT from LONG
+    # on relational sinks. Lakehouse engines keep INT64 ``long``.
+    if base_early == "LONG":
+        if db == "oracle":
+            return "CLOB"
+        if db in {"databricks", "spark", "iceberg", "delta", "hive"}:
+            return DDL_TYPES.get(db, {}).get(LOGICAL_INTEGER, "BIGINT")
+        return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT, DEFAULT_DDL.get(db, "TEXT"))
+    # IEEE half / float16 — stamp REAL/FLOAT32, never invent DOUBLE or TEXT.
+    if base_early in {"HALF", "HALFFLOAT", "FLOAT16"}:
+        types_h = DDL_TYPES.get(db) or {}
+        if db in {"postgresql", "postgres", "cockroachdb", "timescaledb", "alloydb", "yugabytedb", "citus", "supabase", "greenplum", "redshift"}:
+            return "REAL"
+        if db in {"sqlserver", "mssql"}:
+            return "REAL"
+        if db in {"mysql", "mariadb", "tidb"}:
+            return "FLOAT"
+        if db == "oracle":
+            return "BINARY_FLOAT"
+        if db in {"snowflake", "bigquery", "databricks"}:
+            return types_h.get(LOGICAL_FLOAT, "FLOAT")
+        return types_h.get(LOGICAL_FLOAT, "FLOAT")
     # Redshift HLLSKETCH — keep native or fall to VARCHAR with specialty collapse.
     if base_early == "HLLSKETCH":
         if db == "redshift":
@@ -3644,17 +3667,21 @@ def is_oracle_long_text_carrier(inferred: str | None) -> bool:
 def oracle_long_numeric_invent(source_type: str, target_type: str) -> bool:
     """True when Oracle LONG text would be stamped/mapped as NUMBER/integer.
 
-    Spark/Iceberg ``long`` also uses this token for INT64 — only flag numeric
-    Oracle DDL (NUMBER/DECIMAL) invent, not lakehouse BIGINT widen.
+    Exact ``LONG`` is Oracle's deprecated text LOB. Mapping to BIGINT/NUMBER
+    invents numeric polarity — Accept risk. Lakehouse INT64 should use INT64 /
+    BIGINT tokens, not bare LONG, when the source is not Oracle.
     """
     if not is_oracle_long_text_carrier(source_type):
         return False
+    if is_oracle_long_text_carrier(target_type):
+        return False
     tgt_u = strip_identity_qualifier(target_type).upper().replace(" ", "")
-    if tgt_u.startswith(("NUMBER", "DECIMAL", "NUMERIC", "FLOAT", "BINARY_FLOAT", "BINARY_DOUBLE")):
+    if tgt_u.startswith(
+        ("NUMBER", "DECIMAL", "NUMERIC", "FLOAT", "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE")
+    ):
         return True
-    if tgt_u.startswith("DOUBLE"):
-        return True
-    return False
+    tgt = normalize_logical_type(target_type)
+    return tgt in {LOGICAL_INTEGER, LOGICAL_DECIMAL, LOGICAL_FLOAT}
 
 
 def parse_interval_precision(
@@ -5080,7 +5107,15 @@ def temporal_precision_would_narrow(source_type: str, target_type: str) -> bool:
     tgt_p = parse_temporal_fractional_precision(target_type)
     src_p = parse_temporal_fractional_precision(source_type)
     if src_p is None:
-        return False
+        # SQL Server bare DATETIME2 defaults to precision 7 — never treat as
+        # unknown and soft-pass DATETIME2→DATETIME (≈3.33ms round).
+        bare_src = re.sub(r"\s*\(\s*\d+\s*\)", "", src_u).strip()
+        if bare_src == "DATETIME2":
+            src_p = 7
+        elif bare_src == "DATETIMEOFFSET":
+            src_p = 7
+        else:
+            return False
     if tgt_p is None:
         # Bare TIME/DATETIME/TIMESTAMP often defaults to FSP 0 (MySQL) — treat
         # missing typmod as 0 so TIME(6)→TIME is not silent-green. PG defaults
@@ -5460,18 +5495,19 @@ def integer_width_would_narrow(source_type: str, target_type: str) -> bool:
 
 
 def float_mantissa_bits(inferred: str | None) -> int | None:
-    """IEEE significand bits for float carriers (53=double, 24=single), else None."""
+    """IEEE significand bits for float carriers (53=double, 24=single, 11=half)."""
     if normalize_logical_type(inferred) != LOGICAL_FLOAT:
         return None
     upper = strip_identity_qualifier(inferred).upper().replace(" ", "")
+    # IEEE half / float16 (~10 explicit + 1 implicit significand bits).
+    if upper in {"HALF", "HALFFLOAT", "FLOAT16"} or upper.startswith("HALFFLOAT"):
+        return 11
     # Single-precision tokens.
     if upper in {
         "REAL",
         "FLOAT4",
         "FLOAT32",
         "BINARY_FLOAT",
-        "HALF",
-        "FLOAT16",
     } or upper.startswith("REAL("):
         return 24
     # SQL FLOAT(p): p≤24 → single; p>24 → double (SQL Server / ANSI).
@@ -5494,7 +5530,7 @@ def float_mantissa_bits(inferred: str | None) -> int | None:
 
 
 def float_mantissa_would_narrow(source_type: str, target_type: str) -> bool:
-    """True when DOUBLE/FLOAT64 lands on REAL/FLOAT32 (silent IEEE drop)."""
+    """True when DOUBLE/FLOAT64 lands on REAL/FLOAT32/HALF (silent IEEE drop)."""
     src_b = float_mantissa_bits(source_type)
     tgt_b = float_mantissa_bits(target_type)
     if src_b is None or tgt_b is None:
@@ -5560,6 +5596,54 @@ def accent_polarity_invent(source_type: str, target_type: str) -> bool:
     src_ai = is_accent_insensitive_collation(source_type)
     tgt_ai = is_accent_insensitive_collation(target_type)
     return src_ai != tgt_ai
+
+
+def width_fold_polarity_invent(source_type: str, target_type: str) -> bool:
+    """True when mapping invents/drops width-insensitive equality (WS omit).
+
+    SQL Server: ``_WS`` is width-sensitive; omitting ``_WS`` folds fullwidth/
+    halfwidth — unique keys can collide without Accept risk.
+    """
+    src_l = normalize_logical_type(source_type)
+    tgt_l = normalize_logical_type(target_type)
+    if src_l not in {LOGICAL_STRING, LOGICAL_TEXT} or tgt_l not in {
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+    }:
+        return False
+    if not parse_collation(source_type) or not parse_collation(target_type):
+        return False
+    src_name = (parse_collation(source_type) or "").upper()
+    tgt_name = (parse_collation(target_type) or "").upper()
+    if not _is_windows_style_collation(src_name) and not _is_windows_style_collation(
+        tgt_name
+    ):
+        return False
+    return is_width_insensitive_collation(source_type) != is_width_insensitive_collation(
+        target_type
+    )
+
+
+def kana_fold_polarity_invent(source_type: str, target_type: str) -> bool:
+    """True when mapping invents/drops kana-insensitive equality (KS omit)."""
+    src_l = normalize_logical_type(source_type)
+    tgt_l = normalize_logical_type(target_type)
+    if src_l not in {LOGICAL_STRING, LOGICAL_TEXT} or tgt_l not in {
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+    }:
+        return False
+    if not parse_collation(source_type) or not parse_collation(target_type):
+        return False
+    src_name = (parse_collation(source_type) or "").upper()
+    tgt_name = (parse_collation(target_type) or "").upper()
+    if not _is_windows_style_collation(src_name) and not _is_windows_style_collation(
+        tgt_name
+    ):
+        return False
+    return is_kana_insensitive_collation(source_type) != is_kana_insensitive_collation(
+        target_type
+    )
 
 
 def date_to_tz_aware_invent(source_type: str, target_type: str) -> bool:
@@ -5669,6 +5753,10 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
     if case_fold_polarity_invent(source_type, target_type):
         return True
     if accent_polarity_invent(source_type, target_type):
+        return True
+    if width_fold_polarity_invent(source_type, target_type):
+        return True
+    if kana_fold_polarity_invent(source_type, target_type):
         return True
     if date_to_tz_aware_invent(source_type, target_type):
         return True
@@ -5784,6 +5872,10 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
             return True
         if accent_polarity_invent(source_type, target_type):
             return True
+        if width_fold_polarity_invent(source_type, target_type):
+            return True
+        if kana_fold_polarity_invent(source_type, target_type):
+            return True
         if vector_dim_mismatch(source_type, target_type):
             return True
         if vector_encoding_would_collapse(source_type, target_type):
@@ -5873,6 +5965,10 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
     if case_fold_polarity_invent(source_type, target_type):
         return True
     if accent_polarity_invent(source_type, target_type):
+        return True
+    if width_fold_polarity_invent(source_type, target_type):
+        return True
+    if kana_fold_polarity_invent(source_type, target_type):
         return True
     if date_to_tz_aware_invent(source_type, target_type):
         return True
@@ -5968,6 +6064,10 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         if case_fold_polarity_invent(source_type, target_type):
             return True
         if accent_polarity_invent(source_type, target_type):
+            return True
+        if width_fold_polarity_invent(source_type, target_type):
+            return True
+        if kana_fold_polarity_invent(source_type, target_type):
             return True
         if national_charset_would_collapse(source_type, target_type):
             return True

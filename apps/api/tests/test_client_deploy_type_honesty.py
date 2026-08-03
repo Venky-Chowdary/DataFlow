@@ -325,11 +325,53 @@ def test_schema_qualified_decimal_invent_oracle_wave18():
     assert oracle_long_numeric_invent("LONG", "NUMBER(38,0)") is True
     assert is_lossy_coercion("LONG", "NUMBER(38,0)") is True
     assert create_new_mapping_target_type("LONG", "oracle") == "CLOB"
-    # Spark INT64 widen still preserve (not Oracle NUMBER invent).
-    assert is_lossy_coercion("LONG", "BIGINT") is False
+    # Off-Oracle relational: LONG text LOB → TEXT, not BIGINT invent.
+    assert create_new_mapping_target_type("LONG", "postgresql") == "TEXT"
+    assert is_lossy_coercion("LONG", "BIGINT") is True
 
     assert is_lossy_coercion("ANYDATA", "VARCHAR") is True
     assert is_lossy_coercion("HLLSKETCH", "VARCHAR") is True
+
+
+def test_datetime2_half_collation_ws_wave19():
+    from services.type_system import (
+        create_new_mapping_target_type,
+        float_mantissa_bits,
+        is_lossy_coercion,
+        kana_fold_polarity_invent,
+        normalize_logical_type,
+        temporal_precision_would_narrow,
+        width_fold_polarity_invent,
+    )
+
+    assert temporal_precision_would_narrow("DATETIME2", "DATETIME") is True
+    assert is_lossy_coercion("DATETIME2", "DATETIME") is True
+
+    assert normalize_logical_type("HALF") == "float"
+    assert float_mantissa_bits("HALF") == 11
+    assert float_mantissa_bits("FLOAT16") == 11
+    assert float_mantissa_bits("halffloat") == 11
+    assert is_lossy_coercion("DOUBLE", "HALF") is True
+    assert is_lossy_coercion("REAL", "FLOAT16") is True
+    assert create_new_mapping_target_type("FLOAT16", "postgresql") == "REAL"
+    assert create_new_mapping_target_type("HALF", "postgresql") == "REAL"
+
+    assert width_fold_polarity_invent(
+        "NVARCHAR COLLATE Latin1_General_CS_AS_WS",
+        "NVARCHAR COLLATE Latin1_General_CS_AS",
+    ) is True
+    assert is_lossy_coercion(
+        "NVARCHAR COLLATE Latin1_General_CS_AS_WS",
+        "NVARCHAR COLLATE Latin1_General_CS_AS",
+    ) is True
+    assert kana_fold_polarity_invent(
+        "NVARCHAR COLLATE Japanese_XJIS_140_CS_AS_KS",
+        "NVARCHAR COLLATE Japanese_XJIS_140_CS_AS",
+    ) is True
+    assert is_lossy_coercion(
+        "NVARCHAR COLLATE Japanese_XJIS_140_CS_AS_KS",
+        "NVARCHAR COLLATE Japanese_XJIS_140_CS_AS",
+    ) is True
 
 
 def test_struct_int64_interval_identity_document_wave17():
