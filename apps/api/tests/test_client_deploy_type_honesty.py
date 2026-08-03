@@ -518,6 +518,34 @@ def test_long_int8_varbyte_national_wave23():
     assert create_new_mapping_target_type("INTEGER", "azure-sql") == "INT"
 
 
+def test_aurora_clickhouse_unsigned_wave24():
+    """Aurora/pgbouncer aliases, ClickHouse Enum/Nothing, UInt signed invent."""
+    from services.type_system import (
+        create_new_mapping_target_type,
+        is_lossy_coercion,
+        specialty_carrier_base,
+        unsigned_signed_polarity_invent,
+    )
+
+    assert create_new_mapping_target_type("INTEGER", "aurora_postgres") == "INTEGER"
+    assert create_new_mapping_target_type("DATE", "pgbouncer") == "DATE"
+    assert create_new_mapping_target_type("INTEGER", "aurora_mysql") == "INT"
+    assert create_new_mapping_target_type("INTEGER", "singlestore") == "INT"
+    assert create_new_mapping_target_type("BOOLEAN", "memsql") == "BOOLEAN"
+
+    assert specialty_carrier_base("Enum8('a'=1)") == "ENUM8"
+    assert specialty_carrier_base("Nothing") == "NOTHING"
+    assert specialty_carrier_base("Dynamic") == "DYNAMIC"
+    assert create_new_mapping_target_type("Enum8('a'=1)", "postgresql") == "TEXT"
+    assert is_lossy_coercion("Enum8('a'=1)", "TEXT") is True
+    assert is_lossy_coercion("Nothing", "TEXT") is True
+    assert is_lossy_coercion("Dynamic", "TEXT") is True
+
+    assert unsigned_signed_polarity_invent("UInt8", "SMALLINT") is True
+    assert is_lossy_coercion("UInt8", "SMALLINT") is True
+    assert create_new_mapping_target_type("UInt8", "postgresql") == "SMALLINT"
+
+
 def test_struct_int64_interval_identity_document_wave17():
     from services.type_system import (
         bfile_locator_would_collapse,

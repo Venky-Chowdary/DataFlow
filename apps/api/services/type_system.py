@@ -2023,9 +2023,21 @@ def _normalize_dest_db(db_type: str | None) -> str:
         "azure_postgres",
         "aws_rds_postgres",
         "rds_postgres",
+        "aurora",
+        "aurora_postgres",
+        "aurora-postgresql",
+        "pgbouncer",
     }:
         return "postgresql"
-    if db in {"mariadb", "tidb", "mysql2"}:
+    if db in {
+        "mariadb",
+        "tidb",
+        "mysql2",
+        "aurora_mysql",
+        "aurora-mysql",
+        "singlestore",
+        "memsql",
+    }:
         return "mysql"
     if db in {
         "mongo",
@@ -2199,6 +2211,15 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
         return types_h.get(LOGICAL_FLOAT, "FLOAT")
     # Opaque PG USER-DEFINED / UDT — stamp open text; specialty collapse forces Accept risk.
     if base_early in {"USER-DEFINED", "USER_DEFINED"}:
+        return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT, DEFAULT_DDL.get(db, "TEXT"))
+    # ClickHouse Enum8/Enum16 / Nothing / Dynamic — keep native or TEXT + specialty collapse.
+    if base_early.startswith("ENUM8") or base_early.startswith("ENUM16"):
+        if db == "clickhouse":
+            return "Enum8" if base_early.startswith("ENUM8") else "Enum16"
+        return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT, DEFAULT_DDL.get(db, "TEXT"))
+    if base_early in {"NOTHING", "DYNAMIC"}:
+        if db == "clickhouse":
+            return base_early.title() if base_early == "NOTHING" else "Dynamic"
         return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT, DEFAULT_DDL.get(db, "TEXT"))
     # IBM DECFLOAT — IEEE decimal float; never invent NUMBER(p,0) from digit count.
     if base_early == "DECFLOAT" or base_early.startswith("DECFLOAT("):
@@ -4648,6 +4669,10 @@ _SPECIALTY_NATIVE_CARRIERS: Final[frozenset[str]] = frozenset(
         "HLLSKETCH",  # Redshift HyperLogLog sketch
         "USER-DEFINED",  # PG opaque UDT — never silent-green → TEXT
         "USER_DEFINED",
+        "ENUM8",  # ClickHouse closed enum
+        "ENUM16",
+        "NOTHING",  # ClickHouse nothing type
+        "DYNAMIC",  # ClickHouse dynamic type
     }
 )
 
@@ -4737,6 +4762,11 @@ def specialty_carrier_base(inferred: str | None) -> str | None:
     upper = re.sub(r"\s+", " ", (inferred or "").upper().strip())
     if not upper:
         return None
+    # ClickHouse Enum8/Enum16 before generic ENUM( domain parse.
+    if upper.startswith("ENUM8"):
+        return "ENUM8"
+    if upper.startswith("ENUM16"):
+        return "ENUM16"
     # Parametric ENUM/SET are closed domains — not specialty native carriers.
     if upper.startswith(("ENUM(", "SET(")):
         return None
@@ -6121,7 +6151,10 @@ def unsigned_integer_would_overflow(source_type: str, target_type: str) -> bool:
     """
     src_raw = (source_type or "").lower()
     if "unsigned" not in src_raw and not re.search(r"\buint\d*\b", src_raw):
-        return False
+        # ClickHouse UInt8/UInt32 — case-sensitive leading U.
+        raw = strip_identity_qualifier(source_type) or ""
+        if not re.match(r"^UInt(8|16|32|64)\b", raw):
+            return False
     tgt_l = normalize_logical_type(target_type)
     # Lossless sinks for unsigned range.
     if tgt_l in {LOGICAL_DECIMAL, LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON}:
@@ -6136,10 +6169,35 @@ def unsigned_integer_would_overflow(source_type: str, target_type: str) -> bool:
     tgt_w = integer_bit_width(target_type)
     if src_w is None:
         # Unknown unsigned width into signed integer — fail closed.
-        return "unsigned" not in (target_type or "").lower()
+        return "unsigned" not in (target_type or "").lower() and not re.match(
+            r"^UInt", strip_identity_qualifier(target_type) or ""
+        )
     if tgt_w is None:
         tgt_w = 32  # bare INTEGER / INT
     return src_w > tgt_w
+
+
+def _is_unsigned_integer_carrier(inferred: str | None) -> bool:
+    """True for MySQL UNSIGNED / ClickHouse UInt* / UINT* integer carriers."""
+    raw = strip_identity_qualifier(inferred) or ""
+    if re.match(r"^UInt(8|16|32|64)\b", raw):
+        return True
+    lower = raw.lower()
+    return "unsigned" in lower or bool(re.search(r"\buint\d*\b", lower))
+
+
+def unsigned_signed_polarity_invent(source_type: str, target_type: str) -> bool:
+    """True when UNSIGNED/UInt invents a signed integer sink (or reverse).
+
+    ``UInt8→SMALLINT`` values fit but drop unsigned polarity — Accept risk.
+    """
+    if normalize_logical_type(source_type) != LOGICAL_INTEGER:
+        return False
+    if normalize_logical_type(target_type) != LOGICAL_INTEGER:
+        return False
+    return _is_unsigned_integer_carrier(source_type) != _is_unsigned_integer_carrier(
+        target_type
+    )
 
 
 def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
@@ -6187,6 +6245,8 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
     if bitstring_width_would_narrow(source_type, target_type):
         return True
     if unsigned_integer_would_overflow(source_type, target_type):
+        return True
+    if unsigned_signed_polarity_invent(source_type, target_type):
         return True
     if integer_width_would_narrow(source_type, target_type):
         return True
@@ -6324,6 +6384,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
             return True
         if unsigned_integer_would_overflow(source_type, target_type):
             return True
+        if unsigned_signed_polarity_invent(source_type, target_type):
+            return True
         if integer_width_would_narrow(source_type, target_type):
             return True
         if float_mantissa_would_narrow(source_type, target_type):
@@ -6415,6 +6477,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
     if bitstring_opaque_bytes_collapse(source_type, target_type):
         return True
     if unsigned_integer_would_overflow(source_type, target_type):
+        return True
+    if unsigned_signed_polarity_invent(source_type, target_type):
         return True
     if integer_width_would_narrow(source_type, target_type):
         return True

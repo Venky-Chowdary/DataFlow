@@ -226,8 +226,18 @@ export function declaredCarrierFidelityRisk(
   }
   // Specialty → open string (INET/XML/HSTORE/USER-DEFINED/IPv4/…).
   if (
-    /\b(inet|cidr|macaddr|xmltype|xml|hstore|ltree|tsvector|tsquery|jsonpath|objectid|anydata|hllsketch|rowversion|sql_variant|hierarchyid|user-defined|user_defined|ipv4|ipv6)\b/i.test(src)
+    /\b(inet|cidr|macaddr|xmltype|xml|hstore|ltree|tsvector|tsquery|jsonpath|objectid|anydata|hllsketch|rowversion|sql_variant|hierarchyid|user-defined|user_defined|ipv4|ipv6|enum8|enum16|nothing|dynamic)\b/i.test(src)
     && isOpenStringCarrier(tgt)
+  ) {
+    return true;
+  }
+  // Unsigned → signed integer invent (UInt8→SMALLINT).
+  if (
+    (/\bunsigned\b/i.test(src) || /\buint\d*\b/i.test(src) || /^UInt(8|16|32|64)\b/.test(src.trim()))
+    && /\b(smallint|integer|int|bigint|int\d+)\b/i.test(tgt)
+    && !/\bunsigned\b/i.test(tgt)
+    && !/\buint\d*\b/i.test(tgt)
+    && !/^UInt(8|16|32|64)\b/.test(tgt.trim())
   ) {
     return true;
   }
