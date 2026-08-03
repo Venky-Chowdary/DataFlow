@@ -2053,7 +2053,8 @@ def _looks_like_product_howto(lower: str) -> bool:
         re.search(
             r"\b(?:dataflow|datatransfer|data transfer|transfer studio|preflight|"
             r"mapping|connector|pipeline|validate|quarantine|sso|pii|gdpr|"
-            r"hipaa|airbyte|fivetran|gates?|move (?:my |the )?data|sync data)\b",
+            r"hipaa|airbyte|fivetran|gates?|move (?:my |the )?data|sync data|"
+            r"schema types?|semantic types?)\b",
             text,
         )
     )
@@ -2865,14 +2866,24 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         planned.append(("introspect_connector_schema", args))
 
     tables_on = re.search(
-        r"(?:list|show|what)\s+(?:tables|collections|objects)\s+(?:on|in|for)\s+[\"']?(.+?)[\"']?\s*$",
+        r"(?:can\s+you\s+|could\s+you\s+|please\s+)?"
+        r"(?:list|show|get|fetch|pull|grab|what(?:\s+are)?)\s+"
+        r"(?:the\s+|all\s+)?"
+        r"(?:tables|collections|objects|schemas)\s+"
+        r"(?:from|on|in|for|of)\s+[\"']?(.+?)[\"']?\s*[.?!]?\s*$",
         lower,
-    ) or re.search(r"(?:tables|collections)\s+(?:on|in)\s+[\"']?(.+?)[\"']?", lower)
+    ) or re.search(
+        r"(?:tables|collections|objects|schemas)\s+(?:from|on|in|for|of)\s+[\"']?(.+?)[\"']?",
+        lower,
+    )
     if tables_on and "introspect_connector_schema" not in [p[0] for p in planned]:
-        cname = tables_on.group(1).strip().strip("\"'")
-        planned.append(("list_connector_objects", {"connector_name": cname}))
+        cname = _clean_connector_phrase(tables_on.group(1).strip().strip("\"'"))
+        if cname:
+            planned.append(("list_connector_objects", {"connector_name": cname}))
+            # Never also sample a fake table named "tables".
+            planned = [(n, a) for n, a in planned if n != "sample_connector_object"]
     elif re.search(
-        r"\b(?:list|show)\s+tables\b|\bwhat\s+tables\s+(?:do\s+i\s+have|are\s+there)\b|"
+        r"\b(?:list|show|get)\s+tables\b|\bwhat\s+tables\s+(?:do\s+i\s+have|are\s+there)\b|"
         r"\bmy\s+tables\b|\btables\s+do\s+i\s+have\b",
         lower,
     ) and "list_connector_objects" not in [p[0] for p in planned]:
@@ -2934,13 +2945,22 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         lower,
     )
     if sample_m and "sample_connector_object" not in [p[0] for p in planned]:
-        # Don't steal pure schema introspect intents
-        if "schema" not in lower and "columns" not in lower and "describe" not in lower:
+        # Don't steal pure schema introspect / table-inventory intents
+        if (
+            "schema" not in lower
+            and "columns" not in lower
+            and "describe" not in lower
+            and "list_connector_objects" not in [p[0] for p in planned]
+        ):
             table = (sample_m.group(1) or "").strip()
             cname = (sample_m.group(2) or "").strip() if sample_m.lastindex and sample_m.lastindex >= 2 else ""
             cname = re.sub(r"\b(table|schema|collection|data|rows|records)\b", "", cname)
             cname = _clean_connector_phrase(cname)
-            if table and table not in {"data", "rows", "me", "some", "the", "my", "all"}:
+            # "get tables from X" is inventory, not a table named "tables".
+            if table.lower() in {"tables", "collections", "objects", "schemas", "databases"}:
+                if cname and "list_connector_objects" not in [p[0] for p in planned]:
+                    planned.append(("list_connector_objects", {"connector_name": cname}))
+            elif table and table not in {"data", "rows", "me", "some", "the", "my", "all"}:
                 args = {"table": table, "analyze": "analy" in lower or "profile" in lower}
                 if cname:
                     args["connector_name"] = cname
