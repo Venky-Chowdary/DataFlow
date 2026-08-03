@@ -117,10 +117,23 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
   const intentionalOmits = input.mappings.filter(
     (m) => m.transform === "omit" || (m as { intentionalOmit?: boolean }).intentionalOmit,
   );
+  const activeMaps = input.mappings.filter((m) => m.transform !== "omit");
+  const riskUnacked = activeMaps.filter(
+    (m) => mappingRequiresRiskAck(m) && !m.riskAcknowledged,
+  );
+  const lowConfidence = activeMaps.filter(
+    (m) => !m.approved && m.confidence < threshold && !m.riskAcknowledged,
+  );
   if (unmapped.length > 0) {
     block("g3_schema_contract", `${unmapped.length} source column(s) have no mapping.`, {
       kind: "schema_contract", coverage: "full_schema", note: "Unmapped source columns",
     });
+  } else if (riskUnacked.length > 0) {
+    block(
+      "g3_schema_contract",
+      `${riskUnacked.length} mapping(s) have unacked fidelity risk — Accept risk on Map before Validate can pass.`,
+      { kind: "schema_contract", coverage: "full_schema", columns: input.mappings.length },
+    );
   } else {
     const omitNote = intentionalOmits.length
       ? ` · ${intentionalOmits.length} intentionally omitted`
@@ -131,13 +144,6 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     });
   }
 
-  const activeMaps = input.mappings.filter((m) => m.transform !== "omit");
-  const riskUnacked = activeMaps.filter(
-    (m) => mappingRequiresRiskAck(m) && !m.riskAcknowledged,
-  );
-  const lowConfidence = activeMaps.filter(
-    (m) => !m.approved && m.confidence < threshold && !m.riskAcknowledged,
-  );
   if (riskUnacked.length > 0) {
     block(
       "g4_mapping_confidence",
@@ -202,9 +208,9 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     });
   }
 
-  pass("g9_data_integrity", "Sampled types and nulls within expected bounds.", {
-    kind: "data_integrity", coverage: "sample", sample_rows: Math.min(rows.length, 20),
-    note: "Browser sample only — not a full-table uniqueness probe",
+  skip("g9_data_integrity", "Browser-local export — uniqueness/null integrity requires API sample probe.", {
+    kind: "data_integrity", coverage: "n/a",
+    note: "Not a full-table integrity probe — do not treat as gate-pass evidence",
   });
 
   skip("g9_sync_contract", "Full refresh file export — sync contract not applicable.", {

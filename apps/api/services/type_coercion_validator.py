@@ -97,7 +97,9 @@ def validate_mapping_coercions(
             # Unreachable when precision_collapse is False (continued above).
             continue
         else:
-            severity = "block" if float(m.get("confidence", 0)) < floor else "warn"
+            # Cross-logical but not lossy = allow-listed widen (boolean→integer).
+            # Do not warn — Map preserve and G3 must agree.
+            continue
         issues.append({
             "source": src,
             "target": tgt,

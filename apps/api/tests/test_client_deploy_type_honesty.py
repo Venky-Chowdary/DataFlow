@@ -278,6 +278,56 @@ def test_specialty_to_text_is_lossy_not_preserve():
     assert is_lossy_coercion("DECIMAL(19,4)", "MONEY") is True
 
 
+def test_year_invent_geometry_pad_nested_wave15():
+    from services.type_coercion_validator import validate_mapping_coercions
+    from services.type_system import (
+        ddl_type,
+        fixed_width_pad_polarity_loss,
+        geography_contract_would_collapse,
+        is_lossy_coercion,
+        is_nested_shape_collapse,
+        specialty_carrier_base,
+        specialty_carrier_would_collapse,
+        year_domain_would_collapse,
+    )
+
+    assert year_domain_would_collapse("INTEGER", "YEAR") is True
+    assert is_lossy_coercion("SMALLINT", "YEAR") is True
+    assert is_lossy_coercion("YEAR", "SMALLINT") is True
+
+    assert geography_contract_would_collapse(
+        "GEOMETRY(Polygon,4326)", "GEOMETRY(Point,4326)"
+    ) is True
+    assert is_lossy_coercion("POINT", "GEOMETRY") is True
+    assert is_lossy_coercion("GEOMETRY", "POINT") is True
+
+    assert fixed_width_pad_polarity_loss("CHAR(5)", "VARCHAR(5)") is True
+    assert is_lossy_coercion("VARCHAR(5)", "CHAR(5)") is True
+    assert is_lossy_coercion("NCHAR(10)", "NVARCHAR(10)") is True
+
+    assert is_nested_shape_collapse("STRUCT<a:INT>", "STRUCT<a:STRING>") is True
+    assert is_lossy_coercion("ARRAY<INTEGER>", "ARRAY<STRING>") is True
+    assert is_nested_shape_collapse(
+        "MAP<STRING,INT>", "MAP<STRING,STRING>"
+    ) is True
+
+    assert ddl_type("mysql", "NCHAR(10)") == "NCHAR(10)"
+    assert ddl_type("mysql", "NVARCHAR(20)").startswith("NVARCHAR")
+
+    # Dialect range twins are one specialty base — not a collapse.
+    assert specialty_carrier_base("DATERANGE") == specialty_carrier_base("RANGE<DATE>")
+    assert specialty_carrier_would_collapse("DATERANGE", "RANGE<DATE>") is False
+
+    # BOOLEAN→SMALLINT is allow-listed widen — Map/G3 must not invent warn drift.
+    assert is_lossy_coercion("BOOLEAN", "SMALLINT") is False
+    issues = validate_mapping_coercions(
+        [{"source": "b", "target": "b"}],
+        source_types={"b": "BOOLEAN"},
+        target_types={"b": "SMALLINT"},
+    )
+    assert issues == []
+
+
 def test_set_enum_collation_halfvec_struct_wave14():
     from services.type_coercion_validator import validate_mapping_coercions
     from services.type_system import (
@@ -340,7 +390,8 @@ def test_bounded_sink_lob_tier_national_srid_wave13():
 
     assert national_charset_would_collapse("NVARCHAR(50)", "VARCHAR(50)") is True
     assert is_lossy_coercion("NVARCHAR(50)", "VARCHAR(50)") is True
-    assert is_lossy_coercion("NCHAR(10)", "NVARCHAR(10)") is False
+    # NCHAR↔NVARCHAR changes blank-pad polarity (same as CHAR↔VARCHAR).
+    assert is_lossy_coercion("NCHAR(10)", "NVARCHAR(10)") is True
 
     assert geography_contract_would_collapse(
         "GEOMETRY(POINT,4326)", "GEOMETRY"

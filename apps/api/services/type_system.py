@@ -1397,28 +1397,11 @@ def nested_struct_fields_incompatible(source_type: str, target_type: str) -> boo
     if not src_fields or not tgt_fields:
         return False
     tgt_by = {n.lower(): t for n, t in tgt_fields}
-    # Safe leaf widenings inside a nested shape (mirrors is_lossy allow-list subset).
+    # Safe leaf widenings inside a nested shape — numeric widen + text↔text only.
+    # INT→STRING under STRUCT rewrites the nested DDL contract (Accept risk).
     safe_leaf: set[tuple[str, str]] = {
         (LOGICAL_INTEGER, LOGICAL_DECIMAL),
-        (LOGICAL_INTEGER, LOGICAL_STRING),
-        (LOGICAL_INTEGER, LOGICAL_TEXT),
-        (LOGICAL_INTEGER, LOGICAL_JSON),
-        (LOGICAL_DECIMAL, LOGICAL_STRING),
-        (LOGICAL_DECIMAL, LOGICAL_TEXT),
-        (LOGICAL_DECIMAL, LOGICAL_JSON),
-        (LOGICAL_FLOAT, LOGICAL_STRING),
-        (LOGICAL_FLOAT, LOGICAL_TEXT),
-        (LOGICAL_FLOAT, LOGICAL_JSON),
-        (LOGICAL_BOOLEAN, LOGICAL_STRING),
-        (LOGICAL_BOOLEAN, LOGICAL_TEXT),
-        (LOGICAL_BOOLEAN, LOGICAL_JSON),
         (LOGICAL_DATE, LOGICAL_DATETIME),
-        (LOGICAL_DATE, LOGICAL_STRING),
-        (LOGICAL_DATE, LOGICAL_TEXT),
-        (LOGICAL_DATE, LOGICAL_JSON),
-        (LOGICAL_DATETIME, LOGICAL_STRING),
-        (LOGICAL_DATETIME, LOGICAL_TEXT),
-        (LOGICAL_DATETIME, LOGICAL_JSON),
         (LOGICAL_STRING, LOGICAL_TEXT),
         (LOGICAL_TEXT, LOGICAL_STRING),
         (LOGICAL_STRUCT, LOGICAL_JSON),  # nested document path — flagged separately
@@ -1464,24 +1447,10 @@ def nested_array_elements_incompatible(source_type: str, target_type: str) -> bo
     s_l, t_l = normalize_logical_type(src_el), normalize_logical_type(tgt_el)
     if s_l == t_l:
         return False
-    # Safe element widenings (same allow-list subset as STRUCT leaves).
+    # Safe element widenings — numeric widen + text↔text only (nested SSOT).
     safe_el = {
         (LOGICAL_INTEGER, LOGICAL_DECIMAL),
-        (LOGICAL_INTEGER, LOGICAL_STRING),
-        (LOGICAL_INTEGER, LOGICAL_TEXT),
-        (LOGICAL_INTEGER, LOGICAL_JSON),
-        (LOGICAL_DECIMAL, LOGICAL_STRING),
-        (LOGICAL_DECIMAL, LOGICAL_TEXT),
-        (LOGICAL_DECIMAL, LOGICAL_JSON),
-        (LOGICAL_FLOAT, LOGICAL_STRING),
-        (LOGICAL_FLOAT, LOGICAL_TEXT),
-        (LOGICAL_FLOAT, LOGICAL_JSON),
-        (LOGICAL_BOOLEAN, LOGICAL_STRING),
-        (LOGICAL_BOOLEAN, LOGICAL_TEXT),
-        (LOGICAL_BOOLEAN, LOGICAL_JSON),
         (LOGICAL_DATE, LOGICAL_DATETIME),
-        (LOGICAL_DATE, LOGICAL_STRING),
-        (LOGICAL_DATE, LOGICAL_TEXT),
         (LOGICAL_STRING, LOGICAL_TEXT),
         (LOGICAL_TEXT, LOGICAL_STRING),
         (LOGICAL_STRUCT, LOGICAL_JSON),
@@ -1512,12 +1481,16 @@ def is_nested_shape_collapse(source_type: str, target_type: str) -> bool:
             if decimal_params_would_narrow(skv[1], tkv[1]):
                 return True
             s_l, t_l = normalize_logical_type(skv[1]), normalize_logical_type(tkv[1])
-            if s_l != t_l and t_l not in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON}:
-                if (s_l, t_l) not in {
-                    (LOGICAL_INTEGER, LOGICAL_DECIMAL),
-                    (LOGICAL_DATE, LOGICAL_DATETIME),
-                }:
-                    return True
+            # Same nested SSOT as STRUCT/ARRAY — INT→STRING rewrites value DDL.
+            if s_l != t_l and (s_l, t_l) not in {
+                (LOGICAL_INTEGER, LOGICAL_DECIMAL),
+                (LOGICAL_DATE, LOGICAL_DATETIME),
+                (LOGICAL_STRING, LOGICAL_TEXT),
+                (LOGICAL_TEXT, LOGICAL_STRING),
+                (LOGICAL_STRUCT, LOGICAL_JSON),
+                (LOGICAL_MAP, LOGICAL_JSON),
+            }:
+                return True
     if src == LOGICAL_ARRAY and tgt == LOGICAL_ARRAY:
         return nested_array_elements_incompatible(source_type, target_type)
     return False
@@ -2383,8 +2356,12 @@ def _string_ddl_for_dest(db: str, inferred: str | None) -> str | None:
         w = min(width, 4000)
         return f"{'NCHAR' if fixed else 'NVARCHAR'}({w})"
     if db in {"mysql", "mariadb"}:
+        # Preserve NATIONAL CHAR/VARCHAR — never invent non-national from NCHAR.
+        if national:
+            return f"{'NCHAR' if fixed else 'NVARCHAR'}({min(width, cap)})"
         return f"{'CHAR' if fixed else 'VARCHAR'}({min(width, cap)})"
     if db in {"postgresql", "redshift"}:
+        # No national types — CHAR/VARCHAR; remap polarity via national_charset_would_collapse.
         return f"{'CHAR' if fixed else 'VARCHAR'}({min(width, cap)})"
     if db == "oracle":
         w = min(width, cap)
@@ -3244,19 +3221,38 @@ def bitstring_opaque_bytes_collapse(source_type: str, target_type: str) -> bool:
 
 
 def year_domain_would_collapse(source_type: str, target_type: str) -> bool:
-    """True when MySQL YEAR polarity lands on a non-YEAR sink (SMALLINT invent)."""
-    if not is_year_carrier(source_type):
+    """True when MySQL YEAR polarity is dropped or invented.
+
+    YEAR→SMALLINT invents a plain integer; INTEGER/STRING→YEAR invents the
+    1901–2155 YEAR domain (out-of-range only fails at bind — Map must Accept risk).
+    """
+    src_year = is_year_carrier(source_type)
+    tgt_year = is_year_carrier(target_type)
+    if src_year == tgt_year:
         return False
-    if is_year_carrier(target_type):
-        return False
-    tgt = normalize_logical_type(target_type)
-    return tgt in {
+    if src_year and not tgt_year:
+        tgt = normalize_logical_type(target_type)
+        return tgt in {
+            LOGICAL_INTEGER,
+            LOGICAL_DECIMAL,
+            LOGICAL_FLOAT,
+            LOGICAL_STRING,
+            LOGICAL_TEXT,
+            LOGICAL_JSON,
+            LOGICAL_DATE,
+            LOGICAL_DATETIME,
+        }
+    # Invent YEAR from open integer/string/float.
+    src = normalize_logical_type(source_type)
+    return src in {
         LOGICAL_INTEGER,
         LOGICAL_DECIMAL,
         LOGICAL_FLOAT,
         LOGICAL_STRING,
         LOGICAL_TEXT,
         LOGICAL_JSON,
+        LOGICAL_DATE,
+        LOGICAL_DATETIME,
     }
 
 
@@ -3603,6 +3599,26 @@ def is_fixed_width_char_carrier(inferred: str | None) -> bool:
     )
 
 
+def fixed_width_pad_polarity_loss(source_type: str, target_type: str) -> bool:
+    """True when CHAR↔VARCHAR or BINARY↔VARBINARY changes pad/trim equality polarity."""
+    src_l = normalize_logical_type(source_type)
+    tgt_l = normalize_logical_type(target_type)
+    if src_l in {LOGICAL_STRING, LOGICAL_TEXT} and tgt_l in {LOGICAL_STRING, LOGICAL_TEXT}:
+        src_fixed = is_fixed_width_char_carrier(source_type)
+        tgt_fixed = is_fixed_width_char_carrier(target_type)
+        # Only when at least one side is clearly fixed-width (CHAR/BPCHAR).
+        if src_fixed or tgt_fixed:
+            return src_fixed != tgt_fixed
+        return False
+    if src_l == LOGICAL_BINARY and tgt_l == LOGICAL_BINARY:
+        src_fixed = is_fixed_width_binary_carrier(source_type)
+        tgt_fixed = is_fixed_width_binary_carrier(target_type)
+        if src_fixed or tgt_fixed:
+            return src_fixed != tgt_fixed
+        return False
+    return False
+
+
 def parse_enum_or_set_members(inferred: str | None) -> tuple[str, frozenset[str]] | None:
     """Return ('ENUM'|'SET', members) when carrier declares a closed domain."""
     ordered = parse_enum_or_set_ordered_members(inferred)
@@ -3892,11 +3908,42 @@ def parse_geography_srid(inferred: str | None) -> int | None:
     return None
 
 
-def geography_contract_would_collapse(source_type: str, target_type: str) -> bool:
-    """True when GEOMETRY↔GEOGRAPHY polarity or SRID would be dropped/mismatched.
+_GEOMETRY_KIND_TOKENS: Final[tuple[str, ...]] = (
+    "GEOMETRYCOLLECTION",
+    "MULTIPOLYGON",
+    "MULTILINESTRING",
+    "MULTIPOINT",
+    "LINESTRING",
+    "POLYGON",
+    "POINT",
+    "CIRCLE",
+    "BOX",
+    "PATH",
+    "LINE",
+    "LSEG",
+)
 
-    Planar→geodetic and SRID rewrite are silent fidelity losses unless the operator
-    chooses an explicit store-as-WKT / reproject policy.
+
+def geometry_kind(inferred: str | None) -> str | None:
+    """Return POINT/LINESTRING/POLYGON/… when declared, else None for bare GEOMETRY."""
+    upper = strip_identity_qualifier(inferred).upper().replace(" ", "")
+    if not upper:
+        return None
+    # GEOMETRY(POINT,4326) / GEOGRAPHY(POLYGON,4326)
+    m = re.match(r"^(?:GEOMETRY|GEOGRAPHY)\((\w+)", upper)
+    if m:
+        return m.group(1)
+    for kind in _GEOMETRY_KIND_TOKENS:
+        if upper == kind or upper.startswith(kind + "("):
+            return kind
+    return None
+
+
+def geography_contract_would_collapse(source_type: str, target_type: str) -> bool:
+    """True when GEOMETRY↔GEOGRAPHY polarity, SRID, or subtype would be lost.
+
+    Planar→geodetic, SRID rewrite, and Polygon→Point are silent fidelity losses
+    unless the operator chooses an explicit store-as-WKT / reproject policy.
     """
     if normalize_logical_type(source_type) != LOGICAL_GEOGRAPHY:
         return False
@@ -3912,6 +3959,13 @@ def geography_contract_would_collapse(source_type: str, target_type: str) -> boo
         return True
     # Declared SRID → bare geometry drops the spatial contract.
     if ss is not None and ts is None:
+        return True
+    sk = geometry_kind(source_type)
+    tk = geometry_kind(target_type)
+    if sk and tk and sk != tk:
+        return True
+    # Bare ↔ typed subtype invents or drops a geometry kind contract.
+    if bool(sk) != bool(tk):
         return True
     return False
 
@@ -4053,14 +4107,13 @@ def specialty_carrier_base(inferred: str | None) -> str | None:
         return None
     if upper.startswith("ARRAY<") or upper.endswith("[]"):
         return None
+    # PG DATERANGE ↔ BigQuery RANGE<DATE> are dialect twins — one specialty base.
+    range_canon = _normalize_range_carrier(inferred)
+    if range_canon is not None:
+        return range_canon
     if "(" in upper and "RANGE" not in upper:
         upper = upper.split("(", 1)[0].strip()
     if upper in _SPECIALTY_NATIVE_CARRIERS:
-        return upper
-    # BigQuery bare RANGE / RANGE<T> — specialty so TEXT sinks surface collapse.
-    if upper == "RANGE" or upper.startswith("RANGE<"):
-        return upper
-    if "MULTIRANGE" in upper or (upper.endswith("RANGE") and upper != "RANGE"):
         return upper
     return None
 
@@ -5305,6 +5358,8 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
         return True
     if national_charset_would_collapse(source_type, target_type):
         return True
+    if fixed_width_pad_polarity_loss(source_type, target_type):
+        return True
     if binary_width_would_narrow(source_type, target_type):
         return True
     if bitstring_width_would_narrow(source_type, target_type):
@@ -5399,6 +5454,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
             return True
         if national_charset_would_collapse(source_type, target_type):
             return True
+        if fixed_width_pad_polarity_loss(source_type, target_type):
+            return True
         if bitstring_opaque_bytes_collapse(source_type, target_type):
             return True
         if binary_width_would_narrow(source_type, target_type):
@@ -5484,6 +5541,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
     if bounded_string_sink_would_truncate(source_type, target_type):
         return True
     if national_charset_would_collapse(source_type, target_type):
+        return True
+    if fixed_width_pad_polarity_loss(source_type, target_type):
         return True
     if binary_width_would_narrow(source_type, target_type):
         return True
@@ -5591,6 +5650,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         if accent_polarity_invent(source_type, target_type):
             return True
         if national_charset_would_collapse(source_type, target_type):
+            return True
+        if fixed_width_pad_polarity_loss(source_type, target_type):
             return True
         # INTEGER→VARCHAR(1) / JSON→CHAR(10) — bounded sink truncates.
         if bounded_string_sink_would_truncate(source_type, target_type):

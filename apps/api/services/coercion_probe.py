@@ -468,6 +468,12 @@ def analyze_coercion(
         # with the destination logical type (genuine coercion happening).
         # Structural JSON/array pairs are always surfaced so Validate can label
         # them as serialization (not a scary cast) when they round-trip cleanly.
+        # Same-logical YEAR/MONEY/width/IEEE collapses must not early-continue.
+        fidelity_collapse = bool(
+            is_precision_collapse_coercion(src_type, tgt_type)
+            or is_lossy_coercion(src_type, tgt_type)
+            or is_nested_shape_collapse(src_type, tgt_type)
+        )
         coercion_required = src_logical != tgt_logical
         structural_pair = (
             src_logical in _STRUCTURAL_LOGICALS and tgt_logical in _STRUCTURAL_LOGICALS
@@ -479,6 +485,7 @@ def analyze_coercion(
             and json_scalar_wraps == 0
             and not coercion_required
             and not structural_pair
+            and not fidelity_collapse
         ):
             continue
 
@@ -504,13 +511,6 @@ def analyze_coercion(
             failure_examples=raw_failure_values,
             dest_db_type=dest_db_type,
             structural=structural,
-        )
-        # Head-sample coerce-ok must not hide IEEE/time/TZ/YEAR/MONEY/specialty
-        # fidelity collapse or nested STRUCT/MAP/ARRAY contracts.
-        fidelity_collapse = bool(
-            is_precision_collapse_coercion(src_type, tgt_type)
-            or is_lossy_coercion(src_type, tgt_type)
-            or is_nested_shape_collapse(src_type, tgt_type)
         )
         if severity != "block" and fidelity_collapse:
             severity = "block"
