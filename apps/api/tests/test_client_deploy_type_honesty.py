@@ -229,8 +229,8 @@ def test_array_to_json_is_document_collapse_not_preserve():
     assert is_lossy_coercion("ARRAY<INTEGER>", "JSONB") is True
     assert normalize_logical_type("INTEGER[]") == "array"
     assert parse_array_element("INTEGER[]") == "INTEGER"
-    assert ddl_type("postgresql", "ARRAY<INTEGER>") == "BIGINT[]"
-    assert ddl_type("postgresql", "INTEGER[]") == "BIGINT[]"
+    assert ddl_type("postgresql", "ARRAY<INTEGER>") == "INTEGER[]"
+    assert ddl_type("postgresql", "INTEGER[]") == "INTEGER[]"
 
 
 def test_ntz_to_tz_is_polarity_loss_and_bind_refuses_naive():
