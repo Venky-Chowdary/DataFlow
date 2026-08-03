@@ -126,7 +126,7 @@ _METRIC_PHRASES: tuple[tuple[str, str], ...] = (
     (r"count\s+(?:of\s+)?(?:the\s+)?(?:different|distinct|unique)", "count_distinct"),
     (r"(?:distinct|unique) (?:values|count)? ?of", "count_distinct"),
     (r"(?:distinct|unique)", "count_distinct"),
-    (r"(?:how many|number of|total number of|count of|count)", "count"),
+    (r"(?:how many|how mny|number of|total number of|count of|count)", "count"),
     (r"(?:average|avg|mean)(?: of)?", "avg"),
     (r"(?:sum|total)(?: of)?", "sum"),
     (r"(?:minimum|min|lowest|smallest|earliest)(?: of)?", "min"),
@@ -471,11 +471,9 @@ def _finish_request(
     if not req.table:
         req.missing.append("table")
     # Spoken plurals ("by regions") → singular stem for schema resolve.
+    # Status-like stems (status/basis) are preserved inside `_singular`.
     if req.group_by and " " not in req.group_by.strip():
         req.group_by = _singular(req.group_by.strip())
-    if req.column and " " not in req.column.strip():
-        # Keep as spoken; resolve_name singularizes against live columns.
-        pass
     return req
 
 
@@ -499,7 +497,10 @@ def _singular(token: str) -> str:
         return token[:-3] + "y"
     if token.endswith(("ses", "xes", "zes", "ches", "shes")) and len(token) > 4:
         return token[:-2]
-    if token.endswith("s") and not token.endswith("ss") and len(token) > 3:
+    # Don't turn status/genus/basis into broken stems.
+    if token.endswith(("ss", "us", "is", "os")):
+        return token
+    if token.endswith("s") and len(token) > 3:
         return token[:-1]
     return token
 
@@ -736,11 +737,32 @@ def aggregate_connector_data(
             ),
         )
 
+    table = (table or "").strip()
+    # Unsafe identifiers never reach the store — fail closed before connector lookup.
+    if table and not _SAFE_IDENT.match(table):
+        return _tool_result(
+            tool,
+            success=False,
+            error=(
+                "Provide a simple table/collection name "
+                "(letters, numbers, underscore, optional schema.table)."
+            ),
+        )
+    # Empty table with no connector hint → ask for the table first (tests + UX).
+    if not table and not (connector_id or connector_name):
+        from .example_phrases import example_connector_name
+
+        ex = example_connector_name()
+        return _tool_result(
+            tool,
+            success=False,
+            error=f'Which table? Example: "count of orders by status on {ex}".',
+        )
+
     conn, err = _safe_connector(connector_id, connector_name, tool)
     if err:
         return err
 
-    table = (table or "").strip()
     if not table:
         # Railway-class: don't dead-end — list real tables and auto-pick if unique.
         try:
@@ -782,25 +804,18 @@ def aggregate_connector_data(
                     success=False,
                     error=(
                         'Which table? Example: "count of orders by status on '
-                        f'{conn.get("name") or "Local Postgres"}".'
+                        f'{conn.get("name") or "your connector"}".'
                     ),
                 )
         except Exception:
+            from .example_phrases import example_connector_name
+
+            ex = example_connector_name()
             return _tool_result(
                 tool,
                 success=False,
-                error='Which table? Example: "count of orders by status on Local Postgres".',
+                error=f'Which table? Example: "count of orders by status on {ex}".',
             )
-
-    if not _SAFE_IDENT.match(table):
-        return _tool_result(
-            tool,
-            success=False,
-            error=(
-                "Provide a simple table/collection name "
-                "(letters, numbers, underscore, optional schema.table)."
-            ),
-        )
 
     ctype = str(conn.get("type") or conn.get("format") or "").lower()
     cid = str(conn.get("id") or conn.get("_id") or "")

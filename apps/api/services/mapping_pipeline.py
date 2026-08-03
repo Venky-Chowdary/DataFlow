@@ -42,6 +42,21 @@ def _canonicalize_schema_rows(schemas: list[dict] | None) -> list[dict] | None:
     return out
 
 
+def _stamp_create_new_type_risks(
+    mappings: list[dict],
+    *,
+    destination_db_type: str = "",
+) -> list[dict]:
+    """Annotate create-new mappings with cross-dialect precision/width risk.
+
+    Competitors often hide create-new type loss until write time. We surface it
+    on the mapping so Map / Validate / Pilot all see the same risk chip.
+    """
+    from services.semantic_mapper import _apply_create_new_risk_stamps
+
+    return _apply_create_new_risk_stamps(mappings, destination_db_type)
+
+
 def _demote_untyped_varchar_confidence(
     mappings: list[dict],
     *,
@@ -592,6 +607,10 @@ def run_mapping_pipeline(
         source_types=declared_source_types,
         target_types=declared_target_types,
     )
+    enriched_mappings = _stamp_create_new_type_risks(
+        enriched_mappings,
+        destination_db_type=destination_db_type or "",
+    )
 
     transforms = generate_transforms(
         enriched_mappings,
@@ -676,6 +695,27 @@ def run_mapping_pipeline(
     if dropped:
         agents_used.insert(3, "EntailmentPruner")
 
+    from services.semantic_mapper import ml_baseline_status
+
+    engine = {
+        "automapper": "bm25_hungarian_semantic",
+        "ml_baseline": ml_baseline_status(),
+        "llm": {
+            "used": bool(llm_meta.get("llm_used")),
+            "strategy": llm_meta.get("strategy") or "deterministic_only",
+            "policy": llm_meta.get("llm_policy"),
+            "provider": llm_meta.get("llm_provider"),
+            "error": llm_meta.get("llm_error"),
+        },
+        "deterministic_guarantees": [
+            "optimal_bipartite_hungarian",
+            "type_compat_penalty",
+            "sample_consistency_probe",
+            "create_new_type_risk_stamp",
+            "g1_g9_preflight",
+        ],
+    }
+
     return {
         "mappings": enriched_mappings,
         "transforms": transforms,
@@ -691,4 +731,5 @@ def run_mapping_pipeline(
         "integrity": integrity,
         "agents_used": agents_used,
         "llm": llm_meta,
+        "engine": engine,
     }

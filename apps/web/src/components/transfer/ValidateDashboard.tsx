@@ -1437,7 +1437,10 @@ export function ValidateDashboard({
                 </span>
               ) : null}
               {confidenceBand ? (
-                <span className={`df2-vd-proof-chip band-${confidenceBand}`} title="Mapping / evidence confidence band">
+                <span
+                  className={`df2-vd-proof-chip band-${decision === "approve" ? confidenceBand : "review"}`}
+                  title="Mapping / evidence confidence band — not Execute clearance"
+                >
                   Confidence · {confidenceBand}
                 </span>
               ) : null}
@@ -1843,6 +1846,8 @@ export function ValidateDashboard({
                   ? "Create-new — DDL on first write"
                   : mappingProofSummary.destMode === "schema_pending"
                     ? "Schema pending — confirm destination before create-new"
+                    : mappingProofSummary.destMode === "schema_incomplete"
+                      ? "Schema incomplete — reload destination columns"
                     : "Matched to destination schema"}
                 {" · "}
                 every pair has confidence evidence and fidelity risks
@@ -1929,10 +1934,9 @@ export function ValidateDashboard({
                 : "Compliance"
             }
             tone={
-              (proof?.compliance?.requires_review && decision !== "approve")
-              || complianceRisk > 0.4
-                ? "review"
-                : "approve"
+              decision === "approve" && !(proof?.compliance?.requires_review) && complianceRisk <= 0.4
+                ? "approve"
+                : "review"
             }
           />
         </div>

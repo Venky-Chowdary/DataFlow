@@ -64,6 +64,15 @@ def test_decimal_precision_propagated_not_truncated():
 
     assert ddl_carrier_type("DECIMAL(12,4)") == "DECIMAL(12,4)"
     assert ddl_carrier_type("numeric(12,4)") == "DECIMAL(12,4)"
+    # UNSIGNED / specialty must not collapse before create-new risk stamping.
+    assert ddl_carrier_type("INT UNSIGNED") == "INT UNSIGNED"
+    assert ddl_carrier_type("BIGINT UNSIGNED") == "BIGINT UNSIGNED"
+    assert ddl_carrier_type("INET") == "INET"
+    assert ddl_carrier_type("OBJECTID") == "OBJECTID"
+    assert ddl_carrier_type("UInt8") == "UInt8"
+    assert ddl_carrier_type("HALFVEC(3)") == "HALFVEC(3)"
+    assert ddl_carrier_type("SPARSEVEC(16)") == "SPARSEVEC(16)"
+    assert ddl_carrier_type("VECTOR(768)") == "VECTOR(768)"
     # Scale beyond MySQL cap (30) → lossless TEXT, never silent truncate
     assert ddl_type("mysql", "NUMBER(38,31)") == "TEXT"
     assert decimal_scale_would_truncate("NUMBER(38,31)", "mysql") is True

@@ -590,10 +590,10 @@ def safe_ddl_logical_type(
     already projected ``ddl_type(dest, TIMESTAMP)`` were treated as unknown and
     wrongly widened to VARCHAR — CREATE TABLE then stored ISO strings as TEXT.
 
-    When ``honor_explicit`` is True (operator set ``target_type`` on the mapping),
-    never *tighten* TEXT/VARCHAR into DECIMAL/BOOLEAN/… — only widen if samples
-    cannot fit the chosen type. Explicit TEXT is how operators keep high-precision
-    money / opaque payloads lossless.
+    When ``honor_explicit`` is True (operator / Map set ``target_type``), preserve
+    the **physical stamp** unchanged (``TIMESTAMP_LTZ``, ``CHAR(36)``, ``INET``,
+    …). Never collapse Map≡CREATE polarity through ``LOGICAL_TYPES`` membership.
+    Only widen when samples cannot coerce into that stamp's logical class.
     """
     from services.type_system import (
         LOGICAL_DECIMAL,
@@ -603,7 +603,8 @@ def safe_ddl_logical_type(
         parse_vector_dimension,
     )
 
-    proposed_u = (proposed or source_type or "VARCHAR").upper()
+    original = (proposed or source_type or "VARCHAR").strip() or "VARCHAR"
+    proposed_u = original.upper()
     if proposed_u in {"STRING", "CHAR", "CHARACTER", "CHARACTER VARYING"}:
         proposed_u = "VARCHAR"
     # Preserve DECIMAL(p,s) / VECTOR(n) / FLOAT carriers before class-level collapse.
@@ -644,6 +645,17 @@ def safe_ddl_logical_type(
         "vector": "VECTOR",
         "timestamptz": "TIMESTAMPTZ",
     }
+
+    # Explicit Map / operator target_type: keep physical DDL (CHAR(36),
+    # TIMESTAMP_LTZ, INET, …). LOGICAL_TYPES membership must not invent VARCHAR.
+    if honor_explicit:
+        fit_key = _NORM_TO_LOGICAL.get(normalize_logical_type(original), "VARCHAR")
+        if not samples:
+            return original
+        if samples_fit_logical_type(samples, fit_key, field_name=field_name):
+            return original
+        return infer_type(samples, field_name=field_name)
+
     canonical = _NORM_TO_LOGICAL.get(normalize_logical_type(proposed_u))
     if canonical:
         proposed_u = canonical
@@ -652,13 +664,6 @@ def safe_ddl_logical_type(
         if proposed_u == "BOOLEAN" and source_type and str(source_type).upper() in {"VARCHAR", "TEXT", "STRING"}:
             return "VARCHAR"
         return proposed_u if proposed_u in LOGICAL_TYPES else "VARCHAR"
-    # Explicit operator target_type: keep TEXT/VARCHAR as-is; only widen on misfit.
-    if honor_explicit:
-        if proposed_u in {"VARCHAR", "TEXT"}:
-            return proposed_u
-        if samples_fit_logical_type(samples, proposed_u, field_name=field_name):
-            return proposed_u if proposed_u in LOGICAL_TYPES else "VARCHAR"
-        return infer_type(samples, field_name=field_name)
     # Loose text proposals: upgrade when every sample coerces to a tighter type.
     # Without this, CREATE TABLE stays VARCHAR and writers skip type transforms
     # (e.g. "true"/"false"/"1" never become BOOLEAN).

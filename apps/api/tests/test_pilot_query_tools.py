@@ -73,6 +73,16 @@ def test_sample_requires_safe_table_name() -> None:
     assert not _SAFE_IDENT.match("orders; drop table x")
 
 
+def _fake_list_objects(*_a, **_k):
+    from src.ai.copilot.tools import ToolResult
+
+    return ToolResult(
+        name="list_connector_objects",
+        success=True,
+        output={"objects": [{"name": "airports"}, {"name": "countries"}, {"name": "flights"}]},
+    )
+
+
 def test_sample_executes_via_query_router() -> None:
     fake_conn = {
         "id": "c1",
@@ -81,22 +91,61 @@ def test_sample_executes_via_query_router() -> None:
     }
     fake_saved = MagicMock()
     with patch("src.ai.copilot.query_tools._safe_connector", return_value=(fake_conn, None)):
-        with patch("services.connector_store.get_connector", return_value=fake_saved):
-            with patch(
-                "src.routers.query_router._run_query",
-                return_value=(
-                    [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}],
-                    ["id", "name"],
-                    {"id": "INTEGER", "name": "VARCHAR"},
-                    False,
-                ),
-            ):
-                result = sample_connector_object(
-                    connector_name="Local Postgres",
-                    table="airports",
-                    limit=10,
-                    analyze=True,
-                )
+        with patch("src.ai.copilot.query_tools.list_connector_objects", side_effect=_fake_list_objects):
+            with patch("services.connector_store.get_connector", return_value=fake_saved):
+                with patch(
+                    "src.routers.query_router._run_query",
+                    return_value=(
+                        [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}],
+                        ["id", "name"],
+                        {"id": "INTEGER", "name": "VARCHAR"},
+                        False,
+                    ),
+                ):
+                    result = sample_connector_object(
+                        connector_name="Local Postgres",
+                        table="airports",
+                        limit=10,
+                        analyze=True,
+                    )
     assert result.success is True
     assert result.output["row_count"] == 2
     assert result.output["analysis"]["column_count"] == 2
+
+
+def test_sample_fuzzy_resolves_typo() -> None:
+    fake_conn = {"id": "c1", "name": "PostgresVenkat", "type": "postgresql"}
+    fake_saved = MagicMock()
+    with patch("src.ai.copilot.query_tools._safe_connector", return_value=(fake_conn, None)):
+        with patch("src.ai.copilot.query_tools.list_connector_objects", side_effect=_fake_list_objects):
+            with patch("services.connector_store.get_connector", return_value=fake_saved):
+                with patch(
+                    "src.routers.query_router._run_query",
+                    return_value=([{"id": 1}], ["id"], {"id": "INTEGER"}, False),
+                ) as run_q:
+                    result = sample_connector_object(
+                        connector_name="PostgresVenkat",
+                        table="countires",
+                        limit=5,
+                    )
+    assert result.success is True
+    assert result.output["table"] == "countries"
+    assert "countries" in str(result.output.get("resolve_note") or "").lower()
+    assert "countries" in str(run_q.call_args).lower()
+
+
+def test_sample_missing_table_offers_candidates() -> None:
+    fake_conn = {"id": "c1", "name": "PostgresVenkat", "type": "postgresql"}
+    with patch("src.ai.copilot.query_tools._safe_connector", return_value=(fake_conn, None)):
+        with patch("src.ai.copilot.query_tools.list_connector_objects", side_effect=_fake_list_objects):
+            with patch("services.connector_store.get_connector", return_value=MagicMock()):
+                result = sample_connector_object(
+                    connector_name="PostgresVenkat",
+                    table="users",
+                )
+    assert result.success is False
+    err = (result.error or "").lower()
+    assert "no table" in err
+    assert "airports" in err or "countries" in err
+    assert "sample failed" not in err
+    assert "undefinedtable" not in err.replace(" ", "")

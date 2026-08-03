@@ -1,5 +1,6 @@
 import { DtIcon } from "../DtIcon";
 import { mappingRequiresRiskAck, type EditableMapping } from "../../lib/mapping";
+import { isCreateNewColumn } from "../../lib/columnWorkbench";
 
 interface MappingAccuracyBarProps {
   mappings: EditableMapping[];
@@ -9,20 +10,15 @@ interface MappingAccuracyBarProps {
 
 export function MappingAccuracyBar({
   mappings,
-  confidenceThreshold,
+  confidenceThreshold: _confidenceThreshold,
   llmUsed,
 }: MappingAccuracyBarProps) {
   const total = mappings.length;
   const lossy = (m: EditableMapping) => mappingRequiresRiskAck(m) && !m.riskAcknowledged;
-  const ready = mappings.filter(
-    (m) =>
-      !lossy(m) &&
-      (m.approved || (m.confidence >= confidenceThreshold && !m.requiresReview)),
-  ).length;
+  // Ready ≡ operator-approved only — confidence never invents green.
+  const ready = mappings.filter((m) => !lossy(m) && m.approved).length;
   const review = mappings.filter(
-    (m) =>
-      !m.approved &&
-      (m.requiresReview || m.confidence < confidenceThreshold || lossy(m)),
+    (m) => !m.approved || lossy(m),
   ).length;
   const riskOpen = mappings.filter(lossy).length;
   const pii = mappings.filter((m) => m.isPii).length;
@@ -31,10 +27,10 @@ export function MappingAccuracyBar({
     : 0;
   const matchPct = total ? Math.round((ready / total) * 100) : 0;
   const existsInDest = mappings.filter((m) => m.existsInDestination).length;
-  const newFields = mappings.filter((m) => !m.existsInDestination).length;
+  const newFields = mappings.filter((m) => isCreateNewColumn(m)).length;
 
   return (
-    <div className="df2-mapping-accuracy" role="status" aria-label="Mapping threshold coverage — not G4 Execute clearance">
+    <div className="df2-mapping-accuracy" role="status" aria-label="Mapping approval coverage — not Execute clearance">
       <div className="df2-mapping-accuracy-ring" aria-hidden>
         <svg viewBox="0 0 64 64">
           <circle cx="32" cy="32" r="28" className="df2-mapping-accuracy-track" />
@@ -49,14 +45,14 @@ export function MappingAccuracyBar({
         </svg>
         <div className="df2-mapping-accuracy-pct">
           <strong>{matchPct}%</strong>
-          <small>threshold</small>
+          <small>approved</small>
         </div>
       </div>
 
       <div className="df2-mapping-accuracy-stats">
         <div className="df2-mapping-accuracy-stat ok">
           <DtIcon name="check" size={14} />
-          <span><strong>{ready}</strong> above threshold</span>
+          <span><strong>{ready}</strong> approved</span>
         </div>
         {riskOpen > 0 && (
           <div className="df2-mapping-accuracy-stat block">

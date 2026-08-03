@@ -16,6 +16,21 @@ export type ColumnPageSize = (typeof COLUMN_PAGE_SIZES)[number];
 
 export type MappingTier = "ok" | "warn" | "block";
 
+/** True create-new / ADD column — not schema-pending / incomplete dest introspection. */
+export function isCreateNewColumn(m: EditableMapping): boolean {
+  if (m.assignmentStrategy === "pending_dest_schema") return false;
+  if (m.existsInDestination === true) return false;
+  if (m.createNew === true) return true;
+  if (
+    m.assignmentStrategy === "identity_passthrough"
+    || m.assignmentStrategy === "create_compatible_new"
+  ) {
+    return true;
+  }
+  // Proven missing from a loaded dest schema (ADD column).
+  return m.existsInDestination === false;
+}
+
 export interface IndexedMapping {
   mapping: EditableMapping;
   index: number;
@@ -26,22 +41,23 @@ export function mappingTier(
   threshold: number,
 ): MappingTier {
   if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) return "block";
-  if (m.approved || (m.confidence >= threshold && !m.requiresReview)) return "ok";
+  // Ready / ok ≡ operator-approved only — never invent green from confidence.
+  if (m.approved) return "ok";
   if (m.confidence >= threshold - 0.1) return "warn";
   return "block";
 }
 
-export function isMappingReady(m: EditableMapping, threshold: number): boolean {
+export function isMappingReady(m: EditableMapping, _threshold: number): boolean {
   if (m.transform === "omit" || m.engineTransform === "omit") {
     return Boolean(m.approved);
   }
   if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) return false;
-  return m.approved || (!m.requiresReview && m.confidence >= threshold);
+  return Boolean(m.approved);
 }
 
-export function needsMappingReview(m: EditableMapping, threshold: number): boolean {
+export function needsMappingReview(m: EditableMapping, _threshold: number): boolean {
   if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) return true;
-  return !m.approved && (m.requiresReview || m.confidence < threshold);
+  return !m.approved;
 }
 
 export function countByFilter(
@@ -64,7 +80,7 @@ export function countByFilter(
     if (tier === "block") counts.block += 1;
     if (tier === "warn") counts.warn += 1;
     if (m.isPii) counts.pii += 1;
-    if (!m.existsInDestination) counts.new += 1;
+    if (isCreateNewColumn(m)) counts.new += 1;
     if (isMappingReady(m, threshold)) counts.ready += 1;
   }
 
@@ -93,7 +109,7 @@ function matchesFilter(
   if (filter === "block") return mappingTier(m, threshold) === "block";
   if (filter === "warn") return mappingTier(m, threshold) === "warn";
   if (filter === "pii") return Boolean(m.isPii);
-  if (filter === "new") return !m.existsInDestination;
+  if (filter === "new") return isCreateNewColumn(m);
   if (filter === "ready") return isMappingReady(m, threshold);
   return true;
 }

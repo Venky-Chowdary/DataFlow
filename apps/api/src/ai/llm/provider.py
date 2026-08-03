@@ -503,8 +503,8 @@ MODEL_CAPABILITY_MATRIX = [
             "mapping_assignment",
         ],
         "best_for": (
-            "Primary Data Pilot chatbot — local NL→tools→compose for aggregates, "
-            "schema, transfers-with-Confirm, jobs, product how-tos. "
+            "Primary Data Pilot chatbot — local NL→tools→compose (local tool loop) for "
+            "aggregates, schema, transfers-with-Confirm, jobs, product how-tos. "
             "OpenAI/Anthropic/Ollama are optional polish add-ons (engine=hybrid only)."
         ),
     },

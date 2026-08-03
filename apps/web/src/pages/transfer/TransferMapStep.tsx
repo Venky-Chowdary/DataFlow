@@ -371,7 +371,17 @@ export function TransferMapStep({
               <DtIcon name="settings" size={14} /> Advanced
             </button>
           )}
-          <button type="button" className="df2-btn df2-btn-primary" onClick={onContinue}>
+          <button
+            type="button"
+            className="df2-btn df2-btn-primary"
+            onClick={onContinue}
+            disabled={mappingReviewCount > 0}
+            title={
+              mappingReviewCount > 0
+                ? `${mappingReviewCount} column(s) need Approve or Accept risk before Validate`
+                : "Continue to Validate"
+            }
+          >
             Continue to Validate →
           </button>
         </div>

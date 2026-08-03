@@ -12,10 +12,13 @@ import {
   buildPreflightMappings,
   canWidenMapping,
   countApproveEligible,
+  createNewRiskChipLabel,
   editableFromPipelineMappings,
+  engineStampedRiskChip,
   engineTransformToUi,
   inferLogicalFromSample,
   mappingHealthSummary,
+  mappingRequiresRiskAck,
   mappingsFromAnalysis,
   uiTransformToEngine,
   widenMappingToVarchar,
@@ -527,5 +530,113 @@ describe("destination schema honesty", () => {
     assert.equal(payload[1].transform, "omit");
     assert.equal(payload[1].intentional_omit, true);
     assert.equal(payload[1].target, "");
+  });
+
+  it("consumes pipeline create_new_risks stamp before Validate", () => {
+    const editable = editableFromPipelineMappings(
+      [{
+        source: "created_at",
+        target: "created_at",
+        confidence: 0.92,
+        source_type: "TIMESTAMPTZ",
+        target_type: "TIMESTAMP",
+        create_new: true,
+        assignment_strategy: "identity_passthrough",
+        create_new_risks: [{
+          kind: "timezone_polarity",
+          severity: "warn",
+          message: "Create-new drops timezone polarity: TIMESTAMPTZ → TIMESTAMP.",
+        }],
+      }],
+      [],
+      [],
+      0.75,
+    );
+    assert.equal(editable[0].createNew, true);
+    assert.equal(editable[0].createNewRisks?.length, 1);
+    assert.equal(editable[0].approved, false);
+    assert.equal(mappingRequiresRiskAck(editable[0]), true);
+    assert.equal(createNewRiskChipLabel(editable[0]), "TZ risk");
+    assert.ok(engineStampedRiskChip(editable[0])?.label === "TZ risk");
+  });
+
+  it("cast fidelity never auto-approves as Ready without Accept risk", () => {
+    const editable = editableFromPipelineMappings(
+      [{
+        source: "created_at",
+        target: "created_at",
+        confidence: 0.99,
+        source_type: "TIMESTAMP",
+        target_type: "TIMESTAMP",
+        fidelity: "cast",
+        fidelity_reason: "Parsed via datetime; unparseable values quarantine.",
+      }],
+      [],
+      ["created_at"],
+      0.75,
+      { created_at: "TIMESTAMP" },
+    );
+    assert.equal(editable[0].approved, false);
+    assert.equal(mappingRequiresRiskAck(editable[0]), true);
+    assert.equal(engineStampedRiskChip(editable[0])?.label, "cast");
+  });
+
+  it("never invents Approve from high confidence alone", () => {
+    const editable = editableFromPipelineMappings(
+      [{
+        source: "id",
+        target: "id",
+        confidence: 0.99,
+        source_type: "INTEGER",
+        target_type: "INTEGER",
+        requires_review: false,
+      }],
+      [],
+      ["id"],
+      0.75,
+      { id: "INTEGER" },
+    );
+    assert.equal(editable[0].approved, false);
+    assert.equal(editable[0].requiresReview, false);
+  });
+
+  it("does not treat pending dest schema as create-new Widen", () => {
+    const m: EditableMapping = {
+      source: "id",
+      target: "id",
+      confidence: 0.9,
+      approved: false,
+      existsInDestination: false,
+      assignmentStrategy: "pending_dest_schema",
+    };
+    assert.equal(canWidenMapping(m), false);
+  });
+
+  it("specialty health clears after Accept risk + Approve", () => {
+    const open: EditableMapping = {
+      source: "emb",
+      target: "emb",
+      confidence: 0.99,
+      approved: false,
+      transform: "identity_specialty",
+      inferredType: "VECTOR(3)",
+      destType: "VECTOR(3)",
+      fidelity: "mutate",
+      existsInDestination: true,
+    };
+    const openHealth = mappingHealthSummary([open], 0.75);
+    assert.ok(openHealth.specialtyIdentity >= 1);
+    assert.equal(openHealth.weak, true);
+
+    const cleared: EditableMapping = {
+      ...open,
+      approved: true,
+      riskAcknowledged: true,
+    };
+    const clearedHealth = mappingHealthSummary([cleared], 0.75);
+    assert.equal(clearedHealth.specialtyIdentity, 0);
+    assert.equal(clearedHealth.weak, false);
+    assert.equal(clearedHealth.ready, 1);
+    assert.match(clearedHealth.headline, /ready/i);
   });
 });

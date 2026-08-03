@@ -154,11 +154,13 @@ def _render_transfer(tool: str, o: dict[str, Any]) -> str:
     )
     lines = [f"{route} — sync `{plan.get('sync_mode')}`"]
 
-    dest_note = (
-        "destination table exists"
-        if dst.get("table_exists")
-        else "destination table will be created"
-    )
+    dest_exists = dst.get("table_exists")
+    if dest_exists is True:
+        dest_note = "destination table exists"
+    elif dest_exists is False:
+        dest_note = "destination table will be created"
+    else:
+        dest_note = "destination schema pending — not proven create-new"
     lines.append(
         f"• Mapped **{plan.get('mapped_count')}** of {src.get('column_count')} source "
         f"columns ({dest_note})."
@@ -173,20 +175,26 @@ def _render_transfer(tool: str, o: dict[str, Any]) -> str:
         )
 
     lossy = plan.get("lossy_conversions") or []
+    conversions = plan.get("type_conversions") or []
+    if not lossy and conversions:
+        # Older plans may only mark lossy_cast — still refuse round-trip invent.
+        lossy = [
+            c for c in conversions
+            if str(c.get("fidelity") or "").strip().lower() in {"lossy_cast", "cast", "mutate"}
+        ]
     if lossy:
-        lines.append(f"• **{len(lossy)} lossy cast(s)** — data changes shape on write:")
+        lines.append(f"• **{len(lossy)} fidelity risk conversion(s)** — Accept risk / remap before write:")
         for c in lossy[:5]:
             lines.append(
                 f"  – `{c.get('source_column')}` {c.get('from_type')} → "
                 f"{c.get('to_type')} on `{c.get('target_column')}`"
+                + (f" ({c.get('fidelity')})" if c.get("fidelity") else "")
             )
-    else:
-        conversions = plan.get("type_conversions") or []
-        if conversions:
-            lines.append(
-                f"• {len(conversions)} type conversion(s), none lossy — "
-                "every value round-trips."
-            )
+    elif conversions:
+        lines.append(
+            f"• {len(conversions)} type conversion(s) stamped preserve — "
+            "no cast/mutate/lossy fidelity risks in the plan."
+        )
 
     gates = pf.get("gates") or []
     if gates:
@@ -284,6 +292,7 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
     after asking for an export or a transfer start thought the pilot ignored them.
     """
     from .tools import _looks_like_live_data_fetch
+    from .example_phrases import example_connector_name, example_dest_connector_name
 
     lower = (message or "").strip().lower()
     connectors = ctx.get("connectors") or ctx.get("saved_connectors") or []
@@ -292,27 +301,29 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
         for c in connectors
         if isinstance(c, dict) and c.get("name")
     ][:4]
+    src_ex = conn_names[0] if conn_names else example_connector_name(ctx)
+    dst_ex = example_dest_connector_name(ctx, source_hint=src_ex)
 
     suggestions: list[str] = []
     if any(w in lower for w in ("export", "download", "csv", "parquet", "excel")):
         suggestions.append(
-            'I can\'t export files yet — sample the table and use **Query** to pull '
-            'larger result sets: "sample orders on Local Postgres".'
+            f'I can\'t export files yet — sample the table and use **Query** to pull '
+            f'larger result sets: "sample orders on {src_ex}".'
         )
     if _looks_like_live_data_fetch(lower) or re.search(
         r"\b(?:get|fetch|pull|show|sample)\b.+\b(?:from|on|in)\b",
         lower,
     ):
-        on_conn = f" on {conn_names[0]}" if conn_names else " on Local Postgres"
+        on_conn = f" on {src_ex}"
         suggestions.append(
             f'To pull live rows, name the table and a saved connector: '
-            f'"sample users{on_conn}" or "show orders from Warehouse".'
+            f'"sample users{on_conn}" or "show orders from {dst_ex}".'
         )
     if any(w in lower for w in ("transfer", "sync", "move", "migrate", "copy", "replicate")):
         suggestions.append(
             'I can plan a transfer and stage a start — nothing moves until you Confirm. '
-            'Try: "plan transfer of orders from Local Postgres to Warehouse" or '
-            '"transfer orders from Local Postgres to Warehouse as upsert".'
+            f'Try: "plan transfer of orders from {src_ex} to {dst_ex}" or '
+            f'"transfer orders from {src_ex} to {dst_ex} as upsert".'
         )
     if any(w in lower for w in ("delete", "drop", "remove", "destroy")):
         suggestions.append(
@@ -334,11 +345,11 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
     ):
         suggestions.append(
             'For live totals name the table and connector: '
-            '"count of orders by status on Local Postgres" or '
-            '"average price in products on Local Postgres".'
+            f'"count of orders by status on {src_ex}" or '
+            f'"average price in products on {src_ex}".'
         )
     if not suggestions:
-        on_conn = f" on {conn_names[0]}" if conn_names else ""
+        on_conn = f" on {src_ex}" if src_ex and src_ex != "your connector" else ""
         suggestions.append(
             "I can count / sum / average live tables, sample and profile rows, "
             "introspect schemas, map columns, list jobs and pipelines, and open "
@@ -557,6 +568,26 @@ class DataPilotAgent:
         polished = self._polish_with_llm(message, history or [], local, system)
         local_ok = sum(1 for t in (local.tools_used or []) if t.get("success"))
         if local.pending_actions or local_ok > 0 or local.needs_clarification:
+            return _with_llm_footnote(polished, engine)
+
+        # Ops failures with a recoverable clarification must NOT race the LLM —
+        # that path dumps synonym/telecom RAG junk after a missing-table sample.
+        local_errs = " ".join(
+            str(t.get("error") or "") for t in (local.tools_used or []) if not t.get("success")
+        ).lower()
+        if any(
+            needle in local_errs
+            for needle in (
+                "no table",
+                "did you mean",
+                "which table",
+                "which connector",
+                "sample failed",
+                "does not exist",
+                "undefinedtable",
+                "list tables on",
+            )
+        ):
             return _with_llm_footnote(polished, engine)
 
         # Local had nothing grounded — allow a single native LLM tool loop for hard paraphrases.
@@ -908,13 +939,15 @@ class DataPilotAgent:
 
         if tr.name == "run_schedule_now":
             turn.pending_actions.append({
-                "id": f"run_schedule:{out.get('schedule_id')}",
+                "id": f"run_schedule:{out.get('ack_id') or out.get('schedule_id')}",
                 "type": "run_schedule",
                 "label": out.get("label") or "Run pipeline now",
                 "risk": "mutate",
                 "payload": {
+                    "ack_id": out.get("ack_id"),
                     "schedule_id": out.get("schedule_id"),
                     "name": out.get("name"),
+                    "preview": out.get("preview") or {},
                 },
             })
             turn.actions.append({
@@ -1147,6 +1180,7 @@ Draft answer:
         """
         from .followup import (
             inherit_focus_slots,
+            looks_like_elliptical_edit,
             looks_like_followup,
             looks_like_fresh_intent,
             pending_from_assistant_clarification,
@@ -1176,7 +1210,7 @@ Draft answer:
                     return [answered]
                 # Typo / non-answer against a transcript clarification — promote
                 # to hard pending and re-ask (same as memory-backed slots).
-                if not looks_like_fresh_intent(message):
+                if not looks_like_fresh_intent(message) and not looks_like_elliptical_edit(message):
                     memory.remember_pending(session_id, soft)
                     return []
         if pending:
@@ -1184,8 +1218,8 @@ Draft answer:
             if answered:
                 memory.clear_pending(session_id)
                 return [answered]
-            # Fresh intents clear the slot; typos / non-answers keep it open.
-            if looks_like_fresh_intent(message):
+            # Fresh intents and elliptical edits clear the slot; typos keep it open.
+            if looks_like_fresh_intent(message) or looks_like_elliptical_edit(message):
                 memory.clear_pending(session_id)
             else:
                 return []
@@ -1255,6 +1289,19 @@ Draft answer:
 
         memory = get_working_memory()
         args_by_tool = {name: args for name, args in planned}
+
+        # Remember the asked subject even when the tool fails (missing connector)
+        # so elliptical follow-ups like "only paid ones" still have a table/metric.
+        for name, args in planned:
+            if name != "aggregate_data" or not isinstance(args, dict):
+                continue
+            update = {
+                k: args.get(k)
+                for k in ("table", "connector_name", "metric", "column", "group_by", "where")
+                if args.get(k)
+            }
+            if update.get("table") or update.get("connector_name"):
+                memory.update_focus(session_id, **update)
 
         for tr in turn.tool_results:
             if tr.success:
@@ -1819,11 +1866,28 @@ Respond as Data Pilot — grounded in tool results."""
                 parts.append("\n".join(lines))
             elif tr.name == "get_preflight_run" and tr.success:
                 run = tr.output or {}
+                decision = str(
+                    (
+                        (run.get("proof_bundle") or {}).get("transfer_decision") or {}
+                    ).get("decision")
+                    or ""
+                ).strip().lower()
+                if decision == "approve" and run.get("passed"):
+                    status = "APPROVED"
+                elif run.get("passed"):
+                    status = "REVIEW-GRADE"
+                else:
+                    status = "BLOCKED"
+                ready_note = (
+                    f", {run.get('readiness_score', '?')}% readiness evidence"
+                    if decision == "approve" and run.get("passed")
+                    else " — not Execute-cleared"
+                )
                 lines = [
                     f"Validation run **`{run.get('run_id')}`** — "
-                    f"{'PASSED' if run.get('passed') else 'BLOCKED'} "
-                    f"({run.get('passed_count', '?')}/{run.get('total_gates', '?')} gates, "
-                    f"{run.get('readiness_score', '?')}% ready).",
+                    f"{status} "
+                    f"({run.get('passed_count', '?')}/{run.get('total_gates', '?')} gates"
+                    f"{ready_note}).",
                 ]
                 route = run.get("route") or {}
                 if run.get("source_label") or run.get("dest_label"):
@@ -2148,7 +2212,7 @@ Respond as Data Pilot — grounded in tool results."""
                         )
                     if ask_tables:
                         names = [str(c.get("name") or "") for c in conns if c.get("name")]
-                        sample = names[0] if names else "Local Postgres"
+                        sample = names[0] if names else "your connector"
                         lines.append(
                             f'To list tables, name the connector: '
                             f'"list tables on {sample}".'
@@ -2494,9 +2558,18 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
         prompts.extend([
             "Show my pipelines",
             "Show my transfer jobs",
-            "How many rows in airports on Local Postgres?",
-            "What can you do?",
         ])
+        try:
+            from .example_phrases import example_connector_name
+
+            ex = example_connector_name()
+            if ex and ex != "your connector":
+                prompts.append(f"How many rows in airports on {ex}?")
+            else:
+                prompts.append("How many rows in airports on your connector?")
+        except Exception:
+            prompts.append("Show my connectors")
+        prompts.append("What can you do?")
         # Dedupe preserve order
         seen: set[str] = set()
         out: list[str] = []
@@ -2527,9 +2600,26 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
                 prompts.append(f"Tell me everything about {label}")
             if len(prompts) >= 2:
                 break
+        try:
+            from .example_phrases import example_connector_name
+
+            ex = example_connector_name()
+            if ex and ex != "your connector":
+                prompts.extend([
+                    f"How many rows in airports on {ex}?",
+                    f"Count of orders by status on {ex}",
+                ])
+            else:
+                prompts.extend([
+                    "Show my connectors",
+                    "Show my recent jobs",
+                ])
+        except Exception:
+            prompts.extend([
+                "Show my connectors",
+                "Show my recent jobs",
+            ])
         prompts.extend([
-            "How many rows in airports on Local Postgres?",
-            "Count of orders by status on Local Postgres",
             "Show my recent jobs",
             "What can you do?",
         ])

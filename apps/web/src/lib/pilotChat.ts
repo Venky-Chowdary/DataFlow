@@ -4,7 +4,6 @@
  */
 
 import type { CopilotPendingAction } from "./api";
-import { runScheduleNow } from "./api";
 import {
   confirmPilotPending,
   isDestructiveTransfer,
@@ -129,7 +128,12 @@ export async function runPilotConfirm(
 
   if (
     action.type === "studio"
-    || (action.kind && action.type !== "start_transfer" && action.type !== "create_connector")
+    || (
+      action.kind
+      && action.type !== "start_transfer"
+      && action.type !== "create_connector"
+      && action.type !== "run_schedule"
+    )
   ) {
     dispatchStudioAction({
       kind: (action.kind || String(action.payload?.kind || "")) as string,
@@ -146,13 +150,12 @@ export async function runPilotConfirm(
   }
 
   if (action.type === "run_schedule") {
-    const sid = String(action.payload?.schedule_id || "");
-    if (!sid) throw new Error("Missing schedule id");
-    const res = await runScheduleNow(sid);
+    const res = await confirmPilotPending(action);
+    if (res.kind !== "run_schedule") throw new Error("Unexpected confirm result");
     onNavigate?.("schedules");
     toast({
-      title: "Pipeline started",
-      message: `Job ${res.job_id || "queued"}`,
+      title: res.idempotent ? "Pipeline already started" : "Pipeline started",
+      message: `“${res.name}” → job ${res.job_id || "queued"}`,
       tone: "success",
     });
     return "cleared";

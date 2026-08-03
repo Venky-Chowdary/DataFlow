@@ -359,9 +359,9 @@ def iter_prompt_corpus() -> list[PromptCase]:
         ("orders where amount > 10 on Local Postgres", ("aggregate_data",)),
         ("create a postgres connector at localhost database demo", ("create_connector",)),
         ("create a mysql connector at db.example.com", ("create_connector",)),
-        ("explain the 9 preflight gates", ("describe_pilot", "profile_quality_rules")),
+        ("explain the 9 preflight gates", ("explain_product", "describe_pilot", "profile_quality_rules")),
         ("is email PII in orders", ("introspect_connector_schema", "analyze_dataset")),
-        ("help me fix my mapping", ("explain_mapping_assurance", "navigate")),
+        ("help me fix my mapping", ("remediate_validation", "navigate")),
         ("max price in products on Warehouse", ("aggregate_data",)),
     ):
         cases.append(_case(p, *tools, family="nl_accuracy"))
@@ -387,20 +387,49 @@ def iter_prompt_corpus() -> list[PromptCase]:
     ):
         cases.append(_case(
             p,
-            "describe_pilot", "search_knowledge", "profile_quality_rules",
+            "describe_pilot", "search_knowledge", "profile_quality_rules", "explain_product",
             family="quality_gates",
         ))
+
+    # --- Product FAQ (local explain_product — no cloud required) ---
     for p in (
-        "what quality gates do you have?",
-        "what are the quality gates?",
-        "list quality gates",
-        "what are the preflight gates?",
+        "what is upsert",
+        "what is CDC",
+        "what is DataFlow",
+        "what is DataTransfer",
+        "explain preflight",
+        "how do I transfer data",
+        "how does mapping work",
+        "what is a connector",
+        "what is quarantine",
+        "tell me about sync modes",
+        "what makes DataFlow different",
+        "can I move data between postgres and mysql",
+        "how do I validate before transfer",
+        "what is schema drift",
+        "explain full refresh",
+        "what is append mode",
+        "how do preflight gates work",
+        "where do I fix bad data",
+        "can I use Pilot without OpenAI",
+        "how does Confirm work for transfers",
     ):
         cases.append(_case(
             p,
-            "describe_pilot", "search_knowledge", "profile_quality_rules",
-            family="quality_gates",
+            "explain_product", "describe_pilot", "profile_quality_rules",
+            "recommend_sync_mode", "inspect_schema_policy", "get_transfer_capabilities",
+            "explain_mapping_assurance", "remediate_validation",
+            family="product_faq",
         ))
+
+    # --- Create connector (always Confirm after probe) ---
+    for p in (
+        "create a postgres connector named Demo PG host localhost user demo password secret database appdb",
+        "create a mysql connector at db.example.com database shop user root password secret",
+        "add a mongodb connector mongodb://localhost:27017/app",
+        "save connector postgresql://demo:secret@localhost:5432/appdb",
+    ):
+        cases.append(_case(p, "create_connector", family="create_connector"))
 
     # --- Schedules run ---
     for name in ("Nightly Orders", "Hourly CDC", "Weekly Snapshot", "Test"):

@@ -37,9 +37,11 @@ def test_objectid_create_new_mysql_stamps_logical_and_passes_strict():
         specialty_carrier_would_collapse,
     )
 
-    assert ddl_type("mysql", "OBJECTID") == "VARCHAR(24)"
+    assert ddl_type("mysql", "OBJECTID") == "CHAR(24)"
     assert specialty_carrier_would_collapse("OBJECTID", "VARCHAR(24)") is False
+    assert specialty_carrier_would_collapse("OBJECTID", "CHAR(24)") is False
     assert is_lossy_coercion("OBJECTID", "VARCHAR(24)") is False
+    assert is_lossy_coercion("OBJECTID", "CHAR(24)") is False
 
     mappings = map_columns(
         source_columns=["_id"],
@@ -54,8 +56,8 @@ def test_objectid_create_new_mysql_stamps_logical_and_passes_strict():
     )
     assert mappings[0]["create_new"] is True
     # Stamp physical off-engine sink so Map matches CREATE (not silent OBJECTID→OBJECTID).
-    assert mappings[0]["target_type"] == "VARCHAR(24)"
-    assert "VARCHAR(24)" in mappings[0]["reasoning"]
+    assert mappings[0]["target_type"] == "CHAR(24)"
+    assert "CHAR(24)" in mappings[0]["reasoning"]
 
     issues = validate_mapping_coercions(
         mappings=[{
@@ -65,7 +67,7 @@ def test_objectid_create_new_mysql_stamps_logical_and_passes_strict():
             "create_new": True,
         }],
         source_types={"_id": "OBJECTID"},
-        target_types={"id": "VARCHAR(24)"},
+        target_types={"id": "CHAR(24)"},
         validation_mode="strict",
     )
     assert coerce_blocks_transfer(issues) is False
@@ -74,7 +76,7 @@ def test_objectid_create_new_mysql_stamps_logical_and_passes_strict():
     issues_phys = validate_mapping_coercions(
         mappings=[{"source": "_id", "target": "id", "confidence": 0.93}],
         source_types={"_id": "OBJECTID"},
-        target_types={"id": "VARCHAR(24)"},
+        target_types={"id": "CHAR(24)"},
         validation_mode="strict",
     )
     assert coerce_blocks_transfer(issues_phys) is False
@@ -187,14 +189,22 @@ def test_uuid_mysql_create_new_still_solid_with_real_uuids():
         destination_db_type="mysql",
         destination_table_exists=False,
     )
-    assert mappings[0]["target_type"] == "UUID"
+    assert mappings[0]["target_type"] == "CHAR(36)"
     issues = validate_mapping_coercions(
-        mappings=[{"source": "device_id", "target": "device_id", "confidence": 0.93}],
+        mappings=[{
+            "source": "device_id",
+            "target": "device_id",
+            "confidence": 0.93,
+            "create_new": True,
+            "risk_acknowledged": True,
+        }],
         source_types={"device_id": "UUID"},
-        target_types={"device_id": "UUID"},
+        target_types={"device_id": "CHAR(36)"},
         validation_mode="strict",
     )
     assert coerce_blocks_transfer(issues) is False
+    stamped_risks = mappings[0].get("create_new_risks") or []
+    assert any((r.get("kind") == "uuid_domain") for r in stamped_risks)
 
 
 def test_uuid_bigquery_create_new_stamps_string_and_warns_not_silent_green():

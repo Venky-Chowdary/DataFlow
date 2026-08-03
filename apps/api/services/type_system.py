@@ -39,6 +39,7 @@ LOGICAL_BINARY = "binary"
 LOGICAL_INTERVAL = "interval"
 LOGICAL_GEOGRAPHY = "geography"
 LOGICAL_VECTOR = "vector"
+LOGICAL_OBJECTID = "objectid"  # MongoDB ObjectId — first-class, not STRING+specialty dual path
 
 # ---------------------------------------------------------------------------
 # Decimal / integer wire budgets (shared by serializer + transform engine)
@@ -123,7 +124,8 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "time without time zone": LOGICAL_TIME,
     "uuid": LOGICAL_UUID,
     "guid": LOGICAL_UUID,
-    "objectid": LOGICAL_STRING,  # MongoDB ObjectId — specialty OBJECTID via ddl/bind
+    "objectid": LOGICAL_OBJECTID,  # MongoDB ObjectId — first-class logical
+    "object id": LOGICAL_OBJECTID,
     "object_id": LOGICAL_STRING,
     "json": LOGICAL_JSON,
     "jsonb": LOGICAL_JSON,
@@ -594,6 +596,26 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_BINARY: "varbinary",
     },
 }
+
+
+# ObjectId is first-class — stamp into every dialect map (avoid STRING+specialty dual path).
+_OBJECTID_DDL_DEFAULTS: Final[dict[str, str]] = {
+    "mongodb": "objectId",
+    "dynamodb": "S",
+    "redis": "string",
+    "elasticsearch": "keyword",
+    "bigquery": "STRING",
+    "databricks": "STRING",
+    "sqlite": "TEXT",
+    "oracle": "VARCHAR2(24)",
+    "sqlserver": "CHAR(24)",
+    "mysql": "CHAR(24)",
+    "presto": "varchar",
+    "trino": "varchar",
+    "iceberg": "string",
+}
+for _db_key, _map in DDL_TYPES.items():
+    _map.setdefault(LOGICAL_OBJECTID, _OBJECTID_DDL_DEFAULTS.get(_db_key, "VARCHAR(24)"))
 
 # Native specialty DDL where the engine supports the type; otherwise lossless text.
 # Applied after base maps so every destination has interval/geography/vector keys.
@@ -1945,6 +1967,19 @@ def ddl_carrier_type(inferred: str | None) -> str:
         and "<" not in upper
     ):
         return upper
+    # Preserve native specialty carriers (INET, OBJECTID, …) — never collapse to
+    # VARCHAR/TEXT before create-new DDL / risk stamping.
+    specialty = specialty_carrier_base(raw)
+    if specialty is not None:
+        return specialty
+    # Preserve UNSIGNED integer polarity — bare INTEGER invents signed 32-bit CREATE.
+    if "UNSIGNED" in upper or re.search(r"\bUINT\d*\b", upper) or re.match(
+        r"^UINT(8|16|32|64)\b", upper.replace(" ", "")
+    ):
+        return strip_identity_qualifier(raw).strip() or raw
+    # ClickHouse UInt* (case-sensitive leading U).
+    if re.match(r"^UInt(8|16|32|64)\b", strip_identity_qualifier(raw) or ""):
+        return strip_identity_qualifier(raw).strip() or raw
     logical = normalize_logical_type(raw)
     if logical == LOGICAL_DECIMAL:
         # Preserve BIGNUMERIC polarity (76,38) vs bare DECIMAL/NUMERIC (38,9).
@@ -1955,6 +1990,10 @@ def ddl_carrier_type(inferred: str | None) -> str:
             if precision is not None:
                 return f"BIGNUMERIC({precision})"
             return "BIGNUMERIC"
+        # BIGINT UNSIGNED / UINT64 travel as DECIMAL logical for overflow safety
+        # but create-new must keep the unsigned token (never invent NUMBER(38,10)).
+        if _is_unsigned_integer_decimal_carrier(raw):
+            return strip_identity_qualifier(raw).strip() or raw
         precision, scale = parse_numeric_precision_scale(raw)
         if precision is not None and scale is not None:
             return f"DECIMAL({precision},{scale})"
@@ -1962,7 +2001,13 @@ def ddl_carrier_type(inferred: str | None) -> str:
             return f"DECIMAL({precision})"
         return "DECIMAL"
     if logical == LOGICAL_VECTOR:
+        # Preserve HALFVEC/SPARSEVEC encoding polarity — never invent dense VECTOR.
+        enc_raw = strip_identity_qualifier(raw).upper().replace(" ", "")
         dim = parse_vector_dimension(raw)
+        if enc_raw.startswith("HALFVEC"):
+            return f"HALFVEC({dim})" if dim is not None else "HALFVEC"
+        if enc_raw.startswith("SPARSEVEC"):
+            return f"SPARSEVEC({dim})" if dim is not None else "SPARSEVEC"
         if dim is not None:
             return f"VECTOR({dim})"
         return "VECTOR"
@@ -2004,6 +2049,8 @@ def ddl_carrier_type(inferred: str | None) -> str:
         return "TIME"
     if logical == LOGICAL_UUID:
         return "UUID"
+    if logical == LOGICAL_OBJECTID:
+        return "OBJECTID"
     if logical == LOGICAL_JSON:
         return "JSON"
     if logical == LOGICAL_ARRAY:
@@ -2263,11 +2310,13 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
         return "VARCHAR(36)"
     if uuid_exact_wire_carrier(inferred):
         return strip_identity_qualifier(inferred).strip()
-    # MongoDB ObjectId — 12-byte identity; VARCHAR(24) hex on relational sinks.
-    if base_early in {"OBJECTID", "OBJECT_ID"}:
-        if db == "mongodb":
-            return "objectId"
-        return "VARCHAR(24)"
+    # MongoDB ObjectId — dialect-native wire (never invent BigQuery VARCHAR).
+    if base_early in {"OBJECTID", "OBJECT_ID"} or normalize_logical_type(inferred) == LOGICAL_OBJECTID:
+        types_oid = DDL_TYPES.get(db) or {}
+        native_oid = types_oid.get(LOGICAL_OBJECTID)
+        if native_oid:
+            return native_oid
+        return _OBJECTID_DDL_DEFAULTS.get(db, "VARCHAR(24)")
     # Oracle LONG is a deprecated text LOB on Oracle dest (CLOB invent).
     # Off-Oracle, ``long`` is the Spark/Hive INT64 synonym — never invent TEXT
     # with soft-pass (INTEGER→TEXT allow-list greenwash). LONG→BIGINT is gated
@@ -4084,6 +4133,12 @@ def bounded_string_sink_would_truncate(source_type: str, target_type: str) -> bo
         target_type
     ):
         return False
+    # ObjectId CHAR/VARCHAR(24) / BINARY(12) wire — not truncate.
+    if specialty_wire_preserves_value("OBJECTID", target_type) and (
+        normalize_logical_type(source_type) == LOGICAL_OBJECTID
+        or specialty_carrier_base(source_type) == "OBJECTID"
+    ):
+        return False
     # Non-string → tight sink — fail closed (Accept risk).
     return True
 
@@ -5068,11 +5123,10 @@ def resolve_mapping_target_type(
 def create_new_mapping_target_type(src_type: str, dest_db_type: str = "") -> str:
     """Target type stamped on create-new mappings for Validate + writers.
 
-    Keep UUID as logical when the destination emits a native UUID or exact
-    36-char wire (MySQL ``CHAR(36)``, Snowflake ``VARCHAR(36)``). On engines
-    whose only store is bare ``STRING``/``TEXT`` (BigQuery, Databricks, SQLite),
-    stamp the physical type so Validate surfaces polarity loss as a warn —
-    never silent-green UUID→UUID while writers emit STRING.
+    Stamp **physical** DDL whenever the destination has no native UUID type —
+    even for exact ``CHAR(36)`` / ``VARCHAR(36)`` wires. Map must match CREATE
+    (never silent-green UUID→UUID while writers emit VARCHAR). Native UUID /
+    UNIQUEIDENTIFIER destinations keep the engine token.
     """
     if normalize_logical_type(src_type) == LOGICAL_UUID:
         db_uuid = (dest_db_type or "").strip()
@@ -5081,22 +5135,24 @@ def create_new_mapping_target_type(src_type: str, dest_db_type: str = "") -> str
         physical_uuid = ddl_type(db_uuid, src_type)
         phys_base = strip_identity_qualifier(physical_uuid).upper()
         src_u = strip_identity_qualifier(src_type).upper()
-        # SQL Server native token — never stamp logical UUID while CREATE emits UNIQUEIDENTIFIER.
+        # SQL Server native token — stamp UNIQUEIDENTIFIER (matches CREATE).
         if phys_base in {"UNIQUEIDENTIFIER", "GUID"}:
             return physical_uuid
-        # UNIQUEIDENTIFIER off-SQL-Server — stamp physical CHAR(36)/VARCHAR2(36) so
-        # Map matches CREATE (not silent UUID→UUID while writers emit CHAR).
+        # UNIQUEIDENTIFIER off-SQL-Server — stamp physical CHAR(36)/VARCHAR2(36).
         if src_u in {"UNIQUEIDENTIFIER", "GUID"} and phys_base not in {
             "UUID",
             "UNIQUEIDENTIFIER",
             "GUID",
         }:
             return physical_uuid
-        if (
-            normalize_logical_type(physical_uuid) == LOGICAL_UUID
-            or uuid_exact_wire_carrier(physical_uuid)
+        # Native UUID engines (PG, …) — keep logical UUID.
+        if normalize_logical_type(physical_uuid) == LOGICAL_UUID and not uuid_exact_wire_carrier(
+            physical_uuid
         ):
             return "UUID"
+        if phys_base in {"UUID"}:
+            return "UUID"
+        # Exact-wire / STRING / TEXT sinks — stamp physical so Map ≡ CREATE.
         return physical_uuid
     specialty = specialty_carrier_base(src_type)
     db = (dest_db_type or "").strip()
@@ -5160,6 +5216,24 @@ def uuid_capacity_string_carrier(target_type: str | None) -> bool:
         return True
     m = re.match(r"^VARCHAR2\s*\(\s*(\d+)\s*\)$", upper)
     return bool(m and int(m.group(1)) > 36)
+
+
+
+def objectid_would_collapse(source_type: str, target_type: str) -> bool:
+    """True when ObjectId polarity collapses to opaque string/text.
+
+    Width-safe create-new wires (``VARCHAR(24)`` / ``BINARY(12)``) preserve the
+    hex contract and are not a collapse. Bare TEXT/VARCHAR/STRING drop domain
+    polarity and must surface in preflight — never silent green.
+    """
+    if normalize_logical_type(source_type) != LOGICAL_OBJECTID:
+        return False
+    if normalize_logical_type(target_type) == LOGICAL_OBJECTID:
+        return False
+    if specialty_wire_preserves_value("OBJECTID", target_type):
+        return False
+    tgt_l = normalize_logical_type(target_type)
+    return tgt_l in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON, LOGICAL_BINARY}
 
 
 def uuid_would_collapse(source_type: str, target_type: str) -> bool:
@@ -6346,15 +6420,27 @@ def _is_unsigned_integer_carrier(inferred: str | None) -> bool:
 def unsigned_signed_polarity_invent(source_type: str, target_type: str) -> bool:
     """True when UNSIGNED/UInt invents a signed integer sink (or reverse).
 
-    ``UInt8→SMALLINT`` values fit but drop unsigned polarity — Accept risk.
+    Value-safe *clear* widens (``INT UNSIGNED → BIGINT``) do not invent
+    Accept-risk theater — the signed 64-bit sink holds the full unsigned 32-bit
+    range. Tighter signed sinks (``UInt8 → SMALLINT``) still drop unsigned
+    polarity and require Accept risk even when samples fit. Overflow stays
+    blocked by :func:`unsigned_integer_would_overflow`.
     """
     if normalize_logical_type(source_type) != LOGICAL_INTEGER:
         return False
     if normalize_logical_type(target_type) != LOGICAL_INTEGER:
         return False
-    return _is_unsigned_integer_carrier(source_type) != _is_unsigned_integer_carrier(
-        target_type
-    )
+    src_u = _is_unsigned_integer_carrier(source_type)
+    tgt_u = _is_unsigned_integer_carrier(target_type)
+    if src_u == tgt_u:
+        return False
+    # INT / INT UNSIGNED → BIGINT class: full range fits in signed 64-bit.
+    if src_u and not tgt_u and not unsigned_integer_would_overflow(source_type, target_type):
+        src_w = integer_bit_width(source_type)
+        tgt_w = integer_bit_width(target_type)
+        if src_w is not None and tgt_w is not None and tgt_w >= 64 and src_w <= 33:
+            return False
+    return True
 
 
 def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
@@ -6457,7 +6543,15 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
         return True
     if sql_variant_would_collapse(source_type, target_type):
         return True
+    # ObjectId → VARCHAR(24)/BINARY(12) is the industry create-new wire — not lossy.
+    if (
+        normalize_logical_type(source_type) == LOGICAL_OBJECTID
+        and specialty_wire_preserves_value("OBJECTID", target_type)
+    ):
+        return False
     if uuid_would_collapse(source_type, target_type):
+        return True
+    if objectid_would_collapse(source_type, target_type):
         return True
     if generated_always_overwrite_risk(target_type):
         return True
@@ -6474,6 +6568,222 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
     if temporal_precision_would_narrow(source_type, target_type):
         return True
     return False
+
+
+
+def assess_bson_affinity(
+    source_type: str,
+    target_type: str,
+    *,
+    destination_db_type: str = "",
+) -> list[dict]:
+    """Schemaless G3 semantic contract — type affinity when DDL is absent.
+
+    MongoDB / DynamoDB / Redis do not enforce column DDL, but declared (or
+    inferred) carriers still have BSON/AttributeValue affinity. ObjectId↛NUMBER
+    and DECIMAL↛INTEGER must surface before write — never silent SKIP-as-green.
+    """
+    risks: list[dict] = []
+    src = normalize_logical_type(source_type)
+    tgt = normalize_logical_type(target_type) if (target_type or "").strip() else src
+    db = (destination_db_type or "").strip().lower()
+
+    hard = {
+        (LOGICAL_OBJECTID, LOGICAL_INTEGER),
+        (LOGICAL_OBJECTID, LOGICAL_DECIMAL),
+        (LOGICAL_OBJECTID, LOGICAL_FLOAT),
+        (LOGICAL_OBJECTID, LOGICAL_BOOLEAN),
+        (LOGICAL_UUID, LOGICAL_INTEGER),
+        (LOGICAL_UUID, LOGICAL_DECIMAL),
+        (LOGICAL_BINARY, LOGICAL_INTEGER),
+        (LOGICAL_BINARY, LOGICAL_DECIMAL),
+        (LOGICAL_JSON, LOGICAL_INTEGER),
+        (LOGICAL_JSON, LOGICAL_DECIMAL),
+        (LOGICAL_STRUCT, LOGICAL_INTEGER),
+        (LOGICAL_ARRAY, LOGICAL_INTEGER),
+    }
+    if (src, tgt) in hard:
+        risks.append({
+            "kind": "bson_affinity_block",
+            "severity": "block",
+            "message": (
+                f"Schemaless affinity: {source_type or src} → {target_type or tgt}"
+                + (f" on {db}" if db else "")
+                + " invents a numeric/scalar domain the source never had."
+            ),
+        })
+        return risks
+
+    soft = {
+        (LOGICAL_DECIMAL, LOGICAL_INTEGER),
+        (LOGICAL_FLOAT, LOGICAL_INTEGER),
+        (LOGICAL_FLOAT, LOGICAL_DECIMAL),
+        (LOGICAL_DECIMAL, LOGICAL_FLOAT),
+        (LOGICAL_DATETIME, LOGICAL_DATE),
+        (LOGICAL_STRING, LOGICAL_INTEGER),
+        (LOGICAL_STRING, LOGICAL_DECIMAL),
+        (LOGICAL_STRING, LOGICAL_BOOLEAN),
+        (LOGICAL_TEXT, LOGICAL_INTEGER),
+        (LOGICAL_TEXT, LOGICAL_DECIMAL),
+        # Specialty / domain → open string invents no validation at schemaless sinks.
+        (LOGICAL_UUID, LOGICAL_STRING),
+        (LOGICAL_UUID, LOGICAL_TEXT),
+        (LOGICAL_OBJECTID, LOGICAL_STRING),
+        (LOGICAL_OBJECTID, LOGICAL_TEXT),
+        (LOGICAL_BINARY, LOGICAL_STRING),
+        (LOGICAL_BINARY, LOGICAL_TEXT),
+        (LOGICAL_JSON, LOGICAL_STRING),
+        (LOGICAL_JSON, LOGICAL_TEXT),
+        (LOGICAL_VECTOR, LOGICAL_ARRAY),
+        (LOGICAL_VECTOR, LOGICAL_STRING),
+        (LOGICAL_VECTOR, LOGICAL_TEXT),
+    }
+    specialty_to_open = (
+        specialty_carrier_base(source_type) is not None
+        and normalize_logical_type(target_type or "") in {
+            LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON, LOGICAL_ARRAY,
+        }
+        and specialty_carrier_base(target_type) is None
+        and not specialty_wire_preserves_value(
+            specialty_carrier_base(source_type) or "", target_type or ""
+        )
+    )
+    if (
+        (src, tgt) in soft
+        or objectid_would_collapse(source_type, target_type or source_type)
+        or specialty_to_open
+    ):
+        risks.append({
+            "kind": "bson_affinity_warn",
+            "severity": "warn",
+            "message": (
+                f"Schemaless affinity risk: {source_type or src} → {target_type or tgt}"
+                + (f" on {db}" if db else "")
+                + ". No DDL contract — confirm samples before write."
+            ),
+        })
+    return risks
+
+
+def assess_create_new_type_risk(
+    source_type: str,
+    target_type: str,
+    *,
+    destination_db_type: str = "",
+) -> list[dict]:
+    """Risk chips for create-new columns before Validate/write.
+
+    Returns a list of ``{kind, severity, message}`` — empty when lossless.
+    """
+    risks: list[dict] = []
+    src = (source_type or "").strip() or "VARCHAR"
+    tgt = (target_type or "").strip() or src
+    db = (destination_db_type or "").strip().lower()
+
+    if is_precision_collapse_coercion(src, tgt):
+        risks.append({
+            "kind": "precision_collapse",
+            "severity": "warn",
+            "message": (
+                f"Create-new {src} → {tgt} collapses precision"
+                + (f" on {db}" if db else "")
+                + ". Review before execute."
+            ),
+        })
+    elif is_lossy_coercion(src, tgt):
+        risks.append({
+            "kind": "lossy_coercion",
+            "severity": "warn",
+            "message": (
+                f"Create-new {src} → {tgt} may lose information"
+                + (f" on {db}" if db else "")
+                + "."
+            ),
+        })
+
+    # Dialect VARCHAR capacity ceilings that create-new often hit.
+    src_w = parse_string_carrier_width(src)
+    tgt_w = parse_string_carrier_width(tgt)
+    dialect_cap = {
+        "oracle": 4000,
+        "sqlserver": 8000,
+        "mssql": 8000,
+        "redshift": 65535,
+        "mysql": 16383,  # utf8mb4 InnoDB row practical ceiling for VARCHAR
+    }.get(db)
+    if dialect_cap and (src_w or 0) > dialect_cap and (not tgt_w or tgt_w >= dialect_cap):
+        risks.append({
+            "kind": "varchar_width_cap",
+            "severity": "warn",
+            "message": (
+                f"Source width {src_w} exceeds {db} VARCHAR capacity (~{dialect_cap}). "
+                "Create-new may truncate unless you use CLOB/TEXT."
+            ),
+        })
+    if src_w and tgt_w and tgt_w < src_w:
+        risks.append({
+            "kind": "varchar_narrow",
+            "severity": "warn",
+            "message": f"Create-new narrows VARCHAR({src_w}) → VARCHAR({tgt_w}).",
+        })
+
+    if is_timezone_polarity_loss(src, tgt) or time_timezone_polarity_loss(src, tgt):
+        risks.append({
+            "kind": "timezone_polarity",
+            "severity": "warn",
+            "message": f"Create-new drops timezone polarity: {src} → {tgt}.",
+        })
+    if uuid_would_collapse(src, tgt):
+        risks.append({
+            "kind": "uuid_domain",
+            "severity": "warn",
+            "message": (
+                f"Create-new stores UUID as {tgt}"
+                + (f" on {db}" if db else "")
+                + " — UUID domain is not enforced at destination."
+            ),
+        })
+    elif (
+        normalize_logical_type(src) == LOGICAL_UUID
+        and normalize_logical_type(tgt) != LOGICAL_UUID
+        and uuid_exact_wire_carrier(tgt)
+    ):
+        # Exact CHAR/VARCHAR(36) wire preserves values but invents no UUID type —
+        # Accept risk so Map never looks UUID→UUID while CREATE emits string DDL.
+        risks.append({
+            "kind": "uuid_domain",
+            "severity": "warn",
+            "message": (
+                f"Create-new stores UUID as {tgt}"
+                + (f" on {db}" if db else "")
+                + " — exact 36-char wire; UUID domain is not enforced at destination."
+            ),
+        })
+    if objectid_would_collapse(src, tgt):
+        risks.append({
+            "kind": "objectid_domain",
+            "severity": "warn",
+            "message": (
+                f"Create-new stores ObjectId as {tgt}"
+                + (f" on {db}" if db else "")
+                + " — ObjectId domain is not enforced at destination."
+            ),
+        })
+    elif (
+        normalize_logical_type(src) == LOGICAL_OBJECTID
+        and normalize_logical_type(tgt) != LOGICAL_OBJECTID
+        and specialty_wire_preserves_value("OBJECTID", tgt)
+    ):
+        risks.append({
+            "kind": "objectid_domain",
+            "severity": "warn",
+            "message": (
+                f"Create-new stores ObjectId as {tgt}"
+                + (f" on {db}" if db else "")
+                + " — hex/binary wire; ObjectId domain is not enforced at destination."
+            ),
+        })
+    return risks
 
 
 def is_lossy_coercion(source_type: str, target_type: str) -> bool:
@@ -6591,6 +6901,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
             return True
         if uuid_would_collapse(source_type, target_type):
             return True
+        if objectid_would_collapse(source_type, target_type):
+            return True
         if generated_always_overwrite_risk(target_type):
             return True
         if identity_polarity_would_collapse(source_type, target_type):
@@ -6616,6 +6928,12 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         return False
     # BIT(n) → VARCHAR(n) create-new is 0/1 digit text — not opaque BYTEA packing.
     if is_bitstring_carrier(source_type) and tgt in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return False
+    # ObjectId → VARCHAR(24)/BINARY(12) is the industry create-new wire — not lossy.
+    if (
+        normalize_logical_type(source_type) == LOGICAL_OBJECTID
+        and specialty_wire_preserves_value("OBJECTID", target_type)
+    ):
         return False
     # Fielded STRUCT/MAP → opaque JSON/VARIANT is intentional on many warehouses
     # (Airbyte V2) but is still a field-DDL collapse — treat as lossy so G3 surfaces it.
@@ -6702,6 +7020,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
     if sql_variant_would_collapse(source_type, target_type):
         return True
     if uuid_would_collapse(source_type, target_type):
+        return True
+    if objectid_would_collapse(source_type, target_type):
         return True
     if generated_always_overwrite_risk(target_type):
         return True

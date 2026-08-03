@@ -13,6 +13,24 @@ from pathlib import Path
 
 _model_cache = None
 
+
+def ml_baseline_status() -> dict:
+    """Operator-facing status for Map UI / Pilot — never silent about ML availability."""
+    model = _load_ml_baseline()
+    path = Path(__file__).resolve().parents[3] / "packages" / "ml" / "models" / "baseline.pkl"
+    return {
+        "available": model is not None,
+        "path": str(path),
+        "path_exists": path.exists(),
+        "role": "optional_boost",
+        "note": (
+            "ML baseline available — high-confidence predictions can boost matches."
+            if model is not None
+            else "ML baseline unavailable — automapping uses lexical + semantic + Hungarian only."
+        ),
+    }
+
+
 def _load_ml_baseline():
     global _model_cache
     if _model_cache is not None:
@@ -676,6 +694,36 @@ ABBREVIATIONS: dict[str, str] = {
     "ward_code": "ward_code",
     "bed_no": "bed_number",
     "bed_number": "bed_number",
+    # Evidence-grown from enterprise golden unresolved tokens (abbrev coverage CI).
+    "cd": "code",
+    "flg": "flag",
+    "flag": "flag",
+    "cnt": "count",
+    "count": "count",
+    "ctr": "center",
+    "msg": "message",
+    "message": "message",
+    "lim": "limit",
+    "limit": "limit",
+    "yr": "year",
+    "year": "year",
+    "qtr": "quarter",
+    "quarter": "quarter",
+    "hrs": "hours",
+    "hours": "hours",
+    "tm": "time",
+    "kg": "kilogram",
+    "kilogram": "kilogram",
+    "lb": "pound",
+    "pound": "pound",
+    "cvv": "card_verification_value",
+    "card_verification_value": "card_verification_value",
+    "bp": "blood_pressure",
+    "blood_pressure": "blood_pressure",
+    "vitals_hr": "vitals_heart_rate",
+    "vitals_heart_rate": "vitals_heart_rate",
+    "bill": "billing",
+    "billing": "billing",
 }
 
 
@@ -801,13 +849,90 @@ def _qualifier_tokens(name: str) -> set[str]:
     return {t for t in _semantic_form(name).split("_") if t} - _DOMAIN_LEAVES - _ENTITY_STOPWORDS
 
 
+# Lightweight English stem rules for entity qualifiers (paid≈payment, create≈creation).
+# Not a full Porter stemmer — just high-frequency migration stems.
+_STEM_SUFFIXES: tuple[tuple[str, str], ...] = (
+    ("izations", ""),
+    ("isation", ""),
+    ("ations", ""),
+    ("ation", ""),
+    ("ments", ""),
+    ("ment", ""),
+    ("ings", ""),
+    ("ing", ""),
+    ("tions", ""),
+    ("tion", ""),
+    ("sion", ""),
+    ("ness", ""),
+    ("ities", "ity"),
+    ("ity", ""),
+    ("iers", "y"),
+    ("ies", "y"),
+    ("ied", "y"),
+    ("ously", ""),
+    ("ally", ""),
+    ("ers", ""),
+    ("ors", ""),
+    ("er", ""),
+    ("or", ""),
+    ("als", "al"),
+    ("al", ""),
+    ("eds", ""),
+    ("ed", ""),
+    ("es", ""),
+    ("s", ""),
+)
+
+_STEM_IRREGULAR: dict[str, str] = {
+    "paid": "pay",
+    "payment": "pay",
+    "payments": "pay",
+    "bought": "buy",
+    "purchase": "buy",
+    "purchased": "buy",
+    "created": "create",
+    "creation": "create",
+    "creator": "create",
+    "updated": "update",
+    "updation": "update",  # common misspelling in schemas
+    "shipped": "ship",
+    "shipping": "ship",
+    "shipment": "ship",
+    "customer": "cust",
+    "customers": "cust",
+    "transaction": "txn",
+    "transactions": "txn",
+    "amount": "amt",
+    "amounts": "amt",
+}
+
+
+def _light_stem(token: str) -> str:
+    t = (token or "").strip().lower()
+    if not t:
+        return ""
+    if t in _STEM_IRREGULAR:
+        return _STEM_IRREGULAR[t]
+    for suf, repl in _STEM_SUFFIXES:
+        if len(t) > len(suf) + 2 and t.endswith(suf):
+            return t[: -len(suf)] + repl
+    return t
+
+
 def _qualifier_stems_overlap(a: set[str], b: set[str]) -> bool:
-    """True when qualifiers share a stem (ship ≈ shipping, cust ≈ customer)."""
+    """True when qualifiers share a stem (ship ≈ shipping, paid ≈ payment)."""
+    stems_a = {_light_stem(x) for x in a} | set(a)
+    stems_b = {_light_stem(y) for y in b} | set(b)
+    if stems_a & stems_b:
+        return True
     for x in a:
         for y in b:
             if x == y:
                 return True
             if len(x) >= 3 and len(y) >= 3 and (x.startswith(y) or y.startswith(x)):
+                return True
+            sx, sy = _light_stem(x), _light_stem(y)
+            if sx and sy and (sx == sy or (len(sx) >= 3 and len(sy) >= 3 and (sx.startswith(sy) or sy.startswith(sx)))):
                 return True
     return False
 
@@ -1380,7 +1505,7 @@ def map_columns(
                         "requires_review": True,
                     }
                 )
-        return out
+        return _apply_create_new_risk_stamps(out, dest_db)
 
     idf = _build_idf(source_columns + target_columns)
     all_doc_lens = [len(_tokenize(c)) for c in source_columns + target_columns]
@@ -1645,4 +1770,58 @@ def map_columns(
         )
 
     mappings.sort(key=lambda m: source_columns.index(m["source"]))
-    return mappings
+    return _apply_create_new_risk_stamps(mappings, dest_db)
+
+
+def _apply_create_new_risk_stamps(
+    mappings: list[dict],
+    destination_db_type: str = "",
+) -> list[dict]:
+    """Stamp create-new type risks without importing mapping_pipeline (cycle-safe)."""
+    from services.type_system import (
+        assess_create_new_type_risk,
+        create_new_mapping_target_type,
+        is_lossy_coercion,
+        is_precision_collapse_coercion,
+    )
+
+    out: list[dict] = []
+    for m in mappings:
+        row = dict(m)
+        # Only confirmed create-new strategies — never stamp pending schema as
+        # create-new (UI keeps createNew=false; inventing risks/DDL contradicts that).
+        strategy = str(row.get("assignment_strategy") or "")
+        is_create = bool(
+            row.get("create_new")
+            or strategy in {
+                "create_compatible_new",
+                "identity_passthrough",
+            }
+        )
+        if not is_create or strategy == "pending_dest_schema":
+            out.append(row)
+            continue
+        src = str(row.get("source_type") or "VARCHAR")
+        db = destination_db_type or str(row.get("dest_db_type") or "")
+        stamped = str(row.get("target_type") or "").strip()
+        physical = create_new_mapping_target_type(src, db) if db else stamped or src
+        tgt = physical or stamped or src
+        if physical and physical != stamped:
+            row["target_type"] = physical
+            tgt = physical
+        risks = assess_create_new_type_risk(src, tgt, destination_db_type=db)
+        if risks:
+            row["create_new_risks"] = risks
+            row["requires_review"] = True
+            kinds = ", ".join(sorted({r.get("kind", "") for r in risks if r.get("kind")}))
+            reason = str(row.get("reasoning") or "")
+            note = f"create-new type risk: {kinds}"
+            if note not in reason.lower():
+                row["reasoning"] = f"{reason} · {note}".strip(" ·")
+            if (
+                (not row.get("fidelity") or row.get("fidelity") == "lossless")
+                and (is_lossy_coercion(src, tgt) or is_precision_collapse_coercion(src, tgt))
+            ):
+                row["fidelity"] = "lossy_cast"
+        out.append(row)
+    return out

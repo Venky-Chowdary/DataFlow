@@ -2706,6 +2706,18 @@ export function TransferPage({
   const goToPreflight = () => {
     if (explainDestinationGap()) return;
     const threshold = confidenceThreshold;
+    const pendingRisk = columnMappings.filter(
+      (m) => mappingRequiresRiskAck(m) && !m.riskAcknowledged,
+    ).length;
+    if (pendingRisk > 0) {
+      toast({
+        title: "Accept risk before Validate",
+        message: `${pendingRisk} column(s) still need Accept risk (lossy/cast/create-new). Approve alone is not enough.`,
+        tone: "warning",
+      });
+      setStep(STEP_MAP);
+      return;
+    }
     const pendingReview = columnMappings.filter((m) =>
       needsMappingReview(m, threshold),
     ).length;
@@ -2746,6 +2758,23 @@ export function TransferPage({
   const approveAllAndPreflight = async () => {
     const approved = approveMappingsHonestly(columnMappings);
     setColumnMappings(approved);
+    const pendingRisk = approved.filter(
+      (m) => mappingRequiresRiskAck(m) && !m.riskAcknowledged,
+    ).length;
+    const pendingReview = approved.filter((m) =>
+      needsMappingReview(m, confidenceThreshold),
+    ).length;
+    if (pendingRisk > 0 || pendingReview > 0) {
+      toast({
+        title: pendingRisk > 0 ? "Accept risk before Validate" : "Review column mappings",
+        message: pendingRisk > 0
+          ? `${pendingRisk} column(s) still need Accept risk — Approve alone cannot clear them.`
+          : `${pendingReview} column(s) still need Approve before validation.`,
+        tone: "warning",
+      });
+      setStep(STEP_MAP);
+      return;
+    }
     setStep(STEP_VALIDATE);
     await executePreflight(approved);
   };
@@ -2885,13 +2914,17 @@ export function TransferPage({
         const next = columnMappings.map((m) => {
           if (!matches(m)) return m;
           hit = true;
-          if (!m.existsInDestination) {
+          if (m.existsInDestination === false) {
             return sealRemediationApproval({
               ...m,
               destType: action.to_type,
               approved: true,
               requiresReview: false,
             });
+          }
+          if (m.existsInDestination !== true) {
+            // Unknown / pending schema — do not invent create-new type rewrite.
+            return m;
           }
           // Existing DDL cannot be widened by mapping alone — remappoint to a free text
           // column, or invent a new VARCHAR target (ADD / create on write).
@@ -4169,7 +4202,9 @@ export function TransferPage({
           ? "running"
           : preflight
             ? preflight.passed
-              ? "passed"
+              ? ((preflight.proof_bundle?.transfer_decision?.decision || "") === "approve"
+                ? "passed"
+                : "review")
               : "blocked"
             : base.validation_status,
         route: `${sourceLabel} → ${mapDestRouteLabel}`,

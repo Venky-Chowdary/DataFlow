@@ -157,7 +157,10 @@ async def _start_confirmed_transfer(payload: dict) -> dict:
 
 @router.post("/confirm")
 async def copilot_confirm(request: ConfirmActionRequest):
-    """Consume a Pilot mutation ack (e.g. create_connector) — secrets never leave the ledger."""
+    """Consume a Pilot mutation ack (create_connector / start_transfer / run_schedule).
+
+    Secrets and schedule ids stay on the server ledger — the browser only sends ack_id.
+    """
     from services.connector_store import create_connector
 
     from ..ai.copilot.ack_ledger import get_ack_ledger
@@ -217,6 +220,45 @@ async def copilot_confirm(request: ConfirmActionRequest):
             "connector_id": conn.id,
             "name": conn.name,
             "type": conn.type,
+        }
+        ledger.finalize(
+            ack_id,
+            actor=request.actor or "pilot-ui",
+            reason=request.reason or "confirmed",
+            result=result,
+        )
+        return {"ok": True, "idempotent": False, "kind": kind, **result}
+
+    if kind == "run_schedule":
+        schedule_id = str(payload.get("schedule_id") or "").strip()
+        if not schedule_id:
+            ledger.release_claim(ack_id)
+            raise HTTPException(status_code=400, detail="Approval is missing schedule_id")
+        try:
+            from services.schedule_store import get_schedule
+            from ..services.schedule_runner import _run_schedule
+
+            sched = get_schedule(schedule_id)
+            if not sched:
+                ledger.release_claim(ack_id)
+                raise HTTPException(status_code=404, detail="Schedule not found")
+            job_id = _run_schedule(schedule_id)
+            if not job_id:
+                ledger.release_claim(ack_id)
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not start pipeline — check connectors",
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            ledger.release_claim(ack_id)
+            raise HTTPException(status_code=400, detail=f"Failed to run pipeline: {exc}") from exc
+        result = {
+            "job_id": job_id,
+            "schedule_id": schedule_id,
+            "name": str(payload.get("name") or getattr(sched, "name", "") or ""),
+            "status": "queued",
         }
         ledger.finalize(
             ack_id,

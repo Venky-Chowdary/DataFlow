@@ -2,7 +2,7 @@ import { ConnectorIcon } from "../app/brand-icons";
 import { DtIcon } from "./DtIcon";
 import type { IndexedMapping } from "../lib/columnWorkbench";
 import { mappingTier } from "../lib/columnWorkbench";
-import { fidelityChipLabel, fidelityRiskForMapping } from "../lib/schemaIntelligence";
+import { engineStampedRiskChip } from "../lib/mapping";
 
 interface MappingPairListProps {
   items: IndexedMapping[];
@@ -72,27 +72,11 @@ export function MappingPairList({
       <ul className="df2-mapping-pairs-list">
         {items.map(({ mapping, index }) => {
           const tier = mappingTier(mapping, confidenceThreshold);
-          // Prefer the engine's stamped verdict over client-side heuristics so
-          // Map, the proof drawer, and Pilot all show the same risk chip.
-          const engineVerdict = (mapping.fidelity || "").toLowerCase();
-          const engineRisk =
-            engineVerdict === "lossy_cast" || engineVerdict === "mutate" || engineVerdict === "cast"
-              ? {
-                  label: engineVerdict === "lossy_cast" ? "lossy" : engineVerdict === "mutate" ? "mutate" : "cast",
-                  detail: mapping.fidelityReason || `${mapping.inferredType || "?"} → ${mapping.destType || "?"}`,
-                  severity: engineVerdict === "lossy_cast" ? "block" as const : "warn" as const,
-                }
-              : null;
-          const heuristic = engineRisk
-            ? null
-            : fidelityRiskForMapping(mapping, { destConnector: destType });
-          const fidelityLabel = engineRisk
-            ? engineRisk.label
-            : heuristic
-              ? fidelityChipLabel(heuristic)
-              : null;
-          const fidelityDetail = engineRisk?.detail || heuristic?.detail || "";
-          const fidelitySeverity = engineRisk?.severity || heuristic?.severity || "warn";
+          // Engine stamp only — same SSOT as ColumnReview / Proof (no heuristic drift).
+          const engineRisk = engineStampedRiskChip(mapping);
+          const fidelityLabel = engineRisk?.label || null;
+          const fidelityDetail = engineRisk?.detail || "";
+          const fidelitySeverity = engineRisk?.severity || "warn";
           const hasFidelity = Boolean(fidelityLabel);
           const pairTitle = [
             `${mapping.source} → ${mapping.target} (${(mapping.confidence * 100).toFixed(0)}%)`,

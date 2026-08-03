@@ -510,3 +510,119 @@ def test_g3_not_null_contract_blocks_when_samples_contain_nulls():
     ))
     assert result.status.value == "block"
     assert any("not null" in i.lower() for i in (result.details or {}).get("issues", []))
+
+
+def test_g3_empty_dest_without_stamp_blocks():
+    """Never PASS schema contract when dest has zero columns and no target_type."""
+    plan = TransferPlan(
+        source=SourceConfig(
+            kind="file",
+            connected=True,
+            parseable=True,
+            columns=[ColumnSchema(name="id", inferred_type="INTEGER")],
+            row_count_estimate=10,
+        ),
+        destination=DestinationConfig(
+            kind="database",
+            connected=True,
+            can_write=True,
+            can_create_table=True,
+            target_columns=[],
+            db_type="postgresql",
+        ),
+        mappings=[
+            ColumnMapping(
+                source="id",
+                target="id",
+                confidence=0.99,
+                create_new=True,
+            )
+        ],
+    )
+    result = gate_g3_schema_contract(PreflightContext(plan=plan))
+    assert result.status.value == "block"
+
+
+def test_g3_empty_dest_with_stamp_examines_create_new():
+    """Stamped create-new target_type must be examined (not silent skip/PASS)."""
+    plan = TransferPlan(
+        source=SourceConfig(
+            kind="file",
+            connected=True,
+            parseable=True,
+            columns=[ColumnSchema(name="amount", inferred_type="DECIMAL")],
+            row_count_estimate=10,
+        ),
+        destination=DestinationConfig(
+            kind="database",
+            connected=True,
+            can_write=True,
+            can_create_table=True,
+            target_columns=[],
+            db_type="postgresql",
+        ),
+        mappings=[
+            ColumnMapping(
+                source="amount",
+                target="amount",
+                confidence=0.99,
+                create_new=True,
+                target_type="INTEGER",
+            )
+        ],
+    )
+    result = gate_g3_schema_contract(PreflightContext(plan=plan))
+    assert result.status.value == "block"
+    issues = (result.details or {}).get("issues", []) or []
+    assert any("amount" in str(i).lower() for i in issues)
+
+
+def test_g3_json_scalar_wrap_blocks_without_risk_ack():
+    """Bare scalar→JSON wrap must not soft-PASS Validate without Map Accept risk."""
+
+    class _Ctx(PreflightContext):
+        def coercion_report(self):
+            return {
+                "sampled_rows": 1,
+                "by_source": {
+                    "payload": {
+                        "severity": "warn",
+                        "sampled": 1,
+                        "failed": 0,
+                        "sentinel_nulls": 0,
+                        "json_scalar_wraps": 1,
+                        "sample_failures": [],
+                        "suggested_fix": "Accept risk on Map if intentional",
+                    }
+                },
+            }
+
+    plan = TransferPlan(
+        source=SourceConfig(
+            kind="file",
+            connected=True,
+            parseable=True,
+            columns=[ColumnSchema(name="payload", inferred_type="INTEGER")],
+            row_count_estimate=10,
+        ),
+        destination=DestinationConfig(
+            kind="database",
+            connected=True,
+            can_write=True,
+            can_create_table=True,
+            db_type="snowflake",
+            target_columns=[ColumnSchema(name="payload", inferred_type="VARIANT")],
+        ),
+        mappings=[
+            ColumnMapping(source="payload", target="payload", confidence=0.95),
+        ],
+    )
+    blocked = gate_g3_schema_contract(_Ctx(plan=plan))
+    assert blocked.status.value == "block", (blocked.status, blocked.message, blocked.details)
+    assert any("json" in i.lower() or "wrap" in i.lower() for i in (blocked.details or {}).get("issues", []))
+
+    plan.mappings[0].risk_acknowledged = True
+    cleared = gate_g3_schema_contract(_Ctx(plan=plan))
+    assert cleared.status.value == "pass", (cleared.status, cleared.message, cleared.details)
+    warns = (cleared.details or {}).get("warnings", []) or []
+    assert any("wrap" in str(w).lower() or "json" in str(w).lower() for w in warns)

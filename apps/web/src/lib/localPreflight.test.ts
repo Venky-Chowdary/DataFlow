@@ -81,4 +81,17 @@ describe("runLocalPreflight file export honesty", () => {
     assert.equal(pf.passed, true);
     assert.ok(!pf.blockers.some((b) => b.id === "g4_mapping_confidence"));
   });
+
+  it("blocks G4 when high-confidence mappings are not operator-approved", () => {
+    const pf = runLocalPreflight({
+      columns: ["id"],
+      rowCount: 1,
+      mappings: [
+        { source: "id", target: "id", confidence: 0.99, transform: "none", approved: false, requiresReview: false, isPii: false },
+      ],
+      destKind: "file_export",
+    });
+    assert.equal(pf.passed, false);
+    assert.ok(pf.blockers.some((b) => b.id === "g4_mapping_confidence"));
+  });
 });

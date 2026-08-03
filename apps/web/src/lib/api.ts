@@ -711,13 +711,15 @@ export async function confirmCopilotAction(payload: {
   connector_id?: string;
   name?: string;
   type?: string;
-  /** start_transfer */
+  /** start_transfer / run_schedule */
   job_id?: string;
   status?: string;
   source?: string;
   destination?: string;
   sync_mode?: string;
   preflight_run_id?: string;
+  /** run_schedule */
+  schedule_id?: string;
 }> {
   const res = await apiFetch(`${API_BASE}/copilot/confirm`, {
     method: "POST",
@@ -1807,6 +1809,8 @@ export async function mapTransferColumns(payload: {
     fidelity?: string;
     fidelity_reason?: string;
     type_narrowing?: boolean;
+    create_new?: boolean;
+    create_new_risks?: Array<{ kind?: string; severity?: string; message?: string }>;
   }>;
   validation: { passed: boolean; issues: string[] };
   destination_aware: boolean;

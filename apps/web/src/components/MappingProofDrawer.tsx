@@ -8,6 +8,7 @@ import { Drawer } from "./ui/Drawer";
 import { Dialog } from "./ui/Dialog";
 import { DtIcon } from "./DtIcon";
 import type { EditableMapping } from "../lib/mapping";
+import { engineStampedRiskChip, hasCreateNewTypeRisk } from "../lib/mapping";
 import { typeBadgeClass } from "../lib/typeDisplay";
 import { readSession } from "../lib/session";
 
@@ -104,13 +105,17 @@ function fidelityOf(m: EditableMapping): string {
     return "lossy_cast";
   }
   const stamped = (m.fidelity || "").toLowerCase();
+  // cast = quarantine path — never invent green Preserve in the proof drawer.
+  if (stamped === "cast") return "cast";
   if (stamped === "lossy_cast" || stamped === "mutate" || stamped === "preserve") {
     return stamped;
   }
   const t = (m.transform || "none").toLowerCase();
   if (!t || t === "none" || t === "identity") return "preserve";
-  if (["decimal", "integer", "boolean", "date", "datetime", "time", "uuid", "json", "binary", "cast_number", "cast_integer", "cast_boolean"].includes(t)) {
-    return "lossy_cast";
+  // Quarantine cast transforms are not silent loss — don't invent lossy_cast.
+  if (["cast_number", "cast_integer", "cast_boolean", "cast_date", "cast_datetime", "cast_time", "cast_uuid", "cast_json"].includes(t)
+    || ["decimal", "integer", "boolean", "date", "datetime", "time", "uuid", "json", "binary"].includes(t)) {
+    return "cast";
   }
   return "mutate";
 }
@@ -132,6 +137,17 @@ function clientBreakdown(conf: number, nameMatch: boolean, typeAligned: boolean)
 }
 
 /** Client-side proof when API payload is missing — never invents 0.99. */
+function resolveClientDestMode(
+  destCols: string[],
+  destTableExists: boolean | null | undefined,
+): "create_new" | "match_existing" | "schema_pending" | "schema_incomplete" {
+  if (destCols.length > 0) return "match_existing";
+  if (destTableExists === false) return "create_new";
+  // Table confirmed but zero columns — never invent match_existing.
+  if (destTableExists === true) return "schema_incomplete";
+  return "schema_pending";
+}
+
 export function buildClientMappingProof(
   mappings: EditableMapping[],
   opts: {
@@ -142,16 +158,13 @@ export function buildClientMappingProof(
   } = {},
 ): MappingProof {
   const destCols = opts.destColumns ?? [];
-  const destMode =
-    destCols.length > 0 || opts.destTableExists === true
-      ? "match_existing"
-      : opts.destTableExists === false
-        ? "create_new"
-        : "schema_pending";
+  const destMode = resolveClientDestMode(destCols, opts.destTableExists);
   const rows: MappingProofRow[] = mappings.map((m) => {
     let conf = m.confidence;
     if (destMode === "create_new") conf = Math.min(conf, CREATE_NEW_CAP);
-    if (destMode === "schema_pending") conf = Math.min(conf, SCHEMA_PENDING_CAP);
+    if (destMode === "schema_pending" || destMode === "schema_incomplete") {
+      conf = Math.min(conf, SCHEMA_PENDING_CAP);
+    }
     const transform = m.transform ?? "none";
     const fidelity = fidelityOf(m);
     const risks: MappingProofRisk[] = [];
@@ -162,12 +175,30 @@ export function buildClientMappingProof(
         message: `Transform '${transform}' changes values vs source before write.`,
       });
     }
-    if (fidelity === "lossy_cast") {
+    if (fidelity === "lossy_cast" || fidelity === "cast") {
       risks.push({
         code: "coerce_cast",
         severity: "warn",
         message: CAST_QUARANTINE_RISK,
       });
+    }
+    if (hasCreateNewTypeRisk(m)) {
+      for (const r of m.createNewRisks || []) {
+        risks.push({
+          code: r.kind || "create_new_risk",
+          severity: (r.severity || "warn") === "block" ? "warn" : "warn",
+          message: r.message || "Create-new type risk",
+        });
+      }
+    } else {
+      const stamped = engineStampedRiskChip(m);
+      if (stamped && fidelity !== "lossy_cast" && fidelity !== "cast") {
+        risks.push({
+          code: "engine_risk",
+          severity: stamped.severity === "block" ? "warn" : "info",
+          message: stamped.detail || stamped.label,
+        });
+      }
     }
     if (m.isPii || (m.reason || "").toLowerCase().includes("email")) {
       risks.push({
@@ -176,7 +207,7 @@ export function buildClientMappingProof(
         message: "PII/semantic classification — choose Mask / hash / tokenize / preserve.",
       });
     }
-    const exists = Boolean(m.existsInDestination);
+    const exists = m.existsInDestination === true;
     const nameMatch = m.source.toLowerCase() === m.target.toLowerCase();
     const typeAligned = (m.inferredType || "").toLowerCase() === (m.destType || m.inferredType || "").toLowerCase();
     const schema =
@@ -184,9 +215,13 @@ export function buildClientMappingProof(
         ? `CREATE column \`${m.target}\` as ${m.destType || m.inferredType || "VARCHAR"}`
         : destMode === "schema_pending"
           ? `PENDING confirm destination for \`${m.target}\` (${m.destType || m.inferredType || "VARCHAR"})`
+          : destMode === "schema_incomplete"
+            ? `INCOMPLETE destination schema — reload columns before matching \`${m.target}\``
           : exists
             ? `MATCH existing \`${m.target}\` (${m.destType || m.inferredType || "VARCHAR"})`
-            : `ADD new column \`${m.target}\` as ${m.destType || m.inferredType || "VARCHAR"}`;
+            : m.existsInDestination === false
+              ? `ADD new column \`${m.target}\` as ${m.destType || m.inferredType || "VARCHAR"}`
+              : `PENDING confirm destination for \`${m.target}\` (${m.destType || m.inferredType || "VARCHAR"})`;
 
     return {
       source: m.source,
@@ -265,15 +300,11 @@ export function mergeMappingProof(
   const client = buildClientMappingProof(mappings, opts);
   if (!mappingProof?.mappings?.length) return client;
   const bySource = new Map(mappings.map((m) => [m.source, m]));
-  // Live existence wins over stale API dest_mode — never invent create-new from empty cols.
-  const destMode =
-    (opts.destColumns?.length ?? 0) > 0 || opts.destTableExists === true
-      ? "match_existing"
-      : opts.destTableExists === false
-        ? "create_new"
-        : "schema_pending";
+  // Live existence wins over stale API dest_mode — never invent create-new from empty cols,
+  // and never invent match_existing when the table exists but columns failed to load.
+  const destMode = resolveClientDestMode(opts.destColumns ?? [], opts.destTableExists);
   const createNew = destMode === "create_new";
-  const schemaPending = destMode === "schema_pending";
+  const schemaPending = destMode === "schema_pending" || destMode === "schema_incomplete";
   const mergedRows = mappingProof.mappings.map((row) => {
     const live = bySource.get(row.source);
     if (!live) return row;
@@ -293,12 +324,24 @@ export function mergeMappingProof(
         severity: "info",
         message: `Transform '${transform}' changes values vs source before write.`,
       });
-    } else if (fidelity === "lossy_cast") {
+    } else if (fidelity === "lossy_cast" || fidelity === "cast") {
       withoutTransformRisks.push({
         code: "coerce_cast",
         severity: "warn",
         message: CAST_QUARANTINE_RISK,
       });
+    }
+    if (hasCreateNewTypeRisk(live)) {
+      for (const r of live.createNewRisks || []) {
+        const code = r.kind || "create_new_risk";
+        if (!withoutTransformRisks.some((x) => x.code === code && x.message === r.message)) {
+          withoutTransformRisks.push({
+            code,
+            severity: "warn",
+            message: r.message || "Create-new type risk",
+          });
+        }
+      }
     }
     return {
       ...row,
@@ -347,13 +390,13 @@ function pct(n?: number) {
 
 function fidelityLabel(f: string) {
   if (f === "preserve") return "Preserve";
-  if (f === "lossy_cast") return "Cast risk";
+  if (f === "lossy_cast" || f === "cast") return "Cast risk";
   return "Mutates";
 }
 
 function fidelityClass(f: string) {
   if (f === "preserve") return "ok";
-  if (f === "lossy_cast") return "warn";
+  if (f === "lossy_cast" || f === "cast") return "warn";
   return "info";
 }
 
@@ -434,7 +477,7 @@ function PairCard({ r, revealPii }: { r: MappingProofRow; revealPii: boolean }) 
   const samples = revealPii && clear?.length ? clear : masked;
   const canReveal = Boolean(clear?.length);
   return (
-    <li className={`df2-map-proof-pair${aligned ? " is-aligned" : ""}${r.requires_review ? " is-review" : ""}`}>
+    <li className={`df2-map-proof-pair${aligned && !r.requires_review && !(r.risks?.length) ? " is-aligned" : ""}${r.requires_review || (r.risks?.length ?? 0) > 0 ? " is-review" : ""}`}>
       <div className="df2-map-proof-rail" aria-label={`${r.source} maps to ${r.target}`}>
         <div className="df2-map-proof-rail-end is-source">
           <span className="df2-map-proof-rail-kicker">Source</span>
@@ -580,6 +623,8 @@ export function MappingProofDrawer({
       ? "Create-new table — columns CREATE on first write"
       : proof.dest_mode === "schema_pending"
         ? "Destination schema pending — confirm table before create-new"
+        : proof.dest_mode === "schema_incomplete"
+          ? "Existing table — column metadata incomplete; reload Destination schema"
         : "Match existing destination schema";
 
   const summary = proof.summary;
@@ -591,7 +636,7 @@ export function MappingProofDrawer({
           <span className={`df2-badge ${
             proof.dest_mode === "create_new"
               ? "df2-badge-warn"
-              : proof.dest_mode === "schema_pending"
+              : proof.dest_mode === "schema_pending" || proof.dest_mode === "schema_incomplete"
                 ? "df2-badge-run"
                 : "df2-badge-live"
           }`}>
@@ -599,6 +644,8 @@ export function MappingProofDrawer({
               ? "Create new"
               : proof.dest_mode === "schema_pending"
                 ? "Schema pending"
+                : proof.dest_mode === "schema_incomplete"
+                  ? "Schema incomplete"
                 : "Match existing"}
           </span>
           {(proof.summary?.cdc_detected || (proof.sync_mode || "").toLowerCase().includes("cdc")) && (
@@ -621,7 +668,7 @@ export function MappingProofDrawer({
               {pct(summary?.avg_confidence)} / {pct(summary?.max_confidence)}
               {proof.dest_mode === "create_new" ? (
                 <span className="df2-map-proof-cap"> · cap {pct(summary?.confidence_cap_create_new ?? CREATE_NEW_CAP)}</span>
-              ) : proof.dest_mode === "schema_pending" ? (
+              ) : proof.dest_mode === "schema_pending" || proof.dest_mode === "schema_incomplete" ? (
                 <span className="df2-map-proof-cap"> · pending cap {pct(SCHEMA_PENDING_CAP)}</span>
               ) : null}
             </strong>

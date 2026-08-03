@@ -25,6 +25,13 @@ export type PilotConfirmOutcome =
       destination: string;
       sync_mode: string;
       destructive: boolean;
+    }
+  | {
+      kind: "run_schedule";
+      idempotent: boolean;
+      job_id: string;
+      schedule_id: string;
+      name: string;
     };
 
 function payloadRecord(action: CopilotPendingAction): Record<string, unknown> {
@@ -102,6 +109,29 @@ export async function confirmPilotPending(
       destination: String(preview.destination || res.destination || "destination"),
       sync_mode: String(preview.sync_mode || res.sync_mode || ""),
       destructive,
+    };
+  }
+
+  if (action.type === "run_schedule") {
+    const ackId = String(payload.ack_id || "");
+    if (!ackId) {
+      throw new Error(
+        "This approval is missing a server ack_id. Ask Pilot to run the pipeline again.",
+      );
+    }
+    const res = await confirmCopilotAction({
+      ack_id: ackId,
+      actor: "pilot-ui",
+      reason: "operator confirmed run_schedule",
+    });
+    const jobId = String(res.job_id || "");
+    if (!jobId) throw new Error("Pipeline was confirmed but no job_id came back.");
+    return {
+      kind: "run_schedule",
+      idempotent: Boolean(res.idempotent),
+      job_id: jobId,
+      schedule_id: String(res.schedule_id || payload.schedule_id || preview.schedule_id || ""),
+      name: String(res.name || payload.name || preview.name || "Pipeline"),
     };
   }
 

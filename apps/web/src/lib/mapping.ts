@@ -55,6 +55,12 @@ export const MAPPING_TRANSFORMS: { id: MappingTransform; label: string; detail: 
   },
 ];
 
+export interface CreateNewTypeRisk {
+  kind: string;
+  severity?: "info" | "warn" | "block" | string;
+  message: string;
+}
+
 export interface EditableMapping {
   source: string;
   target: string;
@@ -97,6 +103,12 @@ export interface EditableMapping {
   fidelityReason?: string;
   /** True when the type path itself narrows (independent of transform). */
   typeNarrowing?: boolean;
+  /**
+   * Create-new precision / width / TZ risks stamped by the mapping pipeline
+   * (`assess_create_new_type_risk`). Visible before Validate/write — never invent
+   * green when the engine stamped a risk.
+   */
+  createNewRisks?: CreateNewTypeRisk[];
   /**
    * Operator explicitly accepted precision/type loss for this row.
    * Required by G4 for lossy_cast / typeNarrowing — bare Approve is not enough.
@@ -284,11 +296,67 @@ export function isLossyMapping(m: EditableMapping): boolean {
   return (m.fidelity || "").toLowerCase() === "lossy_cast" || Boolean(m.typeNarrowing);
 }
 
-/** Lossy, mutate, specialty, or STRUCT expand — G4 needs risk_acknowledged. */
+/** True when the pipeline stamped create-new precision/width/TZ risk. */
+export function hasCreateNewTypeRisk(m: EditableMapping): boolean {
+  return Boolean(m.createNewRisks && m.createNewRisks.length > 0);
+}
+
+/** Short chip label for the highest-severity create-new risk. */
+export function createNewRiskChipLabel(m: EditableMapping): string | null {
+  if (!hasCreateNewTypeRisk(m)) return null;
+  const kinds = new Set((m.createNewRisks || []).map((r) => (r.kind || "").toLowerCase()));
+  if (kinds.has("timezone_polarity")) return "TZ risk";
+  if (kinds.has("varchar_width_cap") || kinds.has("varchar_narrow")) return "width risk";
+  if (kinds.has("precision_collapse")) return "precision";
+  if (kinds.has("uuid_domain")) return "UUID domain";
+  if (kinds.has("objectid_domain")) return "ObjectId domain";
+  if (kinds.has("lossy_coercion")) return "create-new risk";
+  return "create-new risk";
+}
+
+export function createNewRiskDetail(m: EditableMapping): string {
+  return (m.createNewRisks || []).map((r) => r.message).filter(Boolean).join(" · ");
+}
+
+/**
+ * Prefer engine-stamped fidelity / create-new risks over client heuristics.
+ * Map, intelligence panel, and PairList must show the same chip.
+ */
+export function engineStampedRiskChip(m: EditableMapping): {
+  label: string;
+  detail: string;
+  severity: "block" | "warn";
+} | null {
+  const fidelity = (m.fidelity || "").toLowerCase();
+  if (fidelity === "lossy_cast" || fidelity === "mutate" || fidelity === "cast") {
+    return {
+      label: fidelity === "lossy_cast" ? "lossy" : fidelity === "mutate" ? "mutate" : "cast",
+      detail: m.fidelityReason || `${m.inferredType || "?"} → ${m.destType || "?"}`,
+      severity: fidelity === "lossy_cast" ? "block" : "warn",
+    };
+  }
+  if (hasCreateNewTypeRisk(m)) {
+    const hasBlock = (m.createNewRisks || []).some(
+      (r) => (r.severity || "").toLowerCase() === "block",
+    );
+    return {
+      label: createNewRiskChipLabel(m) || "create-new risk",
+      detail: createNewRiskDetail(m) || m.fidelityReason || "Create-new type risk",
+      severity: hasBlock ? "block" : "warn",
+    };
+  }
+  return null;
+}
+
+/** Lossy, mutate, cast (quarantine path), specialty, create-new risk, or STRUCT expand — G4 needs risk_acknowledged. */
 export function mappingRequiresRiskAck(m: EditableMapping): boolean {
   if (isIntentionalOmit(m)) return false;
   const fidelity = (m.fidelity || "").toLowerCase();
-  if (fidelity === "lossy_cast" || fidelity === "mutate" || m.typeNarrowing) return true;
+  // cast = type path holds but unparseable values quarantine — never silent Ready.
+  if (fidelity === "lossy_cast" || fidelity === "mutate" || fidelity === "cast" || m.typeNarrowing) {
+    return true;
+  }
+  if (hasCreateNewTypeRisk(m)) return true;
   // Dest-type edits clear engine fidelity — recompute from carriers so Approve
   // cannot look green until Accept risk (Map→Validate SSOT).
   if (declaredCarrierFidelityRisk(m.inferredType, m.destType)) return true;
@@ -325,6 +393,10 @@ export function acknowledgeMappingRisk(m: EditableMapping): EditableMapping {
   const ackNote =
     fidelity === "mutate"
       ? "Operator acknowledged value-mutating transform"
+      : fidelity === "cast"
+        ? "Operator acknowledged cast/quarantine path"
+      : hasCreateNewTypeRisk(m)
+        ? "Operator acknowledged create-new type risk"
       : m.structDerived || m.structPolicy === "flatten_top_level_keys" || m.structPolicy === "flatten_deep" || m.structPolicy === "explode_rows"
         ? "Operator acknowledged STRUCT/ARRAY expand policy"
         : isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType) || m.transform === "identity_specialty"
@@ -340,7 +412,7 @@ export function acknowledgeMappingRisk(m: EditableMapping): EditableMapping {
       && (!m.transform || m.transform === "none")
         ? "identity_specialty"
         : m.transform,
-    reason: [m.reason, m.fidelityReason, ackNote].filter(Boolean).join(" · "),
+    reason: [m.reason, createNewRiskDetail(m) || m.fidelityReason, ackNote].filter(Boolean).join(" · "),
   };
 }
 
@@ -658,7 +730,9 @@ export function isEnumToBooleanConflict(m: EditableMapping): boolean {
  * from the Map step (Airbyte/Fivetran posture) — use Remap or ALTER.
  */
 export function canWidenMapping(m: EditableMapping): boolean {
-  return !m.existsInDestination;
+  // Pending/incomplete dest schema is not proven create-new — never invent Widen.
+  if (m.assignmentStrategy === "pending_dest_schema") return false;
+  return m.existsInDestination === false;
 }
 
 /** Widen destination type to VARCHAR and clear numeric/boolean casts — new tables only. */
@@ -898,9 +972,9 @@ export function buildPreflightMappings(
     return editable.map((m) => {
       const enumBool = isEnumToBooleanConflict(m);
       const safe =
-        enumBool && !m.existsInDestination
+        enumBool && m.existsInDestination === false
           ? widenMappingToVarchar(m)
-          : enumBool && m.existsInDestination
+          : enumBool && m.existsInDestination === true
             ? flagExistingEnumBooleanConflict(m)
             : m;
       const pendingDest = safe.assignmentStrategy === "pending_dest_schema";
@@ -997,6 +1071,7 @@ export function editableFromPipelineMappings(
     fidelity?: string;
     fidelity_reason?: string;
     type_narrowing?: boolean;
+    create_new_risks?: Array<{ kind?: string; severity?: string; message?: string }>;
   }>,
   sampleRows?: Record<string, unknown>[],
   destColumns?: string[],
@@ -1050,21 +1125,25 @@ export function editableFromPipelineMappings(
             ? "store_as_json"
             : undefined;
     const engineFidelity = (m.fidelity || "").trim().toLowerCase();
+    const createNewRisks: CreateNewTypeRisk[] | undefined = Array.isArray(m.create_new_risks)
+      && m.create_new_risks.length > 0
+      ? m.create_new_risks
+          .filter((r) => r && (r.kind || r.message))
+          .map((r) => ({
+            kind: String(r.kind || "create_new_risk"),
+            severity: r.severity || "warn",
+            message: String(r.message || ""),
+          }))
+      : undefined;
     const lossyFidelity =
       engineFidelity === "lossy_cast"
       || engineFidelity === "mutate"
-      || Boolean(m.type_narrowing);
-    // Fail-closed: exact-name identity must still clear confidence + fidelity.
-    // Never auto-approve lossy/mutate/narrowing — clients stress-test type remaps.
-    const autoApproved =
-      !requiresReview
-      && !specialty
-      && !structish
-      && !arrayish
-      && !pendingDest
-      && !lossyFidelity
-      && !m.struct_derived
-      && conf >= threshold;
+      || engineFidelity === "cast"
+      || Boolean(m.type_narrowing)
+      || Boolean(createNewRisks?.length);
+    // Fail-closed: never invent Approve from confidence. Operator must Approve
+    // (or Approve-all for eligible rows). Ready ≡ approved only.
+    const autoApproved = false;
     const base: EditableMapping = {
       source: m.source,
       target: m.target,
@@ -1093,6 +1172,7 @@ export function editableFromPipelineMappings(
       fidelity: engineFidelity || undefined,
       fidelityReason: m.fidelity_reason || undefined,
       typeNarrowing: Boolean(m.type_narrowing),
+      createNewRisks,
       structDerived: Boolean(m.struct_derived),
       structParent: m.struct_parent,
     };
@@ -1138,26 +1218,33 @@ export function mappingHealthSummary(
   const total = mappings.length;
   const intentionalOmit = mappings.filter((m) => isIntentionalOmit(m)).length;
   const active = mappings.filter((m) => !isIntentionalOmit(m));
-  const needsReview = active.filter((m) => m.requiresReview && !m.approved).length;
+  const needsReview = active.filter(
+    (m) => !m.approved || (mappingRequiresRiskAck(m) && !m.riskAcknowledged),
+  ).length;
   const lowConfidence = active.filter((m) => m.confidence < threshold && !m.approved).length;
   const unmappedTarget = active.filter((m) => !String(m.target || "").trim()).length;
   const specialtyIdentity = active.filter(
-    (m) => m.transform === "identity_specialty" || isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType),
+    (m) =>
+      (m.transform === "identity_specialty" || isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType))
+      && mappingRequiresRiskAck(m)
+      && !m.riskAcknowledged,
   ).length;
   const existingTypeConflict = active.filter(
     (m) => isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m),
   ).length;
-  const ready = mappings.filter(
-    (m) =>
-      (isIntentionalOmit(m) && m.approved)
-      || (m.approved && String(m.target || "").trim() && !m.requiresReview),
-  ).length;
+  // Ready ≡ operator-approved (and Accept risk when required) — never confidence alone.
+  const ready = mappings.filter((m) => {
+    if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) return false;
+    if (isIntentionalOmit(m)) return Boolean(m.approved);
+    return Boolean(m.approved && String(m.target || "").trim());
+  }).length;
   const weak =
     total === 0
     || unmappedTarget > 0
     || needsReview > 0
     || lowConfidence > 0
-    || existingTypeConflict > 0;
+    || existingTypeConflict > 0
+    || specialtyIdentity > 0;
 
   let headline = "Map looks ready";
   let detail = `${ready}/${total} mappings approved for Validate.`;
@@ -1181,7 +1268,7 @@ export function mappingHealthSummary(
     headline = `${reviewCount} mapping(s) need review`;
     detail = `Accept risk on lossy/specialty rows, or Approve eligible rows only (threshold ${(threshold * 100).toFixed(0)}%).`;
   } else if (specialtyIdentity > 0) {
-    headline = `${specialtyIdentity} specialty type(s) use identity`;
+    headline = `${specialtyIdentity} specialty type(s) need Accept risk`;
     detail = "VECTOR / INTERVAL / GEOGRAPHY travel as identity payloads — Accept risk required before Validate clears G4.";
   } else if (intentionalOmit > 0) {
     headline = `${intentionalOmit} column(s) intentionally omitted`;
@@ -1197,7 +1284,7 @@ export function mappingHealthSummary(
     intentionalOmit,
     specialtyIdentity,
     existingTypeConflict,
-    weak: weak || specialtyIdentity > 0,
+    weak,
     headline,
     detail,
   };

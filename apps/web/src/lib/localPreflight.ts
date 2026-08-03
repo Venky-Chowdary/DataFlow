@@ -126,6 +126,8 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
   const riskUnacked = activeMaps.filter(
     (m) => mappingRequiresRiskAck(m) && !m.riskAcknowledged,
   );
+  // Ready ≡ operator Approve — never invent G4 PASS from confidence alone.
+  const unapproved = activeMaps.filter((m) => !m.approved);
   const lowConfidence = activeMaps.filter(
     (m) => !m.approved && m.confidence < threshold && !m.riskAcknowledged,
   );
@@ -155,6 +157,12 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
       `${riskUnacked.length} mapping(s) need Accept risk on Map (lossy/mutate/STRUCT/specialty).`,
       { kind: "mapping_confidence", coverage: "full_schema", columns: input.mappings.length },
     );
+  } else if (unapproved.length > 0) {
+    block(
+      "g4_mapping_confidence",
+      `${unapproved.length} mapping(s) need Approve on Map before Validate can pass.`,
+      { kind: "mapping_confidence", coverage: "full_schema", columns: input.mappings.length },
+    );
   } else if (lowConfidence.length > 0) {
     block(
       "g4_mapping_confidence",
@@ -162,7 +170,7 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
       { kind: "mapping_confidence", coverage: "full_schema", columns: input.mappings.length },
     );
   } else {
-    pass("g4_mapping_confidence", `${input.mappings.length} mappings meet confidence threshold.`, {
+    pass("g4_mapping_confidence", `${input.mappings.length} mapping(s) operator-approved for Validate.`, {
       kind: "mapping_confidence", coverage: "full_schema", columns: input.mappings.length,
     });
   }

@@ -83,7 +83,7 @@ def test_top_n_ranking_is_a_grouped_sum():
     assert (req.metric, req.column, req.group_by, req.table) == (
         "sum",
         "revenue",
-        "customers",
+        "customer",
         "orders",
     )
     assert req.limit == 5

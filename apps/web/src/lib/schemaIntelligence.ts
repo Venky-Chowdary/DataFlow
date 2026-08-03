@@ -1,4 +1,5 @@
 import type { EditableMapping } from "./mapping";
+import { engineStampedRiskChip, hasCreateNewTypeRisk } from "./mapping";
 import type { ColumnAnalysis, EnhancedAnalysis, PreflightResult, TransferPlan } from "./types";
 import {
   decimalWouldCollapse,
@@ -159,11 +160,24 @@ export function fidelityChipLabel(risk: TypeRisk): string {
   return "fidelity";
 }
 
-/** Pair-row fidelity chip — same rules as detectTypeRisks, keyed by source. */
+/** Pair-row fidelity chip — prefer engine stamps over client-side type heuristics. */
 export function fidelityRiskForMapping(
   mapping: EditableMapping,
   opts?: FidelityRiskOptions,
 ): TypeRisk | null {
+  const stamped = engineStampedRiskChip(mapping);
+  if (stamped) {
+    return {
+      id: hasCreateNewTypeRisk(mapping)
+        ? `create-new-${mapping.source}`
+        : `engine-${mapping.source}`,
+      column: mapping.source,
+      severity: stamped.severity,
+      title: stamped.label,
+      detail: stamped.detail,
+    };
+  }
+  // No engine stamp — fall back to local carrier checks (operator dest-type edits).
   const risks = detectTypeRisks([mapping], null, null, opts);
   const fidelity = risks.find(
     (r) =>
@@ -219,6 +233,19 @@ export function detectTypeRisks(
         title: "Low-confidence mapping",
         detail: `Mapped to "${m.target}" at ${(m.confidence * 100).toFixed(0)}% — review before execute.`,
       });
+    }
+
+    // Engine stamp is SSOT for fidelity/create-new — do not invent parallel type rules.
+    const stamped = engineStampedRiskChip(m);
+    if (stamped) {
+      risks.push({
+        id: hasCreateNewTypeRisk(m) ? `create-new-${m.source}` : `engine-${m.source}`,
+        column: m.source,
+        severity: stamped.severity,
+        title: stamped.label,
+        detail: stamped.detail,
+      });
+      continue;
     }
 
     if (NUMERIC_HINTS.test(srcType) && m.sample && /[^\d.,\-eE+]/.test(m.sample.replace(/\s/g, ""))) {
@@ -372,7 +399,9 @@ export function detectTypeRisks(
         column: m.source,
         severity: "block",
         title: "String enum cannot map to BOOLEAN",
-        detail: m.existsInDestination
+        detail: m.assignmentStrategy === "pending_dest_schema"
+          ? `Sample "${(m.sample || "").slice(0, 40)}" looks like a status label — load destination schema first; Widen is not available until create-new is proven.`
+          : m.existsInDestination === true
           ? `Sample "${(m.sample || "").slice(0, 40)}" is a status label but destination column already exists as BOOLEAN — remap to a VARCHAR column or ALTER the destination. Mapping Widen alone will not change DDL.`
           : `Sample "${(m.sample || "").slice(0, 40)}" looks like a status label — use VARCHAR (Widen → VARCHAR), not Cast boolean.`,
       });

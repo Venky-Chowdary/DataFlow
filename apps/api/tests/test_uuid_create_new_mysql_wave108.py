@@ -47,12 +47,16 @@ def test_uuid_capacity_carrier_not_lossy():
     assert is_lossy_coercion("UUID", "VARCHAR") is True
 
 
-def test_create_new_mapping_keeps_logical_uuid():
+def test_create_new_mapping_stamps_physical_uuid_wire():
     from services.semantic_mapper import map_columns
-    from services.type_system import create_new_mapping_target_type
+    from services.type_system import assess_create_new_type_risk, create_new_mapping_target_type
 
-    assert create_new_mapping_target_type("UUID", "mysql") == "UUID"
+    # Map stamp must match CREATE DDL — never silent UUID→UUID while writers emit CHAR(36).
+    assert create_new_mapping_target_type("UUID", "mysql") == "CHAR(36)"
+    assert create_new_mapping_target_type("UUID", "postgresql") == "UUID"
     assert create_new_mapping_target_type("VARCHAR", "mysql") == "TEXT"
+    risks = assess_create_new_type_risk("UUID", "CHAR(36)", destination_db_type="mysql")
+    assert any(r["kind"] == "uuid_domain" for r in risks)
 
     mappings = map_columns(
         source_columns=["meta_deviceId"],
@@ -65,9 +69,10 @@ def test_create_new_mapping_keeps_logical_uuid():
     )
     assert len(mappings) == 1
     assert mappings[0]["create_new"] is True
-    assert mappings[0]["target_type"] == "UUID"
-    assert "CHAR(36)" in mappings[0]["reasoning"]
-
+    assert mappings[0]["target_type"] == "CHAR(36)"
+    assert "CHAR(36)" in (mappings[0].get("reasoning") or "")
+    stamped_risks = mappings[0].get("create_new_risks") or []
+    assert any((r.get("kind") == "uuid_domain") for r in stamped_risks)
 
 def test_validate_coercion_uuid_to_uuid_create_new_passes_strict():
     from services.type_coercion_validator import (

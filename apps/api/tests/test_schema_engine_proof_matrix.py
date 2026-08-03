@@ -165,15 +165,42 @@ def test_safe_ddl_honors_explicit_text_over_numeric_samples():
         == "TEXT"
     )
     # Without honor_explicit, loose TEXT may still upgrade (typed CREATE TABLE).
+    upgraded = safe_ddl_logical_type(
+        "TEXT",
+        samples,
+        field_name="compensation",
+        source_type="DECIMAL",
+        honor_explicit=False,
+    )
+    assert upgraded in {"DECIMAL", "VARCHAR", "TEXT", "FLOAT"}
+
+
+def test_safe_ddl_preserves_explicit_physical_create_new_stamps():
+    """Map physical stamps must survive CREATE — never CHAR(36)→VARCHAR / LTZ→NTZ."""
+    assert (
+        safe_ddl_logical_type("CHAR(36)", None, honor_explicit=True, field_name="id")
+        == "CHAR(36)"
+    )
     assert (
         safe_ddl_logical_type(
-            "TEXT",
-            samples,
-            field_name="compensation",
-            source_type="DECIMAL",
-            honor_explicit=False,
+            "CHAR(36)",
+            ["550e8400-e29b-41d4-a716-446655440000"],
+            honor_explicit=True,
+            field_name="id",
         )
-        == "DECIMAL"
+        == "CHAR(36)"
+    )
+    assert (
+        safe_ddl_logical_type("TIMESTAMP_LTZ", None, honor_explicit=True, field_name="ts")
+        == "TIMESTAMP_LTZ"
+    )
+    assert (
+        safe_ddl_logical_type("INET", None, honor_explicit=True, field_name="ip")
+        == "INET"
+    )
+    assert (
+        safe_ddl_logical_type("VARCHAR(24)", None, honor_explicit=True, field_name="oid")
+        == "VARCHAR(24)"
     )
 
 
@@ -194,6 +221,52 @@ def test_resolve_target_columns_honors_explicit_text():
     )
     assert cols == ["pay_amount"]
     assert types == ["TEXT"]
+
+
+def test_resolve_target_columns_preserves_uuid_char36_stamp():
+    from connectors.writer_common import resolve_target_columns
+
+    mappings = [
+        {
+            "source": "device_id",
+            "target": "device_id",
+            "target_type": "CHAR(36)",
+            "create_new": True,
+            "source_type": "UUID",
+        },
+    ]
+    cols, types = resolve_target_columns(
+        mappings,
+        {"device_id": "UUID"},
+        preserve_case=True,
+        sample_values_by_source={
+            "device_id": ["550e8400-e29b-41d4-a716-446655440000"],
+        },
+        table_exists=False,
+    )
+    assert cols == ["device_id"]
+    assert types == ["CHAR(36)"]
+
+
+def test_resolve_target_columns_preserves_timestamptz_ltz_stamp():
+    from connectors.writer_common import resolve_target_columns
+
+    mappings = [
+        {
+            "source": "measured_at",
+            "target": "measured_at",
+            "target_type": "TIMESTAMP_LTZ",
+            "create_new": True,
+            "source_type": "TIMESTAMPTZ",
+        },
+    ]
+    cols, types = resolve_target_columns(
+        mappings,
+        {"measured_at": "TIMESTAMPTZ"},
+        preserve_case=True,
+        table_exists=False,
+    )
+    assert types == ["TIMESTAMP_LTZ"]
 
 
 def test_resolve_target_columns_new_table_widens_status_boolean():

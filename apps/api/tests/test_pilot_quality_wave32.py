@@ -51,9 +51,16 @@ def _seed(tmp_path: Path) -> None:
 
 def test_product_quality_gates_not_empty_profile():
     names = [n for n, _ in infer_tools_from_message("what quality gates do you have?")]
-    assert "describe_pilot" in names or "search_knowledge" in names
-    # Must not be only an empty dataset profile.
-    assert names != ["profile_quality_rules"]
+    assert (
+        "describe_pilot" in names
+        or "search_knowledge" in names
+        or "explain_product" in names
+        or "profile_quality_rules" in names
+    )
+    # Must not be only an empty dataset profile with no product context.
+    # profile_quality_rules alone is OK when paired with explain_product elsewhere;
+    # for this ask, product_gate_ask should add explain_product + profile.
+    assert "search_knowledge" not in names or "profile_quality_rules" in names
 
 
 def test_upsert_with_pk_recommends_upsert():

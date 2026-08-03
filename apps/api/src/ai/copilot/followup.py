@@ -204,6 +204,18 @@ _FRESH_INTENT_RE = re.compile(
     re.I,
 )
 
+# Elliptical edits must never fill a connector/table clarification slot.
+# Avoid bare metric verbs ("count of orders…") — those are fresh asks; "… instead"
+# is covered by _INSTEAD_RE below.
+_ELLIPTICAL_EDIT_RE = re.compile(
+    r"^(?:only|just|and|also|now|then|same(?:\s+(?:for|but))?|use\s+\w+\s+instead|"
+    r"make\s+it|switch\s+to|filter\s+to|do\s+that\s+again|by|per|"
+    r"group(?:ed)?\s+by|drop\s+(?:the\s+)?group(?:ing)?|no\s+grouping|"
+    r"top\s+\d|bottom\s+\d|"
+    r"where|filter|instead)\b",
+    re.I,
+)
+
 
 def looks_like_fresh_intent(message: str) -> bool:
     """True when the user clearly started a new request (not a slot fill / typo)."""
@@ -211,6 +223,20 @@ def looks_like_fresh_intent(message: str) -> bool:
     if not reply:
         return False
     return bool(_FRESH_INTENT_RE.search(reply))
+
+
+def looks_like_elliptical_edit(message: str) -> bool:
+    """True for follow-up edits like \"only paid ones\" / \"and by region?\"."""
+    reply = _clean(message)
+    if not reply or len(_words(reply)) > _MAX_FOLLOWUP_WORDS:
+        return False
+    if _ELLIPTICAL_EDIT_RE.search(reply):
+        return True
+    if _INSTEAD_RE.search(reply) and len(_words(reply)) <= 6:
+        return True
+    if _COREFERENCE_RE.search(reply) and len(_words(reply)) <= 8:
+        return True
+    return False
 
 
 def resolve_pending_answer(
@@ -231,6 +257,10 @@ def resolve_pending_answer(
     # A fresh analytics / imperative / navigate / explain sentence is never a
     # slot answer — even when short ("take me to jobs", "fix bad data").
     if looks_like_fresh_intent(reply):
+        return None
+    # Elliptical edits ("only paid ones", "and by region?") are follow-ups, not
+    # connector/table names — never swallow them into a clarification slot.
+    if looks_like_elliptical_edit(reply):
         return None
 
     lower = reply.lower()
@@ -593,7 +623,14 @@ def clarification_slot(name: str, args: dict[str, Any], error: str) -> PendingSl
             question=text,
             candidates=[c.strip() for c in candidates if c.strip()],
         )
-    if "which table" in lowered:
+    if "which table" in lowered or "did you mean" in lowered and "table" in lowered:
+        return PendingSlot(
+            tool=name,
+            args=dict(args or {}),
+            missing="table",
+            question=text,
+        )
+    if "no table" in lowered and ("which table" in lowered or "did you mean" in lowered or "list tables" in lowered):
         return PendingSlot(
             tool=name,
             args=dict(args or {}),

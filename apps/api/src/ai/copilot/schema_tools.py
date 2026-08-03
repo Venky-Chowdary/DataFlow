@@ -152,12 +152,15 @@ def _safe_connector(connector_id: str = "", name: str = "", tool: str = "schema"
     except AmbiguousConnectorError as exc:
         return None, _tool_result(tool, success=False, error=exc.message)
     if not conn:
+        from .example_phrases import example_connector_name
+
+        ex = example_connector_name()
         return None, _tool_result(
             tool,
             success=False,
             error=(
                 "Connector not found. Name a saved connector, e.g. "
-                '"columns on airports in Local Postgres".'
+                f'"columns on airports in {ex}".'
             ),
         )
     return conn, None

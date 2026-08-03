@@ -4,7 +4,7 @@ import { DtIcon } from "./DtIcon";
 import type { IndexedMapping } from "../lib/columnWorkbench";
 import { attentionMappings, mappingTier } from "../lib/columnWorkbench";
 import type { EditableMapping } from "../lib/mapping";
-import { fidelityChipLabel, fidelityRiskForMapping } from "../lib/schemaIntelligence";
+import { engineStampedRiskChip } from "../lib/mapping";
 
 interface MappingIntelligencePanelProps {
   allMappings: EditableMapping[];
@@ -157,17 +157,22 @@ export function MappingIntelligencePanel({
         <ul className="df2-mapping-intelligence-pairs">
           {items.map(({ mapping, index }) => {
             const tier = mappingTier(mapping, confidenceThreshold);
-            const fidelity = fidelityRiskForMapping(mapping, { destConnector: destType });
+            // Engine stamp only — same SSOT as ColumnReview / PairList / Proof.
+            const engineRisk = engineStampedRiskChip(mapping);
+            const fidelityLabel = engineRisk?.label || null;
+            const fidelityDetail = engineRisk?.detail || "";
+            const fidelitySeverity = engineRisk?.severity || "warn";
+            const hasFidelity = Boolean(fidelityLabel);
             const pairTitle = [
               mapping.reason || "Semantic match",
               `${(mapping.confidence * 100).toFixed(0)}%`,
-              fidelity ? `${fidelity.title}: ${fidelity.detail}` : "",
+              fidelityLabel ? `${fidelityLabel}: ${fidelityDetail}` : "",
             ].filter(Boolean).join(" · ");
             return (
               <li key={`${mapping.source}-${index}`}>
                 <button
                   type="button"
-                  className={`df2-mapping-intelligence-pair tier-${tier}${fidelity ? " has-fidelity-risk" : ""}`}
+                  className={`df2-mapping-intelligence-pair tier-${tier}${hasFidelity ? " has-fidelity-risk" : ""}`}
                   onClick={() => onSelectSource?.(mapping.source)}
                   title={pairTitle}
                 >
@@ -175,16 +180,16 @@ export function MappingIntelligencePanel({
                   <span className="pair-arrow" aria-hidden>→</span>
                   <span className="pair-target">{mapping.target}</span>
                   <span className={`pair-conf conf-${tier}`}>{(mapping.confidence * 100).toFixed(0)}</span>
-                  {fidelity && (
+                  {fidelityLabel && (
                     <span
-                      className={`df2-badge df2-badge-xs ${fidelity.severity === "block" ? "df2-badge-run" : "df2-badge-warn"}`}
-                      title={fidelity.detail}
+                      className={`df2-badge df2-badge-xs ${fidelitySeverity === "block" ? "df2-badge-run" : "df2-badge-warn"}`}
+                      title={fidelityDetail}
                     >
-                      {fidelityChipLabel(fidelity)}
+                      {fidelityLabel}
                     </span>
                   )}
                   {mapping.isPii && <span className="df2-badge df2-badge-run df2-badge-xs">PII</span>}
-                  {mapping.requiresReview && !mapping.approved && !fidelity && (
+                  {mapping.requiresReview && !mapping.approved && !hasFidelity && (
                     <span className="df2-badge df2-badge-run df2-badge-xs">review</span>
                   )}
                 </button>

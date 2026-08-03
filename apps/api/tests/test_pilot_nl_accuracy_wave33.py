@@ -94,7 +94,12 @@ def test_create_postgres_connector_intent():
 
 def test_explain_gates_not_ontology_rag():
     names = [n for n, _ in infer_tools_from_message("explain the 9 preflight gates")]
-    assert "describe_pilot" in names or "profile_quality_rules" in names
+    assert (
+        "describe_pilot" in names
+        or "profile_quality_rules" in names
+        or "explain_product" in names
+    )
+    assert "search_knowledge" not in names
 
 
 def test_pii_in_orders_introspects():
@@ -106,7 +111,7 @@ def test_pii_in_orders_introspects():
 def test_fix_mapping_opens_studio():
     planned = infer_tools_from_message("help me fix my mapping")
     names = [n for n, _ in planned]
-    assert "explain_mapping_assurance" in names
+    assert "remediate_validation" in names
     assert any(n == "navigate" and a.get("screen") == "transfer" for n, a in planned)
 
 

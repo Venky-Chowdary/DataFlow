@@ -19,9 +19,11 @@ import {
   isEnumToBooleanConflict,
   isExistingEnumBooleanConflict,
   isIntentionalOmit,
-  isLossyMapping,
   isSpecialtyLogicalType,
   isStructLogicalType,
+  createNewRiskDetail,
+  engineStampedRiskChip,
+  hasCreateNewTypeRisk,
   mappingRequiresRiskAck,
   pipelineTransformChip,
   widenMappingToVarchar,
@@ -72,9 +74,16 @@ interface ColumnReviewPanelProps {
   onFilterChange?: (value: ColumnFilter) => void;
 }
 
-function confidenceClass(c: number, threshold: number, approved: boolean): string {
+function confidenceClass(
+  c: number,
+  threshold: number,
+  approved: boolean,
+  riskOpen = false,
+): string {
+  // Confidence is evidence, not clearance — never paint green until Approve.
+  if (riskOpen) return "block";
   if (approved) return "ok";
-  if (c >= threshold) return "ok";
+  if (c >= threshold) return "warn";
   if (c >= threshold - 0.1) return "warn";
   return "block";
 }
@@ -463,6 +472,12 @@ export function ColumnReviewPanel({
             <DtIcon name="alert" size={16} />
             <span>
               <strong>{needsReview.length} column(s)</strong> need review before transfer.
+              {mappings.some((m) => mappingRequiresRiskAck(m) && !m.riskAcknowledged && !isIntentionalOmit(m)) && (
+                <>
+                  {" "}
+                  Use <strong>Accept risk</strong> for cast / lossy / create-new type chips — Approve alone will not unlock Validate.
+                </>
+              )}
             </span>
           </div>
         )}
@@ -474,6 +489,12 @@ export function ColumnReviewPanel({
               <strong>New destination table</strong>
               {" — create-new fields; types will CREATE on first write"}
               {destType ? ` with ${destType}-native DDL` : ""}.
+              {mappings.some((m) => hasCreateNewTypeRisk(m)) && (
+                <>
+                  {" "}
+                  Precision / width / timezone risks are stamped on rows — review amber chips before Validate.
+                </>
+              )}
             </span>
           </div>
         )}
@@ -541,9 +562,10 @@ export function ColumnReviewPanel({
           </thead>
           <tbody>
             {pageItems.map(({ mapping: m, index }) => {
-              const tier = confidenceClass(m.confidence, confidenceThreshold, m.approved);
-              const ready = isMappingReady(m, confidenceThreshold);
               const omitted = isIntentionalOmit(m);
+              const riskOpen = mappingRequiresRiskAck(m) && !m.riskAcknowledged && !omitted;
+              const tier = confidenceClass(m.confidence, confidenceThreshold, m.approved, riskOpen);
+              const ready = isMappingReady(m, confidenceThreshold);
               return (
                 <tr
                   key={`${m.source}-${index}`}
@@ -563,25 +585,30 @@ export function ColumnReviewPanel({
                         </span>
                       )}
                       {m.isPii && <span className="df2-badge df2-badge-run df2-badge-xs">PII</span>}
+                      {(() => {
+                        const engineRisk = engineStampedRiskChip(m);
+                        if (!engineRisk || omitted) return null;
+                        if (!m.riskAcknowledged) {
+                          return (
+                            <span
+                              className="df2-badge df2-badge-run df2-badge-xs"
+                              title={engineRisk.detail}
+                            >
+                              {engineRisk.label}
+                            </span>
+                          );
+                        }
+                        return (
+                          <span
+                            className="df2-badge df2-badge-warn df2-badge-xs"
+                            title={engineRisk.detail}
+                          >
+                            risk accepted · {engineRisk.label}
+                          </span>
+                        );
+                      })()}
                       {m.requiresReview && !m.approved && !omitted && !mappingRequiresRiskAck(m) && (
                         <span className="df2-badge df2-badge-run df2-badge-xs">ambiguous</span>
-                      )}
-                      {mappingRequiresRiskAck(m) && !m.riskAcknowledged && !omitted && (
-                        <span
-                          className="df2-badge df2-badge-run df2-badge-xs"
-                          title={m.fidelityReason || "Fidelity / structural risk — accept before Validate"}
-                        >
-                          {isLossyMapping(m)
-                            ? "lossy"
-                            : (m.fidelity || "").toLowerCase() === "mutate"
-                              ? "mutates"
-                              : "review risk"}
-                        </span>
-                      )}
-                      {m.riskAcknowledged && mappingRequiresRiskAck(m) && !omitted && (
-                        <span className="df2-badge df2-badge-warn df2-badge-xs" title="Operator accepted mapping risk">
-                          risk accepted
-                        </span>
                       )}
                       {(m.semanticRole === "string_enum" || isEnumToBooleanConflict(m)) && !omitted && (
                         <span className="df2-badge df2-badge-warn df2-badge-xs" title="Status/lifecycle labels — not true/false">
@@ -664,10 +691,10 @@ export function ColumnReviewPanel({
                       )}
                       {!omitted && (
                       <div className="df2-column-dest-badges">
-                        {m.existsInDestination && (
+                        {m.existsInDestination === true && (
                           <span className="df2-col-badge-exists">exists</span>
                         )}
-                        {!m.existsInDestination && destColumnSet.size > 0 && (
+                        {m.existsInDestination === false && destColumnSet.size > 0 && (
                           <span className="df2-col-badge-new">new</span>
                         )}
                         {(isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType)) && (
@@ -769,7 +796,9 @@ export function ColumnReviewPanel({
                         onClick={() => approveOne(index)}
                         title={
                           mappingRequiresRiskAck(m)
-                            ? m.fidelityReason || "Accept fidelity / structural risk for this column"
+                            ? createNewRiskDetail(m)
+                              || m.fidelityReason
+                              || "Accept fidelity / structural risk for this column"
                             : undefined
                         }
                       >
