@@ -38,6 +38,13 @@ class CopilotDataAnalyst:
         schemas = self.feeder.feed_all()
         if not include_catalog:
             schemas = [s for s in schemas if s.source != "catalog"]
+        # Training synonym dumps are not operator datasets — keep them out of
+        # "Tell me about …" chips and inventory answers.
+        schemas = [
+            s for s in schemas
+            if "synonym" not in (s.name or "").lower()
+            and "industry schema" not in (s.name or "").lower()
+        ]
         return [
             {
                 "name": s.name,

@@ -284,6 +284,8 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
     had understood and was offering a tour. Operators reading "I can help with…"
     after asking for an export or a transfer start thought the pilot ignored them.
     """
+    from .tools import _looks_like_live_data_fetch
+
     lower = (message or "").strip().lower()
     connectors = ctx.get("connectors") or ctx.get("saved_connectors") or []
     conn_names = [
@@ -297,6 +299,15 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
         suggestions.append(
             'I can\'t export files yet — sample the table and use **Query** to pull '
             'larger result sets: "sample orders on Local Postgres".'
+        )
+    if _looks_like_live_data_fetch(lower) or re.search(
+        r"\b(?:get|fetch|pull|show|sample)\b.+\b(?:from|on|in)\b",
+        lower,
+    ):
+        on_conn = f" on {conn_names[0]}" if conn_names else " on Local Postgres"
+        suggestions.append(
+            f'To pull live rows, name the table and a saved connector: '
+            f'"sample users{on_conn}" or "show orders from Warehouse".'
         )
     if any(w in lower for w in ("transfer", "sync", "move", "migrate", "copy", "replicate")):
         suggestions.append(
@@ -2244,12 +2255,31 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
             else:
                 prompts.append("Null rates on that result")
         if not any(tr.name == "analyze_dataset" for tr in turn.tool_results):
-            prompts.append("Analyze my logistics data")
+            # Only suggest dataset analysis when indexed uploads actually exist.
+            try:
+                datasets = self.analyst.list_datasets()
+            except Exception:
+                datasets = []
+            if datasets:
+                for d in datasets[:4]:
+                    name = str(d.get("name") or "")
+                    low = name.lower()
+                    if "synonym" in low or "industry schema" in low:
+                        continue
+                    if len(name) >= 20 and all(
+                        c in "0123456789abcdef"
+                        for c in name.replace("-", "").replace("_", "")[:16]
+                    ):
+                        continue
+                    label = name.replace("sample_", "").replace("_", " ")
+                    if label and len(label) < 40:
+                        prompts.append(f"Tell me about {label}")
+                        break
         prompts.extend([
             "Show my pipelines",
             "Show my transfer jobs",
-            "Take me to contracts",
-            "How does mapping assurance work?",
+            "How many rows in airports on Local Postgres?",
+            "What can you do?",
         ])
         # Dedupe preserve order
         seen: set[str] = set()
@@ -2266,9 +2296,21 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
     def _starter_prompts(self) -> list[str]:
         datasets = self.analyst.list_datasets()
         prompts = []
-        for d in datasets[:2]:
-            label = d["name"].replace("sample_", "").replace("_", " ")
-            prompts.append(f"Tell me everything about {label}")
+        for d in datasets[:4]:
+            name = str(d.get("name") or "")
+            # Skip RAG/catalog junk that looks like hash ids or synonym dumps.
+            low = name.lower()
+            if (
+                "synonym" in low
+                or "industry schema" in low
+                or len(name) >= 20 and all(c in "0123456789abcdef" for c in name.replace("-", "").replace("_", "")[:16])
+            ):
+                continue
+            label = name.replace("sample_", "").replace("_", " ")
+            if label and len(label) < 40:
+                prompts.append(f"Tell me everything about {label}")
+            if len(prompts) >= 2:
+                break
         prompts.extend([
             "How many rows in airports on Local Postgres?",
             "Count of orders by status on Local Postgres",
@@ -2277,7 +2319,7 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
         ])
         # Keep a couple of curated domain prompts after the proven ones.
         for extra in (SUGGESTED_PROMPTS or [])[:2]:
-            if extra not in prompts:
+            if extra not in prompts and "logistics" not in extra.lower():
                 prompts.append(extra)
         return prompts
 

@@ -1322,6 +1322,16 @@ class DataPilotTools:
                     continue
                 if _is_raw_knowledge_shard(text) and not _query_targets_semantic_type(query, text):
                     continue
+                # Synonym / industry catalog dumps are never answers to "get users
+                # from postgres" — only keep them when the operator asked about
+                # synonyms / PII / semantic types explicitly.
+                qlow = query.lower()
+                wants_ontology = any(
+                    w in qlow
+                    for w in ("synonym", "semantic type", "pii", "column pattern", "canonical")
+                )
+                if _is_noise_knowledge_hit(text) and not wants_ontology:
+                    continue
                 hits.append({
                     "text": text[:600],
                     "score": round(score, 3),
@@ -2089,11 +2099,49 @@ def _looks_like_unsupported_mutation(lower: str) -> bool:
     return False
 
 
+def _is_noise_knowledge_hit(text: str) -> bool:
+    """Synonym dumps / industry catalog shards are not answers to ops questions."""
+    t = (text or "").strip()
+    if not t:
+        return True
+    low = t.lower()
+    if low.startswith("synonym group:"):
+        return True
+    if low.startswith("industry schema:"):
+        return True
+    if "synonym group:" in low and "=" in t[:80]:
+        return True
+    return False
+
+
+def _looks_like_live_data_fetch(lower: str) -> bool:
+    """True when the operator wants live table rows — never answer with RAG synonyms."""
+    if re.search(
+        r"\b(?:get|fetch|pull|grab|load|show|preview|sample|give\s+me)\b.+\b(?:from|on|in)\b.+"
+        r"\b(?:postgres|postgresql|mysql|mongo|mongodb|snowflake|bigquery|sql\s*server|sqlite|warehouse|connector)\b",
+        lower,
+    ):
+        return True
+    if re.search(
+        r"\b(?:get|fetch|pull|show|preview|sample)\b.+\b(?:data|rows|table|records)\b.+\b(?:from|on|in)\b",
+        lower,
+    ):
+        return True
+    if re.search(
+        r"\b(?:users?|orders?|customers?|products?|employees?|invoices?)\s+(?:data\s+)?(?:from|on|in)\b",
+        lower,
+    ):
+        return True
+    return False
+
+
 def _looks_like_domain_knowledge_query(lower: str) -> bool:
     """RAG fallback only for substantive domain questions — never chat fluff."""
     if _is_meta_pilot_question(lower):
         return False
     if _looks_like_unsupported_mutation(lower):
+        return False
+    if _looks_like_live_data_fetch(lower):
         return False
     if len(lower.strip()) < 16:
         return False
@@ -2111,11 +2159,19 @@ def _looks_like_domain_knowledge_query(lower: str) -> bool:
         )
     ):
         return False
+    # Ops / data verbs are not "explain mapping" — route to live tools or refuse.
+    if any(
+        w in lower
+        for w in (
+            "get ", "fetch ", "pull ", "grab ", "give me ", "show me ",
+            "how many", "count ", "sum ", "average ", "list ", "sample ",
+        )
+    ):
+        return False
     signals = (
         "what is", "what's", "whats", "how do", "how does", "explain", "mean",
-        "pallet", "schema", "mapping", "pii", "cdc", "sync", "transfer",
-        "column", "type", "connector", "warehouse", "mongodb", "snowflake",
-        "postgres", "quality", "quarantine", "checksum", "reconcile",
+        "semantic", "synonym", "pii type", "cdc", "sync mode",
+        "mapping assurance", "checksum", "reconcile",
     )
     return any(s in lower for s in signals)
 
@@ -2750,19 +2806,32 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         r"(?:data|rows)\s+(?:in|from)\s+[\"']?([a-zA-Z0-9_.-]+)[\"']?"
         r"(?:\s+(?:on|in|from|using)\s+[\"']?([^\"'\n]+?))[\"']?",
         lower,
+    ) or re.search(
+        # "can you get users data from postgres" / "get users from Local Postgres"
+        r"(?:can\s+you\s+|could\s+you\s+|please\s+)?"
+        r"(?:get|fetch|pull|grab|load|give\s+me)\s+(?:the\s+)?"
+        r"[\"']?([a-zA-Z0-9_.-]+)[\"']?\s+(?:data|rows|table|records|collection)?\s*"
+        r"(?:from|on|in|using)\s+[\"']?([^\"'\n]+?)[\"']?\s*[.?!]?\s*$",
+        lower,
+    ) or re.search(
+        # "users data from postgres"
+        r"[\"']?([a-zA-Z0-9_.-]+)[\"']?\s+(?:data|rows|records)\s+"
+        r"(?:from|on|in)\s+[\"']?([^\"'\n]+?)[\"']?\s*[.?!]?\s*$",
+        lower,
     )
     if sample_m and "sample_connector_object" not in [p[0] for p in planned]:
         # Don't steal pure schema introspect intents
         if "schema" not in lower and "columns" not in lower and "describe" not in lower:
             table = (sample_m.group(1) or "").strip()
             cname = (sample_m.group(2) or "").strip() if sample_m.lastindex and sample_m.lastindex >= 2 else ""
-            cname = re.sub(r"\b(table|schema|collection)\b", "", cname)
+            cname = re.sub(r"\b(table|schema|collection|data|rows|records)\b", "", cname)
             cname = _clean_connector_phrase(cname)
-            if table and table not in {"data", "rows", "me", "some", "the"}:
+            if table and table not in {"data", "rows", "me", "some", "the", "my", "all"}:
                 args = {"table": table, "analyze": "analy" in lower or "profile" in lower}
                 if cname:
                     args["connector_name"] = cname
                 planned.append(("sample_connector_object", args))
+                planned = [(n, a) for n, a in planned if n != "search_knowledge"]
 
     # Explicit SQL — either "run this sql: …" or a genuinely pasted statement.
     explicit_sql = re.search(

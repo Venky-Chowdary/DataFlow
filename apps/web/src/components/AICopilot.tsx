@@ -240,6 +240,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
           pending_actions: res.pending_actions,
           dataInsight: res.data_insight,
           tools_used: res.tools_used,
+          suggested_prompts: res.suggested_prompts,
         },
       ]);
       // Stay on the Confirm card — never auto-navigate away from an approval.
@@ -334,6 +335,16 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
                     </button>
                   );
                 })}
+              </div>
+            )}
+            {msg.role === "assistant"
+              && i === messages.length - 1
+              && !(msg.pending_actions && msg.pending_actions.length > 0)
+              && (msg.suggested_prompts?.length || (prompts.length > 0 && messages.length > 2)) && (
+              <div className="df2-copilot-suggestions" style={{ marginTop: 8 }}>
+                {(msg.suggested_prompts?.length ? msg.suggested_prompts : prompts).slice(0, 3).map((p) => (
+                  <button key={p} type="button" onClick={() => send(p)}>{p}</button>
+                ))}
               </div>
             )}
           </div>
