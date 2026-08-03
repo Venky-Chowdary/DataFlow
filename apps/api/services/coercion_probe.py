@@ -44,6 +44,7 @@ from services.type_system import (
     is_nested_document_collapse,
     is_nested_shape_collapse,
     is_precision_collapse_coercion,
+    is_unlimited_string_carrier,
     normalize_logical_type,
 )
 from services.value_serializer import (
@@ -246,8 +247,13 @@ def analyze_coercion(
         src_logical = normalize_logical_type(src_type)
         tgt_logical = normalize_logical_type(tgt_type)
 
-        # Text/varchar targets accept any serialized value — no coercion risk.
-        if tgt_logical in _TEXTUAL_LOGICALS:
+        # Only skip truly unbounded TEXT sinks with no declared fidelity loss.
+        # Bounded VARCHAR(n) / LOB-tier narrow / national charset must be probed.
+        if (
+            tgt_logical in _TEXTUAL_LOGICALS
+            and is_unlimited_string_carrier(tgt_type)
+            and not is_lossy_coercion(src_type, tgt_type)
+        ):
             continue
 
         transform = resolve_transform(m, column_types=source_types, dest_types=dest_types)

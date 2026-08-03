@@ -278,6 +278,42 @@ def test_specialty_to_text_is_lossy_not_preserve():
     assert is_lossy_coercion("DECIMAL(19,4)", "MONEY") is True
 
 
+def test_bounded_sink_lob_tier_national_srid_wave13():
+    from services.type_system import (
+        bounded_string_sink_would_truncate,
+        geography_contract_would_collapse,
+        is_lossy_coercion,
+        national_charset_would_collapse,
+        specialty_carrier_would_collapse,
+        string_width_would_narrow,
+    )
+
+    assert bounded_string_sink_would_truncate("INTEGER", "VARCHAR(1)") is True
+    assert is_lossy_coercion("INTEGER", "VARCHAR(1)") is True
+    assert is_lossy_coercion("BOOLEAN", "CHAR(1)") is True
+    assert is_lossy_coercion("JSON", "VARCHAR(10)") is True
+    assert is_lossy_coercion("INTEGER", "TEXT") is False
+
+    assert string_width_would_narrow("LONGTEXT", "TINYTEXT") is True
+    assert is_lossy_coercion("LONGTEXT", "MEDIUMTEXT") is True
+    assert is_lossy_coercion("LONGBLOB", "TINYBLOB") is True
+
+    assert is_lossy_coercion("JSON", "ARRAY") is True
+    assert is_lossy_coercion("VARIANT", "ARRAY<STRING>") is True
+
+    assert national_charset_would_collapse("NVARCHAR(50)", "VARCHAR(50)") is True
+    assert is_lossy_coercion("NVARCHAR(50)", "VARCHAR(50)") is True
+    assert is_lossy_coercion("NCHAR(10)", "NVARCHAR(10)") is False
+
+    assert geography_contract_would_collapse(
+        "GEOMETRY(POINT,4326)", "GEOMETRY"
+    ) is True
+    assert is_lossy_coercion("GEOMETRY(POINT,4326)", "GEOMETRY") is True
+
+    assert specialty_carrier_would_collapse("REGCLASS", "TEXT") is True
+    assert is_lossy_coercion("NAME", "VARCHAR(32)") is True
+
+
 def test_g3_same_logical_and_specialty_invent_wave12():
     from services.type_coercion_validator import (
         coerce_blocks_transfer,

@@ -3277,16 +3277,49 @@ _UNBOUNDED_TEXT_RE = re.compile(
     re.I,
 )
 
+# MySQL LOB tier rank — higher is wider. Bare TEXT/BLOB stay "unlimited" for
+# DDL width propagation (logical ``text`` must not become VARCHAR(65535)).
+_MYSQL_TEXT_TIER_RANK: Final[dict[str, int]] = {
+    "TINYTEXT": 1,
+    "TEXT": 2,
+    "MEDIUMTEXT": 3,
+    "LONGTEXT": 4,
+}
+_MYSQL_BLOB_TIER_RANK: Final[dict[str, int]] = {
+    "TINYBLOB": 1,
+    "BLOB": 2,
+    "MEDIUMBLOB": 3,
+    "LONGBLOB": 4,
+}
+
+
+def mysql_text_tier_rank(inferred: str | None) -> int | None:
+    upper = strip_identity_qualifier(inferred).upper().split()[0] if inferred else ""
+    return _MYSQL_TEXT_TIER_RANK.get(upper)
+
+
+def mysql_blob_tier_rank(inferred: str | None) -> int | None:
+    upper = strip_identity_qualifier(inferred).upper().split()[0] if inferred else ""
+    return _MYSQL_BLOB_TIER_RANK.get(upper)
+
 
 def parse_string_carrier_width(inferred: str | None) -> int | None:
     """Return bounded VARCHAR/CHAR width, or None if unlimited/unknown.
 
     Mirrors Airbyte MySQL CHAR truncation class — declared width must be proven,
-    not inferred from short head samples.
+    not inferred from short head samples. MySQL LOB tiers use
+    :func:`mysql_text_tier_rank` (not a fake VARCHAR width).
     """
     text = (inferred or "").strip()
     if not text:
         return None
+    upper = strip_identity_qualifier(text).upper().split()[0] if text else ""
+    # PG ``name`` is a 63-byte identifier type.
+    if upper == "NAME":
+        return 63
+    # TINYTEXT is the only MySQL LOB with a tight practical bound for width math.
+    if upper == "TINYTEXT":
+        return 255
     if _UNBOUNDED_STRING_RE.search(text) or _UNBOUNDED_TEXT_RE.match(text):
         return None
     m = _STRING_WIDTH_RE.search(text)
@@ -3297,20 +3330,73 @@ def parse_string_carrier_width(inferred: str | None) -> int | None:
 
 
 def is_unlimited_string_carrier(inferred: str | None) -> bool:
-    """True for TEXT / VARCHAR(MAX) / CLOB-class carriers (not bare ambiguous VARCHAR)."""
+    """True for TEXT/CLOB/VARCHAR(MAX)/MEDIUMTEXT/LONGTEXT — not TINYTEXT/NAME."""
     text = (inferred or "").strip()
     if not text:
+        return False
+    upper = strip_identity_qualifier(text).upper().split()[0] if text else ""
+    if upper in {"TINYTEXT", "NAME"}:
         return False
     if _UNBOUNDED_STRING_RE.search(text) or _UNBOUNDED_TEXT_RE.match(text):
         return True
     return normalize_logical_type(text) == LOGICAL_TEXT
 
 
-def string_width_would_narrow(source_type: str, target_type: str) -> bool:
-    """True when source string capacity exceeds destination VARCHAR(n).
+def is_national_string_carrier(inferred: str | None) -> bool:
+    """True for NVARCHAR/NCHAR/NCLOB (Unicode) carriers."""
+    upper = strip_identity_qualifier(inferred).upper().replace(" ", "")
+    if not upper:
+        return False
+    return (
+        upper.startswith("NVARCHAR")
+        or upper.startswith("NCHAR")
+        or upper.startswith("NCLOB")
+        or upper.startswith("NVARCHAR2")
+        or upper.startswith("NTEXT")
+    )
 
-    Cases: ``VARCHAR(255)→VARCHAR(50)``, ``TEXT→VARCHAR(10)``. Bare ``VARCHAR``
-    without a width stays unknown (no invented narrow).
+
+def national_charset_would_collapse(source_type: str, target_type: str) -> bool:
+    """True when Unicode national string lands on non-national CHAR/VARCHAR/CLOB."""
+    if not is_national_string_carrier(source_type):
+        return False
+    if is_national_string_carrier(target_type):
+        return False
+    tgt_l = normalize_logical_type(target_type)
+    return tgt_l in {LOGICAL_STRING, LOGICAL_TEXT}
+
+
+def bounded_string_sink_would_truncate(source_type: str, target_type: str) -> bool:
+    """True when a scalar/document lands on tight CHAR/VARCHAR(n)/TINYTEXT.
+
+    Safe-list ``integer→string`` must not greenwash ``INTEGER→VARCHAR(1)``.
+    MySQL ``TEXT``/``MEDIUMTEXT``/``LONGTEXT`` remain practical scalar sinks
+    (≥64KB); only typmod-bounded and TINYTEXT fail closed.
+    """
+    tgt_l = normalize_logical_type(target_type)
+    if tgt_l not in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return False
+    if is_unlimited_string_carrier(target_type):
+        return False
+    upper = strip_identity_qualifier(target_type).upper().split()[0] if target_type else ""
+    tight = upper == "TINYTEXT" or bool(_STRING_WIDTH_RE.search(target_type or ""))
+    if not tight:
+        return False
+    tgt_w = parse_string_carrier_width(target_type)
+    if tgt_w is None:
+        return False
+    src_l = normalize_logical_type(source_type)
+    if src_l in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return string_width_would_narrow(source_type, target_type)
+    # Non-string → tight sink — fail closed (Accept risk).
+    return True
+
+
+def string_width_would_narrow(source_type: str, target_type: str) -> bool:
+    """True when source string capacity exceeds destination VARCHAR(n)/TEXT tier.
+
+    Cases: ``VARCHAR(255)→VARCHAR(50)``, ``TEXT→VARCHAR(10)``,
+    ``LONGTEXT→TINYTEXT``. Bare ``VARCHAR`` without a width stays unknown.
     """
     src_l = normalize_logical_type(source_type)
     tgt_l = normalize_logical_type(target_type)
@@ -3318,16 +3404,17 @@ def string_width_would_narrow(source_type: str, target_type: str) -> bool:
         return False
     if tgt_l not in {LOGICAL_STRING, LOGICAL_TEXT}:
         return False
-    if is_unlimited_string_carrier(target_type):
-        return False
+    src_rank = mysql_text_tier_rank(source_type)
+    tgt_rank = mysql_text_tier_rank(target_type)
+    if src_rank is not None and tgt_rank is not None and src_rank > tgt_rank:
+        return True
     tgt_w = parse_string_carrier_width(target_type)
     if tgt_w is None:
         return False
-    if is_unlimited_string_carrier(source_type):
-        return True
     src_w = parse_string_carrier_width(source_type)
     if src_w is None:
-        return False
+        # Unlimited generic TEXT/CLOB → bounded; bare VARCHAR unknown → no invent.
+        return is_unlimited_string_carrier(source_type)
     return src_w > tgt_w
 
 
@@ -3343,15 +3430,19 @@ _UNBOUNDED_BINARY_RE = re.compile(
 
 
 def parse_binary_carrier_width(inferred: str | None) -> int | None:
-    """Return bounded BINARY/VARBINARY byte width, or None if unlimited/unknown.
+    """Return bounded BINARY/VARBINARY width, or None if unlimited/unknown.
 
     BIT/VARBIT widths are bit-counted — use ``parse_bitstring_width`` instead.
+    MySQL BLOB tiers use :func:`mysql_blob_tier_rank` (not a fake VARBINARY width).
     """
     text = (inferred or "").strip()
     if not text:
         return None
     if is_bitstring_carrier(text):
         return None
+    upper = strip_identity_qualifier(text).upper().split()[0] if text else ""
+    if upper == "TINYBLOB":
+        return 255
     if _UNBOUNDED_BINARY_RE.search(text):
         return None
     m = _BINARY_WIDTH_RE.search(text)
@@ -3362,11 +3453,14 @@ def parse_binary_carrier_width(inferred: str | None) -> int | None:
 
 
 def is_unlimited_binary_carrier(inferred: str | None) -> bool:
-    """True for BYTEA / BLOB / VARBINARY(MAX) class carriers."""
+    """True for BYTEA / BLOB / VARBINARY(MAX) — not TINYBLOB."""
     text = (inferred or "").strip()
     if not text:
         return False
     if is_bitstring_carrier(text):
+        return False
+    upper = strip_identity_qualifier(text).upper().split()[0] if text else ""
+    if upper == "TINYBLOB":
         return False
     return bool(_UNBOUNDED_BINARY_RE.search(text))
 
@@ -3443,6 +3537,10 @@ def binary_width_would_narrow(source_type: str, target_type: str) -> bool:
         return False
     if is_bitstring_carrier(target_type):
         return bitstring_width_would_narrow(source_type, target_type)
+    src_rank = mysql_blob_tier_rank(source_type)
+    tgt_rank = mysql_blob_tier_rank(target_type)
+    if src_rank is not None and tgt_rank is not None and src_rank > tgt_rank:
+        return True
     tgt_w = parse_binary_carrier_width(target_type)
     if tgt_w is None:
         return False
@@ -3776,6 +3874,9 @@ def geography_contract_would_collapse(source_type: str, target_type: str) -> boo
     ts = parse_geography_srid(target_type)
     if ss is not None and ts is not None and ss != ts:
         return True
+    # Declared SRID → bare geometry drops the spatial contract.
+    if ss is not None and ts is None:
+        return True
     return False
 
 
@@ -3785,6 +3886,8 @@ _SPECIALTY_NATIVE_CARRIERS: Final[frozenset[str]] = frozenset(
         "CIDR",
         "MACADDR",
         "MACADDR8",
+        "REGCLASS",
+        "NAME",
         "POINT",
         "LINE",
         "LSEG",
@@ -5136,6 +5239,10 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
         return True
     if string_width_would_narrow(source_type, target_type):
         return True
+    if bounded_string_sink_would_truncate(source_type, target_type):
+        return True
+    if national_charset_would_collapse(source_type, target_type):
+        return True
     if binary_width_would_narrow(source_type, target_type):
         return True
     if bitstring_width_would_narrow(source_type, target_type):
@@ -5224,6 +5331,10 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
             return True
         if string_width_would_narrow(source_type, target_type):
             return True
+        if bounded_string_sink_would_truncate(source_type, target_type):
+            return True
+        if national_charset_would_collapse(source_type, target_type):
+            return True
         if bitstring_opaque_bytes_collapse(source_type, target_type):
             return True
         if binary_width_would_narrow(source_type, target_type):
@@ -5304,6 +5415,10 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         return True
     if string_width_would_narrow(source_type, target_type):
         return True
+    if bounded_string_sink_would_truncate(source_type, target_type):
+        return True
+    if national_charset_would_collapse(source_type, target_type):
+        return True
     if binary_width_would_narrow(source_type, target_type):
         return True
     if bitstring_width_would_narrow(source_type, target_type):
@@ -5356,8 +5471,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         (LOGICAL_JSON, LOGICAL_TEXT),
         (LOGICAL_JSON, LOGICAL_JSON),
         # ARRAY→JSON/text is document collapse (lossy) — not allow-listed.
+        # JSON→ARRAY invents array domain from a document — not allow-listed.
         (LOGICAL_ARRAY, LOGICAL_ARRAY),
-        (LOGICAL_JSON, LOGICAL_ARRAY),
         # numeric widening and text renderings
         (LOGICAL_INTEGER, LOGICAL_DECIMAL),
         # integer→float is LOSSY for large ints (IEEE mantissa) — not allow-listed
@@ -5404,6 +5519,11 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         if date_to_tz_aware_invent(source_type, target_type):
             return True
         if case_fold_polarity_invent(source_type, target_type):
+            return True
+        if national_charset_would_collapse(source_type, target_type):
+            return True
+        # INTEGER→VARCHAR(1) / JSON→CHAR(10) — bounded sink truncates.
+        if bounded_string_sink_would_truncate(source_type, target_type):
             return True
         return False
     return True
