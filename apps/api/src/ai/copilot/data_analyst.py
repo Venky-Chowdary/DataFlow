@@ -307,13 +307,13 @@ class CopilotDataAnalyst:
         return value
 
     def extract_dataset_hint(self, message: str) -> str | None:
+        """Match upload/industry names without re-parsing every CSV on each turn."""
         lower = message.lower()
-        schemas = self.feeder.feed_all()
-        for schema in schemas:
-            if schema.name.lower().replace("_", " ") in lower:
-                return schema.name
-            if schema.industry and schema.industry in lower:
-                return schema.name
+        for name, industry in self.feeder.list_dataset_names():
+            if name.lower().replace("_", " ") in lower:
+                return name
+            if industry and industry in lower:
+                return name
 
         for word in ("hr", "logistics", "payment", "retail", "finance", "healthcare", "employee", "shipping"):
             if word in lower:

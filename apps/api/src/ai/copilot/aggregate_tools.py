@@ -305,6 +305,9 @@ def _finish_request(
     measure_tail: str = "",
 ) -> AggregationRequest | None:
     """Pull connector, grouping, table and measure out of the remaining text."""
+    # Strip trailing sentence punctuation so "on Local Postgres?" still binds.
+    working = re.sub(r"[?\s.!;,:]+$", "", (working or "").strip())
+    measure_tail = re.sub(r"[?\s.!;,:]+$", "", (measure_tail or "").strip())
     # Connector: trailing "on <connector>" mirrors the pilot's existing
     # "sample <table> on <connector>" convention.
     conn = re.search(

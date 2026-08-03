@@ -299,9 +299,9 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
         )
     if any(w in lower for w in ("transfer", "sync", "move", "migrate", "copy", "replicate")):
         suggestions.append(
-            'I can plan a route or open Transfer Studio, but I can\'t start a sync '
-            'myself yet. Try: "plan transfer from Postgres to Snowflake" or '
-            '"open transfer studio".'
+            'I can plan a transfer and stage a start — nothing moves until you Confirm. '
+            'Try: "plan transfer of orders from Local Postgres to Warehouse" or '
+            '"transfer orders from Local Postgres to Warehouse as upsert".'
         )
     if any(w in lower for w in ("delete", "drop", "remove", "destroy")):
         suggestions.append(
@@ -366,10 +366,15 @@ def _score_response(resp: CopilotResponse | None) -> float:
     if ok > 0:
         score += 1.0
     else:
-        # Cloud prose with zero workspace checks loses to local tool answers
-        if any(m in method for m in ("anthropic", "openai", "ollama", "llm")):
-            score -= 1.35
         score -= fail * 0.1
+
+    # Local OpenAI-style engine is the product default — prefer it when equal.
+    if "local" in method:
+        score += 0.35
+    if any(m in method for m in ("anthropic", "openai", "ollama", "llm")) and ok == 0:
+        score -= 1.35
+    elif any(m in method for m in ("anthropic", "openai", "ollama")) and ok > 0:
+        score -= 0.05
 
     if resp.pending_actions:
         score += 0.45
@@ -447,10 +452,12 @@ class DataPilotAgent:
             return CopilotResponse(
                 answer=(
                     "I'm **Data Pilot** — ask me anything about your workspace. "
-                    "I can count and aggregate live tables, sample and profile "
-                    "rows, inspect schemas, triage jobs, and open the right screen. "
-                    'Try: "how many rows in airports on Local Postgres" or '
-                    '"count of orders by status".'
+                    "I can count and aggregate live tables, sample and profile rows, "
+                    "inspect schemas, plan or stage transfers (**Confirm** before anything moves), "
+                    "triage jobs, and open Fix bad data in Transfer Studio. "
+                    'Try: "how many rows in airports on Local Postgres", '
+                    '"plan transfer of orders from Local Postgres to Warehouse", '
+                    'or "fix bad data".'
                 ),
                 intent="greeting",
                 confidence=1.0,
@@ -466,13 +473,21 @@ class DataPilotAgent:
             return self._local_agent(message, history or [], ctx, data_context)
 
         ctx = self.context_builder.build(data_context, message)
+
+        # Local-first by default — our engine must work like OpenAI tool-calling
+        # without depending on third-party APIs. Opt into hybrid/cloud explicitly.
+        import os
+        engine = (os.environ.get("DATAFLOW_PILOT_ENGINE") or "local").strip().lower()
+        if engine in {"local", "local_first", "deterministic", ""}:
+            return self._local_agent(message, history or [], ctx, data_context)
+
         system = self._build_system_prompt(ctx)
 
         import time as _time
         from concurrent.futures import wait, FIRST_COMPLETED
 
-        # Race local agent vs cloud LLMs. Prefer a finished LLM answer, but never
-        # make the UI wait on a hung provider once the local agent is ready.
+        # Hybrid/cloud: race local vs optional providers. Local remains the
+        # fail-closed baseline when cloud is slow or unavailable.
         local_fut = _executor.submit(
             self._local_agent, message, history or [], ctx, data_context
         )
@@ -486,24 +501,25 @@ class DataPilotAgent:
         except Exception:
             openai_ready = False
 
-        if self.anthropic.is_available():
-            llm_futs.append(
-                _executor.submit(
-                    self._anthropic_agent_loop, message, history or [], system, data_context
+        if engine in {"hybrid", "cloud", "auto"}:
+            if self.anthropic.is_available():
+                llm_futs.append(
+                    _executor.submit(
+                        self._anthropic_agent_loop, message, history or [], system, data_context
+                    )
                 )
-            )
-        if openai_ready:
-            llm_futs.append(
-                _executor.submit(
-                    self._openai_agent, message, history or [], system, data_context
+            if openai_ready:
+                llm_futs.append(
+                    _executor.submit(
+                        self._openai_agent, message, history or [], system, data_context
+                    )
                 )
-            )
-        if self._ollama_available_quick():
-            llm_futs.append(
-                _executor.submit(
-                    self._ollama_agent, message, history or [], system, data_context
+            if self._ollama_available_quick():
+                llm_futs.append(
+                    _executor.submit(
+                        self._ollama_agent, message, history or [], system, data_context
+                    )
                 )
-            )
 
         pending = {local_fut, *llm_futs}
         deadline = _time.monotonic() + _LLM_TOTAL_BUDGET_S
@@ -862,6 +878,108 @@ class DataPilotAgent:
         if not openai.is_available():
             return None
 
+        intent = self._detect_intent(message)
+        turn = PilotTurn()
+        messages: list[dict] = []
+        for m in history[-10:]:
+            role = m.get("role", "user")
+            if role not in ("user", "assistant"):
+                continue
+            content = (m.get("content") or "").strip()
+            if content:
+                messages.append({"role": role, "content": content})
+        messages.append({"role": "user", "content": message})
+
+        # Prefer native tool calling; fall back to local plan + narration.
+        used_native = False
+        for _ in range(self.MAX_TOOL_ITERATIONS):
+            response = openai.generate_agent(
+                messages=messages,
+                system=system,
+                tools=TOOL_DEFINITIONS,
+                max_tokens=4096,
+            )
+            if not response.get("success"):
+                break
+            used_native = True
+            tool_calls = response.get("tool_calls") or []
+            if not tool_calls:
+                text = (response.get("content") or "").strip()
+                if text:
+                    self._commit_memory(
+                        [(tr.name, {}) for tr in turn.tool_results],
+                        turn,
+                        data_context,
+                    )
+                    return CopilotResponse(
+                        answer=text,
+                        intent=intent,
+                        confidence=0.92,
+                        method="openai_agent",
+                        reasoning=f"OpenAI tool loop, {len(turn.tool_results)} tool calls",
+                        suggested_actions=turn.actions,
+                        pending_actions=turn.pending_actions,
+                        needs_clarification=turn.needs_clarification,
+                        suggested_prompts=self._follow_ups(message, turn),
+                        data_insight=self._data_insight_from_turn(turn),
+                        tools_used=_tools_used(turn),
+                    )
+                break
+
+            assistant_msg: dict = {
+                "role": "assistant",
+                "content": response.get("content") or None,
+                "tool_calls": [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": json.dumps(tc.get("input") or {}, default=json_default),
+                        },
+                    }
+                    for tc in tool_calls
+                ],
+            }
+            messages.append(assistant_msg)
+            for tc in tool_calls:
+                args = self._with_result_context(tc["name"], tc.get("input") or {}, data_context)
+                tr = self.tools.execute(tc["name"], args)
+                turn.tool_results.append(tr)
+                self._append_tool_actions(turn, tr)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": json.dumps(
+                        tr.output if tr.success else {"error": tr.error},
+                        default=json_default,
+                    ),
+                })
+
+        if used_native and turn.tool_results:
+            # Tool loop exhausted without a final text — compose locally.
+            self._commit_memory(
+                [(tr.name, {}) for tr in turn.tool_results],
+                turn,
+                data_context,
+            )
+            ctx = get_context_builder().build(data_context)
+            insight = self._data_insight_from_turn(turn)
+            answer = self._compose_local_answer(message, intent, turn, insight, ctx)
+            return CopilotResponse(
+                answer=answer,
+                intent=intent,
+                confidence=0.88,
+                method="openai_agent_compose",
+                suggested_actions=turn.actions,
+                pending_actions=turn.pending_actions,
+                needs_clarification=turn.needs_clarification,
+                suggested_prompts=self._follow_ups(message, turn),
+                data_insight=insight,
+                tools_used=_tools_used(turn),
+            )
+
+        # Fallback: local NL plan + OpenAI narration (no native tools).
         planned = self._plan_with_memory(message, data_context)
         turn = PilotTurn()
         for name, args in planned:
@@ -892,7 +1010,7 @@ Respond as Data Pilot in natural language. Ground your answer in tool results an
             return None
         return CopilotResponse(
             answer=response.content.strip(),
-            intent=self._detect_intent(message),
+            intent=intent,
             confidence=0.9,
             method="openai_agent",
             suggested_actions=turn.actions,
@@ -1064,8 +1182,8 @@ Respond as Data Pilot — grounded in tool results."""
             answer=answer,
             intent=intent,
             confidence=confidence,
-            method="pilot_local_agent",
-            reasoning=f"Local agent with {len(turn.tool_results)} tools",
+            method="pilot_local_engine",
+            reasoning=f"Local OpenAI-style tool loop · {len(turn.tool_results)} tools",
             suggested_actions=turn.actions,
             pending_actions=turn.pending_actions,
             needs_clarification=turn.needs_clarification,

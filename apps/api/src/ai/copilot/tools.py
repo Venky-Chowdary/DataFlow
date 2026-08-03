@@ -620,7 +620,6 @@ TOOL_FAMILIES: list[dict] = [
         "id": "discover",
         "label": "Discover",
         "tools": ["list_datasets", "search_data", "search_connectors", "search_knowledge", "describe_pilot"],
-        "generated_actions": 620,
     },
     {
         "id": "profile",
@@ -639,19 +638,22 @@ TOOL_FAMILIES: list[dict] = [
             "diff_schemas",
             "map_connector_schemas",
         ],
-        "generated_actions": 240,
     },
     {
         "id": "move",
         "label": "Move",
-        "tools": ["plan_transfer_route", "get_transfer_capabilities", "recommend_sync_mode"],
-        "generated_actions": 720,
+        "tools": [
+            "plan_transfer_route",
+            "plan_transfer",
+            "start_transfer",
+            "get_transfer_capabilities",
+            "recommend_sync_mode",
+        ],
     },
     {
         "id": "govern",
         "label": "Govern",
         "tools": ["explain_mapping_assurance", "inspect_schema_policy"],
-        "generated_actions": 140,
     },
     {
         "id": "operate",
@@ -669,28 +671,30 @@ TOOL_FAMILIES: list[dict] = [
             "open_job",
             "open_schedule",
             "start_transfer_studio",
+            "create_connector",
+            "list_connectors",
         ],
-        "generated_actions": 220,
     },
 ]
 
 
 def get_tool_registry() -> dict:
+    """Honest tool registry — counts only real TOOL_DEFINITIONS (no marketing inflation)."""
     tool_names = {t["name"] for t in TOOL_DEFINITIONS}
     families = []
-    generated_total = 0
     for family in TOOL_FAMILIES:
         available = [name for name in family["tools"] if name in tool_names]
-        generated_total += int(family.get("generated_actions", 0))
         families.append({
-            **family,
+            **{k: v for k, v in family.items() if k != "generated_actions"},
             "tools": available,
             "tool_count": len(available),
+            "generated_actions": 0,
         })
     return {
         "tool_count": len(TOOL_DEFINITIONS),
-        "generated_action_count": generated_total,
-        "total_routable_actions": len(TOOL_DEFINITIONS) + generated_total,
+        # Kept for API compat; always 0 — never invent phantom "routable actions".
+        "generated_action_count": 0,
+        "total_routable_actions": len(TOOL_DEFINITIONS),
         "families": families,
         "tools": [
             {
@@ -806,6 +810,7 @@ class DataPilotTools:
 
     def _list_connectors(self) -> ToolResult:
         summary = []
+        errors: list[str] = []
         try:
             from services.connector_store import list_connectors as store_list
 
@@ -820,7 +825,8 @@ class DataPilotTools:
                     "status": d.get("status", "saved"),
                 })
         except Exception as exc:
-            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+            logging.getLogger(__name__).warning("connector_store list failed: %s", exc, exc_info=exc)
+            errors.append(f"connector_store: {exc}")
         if not summary:
             try:
                 from ...services.mongodb_service import get_mongodb_service
@@ -836,7 +842,21 @@ class DataPilotTools:
                         "status": c.get("status", "unknown"),
                     })
             except Exception as exc:
-                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+                logging.getLogger(__name__).warning("mongo list_connectors failed: %s", exc, exc_info=exc)
+                errors.append(f"mongodb: {exc}")
+        # Empty workspace with healthy stores is success; broken stores must not
+        # greenwash as "you have zero connectors".
+        if not summary and errors:
+            return ToolResult(
+                name="list_connectors",
+                success=False,
+                output={"connectors": [], "count": 0, "errors": errors},
+                error=(
+                    "Could not load saved connectors ("
+                    + "; ".join(errors[:2])
+                    + "). Check Settings → storage, then retry."
+                ),
+            )
         return ToolResult(
             name="list_connectors",
             success=True,
@@ -1200,11 +1220,16 @@ class DataPilotTools:
             success=True,
             output={
                 "role": "Data Pilot",
-                "runtime": "local_first",
+                "runtime": "local_engine",
+                "runtime_note": (
+                    "Primary brain is DataFlow's local OpenAI-style tool loop "
+                    "(DATAFLOW_PILOT_ENGINE=local). No third-party API required."
+                ),
                 "can": [
                     "Answer analytics questions with exact aggregates "
                     "(count / sum / avg / min / max / distinct / group by / top-N)",
                     "Plan source→destination routes and sync modes",
+                    "Stage a transfer (map + 9 preflight gates) and start it after you Confirm",
                     "Inspect schema risk, mappings, and validation failures",
                     "Triage jobs by ID (validation runs or job IDs)",
                     "Search your uploaded datasets for columns, PII, and quality",
@@ -1215,12 +1240,16 @@ class DataPilotTools:
                     "Create a saved connector from a URL or host/user/password (server ack + Confirm)",
                     "Compare source vs destination schemas and map columns",
                     "List and run pipeline schedules (with confirmation)",
+                    "Open Fix bad data / quarantine paths in Transfer Studio (Confirm required)",
                     "Open any app screen (Transfer, Jobs, Pipelines, Contracts, Query, …)",
                 ],
                 "cannot_yet": [
-                    "Start a transfer or create a schedule from chat "
-                    "(I can plan the route and open Transfer Studio)",
-                    "Export a table to a file (use Query for larger pulls)",
+                    "Export a table to a downloadable file from chat "
+                    "(sample the table or use Query for larger pulls)",
+                    "Create a brand-new schedule/pipeline definition from chat "
+                    "(I can list and run existing ones)",
+                    "Rewrite quarantine rows in place from chat "
+                    "(I open Transfer Studio Fix with your Confirm)",
                     "Delete connectors, jobs, or data",
                 ],
                 "tools": [t["name"] for t in TOOL_DEFINITIONS],
@@ -1860,6 +1889,13 @@ _META_PILOT_PHRASES = (
     "knowledge you have",
     "trained knowledge",
     "what can pilot",
+    "help me with data pilot",
+    "help with data pilot",
+    "describe yourself",
+    "describe data pilot",
+    "tell me about yourself",
+    "what tools do you have",
+    "your tools",
 )
 
 
@@ -1975,6 +2011,17 @@ def _looks_like_domain_knowledge_query(lower: str) -> bool:
         return False
     fluff = ("thank", "thanks", "ok", "okay", "sure", "cool", "great", "nice", "lol")
     if lower.strip() in fluff or any(lower.startswith(f + " ") for f in fluff):
+        return False
+    # Destructive / unsupported intents must fall through to honest unmapped
+    # replies — never invent knowledge hits that sound like we can delete/export.
+    if any(
+        w in lower
+        for w in (
+            "delete ", "drop ", "destroy ", "truncate ", "remove connector",
+            "export ", "download ", "create a new schedule", "create schedule",
+            "create a pipeline", "new nightly", "cron ",
+        )
+    ):
         return False
     signals = (
         "what is", "what's", "whats", "how do", "how does", "explain", "mean",
@@ -2601,8 +2648,14 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
                 "dest_connector_name": map_m.group(3).strip(),
             }))
 
-    if any(w in lower for w in ("quality rules", "quality gates", "data quality", "profile rules")):
+    if any(w in lower for w in (
+        "quality rules", "quality gates", "data quality", "profile rules",
+        "suggest improvements", "suggestions for my data", "how can i improve",
+        "data recommendations", "recommend fixes",
+    )):
         planned.append(("profile_quality_rules", {}))
+        if any(w in lower for w in ("suggest", "recommend", "improve", "fix")):
+            planned.append(("search_knowledge", {"query": message[:200]}))
 
     # Uploaded dataset compare — only when not already a live schema diff
     if "diff_schemas" not in [p[0] for p in planned]:

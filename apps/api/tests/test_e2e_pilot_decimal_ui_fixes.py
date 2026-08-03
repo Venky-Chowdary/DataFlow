@@ -44,7 +44,7 @@ META_PROMPTS = [
 def test_e2e_pilot_meta_is_natural_not_rag_shard(pilot, prompt):
     resp = pilot.chat(prompt, history=[], data_context=None)
     answer = (resp.answer or "").lower()
-    assert resp.method in {"pilot_local_agent", "greeting"}
+    assert resp.method in {"pilot_local_engine", "pilot_local_agent", "greeting"}
     assert "semantic type:" not in answer
     assert "pallet id" not in answer
     assert "_(6 trained knowledge matches)_" not in (resp.answer or "")

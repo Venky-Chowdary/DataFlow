@@ -7,12 +7,16 @@ Ingest schemas from uploaded files, connectors, and industry templates for AI tr
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 from ..knowledge.industry_schemas import INDUSTRY_SCHEMAS
+
+# Hot-path cache TTL for Pilot NL routing (avoid re-parsing every CSV every turn).
+_FEED_CACHE_TTL_S = 60.0
 
 
 @dataclass
@@ -39,6 +43,10 @@ class UniversalDataFeeder:
         ]
         self.upload_dirs = upload_dirs or default_dirs
         self._parser = None
+        self._feed_cache: list[UniversalSchema] | None = None
+        self._feed_cache_at: float = 0.0
+        self._name_cache: list[tuple[str, str | None]] | None = None
+        self._name_cache_at: float = 0.0
 
     @property
     def parser(self):
@@ -46,6 +54,47 @@ class UniversalDataFeeder:
             from ...services.file_parser import FileParser
             self._parser = FileParser
         return self._parser
+
+    def list_dataset_names(self) -> list[tuple[str, str | None]]:
+        """Lightweight name index for Pilot routing — never parses CSV bodies.
+
+        Returns ``(name, industry_or_none)`` for uploads + industry templates.
+        """
+        now = time.monotonic()
+        if self._name_cache is not None and (now - self._name_cache_at) < _FEED_CACHE_TTL_S:
+            return self._name_cache
+
+        names: list[tuple[str, str | None]] = []
+        seen: set[str] = set()
+        for upload_dir in self.upload_dirs:
+            path = Path(upload_dir)
+            if not path.exists():
+                continue
+            try:
+                for file_path in path.iterdir():
+                    if not file_path.is_file():
+                        continue
+                    if file_path.suffix.lower() not in (
+                        ".csv", ".json", ".jsonl", ".tsv", ".ndjson",
+                    ):
+                        continue
+                    stem = file_path.stem
+                    key = stem.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    names.append((stem, None))
+            except OSError as exc:
+                logger.warning("Could not list %s: %s", upload_dir, exc)
+
+        for key in INDUSTRY_SCHEMAS:
+            if key.lower() not in seen:
+                seen.add(key.lower())
+                names.append((key, key))
+
+        self._name_cache = names
+        self._name_cache_at = now
+        return names
 
     def scan_uploads(self) -> list[UniversalSchema]:
         """Parse all files in upload directories."""
@@ -109,8 +158,16 @@ class UniversalDataFeeder:
             ))
         return schemas
 
-    def feed_all(self) -> list[UniversalSchema]:
-        """Collect schemas from all universal data sources."""
+    def feed_all(self, *, force: bool = False) -> list[UniversalSchema]:
+        """Collect schemas from all universal data sources (TTL-cached)."""
+        now = time.monotonic()
+        if (
+            not force
+            and self._feed_cache is not None
+            and (now - self._feed_cache_at) < _FEED_CACHE_TTL_S
+        ):
+            return self._feed_cache
+
         seen = set()
         all_schemas = []
 
@@ -131,7 +188,15 @@ class UniversalDataFeeder:
                 seen.add(key)
                 all_schemas.append(schema)
 
+        self._feed_cache = all_schemas
+        self._feed_cache_at = now
         return all_schemas
+
+    def invalidate_cache(self) -> None:
+        self._feed_cache = None
+        self._feed_cache_at = 0.0
+        self._name_cache = None
+        self._name_cache_at = 0.0
 
     def to_training_dicts(self, schemas: list[UniversalSchema] | None = None) -> list[dict]:
         """Convert schemas to dicts for conversation synthesis."""

@@ -105,6 +105,81 @@ class DataTransferOpenAIProvider(DataTransferLLMProvider):
         except Exception as e:
             return LLMResponse(content="", success=False, provider=self.name, metadata={"error": str(e)})
 
+    def generate_agent(
+        self,
+        messages: list[dict],
+        system: str = "",
+        tools: list[dict] | None = None,
+        max_tokens: int = 4096,
+    ) -> dict:
+        """OpenAI chat.completions turn with optional native function/tool calling."""
+        if not self.is_available():
+            return {"success": False, "error": "OpenAI not available"}
+
+        try:
+            openai_tools = None
+            if tools:
+                openai_tools = []
+                for tool in tools:
+                    # Accept Anthropic-shaped TOOL_DEFINITIONS or already-OpenAI shapes.
+                    if tool.get("type") == "function" and isinstance(tool.get("function"), dict):
+                        openai_tools.append(tool)
+                        continue
+                    openai_tools.append({
+                        "type": "function",
+                        "function": {
+                            "name": tool["name"],
+                            "description": tool.get("description") or "",
+                            "parameters": tool.get("input_schema")
+                            or tool.get("parameters")
+                            or {"type": "object", "properties": {}},
+                        },
+                    })
+
+            kwargs: dict = {
+                "model": self.model,
+                "messages": (
+                    ([{"role": "system", "content": system}] if system else [])
+                    + list(messages)
+                ),
+                "max_tokens": max_tokens,
+                "temperature": 0.1,
+            }
+            if openai_tools:
+                kwargs["tools"] = openai_tools
+                kwargs["tool_choice"] = "auto"
+
+            response = self._client.chat.completions.create(**kwargs)
+            choice = response.choices[0].message
+            tool_calls: list[dict] = []
+            for tc in choice.tool_calls or []:
+                raw_args = tc.function.arguments or "{}"
+                try:
+                    parsed = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+                except Exception:
+                    parsed = {}
+                if not isinstance(parsed, dict):
+                    parsed = {}
+                tool_calls.append({
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "input": parsed,
+                })
+
+            usage = response.usage
+            return {
+                "success": True,
+                "content": (choice.content or "").strip(),
+                "tool_calls": tool_calls,
+                "stop_reason": "tool_calls" if tool_calls else (choice.finish_reason or "stop"),
+                "usage": {
+                    "input": getattr(usage, "prompt_tokens", 0) or 0,
+                    "output": getattr(usage, "completion_tokens", 0) or 0,
+                },
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
 
 class DataTransferAnthropicProvider(DataTransferLLMProvider):
     name = "anthropic"
@@ -325,8 +400,8 @@ MODEL_CAPABILITY_MATRIX = [
         "env_key": "OPENAI_API_KEY",
         "package": "openai",
         "tier": "cloud",
-        "roles": ["copilot_chat", "rag_answering", "mapping_explanation", "fallback_generation"],
-        "best_for": "Fast grounded chat, mapping explanation, RAG answers, and second-line cloud fallback.",
+        "roles": ["agent_tool_use", "copilot_chat", "rag_answering", "mapping_explanation", "fallback_generation"],
+        "best_for": "Data Pilot tool loops, grounded chat, mapping explanation, RAG answers, and cloud fallback.",
     },
     {
         "provider": "ollama",
@@ -340,13 +415,23 @@ MODEL_CAPABILITY_MATRIX = [
     },
     {
         "provider": "local",
-        "label": "Local deterministic engine",
-        "default_model": "local_knowledge",
+        "label": "Data Pilot local engine",
+        "default_model": "pilot_local_engine",
         "env_key": "",
         "package": "",
         "tier": "deterministic",
-        "roles": ["semantic_rules", "rag_retrieval", "preflight_gates", "mapping_assignment"],
-        "best_for": "Always-on fail-closed semantic analysis, RAG retrieval, preflight, and deterministic mapping safeguards.",
+        "roles": [
+            "agent_tool_use",
+            "copilot_chat",
+            "semantic_rules",
+            "rag_retrieval",
+            "preflight_gates",
+            "mapping_assignment",
+        ],
+        "best_for": (
+            "Primary Data Pilot brain — OpenAI-style tool planning/execution without "
+            "third-party APIs. Exact aggregates, schema, transfers-with-Confirm, job triage."
+        ),
     },
 ]
 
@@ -392,22 +477,36 @@ def get_model_capabilities() -> dict:
             "status": "ready" if available else "configure" if item["tier"] == "cloud" else "offline",
         })
 
-    active = next((p for p in rows if p["available"]), rows[-1])
+    active_local = next((p for p in rows if p["provider"] == "local"), rows[-1])
+    # Prefer configured cloud only when DATAFLOW_PILOT_ENGINE requests hybrid/cloud.
+    engine = (os.environ.get("DATAFLOW_PILOT_ENGINE") or "local").strip().lower()
+    if engine in {"hybrid", "cloud", "auto"}:
+        active = next((p for p in rows if p["available"] and p["provider"] != "local"), active_local)
+    else:
+        active = active_local
     return {
         "active_provider": active["provider"],
         "active_model": active["default_model"],
         "agent_mode": (
-            "anthropic_tools" if providers["anthropic"].is_available()
-            else "openai_tools" if providers["openai"].is_available()
-            else "ollama_tools" if providers["ollama"].is_available()
-            else "local_tools"
+            "local_tools"
+            if engine in {"local", "local_first", "deterministic", ""}
+            else (
+                "anthropic_tools" if providers["anthropic"].is_available()
+                else "openai_tools" if providers["openai"].is_available()
+                else "ollama_tools" if providers["ollama"].is_available()
+                else "local_tools"
+            )
         ),
-        "fallback_order": ["anthropic", "openai", "ollama", "rag", "local"],
+        "pilot_engine": engine or "local",
+        "fallback_order": ["local", "rag", "ollama", "openai", "anthropic"],
         "providers": rows,
         "guarantees": [
-            "Cloud models are used only when their API key and SDK are configured.",
+            "Data Pilot defaults to the local tool engine — no third-party API required.",
+            "Set DATAFLOW_PILOT_ENGINE=hybrid to optionally race Anthropic/OpenAI/Ollama.",
+            "Cloud models are used only when explicitly enabled and their API key/SDK are configured.",
             "RAG and deterministic mapping continue when cloud providers are unavailable.",
             "Preflight gates and schema-policy blockers do not depend on probabilistic model output.",
             "Ambiguous mappings remain reviewable instead of being silently auto-applied.",
+            "Mutations (create connector / start transfer) always require operator Confirm.",
         ],
     }
