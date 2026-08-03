@@ -264,7 +264,22 @@ export function detectTypeRisks(
       const tzToNtz =
         /\b(timestamptz|timestamp with time zone|timestamp_tz|timestamp_ltz)\b/.test(src) &&
         /\b(timestamp_ntz|datetime|timestamp without time zone)\b/.test(dest);
-      if (floatToDecimal || decimalToFloat || decimalToInt || datetimeToDate || stringToNumber || tzToNtz) {
+      const ntzToTz =
+        /\b(timestamp_ntz|datetime|timestamp without time zone)\b/.test(src) &&
+        /\b(timestamptz|timestamp with time zone|timestamp_tz|timestamp_ltz|datetimeoffset)\b/.test(dest);
+      const timeToTimetz =
+        /\btime\b/.test(src) && !/time\s*zone|timetz/.test(src) &&
+        /\b(timetz|time with time zone)\b/.test(dest);
+      const dateToTz =
+        /\bdate\b/.test(src) && !/time/.test(src) &&
+        /\b(timestamptz|timestamp with time zone|timestamp_tz|timestamp_ltz|datetimeoffset)\b/.test(dest);
+      const jsonToString =
+        /\b(jsonb?|variant|super)\b/.test(src) &&
+        /\b(string|text|varchar|nvarchar|char)\b/.test(dest);
+      if (
+        floatToDecimal || decimalToFloat || decimalToInt || datetimeToDate || stringToNumber
+        || tzToNtz || ntzToTz || timeToTimetz || dateToTz || jsonToString
+      ) {
         risks.push({
           id: `lossy-${m.source}`,
           column: m.source,
@@ -277,7 +292,11 @@ export function detectTypeRisks(
                 ? "Datetime → date drops time-of-day"
                 : tzToNtz
                   ? "Timestamptz → NTZ drops timezone polarity"
-                  : "Possible precision loss",
+                  : ntzToTz || timeToTimetz || dateToTz
+                    ? "Wall-clock → timezone-aware invents an offset"
+                    : jsonToString
+                      ? "Document → open string drops JSON validation domain"
+                      : "Possible precision loss",
           detail: floatToDecimal
             ? `${srcTypeRaw} → ${destCarrier}: keep FLOAT/DOUBLE on the destination, or accept rounding risk and approve on Validate.`
             : decimalToFloat

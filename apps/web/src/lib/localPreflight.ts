@@ -32,8 +32,13 @@ function applyTransform(value: unknown, transform?: string): unknown {
       return Number.isFinite(n) ? n : value;
     }
     case "boolean":
-    case "cast_boolean":
-      return ["true", "1", "yes", "y"].includes(s.toLowerCase());
+    case "cast_boolean": {
+      // Strict wire only — match transform_engine._STRICT_BOOL_* (no yes/y invent).
+      const t = s.toLowerCase();
+      if (["true", "t", "1"].includes(t)) return true;
+      if (["false", "f", "0"].includes(t)) return false;
+      return value;
+    }
     default:
       return value;
   }

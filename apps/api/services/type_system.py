@@ -1347,8 +1347,9 @@ def decimal_params_would_narrow(source_type: str, target_type: str) -> bool:
     if sp is None and ss is None:
         return False
     if tp is None and ts is None:
-        # Bare DECIMAL/NUMERIC target — platform default; not a proven narrow.
-        return False
+        # Proven (p,s) → bare DECIMAL invents platform default (often MySQL
+        # DECIMAL(10,0) / engine-specific) — Accept risk, never silent green.
+        return True
     if ss is not None and ts is not None and ts < ss:
         return True
     if sp is not None and tp is not None:
@@ -1364,6 +1365,19 @@ def decimal_params_would_narrow(source_type: str, target_type: str) -> bool:
 def is_opaque_document_logical(inferred: str | None) -> bool:
     """True for VARIANT/JSONB/SUPER-style document sinks (not fielded STRUCT/MAP)."""
     return normalize_logical_type(inferred) == LOGICAL_JSON
+
+
+def document_domain_would_collapse(source_type: str, target_type: str) -> bool:
+    """True when JSON/VARIANT/SUPER/JSONB loses document validation into open text.
+
+    Serializing a document to VARCHAR/STRING/TEXT is value-renderable but drops
+    JSON parse polarity — same Accept-risk class as JSONB→TEXT (specialty path).
+    Never silent-green JSON→STRING while JSONB→STRING blocks.
+    """
+    if normalize_logical_type(source_type) != LOGICAL_JSON:
+        return False
+    tgt = normalize_logical_type(target_type)
+    return tgt in {LOGICAL_STRING, LOGICAL_TEXT}
 
 
 def is_nested_document_collapse(source_type: str, target_type: str) -> bool:
@@ -1436,6 +1450,9 @@ def nested_array_elements_incompatible(source_type: str, target_type: str) -> bo
     """True when ARRAY/LIST element types collapse fidelity (e.g. FLOAT→INTEGER)."""
     src_el = parse_array_element(source_type)
     tgt_el = parse_array_element(target_type)
+    # Bare ARRAY/LIST ↔ typed ARRAY<T> invents or drops the element contract.
+    if bool(src_el) != bool(tgt_el):
+        return True
     if not src_el or not tgt_el:
         return False
     if is_precision_collapse_coercion(src_el, tgt_el):
@@ -1471,6 +1488,9 @@ def is_nested_shape_collapse(source_type: str, target_type: str) -> bool:
     if src == LOGICAL_MAP and tgt == LOGICAL_MAP:
         skv = parse_map_key_value(source_type)
         tkv = parse_map_key_value(target_type)
+        # Bare MAP ↔ typed MAP<K,V> invents or drops the key/value contract.
+        if bool(skv) != bool(tkv):
+            return True
         if skv and tkv:
             if normalize_logical_type(skv[0]) != normalize_logical_type(tkv[0]):
                 return True
@@ -5582,8 +5602,14 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         return True
     if temporal_precision_would_narrow(source_type, target_type):
         return True
+    if document_domain_would_collapse(source_type, target_type):
+        return True
     # ARRAY→ARRAY is in the safe allow-list below only when element types widen.
     if src == LOGICAL_ARRAY and tgt == LOGICAL_ARRAY and is_nested_shape_collapse(
+        source_type, target_type
+    ):
+        return True
+    if src == LOGICAL_MAP and tgt == LOGICAL_MAP and is_nested_shape_collapse(
         source_type, target_type
     ):
         return True
@@ -5594,8 +5620,7 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         (LOGICAL_TEXT, LOGICAL_STRING),
         (LOGICAL_STRING, LOGICAL_JSON),
         (LOGICAL_TEXT, LOGICAL_JSON),
-        (LOGICAL_JSON, LOGICAL_STRING),
-        (LOGICAL_JSON, LOGICAL_TEXT),
+        # JSON/VARIANT/SUPER → open string drops document domain — not allow-listed.
         (LOGICAL_JSON, LOGICAL_JSON),
         # ARRAY→JSON/text is document collapse (lossy) — not allow-listed.
         # JSON→ARRAY invents array domain from a document — not allow-listed.

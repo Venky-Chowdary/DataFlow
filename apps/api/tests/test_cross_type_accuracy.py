@@ -181,7 +181,7 @@ def test_lossy_coercion_detection():
         ("INTEGER", "VARCHAR", False),
         ("DATE", "DATETIME", False),
         ("BOOLEAN", "INTEGER", False),
-        ("JSON", "TEXT", False),
+        ("JSON", "TEXT", True),
         # binary ↔ text needs encoding policy (hex/base64) — Accept risk, not preserve
         ("BINARY", "TEXT", True),
         ("TEXT", "BINARY", True),

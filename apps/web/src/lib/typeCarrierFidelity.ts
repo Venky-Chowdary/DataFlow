@@ -109,10 +109,79 @@ export function decimalWouldCollapse(sourceType: string, targetType: string): bo
   if (!isDecimalFamily(sourceType) || !isDecimalFamily(targetType)) return false;
   const src = parseDecimalPrecisionScale(sourceType);
   const tgt = parseDecimalPrecisionScale(targetType);
-  if (!src || !tgt) return false;
+  if (!src) return false;
+  // Proven (p,s) → bare DECIMAL invents platform default — Accept risk.
+  if (!tgt) return true;
   if (src.scale > tgt.scale) return true;
   // Integer digits capacity: precision − scale.
   return src.precision - src.scale > tgt.precision - tgt.scale;
+}
+
+function isTzAwareTemporal(inferred: string | null | undefined): boolean {
+  const t = (inferred || "").trim().toLowerCase();
+  return /\b(timestamptz|timestamp with time zone|timestamp_tz|timestamp_ltz|timetz|time with time zone|datetimeoffset)\b/.test(
+    t,
+  );
+}
+
+function isNtzTemporal(inferred: string | null | undefined): boolean {
+  const t = (inferred || "").trim().toLowerCase();
+  if (isTzAwareTemporal(t)) return false;
+  return /\b(timestamp_ntz|datetime|timestamp without time zone|timestamp|time)\b/.test(t);
+}
+
+function isDocumentCarrier(inferred: string | null | undefined): boolean {
+  const t = (inferred || "").trim().toLowerCase();
+  return /\b(jsonb?|variant|super|object)\b/.test(t);
+}
+
+function isOpenStringCarrier(inferred: string | null | undefined): boolean {
+  const t = (inferred || "").trim().toLowerCase();
+  return /\b(string|text|varchar|nvarchar|char|nchar|clob)\b/.test(t) && !isDocumentCarrier(t);
+}
+
+/**
+ * Client-side Map fidelity risk when engine stamp is cleared (dest-type change).
+ * Aligns with API is_lossy / timezone / document-domain honesty — never invent Approve.
+ */
+export function declaredCarrierFidelityRisk(
+  sourceType: string | null | undefined,
+  targetType: string | null | undefined,
+): boolean {
+  const src = (sourceType || "").trim();
+  const tgt = (targetType || "").trim();
+  if (!src || !tgt) return false;
+  if (stringWidthWouldNarrow(src, tgt)) return true;
+  if (decimalWouldCollapse(src, tgt)) return true;
+  if (isDocumentCarrier(src) && isOpenStringCarrier(tgt)) return true;
+  if (isTzAwareTemporal(src) && isNtzTemporal(tgt)) return true;
+  if (isNtzTemporal(src) && isTzAwareTemporal(tgt)) return true;
+  if (/\bdate\b/.test(src.toLowerCase()) && isTzAwareTemporal(tgt)) return true;
+  if (
+    /\b(timestamp|datetime|timestamptz)\b/.test(src.toLowerCase())
+    && /\bdate\b/.test(tgt.toLowerCase())
+    && !/time/.test(tgt.toLowerCase().replace("timestamp", "").replace("datetime", ""))
+  ) {
+    return true;
+  }
+  // Bare ARRAY/LIST/MAP ↔ typed element invent/drop.
+  const arrayTyped = (t: string): boolean | null => {
+    if (/^(array|list)$/i.test(t)) return false;
+    if (/^(?:array|list)\s*[<(]/i.test(t) || /\[\s*\]\s*$/.test(t)) return true;
+    return null;
+  };
+  const sa = arrayTyped(src);
+  const ta = arrayTyped(tgt);
+  if (sa != null && ta != null && sa !== ta) return true;
+  const mapTyped = (t: string): boolean | null => {
+    if (/^map$/i.test(t)) return false;
+    if (/^map\s*[<(]/i.test(t)) return true;
+    return null;
+  };
+  const sm = mapTyped(src);
+  const tm = mapTyped(tgt);
+  if (sm != null && tm != null && sm !== tm) return true;
+  return false;
 }
 
 /**

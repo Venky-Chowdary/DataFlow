@@ -278,6 +278,28 @@ def test_specialty_to_text_is_lossy_not_preserve():
     assert is_lossy_coercion("DECIMAL(19,4)", "MONEY") is True
 
 
+def test_document_nested_decimal_bare_wave16():
+    from services.type_system import (
+        decimal_params_would_narrow,
+        document_domain_would_collapse,
+        is_lossy_coercion,
+        is_nested_shape_collapse,
+    )
+
+    assert document_domain_would_collapse("JSON", "STRING") is True
+    assert document_domain_would_collapse("VARIANT", "TEXT") is True
+    assert is_lossy_coercion("SUPER", "VARCHAR") is True
+    assert is_lossy_coercion("JSON", "JSON") is False
+
+    assert is_nested_shape_collapse("ARRAY", "ARRAY<STRING>") is True
+    assert is_lossy_coercion("ARRAY<INT>", "ARRAY") is True
+    assert is_lossy_coercion("MAP", "MAP<STRING,INT>") is True
+    assert is_lossy_coercion("MAP<STRING,INT>", "MAP") is True
+
+    assert decimal_params_would_narrow("DECIMAL(38,10)", "DECIMAL") is True
+    assert is_lossy_coercion("DECIMAL(10,2)", "NUMERIC") is True
+
+
 def test_year_invent_geometry_pad_nested_wave15():
     from services.type_coercion_validator import validate_mapping_coercions
     from services.type_system import (

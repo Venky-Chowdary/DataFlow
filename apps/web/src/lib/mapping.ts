@@ -1,4 +1,5 @@
 import type { ColumnAnalysis } from "./types";
+import { declaredCarrierFidelityRisk } from "./typeCarrierFidelity";
 
 /**
  * Studio MappingTransform vocabulary — must stay aligned with
@@ -288,6 +289,9 @@ export function mappingRequiresRiskAck(m: EditableMapping): boolean {
   if (isIntentionalOmit(m)) return false;
   const fidelity = (m.fidelity || "").toLowerCase();
   if (fidelity === "lossy_cast" || fidelity === "mutate" || m.typeNarrowing) return true;
+  // Dest-type edits clear engine fidelity — recompute from carriers so Approve
+  // cannot look green until Accept risk (Map→Validate SSOT).
+  if (declaredCarrierFidelityRisk(m.inferredType, m.destType)) return true;
   if (isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType)) return true;
   if (m.transform === "identity_specialty") return true;
   if (
@@ -732,15 +736,19 @@ export function applyDestTypeChange(m: EditableMapping, nextDestType: string): E
       requiresReview: true,
     };
   }
+  const narrowing = declaredCarrierFidelityRisk(m.inferredType, nextDestType);
   return {
     ...m,
     destType: nextDestType,
     approved: false,
     riskAcknowledged: false,
     // Stale engine fidelity must not greenwash the new dest type until re-stamp.
-    fidelity: undefined,
-    fidelityReason: undefined,
-    typeNarrowing: undefined,
+    fidelity: narrowing ? "lossy_cast" : undefined,
+    fidelityReason: narrowing
+      ? `Destination type ${nextDestType} may collapse fidelity from ${m.inferredType || "source"}`
+      : undefined,
+    typeNarrowing: narrowing || undefined,
+    requiresReview: narrowing || m.requiresReview,
   };
 }
 
