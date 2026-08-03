@@ -251,7 +251,7 @@ CSV_SNOWFLAKE_DDL_EXPECTED = {
     "order_id": "VARCHAR",
     "customer_email": "VARCHAR",
     "order_total": "NUMBER(38,10)",
-    "quantity": "NUMBER(38,0)",
+    "quantity": "INTEGER",
     "is_gift": "BOOLEAN",
     "order_date": "DATE",
     # Bare TIMESTAMP = wall-clock NTZ (offset samples need explicit TIMESTAMPTZ).

@@ -42,6 +42,9 @@ export const LOGICAL_TYPE_OPTIONS: { value: string; label: string; family: TypeF
 /** Snowflake-native DDL labels — Map should show what CREATE will actually use. */
 export const SNOWFLAKE_TYPE_OPTIONS: { value: string; label: string; family: TypeFamily }[] = [
   { value: "VARCHAR", label: "VARCHAR — text", family: "string" },
+  { value: "SMALLINT", label: "SMALLINT — 16-bit", family: "int" },
+  { value: "INTEGER", label: "INTEGER — 32-bit", family: "int" },
+  { value: "BIGINT", label: "BIGINT — 64-bit", family: "int" },
   { value: "NUMBER(38,0)", label: "NUMBER(38,0) — integer", family: "int" },
   { value: "NUMBER(38,10)", label: "NUMBER(38,10) — decimal", family: "decimal" },
   { value: "FLOAT", label: "FLOAT", family: "float" },
@@ -93,9 +96,11 @@ export const MYSQL_TYPE_OPTIONS: { value: string; label: string; family: TypeFam
 
 export const POSTGRES_TYPE_OPTIONS: { value: string; label: string; family: TypeFamily }[] = [
   { value: "TEXT", label: "TEXT", family: "string" },
-  { value: "BIGINT", label: "BIGINT", family: "int" },
+  { value: "SMALLINT", label: "SMALLINT", family: "int" },
   { value: "INTEGER", label: "INTEGER", family: "int" },
+  { value: "BIGINT", label: "BIGINT", family: "int" },
   { value: "NUMERIC", label: "NUMERIC", family: "decimal" },
+  { value: "REAL", label: "REAL — IEEE single", family: "float" },
   { value: "DOUBLE PRECISION", label: "DOUBLE PRECISION", family: "float" },
   { value: "BOOLEAN", label: "BOOLEAN", family: "bool" },
   { value: "DATE", label: "DATE", family: "temporal" },
@@ -114,9 +119,11 @@ export const POSTGRES_TYPE_OPTIONS: { value: string; label: string; family: Type
 
 export const REDSHIFT_TYPE_OPTIONS: { value: string; label: string; family: TypeFamily }[] = [
   { value: "VARCHAR", label: "VARCHAR", family: "string" },
-  { value: "BIGINT", label: "BIGINT", family: "int" },
+  { value: "SMALLINT", label: "SMALLINT", family: "int" },
   { value: "INTEGER", label: "INTEGER", family: "int" },
+  { value: "BIGINT", label: "BIGINT", family: "int" },
   { value: "NUMERIC(38,10)", label: "NUMERIC(38,10)", family: "decimal" },
+  { value: "REAL", label: "REAL — IEEE single", family: "float" },
   { value: "DOUBLE PRECISION", label: "DOUBLE PRECISION", family: "float" },
   { value: "BOOLEAN", label: "BOOLEAN", family: "bool" },
   { value: "DATE", label: "DATE", family: "temporal" },
@@ -368,14 +375,17 @@ export function normalizeDestTypeValue(current?: string, destType?: string): str
   const matched = options.find((o) => o.value.toUpperCase() === upper);
   if (matched) return matched.value;
   if ((destType || "").toLowerCase().includes("snowflake")) {
-    if (upper === "INTEGER" || upper === "INT" || upper === "BIGINT" || upper === "SMALLINT") {
-      return "NUMBER(38,0)";
+    // Width-preserving invent — never collapse SMALLINT/INTEGER into NUMBER(38,0).
+    if (upper === "TINYINT" || upper === "SMALLINT") return "SMALLINT";
+    if (upper === "INTEGER" || upper === "INT") return "INTEGER";
+    if (upper === "BIGINT") return "BIGINT";
+    if (upper === "REAL" || upper === "FLOAT32" || upper === "FLOAT4" || upper === "BINARY_FLOAT") {
+      return "FLOAT";
     }
-    if (upper === "DECIMAL" || upper === "NUMERIC" || upper === "DOUBLE" || upper === "FLOAT") {
-      // Preserve approximate float semantics — do not invent NUMBER(38,10) scale.
-      if (upper === "FLOAT" || upper === "DOUBLE") return "FLOAT";
+    if (upper === "DECIMAL" || upper === "NUMERIC") {
       return "NUMBER(38,10)";
     }
+    if (upper === "DOUBLE" || upper === "FLOAT" || upper === "FLOAT64") return "FLOAT";
     // Bare TIMESTAMP/DATETIME → NTZ (wall-clock); never invent TIMESTAMP_TZ.
     if (upper === "TIMESTAMP" || upper === "DATETIME") {
       return "TIMESTAMP_NTZ";
@@ -392,11 +402,12 @@ export function normalizeDestTypeValue(current?: string, destType?: string): str
   }
   const dest = (destType || "").toLowerCase();
   if (dest.includes("databricks") || dest.includes("spark") || dest.includes("delta")) {
-    if (upper === "INTEGER" || upper === "INT" || upper === "SMALLINT") return "INT";
+    if (upper === "INTEGER" || upper === "INT" || upper === "SMALLINT" || upper === "TINYINT") return "INT";
     if (upper === "BIGINT" || upper === "LONG") return "BIGINT";
     if (upper === "HALF" || upper === "FLOAT16" || upper === "HALFFLOAT") return "FLOAT";
+    if (upper === "REAL" || upper === "FLOAT32" || upper === "FLOAT4" || upper === "BINARY_FLOAT") return "FLOAT";
     if (upper === "DECIMAL" || upper === "NUMERIC") return "DECIMAL(38,10)";
-    if (upper === "FLOAT" || upper === "FLOAT64") return "DOUBLE";
+    if (upper === "FLOAT" || upper === "FLOAT64" || upper === "DOUBLE") return "DOUBLE";
     if (upper === "VARCHAR" || upper === "TEXT" || upper === "STRING") return "STRING";
     // Honest sink — ddl_type maps JSON/ARRAY/MAP/STRUCT → STRING (not native MAP).
     if (upper === "JSON" || upper === "JSONB" || upper === "ARRAY" || upper === "VARIANT" || upper === "MAP" || upper === "STRUCT") {
@@ -406,11 +417,12 @@ export function normalizeDestTypeValue(current?: string, destType?: string): str
     if (upper === "BYTEA" || upper === "BLOB" || upper === "BYTES") return "BINARY";
   }
   if (dest.includes("iceberg")) {
-    if (upper === "INTEGER" || upper === "INT" || upper === "SMALLINT") return "int";
+    if (upper === "INTEGER" || upper === "INT" || upper === "SMALLINT" || upper === "TINYINT") return "int";
     if (upper === "BIGINT" || upper === "LONG") return "long";
     if (upper === "HALF" || upper === "FLOAT16" || upper === "HALFFLOAT") return "float";
+    if (upper === "REAL" || upper === "FLOAT32" || upper === "FLOAT4" || upper === "BINARY_FLOAT") return "float";
     if (upper === "DECIMAL" || upper === "NUMERIC") return "decimal(38,10)";
-    if (upper === "FLOAT" || upper === "FLOAT64") return "double";
+    if (upper === "FLOAT" || upper === "FLOAT64" || upper === "DOUBLE") return "double";
     if (upper === "VARCHAR" || upper === "TEXT" || upper === "STRING") return "string";
     if (upper === "JSON" || upper === "JSONB" || upper === "MAP" || upper === "STRUCT" || upper === "OBJECT") return "string";
     if (upper === "ARRAY" || upper === "LIST") return "list";

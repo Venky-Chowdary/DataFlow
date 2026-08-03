@@ -29,7 +29,8 @@ def test_oracle_sdo_geometry_normalizes_to_geography():
 
 
 def test_type_system_redshift_ddl():
-    assert ddl_type("redshift", "integer") == "BIGINT"
+    # Width-preserving invent — INTEGER stays INTEGER, not invent-widen BIGINT.
+    assert ddl_type("redshift", "integer") == "INTEGER"
     assert ddl_type("redshift", "json") == "SUPER"
     assert ddl_type("postgresql", "JSON") == "JSONB"
     assert ddl_type("snowflake", "ARRAY") == "VARIANT"
@@ -39,10 +40,10 @@ def test_type_system_redshift_ddl():
 
 
 def test_type_system_lakehouse_ddl():
-    assert ddl_type("databricks", "integer") == "BIGINT"
+    assert ddl_type("databricks", "integer") == "INT"
     assert ddl_type("databricks", "json") == "STRING"
     assert ddl_type("delta", "TIMESTAMP") == "TIMESTAMP"
-    assert ddl_type("iceberg", "integer") == "long"
+    assert ddl_type("iceberg", "integer") == "int"
     assert ddl_type("apache_iceberg", "json") == "string"
     assert ddl_type("iceberg", "UUID") == "uuid"
     assert ddl_type("unity_catalog", "DECIMAL") == "DECIMAL(38,10)"

@@ -2037,6 +2037,9 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
         if db in {"snowflake", "bigquery", "databricks"}:
             return types_h.get(LOGICAL_FLOAT, "FLOAT")
         return types_h.get(LOGICAL_FLOAT, "FLOAT")
+    # Opaque PG USER-DEFINED / UDT — stamp open text; specialty collapse forces Accept risk.
+    if base_early in {"USER-DEFINED", "USER_DEFINED"}:
+        return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT, DEFAULT_DDL.get(db, "TEXT"))
     # Redshift HLLSKETCH — keep native or fall to VARCHAR with specialty collapse.
     if base_early == "HLLSKETCH":
         if db == "redshift":
@@ -2307,6 +2310,14 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
         geo_ddl = _geography_ddl_for_dest(db, inferred)
         if geo_ddl:
             return geo_ddl
+    if logical == LOGICAL_FLOAT:
+        float_ddl = _float_ddl_for_dest(db, inferred)
+        if float_ddl:
+            return float_ddl
+    if logical == LOGICAL_INTEGER:
+        int_ddl = _integer_ddl_for_dest(db, inferred)
+        if int_ddl:
+            return int_ddl
     if logical == LOGICAL_BINARY and is_bitstring_carrier(inferred):
         bit_ddl = _bitstring_ddl_for_dest(db, inferred)
         if bit_ddl:
@@ -2369,7 +2380,11 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
             return base_carrier
     # Bounded VARCHAR/CHAR(n) + COLLATE — create-new must not invent TEXT and
     # drop CI/AI semantics (Airbyte/Informatica class schema loss).
+    # Unlimited VARCHAR(MAX)/TEXT on Oracle — CLOB, never invent VARCHAR2(4000).
     if logical in {LOGICAL_STRING, LOGICAL_TEXT}:
+        if is_unlimited_string_carrier(inferred) and db == "oracle":
+            national = is_national_string_carrier(inferred)
+            return "NCLOB" if national else "CLOB"
         string_ddl = _string_ddl_for_dest(db, inferred)
         if string_ddl:
             return _with_collation_clause(db, inferred, string_ddl, logical)
@@ -2404,6 +2419,189 @@ _BINARY_DDL_CAPS: Final[dict[str, int]] = {
     # ClickHouse FixedString(n) max practical bound for create-new.
     "clickhouse": 1048576,
 }
+
+
+def _float_ddl_for_dest(db: str, inferred: str | None) -> str | None:
+    """Width-preserving IEEE invent — never stamp DOUBLE from REAL/BINARY_FLOAT.
+
+    Bare ``FLOAT`` stays dialect-default (PG ≡ DOUBLE PRECISION). Explicit
+    single-precision tokens keep a single-precision sink so create-new does not
+    soft-pass invent-widen as identity.
+    """
+    if normalize_logical_type(inferred) != LOGICAL_FLOAT:
+        return None
+    upper = strip_identity_qualifier(inferred).upper().replace(" ", "")
+    bits = float_mantissa_bits(inferred)
+    if bits is None:
+        return None
+    # IEEE half handled in ddl_type early path.
+    if bits <= 11:
+        return None
+    explicit_single = upper in {
+        "REAL",
+        "FLOAT4",
+        "FLOAT32",
+        "BINARY_FLOAT",
+    } or upper.startswith("REAL(")
+    if not explicit_single:
+        m = re.match(r"^FLOAT\((\d+)\)$", upper)
+        if m and int(m.group(1)) <= 24:
+            explicit_single = True
+    if bits <= 24 and explicit_single:
+        if db in {
+            "postgresql",
+            "postgres",
+            "cockroachdb",
+            "timescaledb",
+            "alloydb",
+            "yugabytedb",
+            "citus",
+            "supabase",
+            "greenplum",
+            "redshift",
+            "duckdb",
+        }:
+            return "REAL"
+        if db in {"mysql", "mariadb", "tidb"}:
+            return "FLOAT"
+        if db in {"sqlserver", "mssql"}:
+            return "REAL"
+        if db == "oracle":
+            return "BINARY_FLOAT"
+        if db == "snowflake":
+            # Snowflake FLOAT is IEEE-64 — stamp FLOAT and rely on Map dest token.
+            return "FLOAT"
+        if db == "bigquery":
+            return "FLOAT64"
+        if db in {"databricks", "spark", "delta"}:
+            return "FLOAT"
+        if db == "iceberg":
+            return "float"
+        if db == "clickhouse":
+            return "Float32"
+        if db in {"trino", "presto"}:
+            return "real"
+        return "REAL"
+    # Double / bare FLOAT — dialect default.
+    return _FLOAT_DDL.get(db)
+
+
+def _integer_ddl_for_dest(db: str, inferred: str | None) -> str | None:
+    """Width-preserving integer invent — never stamp BIGINT from TINYINT/INT.
+
+    Engines with a single integer wire (BigQuery INT64) still invent that wire;
+    operators see INT64 on Map rather than a false TINYINT identity stamp.
+    """
+    if normalize_logical_type(inferred) != LOGICAL_INTEGER:
+        return None
+    upper = strip_identity_qualifier(inferred).upper()
+    # YEAR / SERIAL handled in ddl_type early paths.
+    if upper == "YEAR" or upper.startswith("YEAR("):
+        return None
+    if upper in {"SERIAL", "BIGSERIAL", "SMALLSERIAL", "TINYSERIAL"}:
+        return None
+    width = integer_bit_width(inferred)
+    if width is None:
+        return None
+    unsigned = "UNSIGNED" in upper or bool(re.search(r"\bUINT\d*\b", upper))
+
+    if db in {"mysql", "mariadb", "tidb"}:
+        if width <= 8:
+            return "TINYINT"
+        if width == 9:
+            return "TINYINT UNSIGNED"
+        if width <= 16:
+            return "SMALLINT"
+        if width == 17:
+            return "SMALLINT UNSIGNED"
+        if width <= 24:
+            return "MEDIUMINT"
+        if width == 25:
+            return "MEDIUMINT UNSIGNED"
+        if width <= 32:
+            return "INT"
+        if width == 33:
+            return "INT UNSIGNED"
+        if width <= 64:
+            return "BIGINT"
+        return "BIGINT UNSIGNED"
+
+    if db in {
+        "postgresql",
+        "postgres",
+        "cockroachdb",
+        "timescaledb",
+        "alloydb",
+        "yugabytedb",
+        "citus",
+        "supabase",
+        "greenplum",
+        "redshift",
+        "duckdb",
+    }:
+        if width <= 16:
+            return "SMALLINT"
+        if width <= 32:
+            return "INTEGER"
+        return "BIGINT"
+
+    if db in {"sqlserver", "mssql"}:
+        # T-SQL TINYINT is 0–255 (unsigned 8).
+        if width <= 8 or (unsigned and width == 9):
+            return "TINYINT"
+        if width <= 16:
+            return "SMALLINT"
+        if width <= 32:
+            return "INT"
+        return "BIGINT"
+
+    if db == "oracle":
+        if width <= 16:
+            return "NUMBER(5,0)"
+        if width <= 32:
+            return "NUMBER(10,0)"
+        return "NUMBER(38,0)"
+
+    if db == "snowflake":
+        if width <= 16:
+            return "SMALLINT"
+        if width <= 32:
+            return "INTEGER"
+        return "BIGINT"
+
+    if db == "bigquery":
+        return "INT64"
+
+    if db in {"databricks", "spark", "delta"}:
+        if width <= 32:
+            return "INT"
+        return "BIGINT"
+
+    if db == "iceberg":
+        if width <= 32:
+            return "int"
+        return "long"
+
+    if db == "clickhouse":
+        if width <= 8:
+            return "Int8" if not unsigned else "UInt8"
+        if width <= 16:
+            return "Int16" if not unsigned else "UInt16"
+        if width <= 32:
+            return "Int32" if not unsigned else "UInt32"
+        return "Int64" if not unsigned else "UInt64"
+
+    if db in {"trino", "presto"}:
+        if width <= 16:
+            return "smallint"
+        if width <= 32:
+            return "integer"
+        return "bigint"
+
+    if db == "sqlite":
+        return "INTEGER"
+
+    return None
 
 
 def _string_ddl_for_dest(db: str, inferred: str | None) -> str | None:
@@ -4207,6 +4405,8 @@ _SPECIALTY_NATIVE_CARRIERS: Final[frozenset[str]] = frozenset(
         "OBJECTID",
         "ANYDATA",  # Oracle polymorphic envelope
         "HLLSKETCH",  # Redshift HyperLogLog sketch
+        "USER-DEFINED",  # PG opaque UDT — never silent-green → TEXT
+        "USER_DEFINED",
     }
 )
 

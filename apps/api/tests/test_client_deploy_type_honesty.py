@@ -374,6 +374,37 @@ def test_datetime2_half_collation_ws_wave19():
     ) is True
 
 
+def test_float_int_udt_invent_width_wave20():
+    """Create-new must not soft-pass invent-widen or opaque UDT→TEXT."""
+    from services.type_system import (
+        create_new_mapping_target_type,
+        is_lossy_coercion,
+        specialty_carrier_base,
+    )
+
+    assert create_new_mapping_target_type("BINARY_FLOAT", "postgresql") == "REAL"
+    assert create_new_mapping_target_type("REAL", "postgresql") == "REAL"
+    assert create_new_mapping_target_type("FLOAT32", "oracle") == "BINARY_FLOAT"
+    assert create_new_mapping_target_type("FLOAT", "postgresql") == "DOUBLE PRECISION"
+    assert is_lossy_coercion("REAL", "DOUBLE") is False
+
+    assert create_new_mapping_target_type("TINYINT", "postgresql") == "SMALLINT"
+    assert create_new_mapping_target_type("INTEGER", "postgresql") == "INTEGER"
+    assert create_new_mapping_target_type("TINYINT", "mysql") == "TINYINT"
+    assert create_new_mapping_target_type("TINYINT UNSIGNED", "mysql") == "TINYINT UNSIGNED"
+    assert create_new_mapping_target_type("MEDIUMINT", "mysql") == "MEDIUMINT"
+    assert create_new_mapping_target_type("INTEGER", "oracle") == "NUMBER(10,0)"
+    assert create_new_mapping_target_type("BIGINT", "oracle") == "NUMBER(38,0)"
+    assert is_lossy_coercion("INTEGER", "BIGINT") is False
+
+    assert specialty_carrier_base("USER-DEFINED") == "USER-DEFINED"
+    assert create_new_mapping_target_type("USER-DEFINED", "postgresql") == "TEXT"
+    assert is_lossy_coercion("USER-DEFINED", "TEXT") is True
+
+    assert create_new_mapping_target_type("VARCHAR(MAX)", "oracle") == "CLOB"
+    assert create_new_mapping_target_type("NVARCHAR(MAX)", "oracle") == "NCLOB"
+
+
 def test_struct_int64_interval_identity_document_wave17():
     from services.type_system import (
         bfile_locator_would_collapse,

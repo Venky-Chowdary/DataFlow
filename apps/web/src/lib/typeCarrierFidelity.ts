@@ -183,17 +183,19 @@ export function declaredCarrierFidelityRisk(
     return true;
   }
   // Float ↔ fixed-point invent/drop IEEE polarity.
-  const srcFloat = /\b(float|double|real|float64|float32|float4|float8|half|halffloat|float16)\b/i.test(src);
-  const tgtFloat = /\b(float|double|real|float64|float32|float4|float8|half|halffloat|float16)\b/i.test(tgt);
+  const srcFloat = /\b(float|double|real|float64|float32|float4|float8|half|halffloat|float16|binary_float|binary_double)\b/i.test(src);
+  const tgtFloat = /\b(float|double|real|float64|float32|float4|float8|half|halffloat|float16|binary_float|binary_double)\b/i.test(tgt);
   const srcDec = isDecimalFamily(src);
   const tgtDec = isDecimalFamily(tgt);
   if ((srcFloat && tgtDec) || (srcDec && tgtFloat)) return true;
-  // IEEE mantissa narrow (DOUBLE→HALF / REAL→FLOAT16).
+  // IEEE mantissa narrow (DOUBLE→HALF / REAL→FLOAT16 / BINARY_DOUBLE→BINARY_FLOAT).
   const srcHalf = /\b(half|halffloat|float16)\b/i.test(src);
   const tgtHalf = /\b(half|halffloat|float16)\b/i.test(tgt);
   const srcDouble = /\b(double|float64|float8|binary_double)\b/i.test(src);
   const tgtDouble = /\b(double|float64|float8|binary_double)\b/i.test(tgt);
-  if ((srcDouble && (tgtHalf || /\b(real|float32|float4)\b/i.test(tgt))) || (/\b(real|float32|float4)\b/i.test(src) && tgtHalf)) {
+  const srcSingle = /\b(real|float32|float4|binary_float)\b/i.test(src);
+  const tgtSingle = /\b(real|float32|float4|binary_float)\b/i.test(tgt);
+  if ((srcDouble && (tgtHalf || tgtSingle)) || (srcSingle && tgtHalf)) {
     return true;
   }
   if (srcDouble && !tgtDouble && tgtFloat && !srcHalf) return true;
@@ -203,10 +205,18 @@ export function declaredCarrierFidelityRisk(
   if (/^long$/i.test(src.trim()) && /\b(bigint|integer|int64|int8|number|decimal|numeric)\b/i.test(tgt)) {
     return true;
   }
-  // Specialty → open string (INET/XML/HSTORE/…).
+  // Specialty → open string (INET/XML/HSTORE/USER-DEFINED/…).
   if (
-    /\b(inet|cidr|macaddr|xmltype|xml|hstore|ltree|tsvector|tsquery|jsonpath|objectid|anydata|hllsketch|rowversion|sql_variant|hierarchyid)\b/i.test(src)
+    /\b(inet|cidr|macaddr|xmltype|xml|hstore|ltree|tsvector|tsquery|jsonpath|objectid|anydata|hllsketch|rowversion|sql_variant|hierarchyid|user-defined|user_defined)\b/i.test(src)
     && isOpenStringCarrier(tgt)
+  ) {
+    return true;
+  }
+  // National charset collapse (NCHAR→CHAR / NVARCHAR→VARCHAR).
+  if (
+    /\b(nchar|nvarchar|nvarchar2|nclob)\b/i.test(src)
+    && /\b(char|varchar|varchar2|text|string|clob)\b/i.test(tgt)
+    && !/\b(nchar|nvarchar|nvarchar2|nclob)\b/i.test(tgt)
   ) {
     return true;
   }
