@@ -479,9 +479,17 @@ def get_model_capabilities() -> dict:
         })
 
     active_local = next((p for p in rows if p["provider"] == "local"), rows[-1])
-    # Prefer configured cloud only when DATAFLOW_PILOT_ENGINE requests hybrid/cloud.
-    engine = (os.environ.get("DATAFLOW_PILOT_ENGINE") or "local").strip().lower()
-    if engine in {"hybrid", "cloud", "auto"}:
+    raw = (os.environ.get("DATAFLOW_PILOT_ENGINE") or "auto").strip().lower()
+    if raw in {"local", "local_first", "deterministic"}:
+        engine = "local"
+    elif raw in {"hybrid", "cloud"}:
+        engine = raw
+    else:
+        # auto: hybrid when any non-local provider is ready
+        engine = "hybrid" if any(
+            p["available"] and p["provider"] != "local" for p in rows
+        ) else "local"
+    if engine in {"hybrid", "cloud"}:
         active = next((p for p in rows if p["available"] and p["provider"] != "local"), active_local)
     else:
         active = active_local
@@ -490,7 +498,7 @@ def get_model_capabilities() -> dict:
         "active_model": active["default_model"],
         "agent_mode": (
             "local_tools"
-            if engine in {"local", "local_first", "deterministic", ""}
+            if engine == "local"
             else (
                 "anthropic_tools" if providers["anthropic"].is_available()
                 else "openai_tools" if providers["openai"].is_available()
@@ -498,16 +506,15 @@ def get_model_capabilities() -> dict:
                 else "local_tools"
             )
         ),
-        "pilot_engine": engine or "local",
-        "fallback_order": ["local", "rag", "ollama", "openai", "anthropic"],
+        "pilot_engine": engine,
+        "fallback_order": ["anthropic", "openai", "ollama", "local"],
         "providers": rows,
         "guarantees": [
-            "Data Pilot defaults to the local tool engine — no third-party API required.",
-            "Set DATAFLOW_PILOT_ENGINE=hybrid to optionally race Anthropic/OpenAI/Ollama.",
-            "Cloud models are used only when explicitly enabled and their API key/SDK are configured.",
+            "DATAFLOW_PILOT_ENGINE=auto (default): uses a real LLM tool loop when an API key is configured; otherwise local tools.",
+            "Set DATAFLOW_PILOT_ENGINE=local to force the offline deterministic engine.",
+            "Set DATAFLOW_PILOT_ENGINE=hybrid to always race LLM + local (LLM preferred when grounded).",
             "RAG and deterministic mapping continue when cloud providers are unavailable.",
             "Preflight gates and schema-policy blockers do not depend on probabilistic model output.",
-            "Ambiguous mappings remain reviewable instead of being silently auto-applied.",
             "Mutations (create connector / start transfer) always require operator Confirm.",
         ],
     }

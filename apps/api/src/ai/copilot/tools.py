@@ -2328,12 +2328,14 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
             primary_tier = pri
             keep.append((name, args))
             continue
-        # Allow companions within 25 points, plus navigate / RAG / triage lists.
+        # Allow companions within 25 points, plus navigate / triage lists.
+        # Never attach RAG as a companion to ops tools — that caused synonym dumps.
+        if name == "search_knowledge" and primary_tier is not None and primary_tier >= 35:
+            continue
         if (
             name in (
                 "navigate",
                 "start_transfer_studio",
-                "search_knowledge",
                 "list_jobs",
                 "list_datasets",
                 "describe_pilot",

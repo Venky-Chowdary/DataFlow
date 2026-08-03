@@ -363,7 +363,7 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
 
 
 def _score_response(resp: CopilotResponse | None) -> float:
-    """Prefer grounded workspace answers over fluent ungrounded LLM prose."""
+    """Prefer grounded workspace answers; let a tool-using LLM beat local templates."""
     if not isinstance(resp, CopilotResponse):
         return -1.0
     score = float(resp.confidence or 0)
@@ -380,13 +380,17 @@ def _score_response(resp: CopilotResponse | None) -> float:
     else:
         score -= fail * 0.1
 
-    # Local OpenAI-style engine is the product default — prefer it when equal.
-    if "local" in method:
-        score += 0.35
-    if any(m in method for m in ("anthropic", "openai", "ollama", "llm")) and ok == 0:
+    is_llm = any(m in method for m in ("anthropic", "openai", "ollama", "llm"))
+    is_local = "local" in method
+
+    # Ungrounded fluent LLM prose loses to local refuse / clarify.
+    if is_llm and ok == 0:
         score -= 1.35
-    elif any(m in method for m in ("anthropic", "openai", "ollama")) and ok > 0:
-        score -= 0.05
+    # Tool-using LLM should beat equally grounded local templates (ChatGPT-quality narration).
+    elif is_llm and ok > 0:
+        score += 0.45
+    elif is_local and ok > 0:
+        score += 0.15
 
     if resp.pending_actions:
         score += 0.45
@@ -409,6 +413,34 @@ def _score_response(resp: CopilotResponse | None) -> float:
     return score
 
 
+def _resolve_pilot_engine() -> str:
+    """Pick the effective engine: local always works; hybrid when keys exist + requested/auto."""
+    import os
+
+    raw = (os.environ.get("DATAFLOW_PILOT_ENGINE") or "auto").strip().lower()
+    if raw in {"local", "local_first", "deterministic"}:
+        return "local"
+    if raw in {"hybrid", "cloud"}:
+        return raw
+    # auto (default): use hybrid when any cloud/ollama provider is ready.
+    try:
+        from ..llm.provider import (
+            DataTransferAnthropicProvider,
+            DataTransferOllamaProvider,
+            DataTransferOpenAIProvider,
+        )
+
+        if DataTransferAnthropicProvider().is_available():
+            return "hybrid"
+        if DataTransferOpenAIProvider().is_available():
+            return "hybrid"
+        if DataTransferOllamaProvider().is_available():
+            return "hybrid"
+    except Exception:
+        pass
+    return "local"
+
+
 @dataclass
 class PilotTurn:
     tool_results: list[ToolResult] = field(default_factory=list)
@@ -419,10 +451,12 @@ class PilotTurn:
 
 class DataPilotAgent:
     """
-    Primary agent — like Claude with tools or a Cursor agent.
+    Primary agent — ChatGPT-style tool loop when an LLM key is configured,
+    otherwise a deterministic local planner that still executes real tools.
+
     1. Build full platform + data context
-    2. Run tool loop (Anthropic tool_use or local inference)
-    3. Compose natural-language answer grounded in real data
+    2. Run tool loop (Anthropic/OpenAI when available, else local NL routing)
+    3. Compose a natural-language answer grounded in real tool results
     """
 
     MAX_TOOL_ITERATIONS = 6
@@ -498,11 +532,9 @@ class DataPilotAgent:
 
         ctx = self.context_builder.build(data_context, message)
 
-        # Local-first by default — our engine must work like OpenAI tool-calling
-        # without depending on third-party APIs. Opt into hybrid/cloud explicitly.
-        import os
-        engine = (os.environ.get("DATAFLOW_PILOT_ENGINE") or "local").strip().lower()
-        if engine in {"local", "local_first", "deterministic", ""}:
+        # Local always works offline. Hybrid/cloud when keys exist (auto detects).
+        engine = _resolve_pilot_engine()
+        if engine == "local":
             return self._local_agent(message, history or [], ctx, data_context)
 
         system = self._build_system_prompt(ctx)
@@ -510,8 +542,7 @@ class DataPilotAgent:
         import time as _time
         from concurrent.futures import wait, FIRST_COMPLETED
 
-        # Hybrid/cloud: race local vs optional providers. Local remains the
-        # fail-closed baseline when cloud is slow or unavailable.
+        # Hybrid/cloud: race one primary LLM vs local. Local is fail-closed baseline.
         local_fut = _executor.submit(
             self._local_agent, message, history or [], ctx, data_context
         )
@@ -525,28 +556,31 @@ class DataPilotAgent:
         except Exception:
             openai_ready = False
 
-        if engine in {"hybrid", "cloud", "auto"}:
-            if self.anthropic.is_available():
-                llm_futs.append(
-                    _executor.submit(
-                        self._anthropic_agent_loop, message, history or [], system, data_context
-                    )
+        # Prefer a single primary cloud provider (not three racing each other).
+        if self.anthropic.is_available():
+            llm_futs.append(
+                _executor.submit(
+                    self._anthropic_agent_loop, message, history or [], system, data_context
                 )
-            if openai_ready:
-                llm_futs.append(
-                    _executor.submit(
-                        self._openai_agent, message, history or [], system, data_context
-                    )
+            )
+        elif openai_ready:
+            llm_futs.append(
+                _executor.submit(
+                    self._openai_agent, message, history or [], system, data_context
                 )
-            if self._ollama_available_quick():
-                llm_futs.append(
-                    _executor.submit(
-                        self._ollama_agent, message, history or [], system, data_context
-                    )
+            )
+        elif self._ollama_available_quick():
+            llm_futs.append(
+                _executor.submit(
+                    self._ollama_agent, message, history or [], system, data_context
                 )
+            )
 
         pending = {local_fut, *llm_futs}
-        deadline = _time.monotonic() + _LLM_TOTAL_BUDGET_S
+        # Give the LLM a real budget; local no longer collapses the race to 400ms.
+        deadline = _time.monotonic() + (
+            _LLM_TURN_TIMEOUT_S + 8 if llm_futs else _LLM_TOTAL_BUDGET_S
+        )
         local_result: CopilotResponse | None = None
         best_llm: CopilotResponse | None = None
 
@@ -561,12 +595,15 @@ class DataPilotAgent:
                     continue
                 if fut is local_fut:
                     local_result = result
-                    # Tiny grace so a nearly-finished LLM can still win; don't stall the UI.
-                    deadline = min(deadline, _time.monotonic() + 0.4)
+                    # If no LLM is racing, stop. Otherwise keep waiting for cloud.
+                    if not llm_futs:
+                        deadline = min(deadline, _time.monotonic() + 0.1)
                     continue
                 if isinstance(result, CopilotResponse):
                     if best_llm is None or _score_response(result) > _score_response(best_llm):
                         best_llm = result
+                    # Cloud finished — don't wait forever for local polish.
+                    deadline = min(deadline, _time.monotonic() + 1.5)
 
         candidates = [c for c in (best_llm, local_result) if isinstance(c, CopilotResponse)]
         if candidates:
@@ -1069,21 +1106,17 @@ class DataPilotAgent:
                     return planned
             # Stored-sample row filters stay on filter_result, not a new aggregate.
             if focus.result_id and re.match(r"^(?:filter|where)\b", low):
-                return inherit_focus_slots(planned, focus) if planned else [
-                    ("analyze_result", {"result_id": focus.result_id})
-                ]
+                if planned and any(n == "filter_result" for n, _ in planned):
+                    return inherit_focus_slots(planned, focus)
+                return [("filter_result", {"result_id": focus.result_id})]
             edit = resolve_followup(message, focus)
-            if edit is not None and not edit.missing:
-                return [("aggregate_data", edit.as_tool_args())]
             if edit is not None:
                 return [("aggregate_data", edit.as_tool_args())]
         if not planned:
             edit = resolve_followup(message, focus)
-            if edit is not None and not edit.missing:
-                return [("aggregate_data", edit.as_tool_args())]
             if edit is not None:
-                # Known subject, missing measure — let the tool ask against the
-                # real schema rather than answering the wrong question.
+                # Known subject (even with missing measure) — let the tool ask
+                # against the real schema rather than answering the wrong question.
                 return [("aggregate_data", edit.as_tool_args())]
             # Result follow-ups when focus has a stored sample/query.
             if focus and focus.result_id:
@@ -1092,6 +1125,8 @@ class DataPilotAgent:
                     "analyze that", "analyze this", "profile that", "summarize that",
                 }:
                     return [("analyze_result", {"result_id": focus.result_id})]
+                if re.match(r"^(?:filter|where)\b", low):
+                    return [("filter_result", {"result_id": focus.result_id})]
         return inherit_focus_slots(planned, focus)
 
     def _commit_memory(

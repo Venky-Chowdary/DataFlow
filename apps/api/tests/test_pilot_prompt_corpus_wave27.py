@@ -12,15 +12,15 @@ from src.ai.copilot.tools import TOOL_DEFINITIONS, get_tool_registry, infer_tool
 
 
 def test_local_engine_is_default_without_cloud():
-    """Product default: local OpenAI-style engine, no third-party dependency."""
+    """Forced local engine: deterministic tools, no third-party dependency."""
     import os
     from src.ai.copilot.pilot_agent import DataPilotAgent
     from src.ai.llm.provider import get_model_capabilities
 
-    os.environ.pop("DATAFLOW_PILOT_ENGINE", None)
+    os.environ["DATAFLOW_PILOT_ENGINE"] = "local"
     caps = get_model_capabilities()
     assert caps["agent_mode"] == "local_tools"
-    assert caps.get("pilot_engine", "local") in {"local", ""}
+    assert caps.get("pilot_engine") == "local"
     assert caps["active_provider"] == "local"
 
     agent = DataPilotAgent()

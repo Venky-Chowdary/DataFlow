@@ -11,15 +11,14 @@ import {
   fetchModelCapabilities,
   formatPilotReachError,
   ModelCapabilities,
-  runScheduleNow,
 } from "../lib/api";
 import { AUTOMATION_IDEAS } from "../lib/automationIdeas";
 import { useActiveData } from "../lib/DataContext";
 import {
-  confirmPilotPending,
-  isDestructiveTransfer,
-  transferOverwriteMessage,
-} from "../lib/pilotConfirm";
+  buildPilotDataContext,
+  nextPilotResultId,
+  runPilotConfirm,
+} from "../lib/pilotChat";
 import { useStudioActions } from "../lib/StudioActionsContext";
 import { API_BASE, Screen } from "../lib/types";
 import { useToast } from "../components/Toast";
@@ -30,7 +29,6 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import {
   createEmptySession,
-  extractPilotResultId,
   loadAsideOpen,
   loadPilotWorkspace,
   loadRailChat,
@@ -154,65 +152,13 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
     if (confirmingId) return;
     setConfirmingId(action.id);
     try {
-      if (action.type === "studio" || (action.kind && action.type !== "start_transfer" && action.type !== "create_connector")) {
-        dispatchStudioAction({
-          kind: (action.kind || String(action.payload?.kind || "")) as string,
-          label: action.label,
-          run_id: action.run_id || (action.payload?.run_id as string | undefined),
-        });
-        onNavigate("transfer");
-        toast({
-          title: "Opening Fix bad data",
-          message: action.label || "Confirm opens Transfer Studio — apply the fix there.",
-          tone: "info",
-        });
-      } else if (action.type === "run_schedule") {
-        const sid = String(action.payload?.schedule_id || "");
-        if (!sid) throw new Error("Missing schedule id");
-        const res = await runScheduleNow(sid);
-        onNavigate("schedules");
-        toast({
-          title: "Pipeline started",
-          message: `Job ${res.job_id || "queued"}`,
-          tone: "success",
-        });
-      } else if (action.type === "create_connector") {
-        const res = await confirmPilotPending(action);
-        if (res.kind !== "create_connector") throw new Error("Unexpected confirm result");
-        window.dispatchEvent(new CustomEvent("df2:connectors-changed"));
-        onNavigate("connectors");
-        toast({
-          title: res.idempotent ? "Connector already saved" : "Connector saved",
-          message: `“${res.name}” (${res.type}) is ready in Connectors.`,
-          tone: "success",
-        });
-      } else if (action.type === "start_transfer") {
-        // Overwrite is the one action that deletes destination rows. Ask once
-        // more with the enterprise ConfirmDialog so a misclick cannot wipe a table.
-        if (isDestructiveTransfer(action)) {
-          const ok = await confirm({
-            title: "Overwrite the destination?",
-            message: transferOverwriteMessage(action),
-            confirmLabel: "Overwrite & run",
-            tone: "danger",
-          });
-          if (!ok) return;
-        }
-        const res = await confirmPilotPending(action);
-        if (res.kind !== "start_transfer") throw new Error("Unexpected confirm result");
-        toast({
-          title: res.idempotent ? "Transfer already running" : "Transfer started",
-          message: `${res.source} → ${res.destination}`,
-          tone: "success",
-        });
-        // Hand the operator to Jobs so they can watch the theater — that is the
-        // next correct action after Confirm, not sitting on a dead chat button.
-        onNavigate("jobs");
-      } else {
-        toast({ title: "Unknown action", message: action.type, tone: "error" });
-        return;
-      }
-      clearPending(msgIndex, action.id);
+      const outcome = await runPilotConfirm(action, {
+        onNavigate,
+        toast,
+        confirm,
+        dispatchStudioAction,
+      });
+      if (outcome === "cleared") clearPending(msgIndex, action.id);
     } catch (error) {
       toast({
         title: "Action failed",
@@ -246,20 +192,11 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
     updateSession(activeId, { messages: nextMessages, title });
 
     try {
-      const pilotContext = {
-        name: activeData?.name || "pilot",
-        columns: activeData?.columns || [],
-        row_count: activeData?.row_count ?? 0,
-        filename: activeData?.filename,
-        samples: activeData?.samples,
-        preflight_run_id: activeData?.preflight_run_id,
-        job_id: activeData?.job_id,
-        validation_status: activeData?.validation_status,
-        route: activeData?.route,
-        blockers: activeData?.blockers,
-        pilot_session_id: activeId,
-        last_result_id: session.lastResultId,
-      };
+      const pilotContext = buildPilotDataContext(activeData, {
+        sessionId: activeId,
+        lastResultId: session.lastResultId,
+        nameFallback: "pilot",
+      });
       const res = await copilotChat(q, session.history, pilotContext);
       const newHistory: CopilotChatMessage[] = [
         ...session.history,
@@ -267,19 +204,11 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
         { role: "assistant" as const, content: res.answer },
       ].slice(-20);
 
-      const liveTools = (res.tools_used || []).filter((t) =>
-        ["sample_connector_object", "run_query", "filter_result", "aggregate_data"].includes(t.name),
+      const nextResultId = nextPilotResultId(
+        res.tools_used,
+        res.data_insight?.last_result_id,
+        session.lastResultId,
       );
-      const freshId =
-        res.data_insight?.last_result_id
-        || extractPilotResultId(res.tools_used);
-      let nextResultId = session.lastResultId;
-      if (freshId) {
-        nextResultId = freshId;
-      } else if (liveTools.length > 0 && liveTools.every((t) => !t.success)) {
-        // Failed live sample/query must not leave a stale ref for “analyze that”.
-        nextResultId = undefined;
-      }
 
       updateSession(activeId, {
         history: newHistory,
@@ -351,11 +280,20 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
   const recentChats = sessions.filter((s) => s.messages.length > 0 || s.id === activeId);
   const canDeleteActive = Boolean(session?.messages.length);
 
+  const engineLabel = modelCapabilities?.pilot_engine || "local";
   const pilotInsightPill =
-    pilotOnline === false ? "Offline" : pilotOnline && modelCapabilities && !anyCloudReady ? "Local engine" : pilotOnline ? "Online" : "Connecting…";
+    pilotOnline === false
+      ? "Offline"
+      : pilotOnline && engineLabel === "local"
+        ? "Local engine"
+        : pilotOnline && anyCloudReady
+          ? `LLM · ${modelCapabilities?.active_provider || "cloud"}`
+          : pilotOnline
+            ? "Online"
+            : "Connecting…";
 
   const pilotStatusClass =
-    pilotOnline === false ? "is-offline" : pilotOnline && modelCapabilities && !anyCloudReady ? "is-local" : "";
+    pilotOnline === false ? "is-offline" : engineLabel === "local" ? "is-local" : "";
 
   return (
     <PageShell

@@ -614,6 +614,7 @@ export interface ModelCapabilities {
   active_provider: string;
   active_model: string;
   agent_mode: string;
+  pilot_engine?: string;
   fallback_order: string[];
   providers: {
     provider: string;
