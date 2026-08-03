@@ -194,8 +194,23 @@ async def patch_ai_provider(provider: str, body: AiProviderBody, request: Reques
     from services.audit_log import append_audit_event
     from services.integrations_store import update_ai_provider
 
+    payload = body.model_dump(exclude_none=True)
+    raw_key = str(payload.get("api_key") or "").strip()
+    if (
+        provider in {"openai", "anthropic"}
+        and raw_key
+        and not raw_key.startswith("•")
+        and not raw_key.startswith("[")
+    ):
+        from ..ai.llm.provider import clear_auth_failures, verify_cloud_api_key
+
+        clear_auth_failures()
+        ok, err = verify_cloud_api_key(provider, raw_key)
+        if not ok:
+            raise HTTPException(status_code=400, detail=err or "API key rejected")
+
     try:
-        updated = update_ai_provider(provider, body.model_dump(exclude_none=True))
+        updated = update_ai_provider(provider, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

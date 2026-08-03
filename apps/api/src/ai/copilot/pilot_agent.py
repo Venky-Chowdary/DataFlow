@@ -361,6 +361,47 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
     return head + "\n\n" + "\n".join(f"• {s}" for s in suggestions[:3])
 
 
+def _llm_unavailable_footnote(engine: str, method: str) -> str:
+    """Honest note when the operator expected hybrid narration but got local tools."""
+    if engine == "local":
+        return ""
+    if method not in {"pilot_local_engine", "greeting"}:
+        return ""
+    try:
+        from ..llm.provider import _AUTH_FAILED_PROVIDERS, get_model_capabilities
+
+        if _AUTH_FAILED_PROVIDERS & {"openai", "anthropic"}:
+            return (
+                "\n\n— **LLM narration is off:** the saved cloud API key was rejected (401). "
+                "Update it in **Settings → AI** (keys are live-checked on save)."
+            )
+        caps = get_model_capabilities()
+        cloud = [p for p in caps.get("providers", []) if p.get("tier") == "cloud"]
+        configured = any(p.get("configured") for p in cloud)
+        ready = any(p.get("available") for p in cloud)
+        ollama = next((p for p in caps.get("providers", []) if p.get("provider") == "ollama"), None)
+        if configured and not ready:
+            return (
+                "\n\n— **LLM narration is off:** no working cloud key. "
+                "Paste a valid OpenAI/Anthropic key in **Settings → AI**, or run Ollama locally."
+            )
+        if ollama and ollama.get("configured") and not ollama.get("available") and not ready:
+            return (
+                "\n\n— **LLM narration is off:** start Ollama (`ollama serve`) or add a cloud key in Settings."
+            )
+    except Exception:
+        return ""
+    return ""
+
+
+def _with_llm_footnote(resp: CopilotResponse, engine: str) -> CopilotResponse:
+    note = _llm_unavailable_footnote(engine, resp.method or "")
+    if not note or note.strip() in (resp.answer or ""):
+        return resp
+    resp.answer = f"{(resp.answer or '').rstrip()}{note}"
+    return resp
+
+
 def _score_response(resp: CopilotResponse | None) -> float:
     """Prefer grounded workspace answers; let a tool-using LLM beat local templates."""
     if not isinstance(resp, CopilotResponse):
@@ -544,7 +585,7 @@ class DataPilotAgent:
         polished = self._polish_with_llm(message, history or [], local, system)
         local_ok = sum(1 for t in (local.tools_used or []) if t.get("success"))
         if local.pending_actions or local_ok > 0 or local.needs_clarification:
-            return polished
+            return _with_llm_footnote(polished, engine)
 
         # Local had nothing grounded — allow a single native LLM tool loop for hard paraphrases.
         import time as _time
@@ -579,7 +620,7 @@ class DataPilotAgent:
             )
 
         if not llm_futs:
-            return polished
+            return _with_llm_footnote(polished, engine)
 
         pending = set(llm_futs)
         deadline = _time.monotonic() + _LLM_TURN_TIMEOUT_S
@@ -599,7 +640,7 @@ class DataPilotAgent:
                         best_llm = result
 
         candidates = [c for c in (best_llm, polished, local) if isinstance(c, CopilotResponse)]
-        return max(candidates, key=_score_response)
+        return _with_llm_footnote(max(candidates, key=_score_response), engine)
 
     def _run_local_recovery(
         self,
@@ -1058,6 +1099,7 @@ class DataPilotAgent:
         try:
             from ..llm.provider import (
                 DataTransferAnthropicProvider,
+                DataTransferOllamaProvider,
                 DataTransferOpenAIProvider,
             )
 
@@ -1070,6 +1112,11 @@ class DataPilotAgent:
                 if anthropic.is_available():
                     provider = anthropic
                     method = "anthropic_polish"
+                else:
+                    ollama = DataTransferOllamaProvider()
+                    if ollama.is_available():
+                        provider = ollama
+                        method = "ollama_polish"
         except Exception:
             return local
         if provider is None:

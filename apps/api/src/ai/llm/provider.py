@@ -49,6 +49,39 @@ def _mark_provider_auth_failed(name: str, err: str) -> bool:
     return False
 
 
+def verify_cloud_api_key(provider: str, api_key: str) -> tuple[bool, str]:
+    """Live-check a cloud key before persisting. Returns (ok, error_message)."""
+    name = (provider or "").strip().lower()
+    if name not in {"openai", "anthropic"}:
+        return True, ""
+    if not _is_valid_api_key(api_key):
+        return False, "API key is empty or masked"
+    try:
+        if name == "openai":
+            from openai import OpenAI
+
+            OpenAI(api_key=api_key.strip()).models.list()
+            _AUTH_FAILED_PROVIDERS.discard("openai")
+            return True, ""
+        import anthropic
+        from services.integrations_store import resolve_provider_model
+
+        model = resolve_provider_model("anthropic", "claude-sonnet-4-20250514")
+        anthropic.Anthropic(api_key=api_key.strip()).messages.create(
+            model=model,
+            max_tokens=1,
+            messages=[{"role": "user", "content": "ping"}],
+        )
+        _AUTH_FAILED_PROVIDERS.discard("anthropic")
+        return True, ""
+    except Exception as e:
+        _mark_provider_auth_failed(name, str(e))
+        msg = str(e)
+        if "invalid_api_key" in msg.lower() or "incorrect api key" in msg.lower() or "401" in msg:
+            return False, "Incorrect API key — paste a valid key from the provider console"
+        return False, msg[:240]
+
+
 @dataclass
 class LLMResponse:
     """Response from an LLM provider."""
@@ -511,12 +544,21 @@ def get_model_capabilities() -> dict:
             configured = True
         installed = _package_available(item.get("package", ""))
         available = provider.is_available()
+        if _provider_auth_failed(item["provider"]):
+            available = False
+            status = "invalid_key"
+        elif available:
+            status = "ready"
+        elif item["tier"] == "cloud":
+            status = "configure"
+        else:
+            status = "offline"
         rows.append({
             **item,
             "configured": configured,
             "package_installed": installed,
             "available": available,
-            "status": "ready" if available else "configure" if item["tier"] == "cloud" else "offline",
+            "status": status,
         })
 
     active_local = next((p for p in rows if p["provider"] == "local"), rows[-1])
@@ -553,9 +595,10 @@ def get_model_capabilities() -> dict:
         "guarantees": [
             "DATAFLOW_PILOT_ENGINE=auto (default): uses a real LLM when a valid API key works; otherwise local tools.",
             "Set DATAFLOW_PILOT_ENGINE=local to force the offline deterministic engine.",
-            "Set DATAFLOW_PILOT_ENGINE=hybrid for local tools + LLM narration (OpenAI or Anthropic) over real tool results.",
+            "Set DATAFLOW_PILOT_ENGINE=hybrid for local tools + LLM narration (OpenAI, Anthropic, or Ollama) over real tool results.",
             "Grounded tool results are executed once — native LLM loops do not re-run mutations or orphan Confirm acks.",
-            "If OpenAI/Anthropic returns 401 invalid_api_key, Pilot soft-disables that provider process-wide and falls back to local until you save a valid key and restart the API.",
+            "Saving an AI key in Settings live-checks it; invalid keys are rejected and soft-disabled process-wide.",
+            "If OpenAI/Anthropic returns 401 invalid_api_key mid-chat, Pilot falls back to local tools until you save a valid key.",
             "RAG and deterministic mapping continue when cloud providers are unavailable.",
             "Mutations (create connector / start transfer) always require operator Confirm.",
         ],
