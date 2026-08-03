@@ -394,6 +394,7 @@ export function normalizeDestTypeValue(current?: string, destType?: string): str
   if (dest.includes("databricks") || dest.includes("spark") || dest.includes("delta")) {
     if (upper === "INTEGER" || upper === "INT" || upper === "SMALLINT") return "INT";
     if (upper === "BIGINT" || upper === "LONG") return "BIGINT";
+    if (upper === "HALF" || upper === "FLOAT16" || upper === "HALFFLOAT") return "FLOAT";
     if (upper === "DECIMAL" || upper === "NUMERIC") return "DECIMAL(38,10)";
     if (upper === "FLOAT" || upper === "FLOAT64") return "DOUBLE";
     if (upper === "VARCHAR" || upper === "TEXT" || upper === "STRING") return "STRING";
@@ -407,6 +408,7 @@ export function normalizeDestTypeValue(current?: string, destType?: string): str
   if (dest.includes("iceberg")) {
     if (upper === "INTEGER" || upper === "INT" || upper === "SMALLINT") return "int";
     if (upper === "BIGINT" || upper === "LONG") return "long";
+    if (upper === "HALF" || upper === "FLOAT16" || upper === "HALFFLOAT") return "float";
     if (upper === "DECIMAL" || upper === "NUMERIC") return "decimal(38,10)";
     if (upper === "FLOAT" || upper === "FLOAT64") return "double";
     if (upper === "VARCHAR" || upper === "TEXT" || upper === "STRING") return "string";
@@ -417,6 +419,21 @@ export function normalizeDestTypeValue(current?: string, destType?: string): str
     if (upper === "BYTEA" || upper === "BLOB" || upper === "BYTES" || upper === "BINARY") return "binary";
     if (upper === "BOOLEAN" || upper === "BOOL") return "boolean";
     if (upper === "UUID") return "uuid";
+  }
+  // Relational / warehouse: Oracle LONG is text LOB — never invent BIGINT.
+  if (
+    upper === "LONG"
+    && !dest.includes("databricks")
+    && !dest.includes("spark")
+    && !dest.includes("iceberg")
+    && !dest.includes("delta")
+    && !dest.includes("mongo")
+  ) {
+    if (dest.includes("oracle")) return "CLOB";
+    return "TEXT";
+  }
+  if (upper === "HALF" || upper === "FLOAT16" || upper === "HALFFLOAT") {
+    return "REAL";
   }
   if (dest.includes("mongo")) {
     if (upper === "INTEGER" || upper === "INT" || upper === "SMALLINT") return "int";
