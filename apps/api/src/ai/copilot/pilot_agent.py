@@ -1010,6 +1010,7 @@ class DataPilotAgent:
         """
         from .followup import (
             inherit_focus_slots,
+            looks_like_followup,
             resolve_followup,
             resolve_pending_answer,
         )
@@ -1030,6 +1031,20 @@ class DataPilotAgent:
                 return [answered]
 
         planned = infer_tools_from_message(message)
+        # Elliptical edits beat a fresh under-specified parse ("what about average
+        # amount" would otherwise lose the remembered WHERE / table).
+        if focus and looks_like_followup(message, focus):
+            low = message.lower().strip()
+            # Stored-sample row filters stay on filter_result, not a new aggregate.
+            if focus.result_id and re.match(r"^(?:filter|where)\b", low):
+                return inherit_focus_slots(planned, focus) if planned else [
+                    ("analyze_result", {"result_id": focus.result_id})
+                ]
+            edit = resolve_followup(message, focus)
+            if edit is not None and not edit.missing:
+                return [("aggregate_data", edit.as_tool_args())]
+            if edit is not None:
+                return [("aggregate_data", edit.as_tool_args())]
         if not planned:
             edit = resolve_followup(message, focus)
             if edit is not None and not edit.missing:

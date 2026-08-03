@@ -240,7 +240,20 @@ def _extract_edit_table(message: str) -> str:
     if not m:
         return ""
     table = _clean(m.group(1))
-    if table.lower() in _PLATFORM_NOUNS or table.lower() in _TEMPORAL_GRAINS:
+    banned = _PLATFORM_NOUNS | set(_TEMPORAL_GRAINS) | {
+        "average", "avg", "mean", "sum", "total", "count", "min", "max",
+        "minimum", "maximum", "distinct", "unique", "amount", "price",
+        "revenue", "qty", "quantity", "value", "values",
+    }
+    if table.lower() in banned:
+        return ""
+    # "what about average amount" is a metric edit, not a table switch.
+    if re.search(
+        rf"\b(?:what|how)\s+about\s+{re.escape(table)}\b.{{0,20}}\b"
+        rf"(?:amount|price|revenue|qty|quantity|value|of|for)\b",
+        message,
+        re.I,
+    ):
         return ""
     return table
 
@@ -387,6 +400,8 @@ def inherit_focus_slots(
                     merged["connector_name"] = focus.connector_name
         if name in _TABLE_SCOPED_TOOLS and not merged.get("table") and focus.table:
             merged["table"] = focus.table
+        if name == "aggregate_data" and not merged.get("where") and getattr(focus, "where", ""):
+            merged["where"] = focus.where
         out.append((name, merged))
     return out
 

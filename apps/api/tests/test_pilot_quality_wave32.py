@@ -93,14 +93,11 @@ def test_where_survives_metric_followup(monkeypatch, tmp_path):
     third = agent.chat("what about average amount", data_context=ctx)
     assert "aggregate_data" in [t.get("name") for t in (third.tools_used or [])]
     # Paid-only average of amount: (10.5+20+7.5)/3 = 12.666...
-    low = (third.answer or "").lower()
-    assert "12" in low or "paid" in low or "average" in low
-    # Should not silently average all 5 rows (8.8) without mentioning filter if where kept.
-    # Soft check: tool succeeded.
-    assert any(
-        t.get("name") == "aggregate_data" and t.get("success")
-        for t in (third.tools_used or [])
-    )
+    ans = third.answer or ""
+    low = ans.lower()
+    assert "12" in ans or "12.6" in ans or "12,6" in ans
+    assert "average" in low or "avg" in low
+    assert "orders" in low or "pilotsqlite" in low
 
 
 def test_suggest_with_live_focus_samples(monkeypatch, tmp_path):
