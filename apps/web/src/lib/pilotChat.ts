@@ -29,6 +29,31 @@ export const PILOT_SCREEN_LABELS: Record<string, string> = {
   benchmarks: "Proofs",
 };
 
+/** Apply non-mutating navigate suggestions from a chat turn. */
+export function applyPilotSafeActions(
+  actions: { risk?: string; type?: string; screen?: string; route?: string }[] | undefined,
+  onNavigate?: (screen: Screen) => void,
+): void {
+  if (!onNavigate || !actions?.length) return;
+  for (const a of actions) {
+    if (a.risk === "mutate" || a.type === "studio") continue;
+    const screen = a.screen || a.route;
+    if ((a.type === "navigate" || !a.type) && screen) {
+      onNavigate(screen as Screen);
+    }
+  }
+}
+
+/** Chip label for a suggested navigate/action. */
+export function pilotActionChipLabel(action: {
+  label?: string;
+  screen?: string;
+  route?: string;
+}): string {
+  const screen = action.screen || action.route;
+  return action.label || (screen ? `Open ${PILOT_SCREEN_LABELS[screen] || screen}` : "Action");
+}
+
 export type ToastFn = (opts: {
   title: string;
   message: string;

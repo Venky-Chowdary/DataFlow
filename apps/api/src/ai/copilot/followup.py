@@ -107,6 +107,89 @@ def _words(text: str) -> list[str]:
     return [w for w in re.split(r"\s+", _clean(text)) if w]
 
 
+def last_assistant_content(history: list[dict] | None) -> str:
+    for m in reversed(history or []):
+        if m.get("role") == "assistant" and (m.get("content") or "").strip():
+            return str(m["content"]).strip()
+    return ""
+
+
+def resolve_platform_coreference(
+    message: str,
+    history: list[dict] | None,
+) -> list[tuple[str, dict[str, Any]]] | None:
+    """those jobs / which of those failed → list_jobs from prior turn context."""
+    text = _clean(message)
+    if not text or not _COREFERENCE_RE.search(text):
+        return None
+    prior = last_assistant_content(history).lower()
+    low = text.lower()
+    jobs_cue = bool(re.search(r"\b(?:jobs?|transfers?|failed|failures|runs?)\b", low)) or (
+        "job" in prior or "transfer" in prior or "pipeline" in prior
+    )
+    if jobs_cue and re.search(r"\b(?:those|these|them|that|it)\b", low):
+        return [("list_jobs", {"limit": 10})]
+    connectors_cue = bool(re.search(r"\bconnectors?\b", low)) or "connector" in prior
+    if connectors_cue and re.search(r"\b(?:those|these|them|that|it)\b", low):
+        return [("list_connectors", {})]
+    return None
+
+
+def resolve_table_coreference_tools(
+    message: str,
+    focus: PilotFocus | None,
+) -> list[tuple[str, dict[str, Any]]] | None:
+    """sample/schema that table → tool with focus.table (not only aggregate edits)."""
+    if not focus or not (focus.table or "").strip():
+        return None
+    if not _COREFERENCE_RE.search(message or ""):
+        return None
+    low = (message or "").lower()
+    args: dict[str, Any] = {"table": focus.table}
+    if focus.connector_name:
+        args["connector_name"] = focus.connector_name
+    if re.search(r"\b(?:sample|preview|show\s+(?:me\s+)?(?:some\s+)?rows|fetch)\b", low):
+        return [("sample_connector_object", args)]
+    if re.search(r"\b(?:schema|columns|describe|structure|introspect)\b", low):
+        return [("introspect_connector_schema", args)]
+    return None
+
+
+def pending_from_assistant_clarification(
+    history: list[dict] | None,
+) -> PendingSlot | None:
+    """Rebuild a soft pending when memory TTL cleared but last ask is still in transcript."""
+    q = last_assistant_content(history)
+    if not q:
+        return None
+    low = q.lower()
+    if "which connector" in low:
+        missing = "connector_name"
+        tool = "sample_connector_object"
+    elif "which table" in low or "which collection" in low:
+        missing = "table"
+        tool = "sample_connector_object"
+    else:
+        return None
+    # Bold candidates from the assistant message: **Local Postgres**
+    raw = re.findall(r"\*\*([^*]{1,60})\*\*", q)
+    cleaned: list[str] = []
+    for c in raw:
+        c = c.strip()
+        if not c or len(c) > 48:
+            continue
+        if re.search(r"\b(?:confirm|jobs?|connectors?|settings|transfer|studio)\b", c, re.I):
+            continue
+        cleaned.append(c)
+    return PendingSlot(
+        tool=tool,
+        missing=missing,
+        args={},
+        candidates=cleaned[:8],
+        question=q.split("\n")[0][:240],
+    )
+
+
 # --------------------------------------------------------------------------
 # 1. Clarification answers
 # --------------------------------------------------------------------------

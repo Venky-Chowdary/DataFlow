@@ -15,9 +15,10 @@ import {
 import { AUTOMATION_IDEAS } from "../lib/automationIdeas";
 import { useActiveData } from "../lib/DataContext";
 import {
+  applyPilotSafeActions,
   buildPilotDataContext,
   nextPilotResultId,
-  PILOT_SCREEN_LABELS,
+  pilotActionChipLabel,
   runPilotConfirm,
 } from "../lib/pilotChat";
 import { useStudioActions } from "../lib/StudioActionsContext";
@@ -117,11 +118,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
   const ideas = AUTOMATION_IDEAS;
 
   const applySafeActions = (actions?: CopilotAction[]) => {
-    actions?.forEach((a) => {
-      if (a.risk === "mutate" || a.type === "studio") return;
-      const screen = a.screen || a.route;
-      if ((a.type === "navigate" || !a.type) && screen) onNavigate(screen as Screen);
-    });
+    applyPilotSafeActions(actions, onNavigate);
   };
 
   const clearPending = (msgIndex: number, actionId: string) => {
@@ -266,20 +263,24 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
   const recentChats = sessions.filter((s) => s.messages.length > 0 || s.id === activeId);
   const canDeleteActive = Boolean(session?.messages.length);
 
-  const engineLabel = modelCapabilities?.pilot_engine || "local";
+  const cloudBroken = cloudProviders.some((p) => p.configured && !p.available);
   const pilotInsightPill =
     pilotOnline === false
       ? "Offline"
-      : pilotOnline && engineLabel === "local"
-        ? "Local engine"
-        : pilotOnline && anyCloudReady
+      : pilotOnline == null
+        ? "Connecting…"
+        : anyCloudReady
           ? `LLM · ${modelCapabilities?.active_provider || "cloud"}`
-          : pilotOnline
-            ? "Online"
-            : "Connecting…";
+          : cloudBroken
+            ? "Local · fix API key"
+            : "Local engine";
 
   const pilotStatusClass =
-    pilotOnline === false ? "is-offline" : engineLabel === "local" ? "is-local" : "";
+    pilotOnline === false
+      ? "is-offline"
+      : anyCloudReady
+        ? ""
+        : "is-local";
 
   return (
     <PageShell
@@ -507,7 +508,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                     const screen = a.screen || a.route;
                     return screen ? (
                       <button key={j} type="button" className="df2-btn df2-btn-sm df2-mt-sm" onClick={() => onNavigate(screen as Screen)}>
-                        {a.label || `Open ${PILOT_SCREEN_LABELS[screen] || screen}`}
+                        {pilotActionChipLabel(a)}
                       </button>
                     ) : null;
                   })}

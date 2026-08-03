@@ -26,6 +26,29 @@ def _is_valid_api_key(value: str) -> bool:
     return not (stripped.startswith("[") or stripped.startswith("•"))
 
 
+# Process-wide: a 401 on one OpenAI/Anthropic instance must disable all instances
+# until the process restarts (operator saves a new key and restarts the API).
+_AUTH_FAILED_PROVIDERS: set[str] = set()
+
+
+def clear_auth_failures() -> None:
+    """Test helper — reset soft auth disables after a key rotation."""
+    _AUTH_FAILED_PROVIDERS.clear()
+
+
+def _provider_auth_failed(name: str) -> bool:
+    return name in _AUTH_FAILED_PROVIDERS
+
+
+def _mark_provider_auth_failed(name: str, err: str) -> bool:
+    """Return True if this error should soft-disable the provider."""
+    low = (err or "").lower()
+    if "401" in low or "invalid_api_key" in low or "incorrect api key" in low or "unauthorized" in low:
+        _AUTH_FAILED_PROVIDERS.add(name)
+        return True
+    return False
+
+
 @dataclass
 class LLMResponse:
     """Response from an LLM provider."""
@@ -58,10 +81,12 @@ class DataTransferOpenAIProvider(DataTransferLLMProvider):
     def __init__(self, model: str | None = None):
         self.model = model or os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
         self._client = None
-        self._auth_failed = False
         self._init_client()
 
     def _init_client(self):
+        if _provider_auth_failed(self.name):
+            self._client = None
+            return
         try:
             from services.integrations_store import resolve_provider_api_key
 
@@ -77,12 +102,10 @@ class DataTransferOpenAIProvider(DataTransferLLMProvider):
             self._client = None
 
     def is_available(self) -> bool:
-        return self._client is not None and not self._auth_failed
+        return self._client is not None and not _provider_auth_failed(self.name)
 
     def _mark_auth_failure(self, err: str) -> None:
-        low = (err or "").lower()
-        if "401" in low or "invalid_api_key" in low or "incorrect api key" in low or "unauthorized" in low:
-            self._auth_failed = True
+        if _mark_provider_auth_failed(self.name, err):
             self._client = None
 
     def generate(self, prompt: str, system: str = "", max_tokens: int = 1024) -> LLMResponse:
@@ -201,6 +224,9 @@ class DataTransferAnthropicProvider(DataTransferLLMProvider):
         self._init_client()
 
     def _init_client(self):
+        if _provider_auth_failed(self.name):
+            self._client = None
+            return
         try:
             from services.integrations_store import resolve_provider_api_key
 
@@ -216,7 +242,11 @@ class DataTransferAnthropicProvider(DataTransferLLMProvider):
             self._client = None
 
     def is_available(self) -> bool:
-        return self._client is not None
+        return self._client is not None and not _provider_auth_failed(self.name)
+
+    def _mark_auth_failure(self, err: str) -> None:
+        if _mark_provider_auth_failed(self.name, err):
+            self._client = None
 
     def generate(self, prompt: str, system: str = "", max_tokens: int = 1024) -> LLMResponse:
         if not self.is_available():
@@ -239,6 +269,7 @@ class DataTransferAnthropicProvider(DataTransferLLMProvider):
                 tokens_used=response.usage.input_tokens + response.usage.output_tokens,
             )
         except Exception as e:
+            self._mark_auth_failure(str(e))
             return LLMResponse(content="", success=False, provider=self.name, metadata={"error": str(e)})
 
     def generate_agent(
@@ -287,6 +318,7 @@ class DataTransferAnthropicProvider(DataTransferLLMProvider):
                 },
             }
         except Exception as e:
+            self._mark_auth_failure(str(e))
             return {"success": False, "error": str(e)}
 
 
@@ -523,7 +555,7 @@ def get_model_capabilities() -> dict:
             "Set DATAFLOW_PILOT_ENGINE=local to force the offline deterministic engine.",
             "Set DATAFLOW_PILOT_ENGINE=hybrid for local tools + LLM narration (OpenAI or Anthropic) over real tool results.",
             "Grounded tool results are executed once — native LLM loops do not re-run mutations or orphan Confirm acks.",
-            "If OpenAI/Anthropic returns 401 invalid_api_key, Pilot falls back to local until you save a valid key in Settings.",
+            "If OpenAI/Anthropic returns 401 invalid_api_key, Pilot soft-disables that provider process-wide and falls back to local until you save a valid key and restart the API.",
             "RAG and deterministic mapping continue when cloud providers are unavailable.",
             "Mutations (create connector / start transfer) always require operator Confirm.",
         ],

@@ -13,9 +13,10 @@ import {
 } from "../lib/api";
 import { useActiveData } from "../lib/DataContext";
 import {
+  applyPilotSafeActions,
   buildPilotDataContext,
   nextPilotResultId,
-  PILOT_SCREEN_LABELS,
+  pilotActionChipLabel,
   runPilotConfirm,
 } from "../lib/pilotChat";
 import { useStudioActions } from "../lib/StudioActionsContext";
@@ -88,15 +89,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
   }, [messages, loading]);
 
   const applyActions = (actions?: CopilotAction[]) => {
-    if (!actions?.length) return;
-    for (const action of actions) {
-      if (action.risk === "mutate" || action.type === "studio") continue;
-      if (action.type === "navigate" && action.screen && onNavigate) {
-        onNavigate(action.screen as Screen);
-      } else if (action.route && onNavigate) {
-        onNavigate(action.route as Screen);
-      }
-    }
+    applyPilotSafeActions(actions, onNavigate);
   };
 
   const clearPending = (msgIndex: number, actionId: string) => {
@@ -247,7 +240,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
               <div className="df2-copilot-actions">
                 {msg.actions.map((action, j) => {
                   const screen = action.screen || action.route;
-                  const label = action.label || (screen ? `Open ${PILOT_SCREEN_LABELS[screen] || screen}` : "Action");
+                  const label = pilotActionChipLabel(action);
                   return (
                     <button
                       key={j}

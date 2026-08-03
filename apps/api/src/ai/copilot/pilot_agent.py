@@ -1133,6 +1133,7 @@ Draft answer:
         self,
         message: str,
         data_context: dict | None,
+        history: list[dict] | None = None,
     ) -> list[tuple[str, dict]]:
         """Resolve this turn against session working memory, then plan tools.
 
@@ -1145,19 +1146,31 @@ Draft answer:
             inherit_focus_slots,
             looks_like_followup,
             looks_like_fresh_intent,
+            pending_from_assistant_clarification,
             resolve_followup,
             resolve_pending_answer,
+            resolve_platform_coreference,
+            resolve_table_coreference_tools,
         )
         from .working_memory import get_working_memory
 
         session_id = self._session_id(data_context)
         if not session_id:
+            platform = resolve_platform_coreference(message, history)
+            if platform:
+                return platform
             return infer_tools_from_message(message)
 
         memory = get_working_memory()
         focus = memory.get_focus(session_id)
 
         pending = memory.get_pending(session_id)
+        if not pending:
+            soft = pending_from_assistant_clarification(history)
+            if soft:
+                answered = resolve_pending_answer(message, soft)
+                if answered:
+                    return [answered]
         if pending:
             answered = resolve_pending_answer(message, pending)
             if answered:
@@ -1168,6 +1181,14 @@ Draft answer:
                 memory.clear_pending(session_id)
             else:
                 return []
+
+        platform = resolve_platform_coreference(message, history)
+        if platform:
+            return platform
+
+        table_coref = resolve_table_coreference_tools(message, focus)
+        if table_coref:
+            return table_coref
 
         planned = infer_tools_from_message(message)
         # Elliptical edits beat a fresh under-specified parse ("what about average
@@ -1191,6 +1212,9 @@ Draft answer:
             edit = resolve_followup(message, focus)
             if edit is not None:
                 return [("aggregate_data", edit.as_tool_args())]
+            # Coreference with focus but no metric edit — still prefer table tools.
+            if table_coref := resolve_table_coreference_tools(message, focus):
+                return table_coref
         if not planned:
             edit = resolve_followup(message, focus)
             if edit is not None:
@@ -1380,7 +1404,7 @@ Draft answer:
             )
 
         # Fallback: local NL plan + OpenAI narration (no native tools).
-        planned = self._plan_with_memory(message, data_context)
+        planned = self._plan_with_memory(message, data_context, history)
         turn = PilotTurn()
         for name, args in planned:
             tr = self.tools.execute(name, self._with_result_context(name, args, data_context))
@@ -1434,7 +1458,7 @@ Respond as Data Pilot in natural language. Ground your answer in tool results an
         if not ollama.is_available():
             return None
 
-        planned = self._plan_with_memory(message, data_context)
+        planned = self._plan_with_memory(message, data_context, history)
         turn = PilotTurn()
         for name, args in planned:
             tr = self.tools.execute(name, self._with_result_context(name, args, data_context))
@@ -1486,7 +1510,7 @@ Respond as Data Pilot — grounded in tool results."""
         intent = self._detect_intent(message)
         turn = PilotTurn()
 
-        planned = self._plan_with_memory(message, data_context)
+        planned = self._plan_with_memory(message, data_context, history)
         if not planned:
             # Typo / non-answer while a clarification is open — re-ask, keep slot.
             session_id = self._session_id(data_context)
