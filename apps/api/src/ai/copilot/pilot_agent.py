@@ -454,31 +454,10 @@ def _score_response(resp: CopilotResponse | None) -> float:
 
 
 def _resolve_pilot_engine() -> str:
-    """Pick the effective engine: local always works; hybrid when keys exist + requested/auto."""
-    import os
+    """Delegate to provider SSOT (Ollama-first auto mode)."""
+    from ..llm.provider import resolve_pilot_engine
 
-    raw = (os.environ.get("DATAFLOW_PILOT_ENGINE") or "auto").strip().lower()
-    if raw in {"local", "local_first", "deterministic"}:
-        return "local"
-    if raw in {"hybrid", "cloud"}:
-        return raw
-    # auto (default): use hybrid when any cloud/ollama provider is ready.
-    try:
-        from ..llm.provider import (
-            DataTransferAnthropicProvider,
-            DataTransferOllamaProvider,
-            DataTransferOpenAIProvider,
-        )
-
-        if DataTransferAnthropicProvider().is_available():
-            return "hybrid"
-        if DataTransferOpenAIProvider().is_available():
-            return "hybrid"
-        if DataTransferOllamaProvider().is_available():
-            return "hybrid"
-    except Exception:
-        pass
-    return "local"
+    return resolve_pilot_engine()
 
 
 @dataclass
@@ -592,32 +571,33 @@ class DataPilotAgent:
         from concurrent.futures import wait, FIRST_COMPLETED
 
         llm_futs: list = []
-        openai_ready = False
-        try:
-            from ..llm.provider import DataTransferOpenAIProvider
-
-            openai_ready = DataTransferOpenAIProvider().is_available()
-        except Exception:
-            openai_ready = False
-
-        if self.anthropic.is_available():
-            llm_futs.append(
-                _executor.submit(
-                    self._anthropic_agent_loop, message, history or [], system, data_context
-                )
-            )
-        elif openai_ready:
-            llm_futs.append(
-                _executor.submit(
-                    self._openai_agent, message, history or [], system, data_context
-                )
-            )
-        elif self._ollama_available_quick():
+        # Self-hosted Ollama first, then cloud — OpenAI is optional.
+        if self._ollama_available_quick():
             llm_futs.append(
                 _executor.submit(
                     self._ollama_agent, message, history or [], system, data_context
                 )
             )
+        elif self.anthropic.is_available():
+            llm_futs.append(
+                _executor.submit(
+                    self._anthropic_agent_loop, message, history or [], system, data_context
+                )
+            )
+        else:
+            openai_ready = False
+            try:
+                from ..llm.provider import DataTransferOpenAIProvider
+
+                openai_ready = DataTransferOpenAIProvider().is_available()
+            except Exception:
+                openai_ready = False
+            if openai_ready:
+                llm_futs.append(
+                    _executor.submit(
+                        self._openai_agent, message, history or [], system, data_context
+                    )
+                )
 
         if not llm_futs:
             return _with_llm_footnote(polished, engine)
@@ -1097,26 +1077,9 @@ class DataPilotAgent:
         provider = None
         method = "llm_polish"
         try:
-            from ..llm.provider import (
-                DataTransferAnthropicProvider,
-                DataTransferOllamaProvider,
-                DataTransferOpenAIProvider,
-            )
+            from ..llm.provider import pick_narration_provider
 
-            openai = DataTransferOpenAIProvider()
-            if openai.is_available():
-                provider = openai
-                method = "openai_polish"
-            else:
-                anthropic = DataTransferAnthropicProvider()
-                if anthropic.is_available():
-                    provider = anthropic
-                    method = "anthropic_polish"
-                else:
-                    ollama = DataTransferOllamaProvider()
-                    if ollama.is_available():
-                        provider = ollama
-                        method = "ollama_polish"
+            provider, method = pick_narration_provider()
         except Exception:
             return local
         if provider is None:
@@ -1218,6 +1181,11 @@ Draft answer:
                 answered = resolve_pending_answer(message, soft)
                 if answered:
                     return [answered]
+                # Typo / non-answer against a transcript clarification — promote
+                # to hard pending and re-ask (same as memory-backed slots).
+                if not looks_like_fresh_intent(message):
+                    memory.remember_pending(session_id, soft)
+                    return []
         if pending:
             answered = resolve_pending_answer(message, pending)
             if answered:
