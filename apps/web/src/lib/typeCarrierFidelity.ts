@@ -173,6 +173,28 @@ export function declaredCarrierFidelityRisk(
   if (!src || !tgt) return false;
   if (stringWidthWouldNarrow(src, tgt)) return true;
   if (decimalWouldCollapse(src, tgt)) return true;
+  // Bare DECIMAL → DECIMAL(p,s) invents capacity (API SSOT).
+  if (
+    isDecimalFamily(src)
+    && isDecimalFamily(tgt)
+    && parseDecimalPrecisionScale(src) == null
+    && parseDecimalPrecisionScale(tgt) != null
+  ) {
+    return true;
+  }
+  // Float ↔ fixed-point invent/drop IEEE polarity.
+  const srcFloat = /\b(float|double|real|float64|float32|float4|float8)\b/i.test(src);
+  const tgtFloat = /\b(float|double|real|float64|float32|float4|float8)\b/i.test(tgt);
+  const srcDec = isDecimalFamily(src);
+  const tgtDec = isDecimalFamily(tgt);
+  if ((srcFloat && tgtDec) || (srcDec && tgtFloat)) return true;
+  // Specialty → open string (INET/XML/HSTORE/…).
+  if (
+    /\b(inet|cidr|macaddr|xmltype|xml|hstore|ltree|tsvector|tsquery|jsonpath|objectid|anydata|hllsketch|rowversion|sql_variant|hierarchyid)\b/i.test(src)
+    && isOpenStringCarrier(tgt)
+  ) {
+    return true;
+  }
   if (isDocumentCarrier(src) && isOpenStringCarrier(tgt)) return true;
   if (isOpenStringCarrier(src) && isDocumentCarrier(tgt)) return true;
   if (isTzAwareTemporal(src) && isNtzTemporal(tgt)) return true;

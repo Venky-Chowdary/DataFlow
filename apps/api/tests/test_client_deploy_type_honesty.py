@@ -280,6 +280,58 @@ def test_specialty_to_text_is_lossy_not_preserve():
     assert is_lossy_coercion("DECIMAL(19,4)", "MONEY") is True
 
 
+def test_schema_qualified_decimal_invent_oracle_wave18():
+    from services.type_system import (
+        bitstring_pad_polarity_loss,
+        create_new_mapping_target_type,
+        decimal_params_would_narrow,
+        identity_domain_would_invent,
+        interval_precision_would_narrow,
+        is_lossy_coercion,
+        oracle_char_byte_polarity_loss,
+        oracle_long_numeric_invent,
+        specialty_carrier_base,
+        specialty_carrier_would_collapse,
+    )
+
+    assert specialty_carrier_base("SYS.XMLTYPE") == "XMLTYPE"
+    assert specialty_carrier_would_collapse("SYS.XMLTYPE", "VARCHAR") is True
+    assert is_lossy_coercion("SYS.XMLTYPE", "VARCHAR") is True
+    assert specialty_carrier_base("PG_CATALOG.INET") == "INET"
+    assert is_lossy_coercion("PG_CATALOG.INET", "TEXT") is True
+
+    assert decimal_params_would_narrow("DECIMAL", "DECIMAL(10,2)") is True
+    assert is_lossy_coercion("NUMERIC", "NUMERIC(5,2)") is True
+
+    assert oracle_char_byte_polarity_loss(
+        "VARCHAR2(100 CHAR)", "VARCHAR2(100 BYTE)"
+    ) is True
+    assert is_lossy_coercion("VARCHAR2(100 CHAR)", "VARCHAR2(100 BYTE)") is True
+
+    assert bitstring_pad_polarity_loss("BIT VARYING(8)", "BIT(8)") is True
+    assert is_lossy_coercion("VARBIT(8)", "BIT(8)") is True
+
+    assert identity_domain_would_invent("INTEGER", "SERIAL") is True
+    assert is_lossy_coercion("INTEGER", "SERIAL") is True
+    assert is_lossy_coercion("BIGINT", "BIGSERIAL") is True
+
+    assert interval_precision_would_narrow(
+        "INTERVAL DAY TO SECOND(6)", "INTERVAL DAY TO SECOND(0)"
+    ) is True
+    assert is_lossy_coercion(
+        "INTERVAL DAY(9) TO SECOND(6)", "INTERVAL DAY(2) TO SECOND(6)"
+    ) is True
+
+    assert oracle_long_numeric_invent("LONG", "NUMBER(38,0)") is True
+    assert is_lossy_coercion("LONG", "NUMBER(38,0)") is True
+    assert create_new_mapping_target_type("LONG", "oracle") == "CLOB"
+    # Spark INT64 widen still preserve (not Oracle NUMBER invent).
+    assert is_lossy_coercion("LONG", "BIGINT") is False
+
+    assert is_lossy_coercion("ANYDATA", "VARCHAR") is True
+    assert is_lossy_coercion("HLLSKETCH", "VARCHAR") is True
+
+
 def test_struct_int64_interval_identity_document_wave17():
     from services.type_system import (
         bfile_locator_would_collapse,

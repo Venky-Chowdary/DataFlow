@@ -99,12 +99,13 @@ const CAST_QUARANTINE_RISK =
   "Cast may fail on bad samples; under quarantine those rows are held out of the primary table (not NULL-invented). coerce_null policy only writes NULL in place.";
 
 function fidelityOf(m: EditableMapping): string {
+  // Carrier risk always wins — never greenwash stamped preserve after dest-type edits.
+  if (m.typeNarrowing || declaredCarrierFidelityRisk(m.inferredType, m.destType)) {
+    return "lossy_cast";
+  }
   const stamped = (m.fidelity || "").toLowerCase();
   if (stamped === "lossy_cast" || stamped === "mutate" || stamped === "preserve") {
     return stamped;
-  }
-  if (m.typeNarrowing || declaredCarrierFidelityRisk(m.inferredType, m.destType)) {
-    return "lossy_cast";
   }
   const t = (m.transform || "none").toLowerCase();
   if (!t || t === "none" || t === "identity") return "preserve";

@@ -1348,6 +1348,9 @@ def decimal_params_would_narrow(source_type: str, target_type: str) -> bool:
     sp, ss = parse_numeric_precision_scale(source_type)
     tp, ts = parse_numeric_precision_scale(target_type)
     if sp is None and ss is None:
+        # Bare DECIMAL → DECIMAL(p,s) invents a capacity the source never proved.
+        if tp is not None or ts is not None:
+            return True
         return False
     if tp is None and ts is None:
         # Proven (p,s) → bare DECIMAL invents platform default (often MySQL
@@ -2008,6 +2011,19 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
         if db == "mongodb":
             return "objectId"
         return "VARCHAR(24)"
+    # Oracle LONG is a deprecated text LOB — never invent NUMBER(38,0) from LONG.
+    if base_early == "LONG" and db == "oracle":
+        return "CLOB"
+    # Redshift HLLSKETCH — keep native or fall to VARCHAR with specialty collapse.
+    if base_early == "HLLSKETCH":
+        if db == "redshift":
+            return "HLLSKETCH"
+        return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT, DEFAULT_DDL.get(db, "TEXT"))
+    # Oracle ANYDATA — polymorphic envelope; JSON/CLOB wire off-engine.
+    if base_early == "ANYDATA":
+        if db == "oracle":
+            return "ANYDATA"
+        return DDL_TYPES.get(db, {}).get(LOGICAL_JSON, DEFAULT_DDL.get(db, "TEXT"))
     # PostgreSQL jsonpath — specialty path expression type (never invent TEXT).
     if base_early == "JSONPATH":
         if db in {
@@ -3589,6 +3605,119 @@ def bitstring_width_would_narrow(source_type: str, target_type: str) -> bool:
     return False
 
 
+def bitstring_pad_polarity_loss(source_type: str, target_type: str) -> bool:
+    """True when BIT VARYING ↔ fixed BIT(n) changes exact-length polarity."""
+    if not is_bitstring_carrier(source_type) or not is_bitstring_carrier(target_type):
+        return False
+    return is_varying_bitstring_carrier(source_type) != is_varying_bitstring_carrier(
+        target_type
+    )
+
+
+def oracle_char_byte_unit(inferred: str | None) -> str | None:
+    """Return ``CHAR`` / ``BYTE`` length semantics for Oracle VARCHAR2/CHAR."""
+    upper = strip_identity_qualifier(inferred).upper()
+    if not upper:
+        return None
+    if re.search(r"\(\s*\d+\s*CHAR\s*\)", upper):
+        return "CHAR"
+    if re.search(r"\(\s*\d+\s*BYTE\s*\)", upper):
+        return "BYTE"
+    return None
+
+
+def oracle_char_byte_polarity_loss(source_type: str, target_type: str) -> bool:
+    """True when VARCHAR2(n CHAR) ↔ VARCHAR2(n BYTE) changes multibyte budget."""
+    src_u = oracle_char_byte_unit(source_type)
+    tgt_u = oracle_char_byte_unit(target_type)
+    if not src_u or not tgt_u:
+        return False
+    return src_u != tgt_u
+
+
+def is_oracle_long_text_carrier(inferred: str | None) -> bool:
+    """True for Oracle deprecated LONG text LOB (exact token, not LONGTEXT/BIGINT)."""
+    upper = strip_identity_qualifier(inferred).upper().replace(" ", "")
+    return upper == "LONG"
+
+
+def oracle_long_numeric_invent(source_type: str, target_type: str) -> bool:
+    """True when Oracle LONG text would be stamped/mapped as NUMBER/integer.
+
+    Spark/Iceberg ``long`` also uses this token for INT64 — only flag numeric
+    Oracle DDL (NUMBER/DECIMAL) invent, not lakehouse BIGINT widen.
+    """
+    if not is_oracle_long_text_carrier(source_type):
+        return False
+    tgt_u = strip_identity_qualifier(target_type).upper().replace(" ", "")
+    if tgt_u.startswith(("NUMBER", "DECIMAL", "NUMERIC", "FLOAT", "BINARY_FLOAT", "BINARY_DOUBLE")):
+        return True
+    if tgt_u.startswith("DOUBLE"):
+        return True
+    return False
+
+
+def parse_interval_precision(
+    inferred: str | None,
+) -> tuple[int | None, int | None] | None:
+    """Return (leading_precision, fractional_seconds) when declared on INTERVAL."""
+    upper = strip_identity_qualifier(inferred).upper()
+    if not upper or "INTERVAL" not in upper:
+        return None
+    leading: int | None = None
+    frac: int | None = None
+    m_lead = re.search(
+        r"\b(?:YEAR|DAY|HOUR|MONTH|MINUTE|SECOND)\s*\(\s*(\d+)\s*\)",
+        upper,
+    )
+    if m_lead:
+        leading = int(m_lead.group(1))
+    m_frac = re.search(r"SECOND\s*\(\s*(\d+)\s*\)", upper)
+    if m_frac:
+        # DAY(d) TO SECOND(s) — second capture is fractional when TO SECOND(s).
+        if re.search(r"TO\s+SECOND\s*\(", upper):
+            frac = int(m_frac.group(1))
+            # Prefer leading from DAY/YEAR when present.
+            m_day = re.search(r"\bDAY\s*\(\s*(\d+)\s*\)", upper)
+            m_year = re.search(r"\bYEAR\s*\(\s*(\d+)\s*\)", upper)
+            if m_day:
+                leading = int(m_day.group(1))
+            elif m_year:
+                leading = int(m_year.group(1))
+        elif leading is None:
+            leading = int(m_frac.group(1))
+    if leading is None and frac is None:
+        return None
+    return leading, frac
+
+
+def interval_precision_would_narrow(source_type: str, target_type: str) -> bool:
+    """True when INTERVAL leading/fractional precision shrinks or invents typmod."""
+    if normalize_logical_type(source_type) != LOGICAL_INTERVAL:
+        return False
+    if normalize_logical_type(target_type) != LOGICAL_INTERVAL:
+        return False
+    sp = parse_interval_precision(source_type)
+    tp = parse_interval_precision(target_type)
+    if sp is None and tp is None:
+        return False
+    # Bare ↔ proven typmod invents/drops precision contract.
+    if (sp is None) != (tp is None):
+        return True
+    assert sp is not None and tp is not None
+    sl, sf = sp
+    tl, tf = tp
+    if sl is not None and tl is not None and tl < sl:
+        return True
+    if sf is not None and tf is not None and tf < sf:
+        return True
+    if sf is not None and tf is None:
+        return True
+    if sl is not None and tl is None and sf is None:
+        return True
+    return False
+
+
 def binary_width_would_narrow(source_type: str, target_type: str) -> bool:
     """True when source binary capacity exceeds destination BINARY(n)/VARBINARY(n).
 
@@ -4049,6 +4178,8 @@ _SPECIALTY_NATIVE_CARRIERS: Final[frozenset[str]] = frozenset(
         "VOID",
         "JSONPATH",
         "OBJECTID",
+        "ANYDATA",  # Oracle polymorphic envelope
+        "HLLSKETCH",  # Redshift HyperLogLog sketch
     }
 )
 
@@ -4143,10 +4274,20 @@ def specialty_carrier_base(inferred: str | None) -> str | None:
         return None
     if upper.startswith("ARRAY<") or upper.endswith("[]"):
         return None
+    # Strip schema/quotes — SYS.XMLTYPE / PG_CATALOG.INET must not greenwash.
+    upper = upper.replace('"', "").replace("`", "").replace("[", "").replace("]", "")
+    if "." in upper and not upper.startswith(
+        ("ARRAY<", "STRUCT<", "MAP<", "RECORD<", "LIST<", "RANGE<")
+    ):
+        upper = upper.rsplit(".", 1)[-1].strip()
     # PG DATERANGE ↔ BigQuery RANGE<DATE> are dialect twins — one specialty base.
     range_canon = _normalize_range_carrier(inferred)
     if range_canon is not None:
         return range_canon
+    # Re-normalize after schema strip for RANGE carriers.
+    range_canon2 = _normalize_range_carrier(upper)
+    if range_canon2 is not None:
+        return range_canon2
     if "(" in upper and "RANGE" not in upper:
         upper = upper.split("(", 1)[0].strip()
     if upper in _SPECIALTY_NATIVE_CARRIERS:
@@ -5199,6 +5340,23 @@ def identity_polarity_would_collapse(source_type: str, target_type: str) -> bool
     }
 
 
+def identity_domain_would_invent(source_type: str, target_type: str) -> bool:
+    """True when plain scalar invents SERIAL/IDENTITY/AUTO_INCREMENT polarity."""
+    if is_identity_column(source_type):
+        return False
+    if not is_identity_column(target_type):
+        return False
+    src = normalize_logical_type(source_type)
+    return src in {
+        LOGICAL_INTEGER,
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+        LOGICAL_JSON,
+    }
+
+
 def is_bfile_locator(inferred: str | None) -> bool:
     """True for Oracle BFILE external locator (not inlined LOB bytes)."""
     upper = strip_identity_qualifier(inferred).upper().strip()
@@ -5492,6 +5650,14 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
         return True
     if interval_family_would_collapse(source_type, target_type):
         return True
+    if interval_precision_would_narrow(source_type, target_type):
+        return True
+    if bitstring_pad_polarity_loss(source_type, target_type):
+        return True
+    if oracle_char_byte_polarity_loss(source_type, target_type):
+        return True
+    if oracle_long_numeric_invent(source_type, target_type):
+        return True
     if geography_contract_would_collapse(source_type, target_type):
         return True
     if specialty_carrier_would_collapse(source_type, target_type):
@@ -5519,6 +5685,8 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
     if generated_always_overwrite_risk(target_type):
         return True
     if identity_polarity_would_collapse(source_type, target_type):
+        return True
+    if identity_domain_would_invent(source_type, target_type):
         return True
     if bfile_locator_would_collapse(source_type, target_type):
         return True
@@ -5596,6 +5764,14 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
             return True
         if interval_family_would_collapse(source_type, target_type):
             return True
+        if interval_precision_would_narrow(source_type, target_type):
+            return True
+        if bitstring_pad_polarity_loss(source_type, target_type):
+            return True
+        if oracle_char_byte_polarity_loss(source_type, target_type):
+            return True
+        if oracle_long_numeric_invent(source_type, target_type):
+            return True
         if geography_contract_would_collapse(source_type, target_type):
             return True
         if specialty_carrier_would_collapse(source_type, target_type):
@@ -5621,6 +5797,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         if generated_always_overwrite_risk(target_type):
             return True
         if identity_polarity_would_collapse(source_type, target_type):
+            return True
+        if identity_domain_would_invent(source_type, target_type):
             return True
         if bfile_locator_would_collapse(source_type, target_type):
             return True
@@ -5676,6 +5854,14 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         return True
     if interval_family_would_collapse(source_type, target_type):
         return True
+    if interval_precision_would_narrow(source_type, target_type):
+        return True
+    if bitstring_pad_polarity_loss(source_type, target_type):
+        return True
+    if oracle_char_byte_polarity_loss(source_type, target_type):
+        return True
+    if oracle_long_numeric_invent(source_type, target_type):
+        return True
     if geography_contract_would_collapse(source_type, target_type):
         return True
     if specialty_carrier_would_collapse(source_type, target_type):
@@ -5703,6 +5889,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
     if generated_always_overwrite_risk(target_type):
         return True
     if identity_polarity_would_collapse(source_type, target_type):
+        return True
+    if identity_domain_would_invent(source_type, target_type):
         return True
     if bfile_locator_would_collapse(source_type, target_type):
         return True
