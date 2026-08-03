@@ -1748,6 +1748,14 @@ th.df2-type-json .df2-type-badge {
   border-color: #ddd6fe;
 }
 
+.df2-structure-field-chip.df2-type-spatial .df2-type-badge,
+.df2-type-spatial .df2-type-badge,
+th.df2-type-spatial .df2-type-badge {
+  background: #f0fdf4;
+  color: #166534;
+  border-color: #bbf7d0;
+}
+
 .df2-structure-field-chip.df2-type-uuid .df2-type-badge,
 .df2-type-uuid .df2-type-badge,
 th.df2-type-uuid .df2-type-badge {
@@ -1783,6 +1791,8 @@ th.df2-type-string .df2-type-badge {
 .df2-structure-table td.df2-type-temporal { box-shadow: inset 2px 0 0 #fdba74; }
 .df2-structure-table th.df2-type-json,
 .df2-structure-table td.df2-type-json { box-shadow: inset 2px 0 0 #c4b5fd; }
+.df2-structure-table th.df2-type-spatial,
+.df2-structure-table td.df2-type-spatial { box-shadow: inset 2px 0 0 #86efac; }
 .df2-structure-table th.df2-type-uuid,
 .df2-structure-table td.df2-type-uuid { box-shadow: inset 2px 0 0 #6ee7b7; }
 .df2-structure-table th.df2-type-binary,

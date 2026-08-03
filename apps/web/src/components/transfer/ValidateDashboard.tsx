@@ -1063,7 +1063,7 @@ export function ValidateDashboard({
         ? "blocked"
         : decision === "review"
           ? "review"
-          : "ready";
+          : "pending";
   const complianceAck = proof?.compliance?.acknowledgment as
     | { actor?: string; at?: string; reason?: string }
     | undefined;

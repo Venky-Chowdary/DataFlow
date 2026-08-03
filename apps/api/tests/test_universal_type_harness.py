@@ -195,7 +195,8 @@ def test_specialty_native_ddl_and_lossless_sinks():
     # Engines without native interval keep lossless text — never invent a fake cast
     assert ddl_type("mysql", "INTERVAL") in {"TEXT", "LONGTEXT"}
     assert is_lossy_coercion("interval", "integer") is True
-    assert is_lossy_coercion("geography", "string") is False
+    # Text sink drops GEOGRAPHY domain — Map Accept risk, not silent preserve.
+    assert is_lossy_coercion("geography", "string") is True
     assert is_lossy_coercion("vector", "array") is False
 
 

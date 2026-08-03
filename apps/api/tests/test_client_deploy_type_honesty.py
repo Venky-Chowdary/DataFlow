@@ -255,3 +255,24 @@ def test_bitstring_bytea_and_year_polarity():
     assert is_lossy_coercion("BIT(8)", "VARCHAR(8)") is False
     assert is_lossy_coercion("YEAR", "SMALLINT") is True
     assert is_lossy_coercion("SET('a','b')", "TEXT[]") is False
+
+
+def test_specialty_to_text_is_lossy_not_preserve():
+    from services.mapping_proof import mapping_fidelity
+    from services.type_system import ddl_type, is_lossy_coercion
+
+    assert is_lossy_coercion("INTERVAL", "VARCHAR") is True
+    assert is_lossy_coercion("GEOGRAPHY", "STRING") is True
+    assert is_lossy_coercion("VECTOR", "VARCHAR") is True
+    assert mapping_fidelity(
+        {"source": "iv", "target": "iv", "transform": "none"},
+        declared_source_type="INTERVAL",
+        declared_target_type="VARCHAR",
+    )["verdict"] == "lossy_cast"
+
+    # BIGINT UNSIGNED must not invent fractional DECIMAL scale.
+    assert ddl_type("snowflake", "BIGINT UNSIGNED") == "NUMBER(38,0)"
+    assert ddl_type("mysql", "BIGINT UNSIGNED").endswith(",0)")
+    assert ddl_type("postgresql", "BIGINT UNSIGNED") == "NUMERIC(20,0)"
+
+    assert is_lossy_coercion("DECIMAL(19,4)", "MONEY") is True

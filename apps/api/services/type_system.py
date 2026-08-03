@@ -1650,6 +1650,25 @@ def _range_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     return None
 
 
+def _is_unsigned_integer_decimal_carrier(inferred: str | None) -> bool:
+    """True when a DECIMAL-logical carrier is really an unsigned integer widen.
+
+    MySQL ``BIGINT UNSIGNED`` / ``UINT64`` map to LOGICAL_DECIMAL so they do not
+    overflow signed BIGINT — but create-new must stay zero-scale, never invent
+    ``NUMBER(38,10)`` fractional digits.
+    """
+    upper = strip_identity_qualifier(inferred).upper()
+    if not upper:
+        return False
+    if re.match(r"^U?INT\d*$", upper.replace(" ", "")):
+        return upper.startswith("UINT") or upper.startswith("INT") and "UNSIGNED" in upper
+    if "UNSIGNED" in upper and re.search(
+        r"\b(?:BIGINT|INTEGER|INT|MEDIUMINT|SMALLINT|TINYINT)\b", upper
+    ):
+        return True
+    return False
+
+
 def _decimal_ddl_for_dest(db: str, inferred: str | None) -> str:
     """Emit destination DECIMAL preserving source scale when possible.
 
@@ -1681,6 +1700,14 @@ def _decimal_ddl_for_dest(db: str, inferred: str | None) -> str:
     # No source params → platform default (PG stays bare NUMERIC; others use
     # a generous floor so values never truncate at write time).
     if precision is None and scale is None:
+        # BIGINT UNSIGNED / UINT64 travel as LOGICAL_DECIMAL for overflow safety
+        # but must not invent fractional scale (NUMBER(38,10) invent).
+        if _is_unsigned_integer_decimal_carrier(inferred):
+            if db == "postgresql":
+                return "NUMERIC(20,0)"
+            if db == "bigquery":
+                return "BIGNUMERIC(20,0)"
+            return template.format(p=min(cap_p, 38), s=0)
         if db == "postgresql":
             return default_ddl
         if db == "bigquery":
@@ -3170,6 +3197,20 @@ def year_domain_would_collapse(source_type: str, target_type: str) -> bool:
         LOGICAL_TEXT,
         LOGICAL_JSON,
     }
+
+
+def money_domain_would_collapse(source_type: str, target_type: str) -> bool:
+    """True when landing on/off named MONEY invents locale-dependent currency polarity.
+
+    ``DECIMAL(19,4)`` is a money-*scale* carrier but not locale MONEY — switching
+    onto ``MONEY``/``SMALLMONEY`` still needs Accept risk.
+    """
+    src_base = strip_identity_qualifier(source_type).upper().replace(" ", "")
+    tgt_base = strip_identity_qualifier(target_type).upper().replace(" ", "")
+    named = {"MONEY", "SMALLMONEY", "CURRENCY"}
+    src_named = src_base in named
+    tgt_named = tgt_base in named
+    return src_named != tgt_named
 
 
 def set_to_array_polarity_preserved(source_type: str, target_type: str) -> bool:
@@ -4941,7 +4982,7 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
     transform engine can perform without losing the original value:
 
       * any value → string/text/json/array (structural serialization)
-      * integer → decimal/float/string/text/json
+      * integer → decimal/string/text/json (integer→float is lossy — IEEE mantissa)
       * decimal → string/text/json (decimal→float is lossy)
       * float → string/text/json (float→decimal and float→integer are lossy)
       * boolean → string/text/json/integer/decimal/float
@@ -4977,6 +5018,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         if bitstring_width_would_narrow(source_type, target_type):
             return True
         if year_domain_would_collapse(source_type, target_type):
+            return True
+        if money_domain_would_collapse(source_type, target_type):
             return True
         if unsigned_integer_would_overflow(source_type, target_type):
             return True
@@ -5021,6 +5064,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
     if is_nested_document_collapse(source_type, target_type):
         return True
     if year_domain_would_collapse(source_type, target_type):
+        return True
+    if money_domain_would_collapse(source_type, target_type):
         return True
     if bitstring_opaque_bytes_collapse(source_type, target_type):
         return True
@@ -5109,16 +5154,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         (LOGICAL_UUID, LOGICAL_JSON),
         # binary ↔ text/JSON is NOT reversible without an encoding policy
         # (hex vs base64 mutate). Treated lossy so Map requires Accept risk.
-        # Specialty → lossless text / JSON (never invent a fake numeric cast)
-        (LOGICAL_INTERVAL, LOGICAL_STRING),
-        (LOGICAL_INTERVAL, LOGICAL_TEXT),
-        (LOGICAL_INTERVAL, LOGICAL_JSON),
-        (LOGICAL_GEOGRAPHY, LOGICAL_STRING),
-        (LOGICAL_GEOGRAPHY, LOGICAL_TEXT),
-        (LOGICAL_GEOGRAPHY, LOGICAL_JSON),
-        (LOGICAL_VECTOR, LOGICAL_STRING),
-        (LOGICAL_VECTOR, LOGICAL_TEXT),
-        (LOGICAL_VECTOR, LOGICAL_JSON),
+        # INTERVAL/GEOGRAPHY/VECTOR → text/JSON drops specialty domain — lossy
+        # (Map Accept risk must match engine fidelity; was false "preserve").
         (LOGICAL_VECTOR, LOGICAL_ARRAY),
         # Fielded nested → text (JSON string form); opaque JSON path is lossy above.
         (LOGICAL_STRUCT, LOGICAL_STRING),

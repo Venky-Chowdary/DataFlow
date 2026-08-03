@@ -7,6 +7,7 @@ export type TypeFamily =
   | "bool"
   | "temporal"
   | "json"
+  | "spatial"
   | "uuid"
   | "binary"
   | "string";
@@ -20,8 +21,8 @@ export const LOGICAL_TYPE_OPTIONS: { value: string; label: string; family: TypeF
   { value: "SMALLINT", label: "SMALLINT", family: "int" },
   { value: "DECIMAL", label: "DECIMAL — precise number", family: "decimal" },
   { value: "NUMERIC", label: "NUMERIC", family: "decimal" },
-  { value: "FLOAT", label: "FLOAT", family: "decimal" },
-  { value: "DOUBLE", label: "DOUBLE", family: "decimal" },
+  { value: "FLOAT", label: "FLOAT", family: "float" },
+  { value: "DOUBLE", label: "DOUBLE", family: "float" },
   { value: "BOOLEAN", label: "BOOLEAN", family: "bool" },
   { value: "DATE", label: "DATE", family: "temporal" },
   { value: "TIME", label: "TIME", family: "temporal" },
@@ -35,7 +36,7 @@ export const LOGICAL_TYPE_OPTIONS: { value: string; label: string; family: TypeF
   { value: "BYTEA", label: "BYTEA", family: "binary" },
   { value: "VECTOR", label: "VECTOR — embedding", family: "binary" },
   { value: "INTERVAL", label: "INTERVAL — duration", family: "temporal" },
-  { value: "GEOGRAPHY", label: "GEOGRAPHY / GEOMETRY", family: "json" },
+  { value: "GEOGRAPHY", label: "GEOGRAPHY / GEOMETRY", family: "spatial" },
 ];
 
 /** Snowflake-native DDL labels — Map should show what CREATE will actually use. */
@@ -43,7 +44,7 @@ export const SNOWFLAKE_TYPE_OPTIONS: { value: string; label: string; family: Typ
   { value: "VARCHAR", label: "VARCHAR — text", family: "string" },
   { value: "NUMBER(38,0)", label: "NUMBER(38,0) — integer", family: "int" },
   { value: "NUMBER(38,10)", label: "NUMBER(38,10) — decimal", family: "decimal" },
-  { value: "FLOAT", label: "FLOAT", family: "decimal" },
+  { value: "FLOAT", label: "FLOAT", family: "float" },
   { value: "BOOLEAN", label: "BOOLEAN", family: "bool" },
   { value: "DATE", label: "DATE", family: "temporal" },
   { value: "TIME", label: "TIME", family: "temporal" },
@@ -52,7 +53,7 @@ export const SNOWFLAKE_TYPE_OPTIONS: { value: string; label: string; family: Typ
   { value: "TIMESTAMP_LTZ", label: "TIMESTAMP_LTZ", family: "temporal" },
   { value: "VARIANT", label: "VARIANT — semi-structured", family: "json" },
   { value: "BINARY", label: "BINARY / bytes", family: "binary" },
-  { value: "GEOGRAPHY", label: "GEOGRAPHY", family: "json" },
+  { value: "GEOGRAPHY", label: "GEOGRAPHY", family: "spatial" },
   { value: "INTERVAL", label: "INTERVAL — stored as VARCHAR", family: "temporal" },
   { value: "VECTOR", label: "VECTOR(FLOAT, n) — set dimension", family: "binary" },
 ];
@@ -61,14 +62,15 @@ export const BIGQUERY_TYPE_OPTIONS: { value: string; label: string; family: Type
   { value: "STRING", label: "STRING", family: "string" },
   { value: "INT64", label: "INT64", family: "int" },
   { value: "BIGNUMERIC", label: "BIGNUMERIC", family: "decimal" },
-  { value: "FLOAT64", label: "FLOAT64", family: "decimal" },
+  { value: "FLOAT64", label: "FLOAT64", family: "float" },
   { value: "BOOL", label: "BOOL", family: "bool" },
   { value: "DATE", label: "DATE", family: "temporal" },
   { value: "TIME", label: "TIME", family: "temporal" },
-  { value: "TIMESTAMP", label: "TIMESTAMP", family: "temporal" },
+  { value: "DATETIME", label: "DATETIME — wall-clock (no TZ)", family: "temporal" },
+  { value: "TIMESTAMP", label: "TIMESTAMP — UTC instant", family: "temporal" },
   { value: "JSON", label: "JSON", family: "json" },
   { value: "BYTES", label: "BYTES", family: "binary" },
-  { value: "GEOGRAPHY", label: "GEOGRAPHY", family: "json" },
+  { value: "GEOGRAPHY", label: "GEOGRAPHY", family: "spatial" },
   { value: "INTERVAL", label: "INTERVAL — native duration", family: "temporal" },
 ];
 
@@ -79,8 +81,8 @@ export const MYSQL_TYPE_OPTIONS: { value: string; label: string; family: TypeFam
   { value: "BIGINT", label: "BIGINT", family: "int" },
   { value: "INT", label: "INT", family: "int" },
   { value: "DECIMAL(38,15)", label: "DECIMAL(38,15)", family: "decimal" },
-  { value: "FLOAT", label: "FLOAT", family: "decimal" },
-  { value: "DOUBLE", label: "DOUBLE", family: "decimal" },
+  { value: "FLOAT", label: "FLOAT", family: "float" },
+  { value: "DOUBLE", label: "DOUBLE", family: "float" },
   { value: "BOOLEAN", label: "BOOLEAN", family: "bool" },
   { value: "DATE", label: "DATE", family: "temporal" },
   { value: "DATETIME(6)", label: "DATETIME(6)", family: "temporal" },
@@ -94,7 +96,7 @@ export const POSTGRES_TYPE_OPTIONS: { value: string; label: string; family: Type
   { value: "BIGINT", label: "BIGINT", family: "int" },
   { value: "INTEGER", label: "INTEGER", family: "int" },
   { value: "NUMERIC", label: "NUMERIC", family: "decimal" },
-  { value: "DOUBLE PRECISION", label: "DOUBLE PRECISION", family: "decimal" },
+  { value: "DOUBLE PRECISION", label: "DOUBLE PRECISION", family: "float" },
   { value: "BOOLEAN", label: "BOOLEAN", family: "bool" },
   { value: "DATE", label: "DATE", family: "temporal" },
   { value: "TIME", label: "TIME", family: "temporal" },
@@ -105,7 +107,7 @@ export const POSTGRES_TYPE_OPTIONS: { value: string; label: string; family: Type
   { value: "BYTEA", label: "BYTEA", family: "binary" },
   { value: "VECTOR", label: "VECTOR — pgvector", family: "binary" },
   { value: "INTERVAL", label: "INTERVAL", family: "temporal" },
-  { value: "GEOGRAPHY", label: "GEOGRAPHY / GEOMETRY", family: "json" },
+  { value: "GEOGRAPHY", label: "GEOGRAPHY / GEOMETRY", family: "spatial" },
   { value: "INET", label: "INET — identity text", family: "string" },
   { value: "MONEY", label: "MONEY — prefer NUMERIC", family: "decimal" },
 ];
@@ -115,14 +117,14 @@ export const REDSHIFT_TYPE_OPTIONS: { value: string; label: string; family: Type
   { value: "BIGINT", label: "BIGINT", family: "int" },
   { value: "INTEGER", label: "INTEGER", family: "int" },
   { value: "NUMERIC(38,10)", label: "NUMERIC(38,10)", family: "decimal" },
-  { value: "DOUBLE PRECISION", label: "DOUBLE PRECISION", family: "decimal" },
+  { value: "DOUBLE PRECISION", label: "DOUBLE PRECISION", family: "float" },
   { value: "BOOLEAN", label: "BOOLEAN", family: "bool" },
   { value: "DATE", label: "DATE", family: "temporal" },
   { value: "TIMESTAMP", label: "TIMESTAMP", family: "temporal" },
   { value: "TIMESTAMPTZ", label: "TIMESTAMPTZ", family: "temporal" },
   { value: "SUPER", label: "SUPER — semi-structured", family: "json" },
   { value: "VARBYTE", label: "VARBYTE", family: "binary" },
-  { value: "GEOMETRY", label: "GEOMETRY", family: "json" },
+  { value: "GEOMETRY", label: "GEOMETRY", family: "spatial" },
   { value: "INTERVAL", label: "INTERVAL — stored as VARCHAR", family: "temporal" },
 ];
 
@@ -132,7 +134,7 @@ export const DATABRICKS_TYPE_OPTIONS: { value: string; label: string; family: Ty
   { value: "BIGINT", label: "BIGINT", family: "int" },
   { value: "INT", label: "INT", family: "int" },
   { value: "DECIMAL(38,10)", label: "DECIMAL(38,10)", family: "decimal" },
-  { value: "DOUBLE", label: "DOUBLE", family: "decimal" },
+  { value: "DOUBLE", label: "DOUBLE", family: "float" },
   { value: "BOOLEAN", label: "BOOLEAN", family: "bool" },
   { value: "DATE", label: "DATE", family: "temporal" },
   { value: "TIMESTAMP", label: "TIMESTAMP", family: "temporal" },
@@ -198,8 +200,8 @@ export const ORACLE_TYPE_OPTIONS: { value: string; label: string; family: TypeFa
   { value: "CLOB", label: "CLOB — long text", family: "string" },
   { value: "NUMBER(38,0)", label: "NUMBER(38,0) — integer", family: "int" },
   { value: "NUMBER(38,10)", label: "NUMBER(38,10) — decimal", family: "decimal" },
-  { value: "BINARY_DOUBLE", label: "BINARY_DOUBLE — IEEE float", family: "decimal" },
-  { value: "BINARY_FLOAT", label: "BINARY_FLOAT", family: "decimal" },
+  { value: "BINARY_DOUBLE", label: "BINARY_DOUBLE — IEEE float", family: "float" },
+  { value: "BINARY_FLOAT", label: "BINARY_FLOAT", family: "float" },
   { value: "BOOLEAN", label: "BOOLEAN (23c+)", family: "bool" },
   { value: "DATE", label: "DATE — datetime (Oracle)", family: "temporal" },
   { value: "TIMESTAMP WITH TIME ZONE", label: "TIMESTAMP WITH TIME ZONE", family: "temporal" },
@@ -207,7 +209,7 @@ export const ORACLE_TYPE_OPTIONS: { value: string; label: string; family: TypeFa
   { value: "JSON", label: "JSON", family: "json" },
   { value: "BLOB", label: "BLOB — bytes", family: "binary" },
   { value: "RAW(2000)", label: "RAW — bytes", family: "binary" },
-  { value: "SDO_GEOMETRY", label: "SDO_GEOMETRY", family: "json" },
+  { value: "SDO_GEOMETRY", label: "SDO_GEOMETRY", family: "spatial" },
 ];
 
 export const SQLSERVER_TYPE_OPTIONS: { value: string; label: string; family: TypeFamily }[] = [
@@ -217,8 +219,8 @@ export const SQLSERVER_TYPE_OPTIONS: { value: string; label: string; family: Typ
   { value: "INT", label: "INT", family: "int" },
   { value: "DECIMAL(38,10)", label: "DECIMAL(38,10)", family: "decimal" },
   { value: "MONEY", label: "MONEY", family: "decimal" },
-  { value: "FLOAT", label: "FLOAT — IEEE", family: "decimal" },
-  { value: "REAL", label: "REAL", family: "decimal" },
+  { value: "FLOAT", label: "FLOAT — IEEE", family: "float" },
+  { value: "REAL", label: "REAL", family: "float" },
   { value: "BIT", label: "BIT — boolean", family: "bool" },
   { value: "DATE", label: "DATE", family: "temporal" },
   { value: "TIME", label: "TIME", family: "temporal" },
@@ -226,7 +228,7 @@ export const SQLSERVER_TYPE_OPTIONS: { value: string; label: string; family: Typ
   { value: "DATETIMEOFFSET", label: "DATETIMEOFFSET", family: "temporal" },
   { value: "UNIQUEIDENTIFIER", label: "UNIQUEIDENTIFIER — UUID", family: "uuid" },
   { value: "VARBINARY(MAX)", label: "VARBINARY(MAX)", family: "binary" },
-  { value: "GEOGRAPHY", label: "GEOGRAPHY", family: "json" },
+  { value: "GEOGRAPHY", label: "GEOGRAPHY", family: "spatial" },
   { value: "XML", label: "XML — stored as text", family: "string" },
 ];
 
@@ -275,7 +277,7 @@ export const HUBSPOT_TYPE_OPTIONS: { value: string; label: string; family: TypeF
 export const KAFKA_TYPE_OPTIONS: { value: string; label: string; family: TypeFamily }[] = [
   { value: "TEXT", label: "TEXT / string", family: "string" },
   { value: "INTEGER", label: "INTEGER / long", family: "int" },
-  { value: "FLOAT", label: "FLOAT / double", family: "decimal" },
+  { value: "FLOAT", label: "FLOAT / double", family: "float" },
   { value: "DECIMAL", label: "DECIMAL", family: "decimal" },
   { value: "BOOLEAN", label: "BOOLEAN", family: "bool" },
   { value: "TIMESTAMP", label: "TIMESTAMP", family: "temporal" },
@@ -322,7 +324,7 @@ export function typeFamily(rawType: string | undefined): TypeFamily {
   if (/interval/.test(t)) return "temporal";
   if (/timestamp|datetime|date|time/.test(t)) return "temporal";
   if (/vector/.test(t)) return "binary";
-  if (/geography|geometry|geojson|geopoint/.test(t)) return "json";
+  if (/geography|geometry|geojson|geopoint|sdo_geometry/.test(t)) return "spatial";
   if (/json|variant|object|array|list|super|map|struct|record/.test(t)) return "json";
   if (/uuid|guid|objectid/.test(t)) return "uuid";
   if (/binary|blob|bytea|bytes|varbinary|bindata/.test(t)) return "binary";
