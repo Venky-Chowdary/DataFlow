@@ -197,7 +197,8 @@ def test_specialty_native_ddl_and_lossless_sinks():
     assert is_lossy_coercion("interval", "integer") is True
     # Text sink drops GEOGRAPHY domain — Map Accept risk, not silent preserve.
     assert is_lossy_coercion("geography", "string") is True
-    assert is_lossy_coercion("vector", "array") is False
+    # VECTOR→ARRAY drops embedding domain / dim contract.
+    assert is_lossy_coercion("vector", "array") is True
 
 
 def test_datetime_preserves_source_offset():

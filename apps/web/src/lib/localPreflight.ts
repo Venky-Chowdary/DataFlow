@@ -134,7 +134,7 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
   const riskUnacked = activeMaps.filter((m) => {
     // Keep local G4 aligned with mappingRequiresRiskAck (specialty logical types too).
     const fidelity = (m.fidelity || "").toLowerCase();
-    const specialtyType = /vector|interval|geography|geometry|hierarchyid|rowversion|xml|inet|cidr|macaddr|bit|tsvector|tsquery|money|uniqueidentifier/i.test(
+    const specialtyType = /vector|halfvec|interval|geography|geometry|hierarchyid|rowversion|xml|inet|cidr|macaddr|hstore|citext|objectid|bit|tsvector|tsquery|money|uniqueidentifier|ltree|pg_lsn/i.test(
       `${m.inferredType || ""} ${m.destType || ""}`,
     );
     const needsAck =

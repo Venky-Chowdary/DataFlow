@@ -278,6 +278,42 @@ def test_specialty_to_text_is_lossy_not_preserve():
     assert is_lossy_coercion("DECIMAL(19,4)", "MONEY") is True
 
 
+def test_integer_float_specialty_vector_honesty_wave11():
+    from services.type_system import (
+        case_fold_polarity_invent,
+        date_to_tz_aware_invent,
+        float_mantissa_would_narrow,
+        integer_width_would_narrow,
+        is_lossy_coercion,
+        specialty_polarity_mismatch,
+        vector_dim_mismatch,
+    )
+
+    assert integer_width_would_narrow("BIGINT", "INTEGER") is True
+    assert is_lossy_coercion("BIGINT", "INTEGER") is True
+    assert is_lossy_coercion("INTEGER", "SMALLINT") is True
+    assert is_lossy_coercion("INTEGER", "BIGINT") is False
+
+    assert float_mantissa_would_narrow("DOUBLE", "REAL") is True
+    assert is_lossy_coercion("DOUBLE PRECISION", "FLOAT") is True
+    assert is_lossy_coercion("REAL", "DOUBLE") is False
+
+    assert specialty_polarity_mismatch("INET", "CIDR") is True
+    assert is_lossy_coercion("INET", "CIDR") is True
+    assert is_lossy_coercion("MACADDR", "MACADDR8") is True
+
+    assert vector_dim_mismatch("VECTOR(1536)", "VECTOR(768)") is True
+    assert is_lossy_coercion("VECTOR(1536)", "VECTOR(768)") is True
+    assert is_lossy_coercion("VECTOR(1536)", "FLOAT[]") is True
+
+    assert case_fold_polarity_invent("TEXT", "CITEXT") is True
+    assert is_lossy_coercion("TEXT", "CITEXT") is True
+
+    assert date_to_tz_aware_invent("DATE", "TIMESTAMPTZ") is True
+    assert is_lossy_coercion("DATE", "TIMESTAMPTZ") is True
+    assert is_lossy_coercion("DATE", "TIMESTAMP") is False
+
+
 def test_bare_datetime_and_time_tz_invent_are_lossy():
     from services.type_system import (
         create_new_mapping_target_type,

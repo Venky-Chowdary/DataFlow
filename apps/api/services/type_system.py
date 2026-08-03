@@ -3926,8 +3926,8 @@ def specialty_carrier_would_collapse(source_type: str, target_type: str) -> bool
         return False
     tgt = specialty_carrier_base(target_type)
     if tgt is not None:
-        # Same specialty family OK; distinct specialty (INET→CIDR) is separate.
-        return False
+        # Distinct specialty bases rewrite domain (INET→CIDR, MACADDR→MACADDR8).
+        return src != tgt
     if specialty_wire_preserves_value(src, target_type):
         return False
     tgt_l = normalize_logical_type(target_type)
@@ -4911,6 +4911,105 @@ def integer_storage_bounds(inferred: str | None) -> tuple[int, int] | None:
     return (-(1 << (width - 1)), (1 << (width - 1)) - 1)
 
 
+def integer_width_would_narrow(source_type: str, target_type: str) -> bool:
+    """True when signed/unsigned integer bit width shrinks (BIGINT→INT invent)."""
+    if normalize_logical_type(source_type) != LOGICAL_INTEGER:
+        return False
+    if normalize_logical_type(target_type) != LOGICAL_INTEGER:
+        return False
+    src_w = integer_bit_width(source_type)
+    tgt_w = integer_bit_width(target_type)
+    if src_w is None or tgt_w is None:
+        return False
+    return src_w > tgt_w
+
+
+def float_mantissa_bits(inferred: str | None) -> int | None:
+    """IEEE significand bits for float carriers (53=double, 24=single), else None."""
+    if normalize_logical_type(inferred) != LOGICAL_FLOAT:
+        return None
+    upper = strip_identity_qualifier(inferred).upper().replace(" ", "")
+    # Single-precision tokens.
+    if upper in {
+        "REAL",
+        "FLOAT4",
+        "FLOAT32",
+        "BINARY_FLOAT",
+        "HALF",
+        "FLOAT16",
+    } or upper.startswith("REAL("):
+        return 24
+    # SQL FLOAT(p): p≤24 → single; p>24 → double (SQL Server / ANSI).
+    m = re.match(r"^FLOAT\((\d+)\)$", upper)
+    if m:
+        return 24 if int(m.group(1)) <= 24 else 53
+    if upper in {
+        "DOUBLE",
+        "DOUBLEPRECISION",
+        "FLOAT8",
+        "FLOAT64",
+        "BINARY_DOUBLE",
+    } or upper.startswith("DOUBLE"):
+        return 53
+    # Bare FLOAT is dialect-dependent (PG≈double, MySQL=single). Fail-closed
+    # treat as single so DOUBLE→FLOAT never silent-greens.
+    if upper == "FLOAT" or upper.startswith("FLOAT"):
+        return 24
+    return 53
+
+
+def float_mantissa_would_narrow(source_type: str, target_type: str) -> bool:
+    """True when DOUBLE/FLOAT64 lands on REAL/FLOAT32 (silent IEEE drop)."""
+    src_b = float_mantissa_bits(source_type)
+    tgt_b = float_mantissa_bits(target_type)
+    if src_b is None or tgt_b is None:
+        return False
+    return src_b > tgt_b
+
+
+def specialty_polarity_mismatch(source_type: str, target_type: str) -> bool:
+    """True when two distinct specialty carriers would rewrite domain polarity.
+
+    INET→CIDR invents network masking; MACADDR→MACADDR8 changes wire width;
+    HSTORE→LTREE is not identity. Same base is fine.
+    """
+    src = specialty_carrier_base(source_type)
+    tgt = specialty_carrier_base(target_type)
+    if src is None or tgt is None:
+        return False
+    return src != tgt
+
+
+def case_fold_polarity_invent(source_type: str, target_type: str) -> bool:
+    """True when mapping invents case-insensitive equality (TEXT→CITEXT / CS→CI)."""
+    tgt_ci = is_case_insensitive_collation(target_type) or (
+        specialty_carrier_base(target_type) == "CITEXT"
+    )
+    if not tgt_ci:
+        return False
+    src_ci = is_case_insensitive_collation(source_type) or (
+        specialty_carrier_base(source_type) == "CITEXT"
+    )
+    if src_ci:
+        return False
+    src_l = normalize_logical_type(source_type)
+    tgt_l = normalize_logical_type(target_type)
+    # CITEXT normalizes as string; also catch CS collation → CI collation.
+    return src_l in {LOGICAL_STRING, LOGICAL_TEXT} and tgt_l in {
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+    }
+
+
+def date_to_tz_aware_invent(source_type: str, target_type: str) -> bool:
+    """True when DATE widens into TZ-aware datetime (midnight instant invent)."""
+    if normalize_logical_type(source_type) != LOGICAL_DATE:
+        return False
+    if normalize_logical_type(target_type) != LOGICAL_DATETIME:
+        return False
+    return datetime_timezone_polarity(target_type) in {"tz", "ltz"}
+
+
 def unsigned_integer_would_overflow(source_type: str, target_type: str) -> bool:
     """True when UNSIGNED source max can exceed a signed (or narrower) integer dest.
 
@@ -4968,6 +5067,10 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
         return True
     if unsigned_integer_would_overflow(source_type, target_type):
         return True
+    if integer_width_would_narrow(source_type, target_type):
+        return True
+    if float_mantissa_would_narrow(source_type, target_type):
+        return True
     if enum_set_domain_would_reject(source_type, target_type):
         return True
     if enum_domain_would_collapse(source_type, target_type):
@@ -4977,6 +5080,14 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
     if geography_contract_would_collapse(source_type, target_type):
         return True
     if specialty_carrier_would_collapse(source_type, target_type):
+        return True
+    if specialty_polarity_mismatch(source_type, target_type):
+        return True
+    if case_fold_polarity_invent(source_type, target_type):
+        return True
+    if date_to_tz_aware_invent(source_type, target_type):
+        return True
+    if vector_dim_mismatch(source_type, target_type):
         return True
     if rowversion_would_collapse_to_temporal(source_type, target_type):
         return True
@@ -5040,6 +5151,10 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
             return True
         if unsigned_integer_would_overflow(source_type, target_type):
             return True
+        if integer_width_would_narrow(source_type, target_type):
+            return True
+        if float_mantissa_would_narrow(source_type, target_type):
+            return True
         if enum_set_domain_would_reject(source_type, target_type):
             return True
         if enum_domain_would_collapse(source_type, target_type):
@@ -5049,6 +5164,12 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         if geography_contract_would_collapse(source_type, target_type):
             return True
         if specialty_carrier_would_collapse(source_type, target_type):
+            return True
+        if specialty_polarity_mismatch(source_type, target_type):
+            return True
+        if case_fold_polarity_invent(source_type, target_type):
+            return True
+        if vector_dim_mismatch(source_type, target_type):
             return True
         if rowversion_would_collapse_to_temporal(source_type, target_type):
             return True
@@ -5088,6 +5209,10 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         return True
     if unsigned_integer_would_overflow(source_type, target_type):
         return True
+    if integer_width_would_narrow(source_type, target_type):
+        return True
+    if float_mantissa_would_narrow(source_type, target_type):
+        return True
     if string_width_would_narrow(source_type, target_type):
         return True
     if binary_width_would_narrow(source_type, target_type):
@@ -5103,6 +5228,14 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
     if geography_contract_would_collapse(source_type, target_type):
         return True
     if specialty_carrier_would_collapse(source_type, target_type):
+        return True
+    if specialty_polarity_mismatch(source_type, target_type):
+        return True
+    if case_fold_polarity_invent(source_type, target_type):
+        return True
+    if date_to_tz_aware_invent(source_type, target_type):
+        return True
+    if vector_dim_mismatch(source_type, target_type):
         return True
     if rowversion_would_collapse_to_temporal(source_type, target_type):
         return True
@@ -5152,7 +5285,7 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         (LOGICAL_BOOLEAN, LOGICAL_INTEGER),
         (LOGICAL_BOOLEAN, LOGICAL_DECIMAL),
         (LOGICAL_BOOLEAN, LOGICAL_FLOAT),
-        # date/time renderings and date→datetime widening
+        # date→datetime NTZ widening only; DATE→TIMESTAMPTZ invents midnight TZ.
         (LOGICAL_DATE, LOGICAL_DATETIME),
         (LOGICAL_DATE, LOGICAL_STRING),
         (LOGICAL_DATE, LOGICAL_TEXT),
@@ -5167,17 +5300,18 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         (LOGICAL_UUID, LOGICAL_STRING),
         (LOGICAL_UUID, LOGICAL_TEXT),
         (LOGICAL_UUID, LOGICAL_JSON),
-        # binary ↔ text/JSON is NOT reversible without an encoding policy
-        # (hex vs base64 mutate). Treated lossy so Map requires Accept risk.
-        # INTERVAL/GEOGRAPHY/VECTOR → text/JSON drops specialty domain — lossy
-        # (Map Accept risk must match engine fidelity; was false "preserve").
-        (LOGICAL_VECTOR, LOGICAL_ARRAY),
+        # VECTOR→ARRAY drops embedding domain — not allow-listed.
         # STRUCT/MAP → text/JSON is nested document collapse (handled above).
         (LOGICAL_STRUCT, LOGICAL_STRUCT),
         (LOGICAL_MAP, LOGICAL_MAP),
     }
 
     if (src, tgt) in safe:
+        # DATE→TIMESTAMPTZ / DATETIMEOFFSET invents an instant — not a free widen.
+        if date_to_tz_aware_invent(source_type, target_type):
+            return True
+        if case_fold_polarity_invent(source_type, target_type):
+            return True
         return False
     return True
 

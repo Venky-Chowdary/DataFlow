@@ -154,7 +154,9 @@ const FLATTEN_POLICIES = new Set<StructPolicy>(["flatten_top_level_keys", "flatt
 
 const STRUCT_TYPE_RE = /\b(json|jsonb|struct|map|object|variant|document|record)\b/i;
 const ARRAY_TYPE_RE = /\b(array|list|repeated)\b/i;
-const SPECIALTY_TYPE_RE = /\b(vector|interval|geography|geometry|geopoint|geojson)\b/i;
+/** Aligned with engine specialty_carrier_base / INTERVAL / VECTOR / GEOGRAPHY. */
+const SPECIALTY_TYPE_RE =
+  /\b(vector|halfvec|interval|geography|geometry|geopoint|geojson|sdo_geometry|inet|cidr|macaddr8?|hstore|citext|objectid|xml|xmltype|tsvector|tsquery|pg_lsn|ltree|hierarchyid|rowversion|sql_variant|uniqueidentifier|ipv[46])\b/i;
 /** Engine transforms with no first-class UI cast — surface as a pipeline chip. */
 const PIPELINE_ONLY_ENGINE = new Set(["url", "iban", "postal", "uuid", "trim_id"]);
 
