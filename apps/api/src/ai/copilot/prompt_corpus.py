@@ -339,6 +339,31 @@ def iter_prompt_corpus() -> list[PromptCase]:
         ("max price in products on Warehouse", ("aggregate_data",)),
     ):
         cases.append(_case(p, *tools, family="nl_accuracy"))
+
+    # --- Quality / suggestions / knowledge ---
+    for p in (
+        "data quality on my uploads",
+        "profile quality rules",
+        "suggest improvements for my data",
+        "how can I improve data quality?",
+        "recommend fixes for bad data quality",
+    ):
+        cases.append(_case(
+            p,
+            "profile_quality_rules", "search_knowledge", "describe_pilot",
+            family="quality",
+        ))
+    for p in (
+        "what quality gates do you have?",
+        "what are the quality gates?",
+        "list quality gates",
+        "what are the preflight gates?",
+    ):
+        cases.append(_case(
+            p,
+            "describe_pilot", "search_knowledge", "profile_quality_rules",
+            family="quality_gates",
+        ))
     for p in (
         "what quality gates do you have?",
         "what are the quality gates?",
