@@ -73,7 +73,7 @@ def test_specialty_quarantine_interval_family_mismatch():
 def test_geography_srid_and_polarity():
     assert spatial_polarity("GEOGRAPHY(Point,4326)") == "geography"
     assert spatial_polarity("GEOMETRY(Point,4326)") == "geometry"
-    assert spatial_polarity("SDO_GEOMETRY") is None  # Oracle single spatial carrier
+    assert spatial_polarity("SDO_GEOMETRY") == "sdo"  # Oracle opaque spatial carrier
     assert parse_geography_srid("GEOGRAPHY(Point,4326)") == 4326
     assert geography_contract_would_collapse(
         "GEOMETRY(Point,4326)", "GEOGRAPHY(Point,4326)"

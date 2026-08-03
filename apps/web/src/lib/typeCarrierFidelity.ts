@@ -182,6 +182,18 @@ export function declaredCarrierFidelityRisk(
   ) {
     return true;
   }
+  // DECFLOAT → fixed DECIMAL/FLOAT invent.
+  if (/\bdecfloat\b/i.test(src) && !/\bdecfloat\b/i.test(tgt)) return true;
+  // Bare NUMBER/DECIMAL → BIGNUMERIC invents (76,38) class.
+  if (
+    isDecimalFamily(src)
+    && /\bbignumeric\b|\bbigdecimal\b/i.test(tgt)
+    && !/\bbignumeric\b|\bbigdecimal\b/i.test(src)
+  ) {
+    return true;
+  }
+  // SMALLDATETIME minute accuracy → second-level TIMESTAMP invent.
+  if (/\bsmalldatetime\b/i.test(src) && !/\bsmalldatetime\b/i.test(tgt)) return true;
   // Float ↔ fixed-point invent/drop IEEE polarity.
   const srcFloat = /\b(float|double|real|float64|float32|float4|float8|half|halffloat|float16|binary_float|binary_double)\b/i.test(src);
   const tgtFloat = /\b(float|double|real|float64|float32|float4|float8|half|halffloat|float16|binary_float|binary_double)\b/i.test(tgt);
@@ -252,10 +264,11 @@ export function declaredCarrierFidelityRisk(
   const tif = intervalFamily(tgt);
   if (sif != null && tif != null && sif !== tif) return true;
   if (sif != null && isOpenStringCarrier(tgt)) return true;
-  // GEOGRAPHY ↔ GEOMETRY polarity.
+  // GEOGRAPHY ↔ GEOMETRY ↔ SDO polarity.
   const geoPol = (t: string): string | null => {
+    if (/\b(sdo_geometry|st_geometry)\b/i.test(t)) return "sdo";
     if (/\bgeography\b/i.test(t)) return "geography";
-    if (/\bgeometry\b/i.test(t) || /\bsdo_geometry\b/i.test(t)) return "geometry";
+    if (/\bgeometry\b/i.test(t)) return "geometry";
     return null;
   };
   const sg = geoPol(src);

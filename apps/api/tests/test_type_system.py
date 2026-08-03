@@ -23,8 +23,8 @@ def test_oracle_sdo_geometry_normalizes_to_geography():
     ):
         assert normalize_logical_type(raw) == "geography", raw
     assert ddl_type("oracle", "geography") == "SDO_GEOMETRY"
-    # geography → SDO_GEOMETRY is identity; text sink drops the spatial contract.
-    assert is_lossy_coercion("geography", "SDO_GEOMETRY") is False
+    # GEOGRAPHY → SDO invents Oracle opaque polarity — Accept risk (not silent identity).
+    assert is_lossy_coercion("geography", "SDO_GEOMETRY") is True
     assert is_lossy_coercion("geography", "VARCHAR2") is True
 
 

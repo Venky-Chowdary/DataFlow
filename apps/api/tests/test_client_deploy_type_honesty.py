@@ -445,6 +445,40 @@ def test_dest_alias_tz_longraw_uuid_wave21():
     )
 
 
+def test_decfloat_alias_sdo_array_wave22():
+    """DECFLOAT invent, mongo/db2 aliases, SDO polarity, nested INT width, SMALLDATETIME."""
+    from services.type_system import (
+        create_new_mapping_target_type,
+        float_mantissa_bits,
+        is_lossy_coercion,
+        spatial_polarity,
+    )
+
+    assert create_new_mapping_target_type("DECFLOAT(34)", "oracle") == "BINARY_DOUBLE"
+    assert is_lossy_coercion("DECFLOAT(34)", "BINARY_DOUBLE") is True
+    assert is_lossy_coercion("DECFLOAT(34)", "NUMBER(34,0)") is True
+    assert create_new_mapping_target_type("DECFLOAT", "postgresql") == "NUMERIC"
+    assert is_lossy_coercion("DECFLOAT", "NUMERIC") is True
+
+    assert create_new_mapping_target_type("INTEGER", "mongo") == "long"
+    assert create_new_mapping_target_type("INTEGER", "documentdb") == "long"
+    assert create_new_mapping_target_type("INTEGER", "neon") == "INTEGER"
+    assert create_new_mapping_target_type("INTEGER", "db2") == "BIGINT"
+    assert create_new_mapping_target_type("INTEGER", "fabric") == "INT"
+
+    assert spatial_polarity("SDO_GEOMETRY") == "sdo"
+    assert is_lossy_coercion("GEOGRAPHY", "SDO_GEOMETRY") is True
+    assert is_lossy_coercion("SDO_GEOMETRY", "GEOMETRY") is True
+
+    assert float_mantissa_bits("REAL UNSIGNED") == 24
+    assert create_new_mapping_target_type("REAL UNSIGNED", "postgresql") == "REAL"
+    assert create_new_mapping_target_type("ARRAY<INT>", "postgresql") == "INTEGER[]"
+
+    assert is_lossy_coercion("NUMBER", "BIGNUMERIC") is True
+    assert is_lossy_coercion("SMALLDATETIME", "TIMESTAMP(0)") is True
+    assert create_new_mapping_target_type("SMALLDATETIME", "postgresql") == "TIMESTAMP(0)"
+
+
 def test_struct_int64_interval_identity_document_wave17():
     from services.type_system import (
         bfile_locator_would_collapse,

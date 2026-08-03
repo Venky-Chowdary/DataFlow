@@ -789,11 +789,16 @@ def parse_numeric_precision_scale(inferred: str | None) -> tuple[int | None, int
 
     ClickHouse ``Decimal128(S)`` / ``Decimal64(S)`` pass scale only — precision is
     implied by the Decimal* width (9/18/38/76).
+
+    ``DECFLOAT(n)`` is IEEE decimal-*float* digit count — not fixed-point (p,s).
     """
     raw = strip_identity_qualifier(inferred)
     if not raw:
         return None, None
     upper = raw.upper().replace(" ", "")
+    # DECFLOAT(16|34) is not DECIMAL(p) — never invent scale 0 from digit count.
+    if upper == "DECFLOAT" or upper.startswith("DECFLOAT("):
+        return None, None
     if upper in {"MONEY", "CURRENCY"}:
         return 19, 4
     if upper == "SMALLMONEY":
@@ -1197,6 +1202,15 @@ def _leaf_ddl_for_nested(db: str, leaf: str) -> str:
         tz_ddl = _datetime_ddl_for_dest(db, leaf)
         if tz_ddl:
             return tz_ddl
+    # Width-preserving invent for nested INT/FLOAT — never BIGINT[] from ARRAY<INT>.
+    if logical == LOGICAL_INTEGER:
+        int_ddl = _integer_ddl_for_dest(db, leaf)
+        if int_ddl:
+            return int_ddl
+    if logical == LOGICAL_FLOAT:
+        float_ddl = _float_ddl_for_dest(db, leaf)
+        if float_ddl:
+            return float_ddl
     return DDL_TYPES.get(db, {}).get(logical, DEFAULT_DDL.get(db, "TEXT"))
 
 
@@ -1373,6 +1387,54 @@ def decimal_params_would_narrow(source_type: str, target_type: str) -> bool:
     return False
 
 
+def is_decfloat_carrier(inferred: str | None) -> bool:
+    """True for IBM ``DECFLOAT`` / ``DECFLOAT(16|34)`` IEEE decimal-float."""
+    upper = strip_identity_qualifier(inferred).upper().replace(" ", "")
+    return upper == "DECFLOAT" or upper.startswith("DECFLOAT(")
+
+
+def decfloat_domain_would_collapse(source_type: str, target_type: str) -> bool:
+    """True when DECFLOAT polarity would be lost into fixed DECIMAL/FLOAT/text."""
+    if not is_decfloat_carrier(source_type):
+        return False
+    if is_decfloat_carrier(target_type):
+        return False
+    return True
+
+
+def bignumeric_capacity_would_invent(source_type: str, target_type: str) -> bool:
+    """True when bare NUMBER/DECIMAL invents BigQuery BIGNUMERIC (76,38) class."""
+    if normalize_logical_type(source_type) != LOGICAL_DECIMAL:
+        return False
+    if normalize_logical_type(target_type) != LOGICAL_DECIMAL:
+        return False
+    src_u = strip_identity_qualifier(source_type).upper().replace(" ", "")
+    tgt_u = strip_identity_qualifier(target_type).upper().replace(" ", "")
+    src_big = src_u.startswith("BIGNUMERIC") or src_u.startswith("BIGDECIMAL")
+    tgt_big = tgt_u.startswith("BIGNUMERIC") or tgt_u.startswith("BIGDECIMAL")
+    return bool(tgt_big and not src_big)
+
+
+def smalldatetime_domain_would_invent(source_type: str, target_type: str) -> bool:
+    """True when SMALLDATETIME (minute accuracy) invents second-level TIMESTAMP.
+
+    Microsoft SMALLDATETIME is minute-rounded; inventing TIMESTAMP(0)/DATETIME
+    claims second fidelity the source never had — Accept risk required.
+    """
+    src = strip_identity_qualifier(source_type).upper().replace(" ", "")
+    if src != "SMALLDATETIME":
+        return False
+    tgt = strip_identity_qualifier(target_type).upper().replace(" ", "")
+    if tgt == "SMALLDATETIME":
+        return False
+    return normalize_logical_type(target_type) in {
+        LOGICAL_DATETIME,
+        LOGICAL_DATE,
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+    }
+
+
 def is_opaque_document_logical(inferred: str | None) -> bool:
     """True for VARIANT/JSONB/SUPER-style document sinks (not fielded STRUCT/MAP)."""
     return normalize_logical_type(inferred) == LOGICAL_JSON
@@ -1487,8 +1549,28 @@ def nested_array_elements_incompatible(source_type: str, target_type: str) -> bo
         return True
     s_l, t_l = normalize_logical_type(src_el), normalize_logical_type(tgt_el)
     if s_l == t_l:
+        # Same logical family can still invent integer/float width (ARRAY<INT>→BIGINT[]).
+        if s_l == LOGICAL_INTEGER and (
+            integer_width_would_narrow(src_el, tgt_el)
+            or (
+                integer_bit_width(src_el) is not None
+                and integer_bit_width(tgt_el) is not None
+                and integer_bit_width(src_el) != integer_bit_width(tgt_el)
+            )
+        ):
+            return True
+        if s_l == LOGICAL_FLOAT and (
+            float_mantissa_would_narrow(src_el, tgt_el)
+            or (
+                float_mantissa_bits(src_el) is not None
+                and float_mantissa_bits(tgt_el) is not None
+                and float_mantissa_bits(src_el) != float_mantissa_bits(tgt_el)
+            )
+        ):
+            return True
         return False
     # Safe element widenings — numeric widen + text↔text only (nested SSOT).
+    # Integer→decimal still allowed; integer→wider integer is width invent above.
     safe_el = {
         (LOGICAL_INTEGER, LOGICAL_DECIMAL),
         (LOGICAL_DATE, LOGICAL_DATETIME),
@@ -1925,10 +2007,24 @@ def _normalize_dest_db(db_type: str | None) -> str:
         "citus",
         "supabase",
         "greenplum",
+        "neon",
+        "azure_postgres",
+        "aws_rds_postgres",
+        "rds_postgres",
     }:
         return "postgresql"
     if db in {"mariadb", "tidb", "mysql2"}:
         return "mysql"
+    if db in {
+        "mongo",
+        "mongodb",
+        "documentdb",
+        "document_db",
+        "cosmos",
+        "cosmos-mongodb",
+        "cosmos_mongodb",
+    }:
+        return "mongodb"
     if db in {"spark", "delta", "delta_lake", "databricks_sql", "unity_catalog"}:
         return "databricks"
     if db in {"apache_iceberg", "iceberg_rest", "nessie"}:
@@ -1950,9 +2046,14 @@ def _normalize_dest_db(db_type: str | None) -> str:
         "synapse",
         "azure_synapse",
         "sql_server",
+        "fabric",
+        "fabric_sql",
         "fabric_warehouse",
     }:
         return "sqlserver"
+    # No dedicated DB2 DDL map yet — use generic SQL rather than soft-pass TEXT.
+    if db in {"db2", "ibm_db2", "ibm-db2", "db2luw"}:
+        return "generic_sql"
     return db
 
 
@@ -2076,6 +2177,29 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
     # Opaque PG USER-DEFINED / UDT — stamp open text; specialty collapse forces Accept risk.
     if base_early in {"USER-DEFINED", "USER_DEFINED"}:
         return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT, DEFAULT_DDL.get(db, "TEXT"))
+    # IBM DECFLOAT — IEEE decimal float; never invent NUMBER(p,0) from digit count.
+    if base_early == "DECFLOAT" or base_early.startswith("DECFLOAT("):
+        if db in {
+            "postgresql",
+            "postgres",
+            "cockroachdb",
+            "timescaledb",
+            "alloydb",
+            "yugabytedb",
+            "citus",
+            "supabase",
+            "greenplum",
+        }:
+            return "NUMERIC"
+        if db == "oracle":
+            return "BINARY_DOUBLE"
+        if db == "sqlserver":
+            return "FLOAT"
+        if db == "bigquery":
+            return "BIGNUMERIC"
+        if db == "snowflake":
+            return "FLOAT"
+        return DDL_TYPES.get(db, {}).get(LOGICAL_FLOAT, "DOUBLE PRECISION")
     # Redshift HLLSKETCH — keep native or fall to VARCHAR with specialty collapse.
     if base_early == "HLLSKETCH":
         if db == "redshift":
@@ -2466,7 +2590,11 @@ def _float_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     """
     if normalize_logical_type(inferred) != LOGICAL_FLOAT:
         return None
-    upper = strip_identity_qualifier(inferred).upper().replace(" ", "")
+    upper = re.sub(
+        r"\bUNSIGNED\b",
+        "",
+        strip_identity_qualifier(inferred).upper(),
+    ).strip().replace(" ", "")
     bits = float_mantissa_bits(inferred)
     if bits is None:
         return None
@@ -4331,17 +4459,16 @@ def interval_family_would_collapse(source_type: str, target_type: str) -> bool:
 
 
 def spatial_polarity(inferred: str | None) -> str | None:
-    """Return ``geography`` (geodetic) / ``geometry`` (planar), or None.
+    """Return ``geography`` / ``geometry`` / ``sdo``, or None.
 
-    Oracle ``SDO_GEOMETRY`` is the single native spatial carrier — not a
-    planar-vs-geodetic polarity signal (mapping logical geography → SDO is
-    identity on Oracle, not a collapse).
+    Oracle ``SDO_GEOMETRY`` / Esri ``ST_GEOMETRY`` are opaque spatial carriers —
+    mapping them onto dual GEOGRAPHY/GEOMETRY invents planar vs geodetic polarity.
     """
     upper = (inferred or "").upper().strip()
     if not upper:
         return None
-    if "SDO_GEOMETRY" in upper:
-        return None
+    if "SDO_GEOMETRY" in upper or "ST_GEOMETRY" in upper:
+        return "sdo"
     # Prefer typmod / exact dual-type carriers over the bare logical name
     # ``geography`` (which is polarity-unknown for create-new DDL defaults).
     if upper.startswith("GEOGRAPHY(") or upper == "GEOGRAPHY":
@@ -5773,7 +5900,12 @@ def float_mantissa_bits(inferred: str | None) -> int | None:
     """IEEE significand bits for float carriers (53=double, 24=single, 11=half)."""
     if normalize_logical_type(inferred) != LOGICAL_FLOAT:
         return None
-    upper = strip_identity_qualifier(inferred).upper().replace(" ", "")
+    # Strip UNSIGNED so REAL UNSIGNED / FLOAT UNSIGNED keep single-width tokens.
+    upper = re.sub(
+        r"\bUNSIGNED\b",
+        "",
+        strip_identity_qualifier(inferred).upper(),
+    ).strip().replace(" ", "")
     # IEEE half / float16 (~10 explicit + 1 implicit significand bits).
     if upper in {"HALF", "HALFFLOAT", "FLOAT16"} or upper.startswith("HALFFLOAT"):
         return 11
@@ -5981,6 +6113,12 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
         return True
     if long_raw_locator_would_collapse(source_type, target_type):
         return True
+    if decfloat_domain_would_collapse(source_type, target_type):
+        return True
+    if bignumeric_capacity_would_invent(source_type, target_type):
+        return True
+    if smalldatetime_domain_would_invent(source_type, target_type):
+        return True
     if decimal_params_would_narrow(source_type, target_type):
         return True
     if string_width_would_narrow(source_type, target_type):
@@ -6103,6 +6241,12 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
             return True
         if long_raw_locator_would_collapse(source_type, target_type):
             return True
+        if decfloat_domain_would_collapse(source_type, target_type):
+            return True
+        if bignumeric_capacity_would_invent(source_type, target_type):
+            return True
+        if smalldatetime_domain_would_invent(source_type, target_type):
+            return True
         if decimal_params_would_narrow(source_type, target_type):
             return True
         if string_width_would_narrow(source_type, target_type):
@@ -6202,6 +6346,12 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
     if timezone_aware_would_collapse_to_string(source_type, target_type):
         return True
     if long_raw_locator_would_collapse(source_type, target_type):
+        return True
+    if decfloat_domain_would_collapse(source_type, target_type):
+        return True
+    if bignumeric_capacity_would_invent(source_type, target_type):
+        return True
+    if smalldatetime_domain_would_invent(source_type, target_type):
         return True
     if year_domain_would_collapse(source_type, target_type):
         return True
