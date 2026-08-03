@@ -760,6 +760,9 @@ export function TransferResultDashboard({
           variant="result"
           title="Job log"
           empty="No captured events for this job yet. Re-run a transfer to collect a full live event stream."
+          collapsible
+          defaultOpen={false}
+          storageKey="df2-result-log-open"
         />
       </section>
     </div>

@@ -204,7 +204,7 @@ const ACCEPTED_UPLOAD_EXTENSIONS = new Set([
   "csv", "json", "jsonl", "tsv", "parquet", "pdf", "docx", "html", "htm", "xlsx", "xls", "xml",
 ]);
 const MAX_UPLOAD_BYTES = 250 * 1024 * 1024;
-const UPLOAD_FORMATS = ["JSON", "CSV", "JSONL", "TSV", "Parquet", "PDF", "DOCX", "HTML"] as const;
+const UPLOAD_FORMATS = ["JSON", "CSV", "JSONL", "TSV", "Excel", "Parquet", "PDF", "DOCX", "HTML"] as const;
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -1961,7 +1961,7 @@ export function TransferPage({
     if (!ACCEPTED_UPLOAD_EXTENSIONS.has(ext)) {
       toast({
         title: "Unsupported file type",
-        message: "Use CSV, TSV, JSON, or JSONL for this transfer flow.",
+        message: "Use CSV, TSV, JSON, JSONL, Excel (.xlsx), or Parquet for this transfer flow.",
         tone: "warning",
       });
       return;
@@ -2079,7 +2079,7 @@ export function TransferPage({
 
   const explainSourceGap = () => {
     if (sourceKind === "file" && !parsed) {
-      toast({ title: "Source file required", message: "Upload a CSV, TSV, JSON, JSONL, or Parquet file to continue.", tone: "warning" });
+      toast({ title: "Source file required", message: "Upload a CSV, TSV, JSON, JSONL, Excel (.xlsx), or Parquet file to continue.", tone: "warning" });
       setStep(STEP_SOURCE);
       return true;
     }

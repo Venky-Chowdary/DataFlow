@@ -147,6 +147,7 @@ export function JobTheater({
   const startRef = useRef<number>(Date.now());
   const doneRef = useRef(false);
   const logSeqRef = useRef(0);
+  const rateSamplesRef = useRef<{ t: number; rows: number }[]>([]);
   const prevRef = useRef<{ message?: string; phase?: string; chunk?: number; loggedRows: number }>({
     loggedRows: 0,
   });
@@ -172,6 +173,7 @@ export function JobTheater({
     doneRef.current = false;
     prevRef.current = { loggedRows: 0 };
     logSeqRef.current = 0;
+    rateSamplesRef.current = [];
     const append = (line: string) => {
       const stamped = `${new Date().toLocaleTimeString()} — ${line}`;
       setLog((l) => {
@@ -202,8 +204,19 @@ export function JobTheater({
           prev.message = update.message;
         }
         if (update.chunk_current != null && update.chunk_current !== prev.chunk) {
-          const total = update.chunk_total != null ? `/${update.chunk_total}` : "";
-          append(`Batch ${update.chunk_current}${total} written`);
+          const totalChunks = update.chunk_total ?? 0;
+          // High batch counts (proxy loads) — don't spam every chunk line.
+          const every = totalChunks > 80 ? 10 : totalChunks > 30 ? 5 : 1;
+          const cur = update.chunk_current;
+          if (
+            cur === 1
+            || cur === totalChunks
+            || every === 1
+            || cur % every === 0
+          ) {
+            const total = update.chunk_total != null ? `/${update.chunk_total}` : "";
+            append(`Batch ${cur}${total} written`);
+          }
           prev.chunk = update.chunk_current;
         }
         const processed = update.records_processed ?? 0;
@@ -215,9 +228,23 @@ export function JobTheater({
         }
 
         setJob(update);
-        const elapsed = (Date.now() - startRef.current) / 1000;
-        if (elapsed > 0.5 && processed > 0) {
-          setThroughput(Math.round(processed / elapsed));
+        // Recent-window RPS (last ~25s) — start-averaged RPS under-reads after
+        // DDL/first batch and invents multi-hour ETAs on healthy loads.
+        const now = Date.now();
+        const samples = rateSamplesRef.current;
+        samples.push({ t: now, rows: processed });
+        while (samples.length > 1 && now - samples[0].t > 25_000) samples.shift();
+        if (samples.length >= 2) {
+          const dr = samples[samples.length - 1].rows - samples[0].rows;
+          const dt = (samples[samples.length - 1].t - samples[0].t) / 1000;
+          if (dt >= 0.75 && dr >= 0) {
+            setThroughput(Math.round(dr / dt));
+          }
+        } else {
+          const elapsed = (now - startRef.current) / 1000;
+          if (elapsed > 0.5 && processed > 0) {
+            setThroughput(Math.round(processed / elapsed));
+          }
         }
         if (!doneRef.current && isJobSuccess(update.status)) {
           doneRef.current = true;
@@ -1325,6 +1352,9 @@ export function JobTheaterView({
           variant="theater"
           title="Live event log"
           empty="Waiting for job events…"
+          collapsible
+          defaultOpen
+          storageKey={`df2-run-log-open:${jobId}`}
         />
       </div>
     </div>

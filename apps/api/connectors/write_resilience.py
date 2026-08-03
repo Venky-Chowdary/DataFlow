@@ -60,9 +60,10 @@ PUBLIC_PROXY_HOST_MARKERS: tuple[str, ...] = (
 )
 
 _CHUNK_RECONNECT_ATTEMPTS = int(os.getenv("DATAFLOW_WRITE_RECONNECT_ATTEMPTS", "12"))
-# Smaller commits on public TCP proxies (Railway etc.) — large COPY/INSERT
-# windows are the #1 cause of "server closed the connection unexpectedly".
-_PROXY_CHUNK_SIZE = int(os.getenv("DATAFLOW_PROXY_CHUNK_SIZE", "1000"))
+# Public TCP proxies (Railway etc.) still need smaller commits than LAN COPY of
+# 20k+, but 1000-row INSERT made 1M-row loads look like multi-hour jobs.
+# 5k chunked COPY + ledger reconnect is the competitive default; override via env.
+_PROXY_CHUNK_SIZE = int(os.getenv("DATAFLOW_PROXY_CHUNK_SIZE", "5000"))
 _RECONNECT_MAX_SECONDS = float(os.getenv("DATAFLOW_WRITE_RECONNECT_MAX_SECONDS", "600"))
 
 LEDGER_TABLE = "_dataflow_write_ledger"

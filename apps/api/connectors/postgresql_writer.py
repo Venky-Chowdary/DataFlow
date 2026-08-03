@@ -849,14 +849,14 @@ def write_mapped_rows(
     written = 0
     chunks_completed = 0
     proxy_dest = is_public_proxy_host(host) or is_public_proxy_host(connection_string)
-    # COPY is faster locally but long COPY streams are a common Railway proxy kill.
-    # Prefer chunked INSERT on public proxies so reconnect/ledger can resume cleanly.
+    # Chunked COPY (PROXY_CHUNK_SIZE / CHUNK_SIZE) + per-chunk commit + ledger
+    # resume. Blanket proxy COPY-off forced executemany at ~1k rows and made
+    # 1M CSV→PG loads look like multi-hour jobs vs competitors using COPY.
     use_copy = (
         write_mode == "insert"
         and not conflict_columns
         and not any(t == "BYTEA" for t in target_types)
         and port != 5439
-        and not proxy_dest
     )
     job_id = str(_kwargs.get("job_id") or "").strip()
     write_batch_key = str(_kwargs.get("write_batch_key") or "").strip() or build_write_batch_key(
@@ -1281,6 +1281,7 @@ def write_mapped_rows(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             warnings=transform_errors,
+            load_method="copy" if use_copy else "insert",
         )
     except Exception as exc:
         close_quietly(conn)

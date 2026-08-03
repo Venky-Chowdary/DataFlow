@@ -500,7 +500,11 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_merge": False,
         "requires_schema": False,
         "supports_binary": True,
-        "common_issues": ["Excel stores dates as serial numbers; DataFlow normalizes them to ISO dates."],
+        "common_issues": [
+            "Upload .xlsx (Office Open XML). DataFlow streams sheets via openpyxl and writes typed rows to Postgres/Snowflake — Excel is not a warehouse native; conversion is automatic.",
+            "Legacy .xls (BIFF) is weakly supported — save as .xlsx for production loads.",
+            "Excel stores dates as serial numbers; DataFlow normalizes them to ISO dates.",
+        ],
         "recommended_batch_size": 5000,
     },
     # Streaming / messaging

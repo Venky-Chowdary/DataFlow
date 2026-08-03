@@ -24,8 +24,9 @@ def test_railway_proxy_is_detected():
 
 def test_proxy_chunk_and_stream_batch_aligned():
     assert write_chunk_size("localhost", default=10_000) == 10_000
-    proxy_chunk = write_chunk_size("caboose.proxy.rlwy.net", default=10_000)
-    assert proxy_chunk <= 1000
+    proxy_chunk = write_chunk_size("caboose.proxy.rlwy.net", default=20_000)
+    # Default proxy chunk is 5k (env DATAFLOW_PROXY_CHUNK_SIZE) — not LAN 20k.
+    assert 1_000 <= proxy_chunk <= 5_000
     assert proxy_stream_batch_size(
         "caboose.proxy.rlwy.net",
         default=20_000,
