@@ -546,6 +546,38 @@ def test_aurora_clickhouse_unsigned_wave24():
     assert create_new_mapping_target_type("UInt8", "postgresql") == "SMALLINT"
 
 
+def test_cloud_aliases_uuid_agg_wave25():
+    """Cloud SQL/Athena/Hive aliases, UUID physical stamp, AggregateFunction collapse."""
+    from services.type_system import (
+        create_new_mapping_target_type,
+        is_lossy_coercion,
+        specialty_carrier_base,
+    )
+
+    assert create_new_mapping_target_type("INTEGER", "athena") == "integer"
+    assert create_new_mapping_target_type("INTEGER", "hive") == "INT"
+    assert create_new_mapping_target_type("INTEGER", "redshift_serverless") == "INTEGER"
+    assert create_new_mapping_target_type("INTEGER", "snowflake_aws") == "INTEGER"
+    assert create_new_mapping_target_type("INTEGER", "cloudsql_postgres") == "INTEGER"
+    assert create_new_mapping_target_type("INTEGER", "cloudsql_mysql") == "INT"
+    assert create_new_mapping_target_type("INTEGER", "rds_mysql") == "INT"
+    assert create_new_mapping_target_type("INTEGER", "percona") == "INT"
+    assert create_new_mapping_target_type("INTEGER", "spanner") == "INT64"
+    assert create_new_mapping_target_type("INTEGER", "cassandra") == "BIGINT"
+
+    assert create_new_mapping_target_type("UNIQUEIDENTIFIER", "mysql") == "CHAR(36)"
+    assert create_new_mapping_target_type("UNIQUEIDENTIFIER", "oracle") == "VARCHAR2(36)"
+    assert create_new_mapping_target_type("UNIQUEIDENTIFIER", "postgresql") == "UUID"
+    assert create_new_mapping_target_type("UNIQUEIDENTIFIER", "sqlserver") == "UNIQUEIDENTIFIER"
+
+    assert specialty_carrier_base("AggregateFunction(sum, UInt64)") == "AGGREGATEFUNCTION"
+    assert specialty_carrier_base("SimpleAggregateFunction(sum, UInt64)") == (
+        "SIMPLEAGGREGATEFUNCTION"
+    )
+    assert is_lossy_coercion("AggregateFunction(sum, UInt64)", "TEXT") is True
+    assert create_new_mapping_target_type("Bool", "clickhouse") == "Bool"
+
+
 def test_struct_int64_interval_identity_document_wave17():
     from services.type_system import (
         bfile_locator_would_collapse,

@@ -551,7 +551,7 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_TEXT: "String",
         LOGICAL_INTEGER: "Int64",
         LOGICAL_DECIMAL: "Decimal(38, 15)",
-        LOGICAL_BOOLEAN: "UInt8",
+        LOGICAL_BOOLEAN: "Bool",
         LOGICAL_DATE: "Date",
         LOGICAL_DATETIME: "DateTime64(3)",
         LOGICAL_TIME: "String",
@@ -2027,6 +2027,9 @@ def _normalize_dest_db(db_type: str | None) -> str:
         "aurora_postgres",
         "aurora-postgresql",
         "pgbouncer",
+        "cloudsql_postgres",
+        "gcp_cloud_sql_postgres",
+        "cloud_sql_postgres",
     }:
         return "postgresql"
     if db in {
@@ -2037,6 +2040,11 @@ def _normalize_dest_db(db_type: str | None) -> str:
         "aurora-mysql",
         "singlestore",
         "memsql",
+        "cloudsql_mysql",
+        "gcp_cloud_sql_mysql",
+        "rds_mysql",
+        "maria",
+        "percona",
     }:
         return "mysql"
     if db in {
@@ -2047,9 +2055,25 @@ def _normalize_dest_db(db_type: str | None) -> str:
         "cosmos",
         "cosmos-mongodb",
         "cosmos_mongodb",
+        "cosmosdb",
+        "firestore",
     }:
         return "mongodb"
-    if db in {"spark", "delta", "delta_lake", "databricks_sql", "unity_catalog"}:
+    if db in {
+        "spark",
+        "delta",
+        "delta_lake",
+        "databricks_sql",
+        "unity_catalog",
+        "databricks_azure",
+        "databricks_aws",
+        "databricks_gcp",
+        "hive",
+        "impala",
+        "emr",
+        "glue",
+        "synapse_spark",
+    }:
         return "databricks"
     if db in {"apache_iceberg", "iceberg_rest", "nessie"}:
         return "iceberg"
@@ -2061,6 +2085,14 @@ def _normalize_dest_db(db_type: str | None) -> str:
         return "redis"
     if db in {"ch", "clickhouse_cloud"}:
         return "clickhouse"
+    if db in {"redshift", "redshift_serverless", "amazon_redshift"}:
+        return "redshift"
+    if db in {"snowflake", "snowflake_aws", "snowflake_azure", "snowflake_gcp"}:
+        return "snowflake"
+    if db in {"athena", "amazon_athena", "aws_athena"}:
+        return "trino"
+    if db in {"spanner", "google_spanner", "cloud_spanner"}:
+        return "bigquery"
     # Microsoft T-SQL family — one DDL SSOT (NVARCHAR / BIT / DATETIME2).
     if db in {
         "mssql",
@@ -2078,8 +2110,16 @@ def _normalize_dest_db(db_type: str | None) -> str:
         "fabric_warehouse",
     }:
         return "sqlserver"
-    # No dedicated DB2 DDL map yet — use generic SQL rather than soft-pass TEXT.
-    if db in {"db2", "ibm_db2", "ibm-db2", "db2luw"}:
+    # No dedicated DB2/Cassandra/Bigtable DDL map yet — generic SQL vs soft-pass TEXT.
+    if db in {
+        "db2",
+        "ibm_db2",
+        "ibm-db2",
+        "db2luw",
+        "cassandra",
+        "bigtable",
+        "google_bigtable",
+    }:
         return "generic_sql"
     return db
 
@@ -2220,6 +2260,13 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
     if base_early in {"NOTHING", "DYNAMIC"}:
         if db == "clickhouse":
             return base_early.title() if base_early == "NOTHING" else "Dynamic"
+        return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT, DEFAULT_DDL.get(db, "TEXT"))
+    # ClickHouse AggregateFunction / SimpleAggregateFunction — opaque state; TEXT + collapse.
+    if base_early.startswith("AGGREGATEFUNCTION") or base_early.startswith(
+        "SIMPLEAGGREGATEFUNCTION"
+    ):
+        if db == "clickhouse":
+            return strip_identity_qualifier(inferred).strip() or base_early
         return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT, DEFAULT_DDL.get(db, "TEXT"))
     # IBM DECFLOAT — IEEE decimal float; never invent NUMBER(p,0) from digit count.
     if base_early == "DECFLOAT" or base_early.startswith("DECFLOAT("):
@@ -4673,6 +4720,8 @@ _SPECIALTY_NATIVE_CARRIERS: Final[frozenset[str]] = frozenset(
         "ENUM16",
         "NOTHING",  # ClickHouse nothing type
         "DYNAMIC",  # ClickHouse dynamic type
+        "AGGREGATEFUNCTION",  # ClickHouse aggregate state
+        "SIMPLEAGGREGATEFUNCTION",
     }
 )
 
@@ -4767,6 +4816,10 @@ def specialty_carrier_base(inferred: str | None) -> str | None:
         return "ENUM8"
     if upper.startswith("ENUM16"):
         return "ENUM16"
+    if upper.startswith("SIMPLEAGGREGATEFUNCTION"):
+        return "SIMPLEAGGREGATEFUNCTION"
+    if upper.startswith("AGGREGATEFUNCTION"):
+        return "AGGREGATEFUNCTION"
     # Parametric ENUM/SET are closed domains — not specialty native carriers.
     if upper.startswith(("ENUM(", "SET(")):
         return None
@@ -4935,8 +4988,17 @@ def create_new_mapping_target_type(src_type: str, dest_db_type: str = "") -> str
             return "UUID"
         physical_uuid = ddl_type(db_uuid, src_type)
         phys_base = strip_identity_qualifier(physical_uuid).upper()
+        src_u = strip_identity_qualifier(src_type).upper()
         # SQL Server native token — never stamp logical UUID while CREATE emits UNIQUEIDENTIFIER.
         if phys_base in {"UNIQUEIDENTIFIER", "GUID"}:
+            return physical_uuid
+        # UNIQUEIDENTIFIER off-SQL-Server — stamp physical CHAR(36)/VARCHAR2(36) so
+        # Map matches CREATE (not silent UUID→UUID while writers emit CHAR).
+        if src_u in {"UNIQUEIDENTIFIER", "GUID"} and phys_base not in {
+            "UUID",
+            "UNIQUEIDENTIFIER",
+            "GUID",
+        }:
             return physical_uuid
         if (
             normalize_logical_type(physical_uuid) == LOGICAL_UUID

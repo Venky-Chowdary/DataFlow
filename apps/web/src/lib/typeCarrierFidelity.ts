@@ -226,7 +226,7 @@ export function declaredCarrierFidelityRisk(
   }
   // Specialty → open string (INET/XML/HSTORE/USER-DEFINED/IPv4/…).
   if (
-    /\b(inet|cidr|macaddr|xmltype|xml|hstore|ltree|tsvector|tsquery|jsonpath|objectid|anydata|hllsketch|rowversion|sql_variant|hierarchyid|user-defined|user_defined|ipv4|ipv6|enum8|enum16|nothing|dynamic)\b/i.test(src)
+    /\b(inet|cidr|macaddr|xmltype|xml|hstore|ltree|tsvector|tsquery|jsonpath|objectid|anydata|hllsketch|rowversion|sql_variant|hierarchyid|user-defined|user_defined|ipv4|ipv6|enum8|enum16|nothing|dynamic|aggregatefunction|simpleaggregatefunction)\b/i.test(src)
     && isOpenStringCarrier(tgt)
   ) {
     return true;
