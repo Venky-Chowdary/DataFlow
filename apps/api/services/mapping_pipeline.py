@@ -567,6 +567,7 @@ def run_mapping_pipeline(
         target_types={s["name"]: s.get("inferred_type", "VARCHAR") for s in (target_schemas or [])},
         schema_policy=schema_policy,
         validation_mode=validation_mode,
+        dest_db_type=destination_db_type,
     )
     if coercion_issues:
         quality_issues = [*quality_issues, *[c["message"] for c in coercion_issues if c.get("severity") == "block"]]

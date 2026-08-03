@@ -93,13 +93,22 @@ const CREATE_NEW_CAP = 0.93;
 /** Schema-pending must never look like proven identity create-new. */
 const SCHEMA_PENDING_CAP = 0.55;
 
+import { declaredCarrierFidelityRisk } from "../lib/typeCarrierFidelity";
+
 const CAST_QUARANTINE_RISK =
   "Cast may fail on bad samples; under quarantine those rows are held out of the primary table (not NULL-invented). coerce_null policy only writes NULL in place.";
 
-function fidelityOf(transform?: string): string {
-  const t = (transform || "none").toLowerCase();
+function fidelityOf(m: EditableMapping): string {
+  const stamped = (m.fidelity || "").toLowerCase();
+  if (stamped === "lossy_cast" || stamped === "mutate" || stamped === "preserve") {
+    return stamped;
+  }
+  if (m.typeNarrowing || declaredCarrierFidelityRisk(m.inferredType, m.destType)) {
+    return "lossy_cast";
+  }
+  const t = (m.transform || "none").toLowerCase();
   if (!t || t === "none" || t === "identity") return "preserve";
-  if (["decimal", "integer", "boolean", "date", "datetime", "time", "uuid", "json", "binary"].includes(t)) {
+  if (["decimal", "integer", "boolean", "date", "datetime", "time", "uuid", "json", "binary", "cast_number", "cast_integer", "cast_boolean"].includes(t)) {
     return "lossy_cast";
   }
   return "mutate";
@@ -143,7 +152,7 @@ export function buildClientMappingProof(
     if (destMode === "create_new") conf = Math.min(conf, CREATE_NEW_CAP);
     if (destMode === "schema_pending") conf = Math.min(conf, SCHEMA_PENDING_CAP);
     const transform = m.transform ?? "none";
-    const fidelity = fidelityOf(transform);
+    const fidelity = fidelityOf(m);
     const risks: MappingProofRisk[] = [];
     if (fidelity === "mutate" && (transform === "trim" || transform === "upper" || transform === "lower")) {
       risks.push({
@@ -271,7 +280,7 @@ export function mergeMappingProof(
     let confidence = live.confidence;
     if (createNew) confidence = Math.min(confidence, CREATE_NEW_CAP);
     if (schemaPending) confidence = Math.min(confidence, SCHEMA_PENDING_CAP);
-    const fidelity = fidelityOf(transform);
+    const fidelity = fidelityOf(live);
     const risks = [...(row.risks || [])];
     // Refresh mutate/cast risk when operator changes transform in Map.
     const withoutTransformRisks = risks.filter(

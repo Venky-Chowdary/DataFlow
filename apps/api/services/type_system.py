@@ -1148,6 +1148,9 @@ def normalize_logical_type(inferred: str | None) -> str:
         return LOGICAL_FLOAT
     if "unsigned" in key and re.search(r"\b(decimal|numeric|number)\b", key):
         return LOGICAL_DECIMAL
+    # Oracle short forms INTERVAL DAY / INTERVAL YEAR — not bare strings.
+    if key.startswith("interval"):
+        return LOGICAL_INTERVAL
     return CANONICAL_TYPES.get(key, CANONICAL_TYPES.get(key.replace(" ", "_"), LOGICAL_STRING))
 
 
@@ -1380,6 +1383,18 @@ def document_domain_would_collapse(source_type: str, target_type: str) -> bool:
     return tgt in {LOGICAL_STRING, LOGICAL_TEXT}
 
 
+def document_domain_would_invent(source_type: str, target_type: str) -> bool:
+    """True when open string/text invents a JSON/VARIANT document domain.
+
+    Writers may wrap scalars as JSON, but Map must Accept risk — never imply the
+    source already carried document validation polarity.
+    """
+    if normalize_logical_type(target_type) != LOGICAL_JSON:
+        return False
+    src = normalize_logical_type(source_type)
+    return src in {LOGICAL_STRING, LOGICAL_TEXT}
+
+
 def is_nested_document_collapse(source_type: str, target_type: str) -> bool:
     """True when STRUCT/MAP/ARRAY collapses into opaque JSON/VARIANT or text.
 
@@ -1441,8 +1456,9 @@ def nested_struct_fields_incompatible(source_type: str, target_type: str) -> boo
             continue
         if (src_l, tgt_l) not in safe_leaf:
             return True
-        # Safe leaf pairs that are still precision collapses (float→string is ok;
-        # float→decimal is NOT in safe_leaf).
+        # Safe leaf (STRING↔TEXT) must still catch specialty→text / width / IEEE.
+        if is_precision_collapse_coercion(src_t, tgt_t):
+            return True
     return False
 
 
@@ -4227,6 +4243,7 @@ def resolve_mapping_target_type(
     *,
     target_types: dict[str, str] | None = None,
     source_type: str = "",
+    dest_db_type: str = "",
 ) -> str:
     """Resolve the DDL type a mapping row should validate/write against.
 
@@ -4249,7 +4266,18 @@ def resolve_mapping_target_type(
         or "VARCHAR"
     )
     if mapping.get("create_new"):
-        return stamped or live or src
+        if stamped:
+            return stamped
+        if live:
+            return live
+        # Empty stamp must not fall back to source identity (BQ UUID→UUID lie).
+        db = (
+            (dest_db_type or "").strip()
+            or str(mapping.get("dest_db_type") or mapping.get("destination_db") or "").strip()
+        )
+        if db:
+            return create_new_mapping_target_type(src, db)
+        return src
     return live or stamped or src
 
 
@@ -5150,6 +5178,42 @@ def generated_always_overwrite_risk(target_type: str) -> bool:
     return is_generated_always_column(target_type)
 
 
+def identity_polarity_would_collapse(source_type: str, target_type: str) -> bool:
+    """True when SERIAL/IDENTITY/AUTO_INCREMENT polarity is dropped on the sink.
+
+    Create-new that stamps plain BIGINT while the source was GENERATED ALWAYS
+    invents a writable numeric column — Accept risk (or stamp identity DDL).
+    """
+    if not is_identity_column(source_type):
+        return False
+    if is_identity_column(target_type):
+        return False
+    tgt = normalize_logical_type(target_type)
+    return tgt in {
+        LOGICAL_INTEGER,
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+        LOGICAL_JSON,
+    }
+
+
+def is_bfile_locator(inferred: str | None) -> bool:
+    """True for Oracle BFILE external locator (not inlined LOB bytes)."""
+    upper = strip_identity_qualifier(inferred).upper().strip()
+    return upper == "BFILE" or upper.startswith("BFILE(")
+
+
+def bfile_locator_would_collapse(source_type: str, target_type: str) -> bool:
+    """True when BFILE locator polarity would be lost into BLOB/BYTES/text."""
+    if not is_bfile_locator(source_type):
+        return False
+    if is_bfile_locator(target_type):
+        return False
+    return True
+
+
 def integer_bit_width(inferred: str | None) -> int | None:
     """Signed bit width; UNSIGNED adds +1 so INT UNSIGNED is wider than INT."""
     upper = (inferred or "").upper()
@@ -5157,15 +5221,41 @@ def integer_bit_width(inferred: str | None) -> int | None:
         re.search(r"\bUINT\d*\b", upper)
     )
     base: int | None = None
-    if "BIGSERIAL" in upper or "BIGINT" in upper or "INT8" in upper or "UINT64" in upper:
+    # Explicit widths before bare INT — INT64/LONG must not miss \\bINT\\b.
+    if (
+        "BIGSERIAL" in upper
+        or "BIGINT" in upper
+        or re.search(r"\bINT64\b", upper)
+        or re.search(r"\bUINT64\b", upper)
+        or re.search(r"\bLONG\b", upper)
+        or re.search(r"\bINT8\b", upper)  # PostgreSQL INT8 ≡ BIGINT
+    ):
         base = 64
     elif "MEDIUMINT" in upper:
         base = 24
-    elif "SMALLSERIAL" in upper or "SMALLINT" in upper or "INT2" in upper or "UINT16" in upper:
+    elif (
+        "SMALLSERIAL" in upper
+        or "SMALLINT" in upper
+        or re.search(r"\bINT16\b", upper)
+        or re.search(r"\bINT2\b", upper)
+        or re.search(r"\bUINT16\b", upper)
+        or re.search(r"\bSHORT\b", upper)
+    ):
         base = 16
-    elif "TINYSERIAL" in upper or "TINYINT" in upper or "INT1" in upper or "UINT8" in upper:
+    elif (
+        "TINYSERIAL" in upper
+        or "TINYINT" in upper
+        or re.search(r"\bINT1\b", upper)
+        or re.search(r"\bUINT8\b", upper)
+    ):
         base = 8
-    elif "SERIAL" in upper or "INTEGER" in upper or "INT4" in upper or "UINT32" in upper:
+    elif (
+        "SERIAL" in upper
+        or "INTEGER" in upper
+        or re.search(r"\bINT32\b", upper)
+        or re.search(r"\bINT4\b", upper)
+        or re.search(r"\bUINT32\b", upper)
+    ):
         base = 32
     elif re.search(r"\bINT\b", upper):
         base = 32
@@ -5428,6 +5518,14 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
         return True
     if generated_always_overwrite_risk(target_type):
         return True
+    if identity_polarity_would_collapse(source_type, target_type):
+        return True
+    if bfile_locator_would_collapse(source_type, target_type):
+        return True
+    if document_domain_would_collapse(source_type, target_type):
+        return True
+    if document_domain_would_invent(source_type, target_type):
+        return True
     if temporal_precision_would_narrow(source_type, target_type):
         return True
     return False
@@ -5522,6 +5620,10 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
             return True
         if generated_always_overwrite_risk(target_type):
             return True
+        if identity_polarity_would_collapse(source_type, target_type):
+            return True
+        if bfile_locator_would_collapse(source_type, target_type):
+            return True
         if temporal_precision_would_narrow(source_type, target_type):
             return True
         if src == LOGICAL_STRUCT and nested_struct_fields_incompatible(
@@ -5600,9 +5702,15 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         return True
     if generated_always_overwrite_risk(target_type):
         return True
+    if identity_polarity_would_collapse(source_type, target_type):
+        return True
+    if bfile_locator_would_collapse(source_type, target_type):
+        return True
     if temporal_precision_would_narrow(source_type, target_type):
         return True
     if document_domain_would_collapse(source_type, target_type):
+        return True
+    if document_domain_would_invent(source_type, target_type):
         return True
     # ARRAY→ARRAY is in the safe allow-list below only when element types widen.
     if src == LOGICAL_ARRAY and tgt == LOGICAL_ARRAY and is_nested_shape_collapse(
@@ -5618,8 +5726,7 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         # text / structural containers are universal sinks
         (LOGICAL_STRING, LOGICAL_TEXT),
         (LOGICAL_TEXT, LOGICAL_STRING),
-        (LOGICAL_STRING, LOGICAL_JSON),
-        (LOGICAL_TEXT, LOGICAL_JSON),
+        # Open string → JSON invents document domain — not allow-listed.
         # JSON/VARIANT/SUPER → open string drops document domain — not allow-listed.
         (LOGICAL_JSON, LOGICAL_JSON),
         # ARRAY→JSON/text is document collapse (lossy) — not allow-listed.

@@ -276,9 +276,17 @@ export function detectTypeRisks(
       const jsonToString =
         /\b(jsonb?|variant|super)\b/.test(src) &&
         /\b(string|text|varchar|nvarchar|char)\b/.test(dest);
+      const stringToJson =
+        /\b(string|text|varchar|nvarchar|char)\b/.test(src) &&
+        /\b(jsonb?|variant|super)\b/.test(dest);
+      const intWidthNarrow =
+        /\b(int64|bigint|long|int8)\b/.test(src) &&
+        /\b(int32|integer|int4|int\b|smallint|tinyint)\b/.test(dest) &&
+        !/\b(int64|bigint|long)\b/.test(dest);
       if (
         floatToDecimal || decimalToFloat || decimalToInt || datetimeToDate || stringToNumber
-        || tzToNtz || ntzToTz || timeToTimetz || dateToTz || jsonToString
+        || tzToNtz || ntzToTz || timeToTimetz || dateToTz || jsonToString || stringToJson
+        || intWidthNarrow
       ) {
         risks.push({
           id: `lossy-${m.source}`,
@@ -296,7 +304,11 @@ export function detectTypeRisks(
                     ? "Wall-clock → timezone-aware invents an offset"
                     : jsonToString
                       ? "Document → open string drops JSON validation domain"
-                      : "Possible precision loss",
+                      : stringToJson
+                        ? "Open string → document invents JSON validation domain"
+                        : intWidthNarrow
+                          ? "Integer width narrows (e.g. INT64 → INT) — values may truncate"
+                          : "Possible precision loss",
           detail: floatToDecimal
             ? `${srcTypeRaw} → ${destCarrier}: keep FLOAT/DOUBLE on the destination, or accept rounding risk and approve on Validate.`
             : decimalToFloat

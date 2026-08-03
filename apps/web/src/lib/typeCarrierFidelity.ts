@@ -140,6 +140,26 @@ function isOpenStringCarrier(inferred: string | null | undefined): boolean {
   return /\b(string|text|varchar|nvarchar|char|nchar|clob)\b/.test(t) && !isDocumentCarrier(t);
 }
 
+/** Approximate signed bit width — mirrors API integer_bit_width for Map chips. */
+function integerBitWidth(inferred: string | null | undefined): number | null {
+  const u = (inferred || "").toUpperCase();
+  if (!u) return null;
+  if (/\b(BIGINT|INT64|INT8|LONG|UINT64)\b/.test(u) || u.includes("BIGSERIAL")) return 64;
+  if (u.includes("MEDIUMINT")) return 24;
+  if (/\b(SMALLINT|INT16|INT2|UINT16|SHORT)\b/.test(u) || u.includes("SMALLSERIAL")) return 16;
+  if (/\b(TINYINT|INT1|UINT8)\b/.test(u) || u.includes("TINYSERIAL")) return 8;
+  if (/\b(INTEGER|INT32|INT4|UINT32)\b/.test(u) || (/\bSERIAL\b/.test(u) && !u.includes("BIG"))) return 32;
+  if (/\bINT\b/.test(u)) return 32;
+  return null;
+}
+
+function integerWidthWouldNarrow(sourceType: string, targetType: string): boolean {
+  const srcW = integerBitWidth(sourceType);
+  const tgtW = integerBitWidth(targetType);
+  if (srcW == null || tgtW == null) return false;
+  return srcW > tgtW;
+}
+
 /**
  * Client-side Map fidelity risk when engine stamp is cleared (dest-type change).
  * Aligns with API is_lossy / timezone / document-domain honesty — never invent Approve.
@@ -154,9 +174,11 @@ export function declaredCarrierFidelityRisk(
   if (stringWidthWouldNarrow(src, tgt)) return true;
   if (decimalWouldCollapse(src, tgt)) return true;
   if (isDocumentCarrier(src) && isOpenStringCarrier(tgt)) return true;
+  if (isOpenStringCarrier(src) && isDocumentCarrier(tgt)) return true;
   if (isTzAwareTemporal(src) && isNtzTemporal(tgt)) return true;
   if (isNtzTemporal(src) && isTzAwareTemporal(tgt)) return true;
   if (/\bdate\b/.test(src.toLowerCase()) && isTzAwareTemporal(tgt)) return true;
+  if (integerWidthWouldNarrow(src, tgt)) return true;
   if (
     /\b(timestamp|datetime|timestamptz)\b/.test(src.toLowerCase())
     && /\bdate\b/.test(tgt.toLowerCase())

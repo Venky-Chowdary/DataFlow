@@ -148,8 +148,10 @@ def test_json_scalar_wrap_is_warn_not_silent_ok():
     col = report["by_source"]["payload"]
     assert col["failed"] == 0
     assert col["json_scalar_wraps"] >= 1
-    assert col["severity"] == "warn"
-    assert "Accept risk" in (col.get("suggested_fix") or "")
+    # Open text → VARIANT invents document domain — Accept risk (not silent ok).
+    assert col["severity"] == "block"
+    assert col.get("fidelity_collapse") is True
+    assert "Accept risk" in (col.get("suggested_fix") or "") or col.get("framing")
 
 
 def test_timetz_preserves_offset_and_refuses_naive_utc_invent():
@@ -276,6 +278,53 @@ def test_specialty_to_text_is_lossy_not_preserve():
     assert ddl_type("postgresql", "BIGINT UNSIGNED") == "NUMERIC(20,0)"
 
     assert is_lossy_coercion("DECIMAL(19,4)", "MONEY") is True
+
+
+def test_struct_int64_interval_identity_document_wave17():
+    from services.type_system import (
+        bfile_locator_would_collapse,
+        create_new_mapping_target_type,
+        document_domain_would_invent,
+        identity_polarity_would_collapse,
+        integer_bit_width,
+        integer_width_would_narrow,
+        interval_family_would_collapse,
+        is_lossy_coercion,
+        is_nested_shape_collapse,
+        normalize_logical_type,
+        resolve_mapping_target_type,
+    )
+
+    assert is_nested_shape_collapse("STRUCT<a:INET>", "STRUCT<a:TEXT>") is True
+    assert is_lossy_coercion("STRUCT<a:INET>", "STRUCT<a:TEXT>") is True
+
+    assert integer_bit_width("INT64") == 64
+    assert integer_bit_width("LONG") == 64
+    assert integer_width_would_narrow("INT64", "INT") is True
+    assert is_lossy_coercion("INT64", "INTEGER") is True
+    assert is_lossy_coercion("LONG", "INT") is True
+
+    assert normalize_logical_type("INTERVAL DAY") == "interval"
+    assert interval_family_would_collapse("INTERVAL DAY", "INTERVAL YEAR") is True
+    assert is_lossy_coercion("INTERVAL DAY", "INTERVAL YEAR") is True
+
+    assert resolve_mapping_target_type(
+        {"create_new": True, "target": "u", "target_type": ""},
+        source_type="UUID",
+        dest_db_type="bigquery",
+    ) == create_new_mapping_target_type("UUID", "bigquery")
+
+    assert identity_polarity_would_collapse(
+        "INT GENERATED ALWAYS AS IDENTITY", "BIGINT"
+    ) is True
+    assert is_lossy_coercion("INT GENERATED ALWAYS AS IDENTITY", "BIGINT") is True
+
+    assert document_domain_would_invent("STRING", "JSON") is True
+    assert is_lossy_coercion("TEXT", "VARIANT") is True
+    assert is_lossy_coercion("STRING", "JSON") is True
+
+    assert bfile_locator_would_collapse("BFILE", "BLOB") is True
+    assert is_lossy_coercion("BFILE", "BLOB") is True
 
 
 def test_document_nested_decimal_bare_wave16():

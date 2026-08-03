@@ -94,7 +94,12 @@ def samples_coerce_mapping(
     return checked > 0
 
 
-def _target_type_for(mapping: dict, dest_types: dict[str, str], source_types: dict[str, str]) -> str:
+def _target_type_for(
+    mapping: dict,
+    dest_types: dict[str, str],
+    source_types: dict[str, str],
+    dest_db_type: str = "",
+) -> str:
     from services.type_system import resolve_mapping_target_type
 
     src = str(mapping.get("source") or "")
@@ -102,6 +107,7 @@ def _target_type_for(mapping: dict, dest_types: dict[str, str], source_types: di
         mapping,
         target_types=dest_types,
         source_type=str(source_types.get(src) or ""),
+        dest_db_type=dest_db_type,
     )
 
 
@@ -243,7 +249,7 @@ def analyze_coercion(
         if not src:
             continue
         src_type = source_types.get(src, "VARCHAR")
-        tgt_type = _target_type_for(m, dest_types, source_types)
+        tgt_type = _target_type_for(m, dest_types, source_types, dest_db_type=dest_db_type)
         src_logical = normalize_logical_type(src_type)
         tgt_logical = normalize_logical_type(tgt_type)
 

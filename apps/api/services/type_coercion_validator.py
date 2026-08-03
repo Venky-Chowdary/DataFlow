@@ -23,6 +23,7 @@ def validate_mapping_coercions(
     schema_policy: str = "manual_review",
     confidence_floor: float = 0.85,
     validation_mode: str = "strict",
+    dest_db_type: str = "",
 ) -> list[dict[str, Any]]:
     """Return structured coercion issues for each mapping pair.
 
@@ -49,7 +50,10 @@ def validate_mapping_coercions(
         src_type = source_types.get(src, "VARCHAR")
         # Create-new stamps (e.g. BQ UUID→STRING) must win over missing live DDL.
         tgt_type = resolve_mapping_target_type(
-            m, target_types=target_types, source_type=src_type
+            m,
+            target_types=target_types,
+            source_type=src_type,
+            dest_db_type=dest_db_type,
         )
         src_logical = normalize_logical_type(src_type)
         tgt_logical = normalize_logical_type(tgt_type)
