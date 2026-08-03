@@ -2157,7 +2157,12 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
     elif "aggregate_data" in names:
         planned = [
             (n, a) for n, a in planned
-            if n not in ("sample_connector_object", "run_query", "analyze_dataset")
+            if n not in (
+                "sample_connector_object",
+                "run_query",
+                "analyze_dataset",
+                "filter_result",
+            )
         ]
         names = {n for n, _ in planned}
     # Platform inventory: "how many jobs failed" / "connector count" must not
@@ -2221,6 +2226,8 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
                 "search_knowledge",
                 "list_jobs",
                 "list_datasets",
+                "describe_pilot",
+                "profile_quality_rules",
             )
             or pri >= primary_tier - 25
         ):
@@ -2768,6 +2775,14 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             elif "contain" in op_raw or "like" in op_raw:
                 op = "contains"
             args = {"column": col, "op": op, "value": val}
+            # Strip a trailing "on <connector>" accidentally captured in value.
+            if args.get("value"):
+                args["value"] = re.sub(
+                    r"\s+on\s+[A-Za-z0-9_\- ]+$",
+                    "",
+                    str(args["value"]),
+                    flags=re.I,
+                ).strip()
             if col:
                 planned.append(("filter_result", args))
 
@@ -2834,11 +2849,18 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             "nine gates",
             "quality gates do you",
             "what are your gates",
+            "explain the 9",
+            "explain the nine",
+            "explain preflight",
+            "explain the gates",
+            "g1-g9",
+            "g1–g9",
         )
     )
     if product_gate_ask:
-        planned.append(("search_knowledge", {"query": "preflight quality gates G1-G9"}))
+        # Prefer honest product gate list over ontology RAG shards.
         planned.append(("describe_pilot", {}))
+        planned.append(("profile_quality_rules", {}))
     elif any(w in lower for w in (
         "quality rules", "quality gates", "data quality", "profile rules",
         "suggest improvements", "suggestions for my data", "how can i improve",
@@ -2847,6 +2869,19 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         planned.append(("profile_quality_rules", {}))
         if any(w in lower for w in ("suggest", "recommend", "improve", "fix")):
             planned.append(("search_knowledge", {"query": message[:200]}))
+
+    # Mapping repair / PII questions — product tools, not ontology RAG dumps.
+    if any(w in lower for w in ("fix my mapping", "fix mapping", "mapping broken", "wrong mapping", "help me fix my mapping")):
+        planned.append(("explain_mapping_assurance", {}))
+        planned.append(("navigate", {"screen": "transfer"}))
+        planned = [(n, a) for n, a in planned if n != "search_knowledge"]
+
+    if re.search(r"\bpii\b", lower):
+        tm = re.search(r"\bin\s+[\"']?([A-Za-z_][A-Za-z0-9_]*)[\"']?", lower)
+        table = (tm.group(1) if tm else "").strip()
+        if table and table not in {"it", "that", "this", "my", "the"}:
+            planned.append(("introspect_connector_schema", {"table": table}))
+            planned = [(n, a) for n, a in planned if n != "search_knowledge"]
 
     # Uploaded dataset compare — only when not already a live schema diff
     if "diff_schemas" not in [p[0] for p in planned]:

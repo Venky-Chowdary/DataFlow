@@ -275,6 +275,19 @@ def looks_like_followup(message: str, focus: PilotFocus | None) -> bool:
     words = _words(text)
     if len(words) > _MAX_FOLLOWUP_WORDS:
         return False
+    # Self-contained asks name their own table/connector — not elliptical.
+    if re.search(
+        r"\b(?:from|in)\s+[A-Za-z_][A-Za-z0-9_]*\b",
+        text,
+        re.I,
+    ) and not _COREFERENCE_RE.search(text):
+        return False
+    if (
+        re.search(r"\bon\s+[A-Za-z_][A-Za-z0-9_\- ]{1,40}\s*$", text, re.I)
+        and len(words) >= 5
+        and not _COREFERENCE_RE.search(text)
+    ):
+        return False
     if _COREFERENCE_RE.search(text):
         return True
     if re.match(r"^(?:and|also|now|then|what\s+about|how\s+about|ok\s+)", text, re.I):

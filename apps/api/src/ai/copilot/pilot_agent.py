@@ -1035,6 +1035,15 @@ class DataPilotAgent:
         # amount" would otherwise lose the remembered WHERE / table).
         if focus and looks_like_followup(message, focus):
             low = message.lower().strip()
+            # Fully grounded fresh aggregate (explicit table ≠ focus) wins.
+            for name, args in planned:
+                if name != "aggregate_data":
+                    continue
+                explicit_table = str((args or {}).get("table") or "").strip().lower()
+                if explicit_table and explicit_table != (focus.table or "").lower():
+                    return inherit_focus_slots(planned, focus)
+                if explicit_table and (args or {}).get("connector_name"):
+                    return planned
             # Stored-sample row filters stay on filter_result, not a new aggregate.
             if focus.result_id and re.match(r"^(?:filter|where)\b", low):
                 return inherit_focus_slots(planned, focus) if planned else [

@@ -122,9 +122,11 @@ class AggregationRequest:
 _METRIC_PHRASES: tuple[tuple[str, str], ...] = (
     (r"how many (?:different|distinct|unique)", "count_distinct"),
     (r"(?:number|count) of (?:different|distinct|unique)", "count_distinct"),
-    (r"(?:how many|number of|total number of|count of|count)", "count"),
+    (r"(?:distinct|unique)\s+count(?:\s+of)?", "count_distinct"),
+    (r"count\s+(?:of\s+)?(?:the\s+)?(?:different|distinct|unique)", "count_distinct"),
     (r"(?:distinct|unique) (?:values|count)? ?of", "count_distinct"),
     (r"(?:distinct|unique)", "count_distinct"),
+    (r"(?:how many|number of|total number of|count of|count)", "count"),
     (r"(?:average|avg|mean)(?: of)?", "avg"),
     (r"(?:sum|total)(?: of)?", "sum"),
     (r"(?:minimum|min|lowest|smallest|earliest)(?: of)?", "min"),
@@ -155,6 +157,14 @@ _STOP_TOKENS = frozenset({
     "was", "were", "have", "has", "had", "there", "here", "please", "thanks",
     "that", "this", "to", "and", "or", "be", "been", "get", "got", "show",
     "me", "tell", "currently", "right", "now", "again", "still",
+})
+
+# Adjectives that mean a status/state filter, not part of the table name.
+# "how many paid orders" → table=orders, where status='paid'.
+_STATUS_ADJECTIVES = frozenset({
+    "paid", "pending", "cancelled", "canceled", "active", "inactive",
+    "open", "closed", "failed", "success", "successful", "complete",
+    "completed", "draft", "approved", "rejected", "shipped", "refunded",
 })
 
 
@@ -253,6 +263,21 @@ def parse_aggregation_request(message: str) -> AggregationRequest | None:
     if re.match(r"^\s*(?:select|with|show|describe|explain)\b", text.lower()):
         return None
 
+    # "orders where amount > 10 on PilotSQLite" — table-first filtered count.
+    table_where = re.match(
+        r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s+where\s+(.+?)\s+on\s+(?:the\s+)?"
+        r"([A-Za-z0-9_][A-Za-z0-9_\- ]{0,48}?)\s*$",
+        text,
+        re.I,
+    )
+    if table_where:
+        return AggregationRequest(
+            metric="count",
+            table=_clean_identifier(table_where.group(1)),
+            where=table_where.group(2).strip(),
+            connector_name=_clean_identifier(table_where.group(3)),
+        )
+
     # Pull filter phrases out first. Left in place, "where status = open" would
     # be scanned for a table name and produce a lookup for a table called
     # "status = open".
@@ -319,6 +344,15 @@ def _finish_request(
     if conn:
         req.connector_name = _clean_identifier(conn.group(1))
         working = _strip_span(working, conn.span())
+        # "on orders PilotSQLite" (missing second "on") → table + connector.
+        tokens = (req.connector_name or "").split()
+        if len(tokens) == 2 and not req.table:
+            left, right = tokens[0], tokens[1]
+            if left.islower() and left not in _PLATFORM_NOUNS and (
+                right[:1].isupper() or "sql" in right.lower() or "ware" in right.lower()
+            ):
+                req.table = left
+                req.connector_name = right
 
     # Grouping dimension: "by status", "per region", "grouped by month".
     grp = re.search(
@@ -374,6 +408,24 @@ def _finish_request(
     # "count of orders" names the table, not a column, when nothing else did.
     if req.metric == "count" and not req.table and req.column:
         req.table, req.column = req.column, ""
+
+    # "how many paid orders" → table=orders + status filter (not table "paid orders").
+    if req.table and " " in req.table.strip():
+        parts = req.table.strip().split()
+        if len(parts) >= 2 and parts[0].lower() in _STATUS_ADJECTIVES:
+            status = parts[0].lower()
+            req.table = parts[-1]
+            clause = f"status = '{status}'"
+            req.where = f"({req.where}) AND {clause}" if req.where else clause
+
+    # "distinct count of region" leaves column=region with metric count_distinct.
+    if req.metric == "count" and req.column and req.table:
+        # count + column without "distinct" stays as filtered? No — COUNT(col)
+        # is unusual; prefer count_distinct when the NL said distinct earlier.
+        pass
+    if req.metric == "count_distinct" and req.column and not req.table:
+        # measure was the dimension; table may still be missing
+        pass
 
     coreferent_subject = False
     if is_coreferent(req.table):

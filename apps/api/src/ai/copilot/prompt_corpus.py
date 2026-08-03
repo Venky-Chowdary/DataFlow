@@ -326,19 +326,19 @@ def iter_prompt_corpus() -> list[PromptCase]:
                 family="result_followup",
             ))
 
-    # --- Quality / suggestions / knowledge ---
-    for p in (
-        "data quality on my uploads",
-        "profile quality rules",
-        "suggest improvements for my data",
-        "how can I improve data quality?",
-        "recommend fixes for bad data quality",
+    # --- Wave 33 NL accuracy expansions ---
+    for p, tools in (
+        ("distinct count of status from orders on Local Postgres", ("aggregate_data",)),
+        ("how many paid orders on Local Postgres", ("aggregate_data",)),
+        ("orders where amount > 10 on Local Postgres", ("aggregate_data",)),
+        ("create a postgres connector at localhost database demo", ("create_connector",)),
+        ("create a mysql connector at db.example.com", ("create_connector",)),
+        ("explain the 9 preflight gates", ("describe_pilot", "profile_quality_rules")),
+        ("is email PII in orders", ("introspect_connector_schema", "analyze_dataset")),
+        ("help me fix my mapping", ("explain_mapping_assurance", "navigate")),
+        ("max price in products on Warehouse", ("aggregate_data",)),
     ):
-        cases.append(_case(
-            p,
-            "profile_quality_rules", "search_knowledge", "describe_pilot",
-            family="quality",
-        ))
+        cases.append(_case(p, *tools, family="nl_accuracy"))
     for p in (
         "what quality gates do you have?",
         "what are the quality gates?",

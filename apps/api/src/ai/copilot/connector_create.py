@@ -146,8 +146,24 @@ def wants_create_connector(message: str) -> bool:
         "save this connection",
         "make a connector",
         "register connector",
+        "create a postgres",
+        "create a postgresql",
+        "create a mysql",
+        "create a mongodb",
+        "create a snowflake",
+        "create an postgres",
+        "add a postgres",
+        "add a mysql",
     )
     if any(v in lower for v in verbs):
+        return True
+    # "create a <engine> connector at host…"
+    if re.search(
+        r"\b(?:create|add|save|register|setup|set\s+up)\s+(?:a\s+|an\s+)?"
+        r"(?:postgres(?:ql)?|mysql|mariadb|mongo(?:db)?|snowflake|sql\s*server|sqlite)"
+        r"\s+connector\b",
+        lower,
+    ):
         return True
     # Credentials pasted with an explicit ask to save/use
     if extract_url_credentials(message) and any(
