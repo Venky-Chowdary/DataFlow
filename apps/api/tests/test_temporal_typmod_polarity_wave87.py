@@ -97,8 +97,8 @@ def test_naive_timestamp_with_typmod_never_flips_to_tz_aware():
     assert datetime_timezone_polarity("TIMESTAMP(6) WITH TIME ZONE") == "tz"
     assert time_timezone_polarity("TIME(6) WITHOUT TIME ZONE") == "ntz"
     assert time_timezone_polarity("TIME(6) WITH TIME ZONE") == "tz"
-    # Bare TIMESTAMP stays ambiguous on purpose (platform default, wave 65).
-    assert datetime_timezone_polarity("TIMESTAMP(6)") is None
+    # Bare TIMESTAMP(p) is wall-clock NTZ — never invent TZ-aware polarity.
+    assert datetime_timezone_polarity("TIMESTAMP(6)") == "ntz"
 
     naive = "TIMESTAMP(6) WITHOUT TIME ZONE"
     for dest in SQL_DESTS:
@@ -172,7 +172,7 @@ def test_smalldatetime_lands_valid_ddl_on_every_dest():
     assert ddl_type("oracle", "SMALLDATETIME") == "TIMESTAMP(0)"
     # Previously invalid: these engines take no precision argument.
     assert ddl_type("bigquery", "SMALLDATETIME") == "DATETIME"
-    assert ddl_type("databricks", "SMALLDATETIME") == "TIMESTAMP_NTZ"
+    assert ddl_type("databricks", "SMALLDATETIME") == "TIMESTAMP"
     assert ddl_type("redshift", "SMALLDATETIME") == "TIMESTAMP"
     assert ddl_type("clickhouse", "SMALLDATETIME") == "DateTime64(0)"
     # SMALLDATETIME starts at 1900 — ClickHouse DateTime (1970 floor) would clamp.

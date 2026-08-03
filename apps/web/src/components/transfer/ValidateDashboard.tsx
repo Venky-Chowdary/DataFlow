@@ -1904,11 +1904,21 @@ export function ValidateDashboard({
       {!running && preflight && (
         <div className="df2-vd-metrics" aria-label="Proof metrics">
           <MetricChip value={readiness} label="Readiness" tone={heroTone} />
-          <MetricChip value={semantic * 100} label="Semantic" tone="approve" />
+          <MetricChip
+            value={semantic * 100}
+            label="Semantic"
+            tone={decision === "approve" ? "approve" : heroTone}
+          />
           <MetricChip
             value={quality == null ? null : quality * 100}
             label="Quality"
-            tone={qualityNotProfiled ? "review" : "approve"}
+            tone={
+              qualityNotProfiled
+                ? "review"
+                : decision === "approve"
+                  ? "approve"
+                  : heroTone
+            }
             emptyLabel="n/a"
           />
           <MetricChip

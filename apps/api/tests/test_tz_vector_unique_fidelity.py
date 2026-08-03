@@ -28,10 +28,10 @@ from services.type_system import (  # noqa: E402
 
 
 def test_datetime_bare_is_ambiguous_and_offset_detected():
-    # Bare DATETIME/TIMESTAMP are ambiguous — platform default (TIMESTAMPTZ).
-    assert datetime_timezone_polarity("DATETIME") is None
-    assert datetime_timezone_polarity("TIMESTAMP") is None
-    assert datetime_timezone_polarity("datetime") is None
+    # Bare DATETIME/TIMESTAMP are wall-clock NTZ — never invent TZ polarity.
+    assert datetime_timezone_polarity("DATETIME") == "ntz"
+    assert datetime_timezone_polarity("TIMESTAMP") == "ntz"
+    assert datetime_timezone_polarity("datetime") == "ntz"
     assert datetime_timezone_polarity("TIMESTAMP_NTZ") == "ntz"
     assert datetime_timezone_polarity("DATETIME(6)") == "ntz"
     assert temporal_value_has_timezone("2024-01-01T12:00:00Z") is True

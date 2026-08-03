@@ -276,3 +276,34 @@ def test_specialty_to_text_is_lossy_not_preserve():
     assert ddl_type("postgresql", "BIGINT UNSIGNED") == "NUMERIC(20,0)"
 
     assert is_lossy_coercion("DECIMAL(19,4)", "MONEY") is True
+
+
+def test_bare_datetime_and_time_tz_invent_are_lossy():
+    from services.type_system import (
+        create_new_mapping_target_type,
+        is_lossy_coercion,
+        is_nested_document_collapse,
+        is_timezone_polarity_loss,
+        temporal_precision_would_narrow,
+        time_timezone_polarity_loss,
+    )
+
+    assert is_timezone_polarity_loss("DATETIME", "TIMESTAMPTZ") is True
+    assert is_lossy_coercion("DATETIME", "TIMESTAMPTZ") is True
+    assert is_lossy_coercion("TIMESTAMP", "DATETIMEOFFSET") is True
+    assert time_timezone_polarity_loss("TIME", "TIMETZ") is True
+    assert is_lossy_coercion("TIME", "TIMETZ") is True
+
+    assert is_nested_document_collapse("STRUCT<a:INT>", "VARCHAR") is True
+    assert is_lossy_coercion("STRUCT<a:INT>", "TEXT") is True
+    assert is_lossy_coercion("ARRAY<INTEGER>", "VARCHAR") is True
+
+    # Open string → closed ENUM needs Accept risk (not write-only quarantine).
+    assert is_lossy_coercion("VARCHAR", "ENUM('a','b')") is True
+
+    # Create-new specialty stamps physical off-engine sink.
+    stamped = create_new_mapping_target_type("INET", "snowflake")
+    assert stamped.upper() in {"VARCHAR", "TEXT", "STRING"} or "VARCHAR" in stamped.upper()
+    assert stamped.upper() != "INET"
+
+    assert temporal_precision_would_narrow("TIME(6)", "TIME") is True

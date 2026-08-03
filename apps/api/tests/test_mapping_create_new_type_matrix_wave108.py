@@ -53,7 +53,8 @@ def test_objectid_create_new_mysql_stamps_logical_and_passes_strict():
         destination_table_exists=False,
     )
     assert mappings[0]["create_new"] is True
-    assert mappings[0]["target_type"] == "OBJECTID"
+    # Stamp physical off-engine sink so Map matches CREATE (not silent OBJECTID→OBJECTID).
+    assert mappings[0]["target_type"] == "VARCHAR(24)"
     assert "VARCHAR(24)" in mappings[0]["reasoning"]
 
     issues = validate_mapping_coercions(
@@ -64,7 +65,7 @@ def test_objectid_create_new_mysql_stamps_logical_and_passes_strict():
             "create_new": True,
         }],
         source_types={"_id": "OBJECTID"},
-        target_types={"id": "OBJECTID"},
+        target_types={"id": "VARCHAR(24)"},
         validation_mode="strict",
     )
     assert coerce_blocks_transfer(issues) is False
@@ -104,11 +105,20 @@ def test_inet_create_new_off_engine_stamps_logical():
         destination_db_type="snowflake",
         destination_table_exists=False,
     )
-    assert mappings[0]["target_type"] == "INET"
+    # Off-engine: stamp physical VARCHAR so Accept risk matches CREATE.
+    stamped = (mappings[0]["target_type"] or "").upper()
+    assert stamped == "VARCHAR" or stamped.startswith("VARCHAR")
+    assert stamped != "INET"
     issues = validate_mapping_coercions(
-        mappings=[{"source": "ip", "target": "ip", "confidence": 0.93}],
+        mappings=[{
+            "source": "ip",
+            "target": "ip",
+            "confidence": 0.93,
+            "create_new": True,
+            "risk_acknowledged": True,
+        }],
         source_types={"ip": "INET"},
-        target_types={"ip": "INET"},
+        target_types={"ip": mappings[0]["target_type"]},
         validation_mode="strict",
     )
     assert coerce_blocks_transfer(issues) is False
@@ -219,6 +229,7 @@ def test_uuid_bigquery_create_new_stamps_string_and_warns_not_silent_green():
             "target": "device_id",
             "confidence": 0.93,
             "create_new": True,
+            "risk_acknowledged": True,
         }],
         source_types={"device_id": "UUID"},
         target_types={"device_id": "STRING"},
@@ -227,6 +238,20 @@ def test_uuid_bigquery_create_new_stamps_string_and_warns_not_silent_green():
     assert coerce_blocks_transfer(issues) is False
     assert issues and issues[0]["severity"] == "warn"
     assert issues[0]["lossy"] is True
+
+    # Strict without Accept risk stays blocked (domain polarity).
+    blocked = validate_mapping_coercions(
+        mappings=[{
+            "source": "device_id",
+            "target": "device_id",
+            "confidence": 0.93,
+            "create_new": True,
+        }],
+        source_types={"device_id": "UUID"},
+        target_types={"device_id": "STRING"},
+        validation_mode="strict",
+    )
+    assert coerce_blocks_transfer(blocked) is True
 
 
 def test_create_new_stamped_target_type_authoritative_without_live_ddl():
@@ -243,6 +268,7 @@ def test_create_new_stamped_target_type_authoritative_without_live_ddl():
         "confidence": 0.93,
         "create_new": True,
         "target_type": "STRING",
+        "risk_acknowledged": True,
     }
     assert resolve_mapping_target_type(
         mapping, target_types={}, source_type="UUID"

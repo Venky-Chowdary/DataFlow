@@ -254,7 +254,8 @@ CSV_SNOWFLAKE_DDL_EXPECTED = {
     "quantity": "NUMBER(38,0)",
     "is_gift": "BOOLEAN",
     "order_date": "DATE",
-    "shipped_at": "TIMESTAMP_TZ",
+    # Bare TIMESTAMP = wall-clock NTZ (offset samples need explicit TIMESTAMPTZ).
+    "shipped_at": "TIMESTAMP_NTZ",
     "metadata": "VARIANT",
     "notes": "VARCHAR",
 }

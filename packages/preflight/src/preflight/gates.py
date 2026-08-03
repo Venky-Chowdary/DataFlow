@@ -376,6 +376,13 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         )
         if not lossy and nested_collapse:
             lossy = True
+        # Coercion probe may block wire values even when declared types look
+        # safe (naive DATETIME→TIMESTAMPTZ). Never skip those columns.
+        probe_early = by_source.get(m.source) if value_aware else None
+        if not lossy and probe_early:
+            sev = str(probe_early.get("severity") or "").lower()
+            if sev == "block" or bool(probe_early.get("has_blocking_failures")):
+                lossy = True
         if not lossy:
             continue
 

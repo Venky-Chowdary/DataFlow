@@ -61,8 +61,8 @@ def test_nested_ddl_databricks_duckdb_clickhouse():
     # Bare array on lakehouse must not collapse to STRING.
     assert ddl_type("databricks", "array") == "ARRAY<STRING>"
     assert ddl_type("clickhouse", "array") == "Array(String)"
-    # PG still uses JSONB for nested carriers (no invent STRUCT).
-    assert ddl_type("postgresql", "ARRAY<INTEGER>") in {"JSONB", "JSON"}
+    # PG typed arrays → native T[]; STRUCT still JSONB (no invent STRUCT DDL).
+    assert ddl_type("postgresql", "ARRAY<INTEGER>") == "BIGINT[]"
     assert ddl_type("postgresql", "STRUCT<lat:FLOAT, lon:FLOAT>") in {"JSONB", "JSON"}
     # Snowflake structured OBJECT/ARRAY — not opaque VARIANT when fields declared.
     sf = ddl_type("snowflake", "STRUCT<lat:FLOAT, lon:FLOAT>")

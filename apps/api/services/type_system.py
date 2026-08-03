@@ -1349,17 +1349,17 @@ def is_opaque_document_logical(inferred: str | None) -> bool:
 
 
 def is_nested_document_collapse(source_type: str, target_type: str) -> bool:
-    """True when STRUCT/MAP/ARRAY collapses into an opaque JSON/VARIANT document.
+    """True when STRUCT/MAP/ARRAY collapses into opaque JSON/VARIANT or text.
 
     Airbyte Destinations V2 often stores objects as JSON — that is valid but is
     **not** field/element DDL fidelity. Operators must see it (G3 warn/block).
-    ARRAY→JSON was previously silent-green while STRUCT→JSON hard-blocked.
+    Nested→VARCHAR/TEXT is the same field-DDL collapse (serialized document).
     """
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
     if src not in {LOGICAL_STRUCT, LOGICAL_MAP, LOGICAL_ARRAY}:
         return False
-    return tgt == LOGICAL_JSON
+    return tgt in {LOGICAL_JSON, LOGICAL_STRING, LOGICAL_TEXT}
 
 
 def nested_struct_fields_incompatible(source_type: str, target_type: str) -> bool:
@@ -2615,9 +2615,10 @@ _TZ_NAIVE_DDL: Final[dict[str, str]] = {
     "bigquery": "DATETIME",
     "duckdb": "TIMESTAMP",
     "timescaledb": "timestamp",
-    "databricks": "TIMESTAMP_NTZ",
-    "clickhouse": "DateTime64(6)",
-    "trino": "timestamp(6)",
+    # Keep lakehouse NTZ spellings aligned with DDL_TYPES[LOGICAL_DATETIME].
+    "databricks": "TIMESTAMP",
+    "clickhouse": "DateTime64(3)",
+    "trino": "timestamp(3)",
     "presto": "timestamp",
     "iceberg": "timestamp",
 }
@@ -2718,11 +2719,17 @@ def time_timezone_polarity(inferred: str | None) -> str | None:
 
 
 def time_timezone_polarity_loss(source_type: str, target_type: str) -> bool:
-    """True when TIMETZ offset polarity would be dropped onto bare TIME."""
-    return (
-        time_timezone_polarity(source_type) == "tz"
-        and time_timezone_polarity(target_type) == "ntz"
-    )
+    """True when TIME offset polarity would be dropped or invented.
+
+    Covers TIMETZ→TIME (offset drop) and TIME→TIMETZ (offset invent on naive).
+    """
+    src = time_timezone_polarity(source_type)
+    tgt = time_timezone_polarity(target_type)
+    if src == "tz" and tgt == "ntz":
+        return True
+    if src == "ntz" and tgt == "tz":
+        return True
+    return False
 
 
 def _time_ddl_for_dest(db: str, inferred: str | None) -> str | None:
@@ -3024,8 +3031,8 @@ def datetime_timezone_polarity(inferred: str | None) -> str | None:
     - ``ltz``: session-relative instant (Snowflake TIMESTAMP_LTZ, Oracle LOCAL TZ,
       PG TIMESTAMPTZ — Openflow / Airbyte #80914)
     - ``tz``: offset-pinned (Snowflake TIMESTAMP_TZ, DATETIMEOFFSET)
-    - ``ntz``: wall-clock naive
-    - ``None``: ambiguous bare TIMESTAMP/DATETIME → platform default
+    - ``ntz``: wall-clock naive (including bare DATETIME/TIMESTAMP)
+    - ``None``: non-temporal or unrecognized carrier
     """
     # Arrow timestamp[unit, tz=…] → carrier before polarity token scan.
     arrow = arrow_dtype_to_carrier(inferred)
@@ -3040,7 +3047,6 @@ def datetime_timezone_polarity(inferred: str | None) -> str | None:
         return None
     # ClickHouse DateTime64(p, 'tz') / DateTime('tz') — column TZ metadata (LTZ).
     # Must run before the generic DATETIME( MySQL ntz token (quote after paren).
-    # Bare DATETIME stays ambiguous (wave 65 → platform TIMESTAMPTZ default).
     if re.search(r"DATETIME64\s*\(\s*\d+\s*,", raw) or re.match(
         r"^DATETIME\s*\(\s*['\"]", raw
     ):
@@ -3049,9 +3055,8 @@ def datetime_timezone_polarity(inferred: str | None) -> str | None:
         return "ntz"
     # A numeric typmod must not break the SQL-standard token match:
     # ``TIMESTAMP(6) WITHOUT TIME ZONE`` is PostgreSQL's information_schema
-    # spelling, and missing it would fall through to the platform default and
-    # flip a naive column to TZ-aware — shifting every value by the session
-    # offset. Keep ``raw`` for the dialect checks that need the parenthesis.
+    # spelling, and missing it would fall through and invent TZ polarity.
+    # Keep ``raw`` for the dialect checks that need the parenthesis.
     collapsed = re.sub(r"\s*\(\s*\d+\s*\)", "", raw).strip()
     ntz_tokens = (
         "TIMESTAMP NTZ",
@@ -3078,6 +3083,10 @@ def datetime_timezone_polarity(inferred: str | None) -> str | None:
         or ("WITH TIME ZONE" in collapsed and "LOCAL" not in collapsed)
     ):
         return "tz"
+    # Bare DATETIME / TIMESTAMP = wall-clock NTZ. Never treat as ambiguous
+    # platform-TZ invent — Map/G3 must require Accept risk for → TIMESTAMPTZ.
+    if collapsed in {"DATETIME", "TIMESTAMP"} or collapsed.startswith("DATETIME "):
+        return "ntz"
     return None
 
 
@@ -3623,9 +3632,9 @@ def enum_set_domain_would_reject(source_type: str, target_type: str) -> bool:
     if tgt is None:
         return False
     if src is None:
-        # Typed dest domain with open/unknown source — samples handle value check;
-        # declared type alone is not enough to block.
-        return False
+        # Open/unknown source → closed ENUM/SET: unfit values only appear at
+        # write (quarantine). Fail-closed so Map/G3 require Accept risk.
+        return True
     _src_kind, src_members = src
     _tgt_kind, tgt_members = tgt
     if not tgt_members:
@@ -3986,14 +3995,8 @@ def create_new_mapping_target_type(src_type: str, dest_db_type: str = "") -> str
             if specialty_carrier_base(physical) is not None:
                 return physical
             # Off-engine wire (ObjectId→VARCHAR(24), INET→VARCHAR/TEXT) — stamp
-            # logical specialty so Validate does not false-block create-new.
-            # Writers still emit ``physical`` via ddl_type at CREATE time.
-            phys_l = normalize_logical_type(physical)
-            if (
-                specialty_wire_preserves_value(specialty, physical)
-                or phys_l in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON}
-            ):
-                return specialty
+            # the physical sink so Map/Validate show polarity (Accept risk), not
+            # silent specialty→specialty identity while CREATE emits VARCHAR.
             return physical
         return specialty
     if db:
@@ -4619,11 +4622,25 @@ def temporal_precision_would_narrow(source_type: str, target_type: str) -> bool:
     if tgt_u == "SMALLDATETIME" and src_u != "SMALLDATETIME" and src_l == LOGICAL_DATETIME:
         return True
     tgt_p = parse_temporal_fractional_precision(target_type)
-    if tgt_p is None:
-        return False
     src_p = parse_temporal_fractional_precision(source_type)
     if src_p is None:
         return False
+    if tgt_p is None:
+        # Bare TIME/DATETIME/TIMESTAMP often defaults to FSP 0 (MySQL) — treat
+        # missing typmod as 0 so TIME(6)→TIME is not silent-green. PG defaults
+        # higher, but Accept risk beats silent fractional truncation.
+        bare = re.sub(r"\s*\(\s*\d+\s*\)", "", tgt_u).strip()
+        if bare in {
+            "TIME",
+            "DATETIME",
+            "TIMESTAMP",
+            "TIME WITHOUT TIME ZONE",
+            "TIMESTAMP WITHOUT TIME ZONE",
+            "TIMESTAMP NTZ",
+        } or bare.startswith("DATETIME"):
+            tgt_p = 0
+        else:
+            return False
     return src_p > tgt_p
 
 
@@ -5112,9 +5129,7 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         (LOGICAL_JSON, LOGICAL_STRING),
         (LOGICAL_JSON, LOGICAL_TEXT),
         (LOGICAL_JSON, LOGICAL_JSON),
-        (LOGICAL_ARRAY, LOGICAL_STRING),
-        (LOGICAL_ARRAY, LOGICAL_TEXT),
-        # ARRAY→JSON is document collapse (lossy) — not allow-listed.
+        # ARRAY→JSON/text is document collapse (lossy) — not allow-listed.
         (LOGICAL_ARRAY, LOGICAL_ARRAY),
         (LOGICAL_JSON, LOGICAL_ARRAY),
         # numeric widening and text renderings
@@ -5157,11 +5172,7 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         # INTERVAL/GEOGRAPHY/VECTOR → text/JSON drops specialty domain — lossy
         # (Map Accept risk must match engine fidelity; was false "preserve").
         (LOGICAL_VECTOR, LOGICAL_ARRAY),
-        # Fielded nested → text (JSON string form); opaque JSON path is lossy above.
-        (LOGICAL_STRUCT, LOGICAL_STRING),
-        (LOGICAL_STRUCT, LOGICAL_TEXT),
-        (LOGICAL_MAP, LOGICAL_STRING),
-        (LOGICAL_MAP, LOGICAL_TEXT),
+        # STRUCT/MAP → text/JSON is nested document collapse (handled above).
         (LOGICAL_STRUCT, LOGICAL_STRUCT),
         (LOGICAL_MAP, LOGICAL_MAP),
     }

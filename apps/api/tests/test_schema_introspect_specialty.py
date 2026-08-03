@@ -173,8 +173,8 @@ def test_tz_polarity_introspect_and_ddl():
 
     assert ddl_type("postgresql", "TIMESTAMPTZ") == "TIMESTAMPTZ"
     assert ddl_type("postgresql", "TIMESTAMP_NTZ") == "TIMESTAMP"
-    # Ambiguous bare TIMESTAMP keeps PG platform default (TIMESTAMPTZ).
-    assert ddl_type("postgresql", "TIMESTAMP") == "TIMESTAMPTZ"
+    # Bare TIMESTAMP is wall-clock NTZ — never invent TIMESTAMPTZ on create-new.
+    assert ddl_type("postgresql", "TIMESTAMP") == "TIMESTAMP"
     # PG TIMESTAMPTZ ≈ Snowflake TIMESTAMP_LTZ (Openflow / Airbyte #80914).
     assert ddl_type("snowflake", "TIMESTAMPTZ") == "TIMESTAMP_LTZ"
     assert ddl_type("snowflake", "TIMESTAMP_TZ") == "TIMESTAMP_TZ"

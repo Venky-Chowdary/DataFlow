@@ -18,8 +18,8 @@ def test_bare_datetime_uses_platform_wall_clock_default():
         ddl_type,
     )
 
-    assert datetime_timezone_polarity("datetime") is None
-    assert datetime_timezone_polarity("DATETIME") is None
+    assert datetime_timezone_polarity("datetime") == "ntz"
+    assert datetime_timezone_polarity("DATETIME") == "ntz"
     # Explicit NTZ from MySQL introspect stays naive.
     assert datetime_timezone_polarity("TIMESTAMP_NTZ") == "ntz"
     assert datetime_timezone_polarity("DATETIME(6)") == "ntz"
