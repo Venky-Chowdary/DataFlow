@@ -157,6 +157,9 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "bytea": LOGICAL_BINARY,
     "blob": LOGICAL_BINARY,
     "varbinary": LOGICAL_BINARY,
+    "varbyte": LOGICAL_BINARY,
+    "bindata": LOGICAL_BINARY,
+    "bin data": LOGICAL_BINARY,
     "tinyblob": LOGICAL_BINARY,
     "mediumblob": LOGICAL_BINARY,
     "longblob": LOGICAL_BINARY,
@@ -170,6 +173,7 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "dec": LOGICAL_DECIMAL,
     "num": LOGICAL_DECIMAL,
     "decfloat": LOGICAL_DECIMAL,
+    "decimal128": LOGICAL_DECIMAL,
     "float4": LOGICAL_FLOAT,
     "float8": LOGICAL_FLOAT,
     "binary_float": LOGICAL_FLOAT,
@@ -1046,6 +1050,14 @@ def normalize_logical_type(inferred: str | None) -> str:
     # contracts (Airbyte Destinations V2 stores objects as JSON — we still label
     # the *source* as struct/map and treat nested→document as an explicit collapse).
     upper = raw.upper()
+    # ClickHouse Nullable / LowCardinality wrappers — unwrap before TEXT fallthrough.
+    m_wrap = re.match(
+        r"^(?:NULLABLE|LOWCARDINALITY)\s*\(\s*(.+)\s*\)$",
+        raw,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if m_wrap:
+        return normalize_logical_type(m_wrap.group(1).strip())
     # DynamoDB AttributeValue type codes — exact tokens only (never match bare
     # "n"/"s" inside other dialects). AWS docs: S/N/B/BOOL/NULL/M/L/SS/NS/BS.
     # Codes that are also generic SQL/Avro aliases defer to CANONICAL_TYPES, so
@@ -2043,6 +2055,9 @@ def _normalize_dest_db(db_type: str | None) -> str:
         "azure_sql",
         "azure_sql_db",
         "azure_sql_mi",
+        "azuresql",
+        "azure-sql",
+        "sqlazure",
         "synapse",
         "azure_synapse",
         "sql_server",
@@ -2137,14 +2152,22 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
         if db == "mongodb":
             return "objectId"
         return "VARCHAR(24)"
-    # Oracle LONG is a deprecated text LOB — never invent NUMBER/BIGINT from LONG
-    # on relational sinks. Lakehouse engines keep INT64 ``long``.
+    # Oracle LONG is a deprecated text LOB on Oracle dest (CLOB invent).
+    # Off-Oracle, ``long`` is the Spark/Hive INT64 synonym — never invent TEXT
+    # with soft-pass (INTEGER→TEXT allow-list greenwash). LONG→BIGINT is gated
+    # by oracle_long_numeric_invent (Accept risk).
     if base_early == "LONG":
         if db == "oracle":
             return "CLOB"
-        if db in {"databricks", "spark", "iceberg", "delta", "hive"}:
-            return DDL_TYPES.get(db, {}).get(LOGICAL_INTEGER, "BIGINT")
-        return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT, DEFAULT_DDL.get(db, "TEXT"))
+        int_ddl = _integer_ddl_for_dest(db, "BIGINT")
+        if int_ddl:
+            return int_ddl
+        return DDL_TYPES.get(db, {}).get(LOGICAL_INTEGER, "BIGINT")
+    # SQL Server SYSNAME ≡ NVARCHAR(128) — never invent NVARCHAR(MAX)/TEXT.
+    if base_early == "SYSNAME":
+        if db == "sqlserver":
+            return "NVARCHAR(128)"
+        return "VARCHAR(128)"
     # Oracle LONG RAW — unbounded binary LOB (not fixed RAW).
     if base_early == "LONG RAW" or base_early.replace(" ", "") == "LONGRAW":
         if db == "oracle":
@@ -2778,7 +2801,11 @@ def _string_ddl_for_dest(db: str, inferred: str | None) -> str | None:
         return None
     fixed = is_fixed_width_char_carrier(inferred)
     upper = strip_identity_qualifier(inferred).upper()
-    national = bool(re.search(r"\bN(?:VAR)?CHAR\b", upper))
+    national = bool(
+        re.search(r"\bN(?:VAR)?CHAR\b", upper)
+        or re.search(r"\bNATIONAL\s+CHARACTER\b", upper)
+        or re.search(r"\bNATIONAL\s+CHAR\b", upper)
+    )
     if db == "bigquery":
         return f"STRING({min(width, cap)})"
     if db == "snowflake":
@@ -2788,10 +2815,13 @@ def _string_ddl_for_dest(db: str, inferred: str | None) -> str | None:
         # and drop declared width (Delta schema-enforcement class).
         return f"VARCHAR({min(width, cap)})"
     if db == "sqlserver":
+        # Preserve source national polarity — never invent NCHAR from CHAR.
         if not fixed and width > 4000:
-            return "NVARCHAR(MAX)"
+            return "NVARCHAR(MAX)" if national else "VARCHAR(MAX)"
         w = min(width, 4000)
-        return f"{'NCHAR' if fixed else 'NVARCHAR'}({w})"
+        if national:
+            return f"{'NCHAR' if fixed else 'NVARCHAR'}({w})"
+        return f"{'CHAR' if fixed else 'VARCHAR'}({w})"
     if db in {"mysql", "mariadb"}:
         # Preserve NATIONAL CHAR/VARCHAR — never invent non-national from NCHAR.
         if national:
@@ -3838,16 +3868,19 @@ def is_unlimited_string_carrier(inferred: str | None) -> bool:
 
 
 def is_national_string_carrier(inferred: str | None) -> bool:
-    """True for NVARCHAR/NCHAR/NCLOB (Unicode) carriers."""
-    upper = strip_identity_qualifier(inferred).upper().replace(" ", "")
+    """True for NVARCHAR/NCHAR/NCLOB / NATIONAL CHARACTER (Unicode) carriers."""
+    upper = strip_identity_qualifier(inferred).upper()
     if not upper:
         return False
+    compact = upper.replace(" ", "")
     return (
-        upper.startswith("NVARCHAR")
-        or upper.startswith("NCHAR")
-        or upper.startswith("NCLOB")
-        or upper.startswith("NVARCHAR2")
-        or upper.startswith("NTEXT")
+        compact.startswith("NVARCHAR")
+        or compact.startswith("NCHAR")
+        or compact.startswith("NCLOB")
+        or compact.startswith("NVARCHAR2")
+        or compact.startswith("NTEXT")
+        or bool(re.search(r"\bNATIONAL\s+CHARACTER\b", upper))
+        or bool(re.search(r"\bNATIONAL\s+CHAR\b", upper))
     )
 
 
@@ -3859,6 +3892,16 @@ def national_charset_would_collapse(source_type: str, target_type: str) -> bool:
         return False
     tgt_l = normalize_logical_type(target_type)
     return tgt_l in {LOGICAL_STRING, LOGICAL_TEXT}
+
+
+def national_charset_would_invent(source_type: str, target_type: str) -> bool:
+    """True when non-national CHAR/VARCHAR invents national NCHAR/NVARCHAR polarity."""
+    if is_national_string_carrier(source_type):
+        return False
+    if not is_national_string_carrier(target_type):
+        return False
+    src_l = normalize_logical_type(source_type)
+    return src_l in {LOGICAL_STRING, LOGICAL_TEXT}
 
 
 def bounded_string_sink_would_truncate(source_type: str, target_type: str) -> bool:
@@ -5811,7 +5854,15 @@ def bfile_locator_would_collapse(source_type: str, target_type: str) -> bool:
 
 def integer_bit_width(inferred: str | None) -> int | None:
     """Signed bit width; UNSIGNED adds +1 so INT UNSIGNED is wider than INT."""
-    upper = (inferred or "").upper()
+    raw = strip_identity_qualifier(inferred)
+    if not raw:
+        return None
+    # ClickHouse Int8/UInt8/… — case-sensitive; must not collide with PG INT8≡BIGINT.
+    m_ch = re.match(r"^(U?Int)(8|16|32|64)\b", raw)
+    if m_ch:
+        bits = int(m_ch.group(2))
+        return bits + 1 if m_ch.group(1).startswith("U") else bits
+    upper = raw.upper()
     unsigned = "UNSIGNED" in upper or bool(
         re.search(r"\bUINT\d*\b", upper)
     )
@@ -6127,6 +6178,8 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
         return True
     if national_charset_would_collapse(source_type, target_type):
         return True
+    if national_charset_would_invent(source_type, target_type):
+        return True
     if fixed_width_pad_polarity_loss(source_type, target_type):
         return True
     if binary_width_would_narrow(source_type, target_type):
@@ -6255,6 +6308,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
             return True
         if national_charset_would_collapse(source_type, target_type):
             return True
+        if national_charset_would_invent(source_type, target_type):
+            return True
         if fixed_width_pad_polarity_loss(source_type, target_type):
             return True
         if bitstring_opaque_bytes_collapse(source_type, target_type):
@@ -6370,6 +6425,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
     if bounded_string_sink_would_truncate(source_type, target_type):
         return True
     if national_charset_would_collapse(source_type, target_type):
+        return True
+    if national_charset_would_invent(source_type, target_type):
         return True
     if fixed_width_pad_polarity_loss(source_type, target_type):
         return True
@@ -6507,6 +6564,8 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         if kana_fold_polarity_invent(source_type, target_type):
             return True
         if national_charset_would_collapse(source_type, target_type):
+            return True
+        if national_charset_would_invent(source_type, target_type):
             return True
         if fixed_width_pad_polarity_loss(source_type, target_type):
             return True

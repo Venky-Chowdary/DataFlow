@@ -325,8 +325,10 @@ def test_schema_qualified_decimal_invent_oracle_wave18():
     assert oracle_long_numeric_invent("LONG", "NUMBER(38,0)") is True
     assert is_lossy_coercion("LONG", "NUMBER(38,0)") is True
     assert create_new_mapping_target_type("LONG", "oracle") == "CLOB"
-    # Off-Oracle relational: LONG text LOB → TEXT, not BIGINT invent.
-    assert create_new_mapping_target_type("LONG", "postgresql") == "TEXT"
+    # Off-Oracle: Spark/Hive INT64 synonym — BIGINT invent (gated Accept risk).
+    assert create_new_mapping_target_type("LONG", "postgresql") == "BIGINT"
+    assert is_lossy_coercion("LONG", "BIGINT") is True
+    assert create_new_mapping_target_type("LONG", "databricks") == "BIGINT"
     assert is_lossy_coercion("LONG", "BIGINT") is True
 
     assert is_lossy_coercion("ANYDATA", "VARCHAR") is True
@@ -477,6 +479,43 @@ def test_decfloat_alias_sdo_array_wave22():
     assert is_lossy_coercion("NUMBER", "BIGNUMERIC") is True
     assert is_lossy_coercion("SMALLDATETIME", "TIMESTAMP(0)") is True
     assert create_new_mapping_target_type("SMALLDATETIME", "postgresql") == "TIMESTAMP(0)"
+
+
+def test_long_int8_varbyte_national_wave23():
+    """Spark long→BIGINT, ClickHouse Int8 width, VARBYTE/binData, national invent."""
+    from services.type_system import (
+        create_new_mapping_target_type,
+        integer_bit_width,
+        is_lossy_coercion,
+        is_national_string_carrier,
+        national_charset_would_invent,
+        normalize_logical_type,
+    )
+
+    assert create_new_mapping_target_type("long", "postgresql") == "BIGINT"
+    assert is_lossy_coercion("LONG", "BIGINT") is True
+    assert create_new_mapping_target_type("LONG", "oracle") == "CLOB"
+
+    assert integer_bit_width("Int8") == 8
+    assert integer_bit_width("INT8") == 64
+    assert create_new_mapping_target_type("Int8", "postgresql") == "SMALLINT"
+
+    assert normalize_logical_type("VARBYTE") == "binary"
+    assert create_new_mapping_target_type("VARBYTE", "postgresql") == "BYTEA"
+    assert create_new_mapping_target_type("binData", "postgresql") == "BYTEA"
+    assert normalize_logical_type("decimal128") == "decimal"
+    assert create_new_mapping_target_type("decimal128", "postgresql") == "NUMERIC"
+
+    assert is_national_string_carrier("NATIONAL CHARACTER VARYING(50)") is True
+    assert is_lossy_coercion("NATIONAL CHARACTER VARYING(50)", "VARCHAR(50)") is True
+    assert create_new_mapping_target_type("CHAR(10)", "sqlserver") == "CHAR(10)"
+    assert national_charset_would_invent("CHAR(10)", "NCHAR(10)") is True
+    assert is_lossy_coercion("CHAR(10)", "NCHAR(10)") is True
+
+    assert create_new_mapping_target_type("SYSNAME", "sqlserver") == "NVARCHAR(128)"
+    assert normalize_logical_type("Nullable(Int32)") == "integer"
+    assert create_new_mapping_target_type("Nullable(Int32)", "postgresql") == "INTEGER"
+    assert create_new_mapping_target_type("INTEGER", "azure-sql") == "INT"
 
 
 def test_struct_int64_interval_identity_document_wave17():

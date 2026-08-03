@@ -432,17 +432,15 @@ export function normalizeDestTypeValue(current?: string, destType?: string): str
     if (upper === "BOOLEAN" || upper === "BOOL") return "boolean";
     if (upper === "UUID") return "uuid";
   }
-  // Relational / warehouse: Oracle LONG is text LOB — never invent BIGINT.
-  if (
-    upper === "LONG"
-    && !dest.includes("databricks")
-    && !dest.includes("spark")
-    && !dest.includes("iceberg")
-    && !dest.includes("delta")
-    && !dest.includes("mongo")
-  ) {
+  // Oracle dest: LONG → CLOB. Off-Oracle: Spark/Hive INT64 synonym → BIGINT
+  // (Accept risk via API oracle_long_numeric_invent — never soft-pass TEXT).
+  if (upper === "LONG") {
     if (dest.includes("oracle")) return "CLOB";
-    return "TEXT";
+    if (dest.includes("databricks") || dest.includes("spark") || dest.includes("iceberg") || dest.includes("delta")) {
+      return dest.includes("iceberg") ? "long" : "BIGINT";
+    }
+    if (dest.includes("mongo")) return "long";
+    return "BIGINT";
   }
   if (upper === "HALF" || upper === "FLOAT16" || upper === "HALFFLOAT") {
     return "REAL";

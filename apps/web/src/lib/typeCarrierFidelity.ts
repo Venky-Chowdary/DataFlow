@@ -142,8 +142,15 @@ function isOpenStringCarrier(inferred: string | null | undefined): boolean {
 
 /** Approximate signed bit width — mirrors API integer_bit_width for Map chips. */
 function integerBitWidth(inferred: string | null | undefined): number | null {
-  const u = (inferred || "").toUpperCase();
-  if (!u) return null;
+  const raw = (inferred || "").trim();
+  if (!raw) return null;
+  // ClickHouse Int8/UInt8 — must not collide with PG INT8≡BIGINT.
+  const ch = raw.match(/^(U?Int)(8|16|32|64)\b/);
+  if (ch) {
+    const bits = Number(ch[2]);
+    return ch[1].startsWith("U") ? bits + 1 : bits;
+  }
+  const u = raw.toUpperCase();
   if (/\b(BIGINT|INT64|INT8|LONG|UINT64)\b/.test(u) || u.includes("BIGSERIAL")) return 64;
   if (u.includes("MEDIUMINT")) return 24;
   if (/\b(SMALLINT|INT16|INT2|UINT16|SHORT)\b/.test(u) || u.includes("SMALLSERIAL")) return 16;
@@ -217,18 +224,25 @@ export function declaredCarrierFidelityRisk(
   if (/^long$/i.test(src.trim()) && /\b(bigint|integer|int64|int8|number|decimal|numeric)\b/i.test(tgt)) {
     return true;
   }
-  // Specialty → open string (INET/XML/HSTORE/USER-DEFINED/…).
+  // Specialty → open string (INET/XML/HSTORE/USER-DEFINED/IPv4/…).
   if (
-    /\b(inet|cidr|macaddr|xmltype|xml|hstore|ltree|tsvector|tsquery|jsonpath|objectid|anydata|hllsketch|rowversion|sql_variant|hierarchyid|user-defined|user_defined)\b/i.test(src)
+    /\b(inet|cidr|macaddr|xmltype|xml|hstore|ltree|tsvector|tsquery|jsonpath|objectid|anydata|hllsketch|rowversion|sql_variant|hierarchyid|user-defined|user_defined|ipv4|ipv6)\b/i.test(src)
     && isOpenStringCarrier(tgt)
   ) {
     return true;
   }
-  // National charset collapse (NCHAR→CHAR / NVARCHAR→VARCHAR).
+  // National charset collapse / invent (NCHAR↔CHAR, NATIONAL CHARACTER).
   if (
-    /\b(nchar|nvarchar|nvarchar2|nclob)\b/i.test(src)
+    /\b(nchar|nvarchar|nvarchar2|nclob|national\s+character|national\s+char)\b/i.test(src)
     && /\b(char|varchar|varchar2|text|string|clob)\b/i.test(tgt)
-    && !/\b(nchar|nvarchar|nvarchar2|nclob)\b/i.test(tgt)
+    && !/\b(nchar|nvarchar|nvarchar2|nclob|national\s+character|national\s+char)\b/i.test(tgt)
+  ) {
+    return true;
+  }
+  if (
+    /\b(char|varchar|varchar2|text|string)\b/i.test(src)
+    && !/\b(nchar|nvarchar|nvarchar2|nclob|national\s+character|national\s+char)\b/i.test(src)
+    && /\b(nchar|nvarchar|nvarchar2|nclob|national\s+character|national\s+char)\b/i.test(tgt)
   ) {
     return true;
   }
