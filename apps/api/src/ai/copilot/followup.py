@@ -127,11 +127,14 @@ def resolve_pending_answer(
     words = _words(reply)
     if not reply or len(words) > 6:
         return None
-    # A fresh analytics / imperative sentence is never a slot answer, even when
-    # it is short ("count orders now"). Let ordinary routing take it.
+    # A fresh analytics / imperative / navigate / explain sentence is never a
+    # slot answer — even when short ("take me to jobs", "fix bad data").
     if re.search(
         r"\b(?:how\s+many|count|sum|avg|average|total|top|bottom|select|show|list|"
-        r"sample|analyze|filter|group(?:ed)?\s+by)\b",
+        r"sample|analyze|filter|group(?:ed)?\s+by|take\s+me|go\s+to|navigate|"
+        r"open|explain|what(?:'s|\s+is)|how\s+does|how\s+do|can\s+you|could\s+you|"
+        r"please|transfer|move|copy|sync|delete|export|create|schedule|"
+        r"fix|repair|heal|quarantine)\b",
         reply,
         re.I,
     ):
@@ -162,11 +165,19 @@ def resolve_pending_answer(
             return None
 
     if not value:
-        # No candidate list (e.g. "which table?") — accept a bare identifier.
+        # No candidate list (e.g. "which table?") — accept a bare identifier only.
+        # Never accept a multi-word sentence as a connector/table name.
         if lower in _AFFIRMATIVE:
             return None
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_. \-]{0,60}", reply):
-            if lower in {"i don't know", "not sure", "no", "nope", "none"}:
+        if len(words) > 3:
+            return None
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.\-]{0,60}", reply):
+            if lower in {"i don't know", "not sure", "no", "nope", "none", "jobs", "contracts", "settings"}:
+                return None
+            value = reply
+        elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_. \-]{0,40}", reply) and len(words) <= 3:
+            # "Local Postgres" / "Prod Mongo" style names
+            if any(w in lower for w in ("take", "me", "to", "go", "open", "show", "the")):
                 return None
             value = reply
     if not value:

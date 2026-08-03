@@ -534,20 +534,21 @@ class DataPilotAgent:
 
         # Local always works offline. Hybrid/cloud when keys exist (auto detects).
         engine = _resolve_pilot_engine()
+        local = self._local_agent(message, history or [], ctx, data_context)
         if engine == "local":
-            return self._local_agent(message, history or [], ctx, data_context)
+            return local
 
         system = self._build_system_prompt(ctx)
+
+        # Product path for ChatGPT-quality: deterministic tools first, then LLM
+        # narration over grounded evidence. Native LLM tool loops are a bonus
+        # race for hard paraphrases — they must not invent facts without tools.
+        polished = self._polish_with_llm(message, history or [], local, system)
 
         import time as _time
         from concurrent.futures import wait, FIRST_COMPLETED
 
-        # Hybrid/cloud: race one primary LLM vs local. Local is fail-closed baseline.
-        local_fut = _executor.submit(
-            self._local_agent, message, history or [], ctx, data_context
-        )
         llm_futs: list = []
-
         openai_ready = False
         try:
             from ..llm.provider import DataTransferOpenAIProvider
@@ -556,7 +557,7 @@ class DataPilotAgent:
         except Exception:
             openai_ready = False
 
-        # Prefer a single primary cloud provider (not three racing each other).
+        # Prefer a single primary cloud native tool loop (not three racing).
         if self.anthropic.is_available():
             llm_futs.append(
                 _executor.submit(
@@ -576,12 +577,11 @@ class DataPilotAgent:
                 )
             )
 
-        pending = {local_fut, *llm_futs}
-        # Give the LLM a real budget; local no longer collapses the race to 400ms.
-        deadline = _time.monotonic() + (
-            _LLM_TURN_TIMEOUT_S + 8 if llm_futs else _LLM_TOTAL_BUDGET_S
-        )
-        local_result: CopilotResponse | None = None
+        if not llm_futs:
+            return polished
+
+        pending = set(llm_futs)
+        deadline = _time.monotonic() + _LLM_TURN_TIMEOUT_S
         best_llm: CopilotResponse | None = None
 
         while pending and _time.monotonic() < deadline:
@@ -593,35 +593,12 @@ class DataPilotAgent:
                 except Exception as exc:
                     logger.warning("Data Pilot worker failed: %s", exc)
                     continue
-                if fut is local_fut:
-                    local_result = result
-                    # If no LLM is racing, stop. Otherwise keep waiting for cloud.
-                    if not llm_futs:
-                        deadline = min(deadline, _time.monotonic() + 0.1)
-                    continue
                 if isinstance(result, CopilotResponse):
                     if best_llm is None or _score_response(result) > _score_response(best_llm):
                         best_llm = result
-                    # Cloud finished — don't wait forever for local polish.
-                    deadline = min(deadline, _time.monotonic() + 1.5)
 
-        candidates = [c for c in (best_llm, local_result) if isinstance(c, CopilotResponse)]
-        if candidates:
-            return max(candidates, key=_score_response)
-        try:
-            return local_fut.result(timeout=5)
-        except Exception as exc:
-            logger.warning("Data Pilot local agent failed: %s", exc)
-            return CopilotResponse(
-                answer=(
-                    "Data Pilot hit an internal error answering that. "
-                    "Retry, or ask about a specific job_id / preflight run_id."
-                ),
-                intent="error",
-                confidence=0.2,
-                method="pilot_error",
-                suggested_prompts=self._starter_prompts()[:3],
-            )
+        candidates = [c for c in (best_llm, polished, local) if isinstance(c, CopilotResponse)]
+        return max(candidates, key=_score_response)
 
     def _run_local_recovery(
         self,
@@ -1049,12 +1026,93 @@ class DataPilotAgent:
         \"analyze that\" become amnesiac dead-ends. Fall back to this agent's
         ephemeral id so same-process multi-turn stays coherent.
         """
-        del history  # reserved for future cross-process history hashing
         ctx = dict(data_context or {})
         if str(ctx.get("pilot_session_id") or "").strip():
             return ctx
         ctx["pilot_session_id"] = self._ephemeral_session
+        # Keep a short transcript digest for LLM narration (not used for hashing).
+        if history:
+            ctx["_history_turns"] = len(history)
         return ctx
+
+    def _polish_with_llm(
+        self,
+        message: str,
+        history: list[dict],
+        local: CopilotResponse,
+        system: str,
+    ) -> CopilotResponse:
+        """Narrate grounded local tool results with OpenAI when available.
+
+        Tools stay deterministic (local). The LLM only rewrites the answer in
+        natural ChatGPT-quality prose — never invents new facts.
+        """
+        tools = local.tools_used or []
+        ok = sum(1 for t in tools if t.get("success"))
+        if ok == 0 and not local.pending_actions:
+            return local
+        try:
+            from ..llm.provider import DataTransferOpenAIProvider
+
+            openai = DataTransferOpenAIProvider()
+            if not openai.is_available():
+                return local
+        except Exception:
+            return local
+
+        tool_bits = []
+        for t in tools[:8]:
+            tool_bits.append(
+                f"- {t.get('name')}: {'ok' if t.get('success') else 'fail'} — {t.get('summary')}"
+            )
+        history_text = "\n".join(
+            f"{m.get('role', 'user').capitalize()}: {m.get('content', '')}"
+            for m in (history or [])[-6:]
+            if (m.get("content") or "").strip()
+        )
+        prompt = f"""Rewrite the Data Pilot answer below in clear, natural product language.
+
+Rules:
+- Keep every fact from the draft answer and tool summaries — do not invent IDs, row counts, or connectors
+- Do not mention tools, APIs, or method names
+- If the draft asks a clarification question, keep it
+- If Confirm is required, say so plainly
+- Be concise (2–8 short sentences or a short bullet list)
+
+Tool evidence:
+{chr(10).join(tool_bits) or 'None'}
+
+History:
+{history_text or 'None'}
+
+User: {message}
+
+Draft answer:
+{local.answer}
+"""
+        try:
+            response = openai.generate(prompt, system=system, max_tokens=900)
+        except Exception:
+            return local
+        if not response.success or not (response.content or "").strip():
+            return local
+        polished = response.content.strip()
+        # Guardrail: empty or tiny polish is useless; keep local.
+        if len(polished) < 20:
+            return local
+        return CopilotResponse(
+            answer=polished,
+            intent=local.intent,
+            confidence=min(0.96, float(local.confidence or 0.9) + 0.03),
+            method="openai_polish",
+            reasoning="Local tools + OpenAI narration",
+            suggested_actions=local.suggested_actions,
+            pending_actions=local.pending_actions,
+            needs_clarification=local.needs_clarification,
+            suggested_prompts=local.suggested_prompts,
+            data_insight=local.data_insight,
+            tools_used=local.tools_used,
+        )
 
     def _plan_with_memory(
         self,
@@ -1089,6 +1147,9 @@ class DataPilotAgent:
             if answered:
                 memory.clear_pending(session_id)
                 return [answered]
+            # Fresh intents must not stay blocked behind a stale "which connector?"
+            # prompt — clear the slot and plan from scratch.
+            memory.clear_pending(session_id)
 
         planned = infer_tools_from_message(message)
         # Elliptical edits beat a fresh under-specified parse ("what about average

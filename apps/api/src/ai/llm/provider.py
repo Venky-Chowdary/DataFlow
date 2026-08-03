@@ -58,6 +58,7 @@ class DataTransferOpenAIProvider(DataTransferLLMProvider):
     def __init__(self, model: str | None = None):
         self.model = model or os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
         self._client = None
+        self._auth_failed = False
         self._init_client()
 
     def _init_client(self):
@@ -76,7 +77,13 @@ class DataTransferOpenAIProvider(DataTransferLLMProvider):
             self._client = None
 
     def is_available(self) -> bool:
-        return self._client is not None
+        return self._client is not None and not self._auth_failed
+
+    def _mark_auth_failure(self, err: str) -> None:
+        low = (err or "").lower()
+        if "401" in low or "invalid_api_key" in low or "incorrect api key" in low or "unauthorized" in low:
+            self._auth_failed = True
+            self._client = None
 
     def generate(self, prompt: str, system: str = "", max_tokens: int = 1024) -> LLMResponse:
         if not self.is_available():
@@ -103,6 +110,7 @@ class DataTransferOpenAIProvider(DataTransferLLMProvider):
                 tokens_used=response.usage.total_tokens if response.usage else 0,
             )
         except Exception as e:
+            self._mark_auth_failure(str(e))
             return LLMResponse(content="", success=False, provider=self.name, metadata={"error": str(e)})
 
     def generate_agent(
@@ -178,6 +186,7 @@ class DataTransferOpenAIProvider(DataTransferLLMProvider):
                 },
             }
         except Exception as e:
+            self._mark_auth_failure(str(e))
             return {"success": False, "error": str(e)}
 
 
@@ -510,11 +519,11 @@ def get_model_capabilities() -> dict:
         "fallback_order": ["anthropic", "openai", "ollama", "local"],
         "providers": rows,
         "guarantees": [
-            "DATAFLOW_PILOT_ENGINE=auto (default): uses a real LLM tool loop when an API key is configured; otherwise local tools.",
+            "DATAFLOW_PILOT_ENGINE=auto (default): uses a real LLM when a valid API key works; otherwise local tools.",
             "Set DATAFLOW_PILOT_ENGINE=local to force the offline deterministic engine.",
-            "Set DATAFLOW_PILOT_ENGINE=hybrid to always race LLM + local (LLM preferred when grounded).",
+            "Set DATAFLOW_PILOT_ENGINE=hybrid for local tools + LLM narration (ChatGPT-quality prose over real tool results).",
+            "If OpenAI/Anthropic returns 401 invalid_api_key, Pilot falls back to local until you save a valid key in Settings.",
             "RAG and deterministic mapping continue when cloud providers are unavailable.",
-            "Preflight gates and schema-policy blockers do not depend on probabilistic model output.",
             "Mutations (create connector / start transfer) always require operator Confirm.",
         ],
     }
