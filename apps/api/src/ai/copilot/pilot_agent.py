@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -420,6 +421,10 @@ class DataPilotAgent:
         self.analyst = get_data_analyst()
         self.context_builder = get_context_builder()
         self._anthropic = None
+        import uuid
+
+        # Same-process multi-turn when the UI hasn't sent pilot_session_id yet.
+        self._ephemeral_session = f"ephemeral-{uuid.uuid4().hex[:12]}"
 
     @property
     def anthropic(self):
@@ -439,6 +444,8 @@ class DataPilotAgent:
     ) -> CopilotResponse:
         message = message.strip()
         lower_msg = message.lower()
+        history = history or []
+        data_context = self._ensure_data_context(data_context, history)
         if not message or lower_msg in {
             "hi",
             "hello",
@@ -470,7 +477,7 @@ class DataPilotAgent:
         from .tools import _is_meta_pilot_question
         if _is_meta_pilot_question(lower_msg):
             ctx = self.context_builder.build(data_context, message)
-            return self._local_agent(message, history or [], ctx, data_context)
+            return self._local_agent(message, history, ctx, data_context)
 
         ctx = self.context_builder.build(data_context, message)
 
@@ -908,6 +915,25 @@ class DataPilotAgent:
     def _session_id(data_context: dict | None) -> str:
         return str((data_context or {}).get("pilot_session_id") or "").strip()
 
+    def _ensure_data_context(
+        self,
+        data_context: dict | None,
+        history: list[dict] | None = None,
+    ) -> dict:
+        """Guarantee a session id so follow-ups / result refs work like Railway chat.
+
+        The web UI sends ``pilot_session_id`` per conversation. API callers and
+        tests often omit it — without a fallback, \"only paid ones\" and
+        \"analyze that\" become amnesiac dead-ends. Fall back to this agent's
+        ephemeral id so same-process multi-turn stays coherent.
+        """
+        del history  # reserved for future cross-process history hashing
+        ctx = dict(data_context or {})
+        if str(ctx.get("pilot_session_id") or "").strip():
+            return ctx
+        ctx["pilot_session_id"] = self._ephemeral_session
+        return ctx
+
     def _plan_with_memory(
         self,
         message: str,
@@ -950,6 +976,13 @@ class DataPilotAgent:
                 # Known subject, missing measure — let the tool ask against the
                 # real schema rather than answering the wrong question.
                 return [("aggregate_data", edit.as_tool_args())]
+            # Result follow-ups when focus has a stored sample/query.
+            if focus and focus.result_id:
+                low = message.lower().strip()
+                if re.search(r"\b(?:analyze|profile|summarize)\b.*\b(?:that|this|it|result|sample)\b", low) or low in {
+                    "analyze that", "analyze this", "profile that", "summarize that",
+                }:
+                    return [("analyze_result", {"result_id": focus.result_id})]
         return inherit_focus_slots(planned, focus)
 
     def _commit_memory(
@@ -987,6 +1020,15 @@ class DataPilotAgent:
         ctx = data_context or {}
         session_id = str(ctx.get("pilot_session_id") or "").strip()
         last_result_id = str(ctx.get("last_result_id") or "").strip()
+        if not last_result_id and session_id and name in ("analyze_result", "filter_result"):
+            try:
+                from .working_memory import get_working_memory
+
+                focus = get_working_memory().get_focus(session_id)
+                if focus and focus.result_id:
+                    last_result_id = focus.result_id
+            except Exception:
+                pass
         if session_id and name in (
             "sample_connector_object",
             "aggregate_data",

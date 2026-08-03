@@ -375,9 +375,11 @@ def _finish_request(
     if req.metric == "count" and not req.table and req.column:
         req.table, req.column = req.column, ""
 
+    coreferent_subject = False
     if is_coreferent(req.table):
         # "how many rows in it" — the subject comes from working memory.
         req.table = ""
+        coreferent_subject = True
     if is_coreferent(req.column):
         req.column = ""
     if is_coreferent(req.group_by):
@@ -399,13 +401,14 @@ def _finish_request(
         and (req.column or "").lower() in _PLATFORM_NOUNS
     ):
         return None
-    # Bare metric with no subject at all ("how many", "count") — still allow
-    # when a connector was named; otherwise leave to inventory / unmapped.
+    # Bare metric with no subject at all ("how many", "count") — leave to
+    # inventory / unmapped, unless the utterance was coreferent ("… in it").
     if (
         not req.table
         and not req.column
         and not req.group_by
         and not req.connector_name
+        and not coreferent_subject
         and req.metric in {"count", "sum", "avg"}
     ):
         return None

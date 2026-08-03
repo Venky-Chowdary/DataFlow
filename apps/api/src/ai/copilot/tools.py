@@ -2431,9 +2431,24 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         ]
 
     pf_match = re.search(r"\bpf_[a-f0-9]{8,}\b", lower)
-    if pf_match or any(w in lower for w in ("preflight run", "validation run", "why did validate", "why validation failed")):
+    if pf_match or any(
+        w in lower
+        for w in (
+            "preflight run",
+            "validation run",
+            "why did validate",
+            "why validation failed",
+            "why did validation",
+            "validate fail",
+            "validation fail",
+        )
+    ):
         if pf_match:
             planned.append(("get_preflight_run", {"run_id": pf_match.group(0)}))
+        else:
+            # No pf_ id — show recent jobs so the operator can pick a failed run.
+            planned.append(("list_jobs", {"limit": 8}))
+            planned.append(("remediate_validation", {"kind": "open_bad_data_fix"}))
 
     job_match = re.search(r"\b([a-f0-9]{24})\b", lower) or re.search(r"\b(job_[a-z0-9_-]{6,})\b", lower)
     if job_match and not (pf_match and job_match.group(1) == pf_match.group(0)):
@@ -2662,13 +2677,13 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     filter_m = re.search(
         r"(?:filter|show\s+rows?)\s+(?:where\s+)?"
         r"[\"']?([a-zA-Z_][a-zA-Z0-9_]*)[\"']?\s*"
-        r"(is\s+not\s+null|is\s+null|equals?|=|!=|<>|contains|like|>|>=|<|<=)\s*"
+        r"(is\s+not\s+null|is\s+null|equals?|\bis\b|=|!=|<>|contains|like|>|>=|<|<=)\s*"
         r"[\"']?([^\"'\n]*?)[\"']?\s*$",
         lower,
     ) or re.search(
         r"(?:rows?\s+where|where)\s+"
         r"[\"']?([a-zA-Z_][a-zA-Z0-9_]*)[\"']?\s*"
-        r"(is\s+not\s+null|is\s+null|equals?|=|!=|<>|contains|like|>|>=|<|<=)\s*"
+        r"(is\s+not\s+null|is\s+null|equals?|\bis\b|=|!=|<>|contains|like|>|>=|<|<=)\s*"
         r"[\"']?([^\"'\n]*?)[\"']?\s*$",
         lower,
     ) or re.search(

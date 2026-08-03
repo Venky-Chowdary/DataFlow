@@ -71,6 +71,34 @@ _AFFIRMATIVE = frozenset({
 })
 
 
+def _extract_edit_where(message: str, focus: PilotFocus | None) -> str:
+    """Parse \"only paid\" / \"where status = paid\" into a filter clause."""
+    text = _clean(message)
+    if not text:
+        return ""
+    where_m = re.search(r"\b(?:where|filter(?:\s+where)?)\s+(.+)$", text, re.I)
+    if where_m:
+        return where_m.group(1).strip()
+    only_m = re.match(
+        r"^(?:only|just)\s+(.+?)(?:\s+ones?|\s+rows?|\s+records?)?$",
+        text,
+        re.I,
+    )
+    if not only_m:
+        return ""
+    val = only_m.group(1).strip().strip("\"'")
+    if not val or val.lower() in _PLATFORM_NOUNS:
+        return ""
+    preferred = ("status", "state", "type", "region", "category", "tier", "channel")
+    cols = [c.lower() for c in ((focus.columns if focus else None) or [])]
+    col = "status"
+    if cols:
+        col = next((c for c in preferred if c in cols), cols[0])
+    if re.fullmatch(r"-?\d+(?:\.\d+)?", val):
+        return f"{col} = {val}"
+    return f"{col} = '{val}'"
+
+
 def _clean(text: str) -> str:
     return (text or "").strip().strip("?!.,;:").strip()
 
@@ -245,6 +273,11 @@ def looks_like_followup(message: str, focus: PilotFocus | None) -> bool:
         return True
     if re.match(r"^(?:top|bottom)\s+\d", text, re.I):
         return True
+    # "only paid ones" / "just pending" — filter the remembered subject.
+    if re.match(r"^(?:only|just)\s+\S+", text, re.I):
+        return True
+    if re.match(r"^(?:where|filter)\b", text, re.I):
+        return True
     # "no grouping" / "drop the group by" removes a slot without naming a subject.
     if _extract_edit_group_by(text)[1]:
         return True
@@ -279,6 +312,11 @@ def resolve_followup(
     )
 
     edited = False
+
+    where_clause = _extract_edit_where(text, focus)
+    if where_clause:
+        req.where = where_clause
+        edited = True
 
     table = _extract_edit_table(text)
     if table:

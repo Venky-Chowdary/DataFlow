@@ -296,6 +296,36 @@ def iter_prompt_corpus() -> list[PromptCase]:
                 family="aggregate_elliptical",
             ))
 
+    # --- Multi-turn / validate triage phrases ---
+    # Standalone "only paid ones" needs working memory — covered by wave31 live tests.
+    for p in (
+        "filter where status is paid",
+        "where region = east",
+        "analyze that",
+        "analyze this result",
+        "why did validate fail",
+        "why validation failed",
+        "validate fail",
+    ):
+        if "validate" in p or "validation" in p:
+            cases.append(_case(
+                p,
+                "list_jobs", "get_preflight_run", "remediate_validation",
+                family="validate_triage",
+            ))
+        elif "analyze" in p:
+            cases.append(_case(
+                p,
+                "analyze_result", "analyze_dataset", "aggregate_data",
+                family="result_followup",
+            ))
+        else:
+            cases.append(_case(
+                p,
+                "filter_result", "aggregate_data",
+                family="result_followup",
+            ))
+
     # --- Quality / suggestions / knowledge ---
     for p in (
         "data quality on my uploads",
