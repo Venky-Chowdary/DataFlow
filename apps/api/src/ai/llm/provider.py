@@ -503,9 +503,9 @@ MODEL_CAPABILITY_MATRIX = [
             "mapping_assignment",
         ],
         "best_for": (
-            "Default Data Pilot engine — deterministic local tool planning/execution "
-            "(no third-party LLM). Exact aggregates, schema, transfers-with-Confirm, "
-            "job triage. Set DATAFLOW_PILOT_ENGINE=hybrid for optional cloud narration."
+            "Primary Data Pilot chatbot — local NL→tools→compose for aggregates, "
+            "schema, transfers-with-Confirm, jobs, product how-tos. "
+            "OpenAI/Anthropic/Ollama are optional polish add-ons (engine=hybrid only)."
         ),
     },
 ]
@@ -524,31 +524,22 @@ def _package_available(package: str) -> bool:
 def resolve_pilot_engine() -> str:
     """Single source of truth for Pilot engine selection.
 
-    Preference for auto mode (self-hosted first):
-    Ollama → Anthropic → OpenAI → local tools.
-    Invalid/soft-disabled cloud keys are skipped via is_available().
+    Local DataFlow engine is always the primary chatbot.
+    OpenAI / Anthropic / Ollama are optional add-ons — only used when the
+    operator explicitly sets DATAFLOW_PILOT_ENGINE=hybrid|cloud.
+    ``auto`` (default) == local.
     """
     raw = (os.environ.get("DATAFLOW_PILOT_ENGINE") or "auto").strip().lower()
-    if raw in {"local", "local_first", "deterministic"}:
-        return "local"
     if raw in {"hybrid", "cloud"}:
         return raw
-    try:
-        if DataTransferOllamaProvider().is_available():
-            return "hybrid"
-        if DataTransferAnthropicProvider().is_available():
-            return "hybrid"
-        if DataTransferOpenAIProvider().is_available():
-            return "hybrid"
-    except Exception:
-        pass
+    # auto / local / unset / anything else → local primary engine
     return "local"
 
 
 def pick_narration_provider():
-    """Return (provider_instance, method_label) for grounded answer polish.
+    """Optional polish providers when engine is explicitly hybrid/cloud.
 
-    Self-hosted Ollama is preferred so teams can run without OpenAI.
+    Never required for Pilot to work. Prefer self-hosted Ollama, then cloud.
     """
     ollama = DataTransferOllamaProvider()
     if ollama.is_available():
@@ -604,8 +595,8 @@ def get_model_capabilities() -> dict:
 
     active_local = next((p for p in rows if p["provider"] == "local"), rows[-1])
     engine = resolve_pilot_engine()
-    # Prefer self-hosted Ollama as the active hybrid provider when ready.
     if engine in {"hybrid", "cloud"}:
+        # Opt-in narration only — still prefer Ollama when polishing.
         active = next(
             (p for p in rows if p["available"] and p["provider"] == "ollama"),
             None,
@@ -613,30 +604,29 @@ def get_model_capabilities() -> dict:
             (p for p in rows if p["available"] and p["provider"] != "local"),
             active_local,
         )
+        agent_mode = "local_tools"
+        if providers["ollama"].is_available():
+            agent_mode = "ollama_polish"
+        elif providers["anthropic"].is_available():
+            agent_mode = "anthropic_polish"
+        elif providers["openai"].is_available():
+            agent_mode = "openai_polish"
     else:
         active = active_local
-    agent_mode = "local_tools"
-    if engine != "local":
-        if providers["ollama"].is_available():
-            agent_mode = "ollama_tools"
-        elif providers["anthropic"].is_available():
-            agent_mode = "anthropic_tools"
-        elif providers["openai"].is_available():
-            agent_mode = "openai_tools"
+        agent_mode = "local_tools"
     return {
         "active_provider": active["provider"],
         "active_model": active.get("default_model") or active.get("model") or "local",
         "agent_mode": agent_mode,
         "pilot_engine": engine,
-        "fallback_order": ["ollama", "anthropic", "openai", "local"],
+        "fallback_order": ["local", "ollama", "anthropic", "openai"],
         "providers": rows,
         "guarantees": [
-            "DATAFLOW_PILOT_ENGINE=auto (default): prefers your local Ollama LLM when running, then Anthropic/OpenAI, else local tools.",
-            "OpenAI is optional — not required when Ollama (or Anthropic) is available.",
-            "Set DATAFLOW_PILOT_ENGINE=local to force the offline deterministic tool engine.",
-            "Set DATAFLOW_PILOT_ENGINE=hybrid for local tools + LLM narration over real tool results.",
-            "Grounded tool results are executed once — native LLM loops do not re-run mutations or orphan Confirm acks.",
-            "Saving an AI key in Settings live-checks it; invalid keys are rejected and soft-disabled process-wide.",
-            "Mutations (create connector / start transfer) always require operator Confirm.",
+            "Primary chatbot = DataFlow local engine (NL → tools → compose). Works with zero cloud keys.",
+            "DATAFLOW_PILOT_ENGINE=auto|local (default): full Pilot chatbot offline — OpenAI/Anthropic/Ollama not required.",
+            "DATAFLOW_PILOT_ENGINE=hybrid|cloud: optional narration polish only; tools still run locally first.",
+            "OpenAI, Anthropic, and Ollama are user add-ons — never the first service provider.",
+            "Grounded tool results are executed once; mutations always require operator Confirm.",
+            "Saving a cloud key in Settings live-checks it; invalid keys are rejected.",
         ],
     }

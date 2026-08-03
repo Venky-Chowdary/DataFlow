@@ -62,6 +62,7 @@ def test_resolve_pending_rejects_take_me_to():
 
 
 def test_polish_scores_above_local():
+    """When hybrid is opted in, polished prose may still be preferred; local stays strong."""
     from src.ai.copilot.agent import CopilotResponse
     from src.ai.copilot.pilot_agent import _score_response
 
@@ -79,4 +80,5 @@ def test_polish_scores_above_local():
         method="openai_polish",
         tools_used=[{"name": "list_jobs", "success": True, "summary": "7 jobs"}],
     )
-    assert _score_response(polished) > _score_response(local)
+    # Local primary: grounded local must stay competitive with optional polish.
+    assert abs(_score_response(local) - _score_response(polished)) < 0.5

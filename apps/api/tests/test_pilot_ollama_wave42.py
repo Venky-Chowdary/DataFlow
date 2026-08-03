@@ -1,4 +1,4 @@
-"""Wave 42 — Ollama-first engine SSOT + soft-pending typo keep."""
+"""Wave 42 leftovers — engine SSOT helpers (updated for local-primary wave 43)."""
 
 from __future__ import annotations
 
@@ -10,22 +10,16 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 
-def test_resolve_engine_prefers_ollama(monkeypatch):
+def test_resolve_engine_auto_is_local(monkeypatch):
     from src.ai.llm import provider as prov
 
     class _Up:
         def is_available(self):
             return True
 
-    class _Down:
-        def is_available(self):
-            return False
-
     monkeypatch.delenv("DATAFLOW_PILOT_ENGINE", raising=False)
     monkeypatch.setattr(prov, "DataTransferOllamaProvider", lambda: _Up())
-    monkeypatch.setattr(prov, "DataTransferAnthropicProvider", lambda: _Down())
-    monkeypatch.setattr(prov, "DataTransferOpenAIProvider", lambda: _Down())
-    assert prov.resolve_pilot_engine() == "hybrid"
+    assert prov.resolve_pilot_engine() == "local"
 
 
 def test_resolve_engine_local_env(monkeypatch):
@@ -35,7 +29,7 @@ def test_resolve_engine_local_env(monkeypatch):
     assert prov.resolve_pilot_engine() == "local"
 
 
-def test_pick_narration_prefers_ollama(monkeypatch):
+def test_pick_narration_prefers_ollama_when_opted_in(monkeypatch):
     from src.ai.llm import provider as prov
 
     class _Ollama:
@@ -82,5 +76,5 @@ def test_pilot_agent_uses_provider_ssot(monkeypatch):
     from src.ai.copilot import pilot_agent as pa
     from src.ai.llm import provider as prov
 
-    monkeypatch.setattr(prov, "resolve_pilot_engine", lambda: "hybrid")
-    assert pa._resolve_pilot_engine() == "hybrid"
+    monkeypatch.setattr(prov, "resolve_pilot_engine", lambda: "local")
+    assert pa._resolve_pilot_engine() == "local"

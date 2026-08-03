@@ -600,7 +600,7 @@ export function SettingsPage() {
                         </p>
                       </div>
                       <div className="df2-model-route">
-                        {(modelCapabilities?.fallback_order ?? ["ollama", "anthropic", "openai", "local"]).map((provider, index) => (
+                        {(modelCapabilities?.fallback_order ?? ["local", "ollama", "anthropic", "openai"]).map((provider, index) => (
                           <span key={provider}>
                             {index > 0 && <i />}
                             <strong>{provider}</strong>

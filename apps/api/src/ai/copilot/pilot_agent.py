@@ -362,36 +362,29 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
 
 
 def _llm_unavailable_footnote(engine: str, method: str) -> str:
-    """Honest note when the operator expected hybrid narration but got local tools."""
-    if engine == "local":
+    """Only when operator explicitly opted into hybrid/cloud polish."""
+    if engine not in {"hybrid", "cloud"}:
         return ""
     if method not in {"pilot_local_engine", "greeting"}:
         return ""
     try:
-        from ..llm.provider import _AUTH_FAILED_PROVIDERS, get_model_capabilities
+        from ..llm.provider import _AUTH_FAILED_PROVIDERS, pick_narration_provider
 
+        provider, _ = pick_narration_provider()
+        if provider is not None:
+            return ""
         if _AUTH_FAILED_PROVIDERS & {"openai", "anthropic"}:
             return (
-                "\n\n— **LLM narration is off:** the saved cloud API key was rejected (401). "
-                "Update it in **Settings → AI** (keys are live-checked on save)."
+                "\n\n— Optional cloud polish is off (API key rejected). "
+                "Local Data Pilot still answered from your workspace. "
+                "Fix the key in **Settings → AI**, or clear hybrid mode."
             )
-        caps = get_model_capabilities()
-        cloud = [p for p in caps.get("providers", []) if p.get("tier") == "cloud"]
-        configured = any(p.get("configured") for p in cloud)
-        ready = any(p.get("available") for p in cloud)
-        ollama = next((p for p in caps.get("providers", []) if p.get("provider") == "ollama"), None)
-        if configured and not ready:
-            return (
-                "\n\n— **LLM narration is off:** no working cloud key. "
-                "Paste a valid OpenAI/Anthropic key in **Settings → AI**, or run Ollama locally."
-            )
-        if ollama and ollama.get("configured") and not ollama.get("available") and not ready:
-            return (
-                "\n\n— **LLM narration is off:** start Ollama (`ollama serve`) or add a cloud key in Settings."
-            )
+        return (
+            "\n\n— Optional narration polish is off (no Ollama/cloud provider ready). "
+            "Local Data Pilot still answered — that is the primary chatbot."
+        )
     except Exception:
         return ""
-    return ""
 
 
 def _with_llm_footnote(resp: CopilotResponse, engine: str) -> CopilotResponse:
@@ -426,11 +419,11 @@ def _score_response(resp: CopilotResponse | None) -> float:
     # Ungrounded fluent LLM prose loses to local refuse / clarify.
     if is_llm and ok == 0:
         score -= 1.35
-    # Tool-using LLM should beat equally grounded local templates (ChatGPT-quality narration).
+    # Tool-using optional polish can beat templates slightly when opted in.
     elif is_llm and ok > 0:
-        score += 0.45
+        score += 0.25
     elif is_local and ok > 0:
-        score += 0.15
+        score += 0.35
 
     if resp.pending_actions:
         score += 0.45
@@ -454,7 +447,7 @@ def _score_response(resp: CopilotResponse | None) -> float:
 
 
 def _resolve_pilot_engine() -> str:
-    """Delegate to provider SSOT (Ollama-first auto mode)."""
+    """Delegate to provider SSOT — local is primary; hybrid is opt-in polish only."""
     from ..llm.provider import resolve_pilot_engine
 
     return resolve_pilot_engine()
@@ -1584,7 +1577,7 @@ Respond as Data Pilot — grounded in tool results."""
         navigated = any(tr.name == "navigate" for tr in turn.tool_results)
         has_knowledge = any(tr.name == "search_knowledge" for tr in turn.tool_results)
         has_connector = any(tr.name == "search_connectors" for tr in turn.tool_results)
-        described = any(tr.name == "describe_pilot" for tr in turn.tool_results)
+        described = any(tr.name in ("describe_pilot", "explain_product") for tr in turn.tool_results)
         live_schema = any(
             tr.name in (
                 "list_connector_objects",
@@ -2243,6 +2236,27 @@ Respond as Data Pilot — grounded in tool results."""
                 if examples:
                     lines.append("Try: " + " · ".join(f'"{e}"' for e in examples[:4]))
                 parts.append("\n".join(lines))
+            elif tr.name == "explain_product" and tr.success:
+                o = tr.output or {}
+                answer = (o.get("answer") or "").strip()
+                if answer:
+                    parts.append(answer)
+                else:
+                    caps = o.get("capabilities") or []
+                    if caps:
+                        parts.append(
+                            "DataFlow helps you move data with honesty and Confirm:\n"
+                            + "\n".join(f"• {c}" for c in caps[:5])
+                        )
+                for act in o.get("actions") or []:
+                    route = act.get("route") or act.get("screen")
+                    label = act.get("label") or route
+                    if route:
+                        turn.actions.append({
+                            "type": "navigate",
+                            "screen": route,
+                            "label": label,
+                        })
             elif tr.name == "search_knowledge" and tr.success:
                 hits = tr.output.get("hits", [])
                 if hits:

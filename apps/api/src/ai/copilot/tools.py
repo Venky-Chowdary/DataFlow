@@ -345,6 +345,20 @@ TOOL_DEFINITIONS: list[dict] = [
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "explain_product",
+        "description": (
+            "Answer product how-to questions about DataFlow (transfer, mapping, preflight, "
+            "connectors, PII, troubleshooting) from curated local knowledge — not RAG dumps."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "list_schedules",
         "description": "List pipeline schedules (Pipelines page) with cadence, next run, and last status.",
         "input_schema": {
@@ -731,6 +745,7 @@ class DataPilotTools:
             "search_connectors": self._search_connectors,
             "search_knowledge": self._search_knowledge,
             "describe_pilot": self._describe_pilot,
+            "explain_product": self._explain_product,
             "plan_transfer_route": self._plan_transfer_route,
             "plan_transfer": self._plan_transfer,
             "start_transfer": self._start_transfer,
@@ -1222,8 +1237,9 @@ class DataPilotTools:
                 "role": "Data Pilot",
                 "runtime": "local_engine",
                 "runtime_note": (
-                    "Primary brain is DataFlow's local OpenAI-style tool loop "
-                    "(DATAFLOW_PILOT_ENGINE=local). No third-party API required."
+                    "Primary brain is DataFlow's local Pilot engine "
+                    "(NL → tools → compose). OpenAI / Anthropic / Ollama are optional "
+                    "add-ons only — not required."
                 ),
                 "can": [
                     "Answer analytics questions with exact aggregates "
@@ -1288,6 +1304,55 @@ class DataPilotTools:
                     "Plans use the same mapping pipeline and 9 gates as Transfer Studio",
                     "Nothing moves until you Confirm — overwrite is never the default",
                 ],
+            },
+        )
+
+    def _explain_product(self, query: str = "") -> ToolResult:
+        """Curated DataFlow product answers — independent of cloud LLMs and RAG noise."""
+        from ..knowledge.copilot_knowledge import (
+            CONVERSATION_TEMPLATES,
+            INTENT_PATTERNS,
+            PRODUCT_CAPABILITIES,
+        )
+
+        lower = (query or "").lower().strip()
+        scores: dict[str, int] = {}
+        for intent, keywords in INTENT_PATTERNS.items():
+            score = sum(1 for kw in keywords if kw in lower)
+            if score:
+                scores[intent] = score
+        # Boost common product how-tos
+        if re.search(r"\b(?:transfer|move|migrate|sync|copy)\b", lower):
+            scores["transfer_help"] = scores.get("transfer_help", 0) + 3
+        if re.search(r"\b(?:map|mapping|column|schema)\b", lower):
+            scores["mapping_help"] = scores.get("mapping_help", 0) + 2
+        if re.search(r"\b(?:preflight|gate|validate|validation)\b", lower):
+            scores["preflight_help"] = scores.get("preflight_help", 0) + 3
+        if re.search(r"\b(?:connector|mongodb|postgres|snowflake|connect)\b", lower):
+            scores["connector_help"] = scores.get("connector_help", 0) + 2
+        if re.search(r"\b(?:pii|gdpr|hipaa|compliance)\b", lower):
+            scores["pii_compliance"] = scores.get("pii_compliance", 0) + 2
+        if re.search(r"\b(?:fail|error|broke|troubleshoot|job)\b", lower):
+            scores["troubleshooting"] = scores.get("troubleshooting", 0) + 2
+        if re.search(r"\b(?:dataflow|datatransfer|what is|what'?s different|airbyte|fivetran)\b", lower):
+            scores["product_help"] = scores.get("product_help", 0) + 3
+        if re.search(r"\b(?:count|aggregate|analy[sz]e|how many|sql)\b", lower):
+            scores["analytics_help"] = scores.get("analytics_help", 0) + 2
+
+        intent = max(scores, key=scores.get) if scores else "greeting"
+        matched = next((t for t in CONVERSATION_TEMPLATES if t.get("intent") == intent), None)
+        if not matched:
+            matched = CONVERSATION_TEMPLATES[0]
+        actions = list(matched.get("actions") or [])
+        return ToolResult(
+            name="explain_product",
+            success=True,
+            output={
+                "intent": intent,
+                "answer": matched.get("assistant") or "",
+                "capabilities": PRODUCT_CAPABILITIES[:6],
+                "actions": actions,
+                "source": "local_product_faq",
             },
         )
 
@@ -1972,6 +2037,52 @@ def _is_meta_pilot_question(lower: str) -> bool:
     return bool(re.search(r"\b(what|which)\s+(knowledge|skills|tools)\b", lower))
 
 
+def _looks_like_product_howto(lower: str) -> bool:
+    """Product how-to / FAQ — answer from curated local FAQ, not RAG or cloud."""
+    text = (lower or "").strip()
+    if not text:
+        return False
+    howto = bool(
+        re.search(
+            r"\b(?:what is|what'?s|what are|how do i|how does|how to|explain|"
+            r"tell me about|where (?:do|can) i|can i|what makes)\b",
+            text,
+        )
+    )
+    product = bool(
+        re.search(
+            r"\b(?:dataflow|datatransfer|data transfer|transfer studio|preflight|"
+            r"mapping|connector|pipeline|validate|quarantine|sso|pii|gdpr|"
+            r"hipaa|airbyte|fivetran|gates?|move (?:my |the )?data|sync data)\b",
+            text,
+        )
+    )
+    if howto and product:
+        return True
+    # Bare product identity questions
+    if re.search(r"\bwhat is data(?:flow|transfer)\b", text):
+        return True
+    if re.search(r"\bhow do i (?:transfer|move|sync|map|connect|validate)\b", text):
+        return True
+    return False
+
+
+def _has_explicit_workspace_subject(lower: str) -> bool:
+    """True when the ask names a live connector/table/job — keep ops tools."""
+    if re.search(r"\bfrom\s+.+\s+to\s+\w", lower):
+        return True
+    if re.search(
+        r"\bon\s+(?:local\s+)?(?:postgres|postgresql|mongodb|mongo|warehouse|mysql|snowflake|bigquery)\b",
+        lower,
+    ):
+        return True
+    if re.search(r"\b(?:job_|pf_)[A-Za-z0-9_\-]+", lower):
+        return True
+    if re.search(r"\bmapping assurance\b", lower):
+        return True
+    return False
+
+
 # A pasted statement, not an English sentence that happens to contain "with".
 _SQL_FENCE_RE = re.compile(r"```(?:sql)?\s*(.+?)```", re.IGNORECASE | re.DOTALL)
 _SQL_SELECT_SHAPE = re.compile(r"^\s*select\b[\s\S]*?\bfrom\b\s*\S", re.IGNORECASE)
@@ -2220,6 +2331,7 @@ _TOOL_PRIORITY: dict[str, int] = {
     "analyze_dataset": 20,
     "search_data": 15,
     "describe_pilot": 5,
+    "explain_product": 6,
 }
 
 _LIVE_SCHEMA_TOOLS = frozenset({
@@ -3019,8 +3131,9 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     )
     if product_gate_ask:
         # Prefer honest product gate list over ontology RAG shards.
-        planned.append(("describe_pilot", {}))
+        planned.append(("explain_product", {"query": message[:240]}))
         planned.append(("profile_quality_rules", {}))
+        planned = [(n, a) for n, a in planned if n != "search_knowledge"]
     elif any(w in lower for w in (
         "quality rules", "quality gates", "data quality", "profile rules",
         "suggest improvements", "suggestions for my data", "how can i improve",
@@ -3028,7 +3141,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     )):
         planned.append(("profile_quality_rules", {}))
         if any(w in lower for w in ("suggest", "recommend", "improve", "fix")):
-            planned.append(("search_knowledge", {"query": message[:200]}))
+            planned.append(("explain_product", {"query": message[:240]}))
 
     # Mapping repair / PII questions — product tools, not ontology RAG dumps.
     if any(w in lower for w in ("fix my mapping", "fix mapping", "mapping broken", "wrong mapping", "help me fix my mapping")):
@@ -3077,7 +3190,10 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             if name and name not in {"this", "that", "it", "my", "the"}:
                 planned.append(("analyze_dataset", {"dataset_name": name}))
 
-    if not planned and _looks_like_domain_knowledge_query(lower):
+    if _looks_like_product_howto(lower) and not _has_explicit_workspace_subject(lower):
+        # Curated local FAQ — independent of cloud and RAG synonym dumps.
+        planned = [("explain_product", {"query": message[:240]})]
+    elif not planned and _looks_like_domain_knowledge_query(lower):
         planned.append(("search_knowledge", {"query": message[:200]}))
 
     # Deduplicate while preserving order
