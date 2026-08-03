@@ -1374,7 +1374,13 @@ export function ValidateDashboard({
               {running
                 ? "Engine running G1–G8…"
                 : preflight
-                  ? executiveSummary?.title ?? (preflight.passed ? "Ready to transfer" : "Action needed before transfer")
+                  ? executiveSummary?.title ?? (
+                    decision === "approve" && preflight.passed
+                      ? "Ready to transfer"
+                      : preflight.passed
+                        ? "Review before Execute"
+                        : "Action needed before transfer"
+                  )
                   : "Run validation to check this route"}
             </h3>
           </div>

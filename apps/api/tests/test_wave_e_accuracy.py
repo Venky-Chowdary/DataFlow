@@ -27,7 +27,8 @@ def test_precision_collapse_helper():
     assert is_precision_collapse_coercion("INTEGER", "DECIMAL") is False
     assert is_timezone_polarity_loss("TIMESTAMPTZ", "TIMESTAMP_NTZ") is True
     assert is_precision_collapse_coercion("TIMESTAMPTZ", "TIMESTAMP WITHOUT TIME ZONE") is True
-    assert is_timezone_polarity_loss("TIMESTAMP_NTZ", "TIMESTAMPTZ") is False
+    # NTZ → TZ invents an instant (UTC stamp) — polarity loss (wave 8).
+    assert is_timezone_polarity_loss("TIMESTAMP_NTZ", "TIMESTAMPTZ") is True
     assert is_timezone_polarity_loss("TIMESTAMP", "TIMESTAMP_NTZ") is False
 
 

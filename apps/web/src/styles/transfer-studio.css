@@ -1716,6 +1716,14 @@ th.df2-type-decimal .df2-type-badge {
   border-color: #cbd5e1;
 }
 
+.df2-structure-field-chip.df2-type-float .df2-type-badge,
+.df2-type-float .df2-type-badge,
+th.df2-type-float .df2-type-badge {
+  background: #ecfeff;
+  color: #0e7490;
+  border-color: #a5f3fc;
+}
+
 .df2-structure-field-chip.df2-type-bool .df2-type-badge,
 .df2-type-bool .df2-type-badge,
 th.df2-type-bool .df2-type-badge {

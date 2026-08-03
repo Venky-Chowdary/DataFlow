@@ -468,7 +468,8 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_DECIMAL: "decimal(38,10)",
         LOGICAL_BOOLEAN: "boolean",
         LOGICAL_DATE: "date",
-        LOGICAL_DATETIME: "timestamptz",
+        # Wall-clock timestamp — bare datetime must not invent timestamptz/UTC.
+        LOGICAL_DATETIME: "timestamp",
         LOGICAL_TIME: "time",
         LOGICAL_UUID: "uuid",
         LOGICAL_JSON: "string",
@@ -558,7 +559,8 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_DECIMAL: "decimal(38,15)",
         LOGICAL_BOOLEAN: "boolean",
         LOGICAL_DATE: "date",
-        LOGICAL_DATETIME: "timestamp(3) with time zone",
+        # Wall-clock timestamp — bare datetime must not invent with-time-zone/UTC.
+        LOGICAL_DATETIME: "timestamp(3)",
         LOGICAL_TIME: "time(3)",
         LOGICAL_UUID: "uuid",
         LOGICAL_JSON: "json",
@@ -3122,15 +3124,63 @@ def parse_vector_length(value: Any) -> int | None:
 
 
 def is_timezone_polarity_loss(source_type: str, target_type: str) -> bool:
-    """True when TZ-aware source loses offset/session polarity onto NTZ or LTZ↔TZ."""
+    """True when timezone polarity would be invented or dropped silently.
+
+    Covers aware→NTZ, NTZ→aware (UTC invent on naive wall-clock), and LTZ↔TZ.
+    """
     src = datetime_timezone_polarity(source_type)
     tgt = datetime_timezone_polarity(target_type)
     if src in {"tz", "ltz"} and tgt == "ntz":
+        return True
+    # Naive / NTZ → TZ-aware invents an instant (UTC stamp) — fail-closed.
+    if src == "ntz" and tgt in {"tz", "ltz"}:
         return True
     # Session-relative ↔ offset-pinned is a silent semantic rewrite.
     if {src, tgt} == {"tz", "ltz"}:
         return True
     return False
+
+
+def bitstring_opaque_bytes_collapse(source_type: str, target_type: str) -> bool:
+    """True when BIT(n)/VARBIT ↔ BYTEA/BINARY invents a packing the operator never declared."""
+    src_bit = is_bitstring_carrier(source_type)
+    tgt_bit = is_bitstring_carrier(target_type)
+    if src_bit == tgt_bit:
+        return False
+    src_bin = normalize_logical_type(source_type) == LOGICAL_BINARY
+    tgt_bin = normalize_logical_type(target_type) == LOGICAL_BINARY
+    if not (src_bin and tgt_bin):
+        return False
+    # One side bitstring, the other opaque bytes.
+    return True
+
+
+def year_domain_would_collapse(source_type: str, target_type: str) -> bool:
+    """True when MySQL YEAR polarity lands on a non-YEAR sink (SMALLINT invent)."""
+    if not is_year_carrier(source_type):
+        return False
+    if is_year_carrier(target_type):
+        return False
+    tgt = normalize_logical_type(target_type)
+    return tgt in {
+        LOGICAL_INTEGER,
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+        LOGICAL_JSON,
+    }
+
+
+def set_to_array_polarity_preserved(source_type: str, target_type: str) -> bool:
+    """True for MySQL SET → TEXT[] / ARRAY (intentional multi-value sink)."""
+    src = parse_enum_or_set_ordered_members(source_type)
+    if src is None or src[0] != "SET":
+        return False
+    tgt_u = (target_type or "").strip().upper().replace(" ", "")
+    if tgt_u in {"TEXT[]", "VARCHAR[]", "STRING[]"} or tgt_u.startswith("ARRAY<"):
+        return True
+    return normalize_logical_type(target_type) == LOGICAL_ARRAY
 
 
 _STRING_WIDTH_RE = re.compile(
@@ -4920,9 +4970,13 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
             return True
         if string_width_would_narrow(source_type, target_type):
             return True
+        if bitstring_opaque_bytes_collapse(source_type, target_type):
+            return True
         if binary_width_would_narrow(source_type, target_type):
             return True
         if bitstring_width_would_narrow(source_type, target_type):
+            return True
+        if year_domain_would_collapse(source_type, target_type):
             return True
         if unsigned_integer_would_overflow(source_type, target_type):
             return True
@@ -4956,9 +5010,19 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
             return True
         return False
 
+    # MySQL SET → TEXT[] is the intentional multi-value sink (not string→array invent).
+    if set_to_array_polarity_preserved(source_type, target_type):
+        return False
+    # BIT(n) → VARCHAR(n) create-new is 0/1 digit text — not opaque BYTEA packing.
+    if is_bitstring_carrier(source_type) and tgt in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return False
     # Fielded STRUCT/MAP → opaque JSON/VARIANT is intentional on many warehouses
     # (Airbyte V2) but is still a field-DDL collapse — treat as lossy so G3 surfaces it.
     if is_nested_document_collapse(source_type, target_type):
+        return True
+    if year_domain_would_collapse(source_type, target_type):
+        return True
+    if bitstring_opaque_bytes_collapse(source_type, target_type):
         return True
     if unsigned_integer_would_overflow(source_type, target_type):
         return True

@@ -209,19 +209,25 @@ def coerce_sql_temporal(value: Any, source_type: str) -> Any:
         "TIMESTAMP WITH TIME ZONE",
         "TIMESTAMP WITH LOCAL TIME ZONE",
         "DATETIMEOFFSET",
+        "TIMESTAMP_LTZ",
     }:
+        # Refuse naive wall-clock → UTC invent (parity with BQ TIMESTAMP / TIMETZ).
+        if not input_has_timezone(value):
+            raise ValueError(
+                f"{base} refuses naive wall-clock (would invent UTC). "
+                "Provide an offset/Z, or map to TIMESTAMP_NTZ / DATETIME."
+            )
         parsed = parse_sql_datetime(value, aware_utc=True)
         return parsed if parsed is not None else value
     if base in {
         "DATETIME",
         "TIMESTAMP",
-        "TIMESTAMP_LTZ",
         "TIMESTAMP_NTZ",
         "DATETIME2",
         "SMALLDATETIME",
         "TIMESTAMP WITHOUT TIME ZONE",
     }:
-        parsed = parse_sql_datetime(value)
+        parsed = parse_sql_datetime(value, wall_clock=True)
         if parsed is None:
             return value
         if base == "SMALLDATETIME":
@@ -402,8 +408,16 @@ def wire_check_temporal(value: Any, ddl_type: str) -> dict[str, Any]:
     if isinstance(value, str) and not value.strip():
         return {"ok": True, "wire_value": None, "reason": "", "needs_normalize": False}
 
-    coerced = coerce_sql_temporal(value, ddl_type)
-    wire = format_wire_value(value, ddl_type)
+    try:
+        coerced = coerce_sql_temporal(value, ddl_type)
+        wire = format_wire_value(value, ddl_type)
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "wire_value": None,
+            "reason": str(exc),
+            "needs_normalize": False,
+        }
 
     # Still a string after coerce → cannot bind as temporal.
     if isinstance(coerced, str):

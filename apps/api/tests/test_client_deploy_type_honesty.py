@@ -229,3 +229,29 @@ def test_array_to_json_is_document_collapse_not_preserve():
     assert parse_array_element("INTEGER[]") == "INTEGER"
     assert ddl_type("postgresql", "ARRAY<INTEGER>") == "BIGINT[]"
     assert ddl_type("postgresql", "INTEGER[]") == "BIGINT[]"
+
+
+def test_ntz_to_tz_is_polarity_loss_and_bind_refuses_naive():
+    import pytest
+    from connectors.sql_temporal import coerce_sql_temporal
+    from services.type_system import is_lossy_coercion, is_timezone_polarity_loss
+
+    assert is_timezone_polarity_loss("TIMESTAMP_NTZ", "TIMESTAMPTZ") is True
+    assert is_lossy_coercion("TIMESTAMP_NTZ", "TIMESTAMPTZ") is True
+    assert is_lossy_coercion("DATETIME2", "DATETIMEOFFSET") is True
+    with pytest.raises(ValueError, match="refuses naive"):
+        coerce_sql_temporal("2024-01-05 10:30:00", "TIMESTAMPTZ")
+    # Offset wire still binds.
+    got = coerce_sql_temporal("2024-01-05T10:30:00Z", "TIMESTAMPTZ")
+    assert got is not None
+
+
+def test_bitstring_bytea_and_year_polarity():
+    from services.type_system import is_lossy_coercion
+
+    assert is_lossy_coercion("BIT(8)", "BYTEA") is True
+    assert is_lossy_coercion("BYTEA", "BIT(8)") is True
+    # Intentional create-new 0/1 digit text sink.
+    assert is_lossy_coercion("BIT(8)", "VARCHAR(8)") is False
+    assert is_lossy_coercion("YEAR", "SMALLINT") is True
+    assert is_lossy_coercion("SET('a','b')", "TEXT[]") is False

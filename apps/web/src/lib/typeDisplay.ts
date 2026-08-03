@@ -3,6 +3,7 @@
 export type TypeFamily =
   | "int"
   | "decimal"
+  | "float"
   | "bool"
   | "temporal"
   | "json"
@@ -315,7 +316,8 @@ export function typeFamily(rawType: string | undefined): TypeFamily {
   if (/number\s*\(\s*\d+\s*\)/.test(t)) return "int";
   if (/\b(int|integer|bigint|smallint|tinyint|long)\b/.test(t) && !/interval/.test(t)) return "int";
   if (/decimal|numeric|bignumeric|money|^number$/.test(t)) return "decimal";
-  if (/float|double|real/.test(t)) return "decimal"; // display family; logical FLOAT stays distinct in Map
+  // Keep IEEE float visually distinct from fixed-point decimal (Map honesty).
+  if (/float|double|real/.test(t)) return "float";
   if (/bool/.test(t)) return "bool";
   if (/interval/.test(t)) return "temporal";
   if (/timestamp|datetime|date|time/.test(t)) return "temporal";
@@ -372,7 +374,11 @@ export function normalizeDestTypeValue(current?: string, destType?: string): str
       if (upper === "FLOAT" || upper === "DOUBLE") return "FLOAT";
       return "NUMBER(38,10)";
     }
-    if (upper === "TIMESTAMP" || upper === "TIMESTAMPTZ" || upper === "DATETIME") {
+    // Bare TIMESTAMP/DATETIME → NTZ (wall-clock); never invent TIMESTAMP_TZ.
+    if (upper === "TIMESTAMP" || upper === "DATETIME") {
+      return "TIMESTAMP_NTZ";
+    }
+    if (upper === "TIMESTAMPTZ") {
       return "TIMESTAMP_TZ";
     }
     if (upper === "JSON" || upper === "JSONB" || upper === "ARRAY") {
