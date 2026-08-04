@@ -72,11 +72,15 @@ class TypeCellResult:
     source_type: str
     stamped_target: str
     ddl: str
-    classification: str  # lossless | lossy_ack_required | blocked | error
+    classification: str  # legacy: lossless | lossy_ack_required | blocked | error
     lossy: bool
     risk_kinds: list[str] = field(default_factory=list)
     coercion_issue_kinds: list[str] = field(default_factory=list)
     failure: str | None = None
+    # Module 15 — charter ConversionClass (SSOT: conversion_contract).
+    conversion_class: str = ""
+    invents_capacity: bool = False
+    requires_risk_contract: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -84,6 +88,9 @@ class TypeCellResult:
             "stamped_target": self.stamped_target,
             "ddl": self.ddl,
             "classification": self.classification,
+            "conversion_class": self.conversion_class,
+            "invents_capacity": self.invents_capacity,
+            "requires_risk_contract": self.requires_risk_contract,
             "lossy": self.lossy,
             "risk_kinds": list(self.risk_kinds),
             "coercion_issue_kinds": list(self.coercion_issue_kinds),
@@ -117,6 +124,7 @@ def _scope_stamp() -> dict[str, Any]:
         "referential_integrity": "not_proven",
         "rollback": "not_claimed",
         "cdc_exactly_once": "not_claimed",
+        "conversion_class": "charter_7_via_conversion_contract",
     }
 
 
@@ -145,6 +153,7 @@ def evaluate_type_cell(
             classification="error",
             lossy=True,
             failure=f"DDL/stamp raised: {exc}",
+            conversion_class="unsupported",
         )
 
     if not stamped or not str(stamped).strip():
@@ -155,6 +164,7 @@ def evaluate_type_cell(
             classification="error",
             lossy=True,
             failure="create_new_mapping_target_type returned empty (invent refused)",
+            conversion_class="unsupported",
         )
 
     lossy = bool(is_lossy_coercion(source_type, stamped, dest_db=dest_db))
@@ -201,6 +211,21 @@ def evaluate_type_cell(
     else:
         classification = "lossless"
 
+    # Module 15 — stamp charter ConversionClass (never invent green on invent/lossy).
+    from services.conversion_contract import classify_conversion
+
+    conv = classify_conversion(
+        source_type,
+        str(stamped),
+        dest_db=dest_db,
+        transform="none",
+        risk_acknowledged=False,
+    )
+    # Silent-green lossy remains blocked even if conversion_class disagrees.
+    conversion_class = str(conv.get("conversion_class") or "")
+    if failure and classification == "blocked":
+        conversion_class = conversion_class or "unsupported"
+
     return TypeCellResult(
         source_type=source_type,
         stamped_target=str(stamped),
@@ -210,6 +235,9 @@ def evaluate_type_cell(
         risk_kinds=risk_kinds,
         coercion_issue_kinds=issue_kinds,
         failure=failure,
+        conversion_class=conversion_class,
+        invents_capacity=bool(conv.get("invents_capacity")),
+        requires_risk_contract=bool(conv.get("requires_risk_contract")),
     )
 
 
@@ -314,6 +342,10 @@ def assess_pair(
     lossless = sum(1 for c in type_cells if c.classification == "lossless")
     lossy = sum(1 for c in type_cells if c.classification == "lossy_ack_required")
     blocked = sum(1 for c in type_cells if c.classification in {"blocked", "error"})
+    conversion_counts: dict[str, int] = {}
+    for c in type_cells:
+        key = c.conversion_class or "unclassified"
+        conversion_counts[key] = conversion_counts.get(key, 0) + 1
 
     mapping = evaluate_mapping_contract(src_db, dest_db)
     values = evaluate_value_fixtures(dest_db)
@@ -359,6 +391,8 @@ def assess_pair(
             "lossless": lossless,
             "lossy_ack_required": lossy,
             "blocked_or_error": blocked,
+            "conversion_class_counts": conversion_counts,
+            "conversion_contract": "conversion_contract.v1",
             "failures": [c.to_dict() for c in cell_failures],
             "cells": [c.to_dict() for c in type_cells],
         },

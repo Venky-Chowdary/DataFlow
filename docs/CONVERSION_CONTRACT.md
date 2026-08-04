@@ -35,7 +35,11 @@ Bare `DECIMAL` → `DECIMAL(p,s)` / bare temporal → dialect FSP / TZ polarity 
 - `apps/api/services/conversion_contract.py`
 - Wired: `mapping_proof.stamp_mapping_fidelity`, `preflight_service` proof stamp, `engine._enforce_ddl_identity`
 
-## Related
+## Pair assurance (Module 15)
 
-- `docs/MIGRATION_RISK_CONTRACT.md`
-- `docs/BUYER_EVIDENCE_PACK.md` Map≡CREATE / pair assurance
+Offline `pair_assurance.evaluate_type_cell` stamps both:
+
+- Legacy `classification`: `lossless | lossy_ack_required | blocked | error`
+- Charter `conversion_class`: from `classify_conversion` (7-class)
+
+Proof artifacts include `conversion_class_counts`. Sample/fixture scope unchanged — never population proof.
