@@ -43,6 +43,7 @@ Live execute + reconcile remains `tests/test_production_sku_matrix.py` (separate
 - **Map≡CREATE (Iceberg):** bare `DECIMAL` → `decimal(38,10)` for quarantine + Arrow; oversize stamps fail closed to `string` — never silent `decimal128` clamp (`test_iceberg_decimal_map_create.py`)
 - **Map≡CREATE (SQLite):** `DECIMAL`/`NUMERIC`/`MONEY` rematerialize to `TEXT` — never NUMERIC affinity invent that stores high-precision values as IEEE `real` (`test_sqlite_decimal_affinity_map_create.py`)
 - **Map≡CREATE (binary typmod):** foreign `BINARY(n)`/`VARBINARY(n)`/`BYTES(n)`/`fixed(n)` rematerialize to dest wire (`BYTES`/`VARBYTE`/`BYTEA`/`fixed`/`RAW`/`BLOB`) — never illegal CREATE pass-through (`test_binary_typmod_materialize_map_create.py`)
+- **Map≡CREATE (bare DECIMAL):** bare `DECIMAL`/`NUMERIC`/`NUMBER` rematerialize to `ddl_type` SSOT `(p,s)` so quarantine can parse capacity — never MySQL `(10,0)` invent or silent money truncate (`test_bare_decimal_materialize_map_create.py`); Snowflake bare uses SSOT `NUMBER(38,10)` not batch invent
 - **Map≡ALTER:** explicit Map `target_type` is a hard widen ceiling — PostgreSQL/MySQL/Snowflake **and** generic_sql (SQL Server / Oracle / DuckDB) backfill may ALTER **up to** the stamp, never past it (`desired_types_honoring_map_stamps`, `_widen_existing_columns_sa` stamp ceiling, `test_map_equals_alter_ddl.py`); overflow cells quarantine instead of silent widen
 
 ## 4. Delivery / CDC

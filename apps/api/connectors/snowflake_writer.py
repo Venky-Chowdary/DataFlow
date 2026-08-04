@@ -129,12 +129,13 @@ def resolve_snowflake_create_types(
     logical_types: list[str],
     mapped_rows: list[tuple],
 ) -> list[str]:
-    """CREATE column types — honor Map-stamped DECIMAL(p,s); invent only for bare DECIMAL.
+    """CREATE column types — honor Map-stamped DECIMAL(p,s); bare uses ddl SSOT.
 
-    DDL must match the approved mapping. Explicit NUMBER/DECIMAL(p,s) stamps are
-    never overridden by batch inference; unfit cells are quarantined instead.
+    Explicit NUMBER/DECIMAL(p,s) stamps are never overridden by batch inference;
+    unfit cells are quarantined instead. Bare DECIMAL rematerializes to
+    ``NUMBER(38,10)`` via ``ddl_type`` — never batch-inferred invent.
     """
-    from services.type_system import normalize_logical_type
+    from services.type_system import ddl_type, normalize_logical_type
 
     out: list[str] = []
     for i, t in enumerate(logical_types):
@@ -142,7 +143,8 @@ def resolve_snowflake_create_types(
             if _parse_number_type(t) is not None:
                 out.append(sf_type(t))
             else:
-                out.append(_snowflake_decimal_type(i, mapped_rows))
+                # Map≡CREATE: platform SSOT, not per-batch invent.
+                out.append(sf_type(ddl_type("snowflake", t)))
         else:
             out.append(sf_type(t))
     return out
