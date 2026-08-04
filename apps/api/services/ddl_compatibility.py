@@ -310,7 +310,7 @@ def evaluate_ddl_compatibility(
                 elif (
                     src_logical == "decimal"
                     and tgt_logical == "decimal"
-                    and is_precision_collapse_coercion(src_type, tgt_type)
+                    and is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest_kind)
                 ):
                     note = " — DECIMAL(p,s) narrowing (scale/capacity shrink; accept risk or remap)"
                 elif src_logical == "datetime" and tgt_logical == "date":
@@ -338,7 +338,7 @@ def evaluate_ddl_compatibility(
         if (
             not schemaless
             and tgt_type
-            and is_precision_collapse_coercion(src_type, tgt_type)
+            and is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest_kind)
             and not risk_ack
         ):
             if specialty_carrier_would_collapse(src_type, tgt_type):

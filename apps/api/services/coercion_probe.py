@@ -476,7 +476,7 @@ def analyze_coercion(
         # them as serialization (not a scary cast) when they round-trip cleanly.
         # Same-logical YEAR/MONEY/width/IEEE collapses must not early-continue.
         fidelity_collapse = bool(
-            is_precision_collapse_coercion(src_type, tgt_type)
+            is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest_db_type)
             or is_lossy_coercion(src_type, tgt_type)
             or is_nested_shape_collapse(src_type, tgt_type)
         )

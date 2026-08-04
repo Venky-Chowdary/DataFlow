@@ -329,7 +329,8 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_BOOLEAN: "BOOLEAN",
         LOGICAL_DATE: "DATE",
         LOGICAL_DATETIME: "DATETIME(6)",
-        LOGICAL_TIME: "TIME",
+        # Match DATETIME(6): bare TIME is MySQL FSP 0 and false-collapses TIME(6).
+        LOGICAL_TIME: "TIME(6)",
         LOGICAL_UUID: "CHAR(36)",
         LOGICAL_JSON: "JSON",
         LOGICAL_ARRAY: "JSON",
@@ -4892,6 +4893,12 @@ def geography_contract_would_collapse(source_type: str, target_type: str) -> boo
     return False
 
 
+# Elasticsearch IP / PG INET / IPv4 / IPv6 — same host-address polarity.
+# CIDR is network-mask polarity and is NOT in this twin set.
+_IP_HOST_ADDRESS_TWINS: Final[frozenset[str]] = frozenset(
+    {"IP", "INET", "IPV4", "IPV6"}
+)
+
 _SPECIALTY_NATIVE_CARRIERS: Final[frozenset[str]] = frozenset(
     {
         "INET",
@@ -5142,6 +5149,10 @@ def specialty_carrier_would_collapse(source_type: str, target_type: str) -> bool
         return False
     tgt = specialty_carrier_base(target_type)
     if tgt is not None:
+        # Host-address dialect twins (Elasticsearch IP / PG INET / IPv4/IPv6).
+        # CIDR stays a distinct network polarity (INET→CIDR still collapses).
+        if src in _IP_HOST_ADDRESS_TWINS and tgt in _IP_HOST_ADDRESS_TWINS:
+            return False
         # Distinct specialty bases rewrite domain (INET→CIDR, MACADDR→MACADDR8).
         return src != tgt
     if specialty_wire_preserves_value(src, target_type):
@@ -5215,25 +5226,58 @@ def resolve_mapping_target_type(
 
 
 def promote_create_new_temporal_stamp(src_type: str, stamped: str, dest_db_type: str = "") -> str:
-    """Upgrade bare TIMESTAMP stamps when source declares fractional precision.
+    """Upgrade bare TIMESTAMP/TIME stamps when source declares fractional precision.
 
-    PG create-new must emit TIMESTAMP(p); bare TIMESTAMP is MySQL FSP-0 territory
-    and would false-block (or worse, silent-truncate) Validate.
+    PG create-new must emit TIMESTAMP(p); MySQL create-new must emit TIME(p) /
+    DATETIME(p). Bare carriers are FSP-0 territory and false-block Validate.
     """
     out = (stamped or "").strip()
     if not out:
         return out
     bare = re.sub(r"\s*\(\s*\d+\s*\)", "", out.upper()).strip()
-    if bare != "TIMESTAMP":
-        return out
     src_p = parse_temporal_fractional_precision(src_type)
     if src_p is None:
         return out
     db = (dest_db_type or "").strip().lower()
-    # PostgreSQL-family create-new: preserve source FSP on the physical stamp.
-    if db in {"", "postgresql", "postgres", "pg", "redshift", "cockroach", "cockroachdb", "alloydb"}:
-        return f"TIMESTAMP({src_p})"
+    if bare == "TIMESTAMP":
+        if db in {
+            "",
+            "postgresql",
+            "postgres",
+            "pg",
+            "redshift",
+            "cockroach",
+            "cockroachdb",
+            "alloydb",
+            "timescaledb",
+            "yugabytedb",
+            "citus",
+            "supabase",
+            "greenplum",
+        }:
+            return f"TIMESTAMP({src_p})"
+        return out
+    if bare == "TIME":
+        # MySQL/Maria/PG: bare TIME is FSP 0 — promote when source declares (p).
+        if db in {
+            "",
+            "mysql",
+            "mariadb",
+            "tidb",
+            "postgresql",
+            "postgres",
+            "pg",
+            "cockroachdb",
+            "alloydb",
+            "sqlserver",
+            "mssql",
+        }:
+            return f"TIME({src_p})"
+        return out
+    if bare == "DATETIME" and db in {"mysql", "mariadb", "tidb", ""}:
+        return f"DATETIME({src_p})"
     return out
+
 
 
 def create_new_mapping_target_type(src_type: str, dest_db_type: str = "") -> str:
@@ -6404,11 +6448,13 @@ def specialty_polarity_mismatch(source_type: str, target_type: str) -> bool:
     """True when two distinct specialty carriers would rewrite domain polarity.
 
     INET→CIDR invents network masking; MACADDR→MACADDR8 changes wire width;
-    HSTORE→LTREE is not identity. Same base is fine.
+    HSTORE→LTREE is not identity. IP/INET/IPv4/IPv6 are host-address twins.
     """
     src = specialty_carrier_base(source_type)
     tgt = specialty_carrier_base(target_type)
     if src is None or tgt is None:
+        return False
+    if src in _IP_HOST_ADDRESS_TWINS and tgt in _IP_HOST_ADDRESS_TWINS:
         return False
     return src != tgt
 

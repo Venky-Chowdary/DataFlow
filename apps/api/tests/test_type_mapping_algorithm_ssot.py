@@ -17,6 +17,7 @@ import pytest
 
 from services.type_system import (  # noqa: E402
     create_new_mapping_target_type,
+    promote_create_new_temporal_stamp,
     document_domain_would_collapse,
     is_dialect_native_document_wire,
     is_precision_collapse_coercion,
@@ -173,3 +174,37 @@ def test_run_mapping_pipeline_varchar_date_samples_widen_physical():
     assert "DATETIME" in tgt.upper(), row
     assert tgt.upper() != "DATETIME"
     assert tgt.upper() != "TEXT"
+
+def test_mysql_time6_create_new_not_bare_time():
+    assert create_new_mapping_target_type("TIME(6)", "mysql").upper() == "TIME(6)"
+    assert create_new_mapping_target_type("TIME", "mysql").upper() == "TIME(6)"
+    assert is_precision_collapse_coercion("TIME(6)", "TIME(6)", dest_db="mysql") is False
+    # Bare TIME still narrows without dest-aware stamp.
+    assert temporal_precision_would_narrow("TIME(6)", "TIME", dest_db="mysql") is True
+    assert promote_create_new_temporal_stamp("TIME(6)", "TIME", "mysql") == "TIME(6)"
+
+
+def test_coercion_probe_uses_dest_db_for_pg_timestamp():
+    from services.coercion_probe import analyze_coercion
+
+    report = analyze_coercion(
+        sample_rows=[{"ts": "2024-01-01 12:00:00.123456"}],
+        mappings=[{"source": "ts", "target": "ts", "target_type": "TIMESTAMP", "create_new": True}],
+        source_types={"ts": "TIMESTAMP_NTZ(6)"},
+        dest_types={},
+        dest_db_type="postgresql",
+        table_exists=False,
+    )
+    cols = report.get("columns") or []
+    # After resolve promotes TIMESTAMP→TIMESTAMP(6), should not fidelity-block.
+    blocked = [c for c in cols if c.get("fidelity_collapse") and c.get("severity") == "block"]
+    assert not blocked, blocked
+
+def test_ip_inet_host_address_twins():
+    from services.type_system import specialty_carrier_would_collapse, specialty_polarity_mismatch
+
+    assert specialty_carrier_would_collapse("IP", "INET") is False
+    assert specialty_polarity_mismatch("IP", "INET") is False
+    assert is_precision_collapse_coercion("IP", "INET") is False
+    assert specialty_polarity_mismatch("INET", "CIDR") is True
+    assert is_precision_collapse_coercion("INET", "CIDR") is True
