@@ -1627,6 +1627,7 @@ export function ValidateDashboard({
                       variant="primary"
                       disabled={remediating || !onApplyAction}
                       leadingIcon={<DtIcon name="layers" size={14} />}
+                      title={`Remap ${col.source} off typed ${col.target} → ${col.toType}`}
                       onClick={() =>
                         onApplyAction?.({
                           kind: "change_target_type",
@@ -1648,6 +1649,7 @@ export function ValidateDashboard({
                     disabled={remediating}
                     leadingIcon={<DtIcon name="layers" size={14} />}
                     onClick={() => onReviewMappings()}
+                    title="Open Map to review type mismatches"
                   >
                     Open Map
                   </Button>
@@ -1676,6 +1678,17 @@ export function ValidateDashboard({
                     onClick={() => onReviewMappings()}
                   >
                     Open Map to fix
+                  </Button>
+                )}
+                {!duplicateRoot && !isPrivilegeBlock && !isConnectionBlock && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={remediating || repairBusy || !preflight}
+                    leadingIcon={<DtIcon name="sparkle" size={14} />}
+                    onClick={() => void proposeDurableRepair()}
+                  >
+                    Propose durable repair
                   </Button>
                 )}
               </>
@@ -2285,8 +2298,14 @@ export function ValidateDashboard({
                               || action.kind === "quarantine_and_rerun"
                               || action.kind === "review_mappings"
                             ))
-                            // Encoding CTAs already live in the top Suggested fixes bar.
-                            && !(showEncodingRemediation && ENCODING_ACTION_KINDS.has(action.kind)),
+                            // Encoding / strip CTAs belong only when encoding is the root cause.
+                            && !(ENCODING_ACTION_KINDS.has(action.kind) && (showEncodingRemediation || isTypeMismatchBlock))
+                            // Type-mismatch Map CTA already lives in the top Suggested fixes bar.
+                            && !(isTypeMismatchBlock && (
+                              action.kind === "review_mappings"
+                              || action.kind === "change_target_type"
+                              || action.kind === "open_mapping"
+                            )),
                           ),
                         )
                           .map((action, i) => (
@@ -2309,21 +2328,6 @@ export function ValidateDashboard({
                             {action.label}
                           </Button>
                         ))}
-                        {/* Propose lives in Suggested fixes bar for duplicate identity. */}
-                        {!duplicateRoot && (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => void proposeDurableRepair()}
-                            disabled={repairBusy || !preflight}
-                            title="Persist a human-gated repair proposal with audit trail"
-                            leadingIcon={<DtIcon name="sparkle" size={14} />}
-                            loading={repairBusy}
-                            loadingLabel="Proposing…"
-                          >
-                            Propose durable repair
-                          </Button>
-                        )}
                       </div>
                     </div>
                   )}

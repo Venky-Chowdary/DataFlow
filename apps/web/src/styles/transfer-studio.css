@@ -5784,13 +5784,60 @@ th.df2-type-string .df2-type-badge {
   bottom: 0;
   z-index: 3;
   flex: 0 0 auto;
-  padding: 12px 14px !important;
+  padding: 12px 14px 0 !important;
   border-top: 1px solid #e2e8f0 !important;
   background: linear-gradient(180deg, rgba(248, 250, 252, 0.92) 0%, #ffffff 40%);
   backdrop-filter: blur(6px);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-width: 0;
 }
 .df2-theater-v3-log-section.is-live {
-  padding-bottom: 16px !important;
+  padding-bottom: 0 !important;
+}
+
+.df2-theater-v3-footer {
+  margin: 0 -14px 0;
+  padding: 10px 14px !important;
+  border-top: 1px solid #e2e8f0;
+  background: #fff;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+}
+
+.df2-theater-v3-footer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.df2-theater-v3-header-hint {
+  font-size: 11px;
+  color: #64748b;
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .df2-theater-v3-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .df2-theater-v3-footer-actions {
+    justify-content: stretch;
+  }
+
+  .df2-theater-v3-footer-actions .df2-btn {
+    flex: 1 1 auto;
+  }
+
+  .df2-theater-v3-header-hint {
+    display: none;
+  }
 }
 
 .df2-live-log {
@@ -6435,9 +6482,9 @@ th.df2-type-string .df2-type-badge {
   border-radius: var(--df-radius-md, 8px);
   background: var(--df-brand-muted, #f0fdfa);
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 12px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
 }
 .df2-vd-assist-actions-title {
   font-size: 11px;
@@ -7560,13 +7607,26 @@ button.df2-vd-assist-toggle:focus-visible {
   background: linear-gradient(180deg, #eff6ff 0%, #f8fafc 100%);
 }
 .df2-vd-fix-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
+  align-items: stretch;
   gap: 8px;
+  width: 100%;
+  min-width: 0;
 }
 .df2-vd-fix-actions .df2-btn {
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  height: auto;
+  min-height: 32px;
+  white-space: normal;
+  text-align: left;
+  line-height: 1.25;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  overflow-wrap: anywhere;
 }
 .df2-vd-blocker-fix-note {
   margin: 8px 0 0;

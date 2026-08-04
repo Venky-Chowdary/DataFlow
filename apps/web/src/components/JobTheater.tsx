@@ -591,14 +591,7 @@ export function JobTheaterView({
           <span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span>
           <CopyIdChip id={jobId} label="Job" compact />
           {isRunning && onCancel && (
-            <button
-              type="button"
-              className="df2-btn df2-btn-sm df2-btn-ghost"
-              onClick={onCancel}
-              disabled={cancelling}
-            >
-              <DtIcon name="x" size={14} /> {cancelling ? "Cancelling…" : "Cancel"}
-            </button>
+            <span className="df2-theater-v3-header-hint">Cancel is in the action bar below</span>
           )}
         </div>
       </header>
@@ -644,7 +637,7 @@ export function JobTheaterView({
       )}
 
       {(isCancelled || isFailed) && (onNewTransfer || onBackToValidate || onBackToMap || onResume) && (
-        <div className="df2-theater-v3-next" role="navigation" aria-label="After cancelled or failed transfer">
+        <div className="df2-theater-v3-next" role="status" aria-label="Recovery guidance">
           <div className="df2-theater-v3-next-copy">
             <strong>
               {isCancelled
@@ -664,7 +657,7 @@ export function JobTheaterView({
             </strong>
             <span>
               {isCancelled
-                ? "Resume from checkpoint, adjust Map / Validate, or start clean."
+                ? "Use the action bar under the event log — Resume, Map / Validate, or start clean."
                 : job.cdc_lease_conflict
                   ? "Clear the lease or stop the holder first — Resume alone will hit the same conflict while the lease is live."
                 : job.cdc_cursor_gap
@@ -678,40 +671,8 @@ export function JobTheaterView({
                   ? "Open Map and set Primary key to a column that is unique in the source (not a repeating id). Or use append without that PK / dedupe upstream, then re-run from Validate."
                 : capacityFailure
                   ? "Free destination capacity first, then Resume from checkpoint — Resume alone will hit the same error."
-                  : "Resume from the last checkpoint, or fix mappings and re-run from Validate."}
+                  : "Use the action bar under the event log to Resume, fix mappings, or re-run from Validate."}
             </span>
-          </div>
-          <div className="df2-theater-v3-next-actions">
-            {duplicateKeyFailure && onBackToMap && (
-              <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={onBackToMap}>
-                <DtIcon name="layers" size={14} /> Open Map · set primary key
-              </button>
-            )}
-            {onResume && (job.chunk_current != null || job.checkpoint) && !job.cdc_lease_conflict && !job.cdc_cursor_gap && !duplicateKeyFailure && (
-              <button
-                type="button"
-                className="df2-btn df2-btn-sm df2-btn-primary"
-                onClick={onResume}
-                disabled={resuming}
-              >
-                <DtIcon name="play" size={14} /> {resuming ? "Resuming…" : "Resume from checkpoint"}
-              </button>
-            )}
-            {onBackToMap && !duplicateKeyFailure && (
-              <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={onBackToMap}>
-                <DtIcon name="layers" size={14} /> Back to Map
-              </button>
-            )}
-            {onBackToValidate && (
-              <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={onBackToValidate}>
-                <DtIcon name="gate" size={14} /> Back to Validate
-              </button>
-            )}
-            {onNewTransfer && (
-              <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={onNewTransfer}>
-                <DtIcon name="plus" size={14} /> New transfer
-              </button>
-            )}
           </div>
         </div>
       )}
@@ -1356,6 +1317,75 @@ export function JobTheaterView({
           defaultOpen
           storageKey={`df2-run-log-open:${jobId}`}
         />
+        <div className="df2-card-footer df2-wizard-footer df2-theater-v3-footer" role="navigation" aria-label="Run actions">
+          {onBackToValidate ? (
+            <button type="button" className="df2-btn" onClick={onBackToValidate}>
+              ← Back
+            </button>
+          ) : (
+            <span />
+          )}
+          <div className="df2-run-footer-status" aria-live="polite">
+            <span>
+              <strong>Status</strong> {jobStatusLabel(job.status)}
+            </span>
+            <span>
+              <strong>Rows</strong> {processed.toLocaleString()}
+            </span>
+          </div>
+          <div className="df2-run-footer-actions df2-theater-v3-footer-actions">
+            {isRunning && onCancel && (
+              <button
+                type="button"
+                className="df2-btn df2-btn-ghost"
+                onClick={onCancel}
+                disabled={cancelling}
+              >
+                <DtIcon name="x" size={16} /> {cancelling ? "Cancelling…" : "Cancel"}
+              </button>
+            )}
+            {(isCancelled || isFailed) && duplicateKeyFailure && onBackToMap && (
+              <button type="button" className="df2-btn df2-btn-primary" onClick={onBackToMap}>
+                <DtIcon name="layers" size={16} /> Open Map · set PK
+              </button>
+            )}
+            {(isCancelled || isFailed)
+              && onResume
+              && (job.chunk_current != null || job.checkpoint)
+              && !job.cdc_lease_conflict
+              && !job.cdc_cursor_gap
+              && !duplicateKeyFailure && (
+              <button
+                type="button"
+                className="df2-btn df2-btn-primary"
+                onClick={onResume}
+                disabled={resuming}
+              >
+                <DtIcon name="play" size={16} /> {resuming ? "Resuming…" : "Resume"}
+              </button>
+            )}
+            {(isCancelled || isFailed) && onBackToMap && !duplicateKeyFailure && (
+              <button type="button" className="df2-btn" onClick={onBackToMap}>
+                <DtIcon name="layers" size={16} /> Map
+              </button>
+            )}
+            {(isCancelled || isFailed) && onBackToValidate && (
+              <button type="button" className="df2-btn df2-btn-secondary" onClick={onBackToValidate}>
+                <DtIcon name="gate" size={16} /> Validate
+              </button>
+            )}
+            {(isComplete || isQuarantine) && onBackToValidate && (
+              <button type="button" className="df2-btn" onClick={onBackToValidate}>
+                <DtIcon name="gate" size={16} /> Validate
+              </button>
+            )}
+            {(isComplete || isCancelled || isFailed || isQuarantine) && onNewTransfer && (
+              <button type="button" className="df2-btn df2-btn-primary" onClick={onNewTransfer}>
+                <DtIcon name="plus" size={16} /> New transfer
+              </button>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -929,7 +929,7 @@
 }
 
 .lp-mkt-next-cta .lp-btn {
-  min-width: min(100%, 200px);
+  min-width: min(100%, 180px);
 }
 
 .lp-section-cta-text {
@@ -1722,11 +1722,41 @@
   display: inline-flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
+  max-width: min(100%, 180px);
+  overflow: hidden;
   font-family: var(--lp-font-display, "Plus Jakarta Sans", system-ui, sans-serif);
   font-size: 16px;
   font-weight: 800;
   letter-spacing: -0.03em;
   color: #f8fafc;
+  line-height: 0;
+}
+
+.lp-login-brand-logo .dw-wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.lp-login-brand-logo .dw-wordmark-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lp-login-brand-logo .dt-logo,
+.lp-login-brand-logo svg,
+.lp-login-brand-logo img {
+  flex: 0 0 auto;
+  display: block;
+  width: 32px;
+  height: 32px;
+  max-width: 32px;
+  max-height: 32px;
+  object-fit: contain;
 }
 
 .lp-login-brand-body {
@@ -1823,25 +1853,28 @@
 /* ── Auth column (companion to brand plane) ── */
 .lp-login-auth {
   position: relative;
-  min-height: 100vh;
-  min-height: 100dvh;
+  min-height: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: safe center;
   background:
     radial-gradient(900px 480px at 100% 0%, rgba(13, 148, 136, 0.1), transparent 55%),
     linear-gradient(180deg, #f4faf9 0%, #eef6f4 100%);
   border-left: 1px solid rgba(13, 148, 136, 0.12);
+  overflow-x: hidden;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .lp-login-auth-inner {
   width: min(440px, 100%);
   margin: 0 auto;
   padding: clamp(24px, 5vh, 48px) clamp(18px, 4vw, 36px);
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
+  display: block;
+  flex: 0 0 auto;
+  max-height: none;
+  overflow: visible;
   animation: lp-login-rise 520ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 

@@ -1030,6 +1030,39 @@
   background: #fff;
 }
 
+.df2-jobs-detail-footer {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-height: 52px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--df-border);
+  background: var(--df-surface-muted, #f8fafc);
+}
+
+.df2-jobs-detail-footer:empty {
+  display: none;
+}
+
+.df2-jobs-detail-footer .df2-jobs-v3-actions,
+.df2-jobs-detail-footer .df2-jobs-quarantine-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+}
+
+.df2-jobs-detail-actions-hint {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--df-text-secondary);
+  line-height: 1.4;
+}
+
 .df2-jobs-detail-pane {
   flex: 1 1 0;
   min-height: 0;

@@ -3117,7 +3117,7 @@
   min-height: 0;
   overflow: hidden;
   display: grid;
-  grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
+  grid-template-columns: minmax(0, 1.05fr) minmax(min(100%, 360px), 0.95fr);
   background: #fff;
 }
 
@@ -3175,6 +3175,52 @@
   overflow: hidden;
 }
 
+.lp-login-brand-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.lp-login-brand-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: min(100%, 180px);
+  overflow: hidden;
+  line-height: 0;
+}
+
+.lp-login-brand-logo .dw-wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.lp-login-brand-logo .dw-wordmark-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: clamp(14px, 1.4vw, 16px);
+}
+
+.lp-login-brand-logo .dt-logo,
+.lp-login-brand-logo svg,
+.lp-login-brand-logo img {
+  flex: 0 0 auto;
+  display: block;
+  width: 32px;
+  height: 32px;
+  max-width: 32px;
+  max-height: 32px;
+  object-fit: contain;
+}
+
 .lp-login-brand-body {
   flex: 1;
   display: flex;
@@ -3182,6 +3228,8 @@
   justify-content: center;
   min-height: 0;
   gap: clamp(10px, 1.6vh, 16px);
+  padding: 0;
+  max-width: none;
 }
 
 .lp-login-brand-title {
@@ -3299,14 +3347,19 @@
 
 .lp-login-auth {
   position: relative;
-  display: grid;
-  place-items: center;
-  padding: clamp(16px, 3vh, 36px) clamp(18px, 3.5vw, 48px);
+  display: flex;
+  flex-direction: column;
+  justify-content: safe center;
+  align-items: center;
+  padding: clamp(12px, 2.2vh, 36px) clamp(16px, 3vw, 48px);
   background:
     radial-gradient(ellipse 80% 55% at 90% 0%, rgba(45, 212, 191, 0.22), transparent 58%),
     radial-gradient(ellipse 60% 50% at 0% 100%, rgba(245, 158, 11, 0.14), transparent 52%),
     linear-gradient(160deg, #e7f5f2 0%, #f3f8f7 38%, #fbfcfd 100%);
-  overflow: hidden;
+  /* Must scroll on short laptops — overflow:hidden clipped the Sign-in button. */
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   min-height: 0;
   border-left: 1px solid rgba(13, 148, 136, 0.14);
 }
@@ -3375,9 +3428,12 @@
   position: relative;
   z-index: 1;
   width: min(448px, 100%);
-  max-height: calc(100dvh - 32px);
-  overflow: auto;
-  overscroll-behavior: contain;
+  /* Grow with the card — parent `.lp-login-auth` scrolls on short viewports.
+     Flex + max-height previously shrunk the overflow:hidden card and hid Sign in. */
+  max-height: none;
+  flex: 0 0 auto;
+  display: block;
+  overflow: visible;
   animation: lp-login-rise 560ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
@@ -3386,13 +3442,16 @@
   background: #fff;
   border: 1px solid rgba(15, 118, 110, 0.16);
   border-radius: 24px;
-  padding: clamp(20px, 2.6vh, 28px) clamp(20px, 2.6vw, 30px) clamp(18px, 2.2vh, 24px);
+  padding: clamp(18px, 2.4vh, 28px) clamp(18px, 2.4vw, 30px) clamp(16px, 2vh, 24px);
   box-shadow:
     0 1px 0 rgba(255, 255, 255, 0.95) inset,
     0 24px 60px rgba(7, 28, 26, 0.12),
     0 8px 20px rgba(13, 148, 136, 0.1);
   box-sizing: border-box;
-  overflow: hidden;
+  /* Clip banner to radius without becoming a flex shrink target. */
+  overflow: clip;
+  min-height: min-content;
+  flex-shrink: 0;
 }
 
 .lp-login-auth-banner {
@@ -3400,7 +3459,7 @@
   left: 0;
   right: 0;
   top: 0;
-  height: 88px;
+  height: clamp(64px, 9vh, 88px);
   background:
     linear-gradient(120deg, #0a3d3a 0%, #0f766e 48%, #115e59 100%);
   pointer-events: none;
@@ -3431,11 +3490,29 @@
   position: relative;
   z-index: 1;
   width: fit-content;
-  margin: 28px 0 16px;
-  padding: 4px;
+  max-width: 100%;
+  margin: clamp(18px, 3.2vh, 28px) 0 clamp(10px, 1.6vh, 16px);
+  padding: 6px;
   border-radius: 16px;
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.14);
   box-shadow: 0 10px 28px rgba(7, 28, 26, 0.28);
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+
+.lp-login-auth-mark .dw-wordmark,
+.lp-login-auth-mark .dt-logo,
+.lp-login-auth-mark svg,
+.lp-login-auth-mark img {
+  display: block;
+  max-width: 100%;
+  max-height: 40px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
 }
 
 .lp-login-auth-kicker {
@@ -3599,11 +3676,19 @@
   }
 
   .lp-login-auth-banner {
-    height: 72px;
+    height: 64px;
   }
 
   .lp-login-auth-mark {
-    margin-top: 22px;
+    margin-top: 16px;
+    margin-bottom: 10px;
+    padding: 5px;
+  }
+
+  .lp-login-auth-mark .dt-logo,
+  .lp-login-auth-mark svg {
+    width: 36px !important;
+    height: 36px !important;
   }
 
   .lp-login-proof {
@@ -3619,7 +3704,7 @@
   }
 }
 
-@media (max-height: 680px) {
+@media (max-height: 720px) {
   .lp-login-metrics {
     display: none;
   }
@@ -3639,6 +3724,56 @@
 
   .lp-login-trust {
     display: none;
+  }
+
+  .lp-login-dev-actions {
+    margin-top: 8px;
+    padding-top: 8px;
+  }
+
+  .lp-login-auth {
+    padding-top: 10px;
+    padding-bottom: 10px;
+  }
+
+  .lp-login-auth-card {
+    padding: 14px 18px 16px;
+  }
+
+  .lp-login-auth-sub {
+    display: none;
+  }
+
+  .lp-login--gate .lp-login-form {
+    gap: 10px;
+  }
+
+  .lp-login--gate .lp-login-submit,
+  .lp-login--gate .lp-btn.lp-login-submit {
+    min-height: 46px;
+    margin-top: 2px;
+  }
+}
+
+@media (max-height: 600px) {
+  .lp-login-auth-banner {
+    height: 52px;
+  }
+
+  .lp-login-auth-kicker {
+    display: none;
+  }
+
+  .lp-login-auth-head h2 {
+    font-size: 1.35rem;
+  }
+
+  .lp-login--gate .lp-field {
+    margin-bottom: 0;
+  }
+
+  .lp-login--gate .lp-input {
+    min-height: 44px;
   }
 }
 
@@ -3687,16 +3822,19 @@
     border-left: none;
     min-height: auto;
     padding: 16px 16px 28px;
+    justify-content: flex-start;
   }
 
   .lp-login-auth-inner {
     max-height: none;
     width: min(440px, 100%);
     padding: 0;
+    margin: 0 auto;
   }
 
   .lp-login-auth-card {
     border-radius: 20px;
+    overflow: clip;
   }
 
   .lp-login-auth-arc {
@@ -7670,13 +7808,8 @@
     transform: none;
   }
 
-  .lp-login--gate {
-    grid-template-columns: 1fr;
-  }
-
-  .lp-login-brand {
-    min-height: 280px;
-  }
+  /* Login gate stays two-column until 960px — stacking here left ~290px for
+     auth on 1024×600 laptops and clipped the Sign-in button. */
 
   .docs-space {
     grid-template-columns: 1fr;
@@ -7775,7 +7908,7 @@
   }
 }
 
-/* Product page next CTAs — centered pill group, no hairlines */
+/* Product page next CTAs — centered button row (no oversized oval card) */
 .lp-mkt-next-band {
   width: 100%;
   margin: 0;
@@ -7791,20 +7924,22 @@
 
 .lp-mkt-next-cta.lp-section-footer,
 .lp .lp-mkt-next-cta.lp-section-footer {
-  display: inline-flex !important;
+  display: flex !important;
   justify-content: center !important;
   align-items: center;
   text-align: center;
   flex-wrap: wrap;
   gap: 12px;
-  margin: 0;
-  padding: 14px 16px;
-  border: 1px solid var(--lp-line) !important;
-  border-radius: 999px;
-  background: #fff;
-  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.05);
-  max-width: min(100%, 560px);
-  width: auto;
+  margin: 28px auto 0;
+  padding: 0;
+  border: 0 !important;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  max-width: min(100%, 640px);
+  width: 100%;
+  position: relative;
+  z-index: 1;
 }
 
 .lp-section-footer--center {
@@ -7814,4 +7949,21 @@
 .lp-mkt-next-cta .lp-btn {
   min-width: 0;
   border-radius: 999px;
+  flex: 0 1 auto;
+  max-width: 100%;
+}
+
+@media (max-width: 560px) {
+  .lp-mkt-next-cta.lp-section-footer,
+  .lp .lp-mkt-next-cta.lp-section-footer {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    padding: 0 4px;
+  }
+
+  .lp-mkt-next-cta .lp-btn {
+    width: 100%;
+    justify-content: center;
+  }
 }

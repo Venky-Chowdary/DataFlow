@@ -504,3 +504,47 @@
   min-height: min(480px, 60vh);
   padding: 32px 16px;
 }
+
+/* --- Global workspace density: no clipped action bars / overflow --- */
+@media (max-width: 1100px) {
+  .df2-page-actionbar,
+  .df2-wizard-footer,
+  .df2-theater-v3-footer,
+  .df2-jobs-detail-footer {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .df2-run-footer-actions,
+  .df2-map-footer-actions,
+  .df2-validate-footer-actions,
+  .df2-theater-v3-footer-actions {
+    width: 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 900px) {
+  .df2-jobs-v3-layout {
+    grid-template-columns: 1fr !important;
+  }
+
+  .df2-jobs-detail-footer .df2-btn,
+  .df2-jobs-detail-footer .df2-jobs-v3-actions > *,
+  .df2-jobs-detail-footer .df2-jobs-quarantine-actions > * {
+    flex: 1 1 auto;
+    min-width: min(100%, 140px);
+  }
+
+  .df2-vd-fix-actions {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+@media (max-height: 700px) {
+  .df2-theater-v3-log-section .df2-live-log.is-open {
+    max-height: min(36vh, 280px) !important;
+    min-height: 120px !important;
+  }
+}

@@ -348,9 +348,87 @@ export function engineStampedRiskChip(m: EditableMapping): {
   return null;
 }
 
+/** Safe normalizations — trim/case/email/phone — not precision or semantic risk. */
+const SAFE_NORMALIZE_TRANSFORMS = new Set<string>([
+  "trim",
+  "lower",
+  "upper",
+  "email",
+  "phone",
+  "strip_controls",
+]);
+
+/**
+ * Operator-facing ack tier for Map status actions.
+ * - approve: harmless / preserve (or safe normalize) — no "risk" language
+ * - review: reversible cast / ISO / widen-to-text — needs eyes, not scare wording
+ * - accept_risk: lossy / irreversible / STRUCT expand / specialty transport
+ */
+export type MappingAckTier = "approve" | "review" | "accept_risk";
+
+export function isSafeNormalizeMapping(m: EditableMapping): boolean {
+  if (isIntentionalOmit(m)) return false;
+  if (m.typeNarrowing || (m.fidelity || "").toLowerCase() === "lossy_cast") return false;
+  if (hasCreateNewTypeRisk(m)) return false;
+  if (isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType)) return false;
+  if (m.transform === "identity_specialty") return false;
+  if (
+    m.structPolicy === "flatten_top_level_keys"
+    || m.structPolicy === "flatten_deep"
+    || m.structPolicy === "explode_rows"
+    || m.structDerived
+  ) {
+    return false;
+  }
+  const t = (m.transform || "").toLowerCase();
+  return SAFE_NORMALIZE_TRANSFORMS.has(t);
+}
+
+export function mappingAckTier(m: EditableMapping): MappingAckTier {
+  if (isIntentionalOmit(m) || !mappingRequiresRiskAck(m)) return "approve";
+  if (isSafeNormalizeMapping(m)) return "approve";
+  const fidelity = (m.fidelity || "").toLowerCase();
+  if (fidelity === "lossy_cast" || m.typeNarrowing) return "accept_risk";
+  if (hasCreateNewTypeRisk(m)) {
+    const hasBlock = (m.createNewRisks || []).some(
+      (r) => (r.severity || "").toLowerCase() === "block",
+    );
+    return hasBlock ? "accept_risk" : "review";
+  }
+  if (
+    isSpecialtyLogicalType(m.inferredType)
+    || isSpecialtyLogicalType(m.destType)
+    || m.transform === "identity_specialty"
+    || m.structDerived
+    || m.structPolicy === "flatten_top_level_keys"
+    || m.structPolicy === "flatten_deep"
+    || m.structPolicy === "explode_rows"
+  ) {
+    return "accept_risk";
+  }
+  // cast / mutate (non-safe) / carrier widen → Review
+  return "review";
+}
+
+export function mappingAckLabel(m: EditableMapping): string {
+  const tier = mappingAckTier(m);
+  if (tier === "accept_risk") return "Accept risk";
+  if (tier === "review") return "Review";
+  return "Approve";
+}
+
+export function mappingAckDoneLabel(m: EditableMapping): string {
+  if (m.riskAcknowledged && mappingRequiresRiskAck(m)) {
+    return mappingAckTier(m) === "accept_risk" ? "Risk accepted" : "Reviewed";
+  }
+  return "Ready";
+}
+
 /** Lossy, mutate, cast (quarantine path), specialty, create-new risk, or STRUCT expand — G4 needs risk_acknowledged. */
 export function mappingRequiresRiskAck(m: EditableMapping): boolean {
   if (isIntentionalOmit(m)) return false;
+  // Safe normalize (email/trim/case) is not fidelity risk — Approve is enough.
+  if (isSafeNormalizeMapping(m)) return false;
   const fidelity = (m.fidelity || "").toLowerCase();
   // cast = type path holds but unparseable values quarantine — never silent Ready.
   if (fidelity === "lossy_cast" || fidelity === "mutate" || fidelity === "cast" || m.typeNarrowing) {
@@ -871,15 +949,40 @@ function boostIdentityConfidence(
   confidence: number,
   createNew = false,
   pendingDestSchema = false,
+  fidelity?: string,
+  transform?: string,
 ): number {
   // Pending / unknown destination — never inflate toward create-new certainty.
   if (pendingDestSchema) return Math.min(confidence, 0.55);
   const norm = normalizeMappingTarget(source);
-  if (norm === target || source.toLowerCase() === target.toLowerCase()) {
-    if (createNew) return Math.min(Math.max(confidence, 0.9), 0.93);
-    return Math.max(confidence, 0.95);
+  const exact = norm === target || source.toLowerCase() === target.toLowerCase();
+  const fid = (fidelity || "").toLowerCase();
+  const tf = (transform || "").toLowerCase();
+  let next = confidence;
+  if (exact) {
+    if (createNew) {
+      // Vary create-new identity by fidelity — avoid a flat 93% wall.
+      if (fid === "lossy_cast") next = Math.min(Math.max(confidence, 0.62), 0.74);
+      else if (fid === "mutate" && !SAFE_NORMALIZE_TRANSFORMS.has(tf)) {
+        next = Math.min(Math.max(confidence, 0.78), 0.88);
+      } else if (fid === "mutate") {
+        next = Math.min(Math.max(confidence, 0.88), 0.94);
+      } else if (fid === "cast") {
+        next = Math.min(Math.max(confidence, 0.8), 0.9);
+      } else if (fid === "preserve" || !fid) {
+        next = Math.min(Math.max(confidence, 0.9), 0.96);
+      } else {
+        next = Math.min(Math.max(confidence, 0.86), 0.93);
+      }
+    } else {
+      next = Math.max(confidence, fid === "lossy_cast" ? 0.7 : 0.95);
+    }
+  } else if (fid === "lossy_cast") {
+    next = Math.min(confidence, 0.72);
+  } else if (fid === "cast") {
+    next = Math.min(Math.max(confidence, 0.7), 0.88);
   }
-  return confidence;
+  return next;
 }
 
 export function mappingsFromAnalysis(
@@ -1100,6 +1203,8 @@ export function editableFromPipelineMappings(
       m.confidence,
       rowCreateNew,
       pendingDest,
+      (m.fidelity || "").trim().toLowerCase() || undefined,
+      (m.transform || "").trim().toLowerCase() || undefined,
     );
     const requiresReview = Boolean(m.requires_review) || pendingDest;
     const sourceType = m.source_type;

@@ -8,6 +8,7 @@ import {
   applyDestTypeChange,
   applyStructPolicyChange,
   applyTransformChange,
+  approveMappingHonestly,
   approveMappingsHonestly,
   buildPreflightMappings,
   canWidenMapping,
@@ -17,6 +18,9 @@ import {
   engineStampedRiskChip,
   engineTransformToUi,
   inferLogicalFromSample,
+  isSafeNormalizeMapping,
+  mappingAckLabel,
+  mappingAckTier,
   mappingHealthSummary,
   mappingRequiresRiskAck,
   mappingsFromAnalysis,
@@ -144,14 +148,14 @@ describe("fail-closed Map approve", () => {
   it("approve-all refuses mutate fidelity without risk ack", () => {
     const next = approveMappingsHonestly([
       {
-        source: "phone",
-        target: "phone",
+        source: "amount",
+        target: "amount",
         confidence: 0.99,
         approved: false,
         fidelity: "mutate",
-        transform: "phone",
+        transform: "currency",
         inferredType: "VARCHAR",
-        destType: "VARCHAR",
+        destType: "DECIMAL",
       },
     ]);
     assert.equal(next[0].approved, false);
@@ -159,6 +163,53 @@ describe("fail-closed Map approve", () => {
     const acked = acknowledgeMappingRisk(next[0]);
     assert.equal(acked.riskAcknowledged, true);
     assert.equal(acked.approved, true);
+  });
+
+  it("safe normalize (email/trim) Approves without Accept risk wording", () => {
+    const email = {
+      source: "customer_email",
+      target: "customer_email",
+      confidence: 0.93,
+      approved: false,
+      fidelity: "mutate" as const,
+      transform: "email" as const,
+      inferredType: "VARCHAR",
+      destType: "TEXT",
+    };
+    assert.equal(isSafeNormalizeMapping(email), true);
+    assert.equal(mappingRequiresRiskAck(email), false);
+    assert.equal(mappingAckLabel(email), "Approve");
+    const next = approveMappingHonestly(email);
+    assert.equal(next.approved, true);
+    assert.equal(next.riskAcknowledged, undefined);
+  });
+
+  it("cast fidelity uses Review label; lossy uses Accept risk", () => {
+    const castRow = {
+      source: "order_date",
+      target: "order_date",
+      confidence: 0.9,
+      approved: false,
+      fidelity: "cast" as const,
+      transform: "date_iso" as const,
+      inferredType: "DATE",
+      destType: "TEXT",
+    };
+    const lossy = {
+      source: "order_amt",
+      target: "order_amt",
+      confidence: 0.7,
+      approved: false,
+      fidelity: "lossy_cast" as const,
+      transform: "cast_integer" as const,
+      inferredType: "DECIMAL",
+      destType: "INTEGER",
+      typeNarrowing: true,
+    };
+    assert.equal(mappingAckTier(castRow), "review");
+    assert.equal(mappingAckLabel(castRow), "Review");
+    assert.equal(mappingAckTier(lossy), "accept_risk");
+    assert.equal(mappingAckLabel(lossy), "Accept risk");
   });
 });
 
@@ -440,7 +491,7 @@ describe("destination schema honesty", () => {
       },
     ]);
     assert.equal(fromEditable[0].create_new, true);
-    assert.ok((fromEditable[0].confidence as number) <= 0.93);
+    assert.ok((fromEditable[0].confidence as number) <= 0.96);
 
     const fromColumns = buildPreflightMappings([
       {
@@ -453,7 +504,7 @@ describe("destination schema honesty", () => {
       },
     ]);
     assert.equal(fromColumns[0].create_new, true);
-    assert.ok((fromColumns[0].confidence as number) <= 0.93);
+    assert.ok((fromColumns[0].confidence as number) <= 0.96);
   });
 
   it("caps Map bootstrap identity when dest column is missing (even without createNew flag)", () => {
@@ -471,7 +522,7 @@ describe("destination schema honesty", () => {
       },
     ]);
     assert.equal(fromBootstrap[0].create_new, true);
-    assert.ok((fromBootstrap[0].confidence as number) <= 0.93);
+    assert.ok((fromBootstrap[0].confidence as number) <= 0.96);
   });
 
   it("mappingsFromAnalysis caps create-new and pending dest honestly", () => {
@@ -483,7 +534,7 @@ describe("destination schema honesty", () => {
       compliance: [],
     }];
     const unknownDest = mappingsFromAnalysis(cols);
-    assert.ok(unknownDest[0].confidence <= 0.93);
+    assert.ok(unknownDest[0].confidence <= 0.96);
 
     const pending = mappingsFromAnalysis(cols, undefined, []);
     assert.equal(pending[0].assignmentStrategy, "pending_dest_schema");
@@ -493,7 +544,7 @@ describe("destination schema honesty", () => {
     const create = mappingsFromAnalysis(cols, undefined, ["other_col"]);
     assert.equal(create[0].existsInDestination, false);
     assert.equal(create[0].createNew, true);
-    assert.ok(create[0].confidence <= 0.93);
+    assert.ok(create[0].confidence <= 0.96);
 
     const existing = mappingsFromAnalysis(cols, undefined, ["id"]);
     assert.equal(existing[0].existsInDestination, true);

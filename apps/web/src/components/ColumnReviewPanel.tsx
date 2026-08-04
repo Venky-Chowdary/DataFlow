@@ -24,6 +24,9 @@ import {
   createNewRiskDetail,
   engineStampedRiskChip,
   hasCreateNewTypeRisk,
+  mappingAckDoneLabel,
+  mappingAckLabel,
+  mappingAckTier,
   mappingRequiresRiskAck,
   pipelineTransformChip,
   widenMappingToVarchar,
@@ -475,7 +478,7 @@ export function ColumnReviewPanel({
               {mappings.some((m) => mappingRequiresRiskAck(m) && !m.riskAcknowledged && !isIntentionalOmit(m)) && (
                 <>
                   {" "}
-                  Use <strong>Accept risk</strong> for cast / lossy / create-new type chips — Approve alone will not unlock Validate.
+                  Use <strong>Review</strong> for reversible casts and <strong>Accept risk</strong> for lossy / irreversible changes — Approve alone will not unlock Validate on those rows.
                 </>
               )}
             </span>
@@ -787,22 +790,24 @@ export function ColumnReviewPanel({
                       <span className="df2-badge df2-badge-muted df2-badge-xs">Omitted</span>
                     ) : ready ? (
                       <span className="df2-badge df2-badge-live df2-badge-xs">
-                        {m.riskAcknowledged && mappingRequiresRiskAck(m) ? "Risk accepted" : "Ready"}
+                        {mappingAckDoneLabel(m)}
                       </span>
                     ) : (
                       <button
                         type="button"
-                        className="df2-btn df2-btn-sm"
+                        className={`df2-btn df2-btn-sm${mappingAckTier(m) === "accept_risk" ? " df2-btn-danger" : ""}`}
                         onClick={() => approveOne(index)}
                         title={
                           mappingRequiresRiskAck(m)
                             ? createNewRiskDetail(m)
                               || m.fidelityReason
-                              || "Accept fidelity / structural risk for this column"
+                              || (mappingAckTier(m) === "review"
+                                ? "Review this conversion before Execute"
+                                : "Accept fidelity / structural risk for this column")
                             : undefined
                         }
                       >
-                        {mappingRequiresRiskAck(m) ? "Accept risk" : "Approve"}
+                        {mappingAckLabel(m)}
                       </button>
                     )}
                   </td>

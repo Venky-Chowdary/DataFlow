@@ -240,7 +240,7 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
             </div>
 
             <div className="lp-login-auth-mark" aria-hidden>
-              <BrandWordmark markSize={44} word={false} title="" />
+              <BrandWordmark markSize={40} word={false} title="" />
             </div>
 
             <div className="lp-login-auth-head">

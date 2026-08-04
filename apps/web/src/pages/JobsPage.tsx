@@ -1244,54 +1244,9 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                             )}
 
                             {selected.status === "failed" && (
-                              <div className="df2-jobs-v3-actions">
-                                {duplicateKeyFailure && onStartTransfer && (
-                                  <button
-                                    type="button"
-                                    className="df2-btn df2-btn-primary"
-                                    onClick={() => openMapInStudio()}
-                                  >
-                                    <DtIcon name="layers" size={16} /> Open Map · set primary key
-                                  </button>
-                                )}
-                                {liveJob?.checkpoint && (liveJob.checkpoint.rows_processed ?? 0) > 0 && !duplicateKeyFailure && (
-                                  <button
-                                    type="button"
-                                    className="df2-btn df2-btn-primary"
-                                    onClick={() => void handleResume()}
-                                    disabled={resuming}
-                                  >
-                                    {resuming ? <ButtonLoader label="Resuming…" /> : <><DtIcon name="activity" size={16} /> Resume from batch {liveJob.checkpoint.chunk_index ?? 0}</>}
-                                  </button>
-                                )}
-                                <button
-                                  type="button"
-                                  className={
-                                    duplicateKeyFailure
-                                      || (liveJob?.checkpoint && (liveJob.checkpoint.rows_processed ?? 0) > 0)
-                                      ? "df2-btn"
-                                      : "df2-btn df2-btn-primary"
-                                  }
-                                  onClick={() => void handleRetry()}
-                                  disabled={retrying}
-                                  title="Starts a new job and re-reads the source from the beginning. Use Resume to continue from the last committed batch."
-                                >
-                                  {retrying
-                                    ? <ButtonLoader label="Retrying…" />
-                                    : (
-                                      <><DtIcon name="transfer" size={16} /> Retry from start</>
-                                    )}
-                                </button>
-                                {onStartTransfer && (
-                                  <button
-                                    type="button"
-                                    className="df2-btn"
-                                    onClick={() => openValidateInStudio()}
-                                  >
-                                    Open Validate in Studio
-                                  </button>
-                                )}
-                              </div>
+                              <p className="df2-jobs-detail-actions-hint">
+                                Recovery actions are pinned in the bar below this card.
+                              </p>
                             )}
                           </div>
                         )}
@@ -1387,22 +1342,6 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                   <strong>{Number(liveJob.coerced_null_rows ?? 0).toLocaleString()}</strong>
                                 </article>
                               </div>
-                              <div className="df2-jobs-quarantine-actions">
-                                <Button
-                                  variant="primary"
-                                  onClick={() => setEvidenceDrawer("quarantine")}
-                                  leadingIcon={<DtIcon name="alert" size={14} />}
-                                >
-                                  Inspect quarantine details
-                                </Button>
-                                <Button
-                                  variant="secondary"
-                                  onClick={() => openValidateInStudio()}
-                                  leadingIcon={<DtIcon name="gate" size={14} />}
-                                >
-                                  Open Validate in Studio
-                                </Button>
-                              </div>
                             </section>
                           </div>
                         )}
@@ -1463,6 +1402,106 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                 description="Run a transfer to capture event and DDL logs. Older jobs may not have a durable log stored."
                               />
                             )}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="df2-jobs-detail-footer" role="navigation" aria-label="Job actions">
+                        {detailTab === "detail" && selected.status === "failed" && (
+                          <div className="df2-jobs-v3-actions">
+                            {duplicateKeyFailure && onStartTransfer && (
+                              <button
+                                type="button"
+                                className="df2-btn df2-btn-primary"
+                                onClick={() => openMapInStudio()}
+                              >
+                                <DtIcon name="layers" size={16} /> Open Map · set primary key
+                              </button>
+                            )}
+                            {liveJob?.checkpoint && (liveJob.checkpoint.rows_processed ?? 0) > 0 && !duplicateKeyFailure && (
+                              <button
+                                type="button"
+                                className="df2-btn df2-btn-primary"
+                                onClick={() => void handleResume()}
+                                disabled={resuming}
+                              >
+                                {resuming ? <ButtonLoader label="Resuming…" /> : <><DtIcon name="activity" size={16} /> Resume from batch {liveJob.checkpoint.chunk_index ?? 0}</>}
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className={
+                                duplicateKeyFailure
+                                  || (liveJob?.checkpoint && (liveJob.checkpoint.rows_processed ?? 0) > 0)
+                                  ? "df2-btn"
+                                  : "df2-btn df2-btn-primary"
+                              }
+                              onClick={() => void handleRetry()}
+                              disabled={retrying}
+                              title="Starts a new job and re-reads the source from the beginning. Use Resume to continue from the last committed batch."
+                            >
+                              {retrying
+                                ? <ButtonLoader label="Retrying…" />
+                                : (
+                                  <><DtIcon name="transfer" size={16} /> Retry from start</>
+                                )}
+                            </button>
+                            {onStartTransfer && (
+                              <button
+                                type="button"
+                                className="df2-btn"
+                                onClick={() => openValidateInStudio()}
+                              >
+                                Open Validate in Studio
+                              </button>
+                            )}
+                          </div>
+                        )}
+                        {detailTab === "quarantine" && (
+                          <div className="df2-jobs-quarantine-actions">
+                            <Button
+                              variant="primary"
+                              onClick={() => setEvidenceDrawer("quarantine")}
+                              leadingIcon={<DtIcon name="alert" size={14} />}
+                            >
+                              Inspect quarantine details
+                            </Button>
+                            <Button
+                              variant="secondary"
+                              onClick={() => openValidateInStudio()}
+                              leadingIcon={<DtIcon name="gate" size={14} />}
+                            >
+                              Open Validate in Studio
+                            </Button>
+                          </div>
+                        )}
+                        {detailTab === "mapping" && onStartTransfer && (
+                          <div className="df2-jobs-v3-actions">
+                            <button
+                              type="button"
+                              className="df2-btn df2-btn-primary"
+                              onClick={() => openMapInStudio()}
+                            >
+                              <DtIcon name="layers" size={16} /> Open Map in Studio
+                            </button>
+                            <button
+                              type="button"
+                              className="df2-btn"
+                              onClick={() => openValidateInStudio()}
+                            >
+                              Open Validate in Studio
+                            </button>
+                          </div>
+                        )}
+                        {detailTab === "log" && onStartTransfer && (
+                          <div className="df2-jobs-v3-actions">
+                            <button
+                              type="button"
+                              className="df2-btn"
+                              onClick={() => openValidateInStudio()}
+                            >
+                              Open Validate in Studio
+                            </button>
                           </div>
                         )}
                       </div>
