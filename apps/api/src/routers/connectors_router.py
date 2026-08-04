@@ -783,9 +783,8 @@ async def get_job_quarantine(job_id: str, request: Request):
         "error": ds.get("dest_quarantine_error") or dest_q.get("error"),
     }
     # Control-plane JSONL durability is independent of the destination-table
-    # DLQ. When persist_rejected_rows fails the engine still lists the rows in
-    # memory, so a Replay button that looks healthy would find nothing to
-    # rewrite. Surface the flag next to dest_dlq so the UI can block that.
+    # DLQ. Module 5: persist failure fail-closes the job (quarantine_durable=False
+    # never pairs with a successful terminal status when rejects exist).
     quarantine_durable = ds.get("quarantine_durable")
     if quarantine_durable is None and rejected_rows:
         # Older jobs wrote rejects without the flag — treat as unknown, not lost.
