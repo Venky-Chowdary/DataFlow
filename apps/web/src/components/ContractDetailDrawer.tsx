@@ -8,9 +8,11 @@ import {
   ContractBreaker,
   DataContractSummary,
   fetchContractBreaker,
+  fetchContractHistory,
+  type ContractRevision,
 } from "../lib/api";
 
-export const CONTRACT_TABS = ["Overview", "Columns", "Mappings", "Quality"] as const;
+export const CONTRACT_TABS = ["Overview", "Columns", "Mappings", "Quality", "History"] as const;
 export type ContractTab = (typeof CONTRACT_TABS)[number];
 
 interface ContractDetailDrawerProps {
@@ -69,6 +71,8 @@ export function ContractDetailDrawer({
   onExport,
 }: ContractDetailDrawerProps) {
   const [breaker, setBreaker] = useState<ContractBreaker | null>(null);
+  const [revisions, setRevisions] = useState<ContractRevision[]>([]);
+  const [historyHonesty, setHistoryHonesty] = useState("");
 
   useEffect(() => {
     if (!open || !c?.id) {
@@ -87,6 +91,29 @@ export function ContractDetailDrawer({
       cancelled = true;
     };
   }, [open, c?.id]);
+
+  useEffect(() => {
+    if (!open || !c?.id || tab !== "History") {
+      return;
+    }
+    let cancelled = false;
+    fetchContractHistory(c.id)
+      .then((h) => {
+        if (!cancelled) {
+          setRevisions(h.revisions || []);
+          setHistoryHonesty(h.honesty || "");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRevisions([]);
+          setHistoryHonesty("");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, c?.id, tab]);
 
   if (!c) return null;
 
@@ -180,6 +207,7 @@ export function ContractDetailDrawer({
             { id: "Columns", label: "Columns", count: c.columns?.length || 0 },
             { id: "Mappings", label: "Mappings", count: c.mappings?.length || 0 },
             { id: "Quality", label: "Quality", count: c.quality_rules?.length || 0 },
+            { id: "History", label: "History", count: revisions.length || undefined },
           ]}
         />
 
@@ -307,6 +335,37 @@ export function ContractDetailDrawer({
                     </li>
                   );
                 })}
+              </ul>
+            )}
+          </section>
+        )}
+
+        {tab === "History" && (
+          <section className="df2-drawer-section" aria-label="Contract revision history">
+            {historyHonesty && (
+              <p className="df2-label-hint" style={{ marginBottom: 12 }}>{historyHonesty}</p>
+            )}
+            {revisions.length === 0 ? (
+              <EmptyState
+                compact
+                icon="clock"
+                title="No revisions yet"
+                description="Sign or re-sign this contract to create a schema-agreement snapshot."
+              />
+            ) : (
+              <ul className="df2-drawer-related-list">
+                {revisions.map((r, i) => (
+                  <li key={`${r.version}-${r.at}-${i}`} className="df2-drawer-related-row">
+                    <span className="df2-drawer-related-main">
+                      <strong>v{r.version ?? "?"} · {r.from_status || "?"} → {r.to_status || "?"}</strong>
+                      <small>
+                        {r.at ? new Date(r.at).toLocaleString() : "—"}
+                        {" · "}
+                        {r.column_count ?? 0} cols · {r.mapping_count ?? 0} maps
+                      </small>
+                    </span>
+                  </li>
+                ))}
               </ul>
             )}
           </section>

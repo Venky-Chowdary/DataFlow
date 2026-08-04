@@ -127,7 +127,7 @@ import {
   findDuplicateKeyRoot,
   isEncodingIntegritySignal,
 } from "../lib/validateIssueGrouping";
-import { suggestUniqueKeyCandidates } from "../lib/uniqueKeySuggestions";
+import { suggestUniqueKeyCandidates, suggestCompositeUniqueKeyCandidates } from "../lib/uniqueKeySuggestions";
 import { needsMappingReview } from "../lib/columnWorkbench";
 import {
   buildStreamContracts,
@@ -928,6 +928,15 @@ export function TransferPage({
         samplePreviewRows as Record<string, unknown>[],
         currentSourceColumns,
         { exclude: primaryKeyField ? [primaryKeyField] : [], limit: 5 },
+      ),
+    [samplePreviewRows, currentSourceColumns, primaryKeyField],
+  );
+  const compositeKeySuggestions = useMemo(
+    () =>
+      suggestCompositeUniqueKeyCandidates(
+        samplePreviewRows as Record<string, unknown>[],
+        currentSourceColumns,
+        { exclude: primaryKeyField && !primaryKeyField.includes(",") ? [primaryKeyField] : [], limit: 3 },
       ),
     [samplePreviewRows, currentSourceColumns, primaryKeyField],
   );
@@ -6015,6 +6024,7 @@ export function TransferPage({
         suggestedCursor={cursorCandidate}
         suggestedPrimaryKey={primaryKeyCandidate}
         uniqueKeySuggestions={uniqueKeySuggestions}
+        compositeKeySuggestions={compositeKeySuggestions}
         snapshotMode={snapshotMode}
         onSnapshotModeChange={setSnapshotMode}
         allowAppendOnly={allowAppendOnly}

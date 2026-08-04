@@ -3054,6 +3054,37 @@ export async function signContract(id: string, strict = true): Promise<DataContr
   return res.json();
 }
 
+export interface ContractRevision {
+  version?: number;
+  from_status?: string;
+  to_status?: string;
+  column_count?: number;
+  mapping_count?: number;
+  at?: string;
+  note?: string;
+}
+
+export async function fetchContractHistory(id: string): Promise<{
+  contract_id: string;
+  current_version: number;
+  current_status: string;
+  revisions: ContractRevision[];
+  honesty?: string;
+}> {
+  const res = await apiFetch(`${API_BASE}/contracts/${encodeURIComponent(id)}/history`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load contract history"));
+  return res.json();
+}
+
+export async function acknowledgeCdcMappingReview(reviewId: string): Promise<Record<string, unknown>> {
+  const res = await apiFetch(
+    `${API_BASE}/cdc/mapping-reviews/${encodeURIComponent(reviewId)}/acknowledge`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not acknowledge mapping review"));
+  return res.json();
+}
+
 export async function deprecateContract(id: string): Promise<DataContractSummary> {
   const res = await apiFetch(`${API_BASE}/contracts/${encodeURIComponent(id)}/deprecate`, {
     method: "POST",

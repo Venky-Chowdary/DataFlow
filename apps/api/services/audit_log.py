@@ -138,6 +138,7 @@ def append_audit_event(
         if coll is not None:
             try:
                 coll.insert_one(event)
+                _maybe_anchor_tip(event)
                 return event
             except Exception as exc:
                 logging.getLogger(__name__).warning(
@@ -156,7 +157,28 @@ def append_audit_event(
         with STORE_PATH.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(file_event, ensure_ascii=False, default=json_default) + "\n")
         _trim_if_needed()
+        _maybe_anchor_tip(event)
         return event
+
+
+def _maybe_anchor_tip(event: dict[str, Any]) -> None:
+    """Best-effort seal of the chain tip (never fails the audit append)."""
+    try:
+        from services.brand_env import getenv_brand
+        from services.audit_anchor import anchor_tip
+
+        tip = str(event.get("event_hash") or "")
+        if not tip:
+            return
+        # Anchor every Nth event to limit write amplification (default: every event in stub).
+        every = int(getenv_brand("AUDIT_ANCHOR_EVERY", "1") or "1")
+        if every > 1:
+            # Cheap sampling: last hex nibble mod every
+            if int(tip[-1], 16) % every != 0:
+                return
+        anchor_tip(tip, event_time=str(event.get("time") or ""))
+    except Exception as exc:
+        logging.getLogger(__name__).debug("audit tip anchor skipped: %s", exc)
 
 
 def latest_event_hash() -> str | None:

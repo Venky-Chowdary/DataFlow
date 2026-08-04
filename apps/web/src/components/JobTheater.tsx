@@ -963,6 +963,26 @@ export function JobTheaterView({
             <div>
               <strong>Map review required</strong>
               <span>{String(job.mapping_review_reason || "cdc_schema_drift")}</span>
+              {job.mapping_review_id && onBackToValidate && (
+                <button
+                  type="button"
+                  className="df2-btn df2-btn-sm"
+                  style={{ marginTop: 6 }}
+                  onClick={() => {
+                    void (async () => {
+                      try {
+                        const { acknowledgeCdcMappingReview } = await import("../lib/api");
+                        await acknowledgeCdcMappingReview(String(job.mapping_review_id));
+                        onBackToValidate();
+                      } catch (err) {
+                        window.alert(err instanceof Error ? err.message : "Acknowledge failed");
+                      }
+                    })();
+                  }}
+                >
+                  Acknowledge after Map
+                </button>
+              )}
             </div>
           </article>
         )}

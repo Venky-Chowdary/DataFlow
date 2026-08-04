@@ -89,6 +89,8 @@ interface DestinationAdvancedDrawerProps {
   suggestedPrimaryKey?: string;
   /** Sample-unique PK candidates (honest: preview sample only). */
   uniqueKeySuggestions?: Array<{ column: string; sampleRows: number; uniqueCount: number }>;
+  /** Sample-unique 2-column composites (comma-joined into primary key field). */
+  compositeKeySuggestions?: Array<{ columns: string[]; sampleRows: number; uniqueCount: number }>;
   /** Debezium-compatible snapshot mode (CDC). */
   snapshotMode?: string;
   onSnapshotModeChange?: (mode: string) => void;
@@ -197,6 +199,7 @@ export function DestinationAdvancedDrawer({
   suggestedCursor = "",
   suggestedPrimaryKey = "",
   uniqueKeySuggestions = [],
+  compositeKeySuggestions = [],
   snapshotMode = "initial",
   onSnapshotModeChange,
   priorityColumn = "",
@@ -328,7 +331,7 @@ export function DestinationAdvancedDrawer({
           </div>
         </div>
 
-        {((requiresCursor || requiresPrimaryKey) && (suggestedCursor || suggestedPrimaryKey || uniqueKeySuggestions.length > 0)) && (
+        {((requiresCursor || requiresPrimaryKey) && (suggestedCursor || suggestedPrimaryKey || uniqueKeySuggestions.length > 0 || (compositeKeySuggestions?.length ?? 0) > 0)) && (
           <div className="df2-adv-suggest-row">
             {requiresCursor && suggestedCursor && !defaultCursor && (
               <button
@@ -363,6 +366,23 @@ export function DestinationAdvancedDrawer({
                     Unique in sample · <strong>{s.column}</strong>
                   </button>
                 ))}
+            {requiresPrimaryKey &&
+              (compositeKeySuggestions || [])
+                .slice(0, 2)
+                .map((s) => {
+                  const joined = s.columns.join(",");
+                  return (
+                    <button
+                      key={joined}
+                      type="button"
+                      className="df2-adv-suggest-chip"
+                      title={`Composite unique in ${s.sampleRows}-row sample — not full-table proof`}
+                      onClick={() => onStreamPrimaryKeyChange(names[0], joined)}
+                    >
+                      Composite in sample · <strong>{s.columns.join(" + ")}</strong>
+                    </button>
+                  );
+                })}
           </div>
         )}
 

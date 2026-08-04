@@ -203,6 +203,45 @@ def build_schedule_request(sched, src: dict, dst: dict):
 
         assert_signed_contract(contract_id, require_signed=require_signed)
 
+    # Fail-closed: open CDC Map-review for this source pauses scheduled runs.
+    sync_l = str(getattr(sched, "sync_mode", "") or "").strip().lower()
+    is_cdc_like = sync_l in {"cdc", "incremental", "incremental_append", "incremental_deduped"}
+    try:
+        from services.cdc_mapping_review import open_review_for_source
+        from services.cdc_schema_history import connection_fingerprint
+        from services.connector_store import get_connector
+
+        src_conn = get_connector(sched.source_connector_id, workspace_id=sched.workspace_id or None)
+        if src_conn is not None:
+            cfg = src_conn.to_dict()
+            source_keys = [
+                connection_fingerprint(cfg, connector_id=src_conn.id),
+                connection_fingerprint(cfg),
+            ]
+            table = (sched.source_table or "").strip()
+            seen: set[str] = set()
+            for source_key in source_keys:
+                if not source_key or source_key in seen:
+                    continue
+                seen.add(source_key)
+                review = open_review_for_source(source_key, table) or open_review_for_source(
+                    source_key, ""
+                )
+                if review:
+                    raise ValueError(
+                        f"CDC mapping review required before schedule run "
+                        f"(review_id={review.get('id')}, table={review.get('table')}). "
+                        "Open Map, review fidelity, acknowledge the review, then re-enable."
+                    )
+    except ValueError:
+        raise
+    except Exception as exc:
+        if is_cdc_like:
+            raise ValueError(
+                f"CDC mapping-review gate unavailable (fail-closed): {exc}"
+            ) from exc
+        logger.debug("CDC mapping-review schedule gate skipped", exc_info=True)
+
     from services.batch_progress import effective_backfill_new_fields
 
     mappings = list(sched.mappings or [])

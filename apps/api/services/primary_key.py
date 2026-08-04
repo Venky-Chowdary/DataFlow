@@ -181,19 +181,23 @@ def _mapping_pairs(mappings: Iterable[Any]) -> list[tuple[str, str]]:
     return pairs
 
 
-def extract_contract_primary_key(
+def extract_contract_primary_key_columns(
     stream_contracts: Iterable[Any] | None,
     *,
     stream_name: str = "",
-) -> str | None:
-    """Operator primary key from Studio ``stream_contracts`` (Execute uses the same)."""
+) -> list[str]:
+    """Ordered composite primary key columns from Studio ``stream_contracts``.
+
+    Prefer this over :func:`extract_contract_primary_key` when callers need the
+    full composite (CDC deletes, uniqueness probes). Empty list when unset.
+    """
     contracts = [
         c
         for c in (stream_contracts or [])
         if isinstance(c, dict) and c.get("selected", True)
     ]
     if not contracts:
-        return None
+        return []
     chosen: dict[str, Any] | None = None
     want = (stream_name or "").strip()
     if want:
@@ -207,13 +211,29 @@ def extract_contract_primary_key(
     if raw is None and c:
         raw = c.get("primary_keys")
     if isinstance(raw, (list, tuple)):
-        for item in raw:
-            name = str(item or "").strip()
-            if name:
-                return name
-        return None
+        out = [str(item).strip() for item in raw if str(item or "").strip()]
+        return out
     name = str(raw or "").strip()
-    return name or None
+    if not name:
+        return []
+    # Comma-joined composite form used by some Studio payloads.
+    if "," in name:
+        return [p.strip() for p in name.split(",") if p.strip()]
+    return [name]
+
+
+def extract_contract_primary_key(
+    stream_contracts: Iterable[Any] | None,
+    *,
+    stream_name: str = "",
+) -> str | None:
+    """Single identity column for legacy callers (first of a composite).
+
+    Prefer :func:`extract_contract_primary_key_columns` when the full composite
+    is required (CDC deletes, uniqueness probes).
+    """
+    cols = extract_contract_primary_key_columns(stream_contracts, stream_name=stream_name)
+    return cols[0] if cols else None
 
 
 def resolve_identity_key(
