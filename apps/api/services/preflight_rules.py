@@ -237,21 +237,22 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         ],
     },
     "constraint_fk": {
-        "title": "Foreign key coverage",
+        "title": "Foreign key / referential integrity",
         "category": "hard",
         "why": (
-            "Destination foreign-key columns are not covered by the current mapping. "
-            "Strict/maximum mode fails closed on schema FK metadata. "
-            "This does not prove population orphan detection — only mapping coverage of "
-            "introspected FK columns."
+            "FK mapping coverage is incomplete and/or an orphan probe found missing "
+            "parents. Strict/maximum mode fails closed. Sample orphan probe never "
+            "equals population RI; proven requires opt-in population orphan scan."
         ),
         "fix": (
-            "Map the FK column(s) so parent references are written, confirm parent rows "
-            "exist, or acknowledge FK risk for this run (audit trail required). "
-            "Acknowledgement clears the block but never claims referential integrity proven."
+            "Map unmapped FK columns, fix missing parent rows / load order, run the "
+            "opt-in population orphan scan when you need RI proven, or acknowledge "
+            "FK risk for this run (audit trail required). Acknowledgement clears the "
+            "block but never claims referential integrity proven."
         ),
         "examples": [
             "Mapped table has customer_id FK → customers.id but customer_id is unmapped.",
+            "Sample orphan probe: customer_id values missing from customers.id.",
         ],
         "suggested_actions": [
             {"kind": "map_column", "label": "Map foreign-key columns"},
@@ -555,6 +556,66 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         "suggested_actions": [
             {"kind": "map_column", "label": "Map foreign-key columns"},
             {"kind": "review_mappings", "label": "Review mappings"},
+        ],
+    },
+    {
+        "keywords": [
+            "fk_orphan_in_sample",
+            "sample orphan",
+            "sample_orphan_probe",
+            "missing from",
+            "population ri not proven",
+        ],
+        "gate": "constraint_fk",
+        "why": (
+            "Sample orphan probe found child FK values with no matching parent key "
+            "in the Validate sample scope. This is not population RI proof."
+        ),
+        "fix": (
+            "Fix missing parent rows or load order, remap the FK, run the opt-in "
+            "population orphan scan for RI proven, or acknowledge FK risk for this "
+            "run (never claims RI proven)."
+        ),
+        "examples": [
+            "Sample orphan probe: 2/10 customer_id values missing from customers.id.",
+        ],
+        "suggested_actions": [
+            {
+                "kind": "fix_orphans",
+                "label": "Fix parent rows / load order",
+            },
+            {
+                "kind": "run_population_orphan_scan",
+                "label": "Run population orphan scan",
+            },
+            {"kind": "review_mappings", "label": "Review FK mapping"},
+        ],
+    },
+    {
+        "keywords": [
+            "fk_orphan_in_population",
+            "population orphan",
+            "population_orphan_probe",
+            "composite_fk_not_probed",
+        ],
+        "gate": "constraint_fk",
+        "why": (
+            "Population orphan scan found missing parents or could not complete "
+            "(e.g. composite FK). Referential integrity is not proven."
+        ),
+        "fix": (
+            "Fix orphan rows at source, complete a full population scan for every "
+            "FK, or acknowledge FK risk. Never treat sample Validate as RI proven."
+        ),
+        "examples": [
+            "Population orphan scan: 12 rows in orders.customer_id missing from customers.id.",
+        ],
+        "suggested_actions": [
+            {
+                "kind": "fix_orphans",
+                "label": "Fix parent rows / load order",
+            },
+            {"kind": "review_mappings", "label": "Review FK mapping"},
         ],
     },
     {
