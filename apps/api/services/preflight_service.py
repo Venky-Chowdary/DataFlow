@@ -818,6 +818,7 @@ def apply_policy_gates(
             }
 
     from services.preflight_rules import enrich_blockers
+    from services.root_cause_engine import apply_root_causes_to_preflight
 
     dest_kind = normalize_dest_kind(destination_db_type)
     enriched_blockers = enrich_blockers(
@@ -826,7 +827,7 @@ def apply_policy_gates(
         validation_mode=validation_mode,
     )
 
-    return {
+    return apply_root_causes_to_preflight({
         **result,
         "passed": not has_blocks,
         "passed_count": passed_count,
@@ -835,7 +836,7 @@ def apply_policy_gates(
         "gates": gates,
         "blockers": enriched_blockers,
         "proof_bundle": proof_bundle,
-    }
+    })
 
 
 @_with_date_locale
@@ -1793,7 +1794,9 @@ def run_file_preflight(
             out["passed_count"] / max(out["total_gates"], 1) * 100, 1
         )
 
-    return out
+    from services.root_cause_engine import apply_root_causes_to_preflight
+
+    return apply_root_causes_to_preflight(out)
 
 
 def probe_destination(endpoint) -> tuple[bool, str]:

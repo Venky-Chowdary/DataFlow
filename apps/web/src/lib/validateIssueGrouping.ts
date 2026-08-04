@@ -474,6 +474,58 @@ export function buildDisplayBlockers(
   preflight: PreflightResult,
   syncMode?: string,
 ): DisplayBlocker[] {
+  // Engine Root Cause SSOT — prefer when present (Module 2).
+  const engineRoots = preflight.root_causes ?? [];
+  if (engineRoots.length > 0) {
+    const absorbed = new Set(engineRoots.flatMap((r) => r.absorbed_blocker_ids ?? []));
+    const items: DisplayBlocker[] = engineRoots.map((r) => ({
+      key: r.root_id,
+      kind: r.kind === "duplicate_identity" ? "duplicate_root" : r.kind === "fidelity_collapse" ? "fidelity_root" : "blocker",
+      title: r.title,
+      message: r.summary,
+      impact: r.business_impact,
+      gateChips: (r.impacted_gates ?? []).map((id) => ({ id, label: gateLabel(id) })),
+      issues: [
+        ...(r.affected_columns?.length
+          ? [`Columns: ${r.affected_columns.slice(0, 8).join(", ")}${r.affected_columns.length > 8 ? "…" : ""}`]
+          : []),
+        ...(typeof r.affected_rows_sample === "number"
+          ? [`Sample rows: ${r.affected_rows_sample}`]
+          : []),
+        ...(typeof r.estimated_total_rows === "number"
+          ? [`Estimated rows: ${r.estimated_total_rows.toLocaleString()}`]
+          : []),
+        ...(r.alternative_fixes ?? []).slice(0, 3),
+      ],
+      fix: r.recommended_fix,
+      why: [
+        r.business_impact,
+        r.recovery_strategy,
+        r.quarantine_policy ? `Quarantine: ${r.quarantine_policy}` : "",
+        r.rollback_policy ? `Rollback: ${r.rollback_policy}` : "",
+      ].filter(Boolean).join(" "),
+    }));
+    for (const b of preflight.blockers ?? []) {
+      if (!b) continue;
+      if (absorbed.has(b.id)) continue;
+      if ((b.details as { root_cause?: boolean } | undefined)?.root_cause) continue;
+      items.push({
+        key: b.id,
+        kind: "blocker",
+        title: gateLabel(b.id),
+        message: b.message,
+        issues: Array.isArray(b.details?.issue_texts)
+          ? (b.details.issue_texts as string[])
+          : undefined,
+        fix: b.guidance?.fix,
+        why: b.guidance?.why,
+        suggested_actions: b.guidance?.suggested_actions,
+        source: b,
+      });
+    }
+    return items;
+  }
+
   const root = findDuplicateKeyRoot(preflight, syncMode);
   const fidelityRoot = findFidelityCollapseRoot(preflight);
   const absorbed = new Set([

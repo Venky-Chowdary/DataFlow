@@ -724,6 +724,31 @@ export interface PreflightResult {
   run_id?: string;
   gates: PreflightGate[];
   blockers: { id: string; message: string; details?: Record<string, unknown>; guidance?: { gate?: string; title?: string; category?: string; why?: string; fix?: string; examples?: string[]; suggested_actions?: ValidationSuggestedAction[] } }[];
+  /**
+   * Engine-level Root Cause Engine output — one explainable problem, many gates.
+   * Prefer this over client-side collapse when present.
+   */
+  root_causes?: Array<{
+    root_id: string;
+    kind: string;
+    title: string;
+    summary: string;
+    business_impact: string;
+    affected_columns?: string[];
+    affected_rows_sample?: number | null;
+    estimated_total_rows?: number | null;
+    risk_level?: string;
+    recommended_fix?: string;
+    alternative_fixes?: string[];
+    recovery_strategy?: string;
+    expected_runtime_impact?: string;
+    quarantine_policy?: string;
+    rollback_policy?: string;
+    documentation?: string;
+    impacted_gates?: string[];
+    absorbed_blocker_ids?: string[];
+    severity?: string;
+  }>;
   /** Top-level privilege probe from destination inspect (also on g2_destination.details). */
   privilege_probe?: {
     status?: string;

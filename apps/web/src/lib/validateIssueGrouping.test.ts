@@ -402,6 +402,46 @@ describe("findFidelityCollapseRoot", () => {
     const fidelity = display.find((d) => d.kind === "fidelity_root");
     assert.equal(fidelity?.source, undefined);
   });
+
+  it("prefers engine root_causes over client collapse", () => {
+    const pf = basePreflight({
+      root_causes: [
+        {
+          root_id: "rc-fidelity-collapse-abc",
+          kind: "fidelity_collapse",
+          title: "Lossy / fidelity collapse across type path",
+          summary: "2 column(s) collapse fidelity — impacts 3 gate check(s)",
+          business_impact: "Execute stays locked until Risk Contract or remap.",
+          affected_columns: ["country_auto_detected", "referral_credit_processed"],
+          affected_rows_sample: 25,
+          estimated_total_rows: 100000,
+          recommended_fix: "Open Map · Accept · cast & continue",
+          alternative_fixes: ["Remap to TEXT"],
+          recovery_strategy: "Re-Validate after contract",
+          quarantine_policy: "holdout_rejected_rows",
+          rollback_policy: "not_productized_see_MIGRATION_ROLLBACK",
+          impacted_gates: ["g3_schema_contract", "g4_mapping_confidence", "g9_data_integrity"],
+          absorbed_blocker_ids: ["g3_schema_contract", "g4_mapping_confidence", "g9_data_integrity"],
+        },
+      ],
+      blockers: [
+        {
+          id: "rc-fidelity-collapse-abc",
+          message: "Lossy / fidelity collapse",
+          details: { root_cause: true },
+        },
+      ],
+      gates: [
+        { id: "g3_schema_contract", status: "block", message: "lossy", details: {} },
+        { id: "g4_mapping_confidence", status: "block", message: "lossy", details: {} },
+        { id: "g9_data_integrity", status: "block", message: "lossy", details: {} },
+      ],
+    });
+    const display = buildDisplayBlockers(pf);
+    assert.equal(display.filter((d) => d.kind === "fidelity_root").length, 1);
+    assert.ok(display[0].issues?.some((i) => /country_auto_detected/i.test(i)));
+    assert.ok(display[0].issues?.some((i) => /Sample rows: 25/i.test(i)));
+  });
 });
 
 describe("rankAndDedupeSuggestedActions", () => {
