@@ -161,19 +161,36 @@ def build_preflight_proof_bundle(
 
     # Align with G4: Map confidence_threshold is the floor (no soft −0.3 band).
     # Proof bundle must not disagree with the gate that unlocks Execute —
-    # skip operator-cleared mappings (user_override / risk_acknowledged).
+    # skip operator-cleared mappings (continue-policy risk contract, or legacy
+    # risk_acknowledged while contract hydration is still rolling out).
     effective_threshold = max(0.55, float(confidence_threshold or 0.85))
+    from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
     confidences = [
         float(m.get("confidence", 0))
         for m in mappings
         if m.get("confidence") is not None
         and not m.get("user_override")
+        and not mapping_has_clearing_risk_contract(m)
         and not m.get("risk_acknowledged")
         and not m.get("riskAcknowledged")
     ]
     min_confidence = round(min(confidences) if confidences else 1.0, 3)
     if confidences and min_confidence < effective_threshold:
         blockers.append("Semantic mapping confidence too low")
+
+    # Migration Risk Contract: boolean risk_acknowledged alone must never
+    # unlock Execute-approve. Continue-policy signed contracts are required.
+    from services.migration_risk_contract import lossy_mappings_missing_risk_contracts
+
+    missing_contracts = lossy_mappings_missing_risk_contracts(mappings)
+    if missing_contracts:
+        cols = ", ".join(missing_contracts[:5])
+        more = f" (+{len(missing_contracts) - 5} more)" if len(missing_contracts) > 5 else ""
+        blockers.append(
+            "Migration Risk Contract required (execution policy) for: "
+            f"{cols}{more}"
+        )
 
     decision = "approve"
     if blockers:
@@ -222,6 +239,16 @@ def build_preflight_proof_bundle(
         "evidence_summary": evidence_summary,
         "compliance": compliance,
         "reconciliation": reconciliation,
+        "risk_contracts": {
+            "missing_columns": missing_contracts,
+            "incomplete": bool(missing_contracts),
+            "note": (
+                "Boolean Accept Risk is not an execution contract. "
+                "Execute-approve requires a signed Migration Risk Contract with a "
+                "continue policy (CAST_AND_CONTINUE, QUARANTINE_ROW, …). "
+                "Default policy is FAIL_JOB."
+            ),
+        },
         "transfer_decision": {
             "decision": decision,
             "blockers": blockers,

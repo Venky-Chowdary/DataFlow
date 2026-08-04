@@ -112,11 +112,57 @@ export interface EditableMapping {
   /**
    * Operator explicitly accepted precision/type loss for this row.
    * Required by G4 for lossy_cast / typeNarrowing — bare Approve is not enough.
+   * Alone this is NOT an execution contract — see riskContract.
    */
   riskAcknowledged?: boolean;
+  /**
+   * Signed Migration Risk Contract (or draft fields signed on Validate).
+   * Execute-approve requires a continue-policy contract — boolean ack is incomplete.
+   */
+  riskContract?: MigrationRiskContractDraft;
   /** Underscore-path collisions from STRUCT flatten — fail-closed, operator-visible. */
   flattenCollisions?: { flat: string; paths: string[][] }[];
 }
+
+/** Draft / signed Migration Risk Contract — mirrors apps/api migration_risk_contract. */
+export type ExecutionPolicy =
+  | "FAIL_JOB"
+  | "STOP_TABLE"
+  | "QUARANTINE_ROW"
+  | "SKIP_ROW"
+  | "RETRY"
+  | "CAST_AND_CONTINUE"
+  | "TRANSFORM_AND_CONTINUE"
+  | "ABORT_TRANSACTION";
+
+export type MigrationRiskContractDraft = {
+  risk_id?: string;
+  severity?: string;
+  root_cause?: string;
+  column: string;
+  source_type: string;
+  destination_type: string;
+  transform?: string | null;
+  rows_sampled?: number;
+  estimated_rows?: number | null;
+  expected_failure_pct?: number | null;
+  expected_precision_loss?: boolean;
+  expected_truncation?: boolean;
+  expected_nulls?: boolean;
+  execution_policy: ExecutionPolicy;
+  quarantine_policy?: string;
+  retry_policy?: string;
+  rollback_strategy?: string;
+  approved_by: string;
+  approved_at?: string;
+  reason: string;
+  signature?: string;
+  proof_pack_ref?: string | null;
+  mapping_hash?: string;
+  plan_id?: string | null;
+  target?: string;
+  version?: number;
+};
 
 const STATUS_ENUM_TOKENS = new Set([
   "active", "inactive", "enabled", "disabled", "pending", "invalidated",
@@ -416,13 +462,16 @@ export function mappingAckTier(m: EditableMapping): MappingAckTier {
 
 export function mappingAckLabel(m: EditableMapping): string {
   const tier = mappingAckTier(m);
-  if (tier === "accept_risk") return "Accept risk";
+  if (tier === "accept_risk") return "Accept · cast & continue";
   if (tier === "review") return "Review";
   return "Approve";
 }
 
 export function mappingAckDoneLabel(m: EditableMapping): string {
   if (m.riskAcknowledged && mappingRequiresRiskAck(m)) {
+    const policy = m.riskContract?.execution_policy;
+    if (policy === "CAST_AND_CONTINUE") return "Contracted · cast";
+    if (policy) return `Contracted · ${policy}`;
     return mappingAckTier(m) === "accept_risk" ? "Risk accepted" : "Reviewed";
   }
   return "Ready";
@@ -464,10 +513,21 @@ export function mappingRequiresManualApproval(m: EditableMapping): boolean {
 }
 
 /**
- * Explicit operator acceptance of fidelity / structural risk — unlocks G4.
- * Distinct from Approve: clients can prove intentional change was never silent.
+ * Explicit operator acceptance of fidelity / structural risk.
+ * Emits a Migration Risk Contract draft. Default Map action uses
+ * CAST_AND_CONTINUE (lossy write allowed) — never silent FAIL_JOB continue.
+ * Server signs on Validate; boolean riskAcknowledged alone does not unlock Execute.
  */
-export function acknowledgeMappingRisk(m: EditableMapping): EditableMapping {
+export function acknowledgeMappingRisk(
+  m: EditableMapping,
+  opts?: {
+    executionPolicy?: ExecutionPolicy;
+    approvedBy?: string;
+    reason?: string;
+    rowsSampled?: number;
+    estimatedRows?: number | null;
+  },
+): EditableMapping {
   if (!mappingRequiresRiskAck(m)) {
     return approveMappingHonestly(m);
   }
@@ -477,16 +537,46 @@ export function acknowledgeMappingRisk(m: EditableMapping): EditableMapping {
       ? "Operator acknowledged value-mutating transform"
       : fidelity === "cast"
         ? "Operator acknowledged cast/quarantine path"
-      : hasCreateNewTypeRisk(m)
-        ? "Operator acknowledged create-new type risk"
-      : m.structDerived || m.structPolicy === "flatten_top_level_keys" || m.structPolicy === "flatten_deep" || m.structPolicy === "explode_rows"
-        ? "Operator acknowledged STRUCT/ARRAY expand policy"
-        : isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType) || m.transform === "identity_specialty"
-          ? "Operator acknowledged specialty identity transport"
-          : "Operator acknowledged type/precision loss risk";
+        : hasCreateNewTypeRisk(m)
+          ? "Operator acknowledged create-new type risk"
+          : m.structDerived || m.structPolicy === "flatten_top_level_keys" || m.structPolicy === "flatten_deep" || m.structPolicy === "explode_rows"
+            ? "Operator acknowledged STRUCT/ARRAY expand policy"
+            : isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType) || m.transform === "identity_specialty"
+              ? "Operator acknowledged specialty identity transport"
+              : "Operator acknowledged type/precision loss risk";
+  const policy: ExecutionPolicy = opts?.executionPolicy || "CAST_AND_CONTINUE";
+  const actor = (opts?.approvedBy || "map-operator").trim() || "map-operator";
+  const why = (opts?.reason || ackNote).trim() || ackNote;
+  const srcType = m.inferredType || "UNKNOWN";
+  const dstType = m.destType || m.inferredType || "UNKNOWN";
+  const riskContract: MigrationRiskContractDraft = {
+    column: m.source,
+    target: m.target || m.source,
+    source_type: srcType,
+    destination_type: dstType,
+    transform: m.transform || null,
+    rows_sampled: opts?.rowsSampled ?? 0,
+    estimated_rows: opts?.estimatedRows ?? null,
+    expected_precision_loss: true,
+    expected_truncation: Boolean(m.typeNarrowing),
+    expected_nulls: fidelity === "cast" || policy === "QUARANTINE_ROW",
+    execution_policy: policy,
+    quarantine_policy:
+      policy === "QUARANTINE_ROW"
+        ? "QUARANTINE_ROW_on_failure"
+        : "holdout_rejected_rows",
+    retry_policy: "none",
+    rollback_strategy: "not_productized_see_MIGRATION_ROLLBACK",
+    approved_by: actor,
+    reason: why,
+    root_cause: `${srcType} → ${dstType} fidelity risk`,
+    severity: "high",
+    version: 1,
+  };
   return {
     ...m,
     riskAcknowledged: true,
+    riskContract,
     approved: true,
     requiresReview: false,
     transform:
@@ -494,7 +584,7 @@ export function acknowledgeMappingRisk(m: EditableMapping): EditableMapping {
       && (!m.transform || m.transform === "none")
         ? "identity_specialty"
         : m.transform,
-    reason: [m.reason, createNewRiskDetail(m) || m.fidelityReason, ackNote].filter(Boolean).join(" · "),
+    reason: [m.reason, createNewRiskDetail(m) || m.fidelityReason, ackNote, `policy=${policy}`].filter(Boolean).join(" · "),
   };
 }
 
@@ -1141,6 +1231,7 @@ export function buildPreflightMappings(
         fidelity: omitted ? undefined : safe.fidelity,
         type_narrowing: omitted ? undefined : Boolean(safe.typeNarrowing) || undefined,
         risk_acknowledged: omitted ? undefined : Boolean(safe.riskAcknowledged) || undefined,
+        risk_contract: omitted ? undefined : (safe.riskContract || undefined),
       };
     });
   }

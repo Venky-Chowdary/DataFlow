@@ -78,6 +78,8 @@ class ColumnMapping:
     # Explicit operator acknowledgment of lossy / narrowing risk (not bare Approve).
     risk_acknowledged: bool = False
     intentional_omit: bool = False
+    # Migration Risk Contract (signed dict) — boolean ack alone is incomplete.
+    risk_contract: dict[str, Any] | None = None
 
 
 @dataclass

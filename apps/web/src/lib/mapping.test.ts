@@ -140,9 +140,14 @@ describe("fail-closed Map approve", () => {
     assert.equal(next.approved, true);
     assert.equal(next.riskAcknowledged, true);
     assert.equal(next.requiresReview, false);
+    assert.ok(next.riskContract);
+    assert.equal(next.riskContract?.execution_policy, "CAST_AND_CONTINUE");
+    assert.equal(next.riskContract?.column, "amount");
     const pf = buildPreflightMappings([], [next]);
     assert.equal(pf[0].risk_acknowledged, true);
     assert.equal(pf[0].fidelity, "lossy_cast");
+    assert.ok(pf[0].risk_contract);
+    assert.equal(pf[0].risk_contract?.execution_policy, "CAST_AND_CONTINUE");
   });
 
   it("approve-all refuses mutate fidelity without risk ack", () => {
@@ -210,7 +215,7 @@ describe("fail-closed Map approve", () => {
     assert.equal(mappingAckTier(castRow), "review");
     assert.equal(mappingAckLabel(castRow), "Review");
     assert.equal(mappingAckTier(lossy), "accept_risk");
-    assert.equal(mappingAckLabel(lossy), "Accept risk");
+    assert.equal(mappingAckLabel(lossy), "Accept · cast & continue");
   });
 });
 

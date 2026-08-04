@@ -283,6 +283,7 @@ export async function runPreflight(payload: {
     type_narrowing?: boolean;
     risk_acknowledged?: boolean;
     intentional_omit?: boolean;
+    risk_contract?: Record<string, unknown>;
     struct_policy?: string;
     struct_derived?: boolean;
     struct_parent?: string;

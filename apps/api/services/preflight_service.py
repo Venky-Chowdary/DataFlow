@@ -42,6 +42,67 @@ from services.validation_plan import build_validation_plan
 from services.value_serializer import cell_to_string
 
 
+def _hydrate_risk_contract(m: dict[str, Any]) -> dict[str, Any] | None:
+    """Sign or verify a Migration Risk Contract draft on the mapping.
+
+    Client may send an unsigned draft after Map Accept risk. Preflight signs it
+    so proof_bundle can trust continue-policy contracts. Tampered signatures
+    are rejected (returned None → Execute-approve stays locked).
+    """
+    raw = m.get("risk_contract") or m.get("riskContract")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        from services.migration_risk_contract import (
+            contract_from_dict,
+            create_migration_risk_contract,
+            verify_risk_contract,
+        )
+
+        existing = contract_from_dict(raw)
+        if existing is not None and verify_risk_contract(existing):
+            return existing.to_dict()
+        # Unsigned / stale draft — re-sign from authoritative fields.
+        signed = create_migration_risk_contract(
+            column=str(raw.get("column") or m.get("source") or ""),
+            source_type=str(raw.get("source_type") or m.get("source_type") or ""),
+            destination_type=str(
+                raw.get("destination_type")
+                or m.get("target_type")
+                or m.get("targetType")
+                or ""
+            ),
+            approved_by=str(raw.get("approved_by") or ""),
+            reason=str(raw.get("reason") or ""),
+            execution_policy=str(raw.get("execution_policy") or "FAIL_JOB"),
+            root_cause=str(raw.get("root_cause") or ""),
+            severity=str(raw.get("severity") or "high"),
+            transform=raw.get("transform"),
+            rows_sampled=int(raw.get("rows_sampled") or 0),
+            estimated_rows=raw.get("estimated_rows"),
+            expected_failure_pct=raw.get("expected_failure_pct"),
+            expected_precision_loss=bool(raw.get("expected_precision_loss", True)),
+            expected_truncation=bool(raw.get("expected_truncation", False)),
+            expected_nulls=bool(raw.get("expected_nulls", False)),
+            quarantine_policy=str(
+                raw.get("quarantine_policy") or "holdout_rejected_rows"
+            ),
+            retry_policy=str(raw.get("retry_policy") or "none"),
+            rollback_strategy=str(
+                raw.get("rollback_strategy")
+                or "not_productized_see_MIGRATION_ROLLBACK"
+            ),
+            proof_pack_ref=raw.get("proof_pack_ref"),
+            mapping_hash=str(raw.get("mapping_hash") or ""),
+            plan_id=raw.get("plan_id"),
+            target=str(raw.get("target") or m.get("target") or m.get("source") or ""),
+            metadata=dict(raw.get("metadata") or {}),
+        )
+        return signed.to_dict()
+    except (TypeError, ValueError):
+        return None
+
+
 def _with_date_locale(fn):
     """Set the active date_locale context for the duration of the call."""
 
@@ -100,6 +161,7 @@ class FilePreflightContext(PreflightContext):
             "type_narrowing": bool(getattr(m, "type_narrowing", False)),
             "risk_acknowledged": bool(getattr(m, "risk_acknowledged", False)),
             "intentional_omit": bool(getattr(m, "intentional_omit", False)),
+            "risk_contract": getattr(m, "risk_contract", None),
         }
 
     def run_dry_run(self, sample_size: int = 1000) -> tuple[bool, list[str]]:
@@ -908,6 +970,21 @@ def run_file_preflight(
     if sample_rows and len(sample_rows) > PREFLIGHT_SAMPLE_LIMIT:
         sample_rows = sample_rows[:PREFLIGHT_SAMPLE_LIMIT]
 
+    # Sign Migration Risk Contract drafts before gates / proof_bundle see them.
+    hydrated_mappings: list[dict[str, Any]] = []
+    for m in mappings or []:
+        row = dict(m) if isinstance(m, dict) else dict(m or {})
+        signed = _hydrate_risk_contract(row)
+        if signed is not None:
+            row["risk_contract"] = signed
+            # Continue-policy contract implies operator ack for G3/G4.
+            from services.migration_risk_contract import contract_clears_validate_block
+
+            if contract_clears_validate_block(signed):
+                row["risk_acknowledged"] = True
+        hydrated_mappings.append(row)
+    mappings = hydrated_mappings
+
     # If the operator did not specify a locale for ambiguous day/month dates,
     # scan the sample for an unambiguous majority before any date coercion.
     if sample_rows and columns:
@@ -1015,6 +1092,7 @@ def run_file_preflight(
                 m.get("risk_acknowledged") or m.get("riskAcknowledged", False)
             ),
             intentional_omit=is_intentional_omit(m),
+            risk_contract=_hydrate_risk_contract(m),
         )
         for m in mappings
     ]

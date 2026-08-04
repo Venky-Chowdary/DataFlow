@@ -45,6 +45,8 @@ class MappingItem(BaseModel):
     type_narrowing: bool = False
     risk_acknowledged: bool = False
     intentional_omit: bool = False
+    # Migration Risk Contract draft/signed — Execute-approve authority.
+    risk_contract: dict[str, Any] | None = None
 
 
 class PreflightRequest(BaseModel):
