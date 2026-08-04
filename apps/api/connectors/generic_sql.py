@@ -940,9 +940,12 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
     if (
         "timestamptz" in raw_lower
         or "timestamp_tz" in raw_lower
+        or "timestamp_ltz" in raw_lower
         or "timestamp with time zone" in raw_lower
+        or "timestamp with local time zone" in raw_lower
         or "datetimeoffset" in raw_lower
         or raw_lower.endswith(" with time zone")
+        or raw_lower.endswith(" local time zone")
     ):
         # SQL Server DATETIMEOFFSET is TZ-aware — never bind as naive DATETIME2.
         if db_type == "questdb":
@@ -959,7 +962,33 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
         return _maybe_nullable(sa.DateTime())
 
     if t == LOGICAL_INTEGER:
-        return _maybe_nullable(sa.BigInteger())
+        # Honor Map integer width — never invent BIGINT from INTEGER/INT.
+        int_u = raw.upper().split("(", 1)[0].strip().replace(" ", "")
+        if int_u in {
+            "BIGINT",
+            "INT64",
+            "LONG",
+            "UBIGINT",
+            "UINT64",
+            "BIGSERIAL",
+        }:
+            return _maybe_nullable(sa.BigInteger())
+        # Oracle NUMBER(p,0) normalized as integer — width from precision.
+        if int_u == "NUMBER":
+            from services.type_system import parse_numeric_precision_scale as _pnps
+
+            np, _ns = _pnps(raw)
+            if np is not None and int(np) > 9:
+                return _maybe_nullable(sa.BigInteger())
+            if np is not None and int(np) <= 4:
+                return _maybe_nullable(sa.SmallInteger())
+            return _maybe_nullable(sa.Integer())
+        if int_u in {"SMALLINT", "INT2", "SMALLSERIAL", "SHORT", "INT16"}:
+            return _maybe_nullable(sa.SmallInteger())
+        if int_u in {"TINYINT", "INT1", "UINT8", "BYTE"}:
+            return _maybe_nullable(sa.SmallInteger())
+        # INTEGER / INT / MEDIUMINT / INT32 / SERIAL / NUMBER(p,0) mid-range
+        return _maybe_nullable(sa.Integer())
     if t == LOGICAL_DECIMAL:
         precision, scale = parse_numeric_precision_scale(raw)
         if db_type == "risingwave":
@@ -1006,9 +1035,9 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
         return _maybe_nullable(sa.Numeric())
     if t == LOGICAL_FLOAT:
         # Approximate IEEE float — never rewrite to fixed-point Numeric.
-        # Honor Map REAL/FLOAT4 stamps (sa.Double invents mantissa widen).
+        # Honor Map REAL/FLOAT4/FLOAT stamps (sa.Double invents mantissa widen).
         float_u = raw.upper().split("(", 1)[0].strip()
-        if float_u in {"REAL", "FLOAT4", "HALF", "FLOAT16", "BINARY_FLOAT"}:
+        if float_u in {"REAL", "FLOAT4", "HALF", "FLOAT16", "BINARY_FLOAT", "FLOAT32"}:
             if dialect_name == "postgresql" and hasattr(postgresql, "REAL"):
                 return _maybe_nullable(postgresql.REAL())
             return _maybe_nullable(sa.Float())
@@ -1018,6 +1047,11 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
             "tidb",
             "sqlserver",
             "mssql",
+            "databricks",
+            "spark",
+            "delta",
+            "delta_lake",
+            "databricks_sql",
         }:
             return _maybe_nullable(sa.Float())
         return _maybe_nullable(sa.Double())
@@ -1034,14 +1068,27 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
                 ChDateTime64(3) if ChDateTime64 is not None else sa.DateTime()
             )
         if db_type == "trino" and TrinoTimestamp is not None:
-            return TrinoTimestamp(precision=3, timezone=True)
+            # Trino bare timestamp path — TZ-aware stamps already returned above.
+            return TrinoTimestamp(precision=3, timezone=False)
         if db_type == "presto":
             return sa.TIMESTAMP()
-        # SQL Server DATETIME2 is timezone-naive; Oracle TIMESTAMP WITH TIME ZONE
-        # keeps aware UTC (matches historical generic_sql bind contract).
-        if dialect_name == "mssql" or db_type in {"sqlserver", "mssql"}:
-            return _maybe_nullable(sa.DateTime())
-        return sa.DateTime(timezone=True)
+        # Map≡CREATE: LOGICAL_DATETIME without TZ markers is NTZ wall-clock on
+        # Oracle/DuckDB/PG/SQL Server. Databricks TIMESTAMP is session-TZ aware
+        # (TIMESTAMP_NTZ already returned naive above) — never invent the wrong
+        # polarity. TZ-aware carriers (TIMESTAMPTZ, DATETIMEOFFSET, Oracle
+        # WITH [LOCAL] TIME ZONE) already returned timezone=True above.
+        db_l = (db_type or "").strip().lower()
+        if db_l in {
+            "databricks",
+            "spark",
+            "delta",
+            "delta_lake",
+            "databricks_sql",
+        }:
+            base = raw_lower.split("(", 1)[0].strip()
+            if base in {"timestamp", "timestamptz"}:
+                return sa.DateTime(timezone=True)
+        return _maybe_nullable(sa.DateTime())
     if t == LOGICAL_TIME:
         # ClickHouse, QuestDB and Presto (PyHive) do not bind Python time objects
         # reliably; store as string in these engines.
