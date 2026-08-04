@@ -173,16 +173,29 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     """Execute a Datawrap Pilot tool — same surface external agents use."""
     _require_mcp_tool_auth(http_request)
     from services.mcp_invocation_log import log_mcp_invocation
+    from services.mcp_rate_limit import check_mcp_rate_limit
 
     from ..ai.copilot.tools import get_pilot_tools
 
     client = http_request.headers.get("X-MCP-Client", "unknown")
+    actor = getattr(getattr(http_request, "state", None), "user_email", None) or client
     correlation_id = getattr(http_request.state, "correlation_id", None)
+    limit = check_mcp_rate_limit(str(actor or client))
+    if not limit.get("allowed"):
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "MCP rate limit exceeded",
+                "retry_after_sec": limit.get("retry_after_sec"),
+                "honesty": "MCP is a production API — rate limits protect the control plane.",
+            },
+            headers={"Retry-After": str(int(float(limit.get("retry_after_sec") or 1)))},
+        )
     start = time.perf_counter()
     try:
         result = get_pilot_tools().execute(request.name, request.arguments)
     except Exception as exc:
-        log_mcp_invocation(
+        receipt = log_mcp_invocation(
             tool=request.name,
             client=client,
             arguments=request.arguments,
@@ -190,12 +203,16 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
             error=str(exc),
             duration_ms=(time.perf_counter() - start) * 1000,
             correlation_id=correlation_id,
+            actor=str(actor or "mcp-agent"),
         )
-        raise HTTPException(status_code=500, detail={"error": str(exc), "tool": request.name}) from exc
+        raise HTTPException(
+            status_code=500,
+            detail={"error": str(exc), "tool": request.name, "receipt_id": receipt.get("id")},
+        ) from exc
 
     ms = (time.perf_counter() - start) * 1000
     if not result.success:
-        log_mcp_invocation(
+        receipt = log_mcp_invocation(
             tool=request.name,
             client=client,
             arguments=request.arguments,
@@ -203,18 +220,30 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
             error=result.error or "tool failed",
             duration_ms=ms,
             correlation_id=correlation_id,
+            actor=str(actor or "mcp-agent"),
         )
-        raise HTTPException(status_code=422, detail={"error": result.error, "tool": request.name})
+        raise HTTPException(
+            status_code=422,
+            detail={"error": result.error, "tool": request.name, "receipt_id": receipt.get("id")},
+        )
 
-    log_mcp_invocation(
+    receipt = log_mcp_invocation(
         tool=request.name,
         client=client,
         arguments=request.arguments,
         status="ok",
         duration_ms=ms,
         correlation_id=correlation_id,
+        actor=str(actor or "mcp-agent"),
     )
-    return {"tool": result.name, "success": True, "output": result.output}
+    return {
+        "tool": result.name,
+        "success": True,
+        "output": result.output,
+        "receipt_id": receipt.get("id"),
+        "ms": receipt.get("ms"),
+        "status": "ok",
+    }
 
 
 @router.get("/logs")

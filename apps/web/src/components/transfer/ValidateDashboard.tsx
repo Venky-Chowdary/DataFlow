@@ -1425,6 +1425,28 @@ export function ValidateDashboard({
             </div>
           )}
 
+          {!running && preflight && (
+            (Array.isArray(preflight.constraint_hints) && preflight.constraint_hints.length > 0)
+            || preflight.snowflake_warehouse_advice?.message
+          ) && (
+            <div className="df2-vd-soft-hints" role="note">
+              <p className="df2-vd-soft-hints-label">Soft advisories (not gates)</p>
+              {preflight.snowflake_warehouse_advice?.message && (
+                <p className="df2-vd-soft-hint" title={preflight.snowflake_warehouse_advice.honesty || undefined}>
+                  {preflight.snowflake_warehouse_advice.message}
+                </p>
+              )}
+              {(preflight.constraint_hints || []).slice(0, 4).map((hint, i) => {
+                const textHint = typeof hint === "string"
+                  ? hint
+                  : String((hint as Record<string, unknown>).message || (hint as Record<string, unknown>).title || JSON.stringify(hint));
+                return (
+                  <p key={`hint-${i}`} className="df2-vd-soft-hint">{textHint}</p>
+                );
+              })}
+            </div>
+          )}
+
           {!running && preflight && (qualityGrade || confidenceBand) && (
             <div className="df2-vd-proof-chips" aria-label="Proof grade">
               {qualityGrade && qualityGrade !== "not_profiled" ? (

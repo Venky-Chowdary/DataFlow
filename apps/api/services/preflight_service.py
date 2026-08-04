@@ -1206,6 +1206,20 @@ def run_file_preflight(
         logger.debug("constraint hints skipped: %s", hint_exc, exc_info=hint_exc)
         out["constraint_hints"] = []
 
+    # Soft Snowflake warehouse sizing from G7 volume — never a GateId.
+    try:
+        dest_fmt = str(destination_db_type or "").strip().lower()
+        if "snowflake" in dest_fmt:
+            from services.snowflake_warehouse_advice import advise_snowflake_warehouse
+
+            advice = advise_snowflake_warehouse(
+                estimated_bytes=int(est_bytes or 0),
+                row_count=int(row_count or 0),
+            )
+            if advice:
+                out["snowflake_warehouse_advice"] = advice
+    except Exception as sf_exc:
+        logger.debug("snowflake warehouse advice skipped: %s", sf_exc, exc_info=sf_exc)
 
     # Multi-load intelligence: compare sample to last N loads of this route.
     try:

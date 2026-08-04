@@ -83,3 +83,15 @@
 - Production WORM: ship tip hashes to an immutable store (S3 Object Lock / Azure WORM /
   vendor TSA) out-of-band, then POST the receipt id back into the stub fields for auditors.
 - Do not claim SOC2 control evidence from the stub alone — auditor letters remain org-owned.
+
+
+## Parallel workers and ordered checkpoints
+
+- Default `DATAFLOW_PARALLEL_WORKERS` / `PARALLEL_WORKERS` is **1**.
+- When raised above 1, the stream dispatcher still yields completed chunks in
+  **ascending index order** before advancing the durable checkpoint. Abort drops
+  unstarted queued chunks (`ChunkAborted`) so resume stays at the last committed index.
+- Writers that cannot safely overlap (SQLite, some Snowflake/Iceberg/proxy paths)
+  force workers=1 in code — do not override those paths in production.
+- Honesty: ordered parallel improves throughput; it does **not** upgrade CDC or
+  upsert delivery beyond **at-least-once**.

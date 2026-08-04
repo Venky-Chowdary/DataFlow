@@ -1648,6 +1648,10 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                   {liveJob.checkpoint.rows_processed != null
                     ? ` · ${(liveJob.checkpoint.rows_processed ?? 0).toLocaleString()} rows committed`
                     : ""}
+                  {liveJob.checkpoint.updated_at
+                    ? ` · updated ${String(liveJob.checkpoint.updated_at)}`
+                    : ""}
+                  {" · at-least-once resume"}
                 </dd>
               </div>
             )}

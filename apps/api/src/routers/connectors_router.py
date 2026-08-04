@@ -630,6 +630,25 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
                 detail="File uploads must be re-submitted from Transfer Studio.",
             )
 
+        from services.checkpoint_service import Checkpoint, evaluate_resume_safety
+
+        cp_raw = job.get("checkpoint")
+        safety = evaluate_resume_safety(
+            Checkpoint.from_dict(cp_raw) if isinstance(cp_raw, dict) else cp_raw,
+            job=job,
+        )
+        if not safety.get("ok"):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "Resume refused — checkpoint not safe",
+                    "reasons": safety.get("reasons") or [],
+                    "warnings": safety.get("warnings") or [],
+                    "age_hours": safety.get("age_hours"),
+                    "honesty": safety.get("honesty"),
+                },
+            )
+
         xfer_req = transfer_request_from_dict(payload)
         # Resume must never inherit a stale skip_preflight flag — gates re-run.
         xfer_req.skip_preflight = False
@@ -651,6 +670,9 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
             "status": "running",
             "resume": True,
             "message": "Resume started from last committed checkpoint (at-least-once upsert).",
+            "checkpoint_age_hours": safety.get("age_hours"),
+            "warnings": safety.get("warnings") or [],
+            "honesty": safety.get("honesty"),
         }
     except HTTPException:
         raise

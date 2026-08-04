@@ -232,6 +232,38 @@ export function ColumnReviewPanel({
     setPage(1);
   };
 
+  // Map hotkeys: A approve eligible, R review filter, X accept risk on first open row.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (!t) return;
+      const tag = (t.tagName || "").toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select" || t.isContentEditable) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const key = e.key.toLowerCase();
+      if (key === "a") {
+        e.preventDefault();
+        approveAll();
+        return;
+      }
+      if (key === "r") {
+        e.preventDefault();
+        focusIssues();
+        return;
+      }
+      if (key === "x") {
+        const idx = mappings.findIndex(
+          (m) => mappingRequiresRiskAck(m) && !m.riskAcknowledged && !isIntentionalOmit(m),
+        );
+        if (idx < 0) return;
+        e.preventDefault();
+        approveOne(idx);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [mappings, onChange]);
+
   const pageStart = filtered.length === 0 ? 0 : (page - 1) * pageSize + 1;
   const pageEnd = Math.min(page * pageSize, filtered.length);
 

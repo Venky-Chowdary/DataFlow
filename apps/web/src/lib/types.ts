@@ -723,6 +723,20 @@ export interface PreflightResult {
   proof_bundle?: PreflightProofBundle;
   coercion_report?: CoercionReport;
   load_history_report?: LoadHistoryReport;
+  /** Soft FK / relational hints — never a GateId. */
+  constraint_hints?: Array<Record<string, unknown> | string>;
+  /** Soft Snowflake warehouse sizing from G7 volume — never a GateId. */
+  snowflake_warehouse_advice?: {
+    kind?: string;
+    recommended_size?: string;
+    credit_band?: string;
+    estimated_bytes?: number;
+    estimated_gib?: number;
+    message?: string;
+    rationale?: string;
+    honesty?: string;
+    current_warehouse?: string | null;
+  };
 }
 
 /** Machine-readable next step from POST /preflight/explain — mapped to Studio controls. */
