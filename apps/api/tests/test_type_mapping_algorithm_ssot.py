@@ -208,3 +208,32 @@ def test_ip_inet_host_address_twins():
     assert is_precision_collapse_coercion("IP", "INET") is False
     assert specialty_polarity_mismatch("INET", "CIDR") is True
     assert is_precision_collapse_coercion("INET", "CIDR") is True
+
+def test_redshift_never_invents_timestamp_typmod():
+    """Amazon Redshift rejects TIMESTAMP(p) — create-new must stay bare."""
+    stamped = create_new_mapping_target_type("TIMESTAMP_NTZ(6)", "redshift")
+    assert "(" not in stamped, stamped
+    assert stamped.upper() == "TIMESTAMP"
+    assert promote_create_new_temporal_stamp("TIMESTAMP_NTZ(6)", "TIMESTAMP", "redshift") == "TIMESTAMP"
+    assert promote_create_new_temporal_stamp("TIMESTAMP_NTZ(6)", "TIMESTAMP(6)", "redshift") == "TIMESTAMP"
+    # Values still fit — bare RS TIMESTAMP is microsecond; not a collapse.
+    assert temporal_precision_would_narrow(
+        "TIMESTAMP_NTZ(6)", "TIMESTAMP", dest_db="redshift"
+    ) is False
+
+
+def test_sqlserver_create_new_datetime2_time_fsp_defaults():
+    assert create_new_mapping_target_type("TIMESTAMP_NTZ", "sqlserver") == "DATETIME2(7)"
+    assert create_new_mapping_target_type("TIMESTAMP_NTZ(6)", "sqlserver") == "DATETIME2(6)"
+    assert create_new_mapping_target_type("TIME", "sqlserver").upper().startswith("TIME")
+    assert create_new_mapping_target_type("TIME(3)", "sqlserver") == "TIME(3)"
+    assert is_precision_collapse_coercion(
+        "TIMESTAMP_NTZ(6)", "DATETIME2(6)", dest_db="sqlserver"
+    ) is False
+
+
+def test_oracle_time_to_varchar2_remains_declared_lossy():
+    """Oracle has no TIME — VARCHAR2 wire must stay Accept-risk / lossy, not silent-green."""
+    stamped = create_new_mapping_target_type("TIME(6)", "oracle")
+    assert "VARCHAR2" in stamped.upper()
+    assert is_precision_collapse_coercion("TIME(6)", stamped, dest_db="oracle") is True

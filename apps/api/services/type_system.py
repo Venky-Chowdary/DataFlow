@@ -343,8 +343,9 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_DECIMAL: "DECIMAL(38,10)",
         LOGICAL_BOOLEAN: "BIT",
         LOGICAL_DATE: "DATE",
-        LOGICAL_DATETIME: "DATETIME2",
-        LOGICAL_TIME: "TIME",
+        # SQL Server defaults DATETIME2/TIME to precision 7 — bare stamps false-collapse.
+        LOGICAL_DATETIME: "DATETIME2(7)",
+        LOGICAL_TIME: "TIME(7)",
         LOGICAL_UUID: "UNIQUEIDENTIFIER",
         LOGICAL_JSON: "NVARCHAR(MAX)",
         LOGICAL_ARRAY: "NVARCHAR(MAX)",
@@ -3370,7 +3371,7 @@ _TZ_NAIVE_DDL: Final[dict[str, str]] = {
     "redshift": "TIMESTAMP",
     "snowflake": "TIMESTAMP_NTZ",
     "mysql": "DATETIME(6)",
-    "sqlserver": "DATETIME2",
+    "sqlserver": "DATETIME2(7)",
     "oracle": "TIMESTAMP",
     "bigquery": "DATETIME",
     "duckdb": "TIMESTAMP",
@@ -3576,6 +3577,12 @@ _TEMPORAL_FSP_CAPS: Final[dict[str, int]] = {
 # TZ-aware variant. Verified against DuckDB 1.3.2, which raises
 # "Type TIMESTAMP WITH TIME ZONE does not support any modifiers!".
 _NO_TZ_TYPMOD_ENGINES: Final[frozenset[str]] = frozenset({"duckdb"})
+
+# Engines that reject TIMESTAMP/TIME typmod entirely (always microsecond
+# or fixed internal precision). Promoting TIMESTAMP(6) here is illegal DDL.
+_NO_TEMPORAL_TYPMOD_ENGINES: Final[frozenset[str]] = frozenset(
+    {"redshift", "bigquery", "databricks", "iceberg", "spark", "delta"}
+)
 
 
 def _is_tz_aware_ddl(base: str) -> bool:
@@ -5226,26 +5233,43 @@ def resolve_mapping_target_type(
 
 
 def promote_create_new_temporal_stamp(src_type: str, stamped: str, dest_db_type: str = "") -> str:
-    """Upgrade bare TIMESTAMP/TIME stamps when source declares fractional precision.
+    """Upgrade or strip temporal stamps for destination-legal DDL.
 
-    PG create-new must emit TIMESTAMP(p); MySQL create-new must emit TIME(p) /
-    DATETIME(p). Bare carriers are FSP-0 territory and false-block Validate.
+    PG/MySQL/SQL Server: bare TIMESTAMP/TIME/DATETIME2 are FSP-0 (or ambiguous)
+    and must promote when source declares (p). Redshift/BigQuery/Databricks/
+    Iceberg reject typmod — never invent TIMESTAMP(6) (illegal CREATE).
     """
     out = (stamped or "").strip()
     if not out:
         return out
     bare = re.sub(r"\s*\(\s*\d+\s*\)", "", out.upper()).strip()
+    db = (dest_db_type or "").strip().lower()
+    # Destinations that cannot take typmod: strip illegal (p) if present.
+    if db in _NO_TEMPORAL_TYPMOD_ENGINES and bare in {
+        "TIMESTAMP",
+        "TIME",
+        "DATETIME",
+        "TIMESTAMP_NTZ",
+        "TIMESTAMPTZ",
+    }:
+        return bare if bare != "TIMESTAMP_NTZ" else "TIMESTAMP"
     src_p = parse_temporal_fractional_precision(src_type)
     if src_p is None:
+        # SQL Server bare DATETIME2 defaults to precision 7 — stamp it so G3
+        # does not treat create-new as FSP-0 collapse vs TIMESTAMP_NTZ(6+).
+        if bare == "DATETIME2" and db in {"sqlserver", "mssql", ""}:
+            return "DATETIME2(7)"
+        if bare == "TIME" and db in {"sqlserver", "mssql"} and "(" not in out.upper():
+            return "TIME(7)"
         return out
-    db = (dest_db_type or "").strip().lower()
     if bare == "TIMESTAMP":
+        if db in _NO_TEMPORAL_TYPMOD_ENGINES:
+            return out
         if db in {
             "",
             "postgresql",
             "postgres",
             "pg",
-            "redshift",
             "cockroach",
             "cockroachdb",
             "alloydb",
@@ -5258,7 +5282,8 @@ def promote_create_new_temporal_stamp(src_type: str, stamped: str, dest_db_type:
             return f"TIMESTAMP({src_p})"
         return out
     if bare == "TIME":
-        # MySQL/Maria/PG: bare TIME is FSP 0 — promote when source declares (p).
+        if db in _NO_TEMPORAL_TYPMOD_ENGINES:
+            return out
         if db in {
             "",
             "mysql",
@@ -5276,6 +5301,8 @@ def promote_create_new_temporal_stamp(src_type: str, stamped: str, dest_db_type:
         return out
     if bare == "DATETIME" and db in {"mysql", "mariadb", "tidb", ""}:
         return f"DATETIME({src_p})"
+    if bare == "DATETIME2" and db in {"sqlserver", "mssql", ""}:
+        return f"DATETIME2({src_p})"
     return out
 
 

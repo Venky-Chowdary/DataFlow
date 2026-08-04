@@ -186,7 +186,7 @@ def test_tz_polarity_introspect_and_ddl():
     assert ddl_type("bigquery", "TIMESTAMPTZ") == "TIMESTAMP"
     assert ddl_type("bigquery", "TIMESTAMP_NTZ") == "DATETIME"
     assert ddl_type("sqlserver", "TIMESTAMPTZ") == "DATETIMEOFFSET"
-    assert ddl_type("sqlserver", "TIMESTAMP_NTZ") == "DATETIME2"
+    assert ddl_type("sqlserver", "TIMESTAMP_NTZ") == "DATETIME2(7)"
 
 
 def test_pg_hstore_point_not_text():

@@ -113,8 +113,9 @@ def _check_coercion_safety(
             mapping or {"target": issue.get("target")},
             target_types=target_types,
             source_type=src_t,
+            dest_db_type=dest_kind,
         )
-        if mapping and is_precision_collapse_coercion(src_t, tgt_t):
+        if mapping and is_precision_collapse_coercion(src_t, tgt_t, dest_db=dest_kind):
             hardened.append(issue)
             continue
         from services.type_system import is_lossy_coercion

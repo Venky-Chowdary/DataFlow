@@ -329,7 +329,7 @@ def _mapping_risks(
                 ),
             })
 
-    if is_precision_collapse_coercion and is_precision_collapse_coercion(src_type, tgt_type):
+    if is_precision_collapse_coercion and is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest):
         if not any(r.get("code") == "timezone_polarity_loss" for r in risks):
             risks.append({
                 "code": "precision_collapse",
