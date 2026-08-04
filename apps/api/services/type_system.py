@@ -5747,6 +5747,13 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         # Foreign IEEE aliases → REAL / DOUBLE PRECISION. Keep REAL/DOUBLE PRECISION.
         "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
         "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+        "BOOLEAN",
     }),
     "snowflake": frozenset({
         "JSON", "JSONB", "UUID", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE",
@@ -5762,6 +5769,12 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         # Foreign IEEE → FLOAT wire. Keep FLOAT.
         "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
         "FLOAT64", "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
     }),
     "bigquery": frozenset({
         "UUID", "JSONB", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE", "SUPER",
@@ -5776,6 +5789,13 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         # Foreign IEEE → FLOAT64 only. Keep FLOAT64.
         "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
         "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+        "BOOLEAN",
     }),
     "spanner": frozenset({
         "UUID", "JSONB", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE", "SUPER",
@@ -5789,6 +5809,13 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         # Foreign IEEE → FLOAT32/FLOAT64. Keep FLOAT32/FLOAT64. Never invent REAL.
         "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16",
         "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+        "BOOLEAN",
     }),
     "postgresql": frozenset({
         # Bare JSON is a logical alias; create-new document wire is JSONB.
@@ -5804,6 +5831,12 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         # Foreign IEEE aliases → REAL / DOUBLE PRECISION. Keep REAL/DOUBLE PRECISION.
         "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
         "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
     }),
     "mysql": frozenset({
         "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC",
@@ -5819,7 +5852,12 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         # Foreign IEEE → FLOAT / DOUBLE. Keep FLOAT/DOUBLE.
         "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
         "FLOAT64", "BINARY_FLOAT", "BINARY_DOUBLE",
-    }),
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+            }),
     "sqlserver": frozenset({
         "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC", "JSON",
         "NVARCHAR2", "HSTORE", "INET", "CIDR",
@@ -5832,6 +5870,12 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         # Foreign IEEE → REAL / FLOAT. Keep REAL/FLOAT (incl. FLOAT(n) typmod).
         "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
         "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+                "YEAR", "MEDIUMINT",
+        "BOOLEAN",
     }),
     "oracle": frozenset({
         "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC", "JSON",
@@ -5847,6 +5891,13 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         # Foreign IEEE → BINARY_FLOAT / BINARY_DOUBLE. Keep BINARY_*.
         "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
         "FLOAT64", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+        "BOOLEAN",
     }),
     "databricks": frozenset({
         "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC",
@@ -5859,6 +5910,12 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         # Foreign IEEE → FLOAT / DOUBLE. Keep FLOAT/DOUBLE (HALF rematerializes).
         "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
         "FLOAT64", "BINARY_FLOAT", "BINARY_DOUBLE",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
     }),
     "iceberg": frozenset({
         "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC",
@@ -5871,6 +5928,13 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         # Foreign IEEE → float / double. Keep lowercase float/double.
         "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
         "FLOAT64", "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+        "BOOLEAN",
     }),
     "duckdb": frozenset({
         "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
@@ -5881,6 +5945,12 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         # Foreign IEEE → REAL / DOUBLE. Keep REAL/DOUBLE.
         "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
         "BINARY_FLOAT", "BINARY_DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
     }),
     "clickhouse": frozenset({
         "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
@@ -5892,6 +5962,13 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         # Foreign IEEE → Float32 / Float64. Keep Float32/Float64.
         "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
         "FLOAT64", "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+        "BOOLEAN",
     }),
     "trino": frozenset({
         "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
@@ -5901,6 +5978,13 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMETZ", "YEAR",
         "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
         "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+        "BOOLEAN",
     }),
     "presto": frozenset({
         "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
@@ -5910,11 +5994,25 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMETZ", "YEAR",
         "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
         "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+        "BOOLEAN",
     }),
     "generic_sql": frozenset({
         "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
         "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
         "BINARY_FLOAT", "BINARY_DOUBLE", "REAL", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+        "BOOLEAN",
     }),
     # SQLite has no true fixed-point type. DECIMAL/NUMERIC/NUMBER stamps get
     # NUMERIC affinity and silently store high-precision values as IEEE real.
@@ -5938,6 +6036,13 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         # Foreign IEEE aliases → REAL (SQLite affinity SSOT). Keep REAL.
         "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
         "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+        "BOOLEAN",
     }),
 }
 
@@ -5956,6 +6061,46 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
         if "<" in upper or "[" in upper:
             return True
         bare_typmod = upper.split("(", 1)[0].strip()
+        # Valued MySQL ENUM/SET is native CREATE wire — keep Map stamp.
+        if bare_typmod in {"ENUM", "SET"} and db in {"mysql", "mariadb", "tidb"}:
+            return True
+        # TINYINT(1) is the MySQL boolean synonym — rematerialize via ddl_type.
+        if bare_typmod == "TINYINT":
+            m_ti = re.match(r"^TINYINT\((\d+)\)$", upper)
+            if m_ti and int(m_ti.group(1)) == 1:
+                return False
+        # MySQL YEAR(4) → YEAR create-new wire (display-width alias).
+        if bare_typmod == "YEAR":
+            return False
+        # BIT(n): n<=1 → boolean polarity (rematerialize); n>1 → bitstring
+        # native only on PG/MySQL/DuckDB — elsewhere VARCHAR(n) SSOT.
+        if bare_typmod == "BIT":
+            m_bit = re.match(r"^BIT\((\d+)\)$", upper)
+            if m_bit:
+                width = int(m_bit.group(1))
+                if width <= 1:
+                    return False
+                if db in {
+                    "postgresql",
+                    "postgres",
+                    "cockroachdb",
+                    "timescaledb",
+                    "alloydb",
+                    "yugabytedb",
+                    "citus",
+                    "supabase",
+                    "greenplum",
+                    "mysql",
+                    "mariadb",
+                    "tidb",
+                    "duckdb",
+                }:
+                    return True
+                return False
+        # VECTOR / HALFVEC / SPARSEVEC typmods always rematerialize to dest
+        # ddl_type (Snowflake VECTOR(FLOAT,n), PG vector(n), else text/array).
+        if bare_typmod in {"VECTOR", "HALFVEC", "SPARSEVEC"}:
+            return False
         if bare_typmod in reject:
             return False
         return True
