@@ -370,15 +370,23 @@ class FilePreflightContext(PreflightContext):
 
 VALIDATION_CONFIDENCE_THRESHOLDS = {
     "balanced": 0.75,
+    "migration": 0.75,
     "strict": 0.85,
+    "audit": 0.85,
     "maximum": 0.95,
+    "discovery": 0.0,
 }
 
 
 def confidence_threshold_for_mode(validation_mode: str | None) -> float:
-    return VALIDATION_CONFIDENCE_THRESHOLDS.get(
-        (validation_mode or "strict").lower(), 0.85
-    )
+    try:
+        from services.validation_mode_contract import confidence_floor_for_mode
+
+        return confidence_floor_for_mode(validation_mode)
+    except Exception:
+        return VALIDATION_CONFIDENCE_THRESHOLDS.get(
+            (validation_mode or "strict").lower(), 0.85
+        )
 
 
 # Destinations that honor SCD2 / mirror streaming paths (must match Studio gating).
@@ -1795,6 +1803,25 @@ def run_file_preflight(
         )
 
     from services.root_cause_engine import apply_root_causes_to_preflight
+    from services.validation_mode_contract import stamp_validation_mode
+
+    stamp_validation_mode(out, validation_mode)
+    # Discovery / Audit: never invent an Execute unlock from Validate readiness.
+    try:
+        from services.validation_mode_contract import mode_allows_write, mode_contract
+
+        if not mode_allows_write(validation_mode):
+            c = mode_contract(validation_mode)
+            out["execute_unlocked"] = False
+            out["write_refused"] = True
+            out.setdefault("warnings", [])
+            if isinstance(out["warnings"], list):
+                out["warnings"].append(
+                    f"Mode `{c['id']}` refuses destination writes — "
+                    f"{c['non_guarantees'][0]}"
+                )
+    except Exception as mode_exc:
+        logger.debug("validation mode stamp side-effects skipped: %s", mode_exc)
 
     return apply_root_causes_to_preflight(out)
 

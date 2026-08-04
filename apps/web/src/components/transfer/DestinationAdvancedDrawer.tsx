@@ -22,7 +22,13 @@ export type DestSchemaPolicy =
   | "pause_on_change"
   | "type_locked";
 
-export type DestValidationMode = "balanced" | "strict" | "maximum";
+export type DestValidationMode =
+  | "balanced"
+  | "strict"
+  | "maximum"
+  | "migration"
+  | "discovery"
+  | "audit";
 export type DestDateLocale = "" | "DMY" | "MDY";
 
 export interface SyncModeOption {
@@ -40,6 +46,8 @@ export interface SchemaPolicyOption {
 export interface ValidationModeOption {
   id: DestValidationMode;
   label: string;
+  threshold?: string;
+  detail?: string;
 }
 
 export interface DateLocaleOption {

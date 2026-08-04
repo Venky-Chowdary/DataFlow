@@ -1402,8 +1402,10 @@ export function editableFromPipelineMappings(
 }
 
 export function confidenceThresholdForMode(mode: string): number {
-  if (mode === "balanced") return 0.75;
+  if (mode === "balanced" || mode === "migration") return 0.75;
   if (mode === "maximum") return 0.95;
+  if (mode === "discovery") return 0;
+  // strict | audit | unknown → fail closed to strict floor
   return 0.85;
 }
 

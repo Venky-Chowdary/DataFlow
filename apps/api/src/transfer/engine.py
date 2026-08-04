@@ -1739,6 +1739,34 @@ class UniversalTransferEngine:
                     )
         else:
             checkpoint = Checkpoint(job_id=job_id)
+
+        # Module 7: AUDIT / DISCOVERY never write — fail closed before mutation.
+        try:
+            from services.validation_mode_contract import assert_mode_allows_write
+
+            assert_mode_allows_write(getattr(request, "validation_mode", None))
+        except Exception as mode_exc:
+            from services.validation_mode_contract import ValidationModeWriteRefused
+
+            if isinstance(mode_exc, ValidationModeWriteRefused):
+                msg = str(mode_exc)
+                mongo.update_job_status(
+                    job_id, "failed", error=msg, phase="failed", progress_pct=0
+                )
+                lineage.emit_run_failed(
+                    run_id=job_id,
+                    job_id=job_id,
+                    error=msg,
+                    error_details={"reason": "validation_mode_write_refused"},
+                )
+                return TransferResult(
+                    success=False,
+                    error=msg,
+                    operation=request.operation,
+                    job_id=job_id,
+                )
+            raise
+
         lineage.emit_run_started(
             run_id=job_id,
             job_id=job_id,

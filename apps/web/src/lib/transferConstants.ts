@@ -19,7 +19,58 @@ export type SchemaPolicyId =
   | "pause_on_change"
   | "type_locked";
 
-export type ValidationModeId = "balanced" | "strict" | "maximum";
+export type ValidationModeId =
+  | "balanced"
+  | "strict"
+  | "maximum"
+  | "migration"
+  | "discovery"
+  | "audit";
+
+export const VALIDATION_MODES: {
+  id: ValidationModeId;
+  label: string;
+  threshold: string;
+  detail: string;
+}[] = [
+  {
+    id: "strict",
+    label: "Strict",
+    threshold: "0.85",
+    detail: "Fail on fidelity risks unless an approved Migration Risk Contract continues the column.",
+  },
+  {
+    id: "maximum",
+    label: "Maximum",
+    threshold: "0.95",
+    detail: "Strict posture with a higher mapping confidence floor.",
+  },
+  {
+    id: "balanced",
+    label: "Balanced",
+    threshold: "0.75",
+    detail: "Allow approved risks; Gate-8 may use sample assurance when digests diverge.",
+  },
+  {
+    id: "migration",
+    label: "Migration",
+    threshold: "0.75",
+    detail: "Warn on recoverable issues; unrecoverable fidelity still hard-blocks.",
+  },
+  {
+    id: "discovery",
+    label: "Discovery",
+    threshold: "report",
+    detail: "Report-only — never unlocks Execute / never writes.",
+  },
+  {
+    id: "audit",
+    label: "Audit",
+    threshold: "0.85",
+    detail: "Hard-block audit trail — never writes.",
+  },
+];
+
 export type DateLocaleId = "" | "DMY" | "MDY";
 
 export const SYNC_MODES: { id: SyncModeId; label: string; detail: string }[] = [
@@ -58,12 +109,6 @@ export const SCHEMA_POLICIES: { id: SchemaPolicyId; label: string; detail: strin
     label: "Type locked",
     detail: "Reject type changes at the destination — fail closed on incompatible casts.",
   },
-];
-
-export const VALIDATION_MODES: { id: ValidationModeId; label: string; threshold: string }[] = [
-  { id: "strict", label: "Strict", threshold: "0.85" },
-  { id: "maximum", label: "Maximum", threshold: "0.95" },
-  { id: "balanced", label: "Balanced", threshold: "0.75" },
 ];
 
 /** Fallback when the schedules API does not return sync_modes — never invent "incremental". */

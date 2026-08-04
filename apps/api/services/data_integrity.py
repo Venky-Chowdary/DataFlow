@@ -20,7 +20,10 @@ from services.value_serializer import cell_to_string
 _MODE_THRESHOLDS = {
     "maximum": {"confidence": 0.95, "null_rate_max": 0.0, "parse_fail_max": 0.0},
     "strict": {"confidence": 0.85, "null_rate_max": 0.05, "parse_fail_max": 0.02},
+    "audit": {"confidence": 0.85, "null_rate_max": 0.05, "parse_fail_max": 0.02},
     "balanced": {"confidence": 0.75, "null_rate_max": 0.15, "parse_fail_max": 0.05},
+    "migration": {"confidence": 0.75, "null_rate_max": 0.15, "parse_fail_max": 0.05},
+    "discovery": {"confidence": 0.0, "null_rate_max": 1.0, "parse_fail_max": 1.0},
 }
 
 

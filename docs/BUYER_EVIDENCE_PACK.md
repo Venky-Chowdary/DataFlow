@@ -9,6 +9,13 @@ Use this pack instead of marketing screenshots when Fortune 100 teams ask “pro
 | G1–G9 | `packages/preflight` (`GateId`, `PREFLIGHT_GATES`) |
 | Host policy extras | Studio Validate may add sync/schema/validation policy gates — distinct from core G1–G9 |
 | Constraint findings | Structured FK findings + optional **sample** orphan probe — block in strict/maximum when dest FK columns are unmapped or sample orphans are found unless `fk_risk_acknowledged`; **never invents population RI proof** (`proven` requires full population orphan scan with zero orphans) |
+| Root Cause Engine | `apps/api/services/root_cause_engine.py` — one fidelity root → many impacted gates (no duplicate blockers) |
+| Mapping confidence SSOT | `g4_mapping_confidence` only hard-blocks; proof/G9 report (`docs/MAPPING_CONFIDENCE_AUTHORITY.md`) |
+| Validation modes | `strict` / `maximum` / `balanced` / `migration` / `discovery` / `audit` with guarantees + non-guarantees (`docs/VALIDATION_MODE_CONTRACT.md`); `discovery`/`audit` **never write** |
+| Risk Contract | Immutable signed Accept Risk (`docs/MIGRATION_RISK_CONTRACT.md`); writers honor execution policy |
+| Coverage honesty | Sample ≠ population (`docs/VALIDATION_COVERAGE_CONTRACT.md`); Gate-8 stamps `checksum_match` / `assurance_level` |
+| Quarantine DLQ | Fail-closed if control-plane DLQ cannot persist rejects (`docs/QUARANTINE_DLQ_FAIL_CLOSED.md`) |
+| Rollback workflow | Signed plans; only `DISCARD_STAGING` executable — no population undo (`docs/MIGRATION_ROLLBACK.md`) |
 
 Do **not** claim “8 gates,” “ten gates,” or invent a marketed “G10 constraints” gate. Required core gates remain **G1–G9**.
 
@@ -24,7 +31,7 @@ Rule: if a route is not in `PRODUCTION_SKU`, it is not a committed migration cla
 
 | Claim | Module | Proves | Does **not** prove |
 |-------|--------|--------|--------------------|
-| `pair_assurance_offline` | `apps/api/services/pair_assurance.py` | Every PRODUCTION_SKU **database→database** pair: type inventory × create-new DDL stamp × lossy/risk/coercion fail-closed × mapping contract × fixture transforms | Live transfer, checksum/Gate-8 population, FK/orphan RI, rollback, CDC exactly-once |
+| `pair_assurance_offline` | `apps/api/services/pair_assurance.py` | Every PRODUCTION_SKU **database→database** pair: type inventory × create-new DDL stamp × lossy/risk/coercion fail-closed × mapping contract × fixture transforms | Live transfer, checksum/Gate-8 population, FK/orphan RI, one-click transfer undo, CDC exactly-once |
 | `connector_pair_matrix` | `tests/test_mapping_connector_pair_matrix.py` | Name-match golden score across dialect labels | Type/DDL fidelity |
 
 Proof artifacts: `apps/api/data/proofs/pair_assurance/{src}__{dst}.json` + `_summary.json`.
