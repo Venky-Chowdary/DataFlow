@@ -5830,10 +5830,21 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
     # NUMERIC affinity and silently store high-precision values as IEEE real.
     # Rematerialize via ddl_type → TEXT (Map≡CREATE honesty).
     # Foreign binary typmods → BLOB (SQLite ignores length; no affinity invent).
+    # UUID/JSON/TIMESTAMP/GUID/… also get NUMERIC affinity (not INT/CHAR/CLOB/
+    # BLOB/REAL) — digit-looking payloads become integer/real/inf. Rematerialize
+    # to TEXT/INTEGER SSOT.
     "sqlite": frozenset({
         "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
         "MONEY", "SMALLMONEY", "CURRENCY",
         "BINARY", "VARBINARY", "BYTES", "VARBYTE", "BYTEA", "FIXED",
+        "UUID", "UNIQUEIDENTIFIER", "GUID", "OBJECTID",
+        "JSON", "JSONB", "VARIANT", "SUPER", "HSTORE", "CITEXT", "AVRO",
+        "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ",
+        "TIMETZ", "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET",
+        "SMALLDATETIME", "DATE", "TIME", "YEAR",
+        "BOOLEAN", "BOOL", "BIT",
+        "ENUM", "SET", "INET", "CIDR", "VECTOR", "STRING",
+        "STRUCT", "MAP", "RECORD", "ARRAY",
     }),
 }
 
@@ -5869,8 +5880,14 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
         return True
     # Dialect multi-word tokens
     if upper.startswith("TIMESTAMP ") or upper.startswith("TIME WITH"):
+        # SQLite: rematerialize to TEXT (NUMERIC affinity invent otherwise).
+        if db == "sqlite":
+            return False
         return True
     if upper.startswith("DOUBLE ") or upper.startswith("CHARACTER "):
+        # SQLite: DOUBLE PRECISION → REAL; CHARACTER VARYING → TEXT.
+        if db == "sqlite":
+            return False
         return True
     return False
 
