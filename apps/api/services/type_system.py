@@ -6980,7 +6980,7 @@ def assess_create_new_type_risk(
     tgt = (target_type or "").strip() or src
     db = (destination_db_type or "").strip().lower()
 
-    if is_precision_collapse_coercion(src, tgt):
+    if is_precision_collapse_coercion(src, tgt, dest_db=db):
         risks.append({
             "kind": "precision_collapse",
             "severity": "warn",
@@ -6990,7 +6990,7 @@ def assess_create_new_type_risk(
                 + ". Review before execute."
             ),
         })
-    elif is_lossy_coercion(src, tgt):
+    elif is_lossy_coercion(src, tgt, dest_db=db):
         risks.append({
             "kind": "lossy_coercion",
             "severity": "warn",
@@ -7086,7 +7086,7 @@ def assess_create_new_type_risk(
     return risks
 
 
-def is_lossy_coercion(source_type: str, target_type: str) -> bool:
+def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") -> bool:
     """True when converting source→target may lose precision, fail silently, or
     change the semantic meaning of a value.
 
@@ -7211,7 +7211,7 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
             return True
         if bfile_locator_would_collapse(source_type, target_type):
             return True
-        if temporal_precision_would_narrow(source_type, target_type):
+        if temporal_precision_would_narrow(source_type, target_type, dest_db=dest_db):
             return True
         if src == LOGICAL_STRUCT and nested_struct_fields_incompatible(
             source_type, target_type
@@ -7235,6 +7235,10 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         and specialty_wire_preserves_value("OBJECTID", target_type)
     ):
         return False
+    # Dialect-aware collapse SSOT — same rules as G3/probe (never MySQL-default FSP
+    # when dest_db is postgresql/redshift, never false-collapse JSON→JSONB).
+    if is_precision_collapse_coercion(source_type, target_type, dest_db=dest_db):
+        return True
     # Fielded STRUCT/MAP → opaque JSON/VARIANT is intentional on many warehouses
     # (Airbyte V2) but is still a field-DDL collapse — treat as lossy so G3 surfaces it.
     if is_nested_document_collapse(source_type, target_type):
@@ -7331,9 +7335,9 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         return True
     if bfile_locator_would_collapse(source_type, target_type):
         return True
-    if temporal_precision_would_narrow(source_type, target_type):
+    if temporal_precision_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
-    if document_domain_would_collapse(source_type, target_type):
+    if document_domain_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
     if document_domain_would_invent(source_type, target_type):
         return True

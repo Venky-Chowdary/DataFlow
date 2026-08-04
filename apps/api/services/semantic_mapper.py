@@ -1852,7 +1852,10 @@ def _apply_create_new_risk_stamps(
                 row["reasoning"] = f"{reason} · {note}".strip(" ·")
             if (
                 (not row.get("fidelity") or row.get("fidelity") == "lossless")
-                and (is_lossy_coercion(src, tgt) or is_precision_collapse_coercion(src, tgt))
+                and (
+                    is_lossy_coercion(src, tgt, dest_db=db)
+                    or is_precision_collapse_coercion(src, tgt, dest_db=db)
+                )
             ):
                 row["fidelity"] = "lossy_cast"
             # Vary confidence: lossy create-new must not look like identity slam-dunk.

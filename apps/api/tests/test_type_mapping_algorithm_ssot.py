@@ -20,6 +20,7 @@ from services.type_system import (  # noqa: E402
     promote_create_new_temporal_stamp,
     document_domain_would_collapse,
     is_dialect_native_document_wire,
+    is_lossy_coercion,
     is_precision_collapse_coercion,
     suggest_remap_target,
     temporal_precision_would_narrow,
@@ -237,3 +238,37 @@ def test_oracle_time_to_varchar2_remains_declared_lossy():
     stamped = create_new_mapping_target_type("TIME(6)", "oracle")
     assert "VARCHAR2" in stamped.upper()
     assert is_precision_collapse_coercion("TIME(6)", stamped, dest_db="oracle") is True
+
+def test_lossy_respects_dest_db_for_timestamp_and_json():
+    """is_lossy_coercion must share dest_db-aware collapse SSOT — not MySQL defaults."""
+    from services.type_system import is_lossy_coercion
+
+    # Without dest_db: bare TIMESTAMP fail-closed (MySQL FSP 0).
+    assert is_lossy_coercion("TIMESTAMP_NTZ(6)", "TIMESTAMP") is True
+    # PostgreSQL create-new: bare TIMESTAMP is micros — not lossy.
+    assert is_lossy_coercion(
+        "TIMESTAMP_NTZ(6)", "TIMESTAMP", dest_db="postgresql"
+    ) is False
+    assert is_lossy_coercion("JSON", "JSONB", dest_db="postgresql") is False
+    assert is_lossy_coercion("JSON", "VARCHAR(50)", dest_db="postgresql") is True
+
+
+def test_validate_mapping_coercions_create_new_pg_timestamp_not_block():
+    from services.type_coercion_validator import validate_mapping_coercions
+
+    issues = validate_mapping_coercions(
+        mappings=[
+            {
+                "source": "ts",
+                "target": "ts",
+                "target_type": "TIMESTAMP",
+                "create_new": True,
+                "confidence": 0.95,
+            }
+        ],
+        source_types={"ts": "TIMESTAMP_NTZ(6)"},
+        target_types={},
+        dest_db_type="postgresql",
+    )
+    blocks = [i for i in issues if i.get("severity") == "block"]
+    assert not blocks, blocks

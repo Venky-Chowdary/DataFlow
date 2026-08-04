@@ -568,12 +568,23 @@ def detect_schema_drift(
                 )
                 or "VARCHAR"
             )
-            tgt_type = ci_get(target_schema, tgt) or "VARCHAR"
-            if not is_lossy_coercion(src_type, tgt_type):
-                continue
-            from services.type_system import is_precision_collapse_coercion
+            # Prefer mapping stamp over invented VARCHAR when live schema lacks column.
+            from services.type_system import (
+                is_precision_collapse_coercion,
+                resolve_mapping_target_type,
+            )
 
-            if is_precision_collapse_coercion(src_type, tgt_type):
+            tgt_type = resolve_mapping_target_type(
+                m,
+                target_types=target_schema,
+                source_type=str(src_type),
+                dest_db_type=str(destination_db_type or dest_kind or ""),
+            ) or ci_get(target_schema, tgt) or "VARCHAR"
+            dest_db = str(destination_db_type or dest_kind or "")
+            if not is_lossy_coercion(src_type, tgt_type, dest_db=dest_db):
+                continue
+
+            if is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest_db):
                 type_mismatches.append({
                     "source": src,
                     "target": tgt,

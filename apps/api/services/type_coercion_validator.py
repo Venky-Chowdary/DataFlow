@@ -67,8 +67,13 @@ def validate_mapping_coercions(
         )
         if wire_ok and not type_locked:
             continue
-        precision_collapse = is_precision_collapse_coercion(src_type, tgt_type)
-        lossy = is_lossy_coercion(src_type, tgt_type) or precision_collapse
+        precision_collapse = is_precision_collapse_coercion(
+            src_type, tgt_type, dest_db=dest_db_type
+        )
+        lossy = (
+            is_lossy_coercion(src_type, tgt_type, dest_db=dest_db_type)
+            or precision_collapse
+        )
         # Same logical family can still be lossy (YEAR→SMALLINT, MONEY→DECIMAL,
         # BIT→BYTEA). Never early-continue past is_lossy — Map/G3 SSOT.
         if src_logical == tgt_logical and not lossy and not wire_ok:
