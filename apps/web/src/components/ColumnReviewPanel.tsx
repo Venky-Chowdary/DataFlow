@@ -126,7 +126,7 @@ export function ColumnReviewPanel({
   onFilterChange,
 }: ColumnReviewPanelProps) {
   const [internalSearch, setInternalSearch] = useState("");
-  const [internalFilter, setInternalFilter] = useState<ColumnFilter>("all");
+  const [internalFilter, setInternalFilter] = useState<ColumnFilter>("review");
   const [sort, setSort] = useState<ColumnSort>("confidence-asc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<ColumnPageSize>(50);
@@ -165,6 +165,14 @@ export function ColumnReviewPanel({
   const avgConfidence = mappings.length
     ? mappings.reduce((s, m) => s + m.confidence, 0) / mappings.length
     : 0;
+
+
+  // Issues-first default when the panel owns its filter (uncontrolled).
+  useEffect(() => {
+    if (filterProp !== undefined) return;
+    const needs = mappings.filter((m) => needsMappingReview(m, confidenceThreshold)).length;
+    setInternalFilter(needs > 0 ? "review" : "all");
+  }, [mappings, confidenceThreshold, filterProp]);
 
   useEffect(() => {
     setPage(1);

@@ -9075,3 +9075,37 @@ button.df2-vd-assist-toggle:focus-visible {
     padding: 6px 8px;
   }
 }
+
+/* Rank 19: never clip Studio primary actions on laptop/mobile heights */
+@media (max-width: 1280px), (max-height: 820px) {
+  .df2-transfer-step-viewport > .df2-card-footer,
+  .df2-transfer-step-viewport > .df2-wizard-footer,
+  .df2-transfer-step-viewport > .df2-studio-actions,
+  .df2-page-transfer-studio .df2-wizard-footer,
+  .df2-page-transfer-studio .df2-studio-actions {
+    flex-shrink: 0 !important;
+    position: sticky;
+    bottom: 0;
+    z-index: 5;
+    padding-bottom: max(8px, env(safe-area-inset-bottom, 0px)) !important;
+    background: var(--df-surface, #fff);
+    box-shadow: 0 -1px 0 rgba(15, 23, 42, 0.08);
+  }
+
+  .df2-transfer-step-viewport {
+    overflow: hidden !important;
+  }
+
+  .df2-transfer-step-viewport > .df2-card-body {
+    min-height: 0;
+    overflow-y: auto;
+    padding-bottom: 12px !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .df2-page-transfer-studio .df2-wizard-footer .df2-btn,
+  .df2-page-transfer-studio .df2-studio-actions .df2-btn {
+    min-height: 40px;
+  }
+}

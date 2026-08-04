@@ -30,6 +30,16 @@ Datawrap is a **governed migration / data-movement workbench**: Source → Desti
 - **Checkpoint fail-closed**: failed checkpoint persistence aborts the job
 - **SKU honesty**: catalog tiles ≠ live; Planned connectors stay labeled until PRODUCTION_SKU
 
+## AI vs gates
+
+AI/Pilot/MCP may suggest mappings and transforms only. They **never** decide G1–G9
+pass/fail. See `docs/AI_GATE_POLICY.md`.
+
+## Rollback
+
+Honest cutover rollback posture (quarantine, staging, warehouse restore — not
+one-click undo): `docs/MIGRATION_ROLLBACK.md`.
+
 ## Buyer evidence
 
 See `docs/BUYER_EVIDENCE_PACK.md` for how to cite gates, SKU routes, and test anchors in diligence.

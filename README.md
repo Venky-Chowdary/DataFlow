@@ -19,7 +19,7 @@ See [docs/PRODUCT_SCOPE.md](docs/PRODUCT_SCOPE.md) for full scope.
 - **apps/web** — React 19 UI (3-screen one-click flow)
 - **apps/api** — FastAPI orchestrator
 - **apps/cli** — GitOps CLI (`plan` / `apply` / `export` / `validate`)
-- **packages/preflight** — 8-gate validation engine
+- **packages/preflight** — G1–G9 fail-closed validation engine
 - **packages/ml** — Synthetic schema factory + training pipeline
 - **design/tokens** — Precision Data design system tokens
 

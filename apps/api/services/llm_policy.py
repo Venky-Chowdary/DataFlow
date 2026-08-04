@@ -68,3 +68,28 @@ def mask_pii_samples(samples: dict[str, list[str]] | None) -> dict[str, list[str
 def llm_use_allowed(requested: bool) -> bool:
     """Combine caller request with global policy."""
     return requested and is_llm_enabled() and is_pii_masking_enabled()
+
+
+# Deterministic fail-closed gates — AI/Pilot/MCP may suggest only.
+AI_OFF_GATE_DECISIONS = frozenset({
+    "g1_source",
+    "g2_destination",
+    "g3_schema_contract",
+    "g4_mapping_confidence",
+    "g5_dry_run",
+    "g6_target_ddl",
+    "g7_capacity",
+    "g8_reconciliation",
+    "g9_data_integrity",
+})
+
+
+def ai_may_decide_preflight_gate(gate_id: str | None = None) -> bool:
+    """Product policy: AI never decides G1–G9 pass/fail (suggestions only).
+
+    ``gate_id`` is accepted for call-site clarity; the answer is always False
+    for any numbered preflight gate. See docs/AI_GATE_POLICY.md.
+    """
+    _ = gate_id  # documented parameter for call-site readability
+    return False
+

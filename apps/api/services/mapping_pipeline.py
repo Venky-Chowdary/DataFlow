@@ -508,14 +508,19 @@ def run_mapping_pipeline(
         col_samples = [
             str(x) for x in (schema_by_name.get(m["source"], {}).get("samples") or [])[:8]
         ] or None
-        transform = infer_transform_for_mapping(
-            m["source"],
-            m["target"],
-            src_type,
-            tgt_type,
-            source_samples=col_samples,
-            destination_db_type=destination_db_type,
-        )
+        # LLM-invented transforms are held as suggested_transform until Map accept —
+        # do not let deterministic infer silently re-apply the invent.
+        if m.get("llm_invented_transform") and not m.get("user_override"):
+            transform = m.get("transform") or "none"
+        else:
+            transform = infer_transform_for_mapping(
+                m["source"],
+                m["target"],
+                src_type,
+                tgt_type,
+                source_samples=col_samples,
+                destination_db_type=destination_db_type,
+            )
         # New/generic destinations: the DDL type should match the chosen typed
         # transform so a date column is created for "date" transforms, etc.
         # Do not collapse parametric DECIMAL(p,s) → bare DECIMAL.

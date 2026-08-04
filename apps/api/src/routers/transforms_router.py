@@ -300,6 +300,24 @@ def preview_plan(body: PlanPreviewRequest) -> dict[str, Any]:
     return {"plan": plan.to_dict(), "models": compiled, "dialect": runner.dialect}
 
 
+
+
+@router.get("/{project_id}/export/dbt")
+def export_dbt_pack(
+    project_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+) -> dict[str, Any]:
+    """Export models as a dbt sources/models starter pack (complement hook only)."""
+    resolve_read_workspace(request, workspace_id)
+    project = get_transform_store().get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Transformation project not found")
+    assert_resource_workspace(request, project.workspace_id or "")
+    from services.dbt_export import export_dbt_files
+
+    return export_dbt_files(project)
+
 @router.post("/{project_id}/run")
 def run_project(
     project_id: str,

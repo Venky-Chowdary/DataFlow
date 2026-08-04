@@ -14,6 +14,7 @@ import {
   deleteTransformProject,
   fetchTransformProjects,
   previewTransformPlan,
+  exportTransformProjectDbt,
   runTransformProject,
   updateTransformProject,
   type TransformModelDef,
@@ -226,6 +227,27 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
       await load();
     } catch (err) {
       toast({ title: err instanceof Error ? err.message : "Could not delete transform", tone: "error" });
+    }
+  };
+
+
+  const handleExportDbt = async (project: TransformProject) => {
+    try {
+      const pack = await exportTransformProjectDbt(project.id);
+      const blob = new Blob([JSON.stringify(pack, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `datawrap-dbt-${project.name || project.id}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast({
+        title: "dbt pack exported",
+        message: `${pack.file_count} file(s). Complement hook only — not dbt Cloud.`,
+        tone: "success",
+      });
+    } catch (err) {
+      toast({ title: err instanceof Error ? err.message : "dbt export failed", tone: "error" });
     }
   };
 
@@ -476,6 +498,13 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
                           loading={runningId === project.id}
                         >
                           Run now
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => void handleExportDbt(project)}
+                        >
+                          Export dbt
                         </Button>
                         <Button variant="ghost" size="sm" onClick={() => openEdit(project)}>
                           Edit

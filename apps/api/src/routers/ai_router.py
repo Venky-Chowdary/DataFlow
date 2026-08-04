@@ -515,6 +515,12 @@ class TransformSuggestionResponse(BaseModel):
     reasoning: str
     confidence: float
     transformations: list[str] = []
+    auto_apply: bool = False
+    requires_human_accept: bool = True
+    note: str = (
+        "Suggestions only — never applied to Map/Validate/Execute without human accept. "
+        "AI never decides G4/G8/G9."
+    )
 
 
 class ModelsStatusResponse(BaseModel):
@@ -647,6 +653,8 @@ async def api_suggest_transforms(request: TransformSuggestionRequest):
             reasoning=result.reasoning,
             confidence=result.confidence,
             transformations=transforms,
+            auto_apply=False,
+            requires_human_accept=True,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

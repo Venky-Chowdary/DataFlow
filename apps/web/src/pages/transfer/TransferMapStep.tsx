@@ -9,7 +9,7 @@ import { Dialog } from "../../components/ui/Dialog";
 import { Button } from "../../components/ui/Button";
 import { DtIcon } from "../../components/DtIcon";
 import type { ColumnFilter } from "../../lib/columnWorkbench";
-import { countByFilter } from "../../lib/columnWorkbench";
+import { countByFilter, needsMappingReview } from "../../lib/columnWorkbench";
 import type { EditableMapping } from "../../lib/mapping";
 import { mappingHealthSummary } from "../../lib/mapping";
 import type { UniqueKeySuggestion } from "../../lib/uniqueKeySuggestions";
@@ -122,12 +122,26 @@ export function TransferMapStep({
   onApplyPrimaryKey,
 }: TransferMapStepProps) {
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<ColumnFilter>("all");
+  const [filter, setFilter] = useState<ColumnFilter>("review");
+  const [userPickedFilter, setUserPickedFilter] = useState(false);
   const [focusSource, setFocusSource] = useState<string | null>(null);
   const [mapDialogOpen, setMapDialogOpen] = useState(false);
   const [proofOpenLocal, setProofOpenLocal] = useState(false);
   const proofOpen = proofOpenProp ?? proofOpenLocal;
   const setProofOpen = onProofOpenChange ?? setProofOpenLocal;
+
+
+  const handleFilterChange = (next: ColumnFilter) => {
+    setUserPickedFilter(true);
+    setFilter(next);
+  };
+
+  useEffect(() => {
+    // Skip while an identity/focus dialog is open so we don't fight setFilter("all").
+    if (userPickedFilter || focusSource) return;
+    const needs = columnMappings.filter((m) => needsMappingReview(m, confidenceThreshold)).length;
+    setFilter(needs > 0 ? "review" : "all");
+  }, [columnMappings, confidenceThreshold, userPickedFilter, focusSource]);
 
   useEffect(() => {
     const content = document.querySelector(".df2-content");
@@ -144,6 +158,7 @@ export function TransferMapStep({
     if (!initialFocusSource) return;
     setFocusSource(initialFocusSource);
     setSearch(initialFocusSource);
+    // Do not set userPickedFilter — issues-first resumes when focusSource clears.
     setFilter("all");
     setMapDialogOpen(true);
     onIdentityFixConsumed?.();
@@ -315,7 +330,7 @@ export function TransferMapStep({
                 search={search}
                 onSearchChange={setSearch}
                 filter={filter}
-                onFilterChange={setFilter}
+                onFilterChange={handleFilterChange}
                 focusSource={focusSource}
                 onFocusHandled={() => setFocusSource(null)}
               />
@@ -473,7 +488,7 @@ export function TransferMapStep({
           search={search}
           onSearchChange={setSearch}
           filter={filter}
-          onFilterChange={setFilter}
+          onFilterChange={handleFilterChange}
           focusSource={focusSource}
           onFocusHandled={() => setFocusSource(null)}
         />

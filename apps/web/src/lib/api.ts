@@ -3485,3 +3485,18 @@ export async function runTransformProject(
   if (!res.ok) throw new Error(await parseApiError(res, "Transformation run failed"));
   return res.json();
 }
+
+export async function exportTransformProjectDbt(projectId: string): Promise<{
+  project_id: string;
+  project_name: string;
+  file_count: number;
+  files: Record<string, string>;
+  honesty: Record<string, unknown>;
+}> {
+  const res = await apiFetch(
+    `${API_BASE}/transforms/${encodeURIComponent(projectId)}/export/dbt`,
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not export dbt pack"));
+  return res.json();
+}
+

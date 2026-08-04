@@ -15,6 +15,45 @@ def _sanitize_samples(samples: dict[str, list[str]] | None) -> dict[str, list[st
         return {}
     return mask_pii_samples(samples)
 
+
+_IDENTITY_TRANSFORMS = frozenset({"", "none", "identity", "null"})
+
+
+def _norm_transform(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def _hold_invented_transform(
+    pick: dict[str, Any],
+    base: dict[str, Any] | None,
+    llm: dict[str, Any],
+) -> dict[str, Any]:
+    """Never auto-apply an LLM-invented transform — require human accept on Map.
+
+    Deterministic baseline transform (if any) stays applied; the LLM proposal is
+    surfaced as ``suggested_transform`` with ``requires_review`` forced.
+    """
+    llm_xf = _norm_transform(llm.get("transform"))
+    base_xf = _norm_transform(
+        (base or {}).get("transform") or (base or {}).get("transformation")
+    )
+    if not llm_xf or llm_xf in _IDENTITY_TRANSFORMS or llm_xf == base_xf:
+        return pick
+    suggested = llm.get("transform") or llm.get("transformation")
+    pick["llm_invented_transform"] = True
+    pick["suggested_transform"] = suggested
+    if base is not None and ("transform" in base or "transformation" in base):
+        pick["transform"] = base.get("transform", base.get("transformation"))
+    else:
+        pick["transform"] = None
+    pick["requires_review"] = True
+    note = (
+        f"LLM suggested transform '{suggested}' — human accept required before Execute"
+    )
+    reason = str(pick.get("reasoning") or "").strip()
+    pick["reasoning"] = f"{reason} · {note}" if reason else note
+    return pick
+
 _LLM_SYSTEM = (
     "You are a data engineering expert. Map source columns to destination columns. "
     "Respond with valid JSON only. Never invent destination columns not in the target list."
@@ -217,6 +256,7 @@ def refine_mappings_with_llm(
                 score_gap, requires_review = _compute_llm_review(src, llm, base)
                 pick["score_gap"] = score_gap
                 pick["requires_review"] = requires_review
+                pick = _hold_invented_transform(pick, base, llm)
                 pick["method"] = "hybrid_llm"
                 pick["agent"] = "LLMMappingAgent"
                 merged.append(pick)
@@ -226,8 +266,9 @@ def refine_mappings_with_llm(
 
         for src, llm in llm_by_source.items():
             if src not in {m["source"] for m in merged} and llm["target"].lower() not in used_targets:
-                merged.append(llm)
-                used_targets.add(llm["target"].lower())
+                held = _hold_invented_transform(dict(llm), None, llm)
+                merged.append(held)
+                used_targets.add(held["target"].lower())
 
         meta.update({
             "llm_used": True,
