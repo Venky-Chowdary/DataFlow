@@ -57,6 +57,7 @@ class WriteResult(_WriteResult):
 
 
 def sqlite_type(inferred: str) -> str:
+    """CREATE DDL for SQLite — rematerializes DECIMAL/MONEY to TEXT (no affinity invent)."""
     return materialize_dest_ddl("sqlite", inferred)
 
 
