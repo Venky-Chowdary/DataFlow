@@ -5735,6 +5735,9 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "BINARY", "VARBINARY", "BYTES", "FIXED",
         # Bare DECIMAL/NUMERIC → DECIMAL(38,15); quarantine needs (p,s).
         "DECIMAL", "NUMERIC",
+        # Foreign temporals → TIMESTAMP / TIMESTAMPTZ SSOT.
+        "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET", "SMALLDATETIME",
+        "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMETZ", "YEAR",
     }),
     "snowflake": frozenset({
         "JSON", "JSONB", "UUID", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE",
@@ -5743,6 +5746,10 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "VARBINARY", "BYTES", "VARBYTE", "FIXED",
         # Bare DECIMAL/NUMBER → NUMBER(38,10) SSOT (never batch invent).
         "DECIMAL", "NUMERIC", "NUMBER",
+        # TIMESTAMP/DATETIME → TIMESTAMP_NTZ; TIMESTAMPTZ → TIMESTAMP_LTZ.
+        # Keep TIMESTAMP_NTZ / TIMESTAMP_LTZ / TIMESTAMP_TZ native.
+        "TIMESTAMP", "DATETIME", "DATETIME2", "DATETIME64", "TIMESTAMPTZ",
+        "DATETIMEOFFSET", "SMALLDATETIME", "TIMETZ", "YEAR",
     }),
     "bigquery": frozenset({
         "UUID", "JSONB", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE", "SUPER",
@@ -5751,6 +5758,9 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "BINARY", "VARBINARY", "VARBYTE", "FIXED",
         # Bare DECIMAL/NUMERIC → BIGNUMERIC create-new wire.
         "DECIMAL", "NUMERIC",
+        # Foreign temporals → DATETIME/TIMESTAMP SSOT. Keep DATETIME/TIMESTAMP/DATE/TIME.
+        "DATETIME2", "DATETIME64", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ",
+        "TIMESTAMPTZ", "DATETIMEOFFSET", "SMALLDATETIME", "TIMETZ", "YEAR",
     }),
     "spanner": frozenset({
         "UUID", "JSONB", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE", "SUPER",
@@ -5758,6 +5768,9 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "DATETIME", "TIME",  # Spanner has no DATETIME/TIME — use STRING wire
         "BINARY", "VARBINARY", "VARBYTE", "FIXED",
         "DECIMAL", "NUMERIC", "NUMBER",
+        "DATETIME2", "DATETIME64", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ",
+        "TIMESTAMPTZ", "DATETIMEOFFSET", "SMALLDATETIME", "TIMETZ", "YEAR",
+        "TIMESTAMP",  # NTZ invent — SSOT STRING(30) / TIMESTAMP for aware via ddl
     }),
     "postgresql": frozenset({
         # Bare JSON is a logical alias; create-new document wire is JSONB.
@@ -5767,6 +5780,9 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "BINARY", "VARBINARY", "BYTES", "VARBYTE", "FIXED",
         # Bare DECIMAL/NUMBER → NUMERIC (unbounded). Keep bare NUMERIC native.
         "DECIMAL", "NUMBER",
+        # Foreign temporals → TIMESTAMP/TIMESTAMPTZ. Keep TIMESTAMP/TIMESTAMPTZ/DATE/TIME.
+        "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET", "SMALLDATETIME",
+        "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMETZ", "YEAR",
     }),
     "mysql": frozenset({
         "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC",
@@ -5775,12 +5791,20 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "BYTES", "VARBYTE", "FIXED",
         # Bare DECIMAL invents MySQL DECIMAL(10,0); SSOT is DECIMAL(38,15).
         "DECIMAL", "NUMERIC", "NUMBER",
+        # TIMESTAMP invents session-TZ; DATETIME/TIME need FSP(6). Keep DATE/YEAR.
+        "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ",
+        "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET", "SMALLDATETIME",
+        "TIME", "TIMETZ",
     }),
     "sqlserver": frozenset({
         "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC", "JSON",
         "NVARCHAR2", "HSTORE", "INET", "CIDR",
         "BYTES", "VARBYTE", "FIXED",
         "DECIMAL", "NUMERIC", "NUMBER",
+        # TIMESTAMP is T-SQL ROWVERSION — never CREATE as datetime. Rematerialize
+        # to DATETIME2(7). Keep DATETIME2 / DATETIMEOFFSET / SMALLDATETIME / DATE.
+        "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ",
+        "DATETIME", "DATETIME64", "TIMETZ", "YEAR",
     }),
     "oracle": frozenset({
         "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC", "JSON",
@@ -5789,12 +5813,19 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "BINARY", "VARBINARY", "BYTES", "VARBYTE", "FIXED",
         # Bare NUMBER/DECIMAL → NUMBER(38,10) SSOT.
         "DECIMAL", "NUMERIC", "NUMBER",
+        # Foreign temporals → TIMESTAMP / WITH TIME ZONE. Keep TIMESTAMP/DATE.
+        "DATETIME", "DATETIME2", "DATETIME64", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ",
+        "TIMESTAMP_TZ", "TIMESTAMPTZ", "DATETIMEOFFSET", "SMALLDATETIME",
+        "TIME", "TIMETZ", "YEAR",
     }),
     "databricks": frozenset({
         "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC",
         "UNIQUEIDENTIFIER", "NVARCHAR2", "HSTORE", "INET", "CIDR",
         "BINARY", "VARBINARY", "BYTES", "VARBYTE", "FIXED",
         "DECIMAL", "NUMERIC", "NUMBER",
+        "TIMESTAMP", "DATETIME", "DATETIME2", "DATETIME64", "TIMESTAMPTZ",
+        "DATETIMEOFFSET", "SMALLDATETIME", "TIMETZ", "YEAR",
+        "TIMESTAMP_TZ",
     }),
     "iceberg": frozenset({
         "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC",
@@ -5802,26 +5833,37 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         # Widthed binary → fixed(n); bare BINARY already → binary. Keep FIXED native.
         "BINARY", "VARBINARY", "BYTES", "VARBYTE",
         "DECIMAL", "NUMERIC", "NUMBER",
+        "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET", "SMALLDATETIME",
+        "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMETZ", "YEAR",
     }),
     "duckdb": frozenset({
         "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
         "BINARY", "VARBINARY", "BYTES", "VARBYTE", "BYTEA", "FIXED",
         "JSONB", "UUID", "SUPER", "VARIANT", "UNIQUEIDENTIFIER", "NVARCHAR2",
+        "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET", "SMALLDATETIME",
+        "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMETZ", "YEAR",
     }),
     "clickhouse": frozenset({
         "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
         "BINARY", "VARBINARY", "BYTES", "VARBYTE", "BYTEA", "FIXED",
         "JSONB", "UUID", "SUPER", "VARIANT", "UNIQUEIDENTIFIER", "NVARCHAR2",
+        "DATETIME", "DATETIME2", "TIMESTAMP", "TIMESTAMPTZ", "DATETIMEOFFSET",
+        "SMALLDATETIME", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ",
+        "TIMETZ", "YEAR",
     }),
     "trino": frozenset({
         "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
         "BINARY", "VARBINARY", "BYTES", "VARBYTE", "BYTEA", "FIXED",
         "JSONB", "UUID", "SUPER", "VARIANT", "UNIQUEIDENTIFIER", "NVARCHAR2",
+        "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET", "SMALLDATETIME",
+        "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMETZ", "YEAR",
     }),
     "presto": frozenset({
         "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
         "BINARY", "VARBINARY", "BYTES", "VARBYTE", "BYTEA", "FIXED",
         "JSONB", "UUID", "SUPER", "VARIANT", "UNIQUEIDENTIFIER", "NVARCHAR2",
+        "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET", "SMALLDATETIME",
+        "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMETZ", "YEAR",
     }),
     "generic_sql": frozenset({
         "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
@@ -5880,12 +5922,13 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
         return True
     # Dialect multi-word tokens
     if upper.startswith("TIMESTAMP ") or upper.startswith("TIME WITH"):
-        # SQLite: rematerialize to TEXT (NUMERIC affinity invent otherwise).
-        if db == "sqlite":
-            return False
-        return True
+        # Rematerialize to dest ddl_type SSOT (MySQL → DATETIME(6), SF →
+        # TIMESTAMP_TZ, PG → TIMESTAMPTZ, SQLite → TEXT). Never invent
+        # foreign multi-word temporals as CREATE DDL.
+        return False
     if upper.startswith("DOUBLE ") or upper.startswith("CHARACTER "):
         # SQLite: DOUBLE PRECISION → REAL; CHARACTER VARYING → TEXT.
+        # Other dests: rematerialize aliases via ddl_type when needed.
         if db == "sqlite":
             return False
         return True
