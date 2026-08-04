@@ -12,7 +12,7 @@ from services import reflection_cache
 from services.type_system import ddl_type, materialize_dest_ddl
 
 from connectors.mysql_conn import get_connection
-from connectors.schema_drift import is_wider_type, widen_existing_columns_native
+from connectors.schema_drift import widen_existing_columns_native
 from connectors.sql_temporal import (
     extract_column_from_sql_error,
     is_sql_data_error,
@@ -532,9 +532,9 @@ def write_mapped_rows(
                 # table as it was before these columns existed.
                 reflection_cache.invalidate_by_identity(_identity, "", table_name)
 
-            # Pick the wider of the mapping-proposed target DDL and the freshly
-            # introspected source DDL, then widen any destination columns that are
-            # now too narrow for the source drift.
+            # Map≡ALTER: source DDL may propose a wider type, but an explicit
+            # Map target_type is a hard ceiling — never MODIFY past it.
+            from connectors.writer_common import desired_types_honoring_map_stamps
             from services.mapping_constraints import write_mappings
 
             active_by_tgt: dict[str, dict] = {}
@@ -542,8 +542,8 @@ def write_mapped_rows(
                 tgt = sanitize_identifier(str(mapping.get("target") or ""), preserve_case=False)
                 if tgt and tgt not in active_by_tgt:
                     active_by_tgt[tgt] = mapping
-            desired_types: list[str] = []
-            for col, target_type in zip(target_cols, target_types):
+            candidate_by_col: dict[str, str] = {}
+            for col in target_cols:
                 mapping = active_by_tgt.get(col) or {}
                 source = mapping.get("source") or ""
                 source_type = (
@@ -551,13 +551,19 @@ def write_mapped_rows(
                     or mapping.get("source_type")
                     or "VARCHAR"
                 )
-                source_ddl = mysql_type(source_type)
-                desired = (
-                    source_ddl
-                    if is_wider_type(target_type, source_ddl)
-                    else target_type
+                candidate_by_col[col] = mysql_type(source_type)
+
+            desired_types, alter_refusals = desired_types_honoring_map_stamps(
+                target_cols=target_cols,
+                current_target_types=target_types,
+                mappings=mappings,
+                candidate_by_col=candidate_by_col,
+            )
+            if alter_refusals:
+                logger.info(
+                    "mysql Map≡ALTER refusals (stamp ceiling): %s",
+                    alter_refusals,
                 )
-                desired_types.append(desired)
 
             widen_existing_columns_native(
                 cursor,

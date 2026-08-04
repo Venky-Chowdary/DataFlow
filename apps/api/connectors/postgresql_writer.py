@@ -18,7 +18,7 @@ from services.type_system import materialize_dest_ddl
 from services.value_serializer import json_default
 
 from connectors.postgresql_conn import get_connection
-from connectors.schema_drift import is_wider_type, widen_existing_columns_native
+from connectors.schema_drift import widen_existing_columns_native
 from connectors.sql_temporal import (
     extract_column_from_sql_error,
     is_sql_data_error,
@@ -1154,12 +1154,10 @@ def write_mapped_rows(
                         )
                     )
 
-            # Pick the wider of the mapping-proposed target DDL and the freshly
-            # inferred source DDL from the actual batch samples, then widen any
-            # destination columns that are now too narrow for source drift.
-            # Using the batch samples (with the active date_locale) instead of the
-            # stale peek-file schema prevents MDY/DMY dates from being downgraded
-            # to TEXT after the table is created.
+            # Map≡ALTER: source/batch DDL may propose a wider type, but an
+            # explicit Map target_type is a hard ceiling — never ALTER past it.
+            # Unfit cells quarantine on write (overflow), not silent widen.
+            from connectors.writer_common import desired_types_honoring_map_stamps
             from services.mapping_constraints import write_mappings
 
             active_by_tgt: dict[str, dict] = {}
@@ -1167,8 +1165,8 @@ def write_mapped_rows(
                 tgt = sanitize_identifier(str(mapping.get("target") or ""), preserve_case=False)
                 if tgt and tgt not in active_by_tgt:
                     active_by_tgt[tgt] = mapping
-            desired_types: list[str] = []
-            for col, target_type in zip(target_cols, target_types):
+            candidate_by_col: dict[str, str] = {}
+            for col in target_cols:
                 mapping = active_by_tgt.get(col) or {}
                 source = mapping.get("source") or ""
                 source_samples = batch_samples.get(source, []) if batch_samples else []
@@ -1180,13 +1178,19 @@ def write_mapped_rows(
                         or mapping.get("source_type")
                         or "VARCHAR"
                     )
-                source_ddl = pg_type(source_type, engine=engine)
-                desired = (
-                    source_ddl
-                    if is_wider_type(target_type, source_ddl)
-                    else target_type
+                candidate_by_col[col] = pg_type(source_type, engine=engine)
+
+            desired_types, alter_refusals = desired_types_honoring_map_stamps(
+                target_cols=target_cols,
+                current_target_types=target_types,
+                mappings=mappings,
+                candidate_by_col=candidate_by_col,
+            )
+            if alter_refusals:
+                logger.info(
+                    "postgresql Map≡ALTER refusals (stamp ceiling): %s",
+                    alter_refusals,
                 )
-                desired_types.append(desired)
 
             widen_existing_columns_native(
                 cursor,

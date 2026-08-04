@@ -128,6 +128,62 @@ def resolve_writer_backfill(
     )
 
 
+def desired_types_honoring_map_stamps(
+    *,
+    target_cols: list[str],
+    current_target_types: list[str],
+    mappings: list[dict[str, Any]] | None,
+    candidate_by_col: dict[str, str] | None = None,
+    preserve_case: bool = False,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Map≡ALTER: never widen past an explicit Map ``target_type`` stamp.
+
+    ``current_target_types`` are the Map-resolved CREATE types (already
+    honor_explicit). ``candidate_by_col`` may propose a wider source/batch DDL.
+    Explicit stamps are a hard ceiling — overflow cells quarantine on write;
+    silent ALTER past the approved mapping is refuse-closed.
+
+    Returns ``(desired_types, refusals)`` where each refusal is audit evidence:
+    ``{column, mapped_type, refused_wider, reason}``.
+    """
+    from connectors.schema_drift import is_wider_type
+    from services.mapping_constraints import write_mappings
+
+    candidates = candidate_by_col or {}
+    by_tgt: dict[str, dict[str, Any]] = {}
+    for mapping in write_mappings(list(mappings or [])):
+        tgt = sanitize_identifier(
+            str(mapping.get("target") or ""), preserve_case=preserve_case
+        )
+        if tgt and tgt not in by_tgt:
+            by_tgt[tgt] = mapping
+
+    desired: list[str] = []
+    refusals: list[dict[str, Any]] = []
+    for col, cur_type in zip(target_cols, current_target_types):
+        mapping = by_tgt.get(col) or {}
+        candidate = str(candidates.get(col) or cur_type or "").strip() or str(cur_type)
+        ceiling = str(cur_type or "").strip() or candidate
+        explicit = str(mapping.get("target_type") or "").strip()
+        if explicit:
+            if candidate and is_wider_type(ceiling, candidate):
+                refusals.append(
+                    {
+                        "column": col,
+                        "mapped_type": ceiling,
+                        "refused_wider": candidate,
+                        "reason": "explicit_map_stamp_ceiling",
+                    }
+                )
+            desired.append(ceiling)
+            continue
+        if candidate and is_wider_type(ceiling, candidate):
+            desired.append(candidate)
+        else:
+            desired.append(ceiling)
+    return desired, refusals
+
+
 def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
     """Convert a mapped cell to a JSON-serializable scalar.
 

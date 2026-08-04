@@ -174,12 +174,39 @@ def _widen_existing_number_columns(
     table_name: str,
     target_cols: list[str],
     target_types: list[str],
-) -> None:
-    """Widen existing NUMBER columns when a later batch needs more capacity.
+    *,
+    stamp_ceiling_by_col: dict[str, str] | None = None,
+    candidate_types: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Align live NUMBER columns up to approved Map types — never past them.
 
-    CREATE TABLE IF NOT EXISTS freezes the first batch's sizing; without this,
-    later chunks raise decimal.Overflow after tens of thousands of rows succeed.
+    Returns audit refusals when a candidate would exceed an explicit Map stamp.
     """
+    from connectors.schema_drift import is_wider_type
+
+    refusals: list[dict[str, Any]] = []
+    ceilings = {str(k).upper(): v for k, v in (stamp_ceiling_by_col or {}).items()}
+    cands = list(candidate_types) if candidate_types is not None else list(target_types)
+    if len(cands) != len(target_cols):
+        cands = list(target_types)
+
+    desired: list[str] = []
+    for col, mapped_typ, cand in zip(target_cols, target_types, cands):
+        stamp = ceilings.get(col.upper())
+        if stamp:
+            if cand and is_wider_type(stamp, cand):
+                refusals.append(
+                    {
+                        "column": col,
+                        "mapped_type": stamp,
+                        "refused_wider": cand,
+                        "reason": "explicit_map_stamp_ceiling",
+                    }
+                )
+            desired.append(stamp)
+        else:
+            desired.append(cand or mapped_typ)
+
     try:
         cur.execute(
             """
@@ -197,9 +224,9 @@ def _widen_existing_number_columns(
         logger.warning(
             "snowflake widen column introspection failed: %s", exc, exc_info=exc
         )
-        return
+        return refusals
 
-    for col, typ in zip(target_cols, target_types):
+    for col, typ in zip(target_cols, desired):
         parsed = _parse_number_type(typ)
         if not parsed:
             continue
@@ -209,22 +236,18 @@ def _widen_existing_number_columns(
             continue
         want_int = max(0, want_p - want_s)
         cur_int = max(0, cur_p - cur_s)
-        final_int = max(want_int, cur_int)
-        final_scale = max(want_s, cur_s)
-        if final_int + final_scale > 38:
-            final_scale = max(0, 38 - final_int)
-        final_p = min(38, final_int + final_scale)
-        if final_p <= cur_p and final_scale <= cur_s and final_int <= cur_int:
+        if want_int <= cur_int and want_s <= cur_s and want_p <= cur_p:
             continue
         try:
             cur.execute(
                 f'ALTER TABLE "{table_name}" ALTER COLUMN "{col}" '
-                f"SET DATA TYPE NUMBER({final_p},{final_scale})"
+                f"SET DATA TYPE NUMBER({want_p},{want_s})"
             )
         except Exception as exc:
             logger.warning(
                 "snowflake alter column %s failed: %s", col, exc, exc_info=exc
             )
+    return refusals
 
 
 def _format_write_error(exc: BaseException) -> str:
@@ -1018,10 +1041,35 @@ def write_mapped_rows(
                     f"CREATE TABLE IF NOT EXISTS {quote_sql_identifier(table_name)} ({col_defs})"
                 )
 
-            # Later stream chunks may need wider NUMBER than the first CREATE.
-            _widen_existing_number_columns(
-                cur, schema, table_name, target_cols, target_types
+            # Later stream chunks may need wider NUMBER than the first CREATE —
+            # but never past an explicit Map stamp (Map≡ALTER).
+            from services.mapping_constraints import write_mappings
+
+            stamp_ceiling_by_col: dict[str, str] = {}
+            by_tgt: dict[str, dict] = {}
+            for mapping in write_mappings(mappings):
+                tgt = sanitize_identifier(
+                    str(mapping.get("target") or ""), preserve_case=True
+                )
+                if tgt and tgt not in by_tgt:
+                    by_tgt[tgt] = mapping
+            for col, typ in zip(target_cols, target_types):
+                if str((by_tgt.get(col) or {}).get("target_type") or "").strip():
+                    stamp_ceiling_by_col[col] = typ
+            alter_refusals = _widen_existing_number_columns(
+                cur,
+                schema,
+                table_name,
+                target_cols,
+                target_types,
+                stamp_ceiling_by_col=stamp_ceiling_by_col or None,
+                candidate_types=target_types,
             )
+            if alter_refusals:
+                logger.info(
+                    "snowflake Map≡ALTER refusals (stamp ceiling): %s",
+                    alter_refusals,
+                )
 
             if backfill_new_fields:
                 cur.execute(
