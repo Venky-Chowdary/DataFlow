@@ -5796,6 +5796,10 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "MONEY", "SMALLMONEY", "CURRENCY",
         "YEAR", "MEDIUMINT",
         "BOOLEAN",
+        # Foreign string/integer aliases → STRING / INT64. Keep STRING/INT64/BYTES.
+        "VARCHAR", "CHAR", "NVARCHAR", "TEXT", "CLOB", "NCLOB", "BPCHAR",
+        "CHARACTER VARYING",
+        "INTEGER", "INT", "BIGINT", "SMALLINT",
     }),
     "spanner": frozenset({
         "UUID", "JSONB", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE", "SUPER",
@@ -6101,6 +6105,12 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
         # ddl_type (Snowflake VECTOR(FLOAT,n), PG vector(n), else text/array).
         if bare_typmod in {"VECTOR", "HALFVEC", "SPARSEVEC"}:
             return False
+        # BigQuery: parameterized NUMERIC/BIGNUMERIC Map stamps are native CREATE
+        # wire — never rewrite NUMERIC(10,2) → BIGNUMERIC(10,2). Bare NUMERIC
+        # still rejects below → BIGNUMERIC. DECIMAL(p,s) rematerializes to
+        # BIGNUMERIC(p,s) (BQ has no DECIMAL type name).
+        if db == "bigquery" and bare_typmod in {"NUMERIC", "BIGNUMERIC"}:
+            return True
         if bare_typmod in reject:
             return False
         return True
@@ -6141,10 +6151,11 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
         return False
     if upper.startswith("DOUBLE ") or upper.startswith("CHARACTER "):
         # DOUBLE PRECISION handled above when in pass-through set; remaining
-        # DOUBLE … forms rematerialize. CHARACTER VARYING → ddl on SQLite.
+        # DOUBLE … forms rematerialize. CHARACTER VARYING → ddl on SQLite /
+        # BigQuery (STRING) / other non-native engines.
         if upper.startswith("DOUBLE "):
             return False
-        if db == "sqlite":
+        if db in {"sqlite", "bigquery", "spanner", "databricks", "iceberg"}:
             return False
         return True
     return False

@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from services.type_system import ddl_type
+from services.type_system import materialize_dest_ddl
 
 from connectors.driver_guard import stub_writes_allowed
 from connectors.stub_writer import simulate_stub_write
@@ -80,8 +80,8 @@ def _bq_fixed_point_spec(
         re.IGNORECASE,
     )
     if not m:
-        # Legalize logicals (e.g. money aliases) via ddl_type wire.
-        wire = ddl_type("bigquery", raw)
+        # Legalize logicals (e.g. money aliases) via Map≡CREATE materialize SSOT.
+        wire = materialize_dest_ddl("bigquery", raw)
         m = re.match(
             r"^(BIGNUMERIC|NUMERIC)\s*"
             r"(?:\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\))?\s*$",
@@ -125,6 +125,9 @@ def bq_type(inferred: str) -> str:
     max_length are applied via :func:`bq_schema_field` kwargs (Map≡CREATE).
 
     Over BIGNUMERIC capacity fails closed to STRING (no silent invent).
+
+    Map≡CREATE: legalization goes through ``materialize_dest_ddl`` — never blind
+    ``ddl_type`` (which invents TIMESTAMP→DATETIME for approved Map stamps).
     """
     import re
 
@@ -132,8 +135,8 @@ def bq_type(inferred: str) -> str:
     if fp is not None:
         return fp[0]
 
-    # Legalize non-BQ carriers (BINARY→BYTES, VARCHAR→STRING) via ddl_type.
-    wire = ddl_type("bigquery", inferred)
+    # Legalize non-BQ carriers (BINARY→BYTES, VARCHAR→STRING, TIMESTAMP keep).
+    wire = materialize_dest_ddl("bigquery", inferred)
     widthed = re.match(r"(STRING|BYTES)\s*\(\s*\d+\s*\)", wire, re.IGNORECASE)
     if widthed:
         return widthed.group(1).upper()
@@ -141,7 +144,7 @@ def bq_type(inferred: str) -> str:
     if re.match(r"^[A-Z_][A-Z0-9_]*\s*\(", wire, re.IGNORECASE):
         base = wire.split("(", 1)[0].strip().upper()
         return base or wire
-    return wire
+    return wire.upper() if wire else wire
 
 
 def bq_schema_field(bigquery_mod: Any, col: str, inferred: str) -> Any:
@@ -163,13 +166,13 @@ def bq_schema_field(bigquery_mod: Any, col: str, inferred: str) -> Any:
             kwargs["precision"] = int(fp[1])
             kwargs["scale"] = int(fp[2])
     elif field_type == "STRING":
-        width = parse_string_carrier_width(ddl_type("bigquery", inferred))
+        width = parse_string_carrier_width(materialize_dest_ddl("bigquery", inferred))
         if width is None:
             width = parse_string_carrier_width(inferred)
         if width is not None and width > 0:
             kwargs["max_length"] = int(width)
     elif field_type == "BYTES":
-        width = parse_binary_carrier_width(ddl_type("bigquery", inferred))
+        width = parse_binary_carrier_width(materialize_dest_ddl("bigquery", inferred))
         if width is None:
             width = parse_binary_carrier_width(inferred)
         if width is not None and width > 0:
@@ -231,7 +234,7 @@ def resolve_bigquery_decimal_target_types(
         elif fp is not None and fp[0] != "STRING":
             out.append(fp[0])
         else:
-            out.append(ddl_type("bigquery", logical))
+            out.append(materialize_dest_ddl("bigquery", logical))
     return out
 
 
