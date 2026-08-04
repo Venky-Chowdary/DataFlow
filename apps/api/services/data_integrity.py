@@ -986,40 +986,44 @@ def _check_mapping_confidence(
     confidence_min: float,
     validation_mode: str = "strict",
 ) -> dict[str, Any]:
-    # Keep G9 aligned with the published/preflight mode floors:
+    """Report mapping confidence for explainability — G4 owns hard blocks.
+
+    Module 3: never ``blocks_transfer`` on confidence alone here. G9 previously
+    duplicated ``g4_mapping_confidence`` and confused Validate with two
+    confidence faces for one threshold.
+    """
+    # Keep G9 aligned with the published/preflight mode floors for *reporting*:
     # maximum=0.95, strict=0.85, balanced=0.75.
     mode = (validation_mode or "strict").strip().lower()
     floor = confidence_min
-    issues: list[str] = []
     warnings: list[str] = []
     for m in mappings:
         # Align with G4: operator override / risk ack already cleared Map confidence.
-        # Re-blocking here made Validate contradict "All mappings meet confidence floor".
         if m.get("user_override") or m.get("risk_acknowledged") or m.get("riskAcknowledged"):
             continue
         conf = float(m.get("confidence", 0))
         if conf < floor:
-            msg = f"{m.get('source')}→{m.get('target')}: confidence {conf:.0%} < {floor:.0%}"
-            # Low confidence is a blocker by default; in balanced mode it is
-            # downgraded to a warning when a more concrete issue already blocks,
-            # so the operator sees the real problem (e.g. lossy coercion).
-            issues.append(msg)
+            warnings.append(
+                f"{m.get('source')}→{m.get('target')}: confidence {conf:.0%} < {floor:.0%} "
+                "(G4 is hard authority)"
+            )
         elif m.get("requires_review"):
-            # In balanced mode a near-threshold mapping with a small gap is a
-            # warning, not a hard blocker, so the user can review without being
-            # stopped entirely. In strict/maximum it stays a blocker.
-            msg = f"{m.get('source')}→{m.get('target')}: ambiguous mapping requires review"
-            if mode in {"strict", "maximum"}:
-                issues.append(msg)
-            else:
-                warnings.append(msg)
-    blocks = len(issues) > 0
+            warnings.append(
+                f"{m.get('source')}→{m.get('target')}: ambiguous mapping requires review "
+                "(G4 is hard authority)"
+            )
     return {
         "check": "mapping_confidence",
-        "passed": not blocks,
-        "blocks_transfer": blocks,
-        "issues": issues[:20],
-        "warnings": warnings[:10],
+        "passed": True,
+        "blocks_transfer": False,
+        "issues": [],
+        "warnings": warnings[:20],
+        "authority": "g4_mapping_confidence",
+        "validation_mode": mode,
+        "note": (
+            "Informational only — hard confidence / review blocks are owned by "
+            "g4_mapping_confidence (Module 3 confidence SSOT)."
+        ),
     }
 
 
@@ -1318,21 +1322,8 @@ def run_integrity_audit(
             },
         })
 
-    # Balanced mode: if a more concrete blocker already exists, downgrade
-    # low-confidence mapping issues from blockers to warnings so the UI
-    # surfaces the root cause (lossy/wrong map) instead of a generic score.
-    if mode == "balanced":
-        mc = next((c for c in checks if c.get("check") == "mapping_confidence"), None)
-        if mc and mc.get("blocks_transfer"):
-            other_blockers = [
-                c for c in checks
-                if c.get("blocks_transfer") and c.get("check") != "mapping_confidence"
-            ]
-            if other_blockers:
-                mc["blocks_transfer"] = False
-                mc["passed"] = True
-                mc["warnings"] = list(mc.get("warnings", [])) + list(mc.get("issues", []))
-                mc["issues"] = []
+    # Module 3: mapping_confidence never blocks_transfer (G4 is SSOT), so the
+    # former balanced-mode "downgrade confidence blockers" path is gone.
 
     passed_checks = [c for c in checks if c.get("passed")]
     failed_checks = [c for c in checks if not c.get("passed")]

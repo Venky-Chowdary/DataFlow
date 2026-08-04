@@ -121,7 +121,8 @@ def test_build_preflight_proof_bundle_blocks_on_pii_risk_and_missing_keys() -> N
     assert bundle["transfer_decision"].get("compliance_only") is True
 
 
-def test_build_preflight_proof_bundle_requires_review_when_mapping_confidence_is_low() -> None:
+def test_build_preflight_proof_bundle_reports_low_confidence_without_reblocking() -> None:
+    """Module 3: G4 owns confidence blocks — proof reports score only."""
     bundle = build_preflight_proof_bundle(
         columns=["id", "email"],
         sample_rows=[{"id": "1", "email": "alice@example.com"}],
@@ -138,9 +139,10 @@ def test_build_preflight_proof_bundle_requires_review_when_mapping_confidence_is
         primary_key="id",
     )
 
-    assert bundle["passed"] is False
-    assert bundle["transfer_decision"]["decision"] == "review"
-    assert "Semantic mapping confidence too low" in bundle["transfer_decision"]["blockers"]
+    assert bundle["min_confidence"] < 0.85
+    assert bundle.get("confidence_below_floor") is True
+    assert bundle.get("confidence_authority") == "g4_mapping_confidence"
+    assert "Semantic mapping confidence too low" not in bundle["transfer_decision"]["blockers"]
 
 
 def test_proof_bundle_skips_confidence_when_operator_override_cleared_g4() -> None:

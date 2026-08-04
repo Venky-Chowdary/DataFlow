@@ -159,10 +159,9 @@ def build_preflight_proof_bundle(
     if not reconciliation.get("preview") and not reconciliation.get("passed"):
         blockers.append("Row-level reconciliation proof failed")
 
-    # Align with G4: Map confidence_threshold is the floor (no soft −0.3 band).
-    # Proof bundle must not disagree with the gate that unlocks Execute —
-    # skip operator-cleared mappings (continue-policy risk contract, or legacy
-    # risk_acknowledged while contract hydration is still rolling out).
+    # Module 3: G4 owns hard mapping-confidence blocks. Proof bundle reports
+    # min_confidence for evidence only — never invent a sibling "confidence too
+    # low" blocker that duplicates g4_mapping_confidence.
     effective_threshold = max(0.55, float(confidence_threshold or 0.85))
     from services.migration_risk_contract import mapping_has_clearing_risk_contract
 
@@ -176,8 +175,8 @@ def build_preflight_proof_bundle(
         and not m.get("riskAcknowledged")
     ]
     min_confidence = round(min(confidences) if confidences else 1.0, 3)
-    if confidences and min_confidence < effective_threshold:
-        blockers.append("Semantic mapping confidence too low")
+    confidence_below_floor = bool(confidences and min_confidence < effective_threshold)
+    # Intentionally do NOT append "Semantic mapping confidence too low" here.
 
     # Migration Risk Contract: boolean risk_acknowledged alone must never
     # unlock Execute-approve. Continue-policy signed contracts are required.
@@ -224,6 +223,11 @@ def build_preflight_proof_bundle(
         f"sample quality {quality_display}; "
         f"compliance risk {compliance.get('risk_score', 0.0):.2f}; reconciliation {recon_label}"
     )
+    if confidence_below_floor:
+        evidence_summary += (
+            f"; below G4 floor {effective_threshold:.2f} "
+            "(hard block is g4_mapping_confidence — not re-stated here)"
+        )
 
     passed = decision == "approve"
 
@@ -232,6 +236,8 @@ def build_preflight_proof_bundle(
         "semantic_mapping_score": semantic_score,
         "min_confidence": min_confidence,
         "confidence_threshold": effective_threshold,
+        "confidence_below_floor": confidence_below_floor,
+        "confidence_authority": "g4_mapping_confidence",
         "semantic_notes": semantic_notes,
         "quality_score": quality_score,
         "confidence_band": confidence_band,

@@ -146,12 +146,34 @@ def _blob(message: str, details: dict[str, Any] | None) -> str:
     return " ".join(parts)
 
 
+def _is_confidence_floor_signal(
+    message: str,
+    details: dict[str, Any] | None,
+    gate_id: str,
+) -> bool:
+    """True for G4 low-confidence / ambiguous review — not lossy risk-ack."""
+    if str(gate_id or "") != "g4_mapping_confidence":
+        return False
+    details = details or {}
+    if details.get("risk_unacknowledged") or details.get("structural_unacknowledged"):
+        return False
+    if details.get("low_confidence") or details.get("ambiguous_mappings"):
+        return True
+    msg = message or ""
+    if re.search(r"risk acknowledgment|STRUCT/specialty|lossy/narrowing", msg, re.I):
+        return False
+    return bool(re.search(r"below floor|ambiguous mapping", msg, re.I))
+
+
 def _is_fidelity_signal(
     message: str,
     details: dict[str, Any] | None,
     gate_id: str,
 ) -> bool:
     details = details or {}
+    # Pure confidence floor is Module 3 mapping_confidence root — not fidelity.
+    if _is_confidence_floor_signal(message, details, gate_id):
+        return False
     if details.get("fidelity_collapse") is True:
         return True
     framing = details.get("framing") if isinstance(details.get("framing"), dict) else {}
@@ -365,6 +387,81 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     severity="block",
                 )
             )
+
+    # Module 3: mapping confidence — G4 is sole hard authority (not proof/G9).
+    conf_gates = [
+        g
+        for g in gates
+        if g.get("status") == "block"
+        and _is_confidence_floor_signal(
+            str(g.get("message") or ""), g.get("details") or {}, str(g.get("id") or "")
+        )
+    ]
+    conf_blockers = [
+        b
+        for b in blockers
+        if _is_confidence_floor_signal(
+            str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or "")
+        )
+    ]
+    if conf_gates or conf_blockers:
+        absorbed = sorted(
+            {
+                *[str(g.get("id")) for g in conf_gates if g.get("id")],
+                *[str(b.get("id")) for b in conf_blockers if b.get("id")],
+            }
+        )
+        cols: list[str] = []
+        for src in conf_gates + conf_blockers:
+            details = (src.get("details") or {})
+            for key in ("low_confidence", "ambiguous_mappings"):
+                for entry in details.get(key) or []:
+                    name = str(entry).split("(")[0].strip()
+                    left = name.split("→")[0].strip() if "→" in name else name
+                    if left:
+                        cols.append(left)
+            cols.extend(_columns_from_details(details))
+        cols = list(dict.fromkeys(cols))
+        roots.append(
+            MigrationRootCause(
+                root_id=_root_id("mapping_confidence", cols, absorbed),
+                kind="mapping_confidence",
+                title="Mapping confidence below floor",
+                summary=(
+                    f"{len(cols) or 'Some'} mapping(s) below the Map confidence floor "
+                    f"— owned by g4_mapping_confidence (not re-blocked by proof/G9)"
+                ),
+                business_impact=(
+                    "Low semantic confidence increases wrong-column risk. Execute stays "
+                    "locked until Map review/approve raises confidence or overrides "
+                    "with evidence — proof pack reports the score but does not invent "
+                    "a second confidence blocker."
+                ),
+                affected_columns=cols,
+                affected_rows_sample=sample_n,
+                estimated_total_rows=est_n,
+                risk_level="high",
+                recommended_fix=(
+                    "Open Map → review low-confidence pairs → Approve with evidence "
+                    "or remap to the correct target → re-run Validate."
+                ),
+                alternative_fixes=[
+                    "Improve source/target column names for lexical match",
+                    "Approve with user_override after human review",
+                    "Lower validation mode only when Discovery/Migration mode is intentional",
+                ],
+                recovery_strategy=(
+                    "After Map approve/remap, re-Validate. No write occurs until G4 passes."
+                ),
+                expected_runtime_impact="Re-Validate only — no dest rewrite until Execute",
+                quarantine_policy="n/a — confidence is a Map decision, not a row quarantine",
+                rollback_policy="not_productized_see_MIGRATION_ROLLBACK",
+                documentation="docs/MAPPING_CONFIDENCE_AUTHORITY.md",
+                impacted_gates=absorbed or ["g4_mapping_confidence"],
+                absorbed_blocker_ids=absorbed,
+                severity="block",
+            )
+        )
 
     dup_gates = [
         g

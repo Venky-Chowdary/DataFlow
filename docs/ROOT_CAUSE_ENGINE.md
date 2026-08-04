@@ -37,7 +37,8 @@ Each `root_causes[]` entry includes:
 
 | Kind | Collapses |
 |------|-----------|
-| `fidelity_collapse` | G3 / G4 / G9 (and related) lossy type paths |
+| `fidelity_collapse` | G3 / G4(risk) / G9 lossy type paths |
+| `mapping_confidence` | G4 confidence floor / ambiguous review (Module 3) |
 | `duplicate_identity` | Identity / uniqueness multi-gate failures |
 
 ## Code SSOT

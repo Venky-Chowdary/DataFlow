@@ -480,7 +480,11 @@ export function buildDisplayBlockers(
     const absorbed = new Set(engineRoots.flatMap((r) => r.absorbed_blocker_ids ?? []));
     const items: DisplayBlocker[] = engineRoots.map((r) => ({
       key: r.root_id,
-      kind: r.kind === "duplicate_identity" ? "duplicate_root" : r.kind === "fidelity_collapse" ? "fidelity_root" : "blocker",
+      kind: r.kind === "duplicate_identity"
+        ? "duplicate_root"
+        : r.kind === "fidelity_collapse" || r.kind === "mapping_confidence"
+          ? "fidelity_root"
+          : "blocker",
       title: r.title,
       message: r.summary,
       impact: r.business_impact,

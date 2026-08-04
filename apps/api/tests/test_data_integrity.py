@@ -291,7 +291,8 @@ def test_integrity_sample_clears_varchar_to_number_with_risk_ack():
 
 # ── Mapping confidence ───────────────────────────────────────────────────────
 
-def test_integrity_blocks_low_confidence_in_strict_mode():
+def test_integrity_reports_low_confidence_without_blocking():
+    """Module 3: G9 reports confidence; G4 owns the hard block."""
     mappings = [{"source": "AMT", "target": "amount", "confidence": 0.55}]
     report = run_integrity_audit(
         source_columns=["AMT"],
@@ -301,7 +302,9 @@ def test_integrity_blocks_low_confidence_in_strict_mode():
     )
     conf = next((c for c in report["checks"] if c["check"] == "mapping_confidence"), None)
     assert conf is not None
-    assert conf["blocks_transfer"] is True
+    assert conf["blocks_transfer"] is False
+    assert conf.get("authority") == "g4_mapping_confidence"
+    assert conf.get("warnings") or conf.get("issues")
 
 
 def test_integrity_honors_user_override_like_g4():
