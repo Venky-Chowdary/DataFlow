@@ -3298,51 +3298,200 @@
 }
 
 .lp-login-auth {
+  position: relative;
   display: grid;
   place-items: center;
-  padding: clamp(12px, 2.5vh, 28px) clamp(16px, 3vw, 40px);
+  padding: clamp(16px, 3vh, 36px) clamp(18px, 3.5vw, 48px);
   background:
-    radial-gradient(ellipse 55% 40% at 100% 0%, rgba(13, 148, 136, 0.07), transparent 55%),
-    #f8fafc;
+    radial-gradient(ellipse 80% 55% at 90% 0%, rgba(45, 212, 191, 0.22), transparent 58%),
+    radial-gradient(ellipse 60% 50% at 0% 100%, rgba(245, 158, 11, 0.14), transparent 52%),
+    linear-gradient(160deg, #e7f5f2 0%, #f3f8f7 38%, #fbfcfd 100%);
   overflow: hidden;
   min-height: 0;
+  border-left: 1px solid rgba(13, 148, 136, 0.14);
+}
+
+.lp-login-auth-bg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.lp-login-auth-glow {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(52px);
+}
+
+.lp-login-auth-glow--a {
+  width: 320px;
+  height: 320px;
+  top: -70px;
+  right: -50px;
+  background: rgba(45, 212, 191, 0.38);
+  animation: lp-login-auth-glow 16s ease-in-out infinite alternate;
+}
+
+.lp-login-auth-glow--b {
+  width: 260px;
+  height: 260px;
+  left: -70px;
+  bottom: 4%;
+  background: rgba(245, 158, 11, 0.22);
+  animation: lp-login-auth-glow 20s ease-in-out infinite alternate-reverse;
+}
+
+.lp-login-auth-grid {
+  position: absolute;
+  inset: 0;
+  opacity: 0.45;
+  background-image:
+    linear-gradient(rgba(15, 118, 110, 0.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15, 118, 110, 0.07) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse 78% 72% at 55% 40%, #000 20%, transparent 78%);
+}
+
+.lp-login-auth-arc {
+  position: absolute;
+  right: -18%;
+  top: 12%;
+  width: min(460px, 58vw);
+  height: min(460px, 58vw);
+  border-radius: 50%;
+  border: 1.5px solid rgba(13, 148, 136, 0.18);
+  box-shadow:
+    inset 0 0 0 40px rgba(45, 212, 191, 0.04),
+    0 0 90px rgba(45, 212, 191, 0.1);
+}
+
+@keyframes lp-login-auth-glow {
+  from { transform: translate3d(0, 0, 0) scale(1); opacity: 0.75; }
+  to { transform: translate3d(-14px, 10px, 0) scale(1.08); opacity: 1; }
 }
 
 .lp-login-auth-inner {
-  width: min(400px, 100%);
-  max-height: calc(100dvh - 24px);
-  overflow: hidden;
+  position: relative;
+  z-index: 1;
+  width: min(448px, 100%);
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  animation: lp-login-rise 560ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.lp-login-auth-card {
+  position: relative;
   background: #fff;
-  border: 1px solid var(--lp-line);
-  border-radius: 18px;
-  padding: clamp(18px, 2.4vh, 28px) clamp(18px, 2.2vw, 26px);
-  box-shadow: var(--lp-shadow-editorial);
+  border: 1px solid rgba(15, 118, 110, 0.16);
+  border-radius: 24px;
+  padding: clamp(20px, 2.6vh, 28px) clamp(20px, 2.6vw, 30px) clamp(18px, 2.2vh, 24px);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.95) inset,
+    0 24px 60px rgba(7, 28, 26, 0.12),
+    0 8px 20px rgba(13, 148, 136, 0.1);
   box-sizing: border-box;
+  overflow: hidden;
+}
+
+.lp-login-auth-banner {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 88px;
+  background:
+    linear-gradient(120deg, #0a3d3a 0%, #0f766e 48%, #115e59 100%);
+  pointer-events: none;
+}
+
+.lp-login-auth-banner-glow {
+  position: absolute;
+  width: 160px;
+  height: 160px;
+  right: 8%;
+  top: -40px;
+  border-radius: 50%;
+  background: rgba(45, 212, 191, 0.35);
+  filter: blur(28px);
+}
+
+.lp-login-auth-banner-path {
+  position: absolute;
+  left: 12%;
+  right: 12%;
+  bottom: 18px;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(245, 158, 11, 0.85), rgba(45, 212, 191, 0.9), transparent);
+  opacity: 0.9;
+}
+
+.lp-login-auth-mark {
+  position: relative;
+  z-index: 1;
+  width: fit-content;
+  margin: 28px 0 16px;
+  padding: 4px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 10px 28px rgba(7, 28, 26, 0.28);
 }
 
 .lp-login-auth-kicker {
   font-size: 11px;
   font-weight: 720;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--lp-accent-ink);
-  margin: 0 0 6px;
+  color: #0f766e;
+  margin: 0 0 8px;
 }
 
 .lp-login-auth-head h2 {
   font-family: var(--lp-font-display);
-  font-size: clamp(1.45rem, 2.4vh, 1.75rem);
-  font-weight: 760;
-  letter-spacing: -0.04em;
-  margin: 0 0 6px;
-  color: var(--lp-ink);
+  font-size: clamp(1.6rem, 2.7vh, 2rem);
+  font-weight: 780;
+  letter-spacing: -0.045em;
+  margin: 0 0 8px;
+  color: #0b1f1d;
 }
 
 .lp-login-auth-sub {
-  margin: 0 0 clamp(12px, 1.8vh, 18px);
-  font-size: 13.5px;
-  line-height: 1.45;
-  color: var(--lp-muted);
+  margin: 0 0 12px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #4b635f;
+}
+
+.lp-login-auth-sub strong {
+  color: #0a3d3a;
+  font-weight: 700;
+}
+
+.lp-login-auth-steps {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 clamp(14px, 2vh, 18px);
+}
+
+.lp-login-auth-steps span {
+  font-size: 10.5px;
+  font-weight: 740;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #0f766e;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(13, 148, 136, 0.1);
+  border: 1px solid rgba(13, 148, 136, 0.2);
+}
+
+.lp-login-auth-steps i {
+  width: 14px;
+  height: 1px;
+  background: rgba(15, 118, 110, 0.35);
 }
 
 .lp-login--gate .lp-login-checks {
@@ -3353,22 +3502,75 @@
   margin-bottom: clamp(10px, 1.4vh, 14px);
 }
 
+.lp-login--gate .lp-input {
+  background: #f4faf9;
+  border-color: rgba(15, 118, 110, 0.18);
+}
+
+.lp-login--gate .lp-input:focus {
+  background: #fff;
+}
+
 .lp-login--gate .lp-login-submit {
-  margin-top: 4px;
+  margin-top: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 52px;
+  border-radius: 14px;
+  box-shadow: 0 12px 28px rgba(13, 148, 136, 0.3);
+}
+
+.lp-login--gate .lp-login-submit:hover:not(:disabled) {
+  box-shadow: 0 16px 32px rgba(13, 148, 136, 0.38);
+  transform: translateY(-1px);
+}
+
+.lp-login--gate .lp-login-submit:disabled {
+  box-shadow: none;
+  transform: none;
+}
+
+.lp-login-trust {
+  list-style: none;
+  margin: clamp(14px, 1.8vh, 18px) 0 0;
+  padding: clamp(12px, 1.5vh, 14px) 0 0;
+  border-top: 1px solid rgba(15, 118, 110, 0.12);
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.lp-login-trust li {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  text-align: center;
+  padding: 9px 4px;
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(13, 148, 136, 0.08), rgba(13, 148, 136, 0.03));
+  border: 1px solid rgba(13, 148, 136, 0.12);
+  color: #0f766e;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  line-height: 1.25;
+}
+
+.lp-login-trust li span {
+  color: #3d5652;
 }
 
 .lp-login-footnote {
-  margin-top: clamp(10px, 1.4vh, 14px);
-  font-size: 11.5px;
-  color: var(--lp-muted-soft);
-  text-align: center;
-  line-height: 1.35;
+  display: none;
 }
 
 .lp-login-dev-actions {
   margin-top: clamp(10px, 1.4vh, 14px);
   padding-top: clamp(10px, 1.4vh, 14px);
-  border-top: 1px dashed var(--lp-line);
+  border-top: 1px dashed rgba(15, 118, 110, 0.2);
 }
 
 .lp-login-dev-hint {
@@ -3390,7 +3592,18 @@
   }
 
   .lp-login-auth-sub {
-    display: none;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .lp-login-auth-banner {
+    height: 72px;
+  }
+
+  .lp-login-auth-mark {
+    margin-top: 22px;
   }
 
   .lp-login-proof {
@@ -3401,8 +3614,8 @@
     display: none;
   }
 
-  .lp-login-footnote {
-    display: none;
+  .lp-login-trust li span {
+    font-size: 10px;
   }
 }
 
@@ -3415,8 +3628,16 @@
     display: none;
   }
 
+  .lp-login-auth-steps {
+    display: none;
+  }
+
   .lp-login--gate .lp-login-divider,
   .lp-login--gate .lp-login-sso {
+    display: none;
+  }
+
+  .lp-login-trust {
     display: none;
   }
 }
@@ -3432,26 +3653,153 @@
 
   .lp-login-brand {
     min-height: auto;
+    order: 2;
   }
 
   .lp-login-brand-inner {
     max-height: none;
     overflow: visible;
+    gap: 14px;
+    padding: 20px 20px 24px;
+  }
+
+  .lp-login-brand-body {
+    justify-content: flex-start;
+    gap: 12px;
+  }
+
+  .lp-login-brand-title {
+    font-size: clamp(1.55rem, 6.5vw, 2.1rem);
+    max-width: none;
+  }
+
+  .lp-login-brand-lead {
+    max-width: none;
+  }
+
+  .lp-login-metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .lp-login-auth {
+    order: 1;
     overflow: visible;
+    border-left: none;
+    min-height: auto;
+    padding: 16px 16px 28px;
   }
 
   .lp-login-auth-inner {
     max-height: none;
+    width: min(440px, 100%);
+    padding: 0;
+  }
+
+  .lp-login-auth-card {
+    border-radius: 20px;
+  }
+
+  .lp-login-auth-arc {
+    opacity: 0.35;
+  }
+}
+
+@media (max-width: 640px) {
+  .lp-login-brand-proof,
+  .lp-login-proof {
+    padding: 12px;
+  }
+
+  .lp-login-brand-foot {
+    display: none;
+  }
+
+  .lp-login-metrics {
+    gap: 6px;
+  }
+
+  .lp-login-metric {
+    padding: 10px 6px;
+  }
+
+  .lp-login-metric strong {
+    font-size: 1.05rem;
+  }
+
+  .lp-login-metric span {
+    font-size: 10px;
+  }
+
+  .lp-login-auth-banner {
+    height: 76px;
+  }
+
+  .lp-login-auth-mark {
+    margin: 24px 0 14px;
+  }
+
+  .lp-login-auth-head h2 {
+    font-size: 1.45rem;
+  }
+
+  .lp-login-auth-steps {
+    gap: 6px;
+  }
+
+  .lp-login-auth-steps span {
+    padding: 4px 8px;
+    font-size: 10px;
+  }
+
+  .lp-login-trust {
+    gap: 6px;
+  }
+
+  .lp-login-trust li {
+    padding: 8px 2px;
+  }
+
+  .lp-login--gate .lp-input {
+    min-height: 50px;
+  }
+
+  .lp-login--gate .lp-login-submit {
+    min-height: 50px;
+  }
+}
+
+@media (max-width: 400px) {
+  .lp-login-auth {
+    padding: 4px 12px 28px;
+  }
+
+  .lp-login-auth-card {
+    padding: 18px 16px 16px;
+    border-radius: 18px;
+  }
+
+  .lp-login-trust {
+    grid-template-columns: 1fr;
+  }
+
+  .lp-login-trust li {
+    flex-direction: row;
+    justify-content: center;
+    gap: 8px;
+    padding: 8px 10px;
+  }
+
+  .lp-login-metrics {
+    grid-template-columns: 1fr;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .lp-login-brand-mesh,
   .lp-login-brand-orb--a,
-  .lp-login-brand-orb--b {
+  .lp-login-brand-orb--b,
+  .lp-login-auth-glow--a,
+  .lp-login-auth-glow--b {
     animation: none;
   }
 }
