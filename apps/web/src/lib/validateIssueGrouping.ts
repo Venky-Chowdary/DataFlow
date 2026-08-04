@@ -162,10 +162,10 @@ export function findFidelityCollapseRoot(
 } | null {
   if (!preflight) return null;
   const gateHits = (preflight.gates ?? []).filter(
-    (g) => g.status === "block" && isFidelityCollapseSignal(g.message, g.details, g.id),
+    (g) => g && g.status === "block" && isFidelityCollapseSignal(g.message, g.details, g.id),
   );
   const blockerHits = (preflight.blockers ?? []).filter((b) =>
-    isFidelityCollapseSignal(b.message, b.details, b.id),
+    Boolean(b && isFidelityCollapseSignal(b.message, b.details, b.id)),
   );
   if (gateHits.length + blockerHits.length < 2) return null;
   const gateIds = [...new Set([
@@ -283,10 +283,10 @@ export function findDuplicateKeyRoot(
   if (!preflight) return null;
 
   const gateHits = (preflight.gates ?? []).filter(
-    (g) => g.status === "block" && isDuplicateIdentitySignal(g.message, g.details, g.id),
+    (g) => g && g.status === "block" && isDuplicateIdentitySignal(g.message, g.details, g.id),
   );
   const blockerHits = (preflight.blockers ?? []).filter((b) =>
-    isDuplicateIdentitySignal(b.message, b.details, b.id),
+    Boolean(b && isDuplicateIdentitySignal(b.message, b.details, b.id)),
   );
 
   if (gateHits.length + blockerHits.length < 1) return null;
@@ -510,7 +510,8 @@ export function buildDisplayBlockers(
     });
   }
 
-  for (const b of preflight.blockers) {
+  for (const b of preflight.blockers ?? []) {
+    if (!b) continue;
     if (absorbed.has(b.id)) continue;
     if (root && isDuplicateIdentitySignal(b.message, b.details, b.id)) continue;
     if (fidelityRoot && isFidelityCollapseSignal(b.message, b.details, b.id)) continue;

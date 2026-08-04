@@ -289,7 +289,8 @@ function extractBadDataIssues(preflight: PreflightResult | null): BadDataIssue[]
       }
     }
   };
-  for (const b of preflight.blockers) {
+  for (const b of preflight.blockers ?? []) {
+    if (!b) continue;
     const details = b.details || {};
     if (Array.isArray(details.errors)) pushFrom(details.errors);
     if (Array.isArray(details.issues)) pushFrom(details.issues);
@@ -298,7 +299,8 @@ function extractBadDataIssues(preflight: PreflightResult | null): BadDataIssue[]
       out.push({ message: b.message });
     }
   }
-  for (const g of preflight.gates) {
+  for (const g of preflight.gates ?? []) {
+    if (!g) continue;
     const details = g.details || {};
     if (Array.isArray(details.encoding_issues)) pushFrom(details.encoding_issues);
     if (g.status === "block") {
@@ -2688,7 +2690,8 @@ export function ValidateDashboard({
           </p>
           <ul>
             {displayBlockers.map((item) => {
-              if (item.kind === "duplicate_root") {
+              if (item.kind === "duplicate_root" || item.kind === "fidelity_root") {
+                const isFidelity = item.kind === "fidelity_root";
                 return (
                   <li key={item.key} className="df2-vd-blocker-root">
                     <strong>{item.title}</strong>
@@ -2714,8 +2717,7 @@ export function ValidateDashboard({
                       </ul>
                     )}
                     <div className="df2-vd-blocker-actions df2-vd-fix-actions">
-                      {/* One primary place for identity: Suggested fixes bar + rail. */}
-                      {onOpenIdentitySettings && (
+                      {!isFidelity && onOpenIdentitySettings && (
                         <Button
                           size="sm"
                           variant="primary"
@@ -2728,6 +2730,17 @@ export function ValidateDashboard({
                             : "Fix identity / sync mode"}
                         </Button>
                       )}
+                      {isFidelity && onReviewMappings && (
+                        <Button
+                          size="sm"
+                          variant="primary"
+                          leadingIcon={<DtIcon name="layers" size={14} />}
+                          onClick={() => onReviewMappings()}
+                          title={item.fix || "Open Map to remap or Accept risk"}
+                        >
+                          Open Map · remap / Accept risk
+                        </Button>
+                      )}
                     </div>
                     {item.fix && (
                       <p className="df2-vd-blocker-fix-note">{item.fix}</p>
@@ -2737,7 +2750,21 @@ export function ValidateDashboard({
                 );
               }
 
-              const b = item.source!;
+              // Root kinds have no `source` payload. Fail closed — never read
+              // `.details` on undefined (Transfer Studio crash).
+              const b = item.source;
+              if (!b) {
+                return (
+                  <li key={item.key}>
+                    <strong>{item.title}</strong>
+                    <span>{item.message}</span>
+                    {item.fix && (
+                      <p className="df2-vd-blocker-fix-note">{item.fix}</p>
+                    )}
+                    {item.why && <span className="df2-vd-blocker-why">{item.why}</span>}
+                  </li>
+                );
+              }
               const issues = issueTextsFromDetails(b.details);
               const blockingCols = (preflight.coercion_report?.columns ?? []).filter((c) => c.severity === "block");
               const showIssueList = issues.length > 0 && !(b.id.includes("dry_run") && blockingCols.length > 0);

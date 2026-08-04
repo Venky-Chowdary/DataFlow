@@ -397,6 +397,10 @@ describe("findFidelityCollapseRoot", () => {
     const display = buildDisplayBlockers(pf);
     assert.equal(display.filter((d) => d.kind === "fidelity_root").length, 1);
     assert.ok(display.every((d) => d.kind !== "blocker" || !/fidelity|precision loss/i.test(d.message)));
+    // Root items must not invent a `source` payload — Validate UI reads
+    // source.details only for kind === "blocker".
+    const fidelity = display.find((d) => d.kind === "fidelity_root");
+    assert.equal(fidelity?.source, undefined);
   });
 });
 
