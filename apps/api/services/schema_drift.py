@@ -75,7 +75,7 @@ def _unpack_schema(schema: dict[str, Any] | None) -> tuple[dict[str, str], dict[
     return columns, {}, []
 
 
-def _is_type_widen(old_type: str, new_type: str) -> bool:
+def _is_type_widen(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
     """True when new_type can hold all values of old_type without loss."""
     old_logical = normalize_logical_type(old_type)
     new_logical = normalize_logical_type(new_type)
@@ -88,10 +88,10 @@ def _is_type_widen(old_type: str, new_type: str) -> bool:
             and new_len > old_len
         )
     # Differing logical types: safe (non-lossy) promotions count as widens.
-    return not is_lossy_coercion(old_type, new_type)
+    return not is_lossy_coercion(old_type, new_type, dest_db=dest_db)
 
 
-def _is_type_narrow(old_type: str, new_type: str) -> bool:
+def _is_type_narrow(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
     old_logical = normalize_logical_type(old_type)
     new_logical = normalize_logical_type(new_type)
     if old_logical == new_logical:
@@ -102,7 +102,7 @@ def _is_type_narrow(old_type: str, new_type: str) -> bool:
             and new_len is not None
             and new_len < old_len
         )
-    return is_lossy_coercion(old_type, new_type)
+    return is_lossy_coercion(old_type, new_type, dest_db=dest_db)
 
 
 def classify_schema_change(

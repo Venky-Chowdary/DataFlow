@@ -291,7 +291,7 @@ def evaluate_ddl_compatibility(
         risk_ack = bool(
             m.get("risk_acknowledged") or m.get("riskAcknowledged")
         )
-        if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type):
+        if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type, dest_db=dest_kind):
             # Align with G3: declared lossy never soft-passes on head samples
             # without explicit Map risk_acknowledged. Accept risk clears the DDL
             # gate (still warn via G3) so Map CTA and Validate agree.

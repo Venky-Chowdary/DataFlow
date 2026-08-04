@@ -1032,7 +1032,13 @@ def _identity_onto_numeric_landmine(source: str, src_type: str, tgt_type: str) -
     return form in {"_id", "id", "objectid", "object_id", "oid", "mongo_id"}
 
 
-def _type_compat_penalty(src_type: str, tgt_type: str, *, source_name: str = "") -> float:
+def _type_compat_penalty(
+    src_type: str,
+    tgt_type: str,
+    *,
+    source_name: str = "",
+    dest_db: str = "",
+) -> float:
     """Reduce score for incompatible type pairs using the canonical type-system rules.
 
     Lossy pairs must not clear Map auto-approve / G4 after an Exact-name boost —
@@ -1045,7 +1051,7 @@ def _type_compat_penalty(src_type: str, tgt_type: str, *, source_name: str = "")
     if source_name and _identity_onto_numeric_landmine(source_name, src_type, tgt_type):
         # Stronger than generic lossy — must lose to create-new text path.
         return 0.92
-    if is_lossy_coercion(src_type, tgt_type):
+    if is_lossy_coercion(src_type, tgt_type, dest_db=dest_db):
         src = normalize_logical_type(src_type)
         tgt = normalize_logical_type(tgt_type)
         if src == "binary" and tgt != "binary":
@@ -1059,7 +1065,7 @@ def _type_compat_penalty(src_type: str, tgt_type: str, *, source_name: str = "")
         return 0.5
     return 0.0
 
-def _type_aware_boost(src_type: str, tgt_type: str) -> float:
+def _type_aware_boost(src_type: str, tgt_type: str, *, dest_db: str = "") -> float:
     """Boost score for exact or highly compatible type matches."""
     from services.type_system import is_lossy_coercion, normalize_logical_type
 
@@ -1069,7 +1075,7 @@ def _type_aware_boost(src_type: str, tgt_type: str) -> float:
     tgt = normalize_logical_type(tgt_type)
     if src == tgt:
         return 0.05
-    if is_lossy_coercion(src_type, tgt_type):
+    if is_lossy_coercion(src_type, tgt_type, dest_db=dest_db):
         return 0.0
     # Safe widening / cross-cast pairs that are not lossy.
     safe_pairs: set[tuple[str, str]] = {
@@ -1127,6 +1133,7 @@ def _score_pair(
     source_type: str = "VARCHAR",
     target_type: str = "VARCHAR",
     source_samples: list[str] | None = None,
+    dest_db: str = "",
 ) -> tuple[float, str]:
     from services.semantic_analyzer import role_match_boost
     from services.training_lexicon import lexicon_boost
@@ -1136,8 +1143,10 @@ def _score_pair(
     src_sem = _semantic_form(source)
     tgt_sem_raw = _semantic_form(target)
 
-    type_penalty = _type_compat_penalty(source_type, target_type, source_name=source)
-    type_boost = _type_aware_boost(source_type, target_type)
+    type_penalty = _type_compat_penalty(
+        source_type, target_type, source_name=source, dest_db=dest_db
+    )
+    type_boost = _type_aware_boost(source_type, target_type, dest_db=dest_db)
     sample_boost = _sample_consistency_boost(source_samples, source_type, target_type)
     if (
         sample_boost > -0.5
@@ -1542,6 +1551,7 @@ def map_columns(
                 src_types.get(source, "VARCHAR"),
                 tgt_types.get(target, "VARCHAR"),
                 src_samples.get(source),
+                dest_db=dest_db,
             )
             pair_scores[(source, target)] = (score, reason)
 
@@ -1563,7 +1573,7 @@ def map_columns(
         tgt_type = tgt_types.get(target, "VARCHAR")
         try:
             from services.type_system import is_lossy_coercion
-            lossy_pair = is_lossy_coercion(src_type, tgt_type)
+            lossy_pair = is_lossy_coercion(src_type, tgt_type, dest_db=dest_db)
         except Exception:
             # Fail closed — unknown type authority must not green-path remaps.
             lossy_pair = True
@@ -1614,6 +1624,7 @@ def map_columns(
                 src_types.get(source, "VARCHAR"),
                 tgt_types.get(target, "VARCHAR"),
                 src_samples.get(source),
+                dest_db=dest_db,
             )
             if score > best_score:
                 best_score, best_target, best_reason = score, target, reason
@@ -1626,7 +1637,7 @@ def map_columns(
         if near_tgt:
             near_tgt_type = tgt_types.get(near_tgt, "VARCHAR")
             near_penalty = _type_compat_penalty(
-                src_type, near_tgt_type, source_name=source
+                src_type, near_tgt_type, source_name=source, dest_db=dest_db
             )
             near_sample = _sample_consistency_boost(
                 src_samples.get(source), src_type, near_tgt_type,
@@ -1646,7 +1657,7 @@ def map_columns(
                 near_tgt_type = tgt_types.get(near_tgt, "VARCHAR")
                 try:
                     from services.type_system import is_lossy_coercion
-                    near_lossy = is_lossy_coercion(src_type, near_tgt_type)
+                    near_lossy = is_lossy_coercion(src_type, near_tgt_type, dest_db=dest_db)
                 except Exception:
                     near_lossy = True
                 if near_lossy:
@@ -1686,7 +1697,7 @@ def map_columns(
                 near_tgt_type = tgt_types.get(near_tgt, "VARCHAR")
                 try:
                     from services.type_system import is_lossy_coercion
-                    near_lossy = is_lossy_coercion(src_type, near_tgt_type)
+                    near_lossy = is_lossy_coercion(src_type, near_tgt_type, dest_db=dest_db)
                 except Exception:
                     near_lossy = True
                 mappings.append(
@@ -1761,7 +1772,9 @@ def map_columns(
         tgt_type = tgt_types.get(best_target, "VARCHAR") if best_target else "VARCHAR"
         try:
             from services.type_system import is_lossy_coercion
-            lossy_pair = bool(best_target and is_lossy_coercion(src_type, tgt_type))
+            lossy_pair = bool(
+                best_target and is_lossy_coercion(src_type, tgt_type, dest_db=dest_db)
+            )
         except Exception:
             lossy_pair = bool(best_target)
         if lossy_pair:

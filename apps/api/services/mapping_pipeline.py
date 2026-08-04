@@ -647,6 +647,7 @@ def run_mapping_pipeline(
         enriched_mappings,
         source_types=declared_source_types,
         target_types=declared_target_types,
+        destination_db_type=destination_db_type or "",
     )
     enriched_mappings = _stamp_create_new_type_risks(
         enriched_mappings,

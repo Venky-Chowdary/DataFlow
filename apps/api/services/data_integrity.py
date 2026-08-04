@@ -125,7 +125,7 @@ def _check_coercion_safety(
             and (mapping.get("risk_acknowledged") or mapping.get("riskAcknowledged"))
         )
         # Match G3: declared lossy cannot be sample-cleared without risk ack.
-        if mapping and is_lossy_coercion(src_t, tgt_t) and not risk_ack:
+        if mapping and is_lossy_coercion(src_t, tgt_t, dest_db=dest_kind) and not risk_ack:
             hardened.append(issue)
             continue
         if mapping and samples_coerce_mapping(

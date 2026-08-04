@@ -415,7 +415,13 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         pair = (source_col.inferred_type.upper(), target.inferred_type.upper())
         # Prefer type_system SSOT when available; LOSSY_COERCIONS is offline fallback only.
         if is_lossy_coercion:
-            lossy = bool(is_lossy_coercion(source_col.inferred_type, target.inferred_type))
+            lossy = bool(
+                is_lossy_coercion(
+                    source_col.inferred_type,
+                    target.inferred_type,
+                    dest_db=dest_kind,
+                )
+            )
         else:
             lossy = pair in LOSSY_COERCIONS
         # Declared type loss (not probe-only domain wraps) — samples cannot soft-pass.

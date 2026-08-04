@@ -258,7 +258,7 @@ def analyze_coercion(
         if (
             tgt_logical in _TEXTUAL_LOGICALS
             and is_unlimited_string_carrier(tgt_type)
-            and not is_lossy_coercion(src_type, tgt_type)
+            and not is_lossy_coercion(src_type, tgt_type, dest_db=dest_db_type)
         ):
             continue
 
@@ -477,7 +477,7 @@ def analyze_coercion(
         # Same-logical YEAR/MONEY/width/IEEE collapses must not early-continue.
         fidelity_collapse = bool(
             is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest_db_type)
-            or is_lossy_coercion(src_type, tgt_type)
+            or is_lossy_coercion(src_type, tgt_type, dest_db=dest_db_type)
             or is_nested_shape_collapse(src_type, tgt_type)
         )
         coercion_required = src_logical != tgt_logical

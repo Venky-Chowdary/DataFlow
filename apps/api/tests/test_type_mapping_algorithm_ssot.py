@@ -272,3 +272,46 @@ def test_validate_mapping_coercions_create_new_pg_timestamp_not_block():
     )
     blocks = [i for i in issues if i.get("severity") == "block"]
     assert not blocks, blocks
+
+def test_cross_surface_dest_db_agreement_pg_timestamp_and_json():
+    """Map/Validate/proof must share dest_db-aware lossy SSOT — no dual verdicts."""
+    from services.type_system import is_lossy_coercion
+    from services.mapping_proof import mapping_fidelity
+    from services.type_coercion_validator import validate_mapping_coercions
+
+    pairs = [
+        ("TIMESTAMP_NTZ(6)", "TIMESTAMP", "postgresql", False),
+        ("TIMESTAMP_NTZ(6)", "TIMESTAMP", "mysql", True),
+        ("JSON", "JSONB", "postgresql", False),
+        ("JSON", "VARCHAR(50)", "postgresql", True),
+    ]
+    for src, tgt, dest, expect_lossy in pairs:
+        assert is_lossy_coercion(src, tgt, dest_db=dest) is expect_lossy, (src, tgt, dest)
+        verdict = mapping_fidelity(
+            {"source_type": src, "target_type": tgt, "transform": "none"},
+            destination_db_type=dest,
+        )
+        if expect_lossy:
+            assert verdict["verdict"] == "lossy_cast", (src, tgt, dest, verdict)
+        else:
+            assert verdict["verdict"] != "lossy_cast", (src, tgt, dest, verdict)
+
+        issues = validate_mapping_coercions(
+            mappings=[
+                {
+                    "source": "c",
+                    "target": "c",
+                    "target_type": tgt,
+                    "create_new": True,
+                    "confidence": 0.95,
+                }
+            ],
+            source_types={"c": src},
+            target_types={},
+            dest_db_type=dest,
+        )
+        blocks = [i for i in issues if i.get("severity") == "block"]
+        if expect_lossy:
+            assert blocks, (src, tgt, dest, issues)
+        else:
+            assert not blocks, (src, tgt, dest, blocks)

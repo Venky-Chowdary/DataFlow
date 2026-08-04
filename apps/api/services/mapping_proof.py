@@ -76,6 +76,7 @@ def mapping_fidelity(
     *,
     declared_source_type: str = "",
     declared_target_type: str = "",
+    destination_db_type: str = "",
 ) -> dict[str, object]:
     """Canonical per-column fidelity verdict for one mapping.
 
@@ -109,7 +110,8 @@ def mapping_fidelity(
     transform = str(mapping.get("transform") or "none")
     t_fidelity = transform_fidelity(transform)
 
-    if is_lossy_coercion(src_type, tgt_type):
+    dest = (destination_db_type or "").strip().lower()
+    if is_lossy_coercion(src_type, tgt_type, dest_db=dest):
         return {
             "verdict": "lossy_cast",
             "reason": f"{src_type} → {tgt_type} can lose precision, range, or domain.",
@@ -146,6 +148,7 @@ def stamp_mapping_fidelity(
     *,
     source_types: dict[str, str] | None = None,
     target_types: dict[str, str] | None = None,
+    destination_db_type: str = "",
 ) -> list[dict]:
     """Attach the canonical verdict to every mapping, in place of guessing.
 
@@ -161,6 +164,7 @@ def stamp_mapping_fidelity(
             m,
             declared_source_type=str(src_declared.get(str(m.get("source") or "")) or ""),
             declared_target_type=str(tgt_declared.get(str(m.get("target") or "")) or ""),
+            destination_db_type=destination_db_type,
         )
         out.append({
             **m,
@@ -270,7 +274,10 @@ def _mapping_risks(
             ),
         })
 
-    if is_lossy_coercion(src_type, tgt_type):
+    src_logical = normalize_logical_type(src_type)
+    tgt_logical = normalize_logical_type(tgt_type)
+    dest = (destination_db_type or "").lower()
+    if is_lossy_coercion(src_type, tgt_type, dest_db=dest):
         risks.append({
             "code": "type_narrowing",
             "severity": "warn",
@@ -279,10 +286,6 @@ def _mapping_risks(
                 "review before production."
             ),
         })
-
-    src_logical = normalize_logical_type(src_type)
-    tgt_logical = normalize_logical_type(tgt_type)
-    dest = (destination_db_type or "").lower()
     if dest in {"spark", "delta", "delta_lake", "databricks_sql", "unity_catalog"}:
         dest = "databricks"
     if dest in {"apache_iceberg", "iceberg_rest", "nessie"}:
@@ -638,7 +641,7 @@ def _sample_preview(mapping: dict) -> list[str]:
     return masked
 
 
-def _evidence(mapping: dict) -> dict[str, Any]:
+def _evidence(mapping: dict, *, destination_db_type: str = "") -> dict[str, Any]:
     profile = mapping.get("column_profile") or {}
     sample_n = mapping.get("sample_count")
     if sample_n is None:
@@ -652,9 +655,16 @@ def _evidence(mapping: dict) -> dict[str, Any]:
     name_match = src == tgt or src.replace("_", "") == tgt.replace("_", "")
     src_type = normalize_logical_type(mapping.get("source_type"))
     tgt_type = normalize_logical_type(mapping.get("target_type") or mapping.get("source_type"))
+    evidence_dest = str(
+        destination_db_type
+        or mapping.get("dest_db_type")
+        or mapping.get("destination_db_type")
+        or ""
+    ).strip().lower()
     type_aligned = src_type == tgt_type or not is_lossy_coercion(
         str(mapping.get("source_type") or ""),
         str(mapping.get("target_type") or mapping.get("source_type") or ""),
+        dest_db=evidence_dest,
     )
     preview, preview_clear = _sample_preview_pair(mapping)
     classification = None
@@ -816,7 +826,7 @@ def build_mapping_proof(
         confidences.append(conf)
         transform = m.get("transform") or "none"
         fidelity = transform_fidelity(str(transform))
-        verdict = mapping_fidelity(m)
+        verdict = mapping_fidelity(m, destination_db_type=destination_db_type)
         risks = _mapping_risks(
             m,
             dest_mode=dest_mode,
@@ -824,7 +834,7 @@ def build_mapping_proof(
             sync_mode=effective_sync,
         )
         all_risks.extend(risks)
-        evidence = _evidence(m)
+        evidence = _evidence(m, destination_db_type=destination_db_type)
         # Cap display confidence honesty for create-new identity
         display_conf = conf
         if evidence.get("create_new"):
