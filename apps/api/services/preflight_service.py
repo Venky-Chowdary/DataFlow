@@ -605,6 +605,25 @@ def run_transfer_policy_gates(
             }
         )
 
+
+    # Redis KV TTL/EXPIRE is not a first-class transfer guarantee (soft warning).
+    if dest in {"redis", "redis_enterprise", "amazon_elasticache_redis", "azure_cache_redis", "google_memorystore_redis"} or src in {
+        "redis", "redis_enterprise", "amazon_elasticache_redis", "azure_cache_redis", "google_memorystore_redis",
+    }:
+        gates.append({
+            "id": "redis_ttl_semantics",
+            "name": "Redis TTL / EXPIRE",
+            "status": GateStatus.PASS.value,
+            "severity": "warn",
+            "message": (
+                "Redis TTL/EXPIRE is not preserved as a migration guarantee — "
+                "values transfer; set EXPIRE in a post-load job if needed. "
+                "See docs/REDIS_TTL_SEMANTICS.md."
+            ),
+            "blocks_transfer": False,
+            "details": {"honesty": "ttl_not_productized"},
+        })
+
     return gates
 
 

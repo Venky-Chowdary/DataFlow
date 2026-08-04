@@ -43,3 +43,8 @@ one-click undo): `docs/MIGRATION_ROLLBACK.md`.
 ## Buyer evidence
 
 See `docs/BUYER_EVIDENCE_PACK.md` for how to cite gates, SKU routes, and test anchors in diligence.
+
+## Compliance packets
+
+- PCI scope (not AoC): `docs/PCI_SCOPE_PACKET.md`
+- Redis TTL honesty: `docs/REDIS_TTL_SEMANTICS.md`

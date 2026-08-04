@@ -47,6 +47,8 @@ export interface QuarantinePanelProps {
   repairMappings?: RepairMapping[];
   /** After approve / apply / reject — parent can deep-link to Validate. */
   onRepairDecided?: (proposal: RepairProposal) => void;
+  /** Sync applied mapping transforms into Studio state before re-validate. */
+  onRepairMappingsApplied?: (mappings: RepairMapping[]) => void;
 }
 
 function summarizeReasons(rows: QuarantineRow[]) {
@@ -125,6 +127,7 @@ export function QuarantinePanel({
   onReplayComplete,
   repairMappings = [],
   onRepairDecided,
+  onRepairMappingsApplied,
 }: QuarantinePanelProps) {
   const { toast } = useToast();
   const [open, setOpen] = useState(initiallyOpen || autoLoad || Boolean(initialDetails?.length));
@@ -136,6 +139,7 @@ export function QuarantinePanel({
   const [repairOpen, setRepairOpen] = useState(false);
   const [repairProposal, setRepairProposal] = useState<RepairProposal | null>(null);
   const [repairBusy, setRepairBusy] = useState(false);
+  const [remediatedPendingValidate, setRemediatedPendingValidate] = useState(false);
   const [issueCount, setIssueCount] = useState(initialDetails?.length ?? 0);
   const [rowCount, setRowCount] = useState(rejectedRows ?? initialDetails?.length ?? 0);
   const [source, setSource] = useState<string>(initialDetails?.length ? "job" : "none");
@@ -663,12 +667,20 @@ export function QuarantinePanel({
         mappings={repairMappings}
         onClose={() => setRepairOpen(false)}
         onApplied={(updated, p) => {
+          setRemediatedPendingValidate(true);
           toast({
-            title: "Repair applied",
-            message: `${updated.length} mapping(s) updated from proposal ${p.id}. Opening Validate so you can re-run gates.`,
+            title: "Repair applied — re-validate required",
+            message: `${updated.length} mapping(s) updated from proposal ${p.id}. Opening Validate to re-run G1–G9.`,
             tone: "success",
           });
-          onRepairDecided?.(p);
+          // Prefer parent closed-loop (Jobs seeds proposal id + mappings).
+          // Do not also call onOpenValidate — a second intent clears repairProposalId.
+          onRepairMappingsApplied?.(updated);
+          if (onRepairDecided) {
+            onRepairDecided(p);
+          } else {
+            onOpenValidate?.();
+          }
         }}
         onDecided={(p) => {
           if (p.status === "proposed") {

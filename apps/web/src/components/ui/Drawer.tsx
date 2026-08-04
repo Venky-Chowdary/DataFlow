@@ -5,7 +5,7 @@ import { lockBodyScroll } from "../../lib/bodyScrollLock";
 
 /**
  * Canonical right-rail width for every app slide-over (Transfer Studio, Jobs,
- * Connectors, Contracts, Pipelines). One size — never invent per-page widths.
+ * Connectors, Contracts, Schedules). One size — never invent per-page widths.
  */
 export const DRAWER_PANEL_WIDTH_PX = 720;
 

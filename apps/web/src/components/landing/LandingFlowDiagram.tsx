@@ -99,7 +99,7 @@ export function LandingFlowDiagram() {
         <circle className="lp-flow-particle" r="5" style={particleStyle} />
       </svg>
       <p className="lp-flow-diagram-caption">
-        One governed path — Transfer Studio, Pipelines, Pilot, and MCP never skip a gate.
+        One governed path — Transfer Studio, Schedules, Pilot, and MCP never skip a gate.
       </p>
     </div>
   );

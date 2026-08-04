@@ -136,7 +136,7 @@ def _probe_saved_connector(connector_id: str) -> tuple[bool, str]:
 @router.post("/run")
 async def run_preflight(body: PreflightRequest):
     """
-    Run all 8 preflight gates before a transfer.
+    Run core G1–G9 preflight gates before a transfer.
     Blocks transfer if any gate fails — no mocked pass when connectors or samples are missing.
     """
     if not body.columns:
@@ -204,43 +204,63 @@ async def run_preflight(body: PreflightRequest):
     if not contract_pk:
         contract_pk = extract_contract_primary_key(body.stream_contracts)
 
-    result = run_file_preflight(
-        columns=body.columns,
-        column_types=body.column_types,
-        row_count=body.row_count,
-        mappings=[m.model_dump() for m in body.mappings],
-        destination_connected=destination_connected,
-        destination_error=dest_error,
-        source_connected=source_connected,
-        source_error=source_error,
-        source_kind=body.source_kind or ("database" if body.source_connector_id else "file"),
-        source_format=body.source_type or body.source_kind,
-        sync_mode=body.sync_mode,
-        sample_rows=body.sample_rows,
-        estimated_bytes=body.estimated_bytes,
-        confidence_threshold=confidence_threshold_for_mode(body.validation_mode),
-        destination_column_types=dest_column_types,
-        destination_column_nullability=dest_meta.get("column_nullability") or {},
-        destination_table_exists=dest_meta.get("table_exists"),
-        destination_can_create=dest_meta.get("can_create_table"),
-        destination_can_write=dest_meta.get("can_write"),
-        privilege_probe=dest_meta.get("privilege_probe"),
-        destination_db_type=(dest_meta.get("db_type") or body.dest_type or "postgresql").lower(),
-        source_connector_id=body.source_connector_id or "",
-        source_table=(body.source_table or body.source_collection or ""),
-        destination_table=(body.dest_table or body.dest_collection or ""),
-        source_filename="",
-        schema_policy=body.schema_policy,
-        backfill_new_fields=body.backfill_new_fields,
-        contract_primary_key=contract_pk,
-        destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
-        destination_unique_keys=dest_meta.get("unique_keys") or [],
-        date_locale=body.date_locale,
-        compliance_acknowledged=bool(body.compliance_acknowledged),
-        schema_drift_acknowledged=bool(body.schema_drift_acknowledged),
-        acknowledgment_actor=str(body.acknowledgment_actor or "").strip(),
-        acknowledgment_reason=str(body.acknowledgment_reason or "").strip(),
-    )
+    try:
+        from services.tracing import get_correlation_id, start_span
+    except Exception:
+        start_span = None  # type: ignore[assignment]
+        def get_correlation_id() -> str:  # type: ignore[misc]
+            return ""
+
+    span_attrs = {
+        "dataflow.phase": "validate",
+        "dataflow.column_count": len(body.columns or []),
+        "dataflow.mapping_count": len(body.mappings or []),
+        "dataflow.validation_mode": body.validation_mode or "",
+        "dataflow.dest_type": (body.dest_type or ""),
+        "dataflow.correlation_id": get_correlation_id(),
+    }
+    with (
+        start_span("studio.validate", attributes=span_attrs, kind="internal")
+        if start_span is not None
+        else __import__("contextlib").nullcontext()
+    ):
+        result = run_file_preflight(
+            columns=body.columns,
+            column_types=body.column_types,
+            row_count=body.row_count,
+            mappings=[m.model_dump() for m in body.mappings],
+            destination_connected=destination_connected,
+            destination_error=dest_error,
+            source_connected=source_connected,
+            source_error=source_error,
+            source_kind=body.source_kind or ("database" if body.source_connector_id else "file"),
+            source_format=body.source_type or body.source_kind,
+            sync_mode=body.sync_mode,
+            sample_rows=body.sample_rows,
+            estimated_bytes=body.estimated_bytes,
+            confidence_threshold=confidence_threshold_for_mode(body.validation_mode),
+            destination_column_types=dest_column_types,
+            destination_column_nullability=dest_meta.get("column_nullability") or {},
+            destination_table_exists=dest_meta.get("table_exists"),
+            destination_can_create=dest_meta.get("can_create_table"),
+            destination_can_write=dest_meta.get("can_write"),
+            privilege_probe=dest_meta.get("privilege_probe"),
+            destination_db_type=(dest_meta.get("db_type") or body.dest_type or "postgresql").lower(),
+            source_connector_id=body.source_connector_id or "",
+            source_table=(body.source_table or body.source_collection or ""),
+            destination_table=(body.dest_table or body.dest_collection or ""),
+            source_filename="",
+            schema_policy=body.schema_policy,
+            backfill_new_fields=body.backfill_new_fields,
+            contract_primary_key=contract_pk,
+            destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
+            destination_unique_keys=dest_meta.get("unique_keys") or [],
+            date_locale=body.date_locale,
+            compliance_acknowledged=bool(body.compliance_acknowledged),
+            schema_drift_acknowledged=bool(body.schema_drift_acknowledged),
+            acknowledgment_actor=str(body.acknowledgment_actor or "").strip(),
+            acknowledgment_reason=str(body.acknowledgment_reason or "").strip(),
+        )
     if body.compliance_acknowledged or body.schema_drift_acknowledged:
         actor = str(body.acknowledgment_actor or "").strip()
         reason = str(body.acknowledgment_reason or "").strip()

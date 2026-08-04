@@ -14,7 +14,7 @@ export interface PageMeta {
 
 const BASE_TITLE = "Datawrap";
 const DEFAULT_DESCRIPTION =
-  "Integrity-first data transfer — migrate databases, sync files, and move data with AI semantic mapping, CDC, quarantine, and 8 preflight gates.";
+  "Integrity-first data transfer — migrate databases, sync files, and move data with AI semantic mapping, CDC, quarantine, and G1–G9 preflight gates.";
 const DEFAULT_KEYWORDS =
   "data transfer, data migration, ETL, database migration, CSV to PostgreSQL, Snowflake migration, semantic mapping, preflight validation, data pipeline, Datawrap";
 
@@ -22,7 +22,7 @@ export const PAGE_META: Record<Screen | "login", PageMeta> = {
   landing: {
     title: "Universal Data Transfer Platform",
     description:
-      "Move data between any source and destination — databases, files, warehouses, and APIs. AI column mapping, 8 preflight gates, and live reconciliation.",
+      "Move data between any source and destination — databases, files, warehouses, and APIs. AI column mapping, G1–G9 preflight gates, and live reconciliation.",
     keywords:
       "data transfer platform, database migration tool, file to database, PostgreSQL to Snowflake, data sync, ETL platform, semantic mapping",
     ogType: "website",

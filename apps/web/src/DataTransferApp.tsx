@@ -807,7 +807,7 @@ function AppShell({
     const target = connectors.find((c) => c.id === id);
     const confirmed = await confirm({
       title: `Delete ${target?.name ?? "this connector"}?`,
-      message: "This removes saved credentials and route references for this connection. Pipelines that used it will need a new connection.",
+      message: "This removes saved credentials and route references for this connection. Schedules that used it will need a new connection.",
       confirmLabel: "Delete connection",
       cancelLabel: "Keep connection",
       tone: "danger",

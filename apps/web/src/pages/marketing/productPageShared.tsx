@@ -49,8 +49,8 @@ export const PRODUCT_FRAMES = {
   pipelines: [
     {
       src: "/docs/screenshots/app-pipelines.png",
-      alt: "Pipelines schedules workspace",
-      caption: "Pipelines — cadence, mode, and health for recurring sync",
+      alt: "Schedules workspace",
+      caption: "Schedules — cadence, mode, and health for recurring sync (not ADF DAGs)",
     },
     {
       src: "/docs/screenshots/app-jobs.png",

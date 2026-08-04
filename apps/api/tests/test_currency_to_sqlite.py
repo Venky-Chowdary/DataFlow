@@ -63,7 +63,7 @@ def test_currency_csv_to_sqlite_preserves_value():
             source_content=content,
             source_filename="payments.csv",
             sync_mode="full_refresh_overwrite",
-            skip_preflight=True,
+            skip_preflight=True,  # rank-56: currency symbols trip G9 between checks without strip/quarantine fixtures
         )
         engine = UniversalTransferEngine()
         result = engine.execute_tracked(request, "0" * 24)

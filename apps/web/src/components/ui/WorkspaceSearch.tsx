@@ -284,7 +284,7 @@ export function WorkspaceSearch({
           ref={inputRef}
           type="text"
           role="searchbox"
-          placeholder="Search pages, connections, pipelines, jobs…"
+          placeholder="Search pages, connections, schedules, jobs…"
           value={query}
           onChange={(e) => {
             onQueryChange(e.target.value);

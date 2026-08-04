@@ -78,7 +78,7 @@ def test_csv_to_sqlite_upsert_updates_existing_rows():
                 "primary_key": "id",
                 "selected": True,
             }],
-            skip_preflight=True,
+            skip_preflight=True,  # rank-56: upsert path unit — SQLite TEXT dest needs risk_ack fixtures for G3/G4/G9
         )
 
         engine = UniversalTransferEngine()

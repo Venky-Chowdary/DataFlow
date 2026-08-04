@@ -361,24 +361,38 @@ async def map_columns_route(body: MapColumnsRequest):
         for c in body.target_columns
     ] if body.target_columns else None
 
-    result = run_mapping_pipeline(
-        body.source_columns,
-        body.target_columns or [],
-        source_schemas=source_schemas,
-        target_schemas=target_schemas,
-        file_format=body.file_format,
-        confidence_threshold=threshold,
-        use_llm=body.use_llm,
-        source_samples=body.source_samples or None,
-        validation_mode=body.validation_mode,
-        destination_db_type=body.destination_db_type or "",
-        schema_policy=body.schema_policy or "manual_review",
-        sync_mode=body.sync_mode or "",
-        destination_table_exists=body.destination_table_exists,
-        source_types_authoritative=source_types_are_authoritative(
-            body.source_kind, body.file_format or ""
-        ),
-    )
+    try:
+        from services.tracing import get_correlation_id, start_span
+    except Exception:
+        start_span = None  # type: ignore[assignment]
+        get_correlation_id = lambda: ""  # noqa: E731
+
+    span_attrs = {
+        "dataflow.phase": "map",
+        "dataflow.source_column_count": len(body.source_columns or []),
+        "dataflow.target_column_count": len(body.target_columns or []),
+        "dataflow.validation_mode": body.validation_mode or "",
+        "dataflow.correlation_id": get_correlation_id() if callable(get_correlation_id) else "",
+    }
+    with (start_span("studio.map", attributes=span_attrs, kind="internal") if start_span is not None else __import__('contextlib').nullcontext()):
+        result = run_mapping_pipeline(
+            body.source_columns,
+            body.target_columns or [],
+            source_schemas=source_schemas,
+            target_schemas=target_schemas,
+            file_format=body.file_format,
+            confidence_threshold=threshold,
+            use_llm=body.use_llm,
+            source_samples=body.source_samples or None,
+            validation_mode=body.validation_mode,
+            destination_db_type=body.destination_db_type or "",
+            schema_policy=body.schema_policy or "manual_review",
+            sync_mode=body.sync_mode or "",
+            destination_table_exists=body.destination_table_exists,
+            source_types_authoritative=source_types_are_authoritative(
+                body.source_kind, body.file_format or ""
+            ),
+        )
     nested_fields: list[dict[str, str]] = []
     try:
         from services.json_intelligence import flatten_column_recommendations
@@ -406,6 +420,7 @@ async def map_columns_route(body: MapColumnsRequest):
         "coercion_issues": result.get("coercion_issues", []),
         "integrity": result.get("integrity", {}),
         "nested_fields": nested_fields,
+        "correlation_id": get_correlation_id(),
     }
 
 

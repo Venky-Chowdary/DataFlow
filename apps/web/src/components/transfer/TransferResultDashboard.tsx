@@ -47,6 +47,8 @@ interface TransferResultDashboardProps {
   onOpenChildJob?: (jobId: string) => void;
   /** Map / Validate repair mappings for quarantine propose/apply. */
   repairMappings?: RepairMapping[];
+  /** Persist approved repair transforms into Studio before re-validate. */
+  onRepairMappingsApplied?: (mappings: RepairMapping[]) => void;
   /** When true, omit internal action bar — parent renders shared wizard footer. */
   hideActions?: boolean;
 }
@@ -92,6 +94,7 @@ export function TransferResultDashboard({
   onResume,
   onOpenChildJob,
   repairMappings = [],
+  onRepairMappingsApplied,
   hideActions = false,
 }: TransferResultDashboardProps) {
   const { setActiveData } = useActiveData();
@@ -724,6 +727,11 @@ export function TransferResultDashboard({
               initiallyOpen
               repairMappings={repairMappings}
               onOpenValidate={onOpenValidate}
+              onRepairMappingsApplied={onRepairMappingsApplied}
+              onRepairDecided={(proposal) => {
+                if (proposal.status === "rejected") return;
+                onOpenValidate?.();
+              }}
               onReplayComplete={(childJobId) => {
                 onOpenChildJob?.(childJobId);
               }}

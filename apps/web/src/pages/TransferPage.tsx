@@ -4006,7 +4006,7 @@ export function TransferPage({
       });
       toast({
         title: "Pipeline created",
-        message: "Daily sync enabled. Manage cadence in Pipelines.",
+        message: "Daily sync enabled. Manage cadence in Schedules.",
         tone: "success",
       });
       onOpenSchedules?.();
@@ -5898,6 +5898,51 @@ export function TransferPage({
                 target_type: m.destType,
                 transform: m.transform || undefined,
               }))}
+              onRepairMappingsApplied={(updated) => {
+                setColumnMappings((prev) => {
+                  const bySource = new Map(prev.map((m) => [m.source, m]));
+                  for (const hit of updated) {
+                    const src = String(hit.source || "");
+                    if (!src) continue;
+                    const existing = bySource.get(src);
+                    const xf =
+                      hit.transform
+                      || (Array.isArray(hit.transforms) && hit.transforms[0]?.type)
+                      || existing?.transform;
+                    const nextType = hit.destination_type || hit.target_type || existing?.destType || "";
+                    const typeChanged = Boolean(nextType) && nextType !== (existing?.destType || "");
+                    bySource.set(
+                      src,
+                      sealRemediationApproval({
+                        source: src,
+                        target: String(hit.destination || existing?.target || src),
+                        confidence: existing?.confidence ?? 1,
+                        destType: String(nextType),
+                        approved: true,
+                        requiresReview: false,
+                        transform: (xf as EditableMapping["transform"]) || existing?.transform,
+                        reason: [
+                          existing?.reason,
+                          `Repair applied (${hit.destination_type || hit.transform || "update"})`,
+                        ].filter(Boolean).join(" · "),
+                        sample: existing?.sample,
+                        inferredType: existing?.inferredType,
+                        isPii: existing?.isPii,
+                        existsInDestination: existing?.existsInDestination,
+                        createNew: existing?.createNew,
+                        assignmentStrategy: existing?.assignmentStrategy,
+                        fidelity: typeChanged ? undefined : existing?.fidelity,
+                        fidelityReason: typeChanged ? undefined : existing?.fidelityReason,
+                        typeNarrowing: typeChanged ? undefined : existing?.typeNarrowing,
+                        riskAcknowledged: typeChanged ? false : existing?.riskAcknowledged,
+                      }),
+                    );
+                  }
+                  const next = [...bySource.values()];
+                  queueMicrotask(() => void executePreflight(next));
+                  return next;
+                });
+              }}
               onNewTransfer={resetTransferStudio}
               onSchedule={() => void handleScheduleRoute()}
               onOpenValidate={() => setStep(STEP_VALIDATE)}

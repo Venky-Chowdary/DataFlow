@@ -203,17 +203,17 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
     try {
       if (editing) {
         await updateSchedule(editing.id, input);
-        toast({ title: "Pipeline updated", message: `"${input.name ?? editing.name}" saved.`, tone: "success" });
+        toast({ title: "Schedule updated", message: `"${input.name ?? editing.name}" saved.`, tone: "success" });
       } else {
         await createSchedule(input as ScheduleInput);
-        toast({ title: "Pipeline created", message: `"${input.name}" is scheduled.`, tone: "success" });
+        toast({ title: "Schedule created", message: `"${input.name}" is scheduled.`, tone: "success" });
       }
       closeForm();
       await load();
       void onSchedulesChange?.();
     } catch (err) {
       toast({
-        title: editing ? "Could not update pipeline" : "Could not create pipeline",
+        title: editing ? "Could not update schedule" : "Could not create schedule",
         message: err instanceof Error ? err.message : undefined,
         tone: "error",
       });
@@ -227,7 +227,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       await updateSchedule(sched.id, { enabled: !sched.enabled });
       await load();
       void onSchedulesChange?.();
-      toast({ title: sched.enabled ? "Pipeline paused" : "Pipeline activated", tone: "success" });
+      toast({ title: sched.enabled ? "Schedule paused" : "Schedule activated", tone: "success" });
     } catch (e) {
       toast({ title: "Update failed", tone: "error" });
       console.error(e);
@@ -237,10 +237,10 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   const handleDelete = async (id: string) => {
     const target = schedules.find((s) => s.id === id);
     const ok = await confirm({
-      title: target ? `Delete pipeline “${target.name}”?` : "Delete this pipeline?",
-      message: "This cannot be undone. Scheduled runs for this pipeline will stop.",
-      confirmLabel: "Delete pipeline",
-      cancelLabel: "Keep pipeline",
+      title: target ? `Delete schedule “${target.name}”?` : "Delete this schedule?",
+      message: "This cannot be undone. Scheduled runs for this schedule will stop.",
+      confirmLabel: "Delete schedule",
+      cancelLabel: "Keep schedule",
       tone: "danger",
     });
     if (!ok) return;
@@ -252,7 +252,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       }
       await load();
       void onSchedulesChange?.();
-      toast({ title: "Pipeline deleted", tone: "success" });
+      toast({ title: "Schedule deleted", tone: "success" });
     } catch (e) {
       toast({ title: "Delete failed", tone: "error" });
       console.error(e);
@@ -265,7 +265,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
     if (contractId && breakerBlocksRuns(breakers[contractId])) {
       toast({
         title: "Contract breaker is open",
-        message: "Reset the breaker on this pipeline (or Contracts) before running.",
+        message: "Reset the breaker on this schedule (or Contracts) before running.",
         tone: "error",
       });
       return;
@@ -275,7 +275,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       await runScheduleNow(id);
       await load();
       onViewJobs?.();
-      toast({ title: "Pipeline run started", message: "Track progress in Job Theater.", tone: "success" });
+      toast({ title: "Schedule run started", message: "Track progress in Job Theater.", tone: "success" });
     } catch (e) {
       toast({
         title: "Run failed",
@@ -343,7 +343,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
     try {
       const blob = await exportScheduleYaml(id);
       downloadBlob(blob, `schedule-${id}.yaml`);
-      toast({ title: "Pipeline YAML exported", tone: "success" });
+      toast({ title: "Schedule YAML exported", tone: "success" });
     } catch (e) {
       toast({
         title: "Export failed",
@@ -399,7 +399,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       wide
       className="df2-page-pipelines"
       title="Schedules"
-      description="Schedule recurring syncs with the same governed transfer engine."
+      description="Recurring sync schedules (not ADF/Informatica DAG pipelines) — same Map→Validate→Execute engine."
     >
       <PageFrame className="df2-pipeline-page">
       {!loading && (
@@ -407,17 +407,17 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
           className={showForm ? "df2-toolbar--creating" : ""}
           searchValue={schedules.length > 0 ? pipelineSearch : undefined}
           onSearchChange={schedules.length > 0 && !showForm ? setPipelineSearch : undefined}
-          searchPlaceholder="Search pipelines by name, table, cadence, or sync mode…"
+          searchPlaceholder="Search schedules by name, table, cadence, or sync mode…"
           filters={
             schedules.length > 0 ? (
-              <FilterBar variant="inline" ariaLabel="Filter pipelines">
+              <FilterBar variant="inline" ariaLabel="Filter schedules">
                 {showForm ? (
                   <span className="df2-toolbar-status" role="status">
-                    {editing ? "Editing pipeline" : "Creating pipeline"}
+                    {editing ? "Editing schedule" : "Creating schedule"}
                   </span>
                 ) : null}
                 <FilterTabs
-                  ariaLabel="Filter pipelines"
+                  ariaLabel="Filter schedules"
                   value={filter}
                   onChange={setFilter}
                   disabled={showForm}
@@ -430,7 +430,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
               </FilterBar>
             ) : showForm ? (
               <span className="df2-toolbar-status" role="status">
-                Creating your first pipeline
+                Creating your first schedule
               </span>
             ) : undefined
           }
@@ -518,14 +518,14 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
 
       <div className="df2-pipeline-workspace">
       {loading ? (
-        <SectionLoader title="Loading pipelines" hint="Fetching scheduled syncs…" />
+        <SectionLoader title="Loading schedules" hint="Fetching schedules…" />
       ) : showForm && schedules.length === 0 ? null : (
       <div className="df2-pipeline-list df2-pipeline-scroll">
         {schedules.length === 0 ? (
           <EmptyState
             page
             icon="activity"
-            title="No scheduled pipelines"
+            title="No schedules yet"
             description="Create a recurring sync to keep source and destination in step — watermark incremental, upsert, and quarantine included."
             action={
               !showForm ? (
@@ -539,11 +539,11 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
           <EmptyState
             compact
             icon="activity"
-            title={`No ${filter === "active" ? "active" : "paused"} pipelines`}
+            title={`No ${filter === "active" ? "active" : "paused"} schedules`}
             description="Try another filter or create a new pipeline."
           />
         ) : (
-          <div className="df2-pipeline-rows" role="list" aria-label="Scheduled pipelines">
+          <div className="df2-pipeline-rows" role="list" aria-label="Schedules">
             <div className="df2-pipeline-rows-head" aria-hidden>
               <span className="df2-pipeline-rows-head-name">Pipeline</span>
               <span>Cadence</span>

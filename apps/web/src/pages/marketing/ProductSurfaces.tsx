@@ -194,7 +194,7 @@ function TransferStudioMock() {
   }, []);
 
   return (
-    <Shot label="Transfer Studio · Orders migration" caption="Live preflight advancing through eight fail-fast gates before write.">
+    <Shot label="Transfer Studio · Orders migration" caption="Live preflight advancing through nine fail-fast gates (G1–G9) before write.">
       <div className="lp-mkt-ui-grid lp-mkt-ui-grid--studio">
         <div className="lp-mkt-ui-pane">
           <h4>Semantic map</h4>
@@ -387,7 +387,7 @@ export function TransferStudioPage({
     <SurfaceShell
       kicker="Product · Transfer Studio"
       title="The wizard that refuses silent data loss"
-      lead="Connect any source to any destination, review semantic maps with confidence scores, pass eight preflight gates (G1–G8), then write with quarantine and checksum proof — all in one governed path."
+      lead="Connect any source to any destination, review semantic maps with confidence scores, pass nine preflight gates (G1–G9), then write with quarantine and checksum proof — all in one governed path."
       ctaPrimary="Open Transfer Studio"
       ctaSecondary="See Job Theater"
       onPrimary={onGetStarted}
@@ -1028,7 +1028,7 @@ export function MigrationsSolutionPage({
     <SolutionShell
       kicker="Solution · Migrations"
       title="Cross-schema cutover you can prove"
-      lead="Move data across schemas that were never 1:1. Semantic maps you can review, eight fail-fast gates, quarantine with reasons, and checksum proof before cutover."
+      lead="Move data across schemas that were never 1:1. Semantic maps you can review, nine fail-fast gates (G1–G9), quarantine with reasons, and checksum proof before cutover."
       ctaPrimary="Start a migration"
       ctaSecondary="Open Transfer Studio"
       onPrimary={onGetStarted}
@@ -1217,7 +1217,7 @@ export function WarehouseSolutionPage({
               <li>
                 <span>02</span>
                 <strong>Map &amp; gate</strong>
-                <p>Semantic maps and eight fail-fast gates — identical to Studio.</p>
+                <p>Semantic maps and nine fail-fast gates (G1–G9) — identical to Studio.</p>
               </li>
               <li>
                 <span>03</span>
@@ -1275,7 +1275,7 @@ export function SyncSolutionPage({
   return (
     <SolutionShell
       kicker="Solution · Recurring sync"
-      title="Incremental pipelines with quarantine, not hope"
+      title="Incremental schedules with quarantine, not hope"
       lead="Keep systems aligned on a cadence — watermark incremental, upsert, schema-drift blocking, and Job Theater visibility on every tick."
       ctaPrimary="Create a sync"
       ctaSecondary="Pipelines product"
