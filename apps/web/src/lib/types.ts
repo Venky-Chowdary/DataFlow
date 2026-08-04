@@ -330,6 +330,12 @@ export interface Gate8ReconciliationPayload {
       size?: number;
       sort_key?: string;
       source_sort_key?: string;
+      stratify_by?: string;
+      auto_selected?: boolean;
+      /** Always sample for Gate-8 keyed compare — never invent population proof. */
+      coverage?: string;
+      population_proof?: boolean;
+      note?: string;
       pk_values?: string[];
       content_sha256?: string;
     };

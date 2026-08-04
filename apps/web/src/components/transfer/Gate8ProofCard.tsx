@@ -465,8 +465,10 @@ export function Gate8ProofCard({
             Sample plan: <strong>stratified</strong>
             {report.sample_compare.sample_seed.stratify_by
               ? ` by ${String(report.sample_compare.sample_seed.stratify_by)}`
-              : ""}{" "}
-            — rare categories included so Gate-8 does not miss skewed type bombs.
+              : ""}
+            {report.sample_compare.sample_seed.auto_selected ? " (auto)" : ""}
+            {" — "}rare categories preferred within this sample. Still{" "}
+            <strong>sample coverage</strong>, not population proof.
           </p>
         )}
         {report.sample_compare?.sample_seed?.content_sha256 && (

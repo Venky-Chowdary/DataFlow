@@ -3682,6 +3682,20 @@ def build_reconciliation_proof(
 
 
 
+def _bucket_member_order(
+    idxs: list[int], *, seed: str, bucket_name: str
+) -> list[int]:
+    """Deterministic intra-bucket order (stable across process restarts)."""
+    import hashlib
+
+    return sorted(
+        idxs,
+        key=lambda i: hashlib.sha256(
+            f"{seed}:{bucket_name}:{i}".encode()
+        ).hexdigest(),
+    )
+
+
 def _stratified_sample_indices(
     records: list[dict[str, Any]],
     *,
@@ -3691,51 +3705,155 @@ def _stratified_sample_indices(
 ) -> list[int]:
     """Deterministic per-bucket quota sampling for skewed categoricals.
 
-    Rare classes get at least one slot when present so Gate-8 does not miss
-    type/value bombs hidden behind common categories (first-N trap).
+    Rare classes get a guaranteed slot when buckets fit in ``sample_size``.
+    When bucket count exceeds ``sample_size``, prefer the *smallest* buckets
+    (rare classes) — never hash-trim across buckets (that reintroduces the
+    first-N trap stratification exists to prevent).
+
+    Still a **sample** plan — never population proof.
     """
     import hashlib
 
     if sample_size <= 0 or not records or not stratify_col:
-        return list(range(min(sample_size, len(records))))
+        return list(range(min(max(sample_size, 0), len(records))))
     buckets: dict[str, list[int]] = {}
     for i, rec in enumerate(records):
-        raw = rec.get(stratify_col) if isinstance(rec, dict) else None
+        if not isinstance(rec, dict):
+            continue
+        raw = rec.get(stratify_col)
         key = normalize_cell(raw) if raw is not None else ""
         buckets.setdefault(key or "<null>", []).append(i)
-    # Stable bucket order
     names = sorted(buckets.keys())
     if not names:
         return list(range(min(sample_size, len(records))))
-    base = sample_size // len(names)
-    rem = sample_size % len(names)
-    picked: list[int] = []
-    for bi, name in enumerate(names):
-        idxs = buckets[name]
-        # Deterministic shuffle within bucket
-        scored = sorted(
-            idxs,
-            key=lambda i: hashlib.sha256(f"{seed}:{name}:{i}".encode()).hexdigest(),
+
+    n_buckets = len(names)
+
+    # More strata than slots: keep rare (smallest) buckets — 1 row each.
+    if n_buckets > sample_size:
+        ranked = sorted(
+            names,
+            key=lambda name: (
+                len(buckets[name]),
+                hashlib.sha256(f"{seed}:bucket:{name}".encode()).hexdigest(),
+                name,
+            ),
         )
+        picked: list[int] = []
+        for name in ranked[:sample_size]:
+            scored = _bucket_member_order(
+                buckets[name], seed=seed, bucket_name=name
+            )
+            if scored:
+                picked.append(scored[0])
+        return picked[:sample_size]
+
+    # Proportional quota with floor 1 (always possible when n_buckets <= sample_size).
+    base = sample_size // n_buckets
+    rem = sample_size % n_buckets
+    picked = []
+    for bi, name in enumerate(names):
+        scored = _bucket_member_order(buckets[name], seed=seed, bucket_name=name)
         take = base + (1 if bi < rem else 0)
-        take = max(1, take) if idxs else 0
-        take = min(take, len(scored))
+        take = min(max(take, 1), len(scored))
         picked.extend(scored[:take])
-    # Trim / pad to sample_size
-    if len(picked) > sample_size:
-        picked = sorted(
-            picked,
-            key=lambda i: hashlib.sha256(f"{seed}:trim:{i}".encode()).hexdigest(),
-        )[:sample_size]
-    elif len(picked) < sample_size:
+
+    # Shrink from largest buckets only — never drop a bucket entirely.
+    while len(picked) > sample_size:
+        # Count current picks per bucket
+        membership: dict[str, list[int]] = {n: [] for n in names}
+        for i in picked:
+            rec = records[i] if i < len(records) else {}
+            raw = rec.get(stratify_col) if isinstance(rec, dict) else None
+            key = normalize_cell(raw) if raw is not None else ""
+            membership.setdefault(key or "<null>", []).append(i)
+        # Drop one row from the largest bucket that still has >1
+        candidates = [
+            (len(idxs), name)
+            for name, idxs in membership.items()
+            if len(idxs) > 1
+        ]
+        if not candidates:
+            # Should not happen when n_buckets <= sample_size; fail closed trim.
+            picked = picked[:sample_size]
+            break
+        _, drop_name = max(
+            candidates,
+            key=lambda t: (
+                t[0],
+                hashlib.sha256(f"{seed}:drop:{t[1]}".encode()).hexdigest(),
+            ),
+        )
+        drop_idxs = membership[drop_name]
+        # Drop the last in deterministic bucket order
+        ordered = _bucket_member_order(drop_idxs, seed=seed, bucket_name=drop_name)
+        drop_i = ordered[-1]
+        picked = [i for i in picked if i != drop_i]
+
+    if len(picked) < sample_size:
         used = set(picked)
         for i in range(len(records)):
-            if i not in used:
+            if i not in used and isinstance(records[i], dict):
                 picked.append(i)
                 used.add(i)
             if len(picked) >= sample_size:
                 break
     return picked[:sample_size]
+
+
+def _auto_stratify_source_column(
+    source_records: list[dict[str, Any]],
+    mappings: list[dict[str, Any]],
+    *,
+    sort_key: str | None,
+    source_sort_key: str | None,
+) -> str | None:
+    """Heuristic stratum: skewed low-cardinality mapped column (not the PK).
+
+    Returns ``None`` when no safe candidate exists — caller falls back to
+    keyed/positional sample. Never claims population coverage.
+    """
+    from collections import Counter
+
+    exclude = {
+        str(sort_key or "").strip().lower(),
+        str(source_sort_key or "").strip().lower(),
+        "id",
+        "_id",
+        "pk",
+        "uuid",
+        "guid",
+    }
+    exclude.discard("")
+    best_col: str | None = None
+    best_key: tuple[float, int, str] | None = None
+    for m in mappings:
+        src_col = str(m.get("source") or "").strip()
+        tgt_col = str(m.get("target") or "").strip()
+        if not src_col:
+            continue
+        if src_col.lower() in exclude or tgt_col.lower() in exclude:
+            continue
+        vals: list[str] = []
+        for r in source_records:
+            raw = r.get(src_col)
+            cell = normalize_cell(raw) if raw is not None else ""
+            vals.append(cell or "<null>")
+        if not vals:
+            continue
+        n_classes = len(set(vals))
+        if not (2 <= n_classes <= 20):
+            continue
+        counts = Counter(vals)
+        skew = max(counts.values()) / len(vals)
+        # Require imbalance so uniform enums don't pretend to stratify.
+        if skew < 0.55:
+            continue
+        key = (skew, n_classes, src_col.lower())
+        if best_key is None or key > best_key:
+            best_key = key
+            best_col = src_col
+    return best_col
 
 
 def sample_compare_rows(
@@ -3858,37 +3976,36 @@ def sample_compare_rows(
 
     import hashlib
 
-    # Auto-stratify: low-cardinality mapped source column (2–20 distinct in sample).
+    dict_records = [r for r in source_records if isinstance(r, dict)]
+    auto_selected = False
+    # Auto-stratify: skewed low-cardinality mapped column (never the PK).
     strat_col = (stratify_by or "").strip() or None
-    if not strat_col and len(source_records) >= sample_size:
-        for m in mappings:
-            src_col = str(m.get("source") or "")
-            if not src_col:
-                continue
-            distinct = {
-                normalize_cell(r.get(src_col))
-                for r in source_records
-                if isinstance(r, dict)
-            }
-            distinct.discard("")
-            if 2 <= len(distinct) <= 20:
-                strat_col = src_col
-                break
+    if not strat_col and len(dict_records) > sample_size:
+        strat_col = _auto_stratify_source_column(
+            dict_records,
+            mappings,
+            sort_key=sort_key,
+            source_sort_key=source_sort_key,
+        )
+        auto_selected = bool(strat_col)
 
-    if strat_col:
+    if strat_col and dict_records:
         idxs = _stratified_sample_indices(
-            [r for r in source_records if isinstance(r, dict)],
+            dict_records,
             stratify_col=strat_col,
             sample_size=sample_size,
             seed=f"{sort_key or ''}:{strat_col}",
         )
-        source_sorted = [source_records[i] for i in idxs if i < len(source_records)]
+        source_sorted = [dict_records[i] for i in idxs if i < len(dict_records)]
         method = "stratified"
     else:
         source_sorted = sorted(
-            source_records, key=lambda r: _sortable(_row_key(r, source_side=True))
+            dict_records or source_records,
+            key=lambda r: _sortable(_row_key(r, source_side=True)),
         )[:sample_size]
         method = "keyed_sorted" if sort_key else "positional_sorted"
+        strat_col = None
+        auto_selected = False
 
     # Deterministic seed for auditor replay — sorted PK (or positional index) set.
     pk_values: list[str] = []
@@ -3902,6 +4019,7 @@ def sample_compare_rows(
             "sort_key": sort_key or "",
             "source_sort_key": source_sort_key or "",
             "stratify_by": strat_col or "",
+            "auto_selected": auto_selected,
             "pk_values": pk_values,
         },
         sort_keys=True,
@@ -3913,6 +4031,15 @@ def sample_compare_rows(
         "sort_key": sort_key or "",
         "source_sort_key": source_sort_key or "",
         "stratify_by": strat_col or "",
+        "auto_selected": auto_selected,
+        "coverage": "sample",
+        "population_proof": False,
+        "note": (
+            "Stratified/keyed sample improves category coverage within the "
+            "read-back sample only — not population proof."
+            if method == "stratified"
+            else "Keyed/positional sample — not population proof."
+        ),
         "pk_values": pk_values[:sample_size],
         "content_sha256": hashlib.sha256(seed_canon.encode("utf-8")).hexdigest(),
     }
