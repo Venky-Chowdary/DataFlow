@@ -2044,9 +2044,11 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               const reopen =
                 proposal.status === "proposed"
                 || (proposal.status === "approved" && maps.length > 0);
+              // Closed-loop: always land on Validate so operator re-runs G1–G9 after repair.
               openValidateInStudio({
                 repairProposalId: reopen ? proposal.id : undefined,
                 mappings: maps,
+                step: "validate",
               });
             }}
             onReplayComplete={(childJobId) => {
