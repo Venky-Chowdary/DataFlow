@@ -621,7 +621,10 @@ def safe_ddl_logical_type(
         # Keep declared width even when samples are opaque float arrays as text.
         if dim is not None:
             return carrier_src
-    if normalize_logical_type(carrier_src) == "float":
+    # Float carriers: never collapse REAL / DOUBLE PRECISION / HALF → bare FLOAT
+    # before honor_explicit — that destroys Map create-new stamps (writer then
+    # invents DOUBLE PRECISION from FLOAT). Soften only when not honoring stamp.
+    if normalize_logical_type(carrier_src) == "float" and not honor_explicit:
         if not samples or samples_fit_logical_type(samples, "FLOAT", field_name=field_name):
             return "FLOAT"
 

@@ -1618,7 +1618,7 @@ def is_nested_document_collapse(source_type: str, target_type: str) -> bool:
     return tgt in {LOGICAL_JSON, LOGICAL_STRING, LOGICAL_TEXT}
 
 
-def nested_struct_fields_incompatible(source_type: str, target_type: str) -> bool:
+def nested_struct_fields_incompatible(source_type: str, target_type: str, *, dest_db: str = "") -> bool:
     """True when STRUCT field contracts are lost or inventively declared.
 
     Opaque ``RECORD``/bare STRUCT → fielded ``STRUCT<a:INT>`` invents a schema
@@ -1653,14 +1653,14 @@ def nested_struct_fields_incompatible(source_type: str, target_type: str) -> boo
         src_l = normalize_logical_type(src_t)
         tgt_l = normalize_logical_type(tgt_t)
         if src_l == LOGICAL_STRUCT and tgt_l == LOGICAL_STRUCT:
-            if nested_struct_fields_incompatible(src_t, tgt_t):
+            if nested_struct_fields_incompatible(src_t, tgt_t, dest_db=dest_db):
                 return True
             continue
         if is_nested_document_collapse(src_t, tgt_t):
             return True
         if src_l == tgt_l:
             # Same family — still catch IEEE/time/TZ collapse when helpers exist.
-            if is_precision_collapse_coercion(src_t, tgt_t):
+            if is_precision_collapse_coercion(src_t, tgt_t, dest_db=dest_db):
                 return True
             continue
         if (src_l, tgt_l) not in safe_leaf:
@@ -1671,7 +1671,7 @@ def nested_struct_fields_incompatible(source_type: str, target_type: str) -> boo
     return False
 
 
-def nested_array_elements_incompatible(source_type: str, target_type: str) -> bool:
+def nested_array_elements_incompatible(source_type: str, target_type: str, *, dest_db: str = "") -> bool:
     """True when ARRAY/LIST element types collapse fidelity (e.g. FLOAT→INTEGER)."""
     src_el = parse_array_element(source_type)
     tgt_el = parse_array_element(target_type)
@@ -1680,9 +1680,9 @@ def nested_array_elements_incompatible(source_type: str, target_type: str) -> bo
         return True
     if not src_el or not tgt_el:
         return False
-    if is_precision_collapse_coercion(src_el, tgt_el):
+    if is_precision_collapse_coercion(src_el, tgt_el, dest_db=dest_db):
         return True
-    if is_nested_shape_collapse(src_el, tgt_el):
+    if is_nested_shape_collapse(src_el, tgt_el, dest_db=dest_db):
         return True
     if decimal_params_would_narrow(src_el, tgt_el):
         return True
@@ -1722,14 +1722,14 @@ def nested_array_elements_incompatible(source_type: str, target_type: str) -> bo
     return (s_l, t_l) not in safe_el
 
 
-def is_nested_shape_collapse(source_type: str, target_type: str) -> bool:
+def is_nested_shape_collapse(source_type: str, target_type: str, *, dest_db: str = "") -> bool:
     """Fielded nested shape lost: document / STRUCT / MAP / ARRAY element collapse."""
     if is_nested_document_collapse(source_type, target_type):
         return True
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
     if src == LOGICAL_STRUCT and tgt == LOGICAL_STRUCT:
-        return nested_struct_fields_incompatible(source_type, target_type)
+        return nested_struct_fields_incompatible(source_type, target_type, dest_db=dest_db)
     if src == LOGICAL_MAP and tgt == LOGICAL_MAP:
         skv = parse_map_key_value(source_type)
         tkv = parse_map_key_value(target_type)
@@ -1739,9 +1739,9 @@ def is_nested_shape_collapse(source_type: str, target_type: str) -> bool:
         if skv and tkv:
             if normalize_logical_type(skv[0]) != normalize_logical_type(tkv[0]):
                 return True
-            if is_nested_shape_collapse(skv[1], tkv[1]):
+            if is_nested_shape_collapse(skv[1], tkv[1], dest_db=dest_db):
                 return True
-            if is_precision_collapse_coercion(skv[1], tkv[1]):
+            if is_precision_collapse_coercion(skv[1], tkv[1], dest_db=dest_db):
                 return True
             if decimal_params_would_narrow(skv[1], tkv[1]):
                 return True
@@ -1757,7 +1757,7 @@ def is_nested_shape_collapse(source_type: str, target_type: str) -> bool:
             }:
                 return True
     if src == LOGICAL_ARRAY and tgt == LOGICAL_ARRAY:
-        return nested_array_elements_incompatible(source_type, target_type)
+        return nested_array_elements_incompatible(source_type, target_type, dest_db=dest_db)
     return False
 
 
@@ -3816,7 +3816,7 @@ PRECISION_COLLAPSE_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset({
 })
 
 
-def datetime_timezone_polarity(inferred: str | None) -> str | None:
+def datetime_timezone_polarity(inferred: str | None, *, dest_db: str = "") -> str | None:
     """Return ``ltz`` / ``tz`` / ``ntz`` when DDL tokens make polarity knowable.
 
     - ``ltz``: session-relative instant (Snowflake TIMESTAMP_LTZ, Oracle LOCAL TZ,
@@ -3824,6 +3824,10 @@ def datetime_timezone_polarity(inferred: str | None) -> str | None:
     - ``tz``: offset-pinned (Snowflake TIMESTAMP_TZ, DATETIMEOFFSET)
     - ``ntz``: wall-clock naive (including bare DATETIME/TIMESTAMP)
     - ``None``: non-temporal or unrecognized carrier
+
+    When ``dest_db`` is BigQuery/Databricks, bare ``TIMESTAMP`` is an instant
+    carrier (not NTZ) — matches native DDL and clears false TZ-collapse on
+    create-new TIMESTAMPTZ→TIMESTAMP wires.
     """
     # Arrow timestamp[unit, tz=…] → carrier before polarity token scan.
     arrow = arrow_dtype_to_carrier(inferred)
@@ -3874,9 +3878,22 @@ def datetime_timezone_polarity(inferred: str | None) -> str | None:
         or ("WITH TIME ZONE" in collapsed and "LOCAL" not in collapsed)
     ):
         return "tz"
-    # Bare DATETIME / TIMESTAMP = wall-clock NTZ. Never treat as ambiguous
-    # platform-TZ invent — Map/G3 must require Accept risk for → TIMESTAMPTZ.
+    # Bare DATETIME = wall-clock NTZ. Bare TIMESTAMP defaults to NTZ unless the
+    # destination engine's TIMESTAMP token is an instant (BQ / Databricks).
     if collapsed in {"DATETIME", "TIMESTAMP"} or collapsed.startswith("DATETIME "):
+        if collapsed == "TIMESTAMP":
+            db = (dest_db or "").strip().lower()
+            if db in {
+                "bigquery",
+                "bq",
+                "databricks",
+                "spark",
+                "delta",
+                "delta_lake",
+                "databricks_sql",
+                "unity_catalog",
+            }:
+                return "ltz"
         return "ntz"
     return None
 
@@ -3950,13 +3967,19 @@ def parse_vector_length(value: Any) -> int | None:
     return None
 
 
-def is_timezone_polarity_loss(source_type: str, target_type: str) -> bool:
+def is_timezone_polarity_loss(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
     """True when timezone polarity would be invented or dropped silently.
 
     Covers aware→NTZ, NTZ→aware (UTC invent on naive wall-clock), and LTZ↔TZ.
+    ``dest_db`` makes destination TIMESTAMP polarity dialect-aware (BQ instant).
     """
-    src = datetime_timezone_polarity(source_type)
-    tgt = datetime_timezone_polarity(target_type)
+    src = datetime_timezone_polarity(source_type, dest_db=dest_db)
+    tgt = datetime_timezone_polarity(target_type, dest_db=dest_db)
     if src in {"tz", "ltz"} and tgt == "ntz":
         return True
     # Naive / NTZ → TZ-aware invents an instant (UTC stamp) — fail-closed.
@@ -5262,6 +5285,10 @@ def promote_create_new_temporal_stamp(src_type: str, stamped: str, dest_db_type:
         if bare == "TIME" and db in {"sqlserver", "mssql"} and "(" not in out.upper():
             return "TIME(7)"
         return out
+    stamp_p = parse_temporal_fractional_precision(out)
+    # Already-parameterized stamps (including Accept-risk narrow) stay as-is.
+    if stamp_p is not None:
+        return out
     if bare == "TIMESTAMP":
         if db in _NO_TEMPORAL_TYPMOD_ENGINES:
             return out
@@ -5357,6 +5384,72 @@ def create_new_mapping_target_type(src_type: str, dest_db_type: str = "") -> str
     if db:
         return promote_create_new_temporal_stamp(src_type, ddl_type(db, src_type), dest_db_type)
     return (src_type or "VARCHAR").strip() or "VARCHAR"
+
+
+
+# Tokens that writers must not re-interpret via ddl_type (Map stamp authority).
+_PHYSICAL_STAMP_PASS_THROUGH: Final[frozenset[str]] = frozenset({
+    "REAL", "FLOAT4", "FLOAT8", "DOUBLE", "DOUBLE PRECISION",
+    "BINARY_FLOAT", "BINARY_DOUBLE",
+    "HALF", "FLOAT16", "FLOAT32", "FLOAT64",
+    "JSONB", "JSON", "VARIANT", "SUPER", "HSTORE", "AVRO",
+    "INET", "CIDR", "UUID", "BYTEA", "CITEXT",
+    "TIMESTAMPTZ", "TIMESTAMP_LTZ", "TIMESTAMP_NTZ", "TIMESTAMP_TZ",
+    "DATETIME2", "DATETIMEOFFSET", "SMALLDATETIME", "TIMETZ",
+    "MONEY", "SMALLMONEY", "YEAR",
+    "NVARCHAR2", "VARCHAR2", "NCHAR", "NVARCHAR", "NCLOB", "CLOB", "BLOB",
+    "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC",
+    "GEOMETRY", "GEOGRAPHY", "VECTOR", "HLLSKETCH",
+    "TINYINT", "MEDIUMINT", "SMALLINT", "BIGINT", "INTEGER", "INT", "BIGINT UNSIGNED",
+    "BOOLEAN", "BOOL", "DATE", "TIME", "TIMESTAMP", "DATETIME", "DATETIME64",
+    "TEXT", "STRING", "VARCHAR", "CHAR", "BPCHAR", "CHARACTER VARYING",
+    "OBJECTID", "UNIQUEIDENTIFIER", "GUID", "ROWVERSION", "BIT",
+    "ENUM", "SET", "ARRAY", "STRUCT", "MAP", "RECORD",
+})
+
+
+def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
+    """True when carrier is already dest DDL (Map stamp) — do not re-ddl invent."""
+    raw = strip_identity_qualifier(carrier).strip()
+    if not raw:
+        return False
+    upper = raw.upper()
+    # Typmod / nested / array brackets are always physical.
+    if "(" in upper or "[" in upper or "<" in upper:
+        return True
+    bare = upper.split("(", 1)[0].strip()
+    if bare in _PHYSICAL_STAMP_PASS_THROUGH or upper in _PHYSICAL_STAMP_PASS_THROUGH:
+        return True
+    # MySQL/Maria FLOAT is a real physical stamp (HALF create-new). On PG/etc.
+    # bare FLOAT is the logical alias that must still map via ddl_type → DOUBLE.
+    if bare == "FLOAT":
+        db = (dest_db or "").strip().lower()
+        return db in {"mysql", "mariadb", "tidb", "sqlserver", "mssql"}
+    if specialty_carrier_base(raw) is not None:
+        return True
+    # Dialect multi-word tokens
+    if upper.startswith("TIMESTAMP ") or upper.startswith("TIME WITH"):
+        return True
+    if upper.startswith("DOUBLE ") or upper.startswith("CHARACTER "):
+        return True
+    return False
+
+
+def materialize_dest_ddl(db_type: str, carrier: str | None) -> str:
+    """Writer CREATE DDL: honor Map physical stamps; map logicals via ddl_type.
+
+    SSOT so Execute CREATE cannot invent REAL→DOUBLE, TIMESTAMP→DATETIME (BQ),
+    NVARCHAR2→VARCHAR2 BYTE, or ARRAY<FLOAT>→ARRAY<DOUBLE> after Map stamped.
+    Illegal typmod on no-typmod engines is still legalized via promote.
+    """
+    raw = strip_identity_qualifier(carrier).strip()
+    if not raw:
+        return ddl_type(db_type, "VARCHAR")
+    db = _normalize_dest_db(db_type)
+    if _is_explicit_physical_stamp(raw, db):
+        legalized = promote_create_new_temporal_stamp("", raw, db)
+        return legalized or raw
+    return ddl_type(db, raw)
 
 
 def uuid_exact_wire_carrier(target_type: str | None) -> bool:
@@ -6699,7 +6792,7 @@ def is_precision_collapse_coercion(
     tgt = normalize_logical_type(target_type)
     if (src, tgt) in PRECISION_COLLAPSE_PAIRS:
         return True
-    if is_timezone_polarity_loss(source_type, target_type):
+    if is_timezone_polarity_loss(source_type, target_type, dest_db=dest_db):
         return True
     if time_timezone_polarity_loss(source_type, target_type):
         return True
@@ -7027,7 +7120,7 @@ def assess_create_new_type_risk(
             "message": f"Create-new narrows VARCHAR({src_w}) → VARCHAR({tgt_w}).",
         })
 
-    if is_timezone_polarity_loss(src, tgt) or time_timezone_polarity_loss(src, tgt):
+    if is_timezone_polarity_loss(src, tgt, dest_db=db) or time_timezone_polarity_loss(src, tgt):
         risks.append({
             "kind": "timezone_polarity",
             "severity": "warn",
@@ -7115,7 +7208,7 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
     if src == tgt:
         # Same logical family can still drop TZ polarity, DECIMAL params,
         # VARCHAR width, UNSIGNED range, STRUCT/MAP fields, or ARRAY elements.
-        if is_timezone_polarity_loss(source_type, target_type):
+        if is_timezone_polarity_loss(source_type, target_type, dest_db=dest_db):
             return True
         if time_timezone_polarity_loss(source_type, target_type):
             return True
@@ -7214,11 +7307,11 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
         if temporal_precision_would_narrow(source_type, target_type, dest_db=dest_db):
             return True
         if src == LOGICAL_STRUCT and nested_struct_fields_incompatible(
-            source_type, target_type
+            source_type, target_type, dest_db=dest_db
         ):
             return True
         if src in {LOGICAL_MAP, LOGICAL_ARRAY} and is_nested_shape_collapse(
-            source_type, target_type
+            source_type, target_type, dest_db=dest_db
         ):
             return True
         return False
@@ -7343,11 +7436,11 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
         return True
     # ARRAY→ARRAY is in the safe allow-list below only when element types widen.
     if src == LOGICAL_ARRAY and tgt == LOGICAL_ARRAY and is_nested_shape_collapse(
-        source_type, target_type
+        source_type, target_type, dest_db=dest_db
     ):
         return True
     if src == LOGICAL_MAP and tgt == LOGICAL_MAP and is_nested_shape_collapse(
-        source_type, target_type
+        source_type, target_type, dest_db=dest_db
     ):
         return True
 

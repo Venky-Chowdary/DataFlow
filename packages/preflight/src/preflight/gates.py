@@ -491,7 +491,9 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         nested_collapse = bool(
             is_nested_shape_collapse
             and is_nested_shape_collapse(
-                source_col.inferred_type, target.inferred_type
+                source_col.inferred_type,
+                target.inferred_type,
+                dest_db=dest_kind,
             )
         )
         if not lossy and nested_collapse:

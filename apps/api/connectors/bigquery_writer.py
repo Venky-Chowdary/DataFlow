@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from services.type_system import ddl_type
+from services.type_system import ddl_type, materialize_dest_ddl
 
 from connectors.driver_guard import stub_writes_allowed
 from connectors.stub_writer import simulate_stub_write
@@ -64,7 +64,7 @@ def bq_type(inferred: str) -> str:
     """
     import re
 
-    raw = ddl_type("bigquery", inferred)
+    raw = materialize_dest_ddl("bigquery", inferred)
     match = re.match(r"(BIGNUMERIC|NUMERIC)\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)", raw, re.IGNORECASE)
     if match:
         precision = int(match.group(2))
@@ -151,7 +151,7 @@ def resolve_bigquery_decimal_target_types(
             out.append(ftype or bq_type(logical))
             continue
         # No physical field yet — use parameterized ddl when available.
-        out.append(ddl_type("bigquery", logical))
+        out.append(materialize_dest_ddl("bigquery", logical))
     return out
 
 

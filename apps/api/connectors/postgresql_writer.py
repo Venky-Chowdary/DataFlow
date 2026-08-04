@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import tempfile
 import json
 import logging
 import time
@@ -13,7 +14,7 @@ from decimal import Decimal
 from typing import Any
 
 from services.schema_inference import infer_type
-from services.type_system import ddl_type
+from services.type_system import materialize_dest_ddl
 from services.value_serializer import json_default
 
 from connectors.postgresql_conn import get_connection
@@ -501,9 +502,12 @@ class WriteResult(_WriteResult):
 
 
 def pg_type(inferred: str, engine: str = "postgresql") -> str:
-    """Map logical type to Postgres or Redshift DDL (never invent Redshift JSONB)."""
+    """Map logical type to Postgres or Redshift DDL (never invent Redshift JSONB).
+
+    Honors Map physical stamps via materialize_dest_ddl — never REAL→DOUBLE etc.
+    """
     db = "redshift" if (engine or "").lower() == "redshift" else "postgresql"
-    return ddl_type(db, inferred)
+    return materialize_dest_ddl(db, inferred)
 
 
 def _copy_text_value(value: Any) -> str:
@@ -526,6 +530,11 @@ def _copy_text_value(value: Any) -> str:
     return text.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n").replace("\r", "\\r")
 
 
+
+def _copy_buffer():
+    """Memory-bounded buffer for COPY — spills to disk when wide batches exceed 1 MiB."""
+    return tempfile.SpooledTemporaryFile(max_size=1 * 1024 * 1024, mode="w+", encoding="utf-8", newline="")
+
 def _copy_rows(cur, schema: str, table_name: str, columns: list[str], rows: list[tuple]) -> None:
     from psycopg2 import sql
 
@@ -535,12 +544,15 @@ def _copy_rows(cur, schema: str, table_name: str, columns: list[str], rows: list
         sql.Identifier(table_name),
         cols_sql,
     )
-    buf = io.StringIO()
-    for row in rows:
-        buf.write("\t".join(_copy_text_value(v) for v in row))
-        buf.write("\n")
-    buf.seek(0)
-    cur.copy_expert(copy_sql, buf)
+    buf = _copy_buffer()
+    try:
+        for row in rows:
+            buf.write("\t".join(_copy_text_value(v) for v in row))
+            buf.write("\n")
+        buf.seek(0)
+        cur.copy_expert(copy_sql, buf)
+    finally:
+        buf.close()
 
 
 def _copy_rows_temp(cur, table_name: str, columns: list[str], rows: list[tuple]) -> None:
@@ -551,12 +563,15 @@ def _copy_rows_temp(cur, table_name: str, columns: list[str], rows: list[tuple])
     copy_sql = sql.SQL(
         "COPY {} ({}) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')"
     ).format(sql.Identifier(table_name), cols_sql)
-    buf = io.StringIO()
-    for row in rows:
-        buf.write("\t".join(_copy_text_value(v) for v in row))
-        buf.write("\n")
-    buf.seek(0)
-    cur.copy_expert(copy_sql, buf)
+    buf = _copy_buffer()
+    try:
+        for row in rows:
+            buf.write("\t".join(_copy_text_value(v) for v in row))
+            buf.write("\n")
+        buf.seek(0)
+        cur.copy_expert(copy_sql, buf)
+    finally:
+        buf.close()
 
 
 def _execute_values_insert(cur, insert_sql: Any, rows: list[tuple] | list[list], *, page_size: int = 1000) -> None:

@@ -13,7 +13,7 @@ from decimal import Overflow
 from pathlib import Path
 from typing import Any, Callable
 
-from services.type_system import ddl_type, normalize_logical_type
+from services.type_system import ddl_type, materialize_dest_ddl, normalize_logical_type
 from services.value_serializer import cell_to_string
 
 from connectors.driver_guard import stub_writes_allowed
@@ -64,7 +64,7 @@ class WriteResult(_WriteResult):
 
 
 def sf_type(inferred: str) -> str:
-    return ddl_type("snowflake", inferred)
+    return materialize_dest_ddl("snowflake", inferred)
 
 
 def _is_fakesnow_connection(conn: Any) -> bool:

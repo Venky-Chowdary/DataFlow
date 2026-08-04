@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from services import reflection_cache
-from services.type_system import ddl_type
+from services.type_system import ddl_type, materialize_dest_ddl
 
 from connectors.mysql_conn import get_connection
 from connectors.schema_drift import is_wider_type, widen_existing_columns_native
@@ -68,7 +68,7 @@ class WriteResult(_WriteResult):
 
 
 def mysql_type(inferred: str) -> str:
-    return ddl_type("mysql", inferred)
+    return materialize_dest_ddl("mysql", inferred)
 
 
 def _fetch_mysql_column_types(

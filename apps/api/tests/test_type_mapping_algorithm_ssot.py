@@ -315,3 +315,60 @@ def test_cross_surface_dest_db_agreement_pg_timestamp_and_json():
             assert blocks, (src, tgt, dest, issues)
         else:
             assert not blocks, (src, tgt, dest, blocks)
+
+def test_materialize_dest_ddl_honors_map_stamps():
+    """Writers must not re-invent Map physical stamps via blind ddl_type."""
+    from services.type_system import ddl_type, materialize_dest_ddl
+
+    assert materialize_dest_ddl("postgresql", "REAL") == "REAL"
+    assert materialize_dest_ddl("postgresql", "float") == ddl_type("postgresql", "float")
+    assert materialize_dest_ddl("bigquery", "TIMESTAMP") == "TIMESTAMP"
+    # Blind ddl_type still treats bare TIMESTAMP as NTZ → DATETIME on BQ.
+    assert ddl_type("bigquery", "TIMESTAMP") == "DATETIME"
+    assert materialize_dest_ddl("mysql", "FLOAT") == "FLOAT"
+    assert materialize_dest_ddl("postgresql", "FLOAT") == ddl_type("postgresql", "FLOAT")
+    assert materialize_dest_ddl("postgresql", "JSONB") == "JSONB"
+    assert materialize_dest_ddl("oracle", "NVARCHAR2(50)").upper().startswith("NVARCHAR2")
+
+
+def test_bq_timestamptz_to_timestamp_not_polarity_loss():
+    from services.type_system import is_lossy_coercion, is_timezone_polarity_loss
+
+    assert is_timezone_polarity_loss("TIMESTAMPTZ", "TIMESTAMP", dest_db="bigquery") is False
+    assert is_lossy_coercion("TIMESTAMPTZ", "TIMESTAMP", dest_db="bigquery") is False
+    # Without dest_db: fail-closed (bare TIMESTAMP = NTZ).
+    assert is_timezone_polarity_loss("TIMESTAMPTZ", "TIMESTAMP") is True
+
+
+def test_promote_preserves_intentional_narrow_typmod():
+    from services.type_system import promote_create_new_temporal_stamp
+
+    assert (
+        promote_create_new_temporal_stamp("TIMESTAMP(6)", "TIMESTAMP(3)", "postgresql")
+        == "TIMESTAMP(3)"
+    )
+    # Bare stamp still promoted from source FSP.
+    assert (
+        promote_create_new_temporal_stamp("TIMESTAMP(6)", "TIMESTAMP", "postgresql")
+        == "TIMESTAMP(6)"
+    )
+
+
+def test_nested_struct_fsp_respects_dest_db():
+    from services.type_system import nested_struct_fields_incompatible
+
+    src = "STRUCT<a:TIMESTAMP_NTZ(6)>"
+    tgt = "STRUCT<a:TIMESTAMP>"
+    assert nested_struct_fields_incompatible(src, tgt, dest_db="postgresql") is False
+    assert nested_struct_fields_incompatible(src, tgt) is True
+
+
+def test_safe_ddl_honors_explicit_real_stamp():
+    from services.schema_inference import safe_ddl_logical_type
+
+    assert (
+        safe_ddl_logical_type("REAL", ["1.5", "2.0"], honor_explicit=True) == "REAL"
+    )
+    # Without honor_explicit, float soften may still collapse.
+    soft = safe_ddl_logical_type("REAL", ["1.5", "2.0"], honor_explicit=False)
+    assert soft in {"FLOAT", "REAL"}

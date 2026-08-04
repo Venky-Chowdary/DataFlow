@@ -11,7 +11,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Callable
 
-from services.type_system import ddl_type
+from services.type_system import ddl_type, materialize_dest_ddl
 from services.value_serializer import json_default
 
 from connectors.sqlite_common import sqlite_file_path
@@ -57,7 +57,7 @@ class WriteResult(_WriteResult):
 
 
 def sqlite_type(inferred: str) -> str:
-    return ddl_type("sqlite", inferred)
+    return materialize_dest_ddl("sqlite", inferred)
 
 
 def _to_sqlite_value(value: Any, source_type: str) -> Any:
