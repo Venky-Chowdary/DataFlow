@@ -26,6 +26,56 @@ _MONGO_COLL = "quarantine_dlq"
 _DLQ_MAX_BYTES = 100 * 1024 * 1024  # 100 MiB
 
 
+class QuarantineDlqLostError(RuntimeError):
+    """Rejected rows exist but durable DLQ persist failed — fail closed.
+
+    Migration Assurance forbids completing a transfer as success/quarantine-ok
+    when rejected rows cannot be recovered from the control-plane DLQ.
+    """
+
+
+def persist_job_quarantine_outcome(dest_summary: dict[str, Any] | None) -> dict[str, Any]:
+    """Evaluate whether quarantine durability is acceptable for terminal status."""
+    summary = dest_summary or {}
+    details = list(summary.get("rejected_details") or [])
+    if not details:
+        return {
+            "ok": True,
+            "fail_closed": False,
+            "rejected_count": 0,
+            "quarantine_durable": True,
+            "note": "No rejected rows — DLQ durability not required.",
+        }
+    durable = summary.get("quarantine_durable")
+    ok = durable is True
+    return {
+        "ok": ok,
+        "fail_closed": not ok,
+        "rejected_count": len(details),
+        "quarantine_durable": durable,
+        "error": summary.get("quarantine_dlq_error"),
+        "note": (
+            "Control-plane DLQ durable."
+            if ok
+            else (
+                "Rejected rows exist but control-plane DLQ is not durable — "
+                "fail closed (Module 5). Replay would find nothing."
+            )
+        ),
+    }
+
+
+def assert_quarantine_durable_or_raise(dest_summary: dict[str, Any] | None) -> None:
+    """Raise when rejected rows would be lost from the durable DLQ."""
+    outcome = persist_job_quarantine_outcome(dest_summary)
+    if outcome["ok"]:
+        return
+    err = (dest_summary or {}).get("quarantine_dlq_error") or outcome["note"]
+    raise QuarantineDlqLostError(
+        f"Quarantine DLQ not durable for {outcome['rejected_count']} rejected row(s): {err}"
+    )
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 

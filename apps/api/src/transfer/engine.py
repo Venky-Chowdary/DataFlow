@@ -789,13 +789,17 @@ def _apply_post_load_transforms(request: Any, dest_summary: dict[str, Any]) -> N
 def _persist_job_quarantine(
     job_id: str, dest_summary: dict[str, Any], request: Any = None
 ) -> None:
-    """Best-effort durable DLQ write for rejected rows; never hide transfer success.
+    """Durable DLQ write for rejected rows — fail closed if control-plane persist fails.
 
-    Writes control-plane JSONL **and** (when supported) a destination
+    Writes control-plane JSONL/Mongo **and** (when supported) a destination
     ``{table}_df_quarantine`` table so operators can query/promote with SQL.
+
+    Module 5: never complete as success/quarantine-ok when rejected rows exist
+    but control-plane DLQ is not durable (replay would find nothing).
     """
     details = dest_summary.get("rejected_details") or []
     if not details:
+        dest_summary["quarantine_durable"] = True
         return
     try:
         from services.quarantine_dlq import persist_rejected_rows
@@ -815,6 +819,7 @@ def _persist_job_quarantine(
         dest_summary["quarantine_durable"] = True
 
     # Destination-side DLQ table (SQL sinks). Failures are surfaced — never silent.
+    # Control-plane durability remains the fail-closed authority for Module 5.
     if request is not None and getattr(request, "destination", None) is not None:
         try:
             from services.dest_quarantine import write_dest_quarantine
@@ -833,6 +838,10 @@ def _persist_job_quarantine(
             dest_summary.setdefault(
                 "dest_quarantine", {"ok": False, "error": str(exc)[:300]}
             )
+
+    from services.quarantine_dlq import assert_quarantine_durable_or_raise
+
+    assert_quarantine_durable_or_raise(dest_summary)
 
 
 _CDC_JOB_FIELDS = (
