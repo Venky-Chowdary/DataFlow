@@ -745,9 +745,21 @@ export interface PreflightResult {
     proven?: boolean;
     coverage?: string;
     population_orphan_probe_ran?: boolean;
+    population_orphan_count?: number | null;
+    sample_orphan_probe_ran?: boolean;
+    sample_orphan_count?: number | null;
     finding_count?: number;
     note?: string;
     fk_risk_acknowledged?: boolean;
+  };
+  /** Sample-scoped orphan probe report (never population proof). */
+  sample_orphan_probe?: {
+    ran?: boolean;
+    coverage?: string;
+    population_proof?: boolean;
+    orphan_count?: number;
+    checked_values?: number;
+    note?: string;
   };
   /** Soft Snowflake warehouse sizing from G7 volume — never a GateId. */
   snowflake_warehouse_advice?: {

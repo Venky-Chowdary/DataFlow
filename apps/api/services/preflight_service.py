@@ -775,6 +775,75 @@ def apply_policy_gates(
 
 
 @_with_date_locale
+def _load_source_foreign_keys(
+    *,
+    source_connector_id: str = "",
+    source_config: dict[str, Any] | None = None,
+    source_table: str = "",
+    workspace_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Introspect source-table FOREIGN KEYs when a live SQL source is available.
+
+    Returns [] when unsupported — never invents FK metadata.
+    """
+    table = (source_table or "").strip()
+    if not table:
+        return []
+    if not source_connector_id and not source_config:
+        return []
+
+    cfg: dict[str, Any] | None = None
+    db_type = ""
+    if source_connector_id:
+        from services.connector_probe import probe_cfg_from_saved
+        from services.connector_store import get_connector
+
+        conn = get_connector(source_connector_id, workspace_id=workspace_id)
+        if conn:
+            cfg = probe_cfg_from_saved(conn)
+            db_type = (conn.type or "").lower()
+    if cfg is None and source_config:
+        cfg = dict(source_config)
+        db_type = (
+            cfg.get("type") or cfg.get("db_type") or cfg.get("format") or ""
+        ).lower()
+    if not cfg or not db_type:
+        return []
+    cfg = dict(cfg)
+    cfg.setdefault("type", db_type)
+
+    # Only engines with real FK catalog readers today.
+    if db_type not in {
+        "postgresql",
+        "postgres",
+        "cockroachdb",
+        "timescaledb",
+        "supabase",
+        "mysql",
+        "mariadb",
+        "singlestore",
+    }:
+        return []
+
+    from services.schema_introspect import introspect_schema
+
+    info = introspect_schema(
+        db_type,
+        host=str(cfg.get("host") or ""),
+        port=int(cfg.get("port") or 5432),
+        database=str(cfg.get("database") or ""),
+        username=str(cfg.get("username") or ""),
+        password=str(cfg.get("password") or ""),
+        schema=str(cfg.get("schema") or "public"),
+        connection_string=str(cfg.get("connection_string") or ""),
+        ssl=bool(cfg.get("ssl", False)),
+        table=table,
+    )
+    if not info.get("ok"):
+        return []
+    return list(info.get("foreign_keys") or [])
+
+
 def run_file_preflight(
     *,
     columns: list[str],
@@ -1218,15 +1287,16 @@ def run_file_preflight(
         ),
     }
 
-    # FK / relational constraint findings — fail-closed on unmapped dest FK
-    # columns in strict/maximum unless operator acknowledged. Schema metadata
-    # coverage only; never invents population orphan / RI proven.
+    # FK / relational constraint findings + sample orphan probe.
+    # Schema unmapped-FK + sample orphans fail closed in strict/maximum unless
+    # acknowledged. Sample orphan never invents population RI proof.
     try:
         from preflight.constraint_hints import (
             assess_constraint_compatibility,
             constraint_findings_block_transfer,
             referential_integrity_posture,
         )
+        from services.sample_orphan_probe import probe_sample_fk_orphans
 
         findings = list(
             assess_constraint_compatibility(
@@ -1236,10 +1306,57 @@ def run_file_preflight(
             )
             or []
         )
+
+        # Prefer source-introspected FKs for orphan probe (sample is source rows).
+        probe_fks = list(destination_foreign_keys or [])
+        try:
+            src_fks = _load_source_foreign_keys(
+                source_connector_id=source_connector_id or "",
+                source_config=source_config,
+                source_table=source_table or "",
+            )
+            if src_fks:
+                probe_fks = src_fks
+                out["source_foreign_keys"] = src_fks
+        except Exception as src_fk_exc:
+            logger.debug(
+                "source FK introspect skipped: %s", src_fk_exc, exc_info=src_fk_exc
+            )
+
+        orphan_report = probe_sample_fk_orphans(
+            sample_rows=sample_rows,
+            mappings=list(mappings or []),
+            foreign_keys=probe_fks,
+            source_connector_id=source_connector_id or "",
+            source_config=source_config,
+            validation_mode=validation_mode,
+            fk_risk_acknowledged=bool(fk_risk_acknowledged),
+        )
+        out["sample_orphan_probe"] = {
+            k: orphan_report.get(k)
+            for k in (
+                "ran",
+                "coverage",
+                "population_proof",
+                "orphan_count",
+                "checked_values",
+                "checks",
+                "note",
+                "error",
+            )
+            if k in orphan_report
+        }
+        for of in orphan_report.get("findings") or []:
+            if isinstance(of, dict):
+                findings.append(of)
+
         out["constraint_findings"] = findings
         out["constraint_hints"] = findings
         ri_posture = referential_integrity_posture(
-            findings, population_orphan_probe_ran=False
+            findings,
+            population_orphan_probe_ran=False,
+            sample_orphan_probe_ran=bool(orphan_report.get("ran")),
+            sample_orphan_count=int(orphan_report.get("orphan_count") or 0),
         )
         if fk_risk_acknowledged:
             ri_posture = {
@@ -1271,13 +1388,23 @@ def run_file_preflight(
                 if block_msgs
                 else "Destination FK columns unmapped — transfer blocked"
             )
+            coverage = "sample_orphan_probe" if any(
+                isinstance(f, dict) and f.get("coverage") == "sample_orphan_probe"
+                for f in findings
+                if str(f.get("severity") or "").lower() in {"block", "ack_required"}
+            ) else "destination_fk_metadata"
             fk_details = {
                 "findings": findings,
-                "coverage": "destination_fk_metadata",
+                "coverage": coverage,
                 "remediation_kind": "acknowledge_fk_risk",
                 "ack_required": True,
                 "population_orphan_proven": False,
-                "rule_id": "constraint_fk.unmapped",
+                "sample_orphan_probe_ran": bool(orphan_report.get("ran")),
+                "rule_id": (
+                    "constraint_fk.sample_orphan"
+                    if coverage == "sample_orphan_probe"
+                    else "constraint_fk.unmapped"
+                ),
             }
             fk_gate = {
                 "id": "constraint_fk",
@@ -1315,6 +1442,7 @@ def run_file_preflight(
             "proven": False,
             "coverage": "none",
             "population_orphan_probe_ran": False,
+            "sample_orphan_probe_ran": False,
             "finding_count": 0,
             "note": "Constraint assessment unavailable for this run.",
         }

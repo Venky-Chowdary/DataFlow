@@ -461,6 +461,7 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                 "primary_key_columns": [],
                 "unique_keys": [],
             }
+            foreign_keys: list[dict[str, Any]] = []
             if target:
                 columns = _pg_fetch_columns(cur, schema, target)
                 # Table may live outside the requested schema (common when UI
@@ -496,6 +497,7 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                     unique_meta = _pg_fetch_unique_keys(cur, resolved_schema, target)
                     if advisory_keys:
                         unique_meta = _mark_unique_keys_advisory(unique_meta)
+                    foreign_keys = _pg_fetch_foreign_keys(cur, resolved_schema, target)
         conn.close()
         out: dict[str, Any] = {
             "ok": True,
@@ -504,6 +506,7 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
             "schema": resolved_schema if table else schema,
             "primary_key_columns": unique_meta.get("primary_key_columns") or [],
             "unique_keys": unique_meta.get("unique_keys") or [],
+            "foreign_keys": foreign_keys,
         }
         if advisory_keys and (out["primary_key_columns"] or out["unique_keys"]):
             out["warnings"] = [
@@ -993,8 +996,10 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                 "primary_key_columns": [],
                 "unique_keys": [],
             }
+            foreign_keys: list[dict[str, Any]] = []
             if columns and target:
                 unique_meta = _mysql_fetch_unique_keys(cur, db_name, target)
+                foreign_keys = _mysql_fetch_foreign_keys(cur, db_name, target)
         conn.close()
         return {
             "ok": True,
@@ -1003,6 +1008,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
             "schema": db_name,
             "primary_key_columns": unique_meta.get("primary_key_columns") or [],
             "unique_keys": unique_meta.get("unique_keys") or [],
+            "foreign_keys": foreign_keys,
         }
     except ImportError:
         return {"ok": False, "error": "Install pymysql for MySQL schema introspection", "columns": [], "tables": []}
@@ -1520,6 +1526,129 @@ def _pg_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
             pk = list(bucket.get("columns") or [])
         unique_keys.append(bucket)
     return {"primary_key_columns": pk, "unique_keys": unique_keys}
+
+
+def _pg_fetch_foreign_keys(cur: Any, schema: str, table: str) -> list[dict[str, Any]]:
+    """Return FOREIGN KEY metadata for ``schema.table`` (information_schema).
+
+    Shape matches constraint_hints / sample_orphan_probe:
+    ``{name, columns, referenced_schema, referenced_table, referenced_columns}``.
+    Never invents FKs — empty list on query failure.
+    """
+    by_name: dict[str, dict[str, Any]] = {}
+    try:
+        cur.execute(
+            """
+            SELECT tc.constraint_name,
+                   kcu.column_name,
+                   kcu.ordinal_position,
+                   ccu.table_schema AS foreign_table_schema,
+                   ccu.table_name AS foreign_table_name,
+                   ccu.column_name AS foreign_column_name
+            FROM information_schema.table_constraints AS tc
+            JOIN information_schema.key_column_usage AS kcu
+              ON tc.constraint_catalog = kcu.constraint_catalog
+             AND tc.constraint_schema = kcu.constraint_schema
+             AND tc.constraint_name = kcu.constraint_name
+            JOIN information_schema.constraint_column_usage AS ccu
+              ON ccu.constraint_catalog = tc.constraint_catalog
+             AND ccu.constraint_schema = tc.constraint_schema
+             AND ccu.constraint_name = tc.constraint_name
+            WHERE tc.constraint_type = 'FOREIGN KEY'
+              AND tc.table_schema = %s
+              AND tc.table_name = %s
+            ORDER BY tc.constraint_name, kcu.ordinal_position
+            """,
+            (schema, table),
+        )
+        for (
+            cname,
+            col,
+            _ord,
+            ref_schema,
+            ref_table,
+            ref_col,
+        ) in cur.fetchall() or []:
+            key = str(cname)
+            bucket = by_name.setdefault(
+                key,
+                {
+                    "name": key,
+                    "columns": [],
+                    "referenced_schema": str(ref_schema or "").strip(),
+                    "referenced_table": str(ref_table or "").strip(),
+                    "referenced_columns": [],
+                },
+            )
+            col_s = str(col).strip()
+            ref_s = str(ref_col).strip()
+            if col_s and col_s not in bucket["columns"]:
+                bucket["columns"].append(col_s)
+            if ref_s and ref_s not in bucket["referenced_columns"]:
+                bucket["referenced_columns"].append(ref_s)
+            if ref_schema and not bucket.get("referenced_schema"):
+                bucket["referenced_schema"] = str(ref_schema).strip()
+            if ref_table and not bucket.get("referenced_table"):
+                bucket["referenced_table"] = str(ref_table).strip()
+    except Exception as exc:
+        logger.debug("pg foreign key introspect failed: %s", exc, exc_info=exc)
+        return []
+    return list(by_name.values())
+
+
+def _mysql_fetch_foreign_keys(cur: Any, schema: str, table: str) -> list[dict[str, Any]]:
+    """Return FOREIGN KEY metadata from ``KEY_COLUMN_USAGE`` (MySQL / MariaDB)."""
+    by_name: dict[str, dict[str, Any]] = {}
+    try:
+        cur.execute(
+            """
+            SELECT CONSTRAINT_NAME,
+                   COLUMN_NAME,
+                   ORDINAL_POSITION,
+                   REFERENCED_TABLE_SCHEMA,
+                   REFERENCED_TABLE_NAME,
+                   REFERENCED_COLUMN_NAME
+            FROM information_schema.KEY_COLUMN_USAGE
+            WHERE TABLE_SCHEMA = %s
+              AND TABLE_NAME = %s
+              AND REFERENCED_TABLE_NAME IS NOT NULL
+            ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION
+            """,
+            (schema, table),
+        )
+        for (
+            cname,
+            col,
+            _ord,
+            ref_schema,
+            ref_table,
+            ref_col,
+        ) in cur.fetchall() or []:
+            key = str(cname)
+            bucket = by_name.setdefault(
+                key,
+                {
+                    "name": key,
+                    "columns": [],
+                    "referenced_schema": str(ref_schema or "").strip(),
+                    "referenced_table": str(ref_table or "").strip(),
+                    "referenced_columns": [],
+                },
+            )
+            col_s = str(col).strip()
+            ref_s = str(ref_col).strip()
+            if col_s and col_s not in bucket["columns"]:
+                bucket["columns"].append(col_s)
+            if ref_s and ref_s not in bucket["referenced_columns"]:
+                bucket["referenced_columns"].append(ref_s)
+            if ref_schema and not bucket.get("referenced_schema"):
+                bucket["referenced_schema"] = str(ref_schema).strip()
+            if ref_table and not bucket.get("referenced_table"):
+                bucket["referenced_table"] = str(ref_table).strip()
+    except Exception as exc:
+        logger.debug("mysql foreign key introspect failed: %s", exc, exc_info=exc)
+        return []
+    return list(by_name.values())
 
 
 def _sqlserver_fetch_unique_keys(conn: Any, schema: str, table: str) -> dict[str, Any]:

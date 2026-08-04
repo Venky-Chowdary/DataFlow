@@ -11,8 +11,10 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 from services.schema_introspect import (  # noqa: E402
+    _mysql_fetch_foreign_keys,
     _mysql_fetch_unique_keys,
     _oracle_fetch_unique_keys,
+    _pg_fetch_foreign_keys,
     _pg_fetch_unique_keys,
     _sqlserver_fetch_unique_keys,
 )
@@ -85,6 +87,30 @@ def test_mysql_fetch_unique_keys_primary_and_unique():
     assert any(
         u["name"] == "uq_email" and u["columns"] == ["email"] for u in meta["unique_keys"]
     )
+
+
+def test_pg_fetch_foreign_keys_groups_columns():
+    cur = MagicMock()
+    cur.fetchall.return_value = [
+        ("orders_customer_fkey", "customer_id", 1, "public", "customers", "id"),
+    ]
+    fks = _pg_fetch_foreign_keys(cur, "public", "orders")
+    assert len(fks) == 1
+    assert fks[0]["columns"] == ["customer_id"]
+    assert fks[0]["referenced_table"] == "customers"
+    assert fks[0]["referenced_columns"] == ["id"]
+    assert fks[0]["referenced_schema"] == "public"
+
+
+def test_mysql_fetch_foreign_keys():
+    cur = MagicMock()
+    cur.fetchall.return_value = [
+        ("fk_ord_cust", "customer_id", 1, "app", "customers", "id"),
+    ]
+    fks = _mysql_fetch_foreign_keys(cur, "app", "orders")
+    assert len(fks) == 1
+    assert fks[0]["name"] == "fk_ord_cust"
+    assert fks[0]["referenced_table"] == "customers"
 
 
 def test_sqlserver_fetch_unique_keys():

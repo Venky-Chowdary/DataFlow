@@ -239,35 +239,61 @@ def referential_integrity_posture(
     findings: list[dict[str, Any]] | None,
     *,
     population_orphan_probe_ran: bool = False,
+    population_orphan_count: int | None = None,
+    sample_orphan_probe_ran: bool = False,
+    sample_orphan_count: int | None = None,
 ) -> dict[str, Any]:
-    """Honesty stamp — schema FK hints never equal population RI proof."""
+    """Honesty stamp — schema FK hints / sample probes never equal population RI.
+
+    ``proven`` is True only after a full-table population orphan probe reports
+    zero orphans. Sample probes never set ``proven``.
+    """
     findings = list(findings or [])
     has_schema = any(
         isinstance(f, dict) and f.get("coverage") == "destination_fk_metadata"
         for f in findings
     )
-    if population_orphan_probe_ran and not findings:
+    has_sample_orphan_finding = any(
+        isinstance(f, dict) and f.get("coverage") == "sample_orphan_probe"
+        for f in findings
+    )
+    pop_count = population_orphan_count
+    proven = bool(
+        population_orphan_probe_ran
+        and pop_count is not None
+        and int(pop_count) == 0
+        and not has_sample_orphan_finding
+    )
+    if proven:
         coverage = "population_orphan_probe"
-        proven = True
+        note = "Population orphan detection proven for selected transfer."
+    elif sample_orphan_probe_ran:
+        coverage = "sample_orphan_probe"
+        note = (
+            "Sample orphan probe ran on Validate sample FK values only — "
+            "population referential integrity is not proven."
+        )
     elif has_schema:
         coverage = "destination_fk_metadata"
-        proven = False
+        note = (
+            "FK metadata coverage only — population orphan / referential "
+            "integrity is not proven from schema hints alone."
+        )
     else:
         coverage = "none"
-        proven = False
+        note = (
+            "No FK metadata or orphan probe for this run — referential "
+            "integrity is not proven."
+        )
     return {
         "proven": proven,
         "coverage": coverage,
         "population_orphan_probe_ran": bool(population_orphan_probe_ran),
+        "population_orphan_count": pop_count,
+        "sample_orphan_probe_ran": bool(sample_orphan_probe_ran),
+        "sample_orphan_count": sample_orphan_count,
         "finding_count": len(findings),
-        "note": (
-            "Population orphan detection proven for selected transfer."
-            if proven
-            else (
-                "FK metadata coverage only — population orphan / referential "
-                "integrity is not proven from schema hints alone."
-            )
-        ),
+        "note": note,
     }
 
 
