@@ -24,12 +24,15 @@ def honesty_dict() -> dict[str, Any]:
 
     Distinguishes what operators can rely on today from what must not be claimed.
     """
+    from services.execution_engine_contract import execution_contract_dict
+
     return {
         "transfer_undo_claimed": TRANSFER_UNDO_CLAIMED,
         "staging_swap_claimed": STAGING_SWAP_CLAIMED,
         "warehouse_restore_claimed": WAREHOUSE_RESTORE_CLAIMED,
         "branch_switch_claimed": BRANCH_SWITCH_CLAIMED,
         "cdc_rewind_claimed": CDC_REWIND_CLAIMED,
+        "execution_engine_contract": execution_contract_dict(),
         "capabilities": {
             "quarantine_holdout": {
                 "available": True,

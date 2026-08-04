@@ -21,6 +21,7 @@ Use this pack instead of marketing screenshots when Fortune 100 teams ask “pro
 | Validate decision path | Root Cause → Affected Gates → Impact → Actions → Preview → Risk Contract → Execute; Execute-ready ≠ `migration_proven` (`docs/VALIDATE_DECISION_PATH.md`) |
 | Conversion contract | Charter 7-class ConversionClass + Map→DDL identity hash; invent (p,s)/FSP/TZ needs approval; AI type matrix non-authoritative (`docs/CONVERSION_CONTRACT.md`) |
 | Mapping engine contract | Operator locks never silently overwritten; charter evidence fields stamped (`docs/MAPPING_ENGINE_CONTRACT.md`) |
+| Execution engine contract | At-least-once honesty; refuse insert resume without checkpoint; Kafka offset commit fail-closed; never claim exactly-once (`docs/EXECUTION_ENGINE_CONTRACT.md`) |
 
 Do **not** claim “8 gates,” “ten gates,” or invent a marketed “G10 constraints” gate. Required core gates remain **G1–G9**.
 

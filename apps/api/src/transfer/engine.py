@@ -1751,28 +1751,33 @@ class UniversalTransferEngine:
                         offset=prior_rows,
                     )
             if not _checkpoint_has_progress(checkpoint):
-                # Insert/append resume-from-zero silently duplicates. Idempotent
-                # modes (upsert/overwrite/mirror) may restart safely when the
-                # control-plane lost the checkpoint (Mongo down, cleared job).
+                # Module 14 — insert/append resume-from-zero silently duplicates.
+                # Idempotent modes may restart from zero when control-plane lost
+                # the checkpoint. Contract SSOT owns the refuse/allow decision.
                 contract = resolve_sync_contract(request.stream_contracts)
                 sync = resolve_effective_sync_mode(
                     request.sync_mode,
                     contract.sync_mode if contract else None,
                 )
-                if requires_upsert(sync) or is_overwrite_sync(sync):
-                    logger.warning(
-                        "resume job=%s without durable checkpoint — restarting "
-                        "from zero under idempotent sync_mode=%s",
-                        job_id,
-                        sync,
+                from services.execution_engine_contract import (
+                    ExecutionContractError,
+                    assert_resume_allowed,
+                )
+
+                try:
+                    decision = assert_resume_allowed(
+                        resume_requested=True,
+                        checkpoint_has_progress=False,
+                        sync_mode=sync,
                     )
-                    checkpoint = Checkpoint(job_id=job_id)
-                else:
-                    raise ValueError(
-                        "No durable checkpoint to resume (need offset, chunk_index, or "
-                        "rows_processed progress). Use Retry / start a new transfer, "
-                        "or re-run from Validate after fixing the failure."
-                    )
+                except ExecutionContractError as exc:
+                    raise ValueError(str(exc)) from exc
+                logger.warning(
+                    "resume job=%s without durable checkpoint — %s",
+                    job_id,
+                    decision.get("reason"),
+                )
+                checkpoint = Checkpoint(job_id=job_id)
         else:
             checkpoint = Checkpoint(job_id=job_id)
 

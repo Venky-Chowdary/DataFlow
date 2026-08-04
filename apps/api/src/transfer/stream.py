@@ -1143,11 +1143,27 @@ def stream_database_transfer(
     sample_rows = sample_probe.rows or []
     avg_row_size = 100
     if sample_rows:
-        avg_row_size = max(1, int(sum(len(str(row)) for row in sample_rows) / len(sample_rows)))
+        # Prefer mapped cell byte lengths — len(str(row)) under-counts nested/wide payloads.
+        sizes: list[int] = []
+        for row in sample_rows:
+            if isinstance(row, dict):
+                sizes.append(sum(len(str(v).encode("utf-8", errors="replace")) for v in row.values()) + 64)
+            else:
+                sizes.append(max(1, len(str(row).encode("utf-8", errors="replace"))))
+        avg_row_size = max(1, int(sum(sizes) / len(sizes)))
     # Warehouses benefit from larger stream chunks so batches clear COPY/MERGE
     # thresholds; Mongo already used 64MB — extend the same class to SF/BQ/RS.
+    # PostgreSQL/MySQL stay tight: wide JSON/TEXT rows OOM mid-COPY otherwise.
     _warehouse_dests = {"mongodb", "snowflake", "bigquery", "redshift"}
-    target_memory_bytes = 64 * 1024 * 1024 if dest_type in _warehouse_dests else 8 * 1024 * 1024
+    _sql_tight = {"postgresql", "postgres", "mysql", "mariadb", "sqlserver", "mssql"}
+    if dest_type in _warehouse_dests:
+        target_memory_bytes = 64 * 1024 * 1024
+    elif dest_type in _sql_tight and avg_row_size >= 4096:
+        target_memory_bytes = 4 * 1024 * 1024  # wide-row PG/MySQL ceiling
+    elif dest_type in _sql_tight:
+        target_memory_bytes = 8 * 1024 * 1024
+    else:
+        target_memory_bytes = 8 * 1024 * 1024
     requested_chunk = int(CHUNK_SIZE)
     chunk_size = adaptive_chunk_size(CHUNK_SIZE, avg_row_size, max_size=CHUNK_SIZE, target_memory_bytes=target_memory_bytes)
     adaptive_chunk = int(chunk_size)
@@ -1181,6 +1197,8 @@ def stream_database_transfer(
         "target_memory_bytes": int(target_memory_bytes),
         "proxy_capped": bool(proxy_capped),
         "object_store_single_shot": bool(object_store_single_shot),
+        "wide_row": bool(avg_row_size >= 4096),
+
         "reason": (
             "object-store single-shot"
             if object_store_single_shot
@@ -1943,7 +1961,13 @@ def stream_database_transfer(
                     from src.services.checkpoint_service import CheckpointPersistenceError
                 if isinstance(exc, CheckpointPersistenceError):
                     raise
-                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+                # Module 14: Kafka offset commit after durable checkpoint must
+                # fail closed — never swallow (delivery state becomes unexplained).
+                from services.execution_engine_contract import (
+                    kafka_offset_commit_must_fail_closed,
+                )
+
+                raise kafka_offset_commit_must_fail_closed(exc) from exc
         if on_checkpoint:
             on_checkpoint(idx, chunks, written, checkpoint.to_dict())
 
@@ -2448,9 +2472,13 @@ class _NoOpCheckpointService:
 
     Used for temporary staging transfers so the parent job's checkpoint is not
     overwritten by an internal phase.
+
+    Module 14 honesty: this phase is not crash-recoverable on its own.
     """
 
     failed_saves = 0
+    durable = False
+    resume_supported = False
 
     @property
     def has_failed_saves(self) -> bool:
@@ -2464,6 +2492,11 @@ class _NoOpCheckpointService:
 
     def load(self, job_id: str) -> Any | None:  # noqa: ARG002
         return None
+
+    def honesty(self) -> dict:
+        from services.execution_engine_contract import noop_checkpoint_posture
+
+        return noop_checkpoint_posture()
 
 
 def _qualified(table: str, schema: str | None) -> str:
