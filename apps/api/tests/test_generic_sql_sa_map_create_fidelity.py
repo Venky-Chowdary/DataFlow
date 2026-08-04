@@ -38,7 +38,6 @@ def _sa(dest: str, stamp: str) -> tuple[str, Any]:
         ("duckdb", "TIMESTAMP"),
         ("duckdb", "TIMESTAMP_NTZ"),
         ("duckdb", "DATETIME"),
-        ("databricks", "TIMESTAMP"),
         ("databricks", "TIMESTAMP_NTZ"),
         ("databricks", "DATETIME2"),
         ("sqlserver", "TIMESTAMP"),
@@ -62,6 +61,7 @@ def test_sa_ntz_stamps_are_timezone_naive(dest: str, stamp: str):
         ("sqlserver", "TIMESTAMPTZ"),
         ("sqlserver", "DATETIMEOFFSET"),
         ("databricks", "TIMESTAMPTZ"),
+        ("databricks", "TIMESTAMP"),
         ("postgresql", "TIMESTAMPTZ"),
     ],
 )

@@ -5908,9 +5908,11 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "UNIQUEIDENTIFIER", "NVARCHAR2", "HSTORE", "INET", "CIDR",
         "BINARY", "VARBINARY", "BYTES", "VARBYTE", "FIXED",
         "DECIMAL", "NUMERIC", "NUMBER",
-        "TIMESTAMP", "DATETIME", "DATETIME2", "DATETIME64", "TIMESTAMPTZ",
+        # Databricks TIMESTAMP is native session-TZ wire — keep Map stamps.
+        # Foreign DATETIME*/TIMESTAMPTZ → TIMESTAMP_NTZ / TIMESTAMP via ddl.
+        "DATETIME", "DATETIME2", "DATETIME64", "TIMESTAMPTZ",
         "DATETIMEOFFSET", "SMALLDATETIME", "TIMETZ", "YEAR",
-        "TIMESTAMP_TZ",
+        "TIMESTAMP_TZ", "TIMESTAMP_LTZ",
         # Foreign IEEE → FLOAT / DOUBLE. Keep FLOAT/DOUBLE (HALF rematerializes).
         "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
         "FLOAT64", "BINARY_FLOAT", "BINARY_DOUBLE",
