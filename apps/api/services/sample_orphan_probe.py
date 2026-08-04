@@ -152,6 +152,35 @@ def _severity(*, validation_mode: str, fk_risk_acknowledged: bool) -> str:
     return "ack_required"
 
 
+def _unavailable_finding(
+    *,
+    note: str,
+    validation_mode: str,
+    fk_risk_acknowledged: bool,
+    foreign_keys: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Fail-closed when FK metadata exists but orphan probe cannot run."""
+    cols: list[str] = []
+    for fk in foreign_keys:
+        c, _, _ = _fk_parts(fk)
+        cols.extend(c)
+    return {
+        "code": "fk_orphan_probe_unavailable",
+        "severity": _severity(
+            validation_mode=validation_mode,
+            fk_risk_acknowledged=fk_risk_acknowledged,
+        ),
+        "columns": cols[:20],
+        "coverage": "none",
+        "population_proof": False,
+        "message": (
+            f"{note} Known destination/source FK metadata exists but sample orphan "
+            "probe could not run — population RI not proven; fail closed until "
+            "connector is available or FK risk is acknowledged via risk contract."
+        ),
+    }
+
+
 def probe_sample_fk_orphans(
     *,
     sample_rows: list[dict[str, Any]] | None,
@@ -166,7 +195,8 @@ def probe_sample_fk_orphans(
     """Probe Validate-sample FK values against live parent keys.
 
     Returns an honesty-stamped report. ``population_proof`` is always False.
-    Empty foreign_keys / missing connector → ``ran=False`` (not a silent pass).
+    Empty foreign_keys → ``ran=False`` (not a silent pass).
+    Known FKs without a runnable probe → fail-closed finding (Module 4).
     """
     empty = {
         "ran": False,
@@ -179,15 +209,31 @@ def probe_sample_fk_orphans(
         "note": "Sample orphan probe did not run (no FK metadata or source connection).",
     }
     fks = [fk for fk in (foreign_keys or []) if isinstance(fk, dict)]
-    if not fks or not sample_rows:
+    if not fks:
         return empty
-    if not source_connector_id and not source_config:
+    if not sample_rows:
+        finding = _unavailable_finding(
+            note="No Validate sample rows for orphan probe.",
+            validation_mode=validation_mode,
+            fk_risk_acknowledged=fk_risk_acknowledged,
+            foreign_keys=fks,
+        )
         return {
             **empty,
-            "note": (
-                "Sample orphan probe skipped — source connector unavailable; "
-                "RI not proven."
-            ),
+            "findings": [finding],
+            "note": finding["message"],
+        }
+    if not source_connector_id and not source_config:
+        finding = _unavailable_finding(
+            note="Source connector unavailable.",
+            validation_mode=validation_mode,
+            fk_risk_acknowledged=fk_risk_acknowledged,
+            foreign_keys=fks,
+        )
+        return {
+            **empty,
+            "findings": [finding],
+            "note": finding["message"],
         }
 
     cfg: dict[str, Any] | None = None
@@ -207,9 +253,16 @@ def probe_sample_fk_orphans(
                 cfg.get("type") or cfg.get("db_type") or cfg.get("format") or ""
             ).lower()
         if not cfg:
+            finding = _unavailable_finding(
+                note="Could not load source config.",
+                validation_mode=validation_mode,
+                fk_risk_acknowledged=fk_risk_acknowledged,
+                foreign_keys=fks,
+            )
             return {
                 **empty,
-                "note": "Sample orphan probe skipped — could not load source config.",
+                "findings": [finding],
+                "note": finding["message"],
             }
         if db_type:
             cfg = dict(cfg)
@@ -223,18 +276,29 @@ def probe_sample_fk_orphans(
             "clickhouse", "trino", "presto", "questdb",
         }
         if db_type and db_type not in sqlish:
+            finding = _unavailable_finding(
+                note=f"Sample orphan probe not implemented for source type {db_type}.",
+                validation_mode=validation_mode,
+                fk_risk_acknowledged=fk_risk_acknowledged,
+                foreign_keys=fks,
+            )
             return {
                 **empty,
-                "note": (
-                    f"Sample orphan probe not implemented for source type {db_type}; "
-                    "RI not proven."
-                ),
+                "findings": [finding],
+                "note": finding["message"],
             }
     except Exception as exc:
         logger.warning("Sample orphan probe config failed: %s", exc, exc_info=exc)
+        finding = _unavailable_finding(
+            note=f"Sample orphan probe config error ({exc}).",
+            validation_mode=validation_mode,
+            fk_risk_acknowledged=fk_risk_acknowledged,
+            foreign_keys=fks,
+        )
         return {
             **empty,
-            "note": f"Sample orphan probe config error — RI not proven ({exc}).",
+            "findings": [finding],
+            "note": finding["message"],
             "error": str(exc),
         }
 
@@ -269,6 +333,23 @@ def probe_sample_fk_orphans(
                     "referenced_table": ref_table,
                     "coverage": "sample_orphan_probe",
                     "population_proof": False,
+                }
+            )
+            findings.append(
+                {
+                    "code": "composite_fk_not_probed",
+                    "severity": sev,
+                    "columns": cols,
+                    "referenced_table": ref_table,
+                    "referenced_columns": ref_cols,
+                    "coverage": "sample_orphan_probe",
+                    "population_proof": False,
+                    "message": (
+                        f"Composite FK {cols} → {ref_table}{ref_cols} was not probed "
+                        "(tuple IN not implemented). Coverage=sample_orphan_probe — "
+                        "population RI not proven; remap to single-column FK, run a "
+                        "population orphan scan, or acknowledge FK risk."
+                    ),
                 }
             )
             continue

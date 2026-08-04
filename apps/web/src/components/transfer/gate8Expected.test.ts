@@ -208,9 +208,12 @@ describe("Gate-8 sample-verified reverse-ETL honesty", () => {
       source_checksum: "aaa",
       target_checksum: "bbb",
       message:
-        "Transfer verified by key-aligned sample (5 compared; whole-table checksums differed — sample is the authority)",
+        "Sample-only assurance: 5 key-aligned row(s) compared (10 rows; whole-table checksums differed). Population / full-checksum fidelity NOT proven — sample coverage only.",
       sample_compare: { passed: true, compared: 5, mismatches: [] },
       coverage: "sample",
+      checksum_match: false,
+      population_proof: false,
+      assurance_level: "sample",
     };
     assert.equal(isGate8SampleVerified(report), true);
     const view = classifyGate8Status(report);

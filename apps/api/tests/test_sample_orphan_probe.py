@@ -41,6 +41,9 @@ def test_sample_probe_skips_without_connector():
     )
     assert report["ran"] is False
     assert report["population_proof"] is False
+    # Module 4: known FKs + no connector → fail-closed finding (not silent skip).
+    assert report["findings"]
+    assert report["findings"][0]["code"] == "fk_orphan_probe_unavailable"
 
 
 def test_sample_probe_finds_orphans_via_parent_lookup():

@@ -13,6 +13,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
+from services.validation_coverage import stamp_validation_coverage
 from services.value_serializer import cell_to_string
 
 # Validation mode → minimum confidence / null tolerance
@@ -1344,6 +1345,14 @@ def run_integrity_audit(
         "checks": checks,
         "issues": all_issues[:30],
         "warnings": all_warnings[:20],
+        "validation_coverage": stamp_validation_coverage(
+            layer="sample",
+            rows_examined=len(rows) if rows else 0,
+            note=(
+                "G9 integrity audit examines Validate sample rows only — "
+                "not population proof."
+            ),
+        ),
         "source_uniqueness_probe": {
             "ran": bool(source_duplicate_probe_ran),
             "primary_key": str(source_duplicate_probe_pk or "") or None,

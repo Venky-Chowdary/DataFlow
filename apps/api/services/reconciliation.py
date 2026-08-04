@@ -80,6 +80,10 @@ class ReconciliationReport:
     phase: str = ""
     post_write_pending: bool = False
     preview: bool = False
+    # Module 4 honesty: sample authority must never hide checksum mismatch.
+    checksum_match: bool | None = None
+    population_proof: bool = False
+    assurance_level: str = ""
 
     def to_dict(self) -> dict:
         return stamp_post_write_phase(asdict(self))
@@ -88,7 +92,8 @@ class ReconciliationReport:
 def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
     """Stamp explicit post-write phase so UIs never confuse writer-ack with Verified.
 
-    Also stamps ``coverage``:
+    Also stamps ``coverage``, ``checksum_match``, ``population_proof``,
+    ``assurance_level`` — Gate-8 never invents population RI proof.
       * ``full_checksum`` — independent source↔dest digests match
       * ``sample`` — keyed sample is the authority (checksums missing or diverge)
       * ``writer_ack`` — writer digest only
@@ -106,12 +111,17 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
     src = str(out.get("source_checksum") or "").strip()
     tgt = str(out.get("target_checksum") or "").strip()
     msg = str(out.get("message") or "").lower()
+    independent_match = bool(src and tgt and src == tgt)
+    # Module 4: always stamp checksum honesty; never invent population RI proof.
+    out["checksum_match"] = independent_match if (src and tgt) else False
+    out["population_proof"] = False
 
     if "file export" in msg or ("skipped" in msg and "reconciliation skipped" in msg):
         out["phase"] = "post_write_skipped"
         out["post_write_pending"] = False
         out["preview"] = False
         out["coverage"] = "none"
+        out["assurance_level"] = "none"
         return out
 
     if not passed:
@@ -119,9 +129,9 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         out["post_write_pending"] = False
         out["preview"] = False
         out["coverage"] = "none"
+        out["assurance_level"] = "none"
         return out
 
-    independent_match = bool(src and tgt and src == tgt)
     writer_only = (
         not tgt
         or "verified by writer" in msg
@@ -137,6 +147,7 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         or "sample-verified" in msg
         or "sample verified" in msg
         or "key-aligned" in msg
+        or "sample-only assurance" in msg
         or writer_only
         or not tgt
     )
@@ -145,6 +156,7 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         out["post_write_pending"] = False
         out["preview"] = False
         out["coverage"] = "sample"
+        out["assurance_level"] = "sample"
         return out
 
     if independent_match and not writer_only:
@@ -152,6 +164,7 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         out["post_write_pending"] = False
         out["preview"] = False
         out["coverage"] = "full_checksum"
+        out["assurance_level"] = "full_checksum"
         return out
 
     if writer_only or (passed and src and not tgt):
@@ -159,12 +172,14 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         out["post_write_pending"] = False
         out["preview"] = False
         out["coverage"] = "writer_ack"
+        out["assurance_level"] = "writer_ack"
         return out
 
     out["phase"] = "post_write_pending"
     out["post_write_pending"] = True
     out["preview"] = False
     out["coverage"] = "none"
+    out["assurance_level"] = "none"
     return out
 
 
@@ -579,14 +594,19 @@ def reconcile(
                     source_checksum=source_checksum,
                     target_checksum=target_checksum,
                     message=(
-                        f"Transfer verified by key-aligned sample ({compared} compared; "
-                        f"{target_rows} rows"
+                        f"Sample-only assurance: {compared} key-aligned row(s) compared "
+                        f"({target_rows} dest rows"
                         + (f", {rejected_rows} rejected" if rejected_rows else "")
-                        + f"; {target_rows - expected_rows} pre-existing rows skipped in checksum)"
+                        + f"; {target_rows - expected_rows} pre-existing rows skipped in checksum). "
+                        "Whole-table checksums are not comparable — population / full-checksum "
+                        "fidelity NOT proven."
                     ),
                     rejected_rows=rejected_rows,
                     rows_skipped=rows_skipped,
                     sample_compare=sample_compare,
+                    checksum_match=False,
+                    population_proof=False,
+                    assurance_level="sample",
                 )
             return ReconciliationReport(
                 passed=False,
@@ -635,15 +655,19 @@ def reconcile(
                 source_checksum=source_checksum,
                 target_checksum=target_checksum,
                 message=(
-                    f"Transfer verified by key-aligned sample ({compared} compared; "
-                    f"{target_rows} rows"
+                    f"Sample-only assurance: {compared} key-aligned row(s) compared "
+                    f"({target_rows} rows"
                     + (f", {rejected_rows} rejected" if rejected_rows else "")
-                    + "; whole-table checksums differed — sample is the authority)"
+                    + "; whole-table checksums differed). "
+                    "Population / full-checksum fidelity NOT proven — sample coverage only."
                 ),
                 rejected_rows=rejected_rows,
                 coerced_null_rows=coerced_null_rows,
                 rows_skipped=rows_skipped,
                 sample_compare=sample_compare,
+                checksum_match=False,
+                population_proof=False,
+                assurance_level="sample",
             )
         return ReconciliationReport(
             passed=False,
@@ -686,6 +710,9 @@ def reconcile(
         coerced_null_rows=coerced_null_rows,
         rows_skipped=rows_skipped,
         sample_compare=sample_compare,
+        checksum_match=True,
+        population_proof=False,
+        assurance_level="full_checksum",
     )
 
 
