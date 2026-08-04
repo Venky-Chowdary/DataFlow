@@ -287,7 +287,7 @@ export function DestinationAdvancedDrawer({
               <p>Keeps existing destination rows and inserts the full snapshot again.</p>
             )}
             {syncMode === "cdc" && (
-              <p>Change delivery is <strong>at-least-once upsert</strong> until exactly-once is proven for your sink.</p>
+              <p>Change delivery is <strong>at-least-once upsert</strong>. Exactly-once and at-most-once are not claimed.</p>
             )}
             {syncMode === "mirror" && (
               <p>Missing source keys are soft-deleted on the destination (not hard-deleted).</p>
