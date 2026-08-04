@@ -30,7 +30,7 @@ def _is_safe_sql(raw_query: str) -> bool:
     """Allow read and metadata queries; block any destructive or write SQL.
 
     Uses ``sqlparse`` when installed; otherwise a conservative regex fallback so
-    Data Pilot / query playground never hard-fail on a missing optional dep.
+    Datawrap Pilot / query playground never hard-fail on a missing optional dep.
     """
     try:
         import sqlparse

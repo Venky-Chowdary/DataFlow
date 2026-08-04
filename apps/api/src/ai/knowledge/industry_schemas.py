@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Industry Schema Templates
+Datawrap — Industry Schema Templates
 
 Pre-defined schema patterns for common industry data formats.
 """

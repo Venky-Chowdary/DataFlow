@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+from services.brand_env import getenv_brand
 import queue
 import threading
 from collections.abc import Callable, Iterable, Iterator
@@ -26,8 +27,8 @@ from typing import TypeVar
 T = TypeVar("T")
 R = TypeVar("R")
 
-DEFAULT_WORKERS = int(os.getenv("DATAFLOW_PARALLEL_WORKERS", "1"))
-DEFAULT_PREFETCH = int(os.getenv("DATAFLOW_PARALLEL_QUEUE", str(max(DEFAULT_WORKERS * 2, 4))))
+DEFAULT_WORKERS = int(getenv_brand("PARALLEL_WORKERS", "1"))
+DEFAULT_PREFETCH = int(getenv_brand("PARALLEL_QUEUE", str(max(DEFAULT_WORKERS * 2, 4))))
 
 
 class ChunkAborted(Exception):

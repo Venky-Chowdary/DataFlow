@@ -1,5 +1,5 @@
 """
-DataTransfer.space — AI API Router
+Datawrap — AI API Router
 
 REST endpoints for AI semantic analysis capabilities.
 """

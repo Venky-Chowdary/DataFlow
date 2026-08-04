@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from services.brand_env import getenv_brand
 import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -16,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="schedule-runner")
 CHECK_INTERVAL_SECONDS = 60
-LOCK_TTL_SECONDS = int(os.getenv("DATAFLOW_SCHEDULER_LOCK_TTL", "300"))
+LOCK_TTL_SECONDS = int(getenv_brand("SCHEDULER_LOCK_TTL", "300"))
 
 
 def _scheduler_instance_id() -> str:

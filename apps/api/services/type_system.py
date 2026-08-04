@@ -991,7 +991,7 @@ _AVRO_LOGICAL_TOKEN_CARRIER: Final[dict[str, str]] = {
 
 
 def avro_logical_token_to_carrier(token: str | None) -> str | None:
-    """Map a bare Avro ``logicalType`` string to a DataFlow carrier.
+    """Map a bare Avro ``logicalType`` string to a Datawrap carrier.
 
     Full Avro field dicts go through :func:`services.avro_schema.avro_type_to_logical`.
     This handles introspect/dtype strings like ``timestamp-millis`` alone.
@@ -1003,7 +1003,7 @@ def avro_logical_token_to_carrier(token: str | None) -> str | None:
 
 
 def arrow_dtype_to_carrier(dtype: str | None) -> str | None:
-    """Map Apache Arrow / PyArrow type strings to DataFlow carriers.
+    """Map Apache Arrow / PyArrow type strings to Datawrap carriers.
 
     Research: Arrow ``timestamp[us, tz=UTC]`` ↔ Iceberg timestamptz; bare
     ``timestamp[us]`` ↔ timestamp NTZ; ``decimal128(p,s)`` ↔ DECIMAL; 
@@ -4902,7 +4902,7 @@ def is_hierarchyid_carrier(inferred: str | None) -> bool:
 def hierarchyid_to_ltree_path(path: str) -> str:
     """Convert hierarchyid ``/1/2/3/`` polarity to PostgreSQL ``ltree`` ``1.2.3``.
 
-    AWS DMS leaves slash strings in VARCHAR; DataFlow create-new uses LTREE when
+    AWS DMS leaves slash strings in VARCHAR; Datawrap create-new uses LTREE when
     the destination is PostgreSQL-family (Microsoft / AWS migration guidance).
     """
     text = (path or "").strip()
@@ -5044,7 +5044,7 @@ def specialty_domain_would_invent(source_type: str, target_type: str) -> bool:
 def specialty_carrier_would_collapse(source_type: str, target_type: str) -> bool:
     """True when a native specialty carrier would collapse to opaque/scalar sink.
 
-    Airbyte maps inet/hstore/pg_lsn/geometric → string. DataFlow preserves natives
+    Airbyte maps inet/hstore/pg_lsn/geometric → string. Datawrap preserves natives
     on PG create-new; mapping to bare VARCHAR/TEXT/STRING invents document polarity
     and must surface in preflight (never silent green). Width-safe create-new
     wires (ObjectId→VARCHAR(24)) are not a collapse. OID→INTEGER invents a

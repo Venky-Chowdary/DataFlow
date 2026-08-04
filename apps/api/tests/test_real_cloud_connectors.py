@@ -1,6 +1,6 @@
 """Real-cloud connector credential matrix.
 
-These tests prove the DataFlow engine can route to Snowflake, BigQuery, GCS,
+These tests prove the Datawrap engine can route to Snowflake, BigQuery, GCS,
 and ADLS endpoints and, when real credentials are supplied, complete a small
 end-to-end transfer.  Without credentials the tests are skipped so the suite
 stays green in local/CI runs that do not have cloud secrets mounted.

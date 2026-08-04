@@ -1,4 +1,4 @@
-"""Top-level schema intelligence engine for DataFlow.
+"""Top-level schema intelligence engine for Datawrap.
 
 Universal contract
 ------------------

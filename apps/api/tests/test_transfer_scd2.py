@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from services.brand_env import getenv_brand
 import sqlite3
 import sys
 import tempfile
@@ -39,7 +40,7 @@ def _csv_path(rows: list[dict], path: Path):
 
 
 @pytest.mark.skipif(
-    os.getenv("DATAFLOW_SKIP_SQLITE") == "1",
+    getenv_brand("SKIP_SQLITE") == "1",
     reason="SQLite tests disabled",
 )
 def test_transfer_scd2_csv_to_sqlite():

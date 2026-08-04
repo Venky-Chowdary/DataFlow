@@ -401,7 +401,7 @@ def _row_tuple(columns: list[str], row: Any) -> tuple:
 
 
 def _logical_to_arrow_type(logical: str, pa: Any) -> Any:
-    """Map DataFlow logical / Iceberg DDL carrier → pyarrow type (fail-closed decimals)."""
+    """Map Datawrap logical / Iceberg DDL carrier → pyarrow type (fail-closed decimals)."""
     from services.type_system import (
         LOGICAL_BINARY,
         LOGICAL_BOOLEAN,

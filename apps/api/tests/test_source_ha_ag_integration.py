@@ -13,6 +13,7 @@ Honesty
 from __future__ import annotations
 
 import os
+from services.brand_env import getenv_brand
 import socket
 import sys
 from pathlib import Path
@@ -23,23 +24,23 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-_AG_LIVE = os.getenv("DATAFLOW_AG_LIVE", "").strip().lower() in {"1", "true", "yes"}
+_AG_LIVE = getenv_brand("AG_LIVE", "").strip().lower() in {"1", "true", "yes"}
 
 CFG = {
     "type": "sqlserver",
-    "host": os.getenv("DATAFLOW_AG_HOST")
-    or os.getenv("DATAFLOW_MSSQL_HOST")
+    "host": getenv_brand("AG_HOST")
+    or getenv_brand("MSSQL_HOST")
     or "localhost",
-    "port": int(os.getenv("DATAFLOW_AG_PORT") or os.getenv("DATAFLOW_MSSQL_PORT") or "1433"),
-    "database": os.getenv("DATAFLOW_AG_DATABASE")
-    or os.getenv("DATAFLOW_MSSQL_DATABASE")
+    "port": int(getenv_brand("AG_PORT") or getenv_brand("MSSQL_PORT") or "1433"),
+    "database": getenv_brand("AG_DATABASE")
+    or getenv_brand("MSSQL_DATABASE")
     or "dataflow",
-    "username": os.getenv("DATAFLOW_AG_USER")
-    or os.getenv("DATAFLOW_MSSQL_USER")
+    "username": getenv_brand("AG_USER")
+    or getenv_brand("MSSQL_USER")
     or "sa",
-    "password": os.getenv("DATAFLOW_AG_PASSWORD")
-    or os.getenv("DATAFLOW_MSSQL_PASSWORD")
-    or "DataFlow_CDC_2022!",
+    "password": getenv_brand("AG_PASSWORD")
+    or getenv_brand("MSSQL_PASSWORD")
+    or "Datawrap_CDC_2022!",
     "multi_subnet_failover": _AG_LIVE,
 }
 

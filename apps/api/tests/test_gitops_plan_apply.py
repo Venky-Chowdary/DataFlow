@@ -1,4 +1,4 @@
-"""GitOps plan/apply proofs for DataFlowManifest."""
+"""GitOps plan/apply proofs for DatawrapManifest."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ def test_gitops_plan_and_apply_schedule(tmp_path, monkeypatch):
 
     manifest = {
         "apiVersion": "dataflow.space/v1",
-        "kind": "DataFlowManifest",
+        "kind": "DatawrapManifest",
         "resources": [
             {
                 "apiVersion": "dataflow.space/v1",
@@ -94,7 +94,7 @@ def test_apply_require_signed_contracts_blocks_unsigned(tmp_path, monkeypatch):
 
     manifest = {
         "apiVersion": "dataflow.space/v1",
-        "kind": "DataFlowManifest",
+        "kind": "DatawrapManifest",
         "resources": [
             {
                 "apiVersion": "dataflow.space/v1",

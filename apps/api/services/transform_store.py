@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from services.brand_env import getenv_brand
 import threading
 import uuid
 from abc import ABC, abstractmethod
@@ -156,7 +157,7 @@ class FileTransformProjectStore(TransformProjectStore):
     """
 
     def __init__(self, path: Path | None = None) -> None:
-        override = os.environ.get("DATAFLOW_TRANSFORMS_PATH")
+        override = getenv_brand("TRANSFORMS_PATH")
         if path is not None:
             self.path = path
         elif override:

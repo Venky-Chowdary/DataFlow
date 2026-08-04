@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { DtLogo } from "../DtLogo";
+import { BrandWordmark } from "../BrandWordmark";
 import { DtIcon } from "../DtIcon";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { hashForPublicRoute } from "../../lib/publicNavigation";
@@ -108,13 +108,13 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
               <a
                 className="lp-nav-brand"
                 href={link("home")}
+                aria-label="Datawrap"
                 onClick={(e) => {
                   e.preventDefault();
                   go("home");
                 }}
               >
-                <DtLogo size={34} />
-                <span className="lp-nav-brand-text">DataFlow</span>
+                <BrandWordmark markSize={36} title="" />
               </a>
             </div>
 
@@ -149,7 +149,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                     <span>Ad-hoc SQL &amp; document queries</span>
                   </a>
                   <a href={link("product-pilot")} onClick={(e) => { e.preventDefault(); go("product-pilot"); }}>
-                    <strong>Data Pilot</strong>
+                    <strong>Datawrap Pilot</strong>
                     <span>Natural-language triage for transfers</span>
                   </a>
                   <a href={link("product-mcp")} onClick={(e) => { e.preventDefault(); go("product-mcp"); }}>
@@ -290,6 +290,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
 
       <main className="lp-main">{children}</main>
 
+      {route !== "contact" ? (
       <footer className="lp-footer lp-footer--compact">
         <div className="lp-footer-inner">
           <div className="lp-footer-grid">
@@ -297,14 +298,17 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
               <a
                 className="lp-footer-brand-link"
                 href={link("home")}
+                aria-label="Datawrap"
                 onClick={(e) => {
                   e.preventDefault();
                   go("home");
                 }}
               >
-                <DtLogo size={22} />
-                <strong>DataFlow</strong>
+                <BrandWordmark markSize={28} title="" size="sm" />
               </a>
+              <p className="lp-footer-tagline">
+                Anywhere to anywhere — wrapped with proof.
+              </p>
             </div>
             <div>
               <h4>Product</h4>
@@ -330,7 +334,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
           </div>
 
           <div className="lp-footer-bottom">
-            <span>© {new Date().getFullYear()} DataFlow</span>
+            <span>© {new Date().getFullYear()} Datawrap</span>
             <span className="lp-footer-legal">
               <a href={link("privacy")} onClick={(e) => { e.preventDefault(); go("privacy"); }}>Privacy</a>
               <a href={link("terms")} onClick={(e) => { e.preventDefault(); go("terms"); }}>Terms</a>
@@ -339,6 +343,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
           </div>
         </div>
       </footer>
+      ) : null}
     </div>
   );
 }

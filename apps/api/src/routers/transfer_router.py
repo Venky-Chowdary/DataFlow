@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from services.brand_env import getenv_brand
 from pathlib import Path
 from typing import Optional
 
@@ -103,8 +104,8 @@ def _residency_check(request, endpoint, allowed_region: str):
     """
     if not allowed_region:
         return
-    tenant_region = getattr(request.state, "data_region", "") or os.getenv("DATAFLOW_DEFAULT_REGION", "us-east-1")
-    strict = os.getenv("DATAFLOW_RESIDENCY_STRICT", "").lower() in ("1", "true", "yes")
+    tenant_region = getattr(request.state, "data_region", "") or getenv_brand("DEFAULT_REGION", "us-east-1")
+    strict = getenv_brand("RESIDENCY_STRICT", "").lower() in ("1", "true", "yes")
     if not strict and (not tenant_region or tenant_region == "us-east-1"):
         return
     dest_region = _destination_data_region(endpoint)

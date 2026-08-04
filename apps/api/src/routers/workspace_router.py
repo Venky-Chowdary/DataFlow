@@ -595,12 +595,12 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
             "models": ["saas_multi_tenant", "customer_vpc_self_host", "air_gapped_compose"],
             "saas_multi_tenant": "Workspace isolation + optional DATAFLOW_REQUIRE_WORKSPACE hard gate",
             "customer_vpc_self_host": "Docker Compose / container deploy in customer VPC — same Transfer Studio engine",
-            "air_gapped": "Supported via offline image load; customer supplies Postgres/object store; no DataFlow SaaS egress required",
+            "air_gapped": "Supported via offline image load; customer supplies Postgres/object store; no Datawrap SaaS egress required",
             "private_link": "not_first_class",
             "data_plane": (
-                "Transfer bytes move source→DataFlow worker→destination over connector TLS "
+                "Transfer bytes move source→Datawrap worker→destination over connector TLS "
                 "(sslmode/rediss/https). Control plane API should sit behind HTTPS. "
-                "DataFlow does not claim zero-copy bypass of the worker for DB→DB migrations."
+                "Datawrap does not claim zero-copy bypass of the worker for DB→DB migrations."
             ),
             "data_loss_controls": [
                 "preflight_gates_g1_g9",
@@ -652,7 +652,7 @@ async def get_security_report(request: Request):
     posture = _security_posture(tenant)
 
     lines = [
-        "# DataFlow Security & Compliance Report",
+        "# Datawrap Security & Compliance Report",
         f"Generated: {datetime.now(timezone.utc).isoformat()}Z",
         f"Environment: {posture['environment']}",
         f"Tenant ID: {posture['tenant_id'] or 'default'}",
@@ -739,7 +739,7 @@ def _baseline_competitors() -> list[dict[str, Any]]:
 
 def _markdown_benchmark_report(report: dict[str, Any]) -> str:
     lines = [
-        "# DataFlow Benchmark Report",
+        "# Datawrap Benchmark Report",
         f"Generated: {report['timestamp']}Z",
         f"Workload: {report['rows']:,} rows from CSV → SQLite (local API host)",
         "",
@@ -759,7 +759,7 @@ def _markdown_benchmark_report(report: dict[str, Any]) -> str:
     ]
     for c in report["competitors"]:
         lines.append(f"| {c['product']} | {c['typical_rps']:,} | {'Yes' if c['resume_from_checkpoint'] else 'No'} | {c['notes']} |")
-    lines.extend(["", "This report was produced by the DataFlow benchmark harness and can be reproduced locally without cloud credentials."])
+    lines.extend(["", "This report was produced by the Datawrap benchmark harness and can be reproduced locally without cloud credentials."])
     return "\n".join(lines)
 
 

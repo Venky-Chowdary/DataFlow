@@ -1,4 +1,4 @@
-"""Platform driver bootstrap — connectors ship with DataFlow, not end-user installs.
+"""Platform driver bootstrap — connectors ship with Datawrap, not end-user installs.
 
 Driver↔module pairs come from ``connector_capabilities._DRIVER_MODULE`` (single
 source of truth). Pip package names live only here as the install map.
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib
 import os
+from services.brand_env import getenv_brand
 import subprocess  # nosec: B404 — only used for auto-installing driver packages from a controlled allowlist
 import sys
 from typing import Any
@@ -77,7 +78,7 @@ def _auto_install_enabled() -> bool:
     from services.platform_config import is_production
 
     default = "0" if is_production() else "1"
-    return os.getenv("DATAFLOW_AUTO_INSTALL_DRIVERS", default).lower() not in ("0", "false", "off", "no")
+    return getenv_brand("AUTO_INSTALL_DRIVERS", default).lower() not in ("0", "false", "off", "no")
 
 
 def ensure_platform_drivers(*, quiet: bool = False) -> dict[str, Any]:
@@ -97,7 +98,7 @@ def ensure_platform_drivers(*, quiet: bool = False) -> dict[str, Any]:
         if disallowed:
             raise RuntimeError(f"Refusing to auto-install untrusted packages: {disallowed}")
         if not quiet:
-            print(f"[*] DataFlow: provisioning {len(pkgs)} connector driver(s)…")
+            print(f"[*] Datawrap: provisioning {len(pkgs)} connector driver(s)…")
         cmd = [sys.executable, "-m", "pip", "install", "-q", *pkgs]
         result = subprocess.run(cmd, capture_output=True, text=True)  # nosec: B603
         if result.returncode == 0:

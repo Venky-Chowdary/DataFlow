@@ -221,7 +221,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
             "VARCHAR without length maps to VARCHAR(65535) — still truncates beyond that.",
             "JSON/ARRAY land as SUPER; binary as VARBYTE.",
             "Upsert prefers native MERGE with NULL-safe PK match; falls back to delete+insert. Still at-least-once (not exactly-once).",
-            "DISTKEY/SORTKEY are operator-owned — DataFlow does not invent them.",
+            "DISTKEY/SORTKEY are operator-owned — Datawrap does not invent them.",
         ],
         "recommended_batch_size": 5000,
     },
@@ -290,7 +290,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "requires_schema": False,
         "supports_binary": True,
         "common_issues": [
-            "The partition key must have a consistent type (S/N/B). DataFlow infers the key type from the source sample.",
+            "The partition key must have a consistent type (S/N/B). Datawrap infers the key type from the source sample.",
             "DynamoDB items cannot exceed 400 KB including attribute names.",
         ],
         "recommended_batch_size": 25,
@@ -421,7 +421,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_binary": False,
         "supports_unstructured": False,
         "common_issues": [
-            "CSV has no type metadata; DataFlow infers types from sample values.",
+            "CSV has no type metadata; Datawrap infers types from sample values.",
             "Malformed quoting or embedded newlines can break parsing.",
             "Different locale decimal separators may misclassify numbers.",
         ],
@@ -501,9 +501,9 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "requires_schema": False,
         "supports_binary": True,
         "common_issues": [
-            "Upload .xlsx (Office Open XML). DataFlow streams sheets via openpyxl and writes typed rows to Postgres/Snowflake — Excel is not a warehouse native; conversion is automatic.",
+            "Upload .xlsx (Office Open XML). Datawrap streams sheets via openpyxl and writes typed rows to Postgres/Snowflake — Excel is not a warehouse native; conversion is automatic.",
             "Legacy .xls (BIFF) is weakly supported — save as .xlsx for production loads.",
-            "Excel stores dates as serial numbers; DataFlow normalizes them to ISO dates.",
+            "Excel stores dates as serial numbers; Datawrap normalizes them to ISO dates.",
         ],
         "recommended_batch_size": 5000,
     },

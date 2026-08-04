@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+from services.brand_env import getenv_brand
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -35,7 +36,7 @@ def _now() -> str:
 
 
 def _store_path() -> Path:
-    env = os.getenv("DATAFLOW_TEAM_STORE", "").strip()
+    env = getenv_brand("TEAM_STORE", "").strip()
     return Path(env) if env else STORE_PATH
 
 
@@ -265,7 +266,7 @@ def require_workspace_isolation() -> bool:
     """
     import os
 
-    return os.getenv("DATAFLOW_REQUIRE_WORKSPACE", "").lower() in ("1", "true", "yes")
+    return getenv_brand("REQUIRE_WORKSPACE", "").lower() in ("1", "true", "yes")
 
 
 def can_read_workspace(workspace_id: str, email: str) -> bool:

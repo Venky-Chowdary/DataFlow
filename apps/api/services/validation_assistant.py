@@ -7,7 +7,7 @@ machine-readable ``suggested_actions`` the UI can turn into one-click buttons.
 The explanation is built deterministically from the existing rulebook
 (:mod:`services.preflight_rules`) and the value-level ``coercion_report`` so it
 always works offline and is fully testable. When an LLM provider is configured
-(Data Pilot infra) it is reused only to add a friendlier natural-language
+(Datawrap Pilot infra) it is reused only to add a friendlier natural-language
 narrative — never to invent the facts. If no provider is available the
 deterministic narrative is used.
 """
@@ -423,7 +423,7 @@ def _llm_narrative(deterministic: str, issues: list[dict[str, Any]]) -> tuple[st
         return deterministic, "deterministic"
 
     system = (
-        "You are DataFlow's validation assistant. Explain data-transfer preflight "
+        "You are Datawrap's validation assistant. Explain data-transfer preflight "
         "failures to a data engineer in clear, concise language. Only use the facts "
         "provided — never invent columns, values, or fixes. Prefer short, prioritized, "
         "actionable steps."

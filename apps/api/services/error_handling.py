@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+from services.brand_env import getenv_brand
 import random
 import re
 import time
@@ -172,7 +173,7 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
             "title": "Destination table is locked",
             "fix": (
                 "Close other sessions on this MySQL table (Workbench, Validate probes, "
-                "stuck prior jobs), then re-run. DataFlow fails closed instead of waiting "
+                "stuck prior jobs), then re-run. Datawrap fails closed instead of waiting "
                 "minutes behind a metadata lock."
             ),
         },
@@ -258,7 +259,7 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
             "title": "MySQL rejected a datetime literal (1292)",
             "fix": (
                 "MySQL DATETIME/TIMESTAMP does not accept ISO-8601 with 'T'/'Z' "
-                "(e.g. 2026-07-04T06:57:37Z). DataFlow should normalize to a Python "
+                "(e.g. 2026-07-04T06:57:37Z). Datawrap should normalize to a Python "
                 "datetime before bind using the destination column type. Confirm the "
                 "Map target for that column is DATETIME (not TEXT), then Resume. If this "
                 "persists after upgrade, open Validate → review that column's wire form."
@@ -279,7 +280,7 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
             "confidence": "high",
             "title": "Duplicate identity-key values in a write batch",
             "fix": (
-                "DataFlow blocked the write because the mapped identity / primary-key column "
+                "Datawrap blocked the write because the mapped identity / primary-key column "
                 "has duplicate values in the source batch (or a non-unique column was chosen as the key). "
                 "This is a source-data check — it happens even when the destination table does not exist yet. "
                 "Next step: (1) Open Map and set Primary key to a column that is unique in the source "
@@ -327,7 +328,7 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
             "confidence": "medium",
             "title": "Destination connection limit reached",
             "fix": (
-                "Likely max_connections (or pool) saturation. Reduce concurrent DataFlow jobs "
+                "Likely max_connections (or pool) saturation. Reduce concurrent Datawrap jobs "
                 "or raise the destination limit, then retry. Confirm with the DB admin if shared."
             ),
         },
@@ -346,7 +347,7 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
             "confidence": "high",
             "title": "JSON source shape is not tabular",
             "fix": (
-                "DataFlow needs object rows. Accepted shapes: [{...}, ...], a wrapper like "
+                "Datawrap needs object rows. Accepted shapes: [{...}, ...], a wrapper like "
                 '{"data":[{...}]} / {"countries":[{...}]} / GeoJSON {"features":[...]}, or one '
                 "object as a single row. Arrays of strings/numbers, empty files, and invalid JSON "
                 "are rejected. Re-export the file in one of those shapes, re-upload, then re-run "
@@ -495,7 +496,7 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
                 "On macOS Homebrew Python, a libexpat mismatch is common — reinstall "
                 "python@3.12 + expat, or run with DYLD_LIBRARY_PATH pointing at "
                 "Homebrew's libexpat before starting the API. This is an environment "
-                "gap, not a DataFlow mapping/schema failure."
+                "gap, not a Datawrap mapping/schema failure."
             ),
         },
     ),
@@ -563,7 +564,7 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
                 (
                     f"Another session is holding a lock on '{error.table_name}' "
                     "(common: an open Validate probe, MySQL Workbench, or a stuck "
-                    "prior job). Close those connections, then re-run. DataFlow "
+                    "prior job). Close those connections, then re-run. Datawrap "
                     "refused to append onto uncleared rows — that would silently "
                     "double the destination."
                 )
@@ -571,7 +572,7 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
                 else (
                     f"Grant DROP (or DELETE) on destination table '{error.table_name}', "
                     "confirm no competing lock is holding it, then re-run. "
-                    "DataFlow refused to append onto rows that should have been replaced — "
+                    "Datawrap refused to append onto rows that should have been replaced — "
                     "continuing would have silently doubled the destination."
                 )
             ),
@@ -589,7 +590,7 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
             "message": raw,
             "fix": (
                 "Resume this job to continue from the last committed chunk. "
-                "DataFlow stopped instead of re-sending the batch because this "
+                "Datawrap stopped instead of re-sending the batch because this "
                 "destination cannot deduplicate a replay, and retrying could "
                 "have written a second copy of those rows. To make retries "
                 "automatic, switch the sync mode to upsert with a primary key."
@@ -614,7 +615,7 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
                 "title": "CDC lease conflict",
                 "message": (
                     f"Another worker holds {resource!r} (holder {holder}). "
-                    "DataFlow refuses concurrent consumers — delivery stays at-least-once."
+                    "Datawrap refuses concurrent consumers — delivery stays at-least-once."
                 ),
                 "fix": (
                     "Stop or wait for the holder job, or Force-release the lease in Job Theater "
@@ -744,11 +745,11 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
 
 @dataclass
 class RetryBudget:
-    max_attempts: int = field(default_factory=lambda: int(os.getenv("DATAFLOW_RETRY_MAX_ATTEMPTS", "3")))
-    base_delay_seconds: float = field(default_factory=lambda: float(os.getenv("DATAFLOW_RETRY_BASE_DELAY_SECONDS", "1.0")))
-    max_delay_seconds: float = field(default_factory=lambda: float(os.getenv("DATAFLOW_RETRY_MAX_DELAY_SECONDS", "60.0")))
-    exponential_base: float = field(default_factory=lambda: float(os.getenv("DATAFLOW_RETRY_EXPONENTIAL_BASE", "2.0")))
-    jitter: bool = field(default_factory=lambda: os.getenv("DATAFLOW_RETRY_JITTER", "true").lower() in ("1", "true", "yes"))
+    max_attempts: int = field(default_factory=lambda: int(getenv_brand("RETRY_MAX_ATTEMPTS", "3")))
+    base_delay_seconds: float = field(default_factory=lambda: float(getenv_brand("RETRY_BASE_DELAY_SECONDS", "1.0")))
+    max_delay_seconds: float = field(default_factory=lambda: float(getenv_brand("RETRY_MAX_DELAY_SECONDS", "60.0")))
+    exponential_base: float = field(default_factory=lambda: float(getenv_brand("RETRY_EXPONENTIAL_BASE", "2.0")))
+    jitter: bool = field(default_factory=lambda: getenv_brand("RETRY_JITTER", "true").lower() in ("1", "true", "yes"))
     budget_used: float = 0.0
     attempts_made: int = 0
 

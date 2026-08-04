@@ -268,7 +268,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     userPassFields.push(
       text("host", "SMTP host", { placeholder: "smtp.gmail.com" }),
       number("port", "Port", { placeholder: "587" }),
-      text("authSource", "From address", { placeholder: "noreply@dataflow.com" }),
+      text("authSource", "From address", { placeholder: "noreply@datawrap.app" }),
       text("database", "Recipients", { placeholder: "alice@example.com, bob@example.com" }),
       text("username", "SMTP username"),
       password("password", "SMTP password"),
@@ -337,7 +337,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       textarea("connection_string", "SQLAlchemy connection URL", {
         rows: 2,
         placeholder: genericSqlPlaceholder(type),
-        hint: "Paste the full SQLAlchemy URL for your engine. DataFlow will validate connectivity and introspect schema.",
+        hint: "Paste the full SQLAlchemy URL for your engine. Datawrap will validate connectivity and introspect schema.",
       })
     );
   } else if (isMongo) {
@@ -345,7 +345,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       textarea("connection_string", "MongoDB connection string", {
         rows: 2,
         placeholder: "mongodb+srv://user:pass@cluster.mongodb.net/mydb?retryWrites=true&w=majority",
-        hint: "mongodb:// or mongodb+srv:// URL. DataFlow will auto-detect authSource and TLS settings.",
+        hint: "mongodb:// or mongodb+srv:// URL. Datawrap will auto-detect authSource and TLS settings.",
       }),
       text("authSource", "Auth source override", { optional: true, placeholder: "admin" }),
       checkbox("ssl", "Force TLS / SSL", { optional: true, hint: "Toggle on if the URI does not include tls=true." })
@@ -378,7 +378,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     connStrFields.push(
       textarea("connection_string", "SMTP URL", {
         rows: 2,
-        placeholder: "smtp://user:pass@smtp.gmail.com:587/?from=noreply@dataflow.com&to=alice@example.com",
+        placeholder: "smtp://user:pass@smtp.gmail.com:587/?from=noreply@datawrap.app&to=alice@example.com",
         hint: "smtp:// or smtps:// URL. Use query params from= and to= for sender/recipients.",
       })
     );

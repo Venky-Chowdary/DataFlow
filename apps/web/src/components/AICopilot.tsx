@@ -40,7 +40,7 @@ interface Message extends PilotMessage {
 
 const DEFAULT_GREETING: Message = {
   role: "assistant",
-  text: "I'm **Data Pilot** — I can plan routes, inspect schema risk, explain mappings, and take you to the right workspace. Paste a `pf_…` validation run ID or a job ID to triage failures.",
+  text: "I'm **Datawrap Pilot** — I can plan routes, inspect schema risk, explain mappings, and take you to the right workspace. Paste a `pf_…` validation run ID or a job ID to triage failures.",
 };
 
 interface AICopilotProps {
@@ -181,7 +181,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
     <div className="df2-copilot">
       <div className="df2-copilot-head">
         <div>
-          <div style={{ fontWeight: 600, fontSize: 14 }}>Data Pilot</div>
+          <div style={{ fontWeight: 600, fontSize: 14 }}>Datawrap Pilot</div>
           <div style={{ fontSize: 12, color: "#64748b" }}>
             {activeData?.preflight_run_id
               ? `Run ${activeData.preflight_run_id}`
@@ -268,7 +268,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
         ))}
         {loading && (
           <div className="df2-copilot-msg assistant df2-copilot-thinking">
-            <span className="df2-loader-bars" aria-label="Data Pilot is working"><i /><i /><i /></span>
+            <span className="df2-loader-bars" aria-label="Datawrap Pilot is working"><i /><i /><i /></span>
             <span>Looking that up…</span>
           </div>
         )}
@@ -310,7 +310,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
         className="df2-btn df2-btn-primary"
         style={{ position: "fixed", bottom: 24, right: 24, width: 48, height: 48, borderRadius: "50%", padding: 0 }}
         onClick={() => setOpen(!open)}
-        aria-label="Data Pilot"
+        aria-label="Datawrap Pilot"
       >
         <DtIcon name="sparkle" size={22} />
       </button>

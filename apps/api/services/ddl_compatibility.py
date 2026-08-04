@@ -252,7 +252,7 @@ def evaluate_ddl_compatibility(
                 continue
             issues.append(
                 f"Target column '{tgt}' does not exist in destination table; "
-                "enable backfill new fields / create-new mapping so DataFlow can ADD COLUMN, "
+                "enable backfill new fields / create-new mapping so Datawrap can ADD COLUMN, "
                 "or remap onto an existing column"
             )
             continue

@@ -54,7 +54,7 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
         <rect width="480" height="300" rx="18" fill="url(#lp-ent-bg)" />
         <rect x="28" y="28" width="424" height="44" rx="12" fill="#111827" stroke="#334155" />
         <circle cx="52" cy="50" r="5" fill="#14b8a6" />
-        <text x="70" y="55" fontSize="12" fill="#e2e8f0" fontWeight="650">dataflow.company.com · SSO enforced</text>
+        <text x="70" y="55" fontSize="12" fill="#e2e8f0" fontWeight="650">datawrap.company.com · SSO enforced</text>
         <rect x="28" y="92" width="200" height="168" rx="14" fill="#111827" stroke="#134e4a" />
         <text x="48" y="122" fontSize="11" fill="#5eead4" fontWeight="700">WORKSPACE A</text>
         <text x="48" y="148" fontSize="13" fill="#f8fafc" fontWeight="650">Analytics ops</text>
@@ -259,7 +259,7 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
     <svg className={cls} viewBox="0 0 480 280" role="img" aria-label="Connector ecosystem">
       <rect width="480" height="280" rx="16" fill="#f0fdfa" stroke="#99f6e4" />
       <circle cx="240" cy="140" r="36" fill="#0d9488" opacity="0.2" />
-      <text x="240" y="145" textAnchor="middle" fontSize="11" fill="#0f766e" fontWeight="700">DataFlow</text>
+      <text x="240" y="145" textAnchor="middle" fontSize="11" fill="#0f766e" fontWeight="700">Datawrap</text>
       {[0, 60, 120, 180, 240, 300].map((deg, i) => {
         const rad = (deg * Math.PI) / 180;
         const x = 240 + Math.cos(rad) * 100;

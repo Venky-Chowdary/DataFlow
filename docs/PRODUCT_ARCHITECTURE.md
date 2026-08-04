@@ -1,8 +1,8 @@
-# DataTransfer.space — Product Architecture & Intelligence Model
+# Datawrap — Product Architecture & Intelligence Model
 
 ## What This Product Is
 
-**DataTransfer.space** is a universal data movement platform: move, transform, validate, and synchronize data from **any source** to **any destination**, with AI that understands what the data *means* — not just what columns are named.
+**Datawrap** is a universal data movement platform: move, transform, validate, and synchronize data from **any source** to **any destination**, with AI that understands what the data *means* — not just what columns are named.
 
 **Motto:** *Universal Data Freedom — Move Any Data, Anywhere, with AI Intelligence*
 
@@ -10,7 +10,7 @@
 
 ## Why This Product Is Unique (And Why No One Built It This Way)
 
-| Gap in Market | Airbyte / Fivetran | Informatica | **DataTransfer.space** |
+| Gap in Market | Airbyte / Fivetran | Informatica | **Datawrap** |
 |---------------|-------------------|-------------|------------------------|
 | AI semantic mapping | Manual | Manual | **210 patterns + RAG + LLM** |
 | Universal file + DB + API | DB-only or file-only | Partial | **Single platform** |

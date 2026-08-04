@@ -1,4 +1,4 @@
-"""DataTransfer.space Services"""
+"""Datawrap Services"""
 from .file_parser import FileParser, ParseResult
 from .mongodb_service import MongoDBService, get_mongodb_service
 

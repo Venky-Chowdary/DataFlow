@@ -41,7 +41,14 @@ export function applyPageMeta(meta: PageMeta) {
   const keywords = meta.keywords || DEFAULT_KEYWORDS;
   const robots = meta.robots ?? "index, follow";
   const ogType = meta.ogType ?? "website";
-  const ogImage = `${siteUrl}/og-image.svg`;
+  const ogImage = `${siteUrl}/og-image.png`;
+  const pageUrl = meta.canonicalPath
+    ? meta.canonicalPath.startsWith("#")
+      ? `${siteUrl}/${meta.canonicalPath}`
+      : meta.canonicalPath.startsWith("http")
+        ? meta.canonicalPath
+        : `${siteUrl}${meta.canonicalPath.startsWith("/") ? "" : "/"}${meta.canonicalPath}`
+    : siteUrl;
 
   document.title = title;
   document.documentElement.lang = "en";
@@ -49,41 +56,55 @@ export function applyPageMeta(meta: PageMeta) {
   upsertMeta("name", "description", description);
   upsertMeta("name", "keywords", keywords);
   upsertMeta("name", "robots", robots);
-  upsertMeta("name", "application-name", "DataFlow");
-  upsertMeta("name", "apple-mobile-web-app-title", "DataFlow");
+  upsertMeta("name", "author", "Datawrap");
+  upsertMeta("name", "application-name", "Datawrap");
+  upsertMeta("name", "apple-mobile-web-app-title", "Datawrap");
   upsertMeta("name", "theme-color", "#0f766e");
 
-  upsertMeta("property", "og:site_name", "DataFlow");
+  upsertMeta("property", "og:site_name", "Datawrap");
   upsertMeta("property", "og:title", title);
   upsertMeta("property", "og:description", description);
   upsertMeta("property", "og:type", ogType);
-  upsertMeta("property", "og:url", siteUrl);
+  upsertMeta("property", "og:url", pageUrl);
   upsertMeta("property", "og:image", ogImage);
-  upsertMeta("property", "og:image:alt", "DataFlow — Universal data transfer platform");
+  upsertMeta("property", "og:image:alt", "Datawrap — Universal data transfer platform");
   upsertMeta("property", "og:locale", "en_US");
+  upsertMeta("property", "og:image:type", "image/png");
 
   upsertMeta("name", "twitter:card", "summary_large_image");
   upsertMeta("name", "twitter:title", title);
   upsertMeta("name", "twitter:description", description);
   upsertMeta("name", "twitter:image", ogImage);
-  upsertMeta("name", "twitter:image:alt", "DataFlow — Universal data transfer platform");
+  upsertMeta("name", "twitter:image:alt", "Datawrap — Universal data transfer platform");
 
-  upsertLink("canonical", siteUrl);
+  upsertLink("canonical", pageUrl);
   upsertLink("icon", "/favicon.svg", { type: "image/svg+xml" });
-  upsertLink("apple-touch-icon", "/apple-touch-icon.svg");
+  upsertLink("apple-touch-icon", "/apple-touch-icon.png");
   upsertLink("manifest", "/site.webmanifest");
 
   upsertJsonLd(meta, siteUrl, title, description);
 }
 
-const JSON_LD_ID = "dataflow-jsonld";
+const JSON_LD_ID = "datawrap-jsonld";
 
 function upsertJsonLd(meta: PageMeta, siteUrl: string, title: string, description: string) {
   const existing = document.getElementById(JSON_LD_ID);
+  // Remove legacy id from pre-rebrand sessions.
+  document.getElementById("dataflow-jsonld")?.remove();
   if (meta.robots?.includes("noindex")) {
     existing?.remove();
     return;
   }
+
+  const pageUrl = meta.canonicalPath
+    ? `${siteUrl}${meta.canonicalPath.startsWith("/") || meta.canonicalPath.startsWith("#") ? "" : "/"}${meta.canonicalPath}`
+    : siteUrl;
+  const absolutePage =
+    pageUrl.includes("#")
+      ? pageUrl
+      : pageUrl.startsWith("http")
+        ? pageUrl
+        : `${siteUrl}${pageUrl}`;
 
   const payload = {
     "@context": "https://schema.org",
@@ -92,18 +113,31 @@ function upsertJsonLd(meta: PageMeta, siteUrl: string, title: string, descriptio
         "@type": "WebSite",
         "@id": `${siteUrl}/#website`,
         url: siteUrl,
-        name: "DataFlow",
+        name: "Datawrap",
+        alternateName: ["Datawrap Pilot", "Datawrap Transfer Studio"],
+        description:
+          "Integrity-first data transfer platform — migrate databases, sync files, and move data with AI semantic mapping, CDC, quarantine, and 8 preflight gates.",
+        inLanguage: "en-US",
+        publisher: { "@id": `${siteUrl}/#organization` },
+      },
+      {
+        "@type": "WebPage",
+        "@id": `${absolutePage}#webpage`,
+        url: absolutePage,
+        name: title,
         description,
+        isPartOf: { "@id": `${siteUrl}/#website` },
         inLanguage: "en-US",
       },
       {
         "@type": "SoftwareApplication",
         "@id": `${siteUrl}/#software`,
-        name: "DataFlow",
+        name: "Datawrap",
         applicationCategory: "BusinessApplication",
         operatingSystem: "Web",
         description,
         url: siteUrl,
+        image: `${siteUrl}/datawrap-mark.png`,
         offers: {
           "@type": "Offer",
           price: "0",
@@ -116,14 +150,19 @@ function upsertJsonLd(meta: PageMeta, siteUrl: string, title: string, descriptio
           "8 preflight validation gates",
           "Scheduled pipelines",
           "MCP server integration",
+          "Datawrap Pilot natural-language ops",
         ],
       },
       {
         "@type": "Organization",
         "@id": `${siteUrl}/#organization`,
-        name: "DataFlow",
+        name: "Datawrap",
         url: siteUrl,
-        logo: `${siteUrl}/favicon.svg`,
+        logo: {
+          "@type": "ImageObject",
+          url: `${siteUrl}/datawrap-mark.png`,
+        },
+        sameAs: [],
       },
     ],
   };
@@ -141,5 +180,5 @@ function upsertJsonLd(meta: PageMeta, siteUrl: string, title: string, descriptio
 export function usePageMeta(meta: PageMeta) {
   useEffect(() => {
     applyPageMeta(meta);
-  }, [meta.title, meta.description, meta.keywords, meta.robots, meta.ogType]);
+  }, [meta.title, meta.description, meta.keywords, meta.robots, meta.ogType, meta.canonicalPath]);
 }

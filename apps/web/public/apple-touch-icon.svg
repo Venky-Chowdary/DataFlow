@@ -1,13 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180" fill="none">
-  <rect width="180" height="180" rx="40" fill="url(#g)"/>
-  <path d="M50 120V70M50 70h30l10 20 20-40h20" stroke="#fff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" opacity=".95"/>
-  <circle cx="50" cy="120" r="12" fill="#F59E0B"/>
-  <circle cx="50" cy="70" r="12" fill="#2DD4BF"/>
-  <circle cx="130" cy="50" r="12" fill="#A7F3D0"/>
-  <defs>
-    <linearGradient id="g" x1="20" y1="20" x2="160" y2="160" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#134E4A"/>
-      <stop offset="1" stop-color="#111827"/>
-    </linearGradient>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180" fill="none" role="img" aria-label="Datawrap">
+  <rect width="180" height="180" rx="40" fill="#0A3D3A"/>
+  <g transform="scale(2.8125)">
+    <rect x="10" y="28" width="44" height="8" rx="2.5" fill="#F59E0B"/>
+    <rect x="28" y="10" width="8" height="44" rx="2.5" fill="#F8FAFC"/>
+    <path d="M16 48 L40 24" stroke="#2DD4BF" stroke-width="8" stroke-linecap="round"/>
+    <path d="M36 18 L52 14 L44 30 Z" fill="#2DD4BF"/>
+    <rect x="27" y="27" width="10" height="10" rx="2" fill="#0A3D3A"/>
+  </g>
 </svg>

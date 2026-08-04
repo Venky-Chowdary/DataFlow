@@ -17,7 +17,7 @@ Research anchors
 - DuckDB 1.3.2 (executed here): ``TIMESTAMP(p)`` is accepted, while
   ``TIMESTAMPTZ(6)`` and ``TIME(6)`` raise
   "Type … does not support any modifiers!". ``TIMETZ`` is native.
-- Oracle has no TIME type — DataFlow lands it as ``VARCHAR2(32)``, so a
+- Oracle has no TIME type — Datawrap lands it as ``VARCHAR2(32)``, so a
   fractional-seconds precision must never be written as a character width.
 """
 

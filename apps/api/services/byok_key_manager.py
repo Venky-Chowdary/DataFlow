@@ -7,12 +7,12 @@ key.  Data for the tenant is encrypted with a derived key produced by HKDF
 from the tenant key plus a context string (tenant id + purpose).
 
 Providers:
-- ``local``    : DataFlow generates a 256-bit key for the tenant.  Useful for
+- ``local``    : Datawrap generates a 256-bit key for the tenant.  Useful for
                  testing and for a "managed customer key" mode.
 - ``wrapped``  : The customer pastes a base64-encoded 256-bit AES key.
                  The plaintext is encrypted with the platform key and stored.
 - ``aws_kms``  : The key reference is an AWS KMS key ARN.  Envelope encryption
-                 is performed by KMS; DataFlow only stores the encrypted data
+                 is performed by KMS; Datawrap only stores the encrypted data
                  key reference (not yet active until KMS integration is wired).
 - ``azure_keyvault`` / ``gcp_kms`` : references to cloud KMS keys (roadmap).
 """

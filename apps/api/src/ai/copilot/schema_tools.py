@@ -1,4 +1,4 @@
-"""Live database schema tools for Data Pilot — reuse transfer introspectors.
+"""Live database schema tools for Datawrap Pilot — reuse transfer introspectors.
 
 Do not invent parallel SQL. Every probe goes through:
   connector resolve → EndpointConfig → introspect_endpoint / schema_introspect.

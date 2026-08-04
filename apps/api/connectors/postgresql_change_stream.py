@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+from services.brand_env import getenv_brand
 import re
 from collections.abc import Iterator
 from datetime import datetime, timezone
@@ -283,12 +284,12 @@ class PostgreSqlChangeStreamCdc:
         self._signal_table_ready = False
         self._last_signal_poll_at = 0.0
         self._signal_poll_interval_sec = float(
-            os.getenv("DATAFLOW_CDC_SIGNAL_POLL_SEC", cfg.get("signal_poll_interval_sec") or 15)
+            getenv_brand("CDC_SIGNAL_POLL_SEC", cfg.get("signal_poll_interval_sec") or 15)
         )
         from services.cdc_lease import CdcLeaseGuard
 
         holder = str(
-            cfg.get("lease_holder_id") or os.getenv("DATAFLOW_CDC_LEASE_HOLDER") or ""
+            cfg.get("lease_holder_id") or getenv_brand("CDC_LEASE_HOLDER") or ""
         )
         self._lease = CdcLeaseGuard(
             cursor_key=cursor_key,
@@ -332,7 +333,7 @@ class PostgreSqlChangeStreamCdc:
         """
         preferred = (self.cfg.get("logical_decoding_plugin") or "").strip().lower()
         env_flag = str(
-            self.cfg.get("pgoutput_decoder") or os.getenv("DATAFLOW_PGOUTPUT_DECODER", "")
+            self.cfg.get("pgoutput_decoder") or getenv_brand("PGOUTPUT_DECODER", "")
         ).strip().lower()
         if preferred == "test_decoding" or env_flag in {"0", "false", "off", "test_decoding"}:
             return "test_decoding"
@@ -535,7 +536,7 @@ class PostgreSqlChangeStreamCdc:
         concurrent commit lands past the target, so it cannot be skipped.
         """
         now = datetime.now(timezone.utc)
-        interval = float(os.getenv("DATAFLOW_CDC_HEARTBEAT_SEC", "10"))
+        interval = float(getenv_brand("CDC_HEARTBEAT_SEC", "10"))
         if self._last_heartbeat_at is not None:
             age = (now - self._last_heartbeat_at).total_seconds()
             if age < max(1.0, interval):
@@ -549,7 +550,7 @@ class PostgreSqlChangeStreamCdc:
         if self._pending_ack_lsn:
             # Applied-but-unacked work exists; ack() owns the slot position.
             return
-        if os.getenv("DATAFLOW_CDC_IDLE_SLOT_ADVANCE", "1").strip().lower() in {
+        if getenv_brand("CDC_IDLE_SLOT_ADVANCE", "1").strip().lower() in {
             "0",
             "false",
             "off",

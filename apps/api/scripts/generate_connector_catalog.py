@@ -1,4 +1,4 @@
-"""Generate connector catalog entries for DataFlow (certified + roadmap tiles)."""
+"""Generate connector catalog entries for Datawrap (certified + roadmap tiles)."""
 
 from __future__ import annotations
 

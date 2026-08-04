@@ -1,4 +1,4 @@
-"""Persist preflight/validation runs so Data Pilot and Jobs can look them up by ID."""
+"""Persist preflight/validation runs so Datawrap Pilot and Jobs can look them up by ID."""
 
 from __future__ import annotations
 

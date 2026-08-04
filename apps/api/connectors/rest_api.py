@@ -132,7 +132,7 @@ def _request_with_retry(
 
 
 def _build_headers(cfg: dict[str, Any]) -> dict[str, str]:
-    headers: dict[str, str] = {"Accept": "application/json", "User-Agent": "DataFlow/1.0"}
+    headers: dict[str, str] = {"Accept": "application/json", "User-Agent": "Datawrap/1.0"}
     mode = (cfg.get("auth_mode") or cfg.get("authPrefix") or "").lower()
     auth_header = (cfg.get("auth_header") or "").strip()
     auth_prefix = (cfg.get("auth_prefix") if cfg.get("auth_prefix") is not None else "Bearer").strip()

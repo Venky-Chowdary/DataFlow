@@ -1,4 +1,4 @@
-"""Unit tests for LLM provider robustness and Data Pilot fallbacks."""
+"""Unit tests for LLM provider robustness and Datawrap Pilot fallbacks."""
 
 from __future__ import annotations
 

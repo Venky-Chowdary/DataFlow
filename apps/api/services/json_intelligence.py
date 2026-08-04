@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from services.brand_env import getenv_brand
 import re
 from typing import Any
 
@@ -410,7 +411,7 @@ def mongo_flatten_enabled(cfg: dict[str, Any] | None = None) -> bool:
     """Operator / env switch — default on so Mongo→SQL maps nested leaves."""
     if cfg is not None and "flatten_nested" in cfg:
         return bool(cfg.get("flatten_nested"))
-    env = (os.environ.get("DATAFLOW_MONGO_FLATTEN_NESTED") or "1").strip().lower()
+    env = (getenv_brand("MONGO_FLATTEN_NESTED") or "1").strip().lower()
     return env not in {"0", "false", "no", "off"}
 
 

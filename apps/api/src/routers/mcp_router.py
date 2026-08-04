@@ -1,4 +1,4 @@
-"""MCP Server — expose Data Pilot tools to Cursor, Claude, VS Code, and external agents.
+"""MCP Server — expose Datawrap Pilot tools to Cursor, Claude, VS Code, and external agents.
 
 Supports:
   - Native Streamable HTTP at ``POST/GET /api/v1/mcp`` (Cursor ``url`` config)
@@ -103,7 +103,7 @@ async def mcp_manifest(http_request: Request):
     base = f"{str(http_request.base_url).rstrip('/')}/api/v1/mcp"
     return {
         "name": "dataflow",
-        "title": "DataFlow MCP Server",
+        "title": "Datawrap MCP Server",
         "version": "2.0.0",
         "description": "Universal data movement — analyze, transfer, and query any dataset via AI agents.",
         "protocol": "streamable-http",
@@ -149,7 +149,7 @@ async def list_mcp_tools():
 
 @router.post("/tools/call")
 async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
-    """Execute a Data Pilot tool — same surface external agents use."""
+    """Execute a Datawrap Pilot tool — same surface external agents use."""
     from services.mcp_invocation_log import log_mcp_invocation
 
     from ..ai.copilot.tools import get_pilot_tools

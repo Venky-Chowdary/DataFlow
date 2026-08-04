@@ -21,7 +21,7 @@ import {
   applyGitopsManifest,
   createSchedule,
   deleteSchedule,
-  exportDataflowManifest,
+  exportDatawrapManifest,
   exportScheduleYaml,
   fetchContractBreaker,
   fetchOpsFreshness,
@@ -320,7 +320,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   const handleExportFleet = async () => {
     setGitopsBusy(true);
     try {
-      const blob = await exportDataflowManifest();
+      const blob = await exportDatawrapManifest();
       downloadBlob(blob, "dataflow.yaml");
       toast({
         title: "Exported dataflow.yaml",

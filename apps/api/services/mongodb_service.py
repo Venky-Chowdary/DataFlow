@@ -1,5 +1,5 @@
 """
-DataTransfer.space — MongoDB Service
+Datawrap — MongoDB Service
 Handles all MongoDB operations for persistence and data transfer
 """
 
@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+from services.brand_env import getenv_brand
 import re
 import threading
 from datetime import datetime, timezone
@@ -1243,7 +1244,7 @@ def get_mongodb_service() -> MongoDBService:
     """Get or create MongoDB service instance."""
     global _mongodb_service
     if _mongodb_service is None:
-        if os.environ.get("DATAFLOW_JOB_STORE", "").lower() == "memory":
+        if getenv_brand("JOB_STORE", "").lower() == "memory":
             _mongodb_service = MemoryMongoDBService()
             _mongodb_service.connect()
         else:

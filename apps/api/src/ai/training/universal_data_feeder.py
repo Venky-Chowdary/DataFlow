@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Universal Data Feeder
+Datawrap — Universal Data Feeder
 
 Ingest schemas from uploaded files, connectors, and industry templates for AI training.
 """

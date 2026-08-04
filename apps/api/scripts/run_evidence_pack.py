@@ -26,7 +26,7 @@ for path in (API_ROOT, PREFLIGHT_SRC):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build DataFlow mapping evidence catalog")
+    parser = argparse.ArgumentParser(description="Build Datawrap mapping evidence catalog")
     parser.add_argument(
         "--refresh-pairs",
         action="store_true",

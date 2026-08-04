@@ -2,7 +2,7 @@
 
 Honesty
 -------
-Uses real column signals already in DataFlow (semantic roles, PII name/value
+Uses real column signals already in Datawrap (semantic roles, PII name/value
 guards, optional analysis ``is_pii`` / ``semantic_type``). Never invents text
 to embed. PII columns are routed to ``exclude_pii`` so they do not land in
 vector metadata or content — operators can still override in Studio, but the

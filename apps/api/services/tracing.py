@@ -1,4 +1,4 @@
-"""OpenTelemetry tracing for DataFlow transfers — optional, fail-closed.
+"""OpenTelemetry tracing for Datawrap transfers — optional, fail-closed.
 
 Tracing is off by default. When ``DATAFLOW_ENABLE_TRACING=1`` and the
 OpenTelemetry SDK is installed, every transfer gets a root span keyed by
@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+from services.brand_env import getenv_brand
 import re
 import threading
 from contextlib import contextmanager
@@ -53,12 +54,12 @@ _SECRET_KEYS = re.compile(
 
 
 def tracing_enabled() -> bool:
-    return os.getenv("DATAFLOW_ENABLE_TRACING", "0").lower() in ("1", "true", "yes")
+    return getenv_brand("ENABLE_TRACING", "0").lower() in ("1", "true", "yes")
 
 
 def otlp_endpoint() -> str:
     return (
-        os.getenv("DATAFLOW_OTLP_ENDPOINT")
+        getenv_brand("OTLP_ENDPOINT")
         or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
         or ""
     ).strip()
@@ -237,7 +238,7 @@ def ensure_provider() -> bool:
             )
             return False
 
-        service_name = os.getenv("DATAFLOW_SERVICE_NAME", "dataflow-api")
+        service_name = getenv_brand("SERVICE_NAME", "dataflow-api")
         resource = Resource.create(
             {
                 "service.name": service_name,
@@ -268,7 +269,7 @@ def ensure_provider() -> bool:
                         "package is installed; falling back to console exporter.",
                         endpoint,
                     )
-        if exporter is None and os.getenv("DATAFLOW_TRACE_CONSOLE", "0").lower() in (
+        if exporter is None and getenv_brand("TRACE_CONSOLE", "0").lower() in (
             "1",
             "true",
             "yes",
@@ -388,4 +389,4 @@ def _span_kind(kind: str) -> Any:
 
 
 def _otlp_insecure() -> bool:
-    return os.getenv("DATAFLOW_OTLP_INSECURE", "1").lower() in ("1", "true", "yes")
+    return getenv_brand("OTLP_INSECURE", "1").lower() in ("1", "true", "yes")

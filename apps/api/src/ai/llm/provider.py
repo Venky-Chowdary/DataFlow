@@ -1,5 +1,5 @@
 """
-DataTransfer.space — LLM Provider Abstraction
+Datawrap — LLM Provider Abstraction
 
 Supports OpenAI, Anthropic, Ollama, and local fallback.
 Works without API keys using local reasoning.
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from services.brand_env import getenv_brand
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -289,7 +290,7 @@ class DataTransferAnthropicProvider(DataTransferLLMProvider):
             response = self._client.messages.create(
                 model=self.model,
                 max_tokens=max_tokens,
-                system=system or "You are a data engineering expert for DataTransfer.space.",
+                system=system or "You are a data engineering expert for Datawrap.",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,
             )
@@ -320,7 +321,7 @@ class DataTransferAnthropicProvider(DataTransferLLMProvider):
             kwargs: dict = {
                 "model": self.model,
                 "max_tokens": max_tokens,
-                "system": system or "You are Data Pilot for DataTransfer.space.",
+                "system": system or "You are Datawrap Pilot for Datawrap.",
                 "messages": messages,
                 "temperature": 0.2,
             }
@@ -465,7 +466,7 @@ MODEL_CAPABILITY_MATRIX = [
         "package": "anthropic",
         "tier": "cloud",
         "roles": ["agent_tool_use", "schema_reasoning", "migration_planning", "policy_explanation"],
-        "best_for": "Long-horizon Data Pilot agent runs, tool use, schema-policy reasoning, and migration plan review.",
+        "best_for": "Long-horizon Datawrap Pilot agent runs, tool use, schema-policy reasoning, and migration plan review.",
     },
     {
         "provider": "openai",
@@ -475,7 +476,7 @@ MODEL_CAPABILITY_MATRIX = [
         "package": "openai",
         "tier": "cloud",
         "roles": ["agent_tool_use", "copilot_chat", "rag_answering", "mapping_explanation", "fallback_generation"],
-        "best_for": "Data Pilot tool loops, grounded chat, mapping explanation, RAG answers, and cloud fallback.",
+        "best_for": "Datawrap Pilot tool loops, grounded chat, mapping explanation, RAG answers, and cloud fallback.",
     },
     {
         "provider": "ollama",
@@ -489,7 +490,7 @@ MODEL_CAPABILITY_MATRIX = [
     },
     {
         "provider": "local",
-        "label": "Data Pilot local engine",
+        "label": "Datawrap Pilot local engine",
         "default_model": "pilot_local_engine",
         "env_key": "",
         "package": "",
@@ -503,7 +504,7 @@ MODEL_CAPABILITY_MATRIX = [
             "mapping_assignment",
         ],
         "best_for": (
-            "Primary Data Pilot chatbot — local NL→tools→compose (local tool loop) for "
+            "Primary Datawrap Pilot chatbot — local NL→tools→compose (local tool loop) for "
             "aggregates, schema, transfers-with-Confirm, jobs, product how-tos. "
             "OpenAI/Anthropic/Ollama are optional polish add-ons (engine=hybrid only)."
         ),
@@ -524,12 +525,12 @@ def _package_available(package: str) -> bool:
 def resolve_pilot_engine() -> str:
     """Single source of truth for Pilot engine selection.
 
-    Local DataFlow engine is always the primary chatbot.
+    Local Datawrap engine is always the primary chatbot.
     OpenAI / Anthropic / Ollama are optional add-ons — only used when the
     operator explicitly sets DATAFLOW_PILOT_ENGINE=hybrid|cloud.
     ``auto`` (default) == local.
     """
-    raw = (os.environ.get("DATAFLOW_PILOT_ENGINE") or "auto").strip().lower()
+    raw = (getenv_brand("PILOT_ENGINE") or "auto").strip().lower()
     if raw in {"hybrid", "cloud"}:
         return raw
     # auto / local / unset / anything else → local primary engine
@@ -622,7 +623,7 @@ def get_model_capabilities() -> dict:
         "fallback_order": ["local", "ollama", "anthropic", "openai"],
         "providers": rows,
         "guarantees": [
-            "Primary chatbot = DataFlow local engine (NL → tools → compose). Works with zero cloud keys.",
+            "Primary chatbot = Datawrap local engine (NL → tools → compose). Works with zero cloud keys.",
             "DATAFLOW_PILOT_ENGINE=auto|local (default): full Pilot chatbot offline — OpenAI/Anthropic/Ollama not required.",
             "DATAFLOW_PILOT_ENGINE=hybrid|cloud: optional narration polish only; tools still run locally first.",
             "OpenAI, Anthropic, and Ollama are user add-ons — never the first service provider.",

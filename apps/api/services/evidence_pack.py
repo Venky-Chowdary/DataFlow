@@ -639,7 +639,7 @@ def build_evidence_catalog(*, refresh_pairs: bool = False) -> dict[str, Any]:
     catalog = {
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "title": "DataFlow mapping evidence catalog",
+        "title": "Datawrap mapping evidence catalog",
         "all_passed": all_passed,
         "claim_count": len(results),
         "passed_count": sum(1 for r in results if r["passed"]),
@@ -717,7 +717,7 @@ def _ensure_connector_pair_proofs() -> None:
 
 def catalog_to_markdown(catalog: dict[str, Any]) -> str:
     lines = [
-        "# DataFlow mapping evidence catalog",
+        "# Datawrap mapping evidence catalog",
         "",
         f"Generated: `{catalog.get('generated_at')}`",
         "",

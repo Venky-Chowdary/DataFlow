@@ -30,6 +30,8 @@ const HASH_ALIASES: Record<string, Screen> = {
   overview: "dashboard",
   studio: "transfer",
   theater: "jobs",
+  proofs: "benchmarks",
+  proof: "benchmarks",
 };
 
 export function screenFromHash(hash: string): Screen | null {

@@ -1,6 +1,6 @@
 """Universal SQLAlchemy connector for any SQL database with a Python DBAPI.
 
-This connector lets DataFlow treat SQLAlchemy-supported engines as first-class
+This connector lets Datawrap treat SQLAlchemy-supported engines as first-class
 sources and destinations. The user provides the catalog type (e.g. mssql,
 oracle, db2, trino, h2) or a full connection_string; we build the SQLAlchemy
 URL and driver name from the catalog. This is the fastest path to 100+
@@ -713,7 +713,7 @@ def _type_repr(type_obj: Any) -> str:
 
 
 def _logical_type_from_sa(col_type: Any) -> str:
-    """Map a SQLAlchemy type instance to a DataFlow logical type."""
+    """Map a SQLAlchemy type instance to a Datawrap logical type."""
     from services.type_system import normalize_logical_type
 
     if col_type is None:
@@ -899,7 +899,7 @@ class _DuckDBJSON(sa.JSON):
 
 
 def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> Any:
-    """Map a DataFlow logical type to a SQLAlchemy type that compiles for the engine.
+    """Map a Datawrap logical type to a SQLAlchemy type that compiles for the engine.
 
     Accepts carriers like ``DECIMAL(12,4)`` / ``NUMERIC(38,10)`` — bare
     ``t == "decimal"`` matching used to fall through to TEXT and strip scale
@@ -1615,7 +1615,7 @@ def _widen_existing_columns_sa(
 
 
 def _infer_logical_from_samples(values: list[Any], field_name: str = "") -> str | None:
-    """Use DataFlow value inference to narrow generic SQL String columns.
+    """Use Datawrap value inference to narrow generic SQL String columns.
 
     We intentionally do NOT narrow string columns to INTEGER or DECIMAL: a
     string column may contain codes, identifiers, bit strings, or formatted
@@ -3815,7 +3815,7 @@ def _upsert_batch(
 
     # ClickHouse must never DELETE+INSERT even if native path failed — mutations
     # race ReplacingMergeTree merges (Airbyte destination AGENTS.md). Dedup is
-    # therefore deferred to the table engine: DataFlow creates ReplacingMergeTree,
+    # therefore deferred to the table engine: Datawrap creates ReplacingMergeTree,
     # but an operator-owned plain MergeTree keeps every duplicate. Say so rather
     # than let the run look like a clean upsert.
     if dialect_name == "clickhouse" or str(dialect_name).startswith("clickhouse"):

@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useRef, type ReactNode } from "react";
 
-/** Studio remediations dispatched from Data Pilot (or Validate AI chips). */
+/** Studio remediations dispatched from Datawrap Pilot (or Validate AI chips). */
 export type StudioActionKind =
   | "normalize_control_chars"
   | "open_bad_data_fix"

@@ -1,4 +1,4 @@
-"""Wave 34 — Railway-class release hardening for Data Pilot.
+"""Wave 34 — Railway-class release hardening for Datawrap Pilot.
 
 Pins the release-critical gaps that amnesia / soft transfer NL and inflated
 local-provider marketing used to leave open:

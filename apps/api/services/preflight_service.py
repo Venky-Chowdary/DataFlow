@@ -77,7 +77,7 @@ class FilePreflightContext(PreflightContext):
             return False, [
                 (
                     "No sample rows available for dry-run validation. "
-                    "Re-run Source introspect so DataFlow can load a preview sample "
+                    "Re-run Source introspect so Datawrap can load a preview sample "
                     "from the source table (column metadata alone is not enough)."
                 )
             ]

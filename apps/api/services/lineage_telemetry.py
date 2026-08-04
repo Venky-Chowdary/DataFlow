@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from services.brand_env import getenv_brand
 import uuid
 from collections import deque
 from datetime import datetime, timezone
@@ -21,7 +22,7 @@ from services.value_serializer import json_default
 #: per emitted event across every job, and was only ever cleared by an explicit
 #: test helper. A ring buffer keeps the recent-history use cases (tests, the
 #: lineage export endpoint, operator debugging) while making the footprint flat.
-MAX_LINEAGE_EVENTS = int(os.getenv("DATAFLOW_MAX_LINEAGE_EVENTS", "5000") or 5000)
+MAX_LINEAGE_EVENTS = int(getenv_brand("MAX_LINEAGE_EVENTS", "5000") or 5000)
 
 #: Deque subclass so existing ``LINEAGE_EVENTS.append`` / iteration / ``len`` /
 #: ``.clear()`` call sites keep working; indexing and slicing of a deque covers

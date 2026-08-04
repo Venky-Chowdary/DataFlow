@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+from services.brand_env import getenv_brand
 import threading
 import time
 from dataclasses import dataclass
@@ -38,19 +39,19 @@ DEFAULT_MAX_ENTRIES = 512
 
 
 def cache_enabled() -> bool:
-    return os.getenv("DATAFLOW_SCHEMA_CACHE", "1").lower() not in ("0", "false", "off", "no")
+    return getenv_brand("SCHEMA_CACHE", "1").lower() not in ("0", "false", "off", "no")
 
 
 def _ttl() -> float:
     try:
-        return max(1.0, float(os.getenv("DATAFLOW_SCHEMA_CACHE_TTL", str(DEFAULT_TTL_SECONDS))))
+        return max(1.0, float(getenv_brand("SCHEMA_CACHE_TTL", str(DEFAULT_TTL_SECONDS))))
     except ValueError:
         return float(DEFAULT_TTL_SECONDS)
 
 
 def _max_entries() -> int:
     try:
-        return max(1, int(os.getenv("DATAFLOW_SCHEMA_CACHE_SIZE", str(DEFAULT_MAX_ENTRIES))))
+        return max(1, int(getenv_brand("SCHEMA_CACHE_SIZE", str(DEFAULT_MAX_ENTRIES))))
     except ValueError:
         return DEFAULT_MAX_ENTRIES
 

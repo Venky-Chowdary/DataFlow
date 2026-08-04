@@ -535,7 +535,7 @@ export function ColumnReviewPanel({
               ) : (
                 <>
                   <strong>Destination schema unknown</strong>
-                  {" — existence not confirmed. Retry Destination/Map; DataFlow will not invent create-new fields yet."}
+                  {" — existence not confirmed. Retry Destination/Map; Datawrap will not invent create-new fields yet."}
                 </>
               )}
             </span>

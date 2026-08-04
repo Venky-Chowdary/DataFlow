@@ -59,7 +59,7 @@ def test_adls(
             return ConnectResult(
                 ok=True,
                 tables=[],
-                message=f"Container `{container}` does not exist yet; DataFlow will create it during write.",
+                message=f"Container `{container}` does not exist yet; Datawrap will create it during write.",
                 driver="azure-storage-blob",
             )
         blobs = [b.name for b in itertools.islice(container_client.list_blobs(), 50)]

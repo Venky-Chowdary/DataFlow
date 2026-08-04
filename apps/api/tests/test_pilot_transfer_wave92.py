@@ -1,4 +1,4 @@
-"""Wave 92 — Data Pilot moves data, with real gates and an explicit Confirm.
+"""Wave 92 — Datawrap Pilot moves data, with real gates and an explicit Confirm.
 
 Three properties are non-negotiable and each has a test here:
 

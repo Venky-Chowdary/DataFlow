@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Conversation Training Data Synthesis
+Datawrap — Conversation Training Data Synthesis
 
 Generate customer-facing Q&A pairs from universal data schemas.
 """
@@ -190,7 +190,7 @@ class ConversationSynthesizer:
         ]
 
     def synthesize_agent_actions(self, universal_schemas: list[dict] | None = None) -> list[ConversationExample]:
-        """Train Data Pilot agent tool-use and in-app actions."""
+        """Train Datawrap Pilot agent tool-use and in-app actions."""
         examples = [
             ConversationExample(
                 id=str(uuid.uuid4()),
@@ -271,7 +271,7 @@ class ConversationSynthesizer:
                     f"1. Go to **Connectors** → **+ New Source**\n"
                     f"2. Search for `{name}` in the 620+ catalog\n"
                     f"3. Configure credentials — category: **{category}**, status: **{status}**\n"
-                    f"4. Data Pilot can then read from {name} and map columns automatically\n\n"
+                    f"4. Datawrap Pilot can then read from {name} and map columns automatically\n\n"
                     f"{c.get('description', '')}"
                 ),
                 intent="transfer_help",

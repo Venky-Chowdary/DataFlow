@@ -1,4 +1,4 @@
-"""Canonical typed-value serialization for DataFlow.
+"""Canonical typed-value serialization for Datawrap.
 
 All source readers, the string matrix builder, and file-export paths should
 convert Python values into the intermediate string form through `cell_to_string`

@@ -1,6 +1,6 @@
 """Debezium-compatible CDC signal table (execute-snapshot / stop-snapshot).
 
-Debezium connectors watch a signal table for operator commands. DataFlow mirrors
+Debezium connectors watch a signal table for operator commands. Datawrap mirrors
 that contract:
 
   CREATE TABLE dataflow_signal (
@@ -94,7 +94,7 @@ def apply_signal_row(
     default_table: str = "",
     primary_key: str = "id",
 ) -> dict[str, Any] | None:
-    """Map one signal-table row into DataFlow incremental snapshot APIs."""
+    """Map one signal-table row into Datawrap incremental snapshot APIs."""
     from services.cdc_incremental_snapshot import (
         cancel_signal,
         list_signals,

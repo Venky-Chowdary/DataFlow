@@ -1,5 +1,5 @@
 /**
- * Shared Data Pilot chat helpers — PilotPage and AICopilot must behave identically
+ * Shared Datawrap Pilot chat helpers — PilotPage and AICopilot must behave identically
  * for context payloads, result-id tracking, and Confirm orchestration.
  */
 
@@ -15,7 +15,7 @@ import type { ActiveDataContext, Screen } from "./types";
 /** Shared screen labels for Pilot page + rail action chips. */
 export const PILOT_SCREEN_LABELS: Record<string, string> = {
   dashboard: "Overview",
-  pilot: "Data Pilot",
+  pilot: "Datawrap Pilot",
   transfer: "Transfer Studio",
   connectors: "Connectors",
   jobs: "Jobs",

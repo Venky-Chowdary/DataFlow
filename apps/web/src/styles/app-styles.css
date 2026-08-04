@@ -30,6 +30,7 @@
 @import "./connectors-page.css";
 @import "./pilot-chat.css";
 @import "./docs-page.css";
+@import "./marketing-editorial.css";
 @import "./query-playground.css";
 @import "./benchmarks.css";
 /* Responsive patches (component rules only; tokens stay in tokens.css) */
@@ -127,7 +128,7 @@
   transform: none;
 }
 
-/* ═══ Data Pilot — ChatGPT-style viewport: NO page scroll ═══ */
+/* ═══ Datawrap Pilot — ChatGPT-style viewport: NO page scroll ═══ */
 .df2-main .df2-content:has(.df2-content-flush) {
   overflow: hidden !important;
 }

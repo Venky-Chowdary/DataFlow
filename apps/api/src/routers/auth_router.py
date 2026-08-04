@@ -4,6 +4,7 @@ import base64
 import hashlib
 import logging
 import os
+from services.brand_env import getenv_brand
 import secrets
 from typing import Any
 from urllib.parse import urlencode
@@ -39,7 +40,7 @@ def _web_origin() -> str:
     explicit = web_url()
     if explicit:
         return explicit.rstrip("/")
-    domain = os.getenv("DATAFLOW_WEB_DOMAIN", "http://localhost:5173").strip()
+    domain = getenv_brand("WEB_DOMAIN", "http://localhost:5173").strip()
     if not domain.startswith("http"):
         domain = f"https://{domain}"
     return domain.rstrip("/")
@@ -54,14 +55,14 @@ def _saml_base_url(request: Request) -> str:
 
 
 def _saml_sp_entity_id(request: Request) -> str:
-    explicit = os.getenv("DATAFLOW_SAML_SP_ENTITY_ID", "").strip()
+    explicit = getenv_brand("SAML_SP_ENTITY_ID", "").strip()
     if explicit:
         return explicit
     return f"{_saml_base_url(request)}/api/v1/auth/sso/saml/metadata"
 
 
 def _saml_acs_url(request: Request) -> str:
-    explicit = os.getenv("DATAFLOW_SAML_ACS_URL", "").strip()
+    explicit = getenv_brand("SAML_ACS_URL", "").strip()
     if explicit:
         return explicit
     return f"{_saml_base_url(request)}/api/v1/auth/sso/saml/callback"
@@ -144,14 +145,14 @@ def _pkce_pair() -> tuple[str, str]:
 
 def _sso_allowed_domains() -> set[str]:
     """Domains that may auto-provision via SSO when no explicit user exists."""
-    raw = os.getenv("DATAFLOW_SSO_ALLOWED_DOMAINS", "").strip()
+    raw = getenv_brand("SSO_ALLOWED_DOMAINS", "").strip()
     if not raw:
         return set()
     return {d.strip().lower().lstrip("@") for d in raw.split(",") if d.strip()}
 
 
 def _sso_auto_provision() -> bool:
-    return os.getenv("DATAFLOW_SSO_AUTO_PROVISION", "0").lower() in ("1", "true", "yes")
+    return getenv_brand("SSO_AUTO_PROVISION", "0").lower() in ("1", "true", "yes")
 
 
 def _is_sso_email_allowed(email: str) -> bool:

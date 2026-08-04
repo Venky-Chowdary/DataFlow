@@ -7,7 +7,7 @@ Decode dispatches on registry ``schemaType``:
 * AVRO (default) — ``fastavro`` schemaless reader against the registered schema
 * PROTOBUF / unknown — refuse (never silently JSON-decode binary contracts)
 
-This module is intentionally separate from DataFlow's internal
+This module is intentionally separate from Datawrap's internal
 ``services.schema_registry`` (transfer schema versioning / lineage).
 """
 
@@ -214,7 +214,7 @@ def decode_with_registered_schema(schema_doc: dict[str, Any], body: bytes) -> An
 
 
 def schema_map_from_registry_doc(schema_doc: dict[str, Any]) -> dict[str, str]:
-    """Derive DataFlow logical field map from a registry subject/schema document."""
+    """Derive Datawrap logical field map from a registry subject/schema document."""
     schema_type, parsed = _parse_registered_schema(schema_doc)
     if schema_type == "AVRO":
         from services.avro_schema import schema_map_from_avro

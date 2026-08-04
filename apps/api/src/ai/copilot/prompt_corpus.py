@@ -1,4 +1,4 @@
-"""Enterprise Data Pilot prompt corpus — parametric real-world NL prompts.
+"""Enterprise Datawrap Pilot prompt corpus — parametric real-world NL prompts.
 
 Generates ≥1000 prompts with expected primary tools for regression. Cases are
 deterministic expansions of enterprise phrasing (query / analyze / suggest /
@@ -395,7 +395,7 @@ def iter_prompt_corpus() -> list[PromptCase]:
     for p in (
         "what is upsert",
         "what is CDC",
-        "what is DataFlow",
+        "what is Datawrap",
         "what is DataTransfer",
         "explain preflight",
         "how do I transfer data",
@@ -403,7 +403,7 @@ def iter_prompt_corpus() -> list[PromptCase]:
         "what is a connector",
         "what is quarantine",
         "tell me about sync modes",
-        "what makes DataFlow different",
+        "what makes Datawrap different",
         "can I move data between postgres and mysql",
         "how do I validate before transfer",
         "what is schema drift",

@@ -1,6 +1,6 @@
 """Iceberg catalog reader for REST / Glue / SQL / Nessie catalogs.
 
-Wraps ``pyiceberg`` to read real Iceberg tables and return DataFlow ``ReadBatch``
+Wraps ``pyiceberg`` to read real Iceberg tables and return Datawrap ``ReadBatch``
 objects. The reader expects either a ``cfg`` dict (the canonical
 ``resolve_connector_config`` output) or individual connection fields.
 """
@@ -53,7 +53,7 @@ def _read_table(
     offset: int,
     columns: list[str] | None,
 ) -> ReadBatch:
-    """Read an Iceberg table and return a DataFlow ``ReadBatch``."""
+    """Read an Iceberg table and return a Datawrap ``ReadBatch``."""
     from connectors.iceberg_catalog import load_catalog, parse_iceberg_catalog_config
 
     config = parse_iceberg_catalog_config(endpoint)

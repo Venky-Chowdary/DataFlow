@@ -1,4 +1,4 @@
-"""GitOps manifest builders + plan/apply for declarative DataFlow resources.
+"""GitOps manifest builders + plan/apply for declarative Datawrap resources.
 
 Produces a versionable ``dataflow.yaml`` document (schedules + contracts).
 ``plan`` is read-only; ``apply`` creates/updates resources. Delivery semantics
@@ -92,7 +92,7 @@ def build_dataflow_manifest(*, include_contracts: bool = True) -> dict[str, Any]
 
     return {
         "apiVersion": "dataflow.space/v1",
-        "kind": "DataFlowManifest",
+        "kind": "DatawrapManifest",
         "metadata": {"generator": "dataflow-gitops-export"},
         "resources": resources,
     }
@@ -104,7 +104,7 @@ def _normalize_resources(payload: dict[str, Any] | list[Any]) -> list[dict[str, 
     if not isinstance(payload, dict):
         return []
     kind = str(payload.get("kind") or "")
-    if kind == "DataFlowManifest":
+    if kind == "DatawrapManifest":
         raw = payload.get("resources") or []
         return [r for r in raw if isinstance(r, dict)]
     if kind in {"PipelineSchedule", "DataContract"}:
@@ -211,7 +211,7 @@ def apply_manifest(
     dry_run: bool = False,
     require_signed_contracts: bool = False,
 ) -> dict[str, Any]:
-    """Apply a DataFlowManifest (or single resource). ``dry_run=True`` delegates to plan.
+    """Apply a DatawrapManifest (or single resource). ``dry_run=True`` delegates to plan.
 
     When ``require_signed_contracts=True`` (CD / staging), every PipelineSchedule
     must reference a SIGNED contract — even if the YAML omits

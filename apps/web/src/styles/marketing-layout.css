@@ -1,16 +1,17 @@
 /**
- * Marketing layout authority — loaded AFTER landing.css.
+ * Marketing layout authority ? loaded AFTER landing.css.
  * One shell, one rhythm, one theme. Editorial density over card walls.
  */
 
-/* ─── Tokens (single source for marketing density) ─── */
+/* ??? Tokens (single source for marketing density) ??? */
 .lp {
-  --lp-shell: min(1080px, calc(100% - clamp(28px, 5vw, 64px)));
-  --lp-shell-wide: min(1080px, calc(100% - clamp(28px, 5vw, 64px)));
+  /* Single content width for landing + every marketing page */
+  --lp-shell: min(1120px, calc(100% - clamp(28px, 5vw, 64px)));
+  --lp-shell-wide: min(1120px, calc(100% - clamp(28px, 5vw, 64px)));
   --lp-gutter: clamp(14px, 3vw, 24px);
   --lp-section-y: clamp(40px, 6vh, 72px);
   --lp-section-y-sm: clamp(28px, 4vh, 48px);
-  /* Align with apps/web tokens.css — no second brand palette */
+  /* Align with apps/web tokens.css ? no second brand palette */
   --lp-ink: var(--df-text-primary);
   --lp-muted: var(--df-text-secondary);
   --lp-muted-soft: var(--df-text-muted);
@@ -28,7 +29,7 @@
   max-width: 100%;
 }
 
-/* Ambient decoration off — paint cost + visual noise */
+/* Ambient decoration off ? paint cost + visual noise */
 .lp-ambient,
 .lp-ambient-orb,
 .lp-ambient-grid,
@@ -39,13 +40,13 @@
   display: none !important;
 }
 
-/* Soft page canvas — no competing gradients fighting sections */
+/* Soft page canvas ? no competing gradients fighting sections */
 .lp {
   background: var(--lp-canvas) !important;
 }
 
 /*
- * Content shell — NEVER apply to .lp-nav-shell.
+ * Content shell ? NEVER apply to .lp-nav-shell.
  * Nav stays wider (1280) so Pricing / CTAs cannot collide.
  */
 .lp-mkt-hero-grid,
@@ -85,7 +86,7 @@
   padding-right: 0 !important;
 }
 
-/* Nav shell — design canvas: 1280, independent of content */
+/* Nav shell ? design canvas: 1280, independent of content */
 .lp-nav-shell {
   width: 100% !important;
   max-width: min(1280px, calc(100% - clamp(20px, 3vw, 40px))) !important;
@@ -118,6 +119,50 @@
 
 .lp-nav-end {
   flex: 0 0 auto !important;
+  margin-left: auto !important;
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+}
+
+.lp-nav-surface {
+  justify-content: flex-start;
+}
+
+.lp-nav-links {
+  margin-left: 0;
+  margin-right: 0;
+}
+
+/* When center links hide, keep actions pinned to the right edge */
+@media (max-width: 1100px) {
+  .lp-nav-links:not(.is-open) {
+    display: none !important;
+  }
+
+  .lp-nav-end {
+    margin-left: auto !important;
+  }
+
+  .lp-nav-actions {
+    display: flex !important;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .lp-nav-actions .lp-btn--brand {
+    display: inline-flex !important;
+  }
+
+  .lp-nav-toggle {
+    display: grid !important;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    border: 1px solid var(--lp-line);
+    background: #fff;
+  }
 }
 
 .lp-nav-actions {
@@ -133,7 +178,8 @@
 }
 
 .docs-space {
-  width: var(--lp-shell) !important;
+  /* Near full viewport so workspace screenshots stay large and aligned */
+  width: min(1680px, calc(100% - clamp(16px, 2vw, 40px))) !important;
   max-width: 100% !important;
   margin: 12px auto 36px !important;
   border-radius: var(--lp-radius) !important;
@@ -143,7 +189,7 @@
   background: #fff;
 }
 
-/* Section rhythm — tighter, consistent */
+/* Section rhythm ? tighter, consistent */
 .lp-section {
   padding: var(--lp-section-y) 0 !important;
   margin: 0 !important;
@@ -273,7 +319,7 @@
   animation-play-state: running;
 }
 
-/* ─── Hero ─── */
+/* ??? Hero ??? */
 .lp-hero--bleed {
   background: #fff;
   border-bottom: 1px solid var(--lp-line);
@@ -349,7 +395,7 @@
   white-space: nowrap;
 }
 
-/* Subpage hero — light default */
+/* Subpage hero ? light default */
 .lp-mkt-hero-band {
   padding: clamp(40px, 6vh, 68px) 0 var(--lp-section-y-sm) !important;
   background: #fff !important;
@@ -357,7 +403,7 @@
   color: var(--lp-ink);
 }
 
-/* Ink hero — scoped contrast (wins over global teal kickers) */
+/* Ink hero ? scoped contrast (wins over global teal kickers) */
 .lp-mkt-hero-band--ink {
   background: linear-gradient(180deg, #0b1220 0%, #121a2b 100%) !important;
   color: #f8fafc !important;
@@ -422,7 +468,7 @@
   border-radius: var(--lp-radius);
 }
 
-/* ─── Stats strip → hairline rail (not card wall) ─── */
+/* ??? Stats strip ? hairline rail (not card wall) ??? */
 .lp-mkt-stats-strip {
   display: grid !important;
   grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
@@ -476,7 +522,7 @@
   line-height: 1.35;
 }
 
-/* Compliance — compact chips, dense wrap */
+/* Compliance ? compact chips, dense wrap */
 .lp-mkt-compliance-badges {
   display: flex;
   flex-wrap: wrap;
@@ -498,7 +544,7 @@
   color: var(--lp-ink);
 }
 
-/* ─── Logos ─── */
+/* ??? Logos ??? */
 .lp-logos {
   padding: 24px 0 !important;
   background: #fff;
@@ -548,7 +594,7 @@
   white-space: nowrap;
 }
 
-/* ─── Outcomes rail ─── */
+/* ??? Outcomes rail ??? */
 .lp-outcomes-rail {
   background: #fff;
 }
@@ -602,7 +648,7 @@
   color: var(--lp-muted);
 }
 
-/* ─── Product surface strip → dense 2-col editorial ─── */
+/* ??? Product surface strip ? dense 2-col editorial ??? */
 .lp-surface-strip-band {
   padding: var(--lp-section-y) 0;
   background: #fff;
@@ -675,7 +721,7 @@
   font-size: 14px;
 }
 
-/* ─── Story rows ─── */
+/* ??? Story rows ??? */
 .lp-story-band {
   padding: var(--lp-section-y) 0;
   background: var(--lp-canvas);
@@ -726,7 +772,7 @@
   white-space: nowrap;
 }
 
-/* ─── Testimonials — 3-up quote grid ─── */
+/* ??? Testimonials ? 3-up quote grid ??? */
 .lp-testimonial-stack {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -784,7 +830,7 @@
   }
 }
 
-/* Trust — 4-up security layers */
+/* Trust ? 4-up security layers */
 .lp-trust-timeline {
   list-style: none;
   margin: 0 0 24px !important;
@@ -871,7 +917,7 @@
   color: var(--lp-teal);
 }
 
-/* ─── Pricing ─── */
+/* ??? Pricing ??? */
 .lp-pricing-meta {
   padding: 18px 0 !important;
   border-bottom: 1px solid var(--lp-line);
@@ -1002,7 +1048,7 @@
   gap: 10px;
 }
 
-/* ─── Enterprise / security editorial ─── */
+/* ??? Enterprise / security editorial ??? */
 .lp-enterprise-split {
   display: grid;
   grid-template-columns: minmax(0, 1.1fr) minmax(260px, 0.9fr);
@@ -1171,7 +1217,7 @@
   border-bottom: 1px solid var(--lp-line);
 }
 
-/* ─── Customers ─── */
+/* ??? Customers ??? */
 .lp-cust-sectors,
 .lp-cust-stories {
   padding: var(--lp-section-y) 0 !important;
@@ -1263,7 +1309,7 @@
   color: var(--lp-muted);
 }
 
-/* ─── Integrations / connectors ─── */
+/* ??? Integrations / connectors ??? */
 .lp-connectors-narrative {
   padding: var(--lp-section-y) 0 !important;
 }
@@ -1307,7 +1353,7 @@
   margin-top: 18px;
 }
 
-/* ─── Product surfaces: packet flow + chapters ─── */
+/* ??? Product surfaces: packet flow + chapters ??? */
 .lp-mkt-page-rich .lp-mkt-body {
   padding-top: 0 !important;
   padding-bottom: 0 !important;
@@ -1316,7 +1362,7 @@
 .lp-mkt-surface .lp-mkt-chapter {
   padding-top: var(--lp-section-y-sm) !important;
   padding-bottom: var(--lp-section-y-sm) !important;
-  border-bottom: 1px solid var(--lp-line);
+  border-bottom: 0;
 }
 
 .lp-mkt-packet-flow {
@@ -1417,7 +1463,7 @@
   font-size: 13.5px !important;
 }
 
-/* Studio band — denser when present */
+/* Studio band ? denser when present */
 .lp-studio-band {
   padding: var(--lp-section-y) 0 !important;
   background: #fff;
@@ -1483,7 +1529,7 @@
   line-height: 1.5;
 }
 
-/* Docs space — editorial support layout */
+/* Docs space ? editorial support layout */
 .docs-space-page-head {
   min-width: 0;
   max-width: 100%;
@@ -1491,9 +1537,10 @@
 
 .docs-space-page-head h1 {
   letter-spacing: -0.03em;
-  max-width: 20ch !important;
-  font-size: clamp(1.65rem, 2.4vw, 2.15rem) !important;
-  line-height: 1.15 !important;
+  max-width: none !important;
+  width: 100% !important;
+  font-size: clamp(1.85rem, 2.8vw, 2.45rem) !important;
+  line-height: 1.12 !important;
   white-space: normal !important;
   overflow: visible !important;
   text-overflow: unset !important;
@@ -1502,12 +1549,13 @@
 .docs-space-page-head p,
 .docs-space-page-head .docs-article-lead,
 .docs-space-page-head .lp-mkt-lead {
-  max-width: 58ch !important;
+  max-width: min(72ch, 100%) !important;
   white-space: normal !important;
   overflow: visible !important;
   text-overflow: unset !important;
   overflow-wrap: break-word !important;
-  line-height: 1.55 !important;
+  line-height: 1.6 !important;
+  font-size: 16.5px !important;
 }
 
 .docs-space-start {
@@ -1620,9 +1668,9 @@
   }
 }
 
-/* ═══════════════════════════════════════════════════════════
-   Contact page — light enterprise pilot wizard (kills cinema dark)
-   ═══════════════════════════════════════════════════════════ */
+/* ???????????????????????????????????????????????????????????
+   Contact page ? light enterprise pilot wizard (kills cinema dark)
+   ??????????????????????????????????????????????????????????? */
 
 .lp-page-contact {
   overflow-x: clip;
@@ -2013,10 +2061,10 @@
 .lp .lp-mkt-section-footer {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 12px;
   margin-top: 20px;
-  padding-top: 16px;
-  border-top: 1px solid var(--lp-line);
+  padding-top: 0;
+  border-top: 0;
 }
 
 .lp-section > .lp-section-footer {
@@ -2026,9 +2074,12 @@
   margin-right: auto;
 }
 
-.lp-section-footer--center,
 .lp-section-footer--start {
   justify-content: flex-start;
+}
+
+.lp-section-footer--center {
+  justify-content: center;
 }
 
 /* Infra ribbon denser */
@@ -2043,7 +2094,7 @@
   color: var(--lp-muted);
 }
 
-/* ─── Responsive ─── */
+/* ??? Responsive ??? */
 @media (max-width: 960px) {
   .lp-hero--bleed .lp-hero-immersive-grid {
     grid-template-columns: 1fr !important;
@@ -2106,9 +2157,9 @@
   }
 }
 
-/* ═══════════════════════════════════════════════════════════════════
-   Airbyte-class home composition (DataFlow tokens)
-   ═══════════════════════════════════════════════════════════════════ */
+/* ???????????????????????????????????????????????????????????????????
+   Airbyte-class home composition (Datawrap tokens)
+   ??????????????????????????????????????????????????????????????????? */
 
 .lp-announce {
   display: flex;
@@ -2146,7 +2197,7 @@
   font-weight: 600;
 }
 
-/* ─── Home hero — beat .lp-hero flex/center cascade ─── */
+/* ??? Home hero ? beat .lp-hero flex/center cascade ??? */
 .lp-hero.lp-hero--home {
   display: block !important;
   align-items: stretch !important;
@@ -2159,7 +2210,7 @@
 }
 
 .lp-hero-home-grid {
-  width: min(1160px, calc(100% - clamp(28px, 5vw, 64px))) !important;
+  width: var(--lp-shell) !important;
   max-width: 100%;
   margin: 0 auto;
   display: grid !important;
@@ -2393,7 +2444,7 @@
 }
 
 .lp-home-stack-row {
-  width: min(1160px, calc(100% - clamp(28px, 5vw, 64px)));
+  width: var(--lp-shell);
   max-width: 100%;
   margin: 0 auto;
   display: flex;
@@ -2438,11 +2489,48 @@
 .lp-home-arch-inner,
 .lp-home-usecases-inner,
 .lp-home-connectors-inner,
-.lp-home-surfaces-inner {
-  width: min(1160px, calc(100% - clamp(28px, 5vw, 64px)));
-  max-width: 100%;
-  margin: 0 auto;
+.lp-home-surfaces-inner,
+.lp-home-proof-inner,
+.lp-home-trust-inner,
+.lp-home-final-inner,
+.lp-cust-hero-inner,
+.lp-cust-outcomes,
+.lp-cust-section,
+.lp-sec-hero-inner,
+.lp-sec-badges,
+.lp-sec-section,
+.lp-sec-agent,
+.lp-int-hero-inner,
+.lp-int-strip,
+.lp-int-section,
+.lp-int-honesty,
+.lp-int-cta,
+.lp-ent-hero-inner,
+.lp-ent-metrics,
+.lp-ent-section,
+.lp-pricing-hero-inner,
+.lp-pricing-v2-plans,
+.lp-pricing-v2-compare,
+.lp-pricing-v2-principles,
+.lp-pricing-v2-cta-inner,
+.lp-sol-hero-inner,
+.lp-sol-section,
+.lp-contact-hero-inner {
+  width: var(--lp-shell) !important;
+  max-width: 100% !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
   box-sizing: border-box;
+}
+
+.lp-home-arch-cta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 28px;
+  padding-top: 20px;
+  border-top: 1px solid var(--lp-line);
+  position: static;
 }
 
 .lp-home-pain-list {
@@ -2484,7 +2572,7 @@
   font-size: 14.5px;
   line-height: 1.55;
   color: var(--lp-muted);
-  max-width: 58ch;
+  max-width: none;
 }
 
 .lp-home-arch {
@@ -2758,7 +2846,7 @@
 }
 
 .lp-home-final-inner {
-  width: min(1160px, calc(100% - clamp(28px, 5vw, 64px)));
+  width: var(--lp-shell);
   max-width: 100%;
   margin: 0 auto;
   text-align: left;
@@ -2831,5 +2919,402 @@
   .lp-announce {
     font-size: 12.5px;
     text-align: center;
+  }
+}
+
+/* ---------------------------------------------------------------
+   Pricing v2 ? cinematic hero + plan grid + clean compare
+   --------------------------------------------------------------- */
+
+.lp-pricing-v2 {
+  --lp-pricing-shell: var(--lp-shell);
+}
+
+.lp-pricing-hero {
+  position: relative;
+  isolation: isolate;
+  min-height: min(72vh, 620px);
+  display: grid;
+  align-items: end;
+  overflow: hidden;
+  background: #07141a;
+  color: #f8fafc;
+}
+
+.lp-pricing-hero-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  z-index: 0;
+  transform: scale(1.02);
+  animation: lp-pricing-hero-drift 28s ease-in-out infinite alternate;
+}
+
+.lp-pricing-hero-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background:
+    linear-gradient(105deg, rgba(7, 20, 26, 0.88) 0%, rgba(7, 20, 26, 0.55) 48%, rgba(7, 20, 26, 0.35) 100%),
+    linear-gradient(0deg, rgba(7, 20, 26, 0.75) 0%, transparent 42%);
+}
+
+.lp-pricing-hero-inner {
+  position: relative;
+  z-index: 2;
+  width: var(--lp-pricing-shell);
+  margin: 0 auto;
+  padding: clamp(72px, 12vh, 120px) 0 clamp(48px, 8vh, 80px);
+}
+
+.lp-pricing-hero-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 16px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #5eead4;
+}
+
+.lp-pricing-hero-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #2dd4bf;
+  box-shadow: 0 0 0 4px rgba(45, 212, 191, 0.18);
+  animation: lp-pricing-pulse 2.4s ease-in-out infinite;
+}
+
+.lp-pricing-hero h1 {
+  margin: 0 0 16px;
+  max-width: 14ch;
+  font-family: var(--df-font-display);
+  font-size: clamp(2.4rem, 5.5vw, 3.75rem);
+  font-weight: 800;
+  letter-spacing: -0.045em;
+  line-height: 1.05;
+  color: #f8fafc;
+}
+
+.lp-pricing-hero-em {
+  color: #5eead4;
+}
+
+.lp-pricing-hero-lead {
+  margin: 0 0 28px;
+  max-width: 42ch;
+  font-size: clamp(1.02rem, 1.5vw, 1.15rem);
+  line-height: 1.55;
+  color: #cbd5e1;
+}
+
+.lp-pricing-hero .lp-btn--on-ink {
+  border-color: rgba(248, 250, 252, 0.35);
+  color: #f8fafc;
+  background: transparent;
+}
+
+.lp-pricing-hero .lp-btn--on-ink:hover {
+  background: rgba(248, 250, 252, 0.08);
+}
+
+@keyframes lp-pricing-hero-drift {
+  from { transform: scale(1.02) translate3d(0, 0, 0); }
+  to { transform: scale(1.06) translate3d(-1.2%, -0.8%, 0); }
+}
+
+@keyframes lp-pricing-pulse {
+  0%, 100% { box-shadow: 0 0 0 4px rgba(45, 212, 191, 0.15); }
+  50% { box-shadow: 0 0 0 8px rgba(45, 212, 191, 0.05); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lp-pricing-hero-img,
+  .lp-pricing-hero-dot { animation: none; }
+}
+
+/* Plan cards */
+.lp-pricing-v2-plans {
+  width: var(--lp-pricing-shell);
+  margin: clamp(-36px, -5vh, -24px) auto 0;
+  position: relative;
+  z-index: 3;
+  padding-bottom: clamp(40px, 6vh, 64px);
+}
+
+.lp-pricing-v2-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+  align-items: stretch;
+}
+
+.lp-pricing-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 28px 24px 24px;
+  border-radius: 20px;
+  background: #fff;
+  border: 1px solid var(--df-border, #e2e8f0);
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.06);
+  transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.35s ease;
+}
+
+.lp-pricing-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 24px 48px rgba(15, 23, 42, 0.1);
+}
+
+.lp-pricing-card.is-featured {
+  border-color: color-mix(in srgb, var(--df-brand, #0f766e) 55%, #e2e8f0);
+  background: linear-gradient(180deg, #f0fdfa 0%, #fff 42%);
+  box-shadow: 0 22px 50px rgba(15, 118, 110, 0.14);
+}
+
+.lp-pricing-card-flag {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #0f766e;
+  background: rgba(15, 118, 110, 0.1);
+}
+
+.lp-pricing-card-head h2 {
+  margin: 0;
+  font-family: var(--df-font-display);
+  font-size: 1.35rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  color: var(--df-text-primary);
+}
+
+.lp-pricing-card-period {
+  margin: 4px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--df-text-muted);
+}
+
+.lp-pricing-card-price strong {
+  font-family: var(--df-font-display);
+  font-size: clamp(2rem, 3vw, 2.4rem);
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  color: var(--df-text-primary);
+}
+
+.lp-pricing-card-blurb {
+  margin: 0;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: var(--df-text-secondary);
+  min-height: 4.2em;
+}
+
+.lp-pricing-card-features {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+  flex: 1;
+}
+
+.lp-pricing-card-features li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 0.92rem;
+  color: var(--df-text-primary);
+}
+
+.lp-pricing-card-features li svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--df-brand, #0f766e);
+}
+
+.lp-btn--block {
+  width: 100%;
+  justify-content: center;
+}
+
+/* Compare table */
+.lp-pricing-v2-compare {
+  width: var(--lp-pricing-shell);
+  margin: 0 auto;
+  padding: clamp(28px, 5vh, 48px) 0 clamp(40px, 6vh, 64px);
+}
+
+.lp-pricing-v2-compare-head {
+  max-width: 42rem;
+  margin-bottom: 28px;
+}
+
+.lp-pricing-v2-compare-head h2 {
+  margin: 8px 0 10px;
+  font-family: var(--df-font-display);
+  font-size: clamp(1.6rem, 3vw, 2.1rem);
+  letter-spacing: -0.03em;
+}
+
+.lp-pricing-v2-compare-head p {
+  margin: 0;
+  color: var(--df-text-secondary);
+  line-height: 1.55;
+}
+
+.lp-pricing-v2-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: 16px;
+  background: #fff;
+}
+
+.lp-pricing-v2-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 640px;
+}
+
+.lp-pricing-v2-table th,
+.lp-pricing-v2-table td {
+  padding: 14px 18px;
+  text-align: left;
+  border-bottom: 1px solid var(--df-border, #e2e8f0);
+  font-size: 0.92rem;
+}
+
+.lp-pricing-v2-table thead th {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--df-text-muted);
+  background: #f8fafc;
+}
+
+.lp-pricing-v2-table tbody th {
+  font-weight: 600;
+  color: var(--df-text-primary);
+}
+
+.lp-pricing-v2-table .is-hot {
+  background: color-mix(in srgb, var(--df-brand, #0f766e) 6%, #fff);
+}
+
+.lp-pricing-yes {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  font-weight: 700;
+  color: #0f766e;
+  background: rgba(15, 118, 110, 0.1);
+}
+
+.lp-pricing-no {
+  color: #94a3b8;
+}
+
+.lp-pricing-v2-principles {
+  width: var(--lp-pricing-shell);
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  padding-bottom: clamp(36px, 5vh, 56px);
+}
+
+.lp-pricing-principle {
+  padding: 20px 18px;
+  border-radius: 14px;
+  background: #f8fafc;
+  border: 1px solid var(--df-border, #e2e8f0);
+  display: grid;
+  gap: 6px;
+}
+
+.lp-pricing-principle strong {
+  font-family: var(--df-font-display);
+  font-size: 1rem;
+  letter-spacing: -0.02em;
+}
+
+.lp-pricing-principle span {
+  font-size: 0.9rem;
+  line-height: 1.45;
+  color: var(--df-text-secondary);
+}
+
+.lp-pricing-v2-cta {
+  width: var(--lp-pricing-shell);
+  margin: 0 auto clamp(48px, 8vh, 80px);
+}
+
+.lp-pricing-v2-cta-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 28px 28px;
+  border-radius: 18px;
+  background: #0b1f1c;
+  color: #e2e8f0;
+}
+
+.lp-pricing-v2-cta-inner h3 {
+  margin: 0 0 8px;
+  font-family: var(--df-font-display);
+  font-size: 1.35rem;
+  letter-spacing: -0.02em;
+  color: #f8fafc;
+}
+
+.lp-pricing-v2-cta-inner p {
+  margin: 0;
+  max-width: 48ch;
+  line-height: 1.5;
+  color: #94a3b8;
+}
+
+.lp-pricing-v2-cta-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+@media (max-width: 960px) {
+  .lp-pricing-v2-grid,
+  .lp-pricing-v2-principles {
+    grid-template-columns: 1fr;
+  }
+
+  .lp-pricing-v2-cta-inner {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .lp-pricing-card.is-featured {
+    order: -1;
   }
 }

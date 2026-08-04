@@ -93,7 +93,7 @@ def build_pinecone_vectors(
     *,
     dimension: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Map DataFlow vector rows to Pinecone upsert vectors (testable, no I/O).
+    """Map Datawrap vector rows to Pinecone upsert vectors (testable, no I/O).
 
     Returns ``(vectors, rejected)``. Missing/mismatched embeddings are rejected
     — never replaced with fabricated zero vectors. Missing ids → deterministic

@@ -12,6 +12,7 @@ import itertools
 import json
 import logging
 import os
+from services.brand_env import getenv_brand
 import sys
 import tempfile
 from collections.abc import Callable
@@ -72,9 +73,9 @@ from .adapters import records_to_matrix, resolve_connector_config, resolve_dest_
 from .stream import _write_batch
 
 STREAMABLE_TYPES = {"csv", "tsv", "jsonl", "ndjson", "json", "excel", "parquet", "avro", "orc"}
-STREAM_THRESHOLD = int(os.getenv("DATAFLOW_STREAM_FILE_ROWS", "1"))
-FILE_SPILL_THRESHOLD = int(os.getenv("DATAFLOW_FILE_SPILL_THRESHOLD", str(50 * 1024 * 1024)))
-SPILL_DIR = os.getenv("DATAFLOW_SPILL_DIR") or None
+STREAM_THRESHOLD = int(getenv_brand("STREAM_FILE_ROWS", "1"))
+FILE_SPILL_THRESHOLD = int(getenv_brand("FILE_SPILL_THRESHOLD", str(50 * 1024 * 1024)))
+SPILL_DIR = getenv_brand("SPILL_DIR") or None
 
 
 _JSONL_SCALAR_ERROR = (
@@ -184,7 +185,7 @@ def _excel_preview(content: bytes | str | os.PathLike, preview_rows: int = 100) 
         from openpyxl import load_workbook
     except ImportError as exc:
         raise ValueError(
-            "Excel import is not ready on this platform node. DataFlow bundles file parsers — retry shortly."
+            "Excel import is not ready on this platform node. Datawrap bundles file parsers — retry shortly."
         ) from exc
 
     wb = load_workbook(content, read_only=True, data_only=True) if _is_path(content) else load_workbook(
@@ -219,7 +220,7 @@ def _excel_batches(content: bytes | str | os.PathLike, chunk_size: int):
         from openpyxl import load_workbook
     except ImportError as exc:
         raise ValueError(
-            "Excel import is not ready on this platform node. DataFlow bundles file parsers — retry shortly."
+            "Excel import is not ready on this platform node. Datawrap bundles file parsers — retry shortly."
         ) from exc
 
     wb = load_workbook(content, read_only=True, data_only=True) if _is_path(content) else load_workbook(
@@ -265,7 +266,7 @@ def _excel_count(content: bytes | str | os.PathLike) -> int:
         from openpyxl import load_workbook
     except ImportError as exc:
         raise ValueError(
-            "Excel import is not ready on this platform node. DataFlow bundles file parsers — retry shortly."
+            "Excel import is not ready on this platform node. Datawrap bundles file parsers — retry shortly."
         ) from exc
 
     wb = load_workbook(content, read_only=True, data_only=True) if _is_path(content) else load_workbook(
@@ -859,7 +860,7 @@ def stream_file_to_database(
         )
     drift_detector = BatchDriftDetector()
 
-    max_workers = int(os.getenv("DATAFLOW_PARALLEL_WORKERS", str(min(2, os.cpu_count() or 1))))
+    max_workers = int(getenv_brand("PARALLEL_WORKERS", str(min(2, os.cpu_count() or 1))))
     # SQLite handles concurrency poorly with a single shared file, so keep it sequential.
     # Snowflake COPY INTO uses a named temporary stage per table; concurrent batches
     # overwrite each other's stage files, so it must also be sequential.

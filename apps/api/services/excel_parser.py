@@ -13,7 +13,7 @@ def _load_workbook(content: bytes):
         from openpyxl import load_workbook
     except ImportError as exc:
         raise ValueError(
-            "Excel import is not ready on this platform node. DataFlow bundles file parsers — retry shortly."
+            "Excel import is not ready on this platform node. Datawrap bundles file parsers — retry shortly."
         ) from exc
     return load_workbook(BytesIO(content), read_only=True, data_only=True)
 

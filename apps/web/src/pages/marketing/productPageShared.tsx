@@ -6,17 +6,27 @@ export const PRODUCT_FRAMES = {
     {
       src: "/docs/screenshots/app-transfer-source.png",
       alt: "Transfer Studio source step with sample-orders.csv typed columns",
-      caption: "Transfer Studio · Source — profiled sample-orders.csv with live column types",
+      caption: "1 · Source — Load sample-orders.csv and review Detected structure",
     },
     {
-      src: "/docs/screenshots/app-jobs.png",
-      alt: "Job Theater after a Transfer Studio run",
-      caption: "After Run — Job Theater shows reconcile and row fidelity",
+      src: "/docs/screenshots/app-transfer-destination.png",
+      alt: "Transfer Studio destination File Export CSV",
+      caption: "2 · Destination — File Export CSV to exports/sample-orders.csv",
     },
     {
-      src: "/docs/screenshots/app-overview.png",
-      alt: "Workspace Overview with live throughput",
-      caption: "Overview — rows moved and connection health from the same workspace",
+      src: "/docs/screenshots/app-transfer-map.png",
+      alt: "Transfer Studio Map columns for sample-orders",
+      caption: "3 · Map — Align five columns, Accept risk, continue",
+    },
+    {
+      src: "/docs/screenshots/app-transfer-validate.png",
+      alt: "Transfer Studio Validate gates dashboard",
+      caption: "4 · Validate — Clear blocking gates before Execute unlocks",
+    },
+    {
+      src: "/docs/screenshots/app-transfer-run.png",
+      alt: "Transfer Studio Run step before Execute",
+      caption: "5 · Run — Execute Transfer when Preflight is approved",
     },
   ],
   jobs: [
@@ -73,8 +83,8 @@ export const PRODUCT_FRAMES = {
   pilot: [
     {
       src: "/docs/screenshots/app-pilot.png",
-      alt: "Data Pilot natural-language triage",
-      caption: "Data Pilot — NL triage on the governed engine",
+      alt: "Datawrap Pilot natural-language triage",
+      caption: "Datawrap Pilot — NL triage on the governed engine",
     },
     {
       src: "/docs/screenshots/app-jobs.png",

@@ -20,7 +20,7 @@ export function ProductValueStrip({ compact = false }: ProductValueStripProps) {
   return (
     <div className={["df-product-strip", compact ? "df-product-strip--compact" : ""].filter(Boolean).join(" ")}>
       <div className="df-product-strip-head">
-        <p className="df-product-strip-tag">DataFlow</p>
+        <p className="df-product-strip-tag">Datawrap</p>
         <h2 className="df-product-strip-title">
           One-click data transfer with fail-fast preflight
         </h2>

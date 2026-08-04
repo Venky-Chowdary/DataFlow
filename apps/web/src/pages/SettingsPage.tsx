@@ -39,7 +39,7 @@ export function SettingsPage() {
   const { toast } = useToast();
   const { confirm } = useConfirm();
   const [tab, setTab] = useState<TabId>("general");
-  const [orgName, setOrgName] = useState("DataFlow");
+  const [orgName, setOrgName] = useState("Datawrap");
   const [timezone, setTimezone] = useState("UTC");
   const [retention, setRetention] = useState("90");
   const [settingsLoading, setSettingsLoading] = useState(true);

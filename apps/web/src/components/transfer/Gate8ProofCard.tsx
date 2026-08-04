@@ -280,7 +280,7 @@ export function Gate8ProofCard({
           </>
         ) : (
           <>
-            After the write finishes, DataFlow compares <strong>row counts</strong> and
+            After the write finishes, Datawrap compares <strong>row counts</strong> and
             {" "}
             <strong>content checksums</strong> so silent truncation or corruption cannot
             look like success. Quarantined rows are <strong>held out</strong> of the primary

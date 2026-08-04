@@ -1,5 +1,5 @@
 """
-DataTransfer.space — API Server
+Datawrap — API Server
 
 Enterprise-grade data transfer platform with AI-powered semantic analysis.
 """
@@ -7,6 +7,7 @@ Enterprise-grade data transfer platform with AI-powered semantic analysis.
 import asyncio
 import logging
 import os
+from services.brand_env import getenv_brand
 import time
 import uuid
 from contextlib import asynccontextmanager, nullcontext
@@ -79,7 +80,7 @@ async def lifespan(app: FastAPI):
     except Exception as ie:
         print(f"[!] Integrations bootstrap warning: {ie}")
 
-    print(f"[*] DataTransfer.space API starting (env={'production' if is_production() else 'development'})…")
+    print(f"[*] Datawrap API starting (env={'production' if is_production() else 'development'})…")
     try:
         from .services.driver_bootstrap import ensure_platform_drivers
 
@@ -93,7 +94,7 @@ async def lifespan(app: FastAPI):
     except Exception as de:
         print(f"[!] Driver bootstrap warning: {de}")
 
-    training_enabled = os.getenv("DATAFLOW_TRAINING", "off" if is_production() else "on").lower() not in (
+    training_enabled = getenv_brand("TRAINING", "off" if is_production() else "on").lower() not in (
         "off", "0", "false",
     )
 
@@ -216,14 +217,14 @@ async def lifespan(app: FastAPI):
         shutdown_tracing()
     except Exception:
         pass
-    print("[*] DataTransfer.space API shutting down…")
+    print("[*] Datawrap API shutting down…")
 
 
 _docs = "/docs" if docs_enabled() else None
 _redoc = "/redoc" if docs_enabled() else None
 
 app = FastAPI(
-    title="DataTransfer.space API",
+    title="Datawrap API",
     description="Universal Data Transfer Platform API",
     version="1.0.0",
     docs_url=_docs,
@@ -399,7 +400,7 @@ app.include_router(repair_router, prefix="/api/v1")
 @app.get("/")
 async def root():
     payload = {
-        "name": "DataTransfer.space",
+        "name": "Datawrap",
         "version": "1.0.0",
         "status": "operational",
         "environment": "production" if is_production() else "development",

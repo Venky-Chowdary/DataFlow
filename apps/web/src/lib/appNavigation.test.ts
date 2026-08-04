@@ -22,4 +22,9 @@ describe("screenFromHash aliases", () => {
     assert.equal(screenFromHash("#/overview"), "dashboard");
     assert.equal(screenFromHash("#/home"), null);
   });
+
+  it("maps Proofs nav label URL to benchmarks screen", () => {
+    assert.equal(screenFromHash("#/proofs"), "benchmarks");
+    assert.equal(screenFromHash("#/proof"), "benchmarks");
+  });
 });

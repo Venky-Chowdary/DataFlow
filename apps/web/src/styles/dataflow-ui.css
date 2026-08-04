@@ -1,5 +1,5 @@
 /**
- * DataFlow UI — single authoritative design system
+ * Datawrap UI — single authoritative design system
  * Airbyte / Fivetran / dbt Cloud patterns: light surfaces, clear hierarchy, restrained motion
  */
 
@@ -1836,7 +1836,7 @@ body {
 .df2-page .dt-badge-info { background: #f0fdfa; color: #0f766e; }
 .df2-page .dt-badge-default { background: #f1f5f9; color: #64748b; }
 
-/* ─── Data Pilot (full page) ─── */
+/* ─── Datawrap Pilot (full page) ─── */
 
 .df2-pilot {
   display: flex;

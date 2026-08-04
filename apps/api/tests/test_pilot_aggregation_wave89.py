@@ -1,4 +1,4 @@
-"""Wave 89 — Data Pilot answers analytics questions with exact aggregates.
+"""Wave 89 — Datawrap Pilot answers analytics questions with exact aggregates.
 
 Before this wave the pilot had no aggregation capability at all. Every phrasing
 a data operator actually uses returned nothing, or worse:
@@ -121,7 +121,7 @@ def test_non_analytics_prompts_are_not_hijacked(prompt):
     ],
 )
 def test_platform_inventory_is_not_a_table_scan(prompt, expected):
-    """"how many jobs" is DataFlow's own inventory, not SELECT COUNT(*) FROM jobs."""
+    """"how many jobs" is Datawrap's own inventory, not SELECT COUNT(*) FROM jobs."""
     names = [n for n, _ in infer_tools_from_message(prompt)]
     assert expected in names, f"{prompt!r} routed to {names}"
     assert "aggregate_data" not in names

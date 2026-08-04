@@ -237,7 +237,7 @@ def _build_db_endpoint(driver: str, tmp_path: Path, role: str, suffix: str) -> E
             port=1433,
             database="dataflow",
             username="sa",
-            password="DataFlow_CDC_2022!",
+            password="Datawrap_CDC_2022!",
             schema="dbo",
             table="payments_sqlserver",
         ),
@@ -284,7 +284,7 @@ def _file_content(fmt: str) -> tuple[bytes, str]:
         buf = BytesIO()
         schema = fastavro.parse_schema({
             "type": "record",
-            "name": "DataFlowRow",
+            "name": "DatawrapRow",
             "fields": [
                 {"name": "id", "type": ["null", "string"]},
                 {"name": "amount", "type": ["null", "string"]},

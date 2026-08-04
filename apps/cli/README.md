@@ -1,4 +1,4 @@
-# DataFlow GitOps CLI
+# Datawrap GitOps CLI
 
 Plan / apply / export / validate for `dataflow.yaml`.
 

@@ -1,5 +1,5 @@
 /**
- * Persist Data Pilot conversations locally so refresh / nav does not wipe chats.
+ * Persist Datawrap Pilot conversations locally so refresh / nav does not wipe chats.
  * Scoped per browser profile (localStorage) — not a server transcript store.
  * Secrets (passwords, connection URLs with credentials) are redacted before write.
  */
@@ -234,7 +234,7 @@ export function saveRailChat(
 
 /**
  * Promote the FAB/rail conversation into the Pilot workspace so opening
- * Data Pilot keeps the same session id, result ref, and message history.
+ * Datawrap Pilot keeps the same session id, result ref, and message history.
  * Returns null when the rail has nothing worth promoting.
  */
 export function promoteRailChatToPilotSession(): {

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from services.brand_env import getenv_brand
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -87,7 +88,7 @@ def _store_path() -> Path:
     ``DATAFLOW_CONNECTOR_STORE`` overrides the default so deployments can mount
     a persistent volume at a known location.
     """
-    env = os.getenv("DATAFLOW_CONNECTOR_STORE", "").strip()
+    env = getenv_brand("CONNECTOR_STORE", "").strip()
     if env:
         return Path(env)
     return STORE_PATH
@@ -172,7 +173,7 @@ def _resolve_backend() -> str:
     if _backend_choice is not None:
         return _backend_choice
 
-    env = os.getenv("DATAFLOW_CONNECTOR_STORE_BACKEND", "auto").lower()
+    env = getenv_brand("CONNECTOR_STORE_BACKEND", "auto").lower()
     if env in ("mongo", "mongodb"):
         _backend_choice = "mongo"
         logger.info("Connector store backend: mongo (explicit)")
@@ -315,7 +316,7 @@ def _save_all(connectors: list[SavedConnector]) -> None:
 
 
 def _seed_enabled() -> bool:
-    return os.getenv("DATAFLOW_SEED_DEMO", "").lower() in ("1", "true", "yes")
+    return getenv_brand("SEED_DEMO", "").lower() in ("1", "true", "yes")
 
 
 def _seed_defaults() -> list[SavedConnector]:
@@ -326,22 +327,22 @@ def _seed_defaults() -> list[SavedConnector]:
             name="PostgreSQL · Source (demo)",
             type="postgresql",
             role="source",
-            connection_string=os.getenv("DATAFLOW_DEMO_PG_CONNECTION_STRING", ""),
+            connection_string=getenv_brand("DEMO_PG_CONNECTION_STRING", ""),
         ),
         SavedConnector(
             id="demo-snowflake-dest",
             name="Snowflake · Warehouse (demo)",
             type="snowflake",
             role="destination",
-            connection_string=os.getenv("DATAFLOW_DEMO_SNOWFLAKE_CONNECTION_STRING", ""),
-            warehouse=os.getenv("DATAFLOW_DEMO_SNOWFLAKE_WAREHOUSE", "COMPUTE_WH"),
+            connection_string=getenv_brand("DEMO_SNOWFLAKE_CONNECTION_STRING", ""),
+            warehouse=getenv_brand("DEMO_SNOWFLAKE_WAREHOUSE", "COMPUTE_WH"),
         ),
         SavedConnector(
             id="demo-mongo-dest",
             name="MongoDB · Analytics (demo)",
             type="mongodb",
             role="destination",
-            connection_string=os.getenv("DATAFLOW_DEMO_MONGO_CONNECTION_STRING", ""),
+            connection_string=getenv_brand("DEMO_MONGO_CONNECTION_STRING", ""),
         ),
     ]
     _save_all(defaults)

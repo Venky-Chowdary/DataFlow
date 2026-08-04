@@ -57,12 +57,12 @@ def all_operation_prompts() -> list[OpPrompt]:
         "search connectors for warehouse",
     ], "search_connectors", "list_connectors")
     add("search_knowledge", [
-        "what is a semantic type in DataFlow?",
+        "what is a semantic type in Datawrap?",
     ], "search_knowledge", "explain_product", "describe_pilot")
     add("describe_pilot", [
         "what can you do?",
         "who are you?",
-        "help me with Data Pilot",
+        "help me with Datawrap Pilot",
     ], "describe_pilot")
 
     # --- profile / live data ---
@@ -233,7 +233,7 @@ def all_operation_prompts() -> list[OpPrompt]:
     add("explain_product", [
         "what is upsert",
         "what is CDC",
-        "what is DataFlow",
+        "what is Datawrap",
         "explain preflight",
         "can I use Pilot without OpenAI",
         "how does Confirm work for transfers",

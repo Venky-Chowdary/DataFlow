@@ -1,9 +1,11 @@
 /** Normalize API origin so login and all routes hit `/api/v1/...`. */
 function resolveApiBase(): string {
-  const fromWindow =
+  const w =
     typeof window !== "undefined"
-      ? (window as { DATAFLOW_API_BASE?: string }).DATAFLOW_API_BASE
+      ? (window as { DATAWRAP_API_BASE?: string; DATAFLOW_API_BASE?: string })
       : undefined;
+  // Prefer Datawrap; keep DATAFLOW_* for Railway cutover until vars are renamed.
+  const fromWindow = w?.DATAWRAP_API_BASE || w?.DATAFLOW_API_BASE;
   // `import.meta.env` is a Vite inject. Under node:test there is no Vite
   // transform, so reading `.env` throws. Fall back cleanly instead of
   // crashing every pure helper that happens to import this module.
@@ -396,7 +398,7 @@ export interface ActiveDataContext {
   row_count: number;
   samples?: Record<string, string[]>;
   schema?: Record<string, string>;
-  /** Validation run ID (pf_…) — Data Pilot can look this up. */
+  /** Validation run ID (pf_…) — Datawrap Pilot can look this up. */
   preflight_run_id?: string;
   /** Live transfer job ID once Execute starts. */
   job_id?: string;
@@ -692,7 +694,7 @@ export interface PreflightResult {
   passed_count: number;
   total_gates: number;
   readiness_score: number;
-  /** Stable ID for this validation run — surface in UI and feed Data Pilot. */
+  /** Stable ID for this validation run — surface in UI and feed Datawrap Pilot. */
   run_id?: string;
   gates: PreflightGate[];
   blockers: { id: string; message: string; details?: Record<string, unknown>; guidance?: { gate?: string; title?: string; category?: string; why?: string; fix?: string; examples?: string[]; suggested_actions?: ValidationSuggestedAction[] } }[];

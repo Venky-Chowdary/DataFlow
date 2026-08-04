@@ -1,5 +1,5 @@
 """
-DataTransfer.space — AI Semantic Mapping Engine
+Datawrap — AI Semantic Mapping Engine
 Enterprise-grade intelligent data analysis and mapping
 
 This is the core AI engine that differentiates us from competitors:
@@ -597,7 +597,7 @@ class SemanticAnalyzer:
     """
     AI-powered semantic analysis engine.
 
-    This is the core intelligence that differentiates DataTransfer.space.
+    This is the core intelligence that differentiates Datawrap.
     It uses multiple signals to understand data:
 
     1. Column name analysis (NLP-based)
@@ -1116,7 +1116,7 @@ def detect_pii(columns: dict[str, list[str]]) -> dict[str, list[ComplianceFramew
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("DataTransfer.space — AI Semantic Engine Demo")
+    print("Datawrap — AI Semantic Engine Demo")
     print("=" * 60)
 
     sample_schema = {

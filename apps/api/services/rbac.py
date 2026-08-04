@@ -1,4 +1,4 @@
-"""Role-based access control for the DataFlow API.
+"""Role-based access control for the Datawrap API.
 
 Permission model (enterprise-friendly):
 

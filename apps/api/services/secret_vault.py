@@ -18,6 +18,7 @@ import base64
 import hashlib
 import logging
 import os
+from services.brand_env import getenv_brand
 import uuid
 from abc import ABC, abstractmethod
 from typing import Any
@@ -39,16 +40,16 @@ def _is_production() -> bool:
 
         return bool(is_production())
     except Exception:
-        env = os.getenv("DATAFLOW_ENV", os.getenv("ENVIRONMENT", "")).lower()
+        env = getenv_brand("ENV", os.getenv("ENVIRONMENT", "")).lower()
         return env in ("production", "prod")
 
 
 def _tenant_id() -> str:
-    return (os.getenv("DATAFLOW_TENANT_ID") or "global").strip() or "global"
+    return (getenv_brand("TENANT_ID") or "global").strip() or "global"
 
 
 def _secrets_manager_prefix() -> str:
-    return (os.getenv("DATAFLOW_SECRETS_MANAGER_PREFIX") or "dataflow").strip("/")
+    return (getenv_brand("SECRETS_MANAGER_PREFIX") or "dataflow").strip("/")
 
 
 class SecretVault(ABC):
@@ -74,7 +75,7 @@ class FernetVault(SecretVault):
         except Exception:
             return False
         if _is_production() and not _has_dedicated_secrets_key():
-            auth = os.getenv("DATAFLOW_AUTH_SECRET", "")
+            auth = getenv_brand("AUTH_SECRET", "")
             return bool(auth and auth != "dev-change-me-before-production")
         return True
 
@@ -131,10 +132,10 @@ class AwsSecretsManagerVault(SecretVault):
         try:
             create_kwargs = {
                 "Name": secret_name,
-                "Description": "DataFlow connector credential",
+                "Description": "Datawrap connector credential",
                 "SecretString": plain,
             }
-            kms_key_id = os.getenv("DATAFLOW_SECRETS_KMS_KEY_ID", "").strip()
+            kms_key_id = getenv_brand("SECRETS_KMS_KEY_ID", "").strip()
             if kms_key_id:
                 create_kwargs["KmsKeyId"] = kms_key_id
             resp = client.create_secret(**create_kwargs)
@@ -171,7 +172,7 @@ _vault_instance: SecretVault | None = None
 def _get_vault() -> SecretVault:
     global _vault_instance
     if _vault_instance is None:
-        backend = (os.getenv("DATAFLOW_SECRETS_BACKEND") or "fernet").lower().strip()
+        backend = (getenv_brand("SECRETS_BACKEND") or "fernet").lower().strip()
         if backend == "aws_secretsmanager":
             _vault_instance = AwsSecretsManagerVault()
         else:
@@ -180,11 +181,11 @@ def _get_vault() -> SecretVault:
 
 
 def _has_dedicated_secrets_key() -> bool:
-    return bool(os.getenv("DATAFLOW_SECRETS_KEY", "").strip())
+    return bool(getenv_brand("SECRETS_KEY", "").strip())
 
 
 def _fernet_key() -> bytes:
-    raw = os.getenv("DATAFLOW_SECRETS_KEY", "").strip()
+    raw = getenv_brand("SECRETS_KEY", "").strip()
     if raw:
         try:
             decoded = base64.urlsafe_b64decode(raw + "==")
@@ -194,7 +195,7 @@ def _fernet_key() -> bytes:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         if len(raw.encode()) >= 32:
             return base64.urlsafe_b64encode(hashlib.sha256(raw.encode()).digest())
-    auth = os.getenv("DATAFLOW_AUTH_SECRET", "dev-change-me-before-production")
+    auth = getenv_brand("AUTH_SECRET", "dev-change-me-before-production")
     return base64.urlsafe_b64encode(hashlib.sha256(auth.encode()).digest())
 
 
@@ -255,7 +256,7 @@ def _fernet_encrypt(plain: str) -> str:
         return f"{_PREFIX_V0}{base64.urlsafe_b64encode(plain.encode('utf-8')).decode('ascii')}"
 
     if _is_production() and not _has_dedicated_secrets_key():
-        auth = os.getenv("DATAFLOW_AUTH_SECRET", "")
+        auth = getenv_brand("AUTH_SECRET", "")
         if not auth or auth == "dev-change-me-before-production":
             raise SecretVaultError(
                 "Production requires DATAFLOW_SECRETS_KEY (or a strong DATAFLOW_AUTH_SECRET) "

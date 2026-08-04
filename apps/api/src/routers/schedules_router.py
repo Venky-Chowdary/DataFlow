@@ -218,7 +218,7 @@ def export_dataflow_manifest(format: Literal["yaml", "json"] = "yaml"):
 
 @router.post("/gitops/plan")
 async def gitops_plan_manifest(payload: dict[str, Any]):
-    """Dry-run a DataFlowManifest / PipelineSchedule / DataContract YAML body."""
+    """Dry-run a DatawrapManifest / PipelineSchedule / DataContract YAML body."""
     from services.gitops_manifest import plan_manifest
 
     try:

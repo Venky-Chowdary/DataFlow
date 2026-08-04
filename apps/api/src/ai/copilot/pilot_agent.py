@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Data Pilot Agent
+Datawrap — Datawrap Pilot Agent
 
 Anthropic/Cursor-style agent: full data context, tool use, natural conversation.
 Answers any data question and performs work in the app when asked.
@@ -387,12 +387,12 @@ def _llm_unavailable_footnote(engine: str, method: str) -> str:
         if _AUTH_FAILED_PROVIDERS & {"openai", "anthropic"}:
             return (
                 "\n\n— Optional cloud polish is off (API key rejected). "
-                "Local Data Pilot still answered from your workspace. "
+                "Local Datawrap Pilot still answered from your workspace. "
                 "Fix the key in **Settings → AI**, or clear hybrid mode."
             )
         return (
             "\n\n— Optional narration polish is off (no Ollama/cloud provider ready). "
-            "Local Data Pilot still answered — that is the primary chatbot."
+            "Local Datawrap Pilot still answered — that is the primary chatbot."
         )
     except Exception:
         return ""
@@ -526,7 +526,7 @@ class DataPilotAgent:
         }:
             return CopilotResponse(
                 answer=(
-                    "I'm **Data Pilot** — ask me anything about your workspace. "
+                    "I'm **Datawrap Pilot** — ask me anything about your workspace. "
                     "I can count and aggregate live tables, sample and profile rows, "
                     "inspect schemas, plan or stage transfers (**Confirm** before anything moves), "
                     "triage jobs, and open Fix bad data in Transfer Studio. "
@@ -637,7 +637,7 @@ class DataPilotAgent:
                 try:
                     result = fut.result()
                 except Exception as exc:
-                    logger.warning("Data Pilot worker failed: %s", exc)
+                    logger.warning("Datawrap Pilot worker failed: %s", exc)
                     continue
                 if isinstance(result, CopilotResponse):
                     if best_llm is None or _score_response(result) > _score_response(best_llm):
@@ -877,7 +877,7 @@ class DataPilotAgent:
                 "mcp": "MCP",
                 "docs": "Docs",
                 "benchmarks": "Proofs",
-                "pilot": "Data Pilot",
+                "pilot": "Datawrap Pilot",
             }
             screen = out.get("screen")
             turn.actions.append({
@@ -1121,7 +1121,7 @@ class DataPilotAgent:
             for m in (history or [])[-6:]
             if (m.get("content") or "").strip()
         )
-        prompt = f"""Rewrite the Data Pilot answer below in clear, natural product language.
+        prompt = f"""Rewrite the Datawrap Pilot answer below in clear, natural product language.
 
 Rules:
 - Keep every fact from the draft answer and tool summaries — do not invent IDs, row counts, or connectors
@@ -1483,7 +1483,7 @@ History:
 
 User: {message}
 
-Respond as Data Pilot in natural language. Ground your answer in tool results and context."""
+Respond as Datawrap Pilot in natural language. Ground your answer in tool results and context."""
 
         response = openai.generate(prompt, system=DATA_PILOT_PERSONA, max_tokens=2048)
         if not response.success or not response.content.strip():
@@ -1537,7 +1537,7 @@ History:
 
 User: {message}
 
-Respond as Data Pilot — grounded in tool results."""
+Respond as Datawrap Pilot — grounded in tool results."""
 
         response = ollama.generate(prompt, system=DATA_PILOT_PERSONA, max_tokens=2048)
         if not response.success or not response.content.strip():
@@ -1724,7 +1724,7 @@ Respond as Data Pilot — grounded in tool results."""
                     "mcp": "MCP",
                     "docs": "Docs",
                     "benchmarks": "Proofs",
-                    "pilot": "Data Pilot",
+                    "pilot": "Datawrap Pilot",
                 }
                 # When Confirm is still required, do not claim we already opened the screen.
                 if turn.pending_actions:
@@ -2266,8 +2266,8 @@ Respond as Data Pilot — grounded in tool results."""
             elif tr.name == "describe_pilot" and tr.success:
                 o = tr.output or {}
                 lines = [
-                    "I'm **Data Pilot** — I help with analytics, routes, schema "
-                    "risk, mappings, jobs, and fixes inside DataFlow. I answer from "
+                    "I'm **Datawrap Pilot** — I help with analytics, routes, schema "
+                    "risk, mappings, jobs, and fixes inside Datawrap. I answer from "
                     "your workspace first; I never invent warehouse facts.",
                     "**I can:**",
                 ]
@@ -2309,7 +2309,7 @@ Respond as Data Pilot — grounded in tool results."""
                     caps = o.get("capabilities") or []
                     if caps:
                         parts.append(
-                            "DataFlow helps you move data with honesty and Confirm:\n"
+                            "Datawrap helps you move data with honesty and Confirm:\n"
                             + "\n".join(f"• {c}" for c in caps[:5])
                         )
                 for act in o.get("actions") or []:
@@ -2453,7 +2453,7 @@ Respond as Data Pilot — grounded in tool results."""
 
 {self.context_builder.to_system_context(ctx)}
 {session_block}
-You are Data Pilot for DataFlow only — data knowledge, product capabilities, and in-app actions.
+You are Datawrap Pilot for Datawrap only — data knowledge, product capabilities, and in-app actions.
 Available tools (internal — never name these in user-facing answers): {tool_names}.
 Use tools for any factual claim about jobs, connectors, datasets, schedules, or capabilities.
 Never invent IDs or warehouse state. Never mention tool names, APIs, or internal method labels in replies — write in plain product language.

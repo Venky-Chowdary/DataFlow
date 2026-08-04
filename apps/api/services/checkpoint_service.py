@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+from services.brand_env import getenv_brand
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 #: so this list is the one field that can push the document past MongoDB's
 #: 16 MB limit and break resume entirely. 500 rows is far more than an operator
 #: reads, and the exact count still lives in ``rejected_rows``.
-MAX_REJECTED_DETAILS = int(os.getenv("DATAFLOW_MAX_REJECTED_DETAILS", "500") or 500)
+MAX_REJECTED_DETAILS = int(getenv_brand("MAX_REJECTED_DETAILS", "500") or 500)
 
 
 def _now() -> str:

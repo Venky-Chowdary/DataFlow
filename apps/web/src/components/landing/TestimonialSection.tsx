@@ -4,7 +4,7 @@ import type { PublicRoute } from "../../lib/publicNavigation";
 
 const QUOTES = [
   {
-    quote: "We replaced a tangle of brittle scripts with DataFlow in a weekend. The preflight gates caught a schema drift that would have cost us hours of rework.",
+    quote: "We replaced a tangle of brittle scripts with Datawrap in a weekend. The preflight gates caught a schema drift that would have cost us hours of rework.",
     name: "Alex R.",
     title: "Staff Data Engineer, Fortune 500 retailer",
     industry: "Retail",
@@ -34,7 +34,7 @@ export function TestimonialSection({ onNavigate }: TestimonialSectionProps) {
       <div className="lp-section-head">
         <p className="lp-section-kicker">Proof</p>
         <h2>What data teams say</h2>
-        <p>Engineers choose DataFlow when accuracy matters more than speed alone.</p>
+        <p>Engineers choose Datawrap when accuracy matters more than speed alone.</p>
       </div>
       <div className="lp-testimonial-stack">
         {QUOTES.map((q) => (

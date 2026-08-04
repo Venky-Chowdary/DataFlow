@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+from services.brand_env import getenv_brand
 import socket
 import sys
 import tempfile
@@ -102,7 +103,7 @@ def _pg_config() -> dict[str, Any] | None:
         "database": os.environ["DATAFLOW_BENCHMARK_PG_DATABASE"],
         "username": os.environ["DATAFLOW_BENCHMARK_PG_USER"],
         "password": os.environ["DATAFLOW_BENCHMARK_PG_PASSWORD"],
-        "schema": os.environ.get("DATAFLOW_BENCHMARK_PG_SCHEMA") or "public",
+        "schema": getenv_brand("BENCHMARK_PG_SCHEMA") or "public",
     }
 
 
@@ -116,7 +117,7 @@ def _mysql_config() -> dict[str, Any] | None:
         "database": os.environ["DATAFLOW_BENCHMARK_MYSQL_DATABASE"],
         "username": os.environ["DATAFLOW_BENCHMARK_MYSQL_USER"],
         "password": os.environ["DATAFLOW_BENCHMARK_MYSQL_PASSWORD"],
-        "schema": os.environ.get("DATAFLOW_BENCHMARK_MYSQL_SCHEMA") or os.environ["DATAFLOW_BENCHMARK_MYSQL_DATABASE"],
+        "schema": getenv_brand("BENCHMARK_MYSQL_SCHEMA") or os.environ["DATAFLOW_BENCHMARK_MYSQL_DATABASE"],
     }
 
 
@@ -507,5 +508,5 @@ def main(rows: int = 1000) -> None:
 
 
 if __name__ == "__main__":
-    rows = int(os.environ.get("DATAFLOW_BENCHMARK_ROWS", "1000"))
+    rows = int(getenv_brand("BENCHMARK_ROWS", "1000"))
     main(rows)

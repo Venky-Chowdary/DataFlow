@@ -1,4 +1,4 @@
-"""Live query / sample / result-analysis tools for Data Pilot.
+"""Live query / sample / result-analysis tools for Datawrap Pilot.
 
 Never invent SQL results. Paths:
   saved connector → read-only check → query_router._run_query → result_store

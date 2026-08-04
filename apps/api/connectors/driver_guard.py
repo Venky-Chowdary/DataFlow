@@ -5,9 +5,10 @@ from __future__ import annotations
 import os
 
 
+from services.brand_env import getenv_brand
 def allow_stub_writes() -> bool:
     """Only allow simulated writes when DATAFLOW_ALLOW_STUB_WRITES=1."""
-    return os.getenv("DATAFLOW_ALLOW_STUB_WRITES", "").lower() in ("1", "true", "yes")
+    return getenv_brand("ALLOW_STUB_WRITES", "").lower() in ("1", "true", "yes")
 
 
 def stub_writes_allowed() -> bool:
@@ -26,7 +27,7 @@ def platform_driver_unavailable(connector_label: str) -> str:
     """User-facing message — no pip instructions."""
     return (
         f"{connector_label} connector is not ready on this platform node yet. "
-        "DataFlow bundles all transfer drivers — wait a moment and retry, or contact your administrator if this persists."
+        "Datawrap bundles all transfer drivers — wait a moment and retry, or contact your administrator if this persists."
     )
 
 

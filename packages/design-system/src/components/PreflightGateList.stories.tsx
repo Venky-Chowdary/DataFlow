@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react";
 import { PreflightGateList } from "./PreflightGateList";
 
 const meta: Meta<typeof PreflightGateList> = {
-  title: "DataFlow/PreflightGateList",
+  title: "Datawrap/PreflightGateList",
   component: PreflightGateList,
 };
 

@@ -636,21 +636,21 @@ export function formatPilotReachError(error: unknown, apiBase: string = API_BASE
   const raw = error instanceof Error ? error.message : String(error || "Unknown error");
   const lower = raw.toLowerCase();
   if (lower.includes("timed out") || lower.includes("abort")) {
-    return "Data Pilot took too long to respond. Please try again in a moment.";
+    return "Datawrap Pilot took too long to respond. Please try again in a moment.";
   }
   if (lower.includes("401") || lower.includes("authentication required") || lower.includes("not authenticated")) {
     return "Your session expired. Sign in again, then retry.";
   }
   if (lower.includes("403") || lower.includes("forbidden")) {
-    return "You don’t have permission to use Data Pilot in this workspace.";
+    return "You don’t have permission to use Datawrap Pilot in this workspace.";
   }
   if (lower.includes("failed to fetch") || lower.includes("networkerror") || lower.includes("load failed")) {
-    return "Couldn’t reach Data Pilot right now. Check that the app is online, then try again.";
+    return "Couldn’t reach Datawrap Pilot right now. Check that the app is online, then try again.";
   }
   if (lower.includes("503") || lower.includes("no ai") || lower.includes("provider")) {
-    return "Data Pilot isn’t available right now. Please try again shortly.";
+    return "Datawrap Pilot isn’t available right now. Please try again shortly.";
   }
-  return "Something went wrong with Data Pilot. Please try again.";
+  return "Something went wrong with Datawrap Pilot. Please try again.";
 }
 
 export async function copilotChat(
@@ -741,7 +741,7 @@ export async function fetchCopilotPrompts(): Promise<string[]> {
 
 export async function fetchPilotTools(): Promise<PilotToolRegistry> {
   const res = await apiFetch(`${API_BASE}/copilot/tools`);
-  if (!res.ok) throw new Error("Data Pilot tools failed");
+  if (!res.ok) throw new Error("Datawrap Pilot tools failed");
   return res.json();
 }
 
@@ -1335,7 +1335,7 @@ export async function runScheduleNow(id: string): Promise<{ job_id: string }> {
   return res.json();
 }
 
-export async function exportDataflowManifest(): Promise<Blob> {
+export async function exportDatawrapManifest(): Promise<Blob> {
   const res = await apiFetch(`${API_BASE}/schedules/export/dataflow?format=yaml`);
   if (!res.ok) throw new Error(await parseApiError(res, "Could not export dataflow.yaml"));
   return res.blob();
@@ -2237,7 +2237,7 @@ export async function fetchWorkspaceSettings(): Promise<{
 }> {
   const res = await apiFetch(`${API_BASE}/workspace/settings`);
   if (!res.ok) {
-    return { org_name: "DataFlow", timezone: "UTC", retention_days: 90 };
+    return { org_name: "Datawrap", timezone: "UTC", retention_days: 90 };
   }
   return res.json();
 }

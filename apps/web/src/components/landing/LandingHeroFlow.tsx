@@ -2,8 +2,8 @@ import { useEffect, useRef } from "react";
 import { useInView } from "../../hooks/useInView";
 
 /**
- * Clean enterprise hero stage: source → map → destination with living packet trails.
- * Animation pauses when off-screen to keep landing scroll smooth.
+ * Hero product proof: source → governed engine → destination
+ * over a living data-wave field (canvas). Compact — no empty void.
  */
 export function LandingHeroFlow() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -24,15 +24,16 @@ export function LandingHeroFlow() {
     let running = true;
     let t0 = performance.now();
 
-    type Packet = { t: number; lane: number; speed: number };
-    const packets: Packet[] = Array.from({ length: 6 }, (_, i) => ({
+    type Packet = { t: number; lane: number; speed: number; hue: number };
+    const packets: Packet[] = Array.from({ length: 10 }, (_, i) => ({
       t: Math.random(),
-      lane: i % 2,
-      speed: 0.1 + Math.random() * 0.12,
+      lane: i % 4,
+      speed: 0.08 + Math.random() * 0.14,
+      hue: i % 3,
     }));
 
     const resize = () => {
-      const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+      const dpr = Math.min(window.devicePixelRatio || 1, 1.75);
       const { width, height } = wrap.getBoundingClientRect();
       canvas.width = Math.max(1, Math.floor(width * dpr));
       canvas.height = Math.max(1, Math.floor(height * dpr));
@@ -45,6 +46,8 @@ export function LandingHeroFlow() {
     const ro = new ResizeObserver(resize);
     ro.observe(wrap);
 
+    const colors = ["#2dd4bf", "#14b8a6", "#f59e0b"];
+
     const tick = (now: number) => {
       if (!running) return;
       if (!inViewRef.current) {
@@ -56,51 +59,84 @@ export function LandingHeroFlow() {
       ctx.clearRect(0, 0, width, height);
 
       const elapsed = (now - t0) / 1000;
-      const yMid = height * 0.42;
-      const x0 = width * 0.18;
-      const x1 = width * 0.5;
-      const x2 = width * 0.82;
 
-      for (let lane = 0; lane < 2; lane++) {
-        const y = yMid + (lane === 0 ? -10 : 10);
+      // Soft field wash
+      const grad = ctx.createLinearGradient(0, 0, width, height);
+      grad.addColorStop(0, "rgba(45, 212, 191, 0.08)");
+      grad.addColorStop(0.55, "rgba(15, 118, 110, 0.04)");
+      grad.addColorStop(1, "rgba(245, 158, 11, 0.06)");
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, width, height);
+
+      // Multi-lane wave ribbons
+      for (let lane = 0; lane < 4; lane++) {
+        const yBase = height * (0.22 + lane * 0.2);
+        const amp = 6 + lane * 2;
         ctx.beginPath();
-        ctx.moveTo(x0, y);
-        ctx.bezierCurveTo(x0 + width * 0.1, y - 8, x1 - width * 0.08, y + 8, x1, y);
-        ctx.bezierCurveTo(x1 + width * 0.08, y - 8, x2 - width * 0.1, y + 8, x2, y);
-        ctx.strokeStyle = "rgba(13, 148, 136, 0.18)";
-        ctx.lineWidth = 1.5;
+        for (let x = 0; x <= width; x += 6) {
+          const y =
+            yBase +
+            Math.sin(x * 0.018 + elapsed * (0.9 + lane * 0.15) + lane) * amp +
+            Math.sin(x * 0.007 + elapsed * 0.4) * 3;
+          if (x === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle =
+          lane === 1 ? "rgba(245, 158, 11, 0.28)" : "rgba(45, 212, 191, 0.28)";
+        ctx.lineWidth = lane === 1 ? 1.75 : 1.25;
+        ctx.stroke();
+      }
+
+      // Vertical pulse columns (data ticks)
+      for (let i = 0; i < 7; i++) {
+        const x = width * (0.12 + i * 0.12);
+        const pulse = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(elapsed * 1.6 + i));
+        ctx.strokeStyle = `rgba(94, 234, 212, ${0.08 + pulse * 0.12})`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, height * 0.12);
+        ctx.lineTo(x, height * 0.88);
         ctx.stroke();
       }
 
       if (!reduced) {
         for (const p of packets) {
           p.t += p.speed * 0.016;
-          if (p.t > 1.15) p.t = -0.05;
+          if (p.t > 1.12) p.t = -0.05;
           const u = Math.min(1, Math.max(0, p.t));
-          const yBase = yMid + (p.lane === 0 ? -10 : 10);
-          const bob = Math.sin((u + elapsed * 0.4) * Math.PI * 2) * 4;
-          let x: number;
-          let y: number;
-          if (u < 0.5) {
-            const s = u / 0.5;
-            x = x0 + (x1 - x0) * s;
-            y = yBase + bob - Math.sin(s * Math.PI) * 10;
-          } else {
-            const s = (u - 0.5) / 0.5;
-            x = x1 + (x2 - x1) * s;
-            y = yBase + bob - Math.sin(s * Math.PI) * 8;
-          }
+          const yBase = height * (0.22 + p.lane * 0.2);
+          const amp = 6 + p.lane * 2;
+          const x = width * (0.06 + u * 0.88);
+          const y =
+            yBase +
+            Math.sin(x * 0.018 + elapsed * (0.9 + p.lane * 0.15) + p.lane) * amp +
+            Math.sin((u + elapsed * 0.5) * Math.PI * 2) * 3;
 
-          ctx.fillStyle = "rgba(15, 118, 110, 0.2)";
+          const c = colors[p.hue];
+          ctx.fillStyle = `${c}33`;
           ctx.beginPath();
-          ctx.arc(x, y, 7, 0, Math.PI * 2);
+          ctx.arc(x, y, 8, 0, Math.PI * 2);
           ctx.fill();
 
-          ctx.fillStyle = "#0f766e";
+          ctx.fillStyle = c;
           ctx.beginPath();
-          ctx.arc(x, y, 2.6, 0, Math.PI * 2);
+          ctx.arc(x, y, 2.8, 0, Math.PI * 2);
           ctx.fill();
         }
+
+        // Center seal pulse
+        const cx = width * 0.5;
+        const cy = height * 0.5;
+        const seal = 0.5 + 0.5 * Math.sin(elapsed * 2.2);
+        ctx.strokeStyle = `rgba(45, 212, 191, ${0.2 + seal * 0.35})`;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 10 + seal * 4, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.fillStyle = "#2dd4bf";
+        ctx.beginPath();
+        ctx.arc(cx, cy, 3.2, 0, Math.PI * 2);
+        ctx.fill();
       }
 
       raf = requestAnimationFrame(tick);
@@ -115,9 +151,13 @@ export function LandingHeroFlow() {
   }, [wrapRef]);
 
   return (
-    <div className="lp-hero-flow" ref={wrapRef} aria-hidden>
+    <div className="lp-hero-flow" aria-hidden>
       <div className="lp-hero-flow-stage">
-        <canvas className="lp-hero-flow-canvas" ref={canvasRef} />
+        <div className="lp-hero-flow-atmosphere" aria-hidden>
+          <span className="lp-hero-flow-grid" />
+          <span className="lp-hero-flow-orb lp-hero-flow-orb--a" />
+          <span className="lp-hero-flow-orb lp-hero-flow-orb--b" />
+        </div>
 
         <div className="lp-hero-flow-rail">
           <article className="lp-hero-flow-card lp-hero-flow-card--source">
@@ -170,6 +210,26 @@ export function LandingHeroFlow() {
             </ul>
           </article>
         </div>
+
+        <div className="lp-hero-flow-waveband" ref={wrapRef}>
+          <canvas className="lp-hero-flow-canvas" ref={canvasRef} />
+          <div className="lp-hero-flow-waveband-label">
+            <span>Live packet path</span>
+            <strong>source → map → destination</strong>
+          </div>
+        </div>
+
+        <footer className="lp-hero-flow-proof">
+          <span>
+            <em>G1–G8</em> preflight
+          </span>
+          <span>
+            <em>0</em> silent drops
+          </span>
+          <span>
+            <em>Σ</em> checksum MATCH
+          </span>
+        </footer>
       </div>
     </div>
   );

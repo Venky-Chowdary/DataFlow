@@ -1,5 +1,5 @@
 /**
- * DataFlow Enterprise Platform — layout & visual system + motion.
+ * Datawrap Enterprise Platform — layout & visual system + motion.
  * Light theme only — high contrast, Airbyte/Fivetran-style data product UI.
  * Merged from enterprise-platform.css + enterprise-motion.css (previously
  * adjacent imports with no file between them, so merging changes nothing).
@@ -983,7 +983,7 @@ body {
   gap: 12px;
 }
 
-/* ─── Data Pilot — full viewport height ─── */
+/* ─── Datawrap Pilot — full viewport height ─── */
 
 .df2-content-flush {
   height: calc(100vh - 52px);
@@ -1584,7 +1584,7 @@ body {
   min-height: 0;
 }
 
-/* ─── Data Pilot — always light (no dark jarvis bleed) ─── */
+/* ─── Datawrap Pilot — always light (no dark jarvis bleed) ─── */
 
 .df2-pilot,
 .df2-pilot-main,

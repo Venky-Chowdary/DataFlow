@@ -1,7 +1,7 @@
 """Unified preflight proof bundle.
 
 This module assembles the deterministic safety signals already implemented in
-DataFlow into one auditable decision object:
+Datawrap into one auditable decision object:
 - semantic mapping quality
 - sample quality
 - compliance / PII risk

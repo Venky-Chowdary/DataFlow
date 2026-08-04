@@ -1,4 +1,4 @@
-"""Structured logging for the DataFlow API and worker processes.
+"""Structured logging for the Datawrap API and worker processes.
 
 Before this module the API process configured logging not at all: only
 ``src/worker_main.py`` ever called ``basicConfig``, so under Uvicorn every
@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from services.brand_env import getenv_brand
 import sys
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
@@ -213,14 +214,14 @@ def log_format() -> str:
     A developer running the API locally gets readable output, while a container
     (no TTY) emits shippable JSON without anyone remembering to set a variable.
     """
-    explicit = (os.getenv("DATAFLOW_LOG_FORMAT") or "").strip().lower()
+    explicit = (getenv_brand("LOG_FORMAT") or "").strip().lower()
     if explicit in ("json", "text"):
         return explicit
     return "text" if sys.stderr.isatty() else "json"
 
 
 def configure_logging(*, force: bool = False) -> None:
-    """Install DataFlow's root logging configuration. Idempotent.
+    """Install Datawrap's root logging configuration. Idempotent.
 
     Safe to call from both the API lifespan and the worker entry point; the
     second call is a no-op unless ``force`` is set (used by tests).
@@ -229,7 +230,7 @@ def configure_logging(*, force: bool = False) -> None:
     if _CONFIGURED and not force:
         return
 
-    level_name = (os.getenv("DATAFLOW_LOG_LEVEL") or "INFO").strip().upper()
+    level_name = (getenv_brand("LOG_LEVEL") or "INFO").strip().upper()
     level = getattr(logging, level_name, logging.INFO)
 
     formatter: logging.Formatter = (
@@ -280,7 +281,7 @@ def _library_levels() -> dict[str, int]:
         "asyncio": logging.WARNING,
         "watchfiles": logging.WARNING,
     }
-    raw = (os.getenv("DATAFLOW_LOG_LEVELS") or "").strip()
+    raw = (getenv_brand("LOG_LEVELS") or "").strip()
     for pair in raw.split(","):
         if "=" not in pair:
             continue

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from services.brand_env import getenv_brand
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -1218,8 +1219,8 @@ def _run_cdc_shared_multi_table(
                 if limit and total_rows >= limit:
                     break
         if run_stream and not (limit and total_rows >= limit):
-            max_idle = max(1, int(os.getenv("DATAFLOW_CDC_MAX_IDLE_POLLS", "3")))
-            max_rounds = max(1, int(os.getenv("DATAFLOW_CDC_MAX_POLL_ROUNDS", "50")))
+            max_idle = max(1, int(getenv_brand("CDC_MAX_IDLE_POLLS", "3")))
+            max_rounds = max(1, int(getenv_brand("CDC_MAX_POLL_ROUNDS", "50")))
             idle = 0
             for _ in range(max_rounds):
                 had = False
@@ -1799,9 +1800,9 @@ def _run_cdc_single_stream(
     import os
 
     # Continuous CDC: drain snapshot, then poll until idle or budget exhausted.
-    max_idle_polls = max(1, int(os.getenv("DATAFLOW_CDC_MAX_IDLE_POLLS", "3")))
-    max_poll_rounds = max(1, int(os.getenv("DATAFLOW_CDC_MAX_POLL_ROUNDS", "50")))
-    txn_hold_sleep = float(os.getenv("DATAFLOW_CDC_TXN_HOLD_SLEEP_SEC", "0.25"))
+    max_idle_polls = max(1, int(getenv_brand("CDC_MAX_IDLE_POLLS", "3")))
+    max_poll_rounds = max(1, int(getenv_brand("CDC_MAX_POLL_ROUNDS", "50")))
+    txn_hold_sleep = float(getenv_brand("CDC_TXN_HOLD_SLEEP_SEC", "0.25"))
 
     def _apply_and_checkpoint(change: ChangeBatch) -> bool:
         """Apply one batch, persist watermark, ack source. Returns True if data moved."""

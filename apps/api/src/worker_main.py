@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+from services.brand_env import getenv_brand
 import sys
 
 
@@ -26,7 +27,7 @@ def main() -> int:
         configure_logging()
     except Exception:  # pragma: no cover - never let logging stop the worker
         logging.basicConfig(
-            level=os.getenv("DATAFLOW_LOG_LEVEL", "INFO"),
+            level=getenv_brand("LOG_LEVEL", "INFO"),
             format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
         )
     log = logging.getLogger("dataflow.worker")
@@ -42,11 +43,11 @@ def main() -> int:
         return 2
 
     log.info(
-        "DataFlow worker starting (worker_id=%s)",
+        "Datawrap worker starting (worker_id=%s)",
         os.getenv("HOSTNAME") or os.getenv("RAILWAY_REPLICA_ID") or "local",
     )
     try:
-        run_fleet_loop(run_fleet_job, poll_seconds=float(os.getenv("DATAFLOW_WORKER_POLL", "2")))
+        run_fleet_loop(run_fleet_job, poll_seconds=float(getenv_brand("WORKER_POLL", "2")))
     except KeyboardInterrupt:
         log.info("Worker interrupted — shutting down")
     return 0

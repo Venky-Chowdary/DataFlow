@@ -1,6 +1,6 @@
 """Cross-schema transfer matrix.
 
-Proves that DataFlow can move data between tables/collections with different
+Proves that Datawrap can move data between tables/collections with different
 column names and types, both with explicit mappings and via the semantic
 auto-mapper when a target schema already exists.
 """

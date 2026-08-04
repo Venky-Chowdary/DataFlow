@@ -24,7 +24,7 @@ export {
   TransferIcon,
 } from "./components/DatabaseIcons";
 
-// DataTransfer.space Enterprise Components
+// Datawrap Enterprise Components
 export { HeroLanding, HeroLandingStyles, DataUniverseVisualization } from "./components/HeroLanding";
 export { ConnectorMarketplace, ConnectorMarketplaceStyles } from "./components/ConnectorMarketplace";
 export { AISchemaStudio, AISchemaStudioStyles } from "./components/AISchemaStudio";

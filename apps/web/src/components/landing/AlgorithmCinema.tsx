@@ -1,6 +1,6 @@
 /**
  * AlgorithmCinema — product-feeling animated stages that carry the
- * DataFlow story on marketing pages. These are NOT decorative dots;
+ * Datawrap story on marketing pages. These are NOT decorative dots;
  * each stage renders a concrete slice of the real engine: semantic
  * mapping, G1–G8 preflight, checksum proof, and CDC handoff.
  *
@@ -113,7 +113,15 @@ export function MappingCinema() {
             return (
               <g key={`w-${edge.source}`} className={`lp-cinema-wire is-${state}`}>
                 <path d={`M0,${y} C80,${y} 120,${y} 200,${y}`} />
-                <text x="100" y={y - 8} textAnchor="middle" className="lp-cinema-wire-score">
+                <rect
+                  className="lp-cinema-wire-score-bg"
+                  x="78"
+                  y={y - 22}
+                  width="44"
+                  height="18"
+                  rx="5"
+                />
+                <text x="100" y={y - 9} textAnchor="middle" className="lp-cinema-wire-score">
                   {edge.confidence.toFixed(2)}
                 </text>
               </g>
@@ -478,7 +486,7 @@ export function AlgorithmCinemaBand({
 
 export interface ProductSurfaceStripProps<Route extends string> {
   onNavigate: (route: Route) => void;
-  /** Optional override; defaults to the six DataFlow product routes. */
+  /** Optional override; defaults to the six Datawrap product routes. */
   surfaces?: readonly { label: string; route: Route; sub?: string }[];
 }
 

@@ -1,6 +1,6 @@
 # Hybrid Connector Bridge
 
-Use this pattern when the DataFlow control plane runs on Railway or in a managed SaaS account, but the customer has private VPC data sources (RDS, on-prem, VPC-only SaaS) that cannot be reached from the public internet.
+Use this pattern when the Datawrap control plane runs on Railway or in a managed SaaS account, but the customer has private VPC data sources (RDS, on-prem, VPC-only SaaS) that cannot be reached from the public internet.
 
 ## How it works
 
@@ -8,7 +8,7 @@ A small, read-only **Connector Bridge** agent runs inside the customer network. 
 
 ```
 ┌──────────────────┐         outbound mTLS          ┌─────────────────────┐
-│  Customer VPC    │      tunnel (no inbound ports)    │  DataFlow SaaS    │
+│  Customer VPC    │      tunnel (no inbound ports)    │  Datawrap SaaS    │
 │  ┌────────────┐  │  ──────────────────────────────▶ │  Control Plane    │
 │  │   Bridge   │  │                                 │                   │
 │  │   Agent    │  │  ◀────────────────────────────── │  schedules jobs   │

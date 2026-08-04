@@ -310,7 +310,7 @@ def import_contract(payload: dict[str, Any]):
     from services.gitops_manifest import apply_manifest
 
     # Accept bare contract dicts and kind-wrapped artifacts.
-    if payload.get("kind") == "DataContract" or payload.get("kind") == "DataFlowManifest":
+    if payload.get("kind") == "DataContract" or payload.get("kind") == "DatawrapManifest":
         result = apply_manifest(payload, dry_run=False)
         rows = [r for r in (result.get("results") or []) if r.get("kind") == "DataContract" and r.get("ok")]
         if not rows:

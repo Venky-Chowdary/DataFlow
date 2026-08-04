@@ -314,7 +314,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     }
   }, [filter, filtered, jobs, counts.failed, selectedId]);
 
-  // Feed the selected job into Data Pilot so NL triage uses the real job ID.
+  // Feed the selected job into Datawrap Pilot so NL triage uses the real job ID.
   useEffect(() => {
     const job = jobs.find((j) => j._id === selectedId);
     if (!job) return;

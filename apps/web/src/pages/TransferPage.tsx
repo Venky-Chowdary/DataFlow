@@ -1484,7 +1484,7 @@ export function TransferPage({
         lastNewTableToastRef.current = tableKey;
         toast({
           title: "New table will be created",
-          message: `${targetCollection.trim()} was not found on the destination — DataFlow will CREATE TABLE on first write.`,
+          message: `${targetCollection.trim()} was not found on the destination — Datawrap will CREATE TABLE on first write.`,
           tone: "info",
         });
       }
@@ -4182,7 +4182,7 @@ export function TransferPage({
     };
   }, [columnMappings.length, effectiveMappingProof]);
 
-  // Keep Data Pilot fed with the active validation/job IDs for NL triage & remediations.
+  // Keep Datawrap Pilot fed with the active validation/job IDs for NL triage & remediations.
   useEffect(() => {
     if (!preflight && !activeJobId) return;
     setActiveData((prev) => {
@@ -4723,7 +4723,7 @@ export function TransferPage({
               )}
               {!parsed && !uploading && (
                 <div className="df2-upload-sample-row">
-                  <span className="df2-label-hint">New to DataFlow?</span>
+                  <span className="df2-label-hint">New to Datawrap?</span>
                   <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => void loadSampleDataset()}>
                     <DtIcon name="sparkle" size={14} /> Load sample orders CSV
                   </button>
@@ -4802,7 +4802,7 @@ export function TransferPage({
                   </div>
                 </div>
                 <p className="df2-label-hint" style={{ marginTop: 8 }}>
-                  DataFlow will detect format from the object key and profile schema on continue.
+                  Datawrap will detect format from the object key and profile schema on continue.
                 </p>
               </>
             )
@@ -5270,7 +5270,7 @@ export function TransferPage({
                         : destDriverType === "pinecone"
                           ? "default"
                           : destDriverType === "weaviate"
-                            ? "DataflowChunk"
+                            ? "DatawrapChunk"
                             : destDriverType === "qdrant" || destDriverType === "milvus"
                               ? "chunks"
                               : "Pick table or type new name"
@@ -5356,7 +5356,7 @@ export function TransferPage({
                       <strong>
                         {destDriverType === "mongodb" ? "Collection not found." : "Table not found."}
                       </strong>{" "}
-                      DataFlow will create it automatically on first write.
+                      Datawrap will create it automatically on first write.
                     </p>
                   </>
                 ) : (

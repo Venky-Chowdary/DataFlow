@@ -1,6 +1,6 @@
 """Cross-schema edge-type transfers.
 
-Proves that DataFlow preserves precision and semantics for booleans, high-
+Proves that Datawrap preserves precision and semantics for booleans, high-
 precision decimals, timezones, JSON/arrays, and locale-ambiguous dates when
 mapping between different column names and types.
 """

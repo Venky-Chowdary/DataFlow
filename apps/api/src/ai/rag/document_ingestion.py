@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Document Ingestion
+Datawrap — Document Ingestion
 
 Ingest schemas, column names, and data patterns into the vector store.
 """

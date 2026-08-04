@@ -1,4 +1,4 @@
-"""Natural-language aggregation for Data Pilot — real GROUP BY against live tables.
+"""Natural-language aggregation for Datawrap Pilot — real GROUP BY against live tables.
 
 The pilot could sample and profile rows but had no way to answer the most common
 analytics questions ("how many orders by status", "average price", "revenue by
@@ -73,7 +73,7 @@ _TEMPORAL_GRAINS = {
 
 _TEMPORAL_TYPE_HINTS = ("date", "time", "timestamp")
 
-# DataFlow's own objects, not warehouse tables. "how many jobs failed" belongs to
+# Datawrap's own objects, not warehouse tables. "how many jobs failed" belongs to
 # list_jobs, not to SELECT COUNT(*) FROM jobs — unless the user named a connector,
 # which means they really do mean a table with that name.
 _PLATFORM_NOUNS = frozenset({

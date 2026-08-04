@@ -1,7 +1,7 @@
 """Weaviate vector destination writer — turns rows into upserted objects.
 
 Uses the Weaviate REST API (``/v1``) so no extra Python client is required.
-Classes use ``vectorizer: none`` — DataFlow supplies embeddings via
+Classes use ``vectorizer: none`` — Datawrap supplies embeddings via
 ``services/vectorization.py``. Delivery is at-least-once upsert by object id.
 """
 
@@ -115,7 +115,7 @@ def build_weaviate_objects(
     class_name: str,
     dimension: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Map DataFlow vector rows to Weaviate batch objects (testable, no I/O).
+    """Map Datawrap vector rows to Weaviate batch objects (testable, no I/O).
 
     Returns ``(objects, rejected)``. Missing embeddings are rejected — never
     fabricated as zero vectors. Missing ids → deterministic UUID over

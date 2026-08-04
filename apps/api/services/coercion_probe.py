@@ -532,7 +532,7 @@ def analyze_coercion(
             fix = (
                 f"Column '{src}' → {tgt_type}: {wire_normalize} of {len(rows)} sampled "
                 f"value(s) use ISO timestamps (e.g. {example.get('value', '…')!r}). "
-                f"DataFlow will normalize to {example.get('wire_form') or 'YYYY-MM-DD HH:MM:SS'} "
+                f"Datawrap will normalize to {example.get('wire_form') or 'YYYY-MM-DD HH:MM:SS'} "
                 f"at write time for destination SQL/warehouse temporal bind."
             )
         if json_scalar_wraps and not fix:

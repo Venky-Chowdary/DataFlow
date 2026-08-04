@@ -28,7 +28,7 @@ from services.type_system import is_lossy_coercion, normalize_logical_type
 # Policies that auto-apply additive field evolution (Airbyte propagate_*).
 PROPAGATE_POLICIES = frozenset({"propagate_columns", "propagate_all"})
 
-# Always pause — Airbyte breaking + DataFlow type-fidelity (no silent narrow).
+# Always pause — Airbyte breaking + Datawrap type-fidelity (no silent narrow).
 HARD_BREAKING_KINDS = frozenset({
     "primary_key_change",
     "cursor_removed",
@@ -299,7 +299,7 @@ def resolve_schema_evolution(
 
     Airbyte: propagate applies non-breaking; breaking always pauses.
     Fivetran: net-additive drops/renames under propagate (keep dest history).
-    DataFlow: also fail-closed on type narrow (no silent airbyte_meta soft-pass).
+    Datawrap: also fail-closed on type narrow (no silent airbyte_meta soft-pass).
     """
     policy = (schema_policy or "manual_review").strip().lower()
     classification = classification or {

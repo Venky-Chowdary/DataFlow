@@ -1,6 +1,6 @@
 """Post-load SQL transformation models — definition, dependency graph, planning.
 
-DataFlow moved data well and then stopped. Everything downstream of the load —
+Datawrap moved data well and then stopped. Everything downstream of the load —
 the "T" that Airbyte delegates to dbt and Fivetran ships as dbt Core plus
 Quickstart models — did not exist at all. An operator who landed raw orders and
 wanted a daily revenue rollup had to leave the product.

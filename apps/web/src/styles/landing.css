@@ -1,5 +1,5 @@
 /**
- * DataFlow marketing landing — Devin.ai layout ditto, DataFlow product content.
+ * Datawrap marketing landing — Devin.ai layout ditto, Datawrap product content.
  * Light, minimal, centered hero + product mock + use-case sections.
  */
 
@@ -925,7 +925,11 @@
 }
 
 .lp-section-footer .lp-btn {
-  min-width: min(100%, 220px);
+  min-width: 0;
+}
+
+.lp-mkt-next-cta .lp-btn {
+  min-width: min(100%, 200px);
 }
 
 .lp-section-cta-text {
@@ -6153,7 +6157,7 @@
 
 /* ═══════════════════════════════════════════════════════════════════════════
    Azure-inspired chrome — full-bleed sticky nav morph, ambient motion,
-   section scroll drama, and edge-to-edge footer. Brand stays DataFlow teal.
+   section scroll drama, and edge-to-edge footer. Brand stays Datawrap teal.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 .lp-nav {
@@ -10416,11 +10420,11 @@
 }
 
 /* =========================================================================
- * Algorithm Cinema — full-bleed dark stages that carry the DataFlow story
+ * Algorithm Cinema — full-bleed dark stages that carry the Datawrap story
  * (semantic mapping, G1–G8 preflight, checksum proof, CDC handoff).
  *
  * All stages honor prefers-reduced-motion via the component (final state
- * renders). CSS deliberately keeps token colors and DataFlow brand.
+ * renders). CSS deliberately keeps token colors and Datawrap brand.
  * ========================================================================= */
 
 .lp-cinema-band {
@@ -10578,14 +10582,14 @@
 }
 
 .lp-cinema-chip.is-ok {
-  background: color-mix(in srgb, var(--df-brand) 22%, transparent);
-  border-color: color-mix(in srgb, var(--df-brand) 55%, transparent);
-  color: #a7f3d0;
+  background: rgba(45, 212, 191, 0.22);
+  border-color: rgba(45, 212, 191, 0.5);
+  color: #99f6e4;
 }
 
 .lp-cinema-chip.is-warn {
-  background: rgba(251, 191, 36, 0.16);
-  border-color: rgba(251, 191, 36, 0.35);
+  background: rgba(251, 191, 36, 0.2);
+  border-color: rgba(251, 191, 36, 0.55);
   color: #fde68a;
 }
 
@@ -10627,42 +10631,49 @@
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
-  background: rgba(15, 23, 42, 0.55);
-  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.28);
   border-radius: 10px;
-  transition: border-color 0.28s ease, transform 0.28s ease, background 0.28s ease;
-  opacity: 0.55;
+  transition: border-color 0.28s ease, transform 0.28s ease, background 0.28s ease, opacity 0.28s ease;
+  opacity: 0.72;
   transform: translateY(4px);
 }
 
 .lp-cinema-field.is-live {
   opacity: 1;
   transform: none;
-  border-color: color-mix(in srgb, var(--df-brand) 45%, rgba(148, 163, 184, 0.2));
-  background: rgba(13, 148, 136, 0.08);
+  border-color: rgba(45, 212, 191, 0.55);
+  background: rgba(13, 148, 136, 0.22);
 }
 
 .lp-cinema-field.is-review {
-  border-color: rgba(251, 191, 36, 0.6);
-  background: rgba(251, 191, 36, 0.1);
+  border-color: rgba(251, 191, 36, 0.75);
+  background: rgba(251, 191, 36, 0.16);
 }
 
 .lp-cinema-field code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
   color: #f8fafc;
+  font-weight: 600;
 }
 
 .lp-cinema-field em {
   font-style: normal;
   font-size: 10px;
   text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: #94a3b8;
-  padding: 2px 8px;
+  letter-spacing: 0.08em;
+  color: #99f6e4;
+  padding: 3px 8px;
   border-radius: 999px;
-  border: 1px solid rgba(148, 163, 184, 0.22);
-  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid rgba(45, 212, 191, 0.35);
+  background: rgba(15, 118, 110, 0.35);
+}
+
+.lp-cinema-field.is-review em {
+  color: #fde68a;
+  border-color: rgba(251, 191, 36, 0.45);
+  background: rgba(120, 53, 15, 0.45);
 }
 
 .lp-cinema-wires {
@@ -10674,11 +10685,11 @@
 
 .lp-cinema-wire path {
   fill: none;
-  stroke: rgba(148, 163, 184, 0.35);
-  stroke-width: 1.6;
-  stroke-dasharray: 220;
-  stroke-dashoffset: 220;
-  transition: stroke 0.4s ease, stroke-dashoffset 0.7s ease;
+  stroke: rgba(153, 246, 228, 0.45);
+  stroke-width: 2.25;
+  stroke-dasharray: none;
+  stroke-dashoffset: 0;
+  transition: stroke 0.4s ease, stroke-width 0.35s ease, filter 0.35s ease;
 }
 
 .lp-cinema-wire.is-draw path,
@@ -10688,35 +10699,50 @@
 }
 
 .lp-cinema-wire.is-draw path {
-  stroke: color-mix(in srgb, var(--df-brand) 60%, rgba(148, 163, 184, 0.5));
+  stroke: #5eead4;
+  stroke-width: 2.8;
 }
 
 .lp-cinema-wire.is-review path {
-  stroke: rgba(251, 191, 36, 0.75);
-  stroke-dasharray: 6 6;
+  stroke: #fbbf24;
+  stroke-width: 2.8;
+  stroke-dasharray: 7 5;
   animation: lp-cinema-wire-review 1.4s linear infinite;
 }
 
 .lp-cinema-wire.is-pin path {
-  stroke: color-mix(in srgb, var(--df-brand) 85%, transparent);
-  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--df-brand) 40%, transparent));
+  stroke: #2dd4bf;
+  stroke-width: 3;
+  filter: drop-shadow(0 0 10px rgba(45, 212, 191, 0.65));
 }
 
 @keyframes lp-cinema-wire-review {
   to { stroke-dashoffset: -24; }
 }
 
-.lp-cinema-wire-score {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 9px;
-  fill: #cbd5e1;
-  opacity: 0;
-  transition: opacity 0.4s ease;
+.lp-cinema-wire-score-bg {
+  fill: #042f2e;
+  stroke: rgba(94, 234, 212, 0.45);
+  stroke-width: 1;
 }
 
-.lp-cinema-wire.is-draw .lp-cinema-wire-score,
-.lp-cinema-wire.is-review .lp-cinema-wire-score,
-.lp-cinema-wire.is-pin .lp-cinema-wire-score {
+.lp-cinema-wire.is-review .lp-cinema-wire-score-bg {
+  fill: #78350f;
+  stroke: rgba(251, 191, 36, 0.65);
+}
+
+.lp-cinema-wire.is-draw .lp-cinema-wire-score-bg,
+.lp-cinema-wire.is-pin .lp-cinema-wire-score-bg {
+  fill: #064e3b;
+  stroke: rgba(45, 212, 191, 0.65);
+}
+
+.lp-cinema-wire-score {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 800;
+  fill: #ecfdf5;
+  stroke: none;
   opacity: 1;
 }
 

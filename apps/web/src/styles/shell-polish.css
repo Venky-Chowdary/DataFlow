@@ -782,7 +782,7 @@ select.df2-select {
   max-width: 420px;
 }
 
-/* ─── Data Pilot ─── */
+/* ─── Datawrap Pilot ─── */
 .df2-pilot-muted {
   margin: 0;
   font-size: 11px;
@@ -2482,7 +2482,7 @@ textarea.df2-pilot-composer textarea {
   transition: width 0.4s ease;
 }
 
-/* ─── Data Pilot polish ─── */
+/* ─── Datawrap Pilot polish ─── */
 .df2-pilot {
   min-height: calc(100vh - 64px);
 }

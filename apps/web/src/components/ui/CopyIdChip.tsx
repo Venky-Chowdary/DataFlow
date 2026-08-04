@@ -13,7 +13,7 @@ interface CopyIdChipProps {
 }
 
 /**
- * Enterprise tracking chip — full/selectable ID + one-click copy for Data Pilot.
+ * Enterprise tracking chip — full/selectable ID + one-click copy for Datawrap Pilot.
  */
 export function CopyIdChip({
   id,

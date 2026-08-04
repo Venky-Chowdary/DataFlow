@@ -129,7 +129,7 @@ export function LandingDataPlane3D() {
             <div className="lp-d3-engine">
               <div className="lp-d3-engine-lid" />
               <div className="lp-d3-engine-body">
-                <strong>DataFlow</strong>
+                <strong>Datawrap</strong>
                 <span>governed engine</span>
                 <div className="lp-d3-engine-bars">
                   <i style={{ "--p": "0.9" } as CSSProperties} />

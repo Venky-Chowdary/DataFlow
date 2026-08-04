@@ -95,11 +95,11 @@ export function PipelineTopology({ nodes, edges, emptyHint }: PipelineTopologyPr
           </div>
         </div>
 
-        <div className="df2-pipeline-hub" aria-label="DataFlow sync engine">
+        <div className="df2-pipeline-hub" aria-label="Datawrap sync engine">
           <div className="df2-pipeline-hub-connector left" aria-hidden />
           <div className="df2-pipeline-hub-inner">
             <DtLogo size={28} />
-            <span>DataFlow</span>
+            <span>Datawrap</span>
           </div>
           <div className="df2-pipeline-hub-connector right" aria-hidden />
         </div>

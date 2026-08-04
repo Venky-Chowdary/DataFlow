@@ -1,4 +1,4 @@
-"""Data Pilot get_job / ID routing — not a chatbot stub."""
+"""Datawrap Pilot get_job / ID routing — not a chatbot stub."""
 
 from __future__ import annotations
 

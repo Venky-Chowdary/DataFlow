@@ -1,4 +1,4 @@
-"""Preflight run IDs for Data Pilot / Validate tracking."""
+"""Preflight run IDs for Datawrap Pilot / Validate tracking."""
 
 from __future__ import annotations
 

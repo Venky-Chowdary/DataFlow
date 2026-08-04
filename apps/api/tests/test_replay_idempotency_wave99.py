@@ -21,6 +21,7 @@ Defects covered:
 from __future__ import annotations
 
 import os
+from services.brand_env import getenv_brand
 import sys
 import tempfile
 import threading
@@ -630,7 +631,7 @@ class TestEngineRaisesOnDuplicateSubmission:
         from src.transfer.engine import UniversalTransferEngine
 
         engine = UniversalTransferEngine()
-        prev = os.environ.get("DATAFLOW_JOB_IDEMPOTENCY")
+        prev = getenv_brand("JOB_IDEMPOTENCY")
         os.environ["DATAFLOW_JOB_IDEMPOTENCY"] = "0"
         try:
             assert engine._idempotency_key(_request()) == ""
@@ -913,7 +914,7 @@ class TestIdleSlotReleasesWal:
         state = _state()
         reader = _reader_with(state)
         reader._incremental_snapshot_open = lambda: False
-        prev = os.environ.get("DATAFLOW_CDC_IDLE_SLOT_ADVANCE")
+        prev = getenv_brand("CDC_IDLE_SLOT_ADVANCE")
         os.environ["DATAFLOW_CDC_IDLE_SLOT_ADVANCE"] = "0"
         try:
             reader.heartbeat()

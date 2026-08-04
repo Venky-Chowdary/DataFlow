@@ -1,12 +1,12 @@
-# DataFlow Preflight & Data Governance Rulebook
+# Datawrap Preflight & Data Governance Rulebook
 
-This document is the source of truth for the rules that govern whether a transfer is approved, reviewed, or blocked in DataFlow. It is intended for product, engineering, and operations teams and is aligned with the Universal Data Transfer orchestration framework: canonical intermediate models, connector capability discovery, hard gates, soft gates, validation evidence, quarantine, and reversible transforms.
+This document is the source of truth for the rules that govern whether a transfer is approved, reviewed, or blocked in Datawrap. It is intended for product, engineering, and operations teams and is aligned with the Universal Data Transfer orchestration framework: canonical intermediate models, connector capability discovery, hard gates, soft gates, validation evidence, quarantine, and reversible transforms.
 
 ---
 
 ## 1. Purpose
 
-DataFlow is a **universal any-to-any data transfer platform**. Before a transfer writes any data to the destination, the preflight engine checks the source, the destination, the schema mapping, the data values, and the configured policy. The goals are:
+Datawrap is a **universal any-to-any data transfer platform**. Before a transfer writes any data to the destination, the preflight engine checks the source, the destination, the schema mapping, the data values, and the configured policy. The goals are:
 
 - **No data loss.** Never silently drop, truncate, or coerce values unless the user explicitly approves a lossy transform.
 - **No guessing.** Every mapping has a confidence score, evidence, and a reversible/lossy flag.
@@ -28,12 +28,12 @@ DataFlow is a **universal any-to-any data transfer platform**. Before a transfer
 
 | Gate ID | Title | Category | Why it may block | What to do | Examples |
 |---|---|---|---|---|---|
-| **G1 Source** | Source connectivity | Hard | DataFlow cannot read the source. | Check host, port, credentials, network, and that the source file/table/collection exists. | PostgreSQL connection refused; S3 bucket not found; CSV parse error. |
-| **G2 Destination** | Destination connectivity | Hard | DataFlow can read the source but cannot reach or write to the destination. | Check destination host, credentials, write permissions, and that the database/schema/bucket exists. | MongoDB auth failed; Snowflake warehouse suspended; bucket write denied. |
+| **G1 Source** | Source connectivity | Hard | Datawrap cannot read the source. | Check host, port, credentials, network, and that the source file/table/collection exists. | PostgreSQL connection refused; S3 bucket not found; CSV parse error. |
+| **G2 Destination** | Destination connectivity | Hard | Datawrap can read the source but cannot reach or write to the destination. | Check destination host, credentials, write permissions, and that the database/schema/bucket exists. | MongoDB auth failed; Snowflake warehouse suspended; bucket write denied. |
 | **G3 Schema Contract** | Schema contract / type coercion | Hard | A source value cannot be stored in the target type without losing precision or failing. | Change the target column type to a wider or compatible type, or add a safe transform. For schemaless destinations (MongoDB, DynamoDB, Redis) this gate is relaxed because no DDL type contract is enforced. | VARCHAR `'abc'` → INTEGER is impossible; TIMESTAMP → DATE truncates time; DECIMAL → INTEGER drops fractional cents. |
 | **G4 Mapping Confidence** | Mapping confidence | Soft | The AI mapper is not certain that a source column means the same thing as the target column. | Review the mapping panel, confirm or re-map the column, and approve. Improve column names or provide a sample. | `'amt'` mapped to `'amount'` with low confidence; `'created'` vs `'updated'`. |
 | **G5 Dry Run / Integrity** | Transform dry-run / integrity | Hard | A sample row could not be transformed or violates an integrity rule. | Fix the source value, choose a less strict transform, or switch validation mode. For schemaless destinations values are stored as-is when possible. | `'2024-13-01'` cannot be parsed as a date; required identifier is null. |
-| **G6 Target DDL** | Target DDL compatibility | Hard | The target table or collection cannot accept the data as mapped. | Allow DataFlow to create/alter the target, remove duplicate keys, widen a column, or map to a compatible existing column. | Duplicate `_id` values in MongoDB; VARCHAR(10) cannot fit a 50-character email; target column does not exist. |
+| **G6 Target DDL** | Target DDL compatibility | Hard | The target table or collection cannot accept the data as mapped. | Allow Datawrap to create/alter the target, remove duplicate keys, widen a column, or map to a compatible existing column. | Duplicate `_id` values in MongoDB; VARCHAR(10) cannot fit a 50-character email; target column does not exist. |
 | **G7 Capacity** | Capacity / staging | Soft | The local staging volume may not have enough free space. | Free disk space, reduce the batch size, or stream directly to destination. | A 100 GB export needs 300 GB free staging. |
 | **G8 Reconciliation** | Reconciliation | Soft | Source and target row counts or key sets do not match after the transfer. | Investigate missing rows, duplicates, or filter differences. | 1000 source rows but 980 written. |
 | **G9 Data Integrity** | Data integrity audit | Hard | The sample violates duplicate keys, required nulls, financial precision loss, or encoding anomalies. | Clean the source data, adjust the mapping, or switch validation mode to `balanced` for non-critical fields. | Primary key has duplicates; amount lost a decimal place; `user_id` is 60% null. |
@@ -127,7 +127,7 @@ The proof-bundle confidence floor is `max(0.55, threshold - 0.3)`. Mappings belo
 
 - **What it means:** The target cannot accept the mapped data.
 - **Fix:**
-  - Allow DataFlow to create the table/collection.
+  - Allow Datawrap to create the table/collection.
   - Widen a VARCHAR column.
   - Remove duplicate primary keys in the source.
   - Map to an existing column with a compatible type.
@@ -186,7 +186,7 @@ The proof-bundle confidence floor is `max(0.55, threshold - 0.3)`. Mappings belo
 
 - **DDL type contract is enforced.** Lossy coercions are blocked or warned.
 - **Primary keys and unique constraints are honored.** Duplicates and nulls in required keys are blocked.
-- **Auto-create is allowed when the policy permits.** DataFlow can create the target table with the inferred schema.
+- **Auto-create is allowed when the policy permits.** Datawrap can create the target table with the inferred schema.
 
 ### 8.3 File sources and destinations (CSV, JSON, JSONL, TSV, Parquet, Excel)
 
@@ -209,7 +209,7 @@ The proof-bundle confidence floor is `max(0.55, threshold - 0.3)`. Mappings belo
   6. Value-profile cross-checks on samples.
 - **Each mapping produces:** source path, target path, transform expression, confidence score, evidence, lossy flag, reversible flag, and fallback/quarantine rule.
 - **Conflict resolution:** If two source fields map to one target, the higher-confidence candidate wins and the runner-up is reported. If one source field must fan out, a deterministic derivation rule is applied.
-- **Unknown target schema:** DataFlow creates identity columns with the inferred source type when the target is unknown. The user can review and rename before execution.
+- **Unknown target schema:** Datawrap creates identity columns with the inferred source type when the target is unknown. The user can review and rename before execution.
 
 ---
 

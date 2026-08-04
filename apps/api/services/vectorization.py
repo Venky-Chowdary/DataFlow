@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+from services.brand_env import getenv_brand
 from functools import lru_cache
 from typing import Any, Callable, Protocol
 
@@ -130,7 +131,7 @@ class _HashEmbedder:
 @lru_cache(maxsize=8)
 def _get_embedder(name: str | None = None) -> Embedder:
     """Return a cached embedder instance by model name or env default."""
-    default = os.environ.get("DATAFLOW_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+    default = getenv_brand("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
     model_name = name or default
 
     if model_name.startswith("openai/"):

@@ -30,7 +30,7 @@ export function UniversalHero({ onStartTransfer, onOpenPilot }: UniversalHeroPro
           {onOpenPilot && (
             <button type="button" className="dt-btn dt-btn-lg dt-universal-cta-secondary" onClick={onOpenPilot}>
               <DtIcon name="sparkle" size={18} />
-              Ask Data Pilot
+              Ask Datawrap Pilot
             </button>
           )}
         </div>

@@ -1,4 +1,4 @@
-"""DataTransfer.space — Copilot / Data Pilot Module"""
+"""Datawrap — Copilot / Datawrap Pilot Module"""
 
 from .agent import CopilotResponse, DataTransferCopilotAgent, get_copilot_agent
 from .pilot_agent import DataPilotAgent, get_pilot_agent

@@ -147,7 +147,7 @@ export function inferTransferFailureHint(
       confidence: "high",
       fix:
         errorFix
-        || 'DataFlow needs object rows: [{...}], a wrapper like {"data":[{...}]} / {"countries":[{...}]}, GeoJSON features, or one object as a single row. Re-export, re-upload, then re-run from Source — Resume will not help if extract never started.',
+        || 'Datawrap needs object rows: [{...}], a wrapper like {"data":[{...}]} / {"countries":[{...}]}, GeoJSON features, or one object as a single row. Re-export, re-upload, then re-run from Source — Resume will not help if extract never started.',
     };
   }
   if (
@@ -191,7 +191,7 @@ export function inferTransferFailureHint(
       confidence: "high",
       fix:
         errorFix
-        || "Grant DROP (or DELETE) on the destination table, confirm no lock is holding it, then re-run. DataFlow refused to continue as an append — that would have silently doubled the destination row count.",
+        || "Grant DROP (or DELETE) on the destination table, confirm no lock is holding it, then re-run. Datawrap refused to continue as an append — that would have silently doubled the destination row count.",
     };
   }
   if (
@@ -205,7 +205,7 @@ export function inferTransferFailureHint(
       confidence: "high",
       fix:
         errorFix
-        || "Resume this job from the last committed chunk. DataFlow stopped instead of re-sending the batch because this destination cannot deduplicate a replay. To make retries automatic, switch the sync mode to upsert with a primary key.",
+        || "Resume this job from the last committed chunk. Datawrap stopped instead of re-sending the batch because this destination cannot deduplicate a replay. To make retries automatic, switch the sync mode to upsert with a primary key.",
     };
   }
   if (

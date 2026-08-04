@@ -12,6 +12,7 @@ import atexit
 import concurrent.futures
 import logging
 import os
+from services.brand_env import getenv_brand
 import threading
 from typing import Any, Callable
 
@@ -32,7 +33,7 @@ def _ensure_executor() -> concurrent.futures.ThreadPoolExecutor:
     if _shutdown:
         raise RuntimeError("Transfer scheduler has been shut down")
     if _executor is None or _executor._shutdown:
-        max_workers = max(1, int(os.getenv("DATAFLOW_TRANSFER_WORKERS", "4")))
+        max_workers = max(1, int(getenv_brand("TRANSFER_WORKERS", "4")))
         _executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="df-transfer-",
@@ -77,7 +78,7 @@ def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> co
     if not _started.is_set():
         _started.set()
 
-    ttl_seconds = int(os.getenv("DATAFLOW_WORKER_LEASE_TTL", "60"))
+    ttl_seconds = int(getenv_brand("WORKER_LEASE_TTL", "60"))
     if not _lease_store.acquire(job_id, ttl_seconds=ttl_seconds):
         _logger.warning("Transfer job %s is already leased by another worker; skipping", job_id)
         future: concurrent.futures.Future[Any] = concurrent.futures.Future()

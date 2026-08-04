@@ -1,6 +1,6 @@
 """Reverse-ETL destination architecture (activation / operational sync).
 
-DataFlow's primary path is source→warehouse. Reverse-ETL flips that: curated
+Datawrap's primary path is source→warehouse. Reverse-ETL flips that: curated
 warehouse tables activate into operational SaaS systems (CRM, support, etc.).
 
 This module defines the contract and a registry of activation adapters. Concrete

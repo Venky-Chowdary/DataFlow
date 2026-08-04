@@ -1,4 +1,4 @@
-"""Context resolution for Data Pilot follow-up turns.
+"""Context resolution for Datawrap Pilot follow-up turns.
 
 Separate from raw-history replay on purpose. The 2026 multi-turn text-to-SQL
 memory study found that resolving referenced context into an *authoritative

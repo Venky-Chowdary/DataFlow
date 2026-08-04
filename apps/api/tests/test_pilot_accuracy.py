@@ -1,4 +1,4 @@
-"""Accuracy / robustness guarantees for Data Pilot routing and scoring."""
+"""Accuracy / robustness guarantees for Datawrap Pilot routing and scoring."""
 
 from __future__ import annotations
 

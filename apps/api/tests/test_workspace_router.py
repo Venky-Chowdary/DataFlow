@@ -76,5 +76,5 @@ def test_security_posture_report(client):
     assert response.status_code == 200, response.text
     assert response.headers["content-type"] == "text/markdown; charset=utf-8"
     body = response.text
-    assert "DataFlow Security & Compliance Report" in body
+    assert "Datawrap Security & Compliance Report" in body
     assert posture["data_region"] in body

@@ -8,6 +8,7 @@ assistant privacy-safe even when no local model is configured.
 from __future__ import annotations
 
 import os
+from services.brand_env import getenv_brand
 import re
 
 # PII / sensitive patterns we do not send to cloud LLMs.
@@ -29,14 +30,14 @@ _SANITIZE_RE = re.compile(
 
 def is_llm_enabled() -> bool:
     """Return whether LLM inference is globally enabled."""
-    return os.getenv("DATAFLOW_LLM_ENABLED", "true").lower() not in (
+    return getenv_brand("LLM_ENABLED", "true").lower() not in (
         "false", "0", "off", "disabled", "no"
     )
 
 
 def is_pii_masking_enabled() -> bool:
     """Return whether PII masking before LLM prompts is required."""
-    return os.getenv("DATAFLOW_PII_MASKING", "true").lower() not in (
+    return getenv_brand("PII_MASKING", "true").lower() not in (
         "false", "0", "off", "disabled", "no"
     )
 

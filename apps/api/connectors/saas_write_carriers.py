@@ -413,7 +413,7 @@ def shopify_metafield_type_to_carrier(
 
     Research: Shopify Admin metafield types
     (https://shopify.dev/docs/apps/build/metafields/list-of-data-types).
-    Values are always API strings, but DataFlow carriers preserve polarity so
+    Values are always API strings, but Datawrap carriers preserve polarity so
     Map/Validate/quarantine do not invent TEXT for booleans, decimals, lists,
     or measurement JSON objects.
     """

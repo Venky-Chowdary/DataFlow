@@ -1,4 +1,4 @@
-"""Enterprise Data Pilot prompt corpus — ≥1000 real NL prompts.
+"""Enterprise Datawrap Pilot prompt corpus — ≥1000 real NL prompts.
 
 Validates local NL routing (infer_tools_from_message) against the parametric
 corpus. This is not a mocked chatbot: every case is a real operator phrase and

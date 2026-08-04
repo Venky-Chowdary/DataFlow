@@ -1,4 +1,4 @@
-"""Automation ideas — category cards for Data Pilot (beats static competitor templates)."""
+"""Automation ideas — category cards for Datawrap Pilot (beats static competitor templates)."""
 
 from fastapi import APIRouter
 
@@ -52,7 +52,7 @@ AUTOMATION_IDEAS = [
         "category": "analytics",
         "title": "Data quality report",
         "prompt": "Analyze all my datasets and give me quality scores and PII summary",
-        "description": "Cross-dataset quality dashboard from Data Pilot.",
+        "description": "Cross-dataset quality dashboard from Datawrap Pilot.",
     },
     {
         "id": "file_export",

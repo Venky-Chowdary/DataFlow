@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Copilot Data Analyst
+Datawrap — Copilot Data Analyst
 
 Analyzes real universal data and composes natural-language responses
 about columns, values, PII, quality — not just transfer steps.

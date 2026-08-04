@@ -345,7 +345,7 @@ async def run_preflight(body: PreflightRequest):
 
 @router.get("/runs")
 async def list_preflight_runs(limit: int = 20):
-    """List recent validation runs (IDs Data Pilot / Jobs can reference)."""
+    """List recent validation runs (IDs Datawrap Pilot / Jobs can reference)."""
     from services.preflight_run_store import list_preflight_runs as _list
 
     return {"runs": _list(limit=limit), "count": min(limit, 100)}
@@ -368,7 +368,7 @@ class ExplainRequest(BaseModel):
     preflight: dict[str, Any] = Field(..., description="Full preflight result dict")
     dest_type: str | None = None
     validation_mode: str = "strict"
-    use_llm: bool = Field(True, description="Reuse Data Pilot LLM for a natural-language narrative when available")
+    use_llm: bool = Field(True, description="Reuse Datawrap Pilot LLM for a natural-language narrative when available")
 
 
 @router.post("/explain")

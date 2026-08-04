@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Vector Store
+Datawrap — Vector Store
 
 Local vector storage using ChromaDB with in-memory fallback.
 """
@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from services.brand_env import getenv_brand
 import uuid
 from dataclasses import dataclass
 from typing import Optional
@@ -19,8 +20,7 @@ from .embedding_service import get_embedding_service
 
 _vector_store: Optional["DataTransferVectorStore"] = None
 
-DEFAULT_PERSIST_DIR = os.environ.get(
-    "DATAFLOW_VECTOR_STORE_DIR",
+DEFAULT_PERSIST_DIR = getenv_brand("VECTOR_STORE_DIR",
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "vector_store"),
 )
 
@@ -49,7 +49,7 @@ class DataTransferVectorStore:
 
     def _init_backend(self):
         os.makedirs(self.persist_dir, exist_ok=True)
-        backend = os.environ.get("DATAFLOW_VECTOR_STORE_BACKEND", "memory").lower()
+        backend = getenv_brand("VECTOR_STORE_BACKEND", "memory").lower()
         if backend == "chromadb":
             try:
                 import chromadb

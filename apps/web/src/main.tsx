@@ -17,7 +17,7 @@ import "./styles/app-styles.css";
    created a second .dt-toast-host and duplicate notifications. */
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <PageErrorBoundary label="DataFlow">
+    <PageErrorBoundary label="Datawrap">
       <DataTransferApp />
     </PageErrorBoundary>
   </React.StrictMode>

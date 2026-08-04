@@ -1035,12 +1035,16 @@
 }
 
 .docs-article-layout {
-  display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
-  gap: 28px;
-  width: min(1180px, calc(100% - 32px));
-  margin: 0 auto;
-  padding: 28px 0 72px;
+  display: block;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
+
+.docs-space .docs-article-layout .docs-toc,
+.docs-space .docs-toc--sticky {
+  display: none !important;
 }
 
 .docs-sidebar {
@@ -1156,7 +1160,7 @@
 
 .docs-article-lead {
   margin: 0 0 10px;
-  max-width: 68ch;
+  max-width: none;
   color: #475569;
   line-height: 1.55;
   font-size: 1.05rem;
@@ -1213,23 +1217,23 @@
 .docs-section > p {
   margin: 0 0 16px;
   color: #475569;
-  line-height: 1.6;
-  max-width: 70ch;
+  line-height: 1.7;
+  max-width: none;
 }
 
 .docs-figure {
   margin: 0 0 18px;
-  padding: 10px;
-  border-radius: 14px;
-  border: 1px solid #e2e8f0;
-  background: #fff;
+  padding: 0;
+  border-radius: 0;
+  border: none;
+  background: transparent;
 }
 
 .docs-figure img {
   display: block;
   width: 100%;
   border-radius: 10px;
-  border: 1px solid #e2e8f0;
+  border: none;
   background: #f8fafc;
 }
 
@@ -1436,9 +1440,10 @@
 /* ── Confluence-style docs space ── */
 .docs-space {
   display: grid;
-  grid-template-columns: minmax(240px, 280px) minmax(0, 1fr);
+  grid-template-columns: minmax(260px, 280px) minmax(0, 1fr);
   gap: 0;
-  width: min(1280px, calc(100% - clamp(16px, 3vw, 40px)));
+  /* Near full viewport for full-desktop workspace screenshots */
+  width: min(1680px, calc(100% - clamp(16px, 2vw, 40px)));
   margin: 20px auto 72px;
   min-height: calc(100vh - 140px);
   border: 1px solid var(--df-border, #e2e8f0);
@@ -1692,26 +1697,23 @@
   inset: 0;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   object-position: top left;
   opacity: 0;
-  transform: scale(1.06);
-  transition: opacity 0.9s ease, transform 4.2s ease;
+  transform: none;
+  transition: opacity 0.45s ease;
   pointer-events: none;
+  animation: none !important;
 }
 
 .docs-shot-reel-frame.is-active {
   opacity: 1;
-  transform: scale(1);
+  transform: none;
   z-index: 1;
 }
 
 .docs-shot-reel-vignette {
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  pointer-events: none;
-  background: linear-gradient(180deg, transparent 55%, rgba(15, 23, 42, 0.35));
+  display: none;
 }
 
 .docs-shot-reel figcaption {
@@ -1743,36 +1745,35 @@
 
 .docs-figure--live {
   margin: 16px 0;
+  padding: 0;
+  border: none;
+  background: transparent;
 }
 
 .docs-figure-live {
-  overflow: hidden;
-  border-radius: 12px;
-  border: 1px solid #e2e8f0;
-  background: #0f172a;
+  overflow: visible;
+  border-radius: 0;
+  border: none;
+  background: transparent;
 }
 
 .docs-figure-live img {
   display: block;
   width: 100%;
-  aspect-ratio: 16 / 10;
-  object-fit: cover;
+  height: auto;
+  aspect-ratio: auto;
+  object-fit: contain;
   object-position: top left;
-  animation: docs-shot-ken 12s ease-in-out infinite alternate;
+  animation: none !important;
+  transform: none !important;
 }
 
-@keyframes docs-shot-ken {
-  from { transform: scale(1) translate(0, 0); }
-  to { transform: scale(1.06) translate(-1.5%, -1%); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .docs-shot-reel-frame,
-  .docs-figure-live img {
-    animation: none !important;
-    transition: none !important;
-    transform: none !important;
-  }
+.docs-shot-reel-frame,
+.docs-shot-reel-frame img,
+.docs-figure-live img,
+.docs-figure--live img {
+  animation: none !important;
+  transform: none !important;
 }
 
 .docs-space-nav-mobile {
@@ -1898,12 +1899,30 @@
 }
 
 .docs-shot-reel--hero {
-  margin: 22px 0 8px;
+  margin: 22px 0 18px;
+  width: 100%;
 }
 
 .docs-shot-reel--hero .docs-shot-reel-stage {
-  aspect-ratio: 16 / 9.5;
-  max-height: 420px;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  max-height: none;
+  border-radius: 12px;
+}
+
+.docs-shot-reel--hero .docs-shot-reel-frame {
+  object-fit: contain;
+  object-position: top center;
+  background: #0b1220;
+}
+
+.docs-shot-reel--hero figcaption {
+  font-size: 13.5px;
+  color: #475569;
+}
+
+.docs-shot-reel--hero .docs-shot-reel-dots {
+  justify-content: flex-start;
 }
 
 @media (max-width: 720px) {

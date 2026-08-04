@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Copilot API Router
+Datawrap — Copilot API Router
 
 Customer-facing chat + separate training agent endpoints.
 """
@@ -288,7 +288,7 @@ async def copilot_prompts():
 
 @router.get("/tools", response_model=ToolRegistryResponse)
 async def copilot_tools():
-    """Expose Data Pilot tool registry and generated connector actions."""
+    """Expose Datawrap Pilot tool registry and generated connector actions."""
     from ..ai.copilot.tools import get_tool_registry
     return get_tool_registry()
 

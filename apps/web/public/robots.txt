@@ -1,4 +1,5 @@
 User-agent: *
 Allow: /
 
-Sitemap: /sitemap.xml
+# App shell routes are noindex via page meta; marketing surfaces are crawlable.
+Sitemap: https://datawrap.app/sitemap.xml

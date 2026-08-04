@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+from services.brand_env import getenv_brand
 from src.transfer.engine import UniversalTransferEngine
 from src.transfer.models import EndpointConfig, TransferRequest, TransferResult
 
@@ -152,7 +153,7 @@ def sqlserver_endpoint(table: str) -> EndpointConfig:
         port=1433,
         database="dataflow",
         username="sa",
-        password="DataFlow_CDC_2022!",
+        password="Datawrap_CDC_2022!",
         schema="dbo",
         table=table,
     )
@@ -192,14 +193,14 @@ def oracle_endpoint(table: str) -> EndpointConfig:
     return EndpointConfig(
         kind="database",
         format="oracle",
-        host=os.getenv("DATAFLOW_ORACLE_HOST", "localhost"),
-        port=int(os.getenv("DATAFLOW_ORACLE_PORT", "1521")),
-        database=os.getenv("DATAFLOW_ORACLE_SERVICE")
-        or os.getenv("DATAFLOW_ORACLE_DATABASE", "ORCLPDB1"),
-        username=os.getenv("DATAFLOW_ORACLE_USER", "dataflow"),
-        password=os.getenv("DATAFLOW_ORACLE_PASSWORD", "dataflow"),
-        schema=os.getenv("DATAFLOW_ORACLE_SCHEMA")
-        or os.getenv("DATAFLOW_ORACLE_USER", "dataflow"),
+        host=getenv_brand("ORACLE_HOST", "localhost"),
+        port=int(getenv_brand("ORACLE_PORT", "1521")),
+        database=getenv_brand("ORACLE_SERVICE")
+        or getenv_brand("ORACLE_DATABASE", "ORCLPDB1"),
+        username=getenv_brand("ORACLE_USER", "dataflow"),
+        password=getenv_brand("ORACLE_PASSWORD", "dataflow"),
+        schema=getenv_brand("ORACLE_SCHEMA")
+        or getenv_brand("ORACLE_USER", "dataflow"),
         table=table,
     )
 
@@ -218,9 +219,9 @@ def require_oracle_env() -> None:
 
     import pytest
 
-    if os.getenv("DATAFLOW_ORACLE_ENABLE", "").strip() not in {"1", "true", "yes"}:
+    if getenv_brand("ORACLE_ENABLE", "").strip() not in {"1", "true", "yes"}:
         pytest.skip("Oracle typed e2e requires DATAFLOW_ORACLE_ENABLE=1")
-    require_ports(int(os.getenv("DATAFLOW_ORACLE_PORT", "1521")), host=os.getenv("DATAFLOW_ORACLE_HOST", "localhost"))
+    require_ports(int(getenv_brand("ORACLE_PORT", "1521")), host=getenv_brand("ORACLE_HOST", "localhost"))
 
 
 def seed_postgresql_typed(table: str) -> None:
@@ -731,7 +732,7 @@ def drop_sqlserver_table(table: str) -> None:
         server="localhost",
         port=1433,
         user="sa",
-        password="DataFlow_CDC_2022!",
+        password="Datawrap_CDC_2022!",
         database="dataflow",
     )
     try:
@@ -752,7 +753,7 @@ def read_sqlserver_row(table: str, row_id: int = 1) -> dict[str, Any]:
             server="localhost",
             port=1433,
             user="sa",
-            password="DataFlow_CDC_2022!",
+            password="Datawrap_CDC_2022!",
             database="dataflow",
         )
         try:
@@ -782,7 +783,7 @@ def read_sqlserver_row(table: str, row_id: int = 1) -> dict[str, Any]:
 
         conn = pyodbc.connect(
             "DRIVER={ODBC Driver 17 for SQL Server};"
-            "SERVER=localhost,1433;DATABASE=dataflow;UID=sa;PWD=DataFlow_CDC_2022!;"
+            "SERVER=localhost,1433;DATABASE=dataflow;UID=sa;PWD=Datawrap_CDC_2022!;"
             "TrustServerCertificate=yes;"
         )
         try:

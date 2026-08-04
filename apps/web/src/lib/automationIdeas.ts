@@ -69,7 +69,7 @@ export const AUTOMATION_IDEAS: AutomationIdea[] = [
     category: "analytics",
     title: "Data quality report",
     prompt: "Analyze all my datasets and give me quality scores and PII summary",
-    description: "Cross-dataset quality from Data Pilot.",
+    description: "Cross-dataset quality from Datawrap Pilot.",
   },
   {
     id: "file_export",

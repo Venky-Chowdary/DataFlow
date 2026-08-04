@@ -101,7 +101,7 @@ export function SchemaIntelligenceRail({
       </div>
 
       <div className="df2-rail-panel df2-intelligence-advantages">
-        <div className="df2-rail-kicker">Why DataFlow</div>
+        <div className="df2-rail-kicker">Why Datawrap</div>
         <ul className="df2-advantage-list">
           {advantages.map((adv) => (
             <li key={adv.id}>
@@ -119,7 +119,7 @@ export function SchemaIntelligenceRail({
         <div className="df2-rail-panel">
           <p className="df2-intelligence-empty">
             Upload JSON/CSV, connect MongoDB, or point at S3 — we profile schema, detect nested documents,
-            map to Snowflake/Postgres/BigQuery with type safety. Compass imports BSON locally; DataFlow governs the full route.
+            map to Snowflake/Postgres/BigQuery with type safety. Compass imports BSON locally; Datawrap governs the full route.
           </p>
         </div>
       )}

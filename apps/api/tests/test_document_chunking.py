@@ -101,7 +101,7 @@ def test_docx_chunks_via_file_parser():
     from services.file_parser import FileParser
 
     raw = _make_docx_bytes(
-        ["DataFlow moves data without silent loss.", "Quarantine keeps bad cells visible."],
+        ["Datawrap moves data without silent loss.", "Quarantine keeps bad cells visible."],
         heading="Integrity",
     )
     parsed = FileParser.parse(raw, "integrity.docx")

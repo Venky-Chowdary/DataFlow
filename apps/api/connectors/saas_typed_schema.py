@@ -12,7 +12,7 @@ from typing import Any
 
 from services.value_serializer import cell_to_string, json_default
 
-# Notion property type → DataFlow logical type
+# Notion property type → Datawrap logical type
 _NOTION_LOGICAL: dict[str, str] = {
     "title": "string",
     "rich_text": "string",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from services.brand_env import getenv_brand
 import re
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -23,8 +24,8 @@ from connectors.sql_identifiers import (  # noqa: F401 — re-export canonical h
 )
 
 # Configurable batch size — default 20 000 rows per commit (enterprise scale)
-CHUNK_SIZE = int(os.getenv("DATAFLOW_CHUNK_SIZE", "20000"))
-TRANSFORM_ERROR_POLICY = os.getenv("DATAFLOW_TRANSFORM_ERROR_POLICY", "quarantine").lower()
+CHUNK_SIZE = int(getenv_brand("CHUNK_SIZE", "20000"))
+TRANSFORM_ERROR_POLICY = getenv_brand("TRANSFORM_ERROR_POLICY", "quarantine").lower()
 VALID_ERROR_POLICIES = {"fail", "quarantine", "coerce_null"}
 
 # Active Map mappings while write-quarantine matrix runs — enables dual-stamp

@@ -127,7 +127,7 @@ This is the #1 disqualifier in 2026 evaluations. Batch-only or cursor-polling is
 | CDC retention health probe                                                                           | **Shipped** — ok/at_risk/gap vs min_lsn/oldest SCN; ops API + Validate/Theater/Results; gap recovery CTA                 |
 
 
-**Verdict:** DataFlow can win evaluations that prioritize *provable trust*. It cannot yet win evaluations that prioritize *CDC platform coverage*. Say so in sales decks.
+**Verdict:** Datawrap can win evaluations that prioritize *provable trust*. It cannot yet win evaluations that prioritize *CDC platform coverage*. Say so in sales decks.
 
 **Target:** Move data into vector DBs so it is AI-ready.
 
@@ -152,7 +152,7 @@ This is the #1 disqualifier in 2026 evaluations. Batch-only or cursor-polling is
 
 ### Why it matters
 
-Airbyte ships five vector destinations and an official RAG pipeline guide. DataFlow now matches that destination set with Studio-wired writers and can beat them on semantic mapping + integrity.
+Airbyte ships five vector destinations and an official RAG pipeline guide. Datawrap now matches that destination set with Studio-wired writers and can beat them on semantic mapping + integrity.
 
 ### Recommended next step
 
@@ -229,7 +229,7 @@ Oracle·SQL Server fleet depth / optional dual-node AG·DG live matrix when infr
 
 ---
 
-## G5: GitOps / DataFlow-as-Code
+## G5: GitOps / Datawrap-as-Code
 
 **Target:** Pipelines as code, versioned and CI-tested.
 
@@ -245,7 +245,7 @@ Oracle·SQL Server fleet depth / optional dual-node AG·DG live matrix when infr
 
 ### Why it matters
 
-Enterprise buyers want reviewable pipeline definitions and drift detection in CI. Meltano proved demand but lacks DataFlow's UI/AI story.
+Enterprise buyers want reviewable pipeline definitions and drift detection in CI. Meltano proved demand but lacks Datawrap's UI/AI story.
 
 ### Recommended next step
 
@@ -300,7 +300,7 @@ Ship undo/rollback (staging swap or Iceberg branch) — do not claim rollback un
 
 ### Why it matters
 
-Iceberg is the de-facto table-format standard; closing the catalog gap makes DataFlow compatible with Snowflake, Databricks, Athena, DuckDB, Trino without a second copy path.
+Iceberg is the de-facto table-format standard; closing the catalog gap makes Datawrap compatible with Snowflake, Databricks, Athena, DuckDB, Trino without a second copy path.
 
 ### Recommended next step
 
@@ -342,7 +342,7 @@ Ship a generic Singer tap/target bridge and a connector SDK so the community can
 ## Competitive maturity score
 
 
-| Dimension                   | DataFlow today | Airbyte/Fivetran | Gap                                                              |
+| Dimension                   | Datawrap today | Airbyte/Fivetran | Gap                                                              |
 | --------------------------- | -------------- | ---------------- | ---------------------------------------------------------------- |
 | Batch reliability           | 8/10           | 9/10             | small                                                            |
 | Connector depth             | 5/10           | 9/10             | large (3 transfer-ready SaaS writers added; still far behind)    |

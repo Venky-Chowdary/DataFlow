@@ -1,4 +1,4 @@
-"""OAuth2 helpers for DataFlow Connector CDK — token refresh with config write-back."""
+"""OAuth2 helpers for Datawrap Connector CDK — token refresh with config write-back."""
 
 from __future__ import annotations
 

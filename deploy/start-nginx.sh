@@ -6,8 +6,8 @@ export PORT
 
 DEFAULT_API="https://dataflow-api-production-722b.up.railway.app/api/v1"
 
-# Railway may set DATAFLOW_API_BASE at runtime and/or VITE_API_BASE at build.
-RAW_API_BASE=${DATAFLOW_API_BASE:-${VITE_API_BASE:-$DEFAULT_API}}
+# Prefer DATAWRAP_*; fall back to DATAFLOW_* / VITE_API_BASE during cutover.
+RAW_API_BASE=${DATAWRAP_API_BASE:-${DATAFLOW_API_BASE:-${VITE_API_BASE:-$DEFAULT_API}}}
 RAW_API_BASE=$(printf '%s' "$RAW_API_BASE" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
 if [ -z "$RAW_API_BASE" ]; then
   RAW_API_BASE="$DEFAULT_API"
@@ -61,10 +61,11 @@ envsubst '$PORT $API_PROXY_PASS $API_PROXY_HOST $API_ORIGIN' < "$TEMPLATE" > /et
 
 INDEX=/usr/share/nginx/html/index.html
 if [ -f "$INDEX" ]; then
+  sed -i '/window\.DATAWRAP_API_BASE/d' "$INDEX"
   sed -i '/window\.DATAFLOW_API_BASE/d' "$INDEX"
-  sed -i "s|</head>|<script>window.DATAFLOW_API_BASE=\"${BROWSER_API_BASE}\"</script></head>|" "$INDEX"
+  sed -i "s|</head>|<script>window.DATAWRAP_API_BASE=\"${BROWSER_API_BASE}\";window.DATAFLOW_API_BASE=\"${BROWSER_API_BASE}\"</script></head>|" "$INDEX"
 fi
 
-echo "DataFlow web: browser API_BASE=${BROWSER_API_BASE} proxy→${API_PROXY_PASS} (from ${UPSTREAM_API})"
+echo "Datawrap web: browser API_BASE=${BROWSER_API_BASE} proxy→${API_PROXY_PASS} (from ${UPSTREAM_API})"
 
 nginx -g 'daemon off;'

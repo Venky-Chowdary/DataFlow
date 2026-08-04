@@ -91,5 +91,5 @@ def test_hybrid_footnote_on_auth_failure(monkeypatch):
     monkeypatch.setattr(agent, "context_builder", MagicMock(build=lambda *a, **k: {}))
 
     out = agent.chat("show my jobs", data_context={"pilot_session_id": "wave41"})
-    assert "Optional" in (out.answer or "") or "optional" in (out.answer or "") or "Local Data Pilot" in (out.answer or "")
+    assert "Optional" in (out.answer or "") or "optional" in (out.answer or "") or "Local Datawrap Pilot" in (out.answer or "")
     prov.clear_auth_failures()

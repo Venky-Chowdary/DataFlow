@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from services.brand_env import getenv_brand
 import re
 import sys
 import threading
@@ -1629,7 +1630,7 @@ def stream_database_transfer(
         lower = {h.lower(): h for h in batch.headers}
         pk_source_col = lower.get(pk_source_col.lower(), pk_source_col)
 
-    max_workers = int(os.getenv("DATAFLOW_PARALLEL_WORKERS", str(min(2, os.cpu_count() or 1))))
+    max_workers = int(getenv_brand("PARALLEL_WORKERS", str(min(2, os.cpu_count() or 1))))
     # SQLite handles concurrency poorly with a single shared file, so keep it sequential.
     # Snowflake reuses one connection for the job — must stay serial.
     # Iceberg catalog commits are snapshot-isolated; concurrent writers conflict.

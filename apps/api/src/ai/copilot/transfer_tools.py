@@ -1,4 +1,4 @@
-"""Real transfer planning and confirm-gated execution for Data Pilot.
+"""Real transfer planning and confirm-gated execution for Datawrap Pilot.
 
 The pilot could describe transfers but never run one, and what it *did* describe
 was invented: the old ``plan_transfer_route`` matched substrings like "csv" in a

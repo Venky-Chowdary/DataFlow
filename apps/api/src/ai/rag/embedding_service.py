@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Embedding Service
+Datawrap — Embedding Service
 
 Semantic embedding generation with graceful fallback.
 Uses sentence-transformers when available, falls back to TF-IDF.
@@ -11,6 +11,7 @@ import hashlib
 import logging
 import math
 import os
+from services.brand_env import getenv_brand
 import re
 from typing import Optional
 
@@ -34,7 +35,7 @@ class DataTransferEmbeddingService:
         self._init_backend()
 
     def _init_backend(self):
-        prefer = (os.environ.get("DATAFLOW_EMBEDDING_BACKEND") or "").strip().lower()
+        prefer = (getenv_brand("EMBEDDING_BACKEND") or "").strip().lower()
         if prefer in {"tfidf", "fallback", "off", "none"}:
             self._backend = "tfidf_fallback"
             return
@@ -46,7 +47,7 @@ class DataTransferEmbeddingService:
             try:
                 self._model = SentenceTransformer(self.MODEL_NAME, local_files_only=True)
             except Exception:
-                allow_dl = (os.environ.get("DATAFLOW_ALLOW_EMBEDDING_DOWNLOAD") or "").lower() in {
+                allow_dl = (getenv_brand("ALLOW_EMBEDDING_DOWNLOAD") or "").lower() in {
                     "1",
                     "true",
                     "on",

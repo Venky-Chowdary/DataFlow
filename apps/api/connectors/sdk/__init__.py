@@ -1,4 +1,4 @@
-"""DataFlow Connector CDK — Airbyte-shaped contract with DataFlow naming.
+"""Datawrap Connector CDK — Airbyte-shaped contract with Datawrap naming.
 
 Protocol: ``spec`` / ``check`` / ``discover`` / ``read(stream, state)`` / ``write``.
 Honesty: only connectors registered here *and* listed in

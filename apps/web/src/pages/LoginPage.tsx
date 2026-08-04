@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import { BrandWordmark } from "../components/BrandWordmark";
 import { DtIcon } from "../components/DtIcon";
-import { DtLogo } from "../components/DtLogo";
 import { useToast } from "../components/Toast";
 import { fetchSsoProviders, loginWorkspace, ssoStartUrl, SsoType } from "../lib/api";
 import { writeSession } from "../lib/session";
@@ -19,7 +19,7 @@ function isValidEmail(value: string) {
 const TARGET_LABELS: Partial<Record<Screen, string>> = {
   dashboard: "Overview",
   transfer: "Transfer Studio",
-  pilot: "Data Pilot",
+  pilot: "Datawrap Pilot",
   connectors: "Connectors",
   jobs: "Job Theater",
   settings: "Settings",
@@ -67,15 +67,10 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
       ? "Use at least 8 characters."
       : "";
 
-  const targetLabel = TARGET_LABELS[target] ?? "DataFlow";
+  const targetLabel = TARGET_LABELS[target] ?? "Datawrap";
   const emailOk = isValidEmail(email);
   const passwordOk = password.length >= 8;
   const ready = useMemo(() => emailOk && passwordOk, [emailOk, passwordOk]);
-
-  const passwordChecks = [
-    { ok: password.length >= 8, label: "At least 8 characters" },
-    { ok: /[A-Za-z]/.test(password) && /\d/.test(password), label: "Letters and a number recommended" },
-  ];
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -168,7 +163,7 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
 
   return (
     <main className="lp-login lp-login--gate">
-      <section className="lp-login-brand" aria-label="DataFlow">
+      <section className="lp-login-brand" aria-label="Datawrap">
         <div className="lp-login-brand-bg" aria-hidden>
           <span className="lp-login-brand-mesh" />
           <span className="lp-login-brand-orb lp-login-brand-orb--a" />
@@ -183,17 +178,27 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
               <span>Back</span>
             </button>
             <div className="lp-login-brand-logo">
-              <DtLogo size={32} />
-              <span>DataFlow</span>
+              <BrandWordmark markSize={32} title="" />
             </div>
           </header>
 
           <div className="lp-login-brand-body">
             <p className="lp-login-brand-kicker">Enterprise data platform</p>
-            <h1 className="lp-login-brand-title">DataFlow</h1>
+            <h1 className="lp-login-brand-title">Sign in to governed transfers</h1>
             <p className="lp-login-brand-lead">
-              Governed movement for banks, warehouses, and ops teams — semantic mapping, preflight, and checksum proof on every run.
+              Semantic mapping, eight gates, and checksum proof — for humans and agents.
             </p>
+
+            <div className="lp-login-proof" aria-hidden>
+              <div className="lp-login-proof-flow">
+                <span>Map</span>
+                <i />
+                <span>Preflight</span>
+                <i />
+                <span>Prove</span>
+              </div>
+              <p>Every session inherits workspace RBAC. Agents never skip gates.</p>
+            </div>
 
             <div className="lp-login-metrics" role="list">
               {TRUST_METRICS.map((m) => (
@@ -225,7 +230,7 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
             <p className="lp-login-auth-kicker">Secure workspace access</p>
             <h2 id="login-form-title">Sign in</h2>
             <p className="lp-login-auth-sub">
-              Authenticate with your workspace credentials. Sessions are issued by the DataFlow API — never stored as plain text.
+              Use your workspace credentials. Sessions are issued by the Datawrap API.
             </p>
           </div>
 
@@ -299,7 +304,6 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
                   autoComplete="current-password"
                   placeholder="Enter your password"
                   aria-invalid={Boolean(passwordError || (credentialError && alertKind === "auth"))}
-                  aria-describedby="login-password-hints"
                 />
                 <button
                   type="button"
@@ -311,14 +315,6 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
                 </button>
               </div>
               {passwordError && <small className="lp-field-error">{passwordError}</small>}
-              <ul id="login-password-hints" className="lp-login-checks" aria-live="polite">
-                {passwordChecks.map((c) => (
-                  <li key={c.label} className={c.ok ? "is-ok" : ""}>
-                    <span className="lp-login-check-mark" aria-hidden>{c.ok ? "✓" : "○"}</span>
-                    {c.label}
-                  </li>
-                ))}
-              </ul>
             </div>
 
             <div className="lp-login-row">
@@ -367,7 +363,7 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
           )}
 
           <p className="lp-login-footnote">
-            Protected by DataFlow control-plane auth · TLS in transit · operator audit on sign-in
+            TLS in transit · operator audit on sign-in
           </p>
         </div>
       </section>

@@ -1,4 +1,4 @@
-"""NL → tools / pending_actions matrix for Data Pilot (product scope)."""
+"""NL → tools / pending_actions matrix for Datawrap Pilot (product scope)."""
 
 from __future__ import annotations
 

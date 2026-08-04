@@ -63,7 +63,7 @@ export function LandingInfraRibbon() {
         <div className="lp-infra-packet" style={{ "--active": active } as CSSProperties} aria-hidden />
       </div>
       <p className="lp-infra-caption">
-        Real systems on both ends — DataFlow sits in the middle with mapping, gates, and proof.
+        Real systems on both ends — Datawrap sits in the middle with mapping, gates, and proof.
       </p>
     </div>
   );

@@ -26,7 +26,7 @@ _BSON_DECIMAL = _bson_decimal_type()
 
 
 def _infer_logical_from_strings(samples: list[str], field_name: str = "") -> str | None:
-    """Use DataFlow value inference to narrow TEXT/CHAR columns."""
+    """Use Datawrap value inference to narrow TEXT/CHAR columns."""
     try:
         from services.schema_inference import infer_column
 
@@ -2032,7 +2032,7 @@ def _pg_elem_to_logical(elem: str) -> str:
 
 
 def _pg_to_logical(dtype: str) -> str:
-    """Map PostgreSQL ``format_type`` / data_type strings to DataFlow logical carriers.
+    """Map PostgreSQL ``format_type`` / data_type strings to Datawrap logical carriers.
 
     Parametric types keep their dimensions in the type string (DECIMAL(p,s),
     VECTOR(n)) so ``ddl_type`` can propagate them — same contract as DECIMAL.
@@ -2917,7 +2917,7 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
 
 
 def _arrow_to_logical(dtype: str) -> str:
-    """Map Apache Arrow / PyArrow dtype strings to DataFlow carriers."""
+    """Map Apache Arrow / PyArrow dtype strings to Datawrap carriers."""
     from services.type_system import arrow_dtype_to_carrier
 
     carrier = arrow_dtype_to_carrier(dtype)
@@ -3897,7 +3897,7 @@ def salesforce_field_to_logical(
     scale: int | None = None,
     length: int | None = None,
 ) -> str:
-    """Map Salesforce describe field type → DataFlow logical carrier.
+    """Map Salesforce describe field type → Datawrap logical carrier.
 
     Currency/percent without Describe precision still get honest DECIMAL defaults
     (never bare DECIMAL that invents warehouse NUMBER). Datetime is UTC → TIMESTAMPTZ.
@@ -3952,7 +3952,7 @@ def hubspot_property_to_logical(
     number_display_hint: str = "",
     name: str = "",
 ) -> str:
-    """Map HubSpot property type → DataFlow logical carrier.
+    """Map HubSpot property type → Datawrap logical carrier.
 
     Uses ``fieldType`` / ``numberDisplayHint`` when present so currency and
     whole-number properties do not all collapse to bare DECIMAL.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import logging
 import os
+from services.brand_env import getenv_brand
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -53,8 +54,8 @@ logger = logging.getLogger(__name__)
 
 # Prefer COPY INTO for modest stream batches — 2000 was too high when wide Mongo
 # rows shrink stream chunks below the threshold and force slow INSERT loops.
-COPY_THRESHOLD = int(os.getenv("DATAFLOW_SNOWFLAKE_COPY_THRESHOLD", "200"))
-MAX_BIND_INSERT_ROWS = int(os.getenv("DATAFLOW_SF_BIND_INSERT_ROWS", "1000"))
+COPY_THRESHOLD = int(getenv_brand("SNOWFLAKE_COPY_THRESHOLD", "200"))
+MAX_BIND_INSERT_ROWS = int(getenv_brand("SF_BIND_INSERT_ROWS", "1000"))
 
 @dataclass
 class WriteResult(_WriteResult):

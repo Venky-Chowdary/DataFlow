@@ -1,10 +1,10 @@
 /**
- * DataFlow — Universal Data Platform
+ * Datawrap — Universal Data Platform
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DtIcon } from "./components/DtIcon";
-import { DtLogo } from "./components/DtLogo";
+import { BrandWordmark } from "./components/BrandWordmark";
 import { PageErrorBoundary } from "./components/PageErrorBoundary";
 import { ToastProvider, useToast } from "./components/Toast";
 import { ConfirmProvider, useConfirm } from "./components/ui/ConfirmDialog";
@@ -58,7 +58,7 @@ const NAV: { id: Screen; label: string; icon: string; desc: string; group: "plat
   { id: "pilot", label: "Pilot", icon: "sparkle", desc: "Natural-language assistant", group: "ops" },
   { id: "settings", label: "Settings", icon: "settings", desc: "Security, team, SSO", group: "system" },
   { id: "mcp", label: "MCP", icon: "zap", desc: "IDE tool integrations", group: "system" },
-  { id: "docs", label: "Help", icon: "book", desc: "How DataFlow works", group: "system" },
+  { id: "docs", label: "Help", icon: "book", desc: "How Datawrap works", group: "system" },
   { id: "benchmarks", label: "Proofs", icon: "speed", desc: "Scale and fidelity benchmarks", group: "system" },
 ];
 
@@ -408,11 +408,11 @@ function AppShell({
 
       <aside className={`df2-sidebar ${mobileNavOpen ? "open" : ""}`} aria-label="Main navigation">
         <div className="df2-sidebar-brand">
-          <DtLogo size={sidebarNavCompact ? 32 : 36} />
-          <div className="df2-sidebar-brand-copy">
-            <div className="df2-brand-name">DataFlow</div>
-            <div className="df2-brand-tag">Universal data platform</div>
-          </div>
+          <BrandWordmark
+            markSize={sidebarNavCompact ? 32 : 34}
+            word={!sidebarNavCompact}
+            title=""
+          />
           <button
             type="button"
             className="df2-sidebar-collapse-btn"
@@ -528,7 +528,7 @@ function AppShell({
             </button>
             <div className="df2-breadcrumb">
               <span>Workspace</span>
-              <strong> {currentNav?.label ?? "DataFlow"}</strong>
+              <strong> {currentNav?.label ?? "Datawrap"}</strong>
             </div>
             <WorkspaceSearch
               query={searchQuery}
@@ -568,7 +568,7 @@ function AppShell({
                 variant="ghost"
                 className={copilotOpen ? "active" : ""}
                 onClick={() => setCopilotOpen((o) => !o)}
-                aria-label="Toggle Data Pilot"
+                aria-label="Toggle Datawrap Pilot"
                 leadingIcon={<DtIcon name="sparkle" size={16} />}
               >
                 <span className="df2-topbar-btn-text">Pilot</span>
@@ -624,7 +624,7 @@ function AppShell({
               )}
               {mountedScreens.has("pilot") && (
                 <div className={`df2-screen-keep ${showScreen("pilot")}`} hidden={screen !== "pilot"} aria-hidden={screen !== "pilot"}>
-                <PageErrorBoundary label="Data Pilot">
+                <PageErrorBoundary label="Datawrap Pilot">
                   <PilotPage onNavigate={setScreen} />
                 </PageErrorBoundary>
                 </div>
@@ -768,7 +768,7 @@ function AppShell({
       </div>
 
       {showCopilotRail && (
-        <aside className="df2-copilot-rail" aria-label="Data Pilot">
+        <aside className="df2-copilot-rail" aria-label="Datawrap Pilot">
           <AICopilot variant="rail" onNavigate={setScreen} onClose={() => setCopilotOpen(false)} />
         </aside>
       )}
@@ -793,8 +793,8 @@ function AppShell({
           type="button"
           className="df2-copilot-edge-open"
           onClick={() => setCopilotOpen(true)}
-          aria-label="Expand Data Pilot"
-          title="Expand Data Pilot"
+          aria-label="Expand Datawrap Pilot"
+          title="Expand Datawrap Pilot"
         >
           <DtIcon name="sparkle" size={14} />
           <span>Pilot</span>
@@ -933,7 +933,10 @@ function DataTransferAppInner() {
       ? {
           title: marketingMeta.title,
           description: marketingMeta.description,
-          keywords: "DataFlow, data transfer, migration, ETL, Transfer Studio",
+          keywords:
+            marketingMeta.keywords
+            || "Datawrap, data transfer, migration, ETL, Transfer Studio, semantic mapping, preflight",
+          canonicalPath: marketingMeta.canonicalPath || "#/",
           ogType: "website" as const,
         }
       : stage === "login"

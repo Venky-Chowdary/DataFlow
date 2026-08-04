@@ -1,6 +1,6 @@
 """Iceberg catalog factory and helpers for REST / Glue / SQL / Nessie catalogs.
 
-Wraps ``pyiceberg`` so the DataFlow engine can read and write real Iceberg tables
+Wraps ``pyiceberg`` so the Datawrap engine can read and write real Iceberg tables
 (REST catalog, AWS Glue, Hive, or a local SQL-backed catalog) without duplicating
 catalog logic. The legacy filesystem-only CoW writer remains in
 ``connectors/iceberg_writer`` for bare-path destinations that do not configure a

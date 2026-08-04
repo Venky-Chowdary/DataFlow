@@ -1,5 +1,5 @@
 """
-DataTransfer.space — AI System Integration Tests
+Datawrap — AI System Integration Tests
 
 Tests RAG pipeline, enhanced mapping, synonym intelligence, and evaluation.
 """
@@ -156,7 +156,7 @@ def test_natural_language():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("DataTransfer.space — AI System Integration Tests")
+    print("Datawrap — AI System Integration Tests")
     print("=" * 60)
 
     tests = [

@@ -105,7 +105,7 @@ def test_gitops_manifest_shape(tmp_path, monkeypatch):
         }
     )
     manifest = gm.build_dataflow_manifest(include_contracts=False)
-    assert manifest["kind"] == "DataFlowManifest"
+    assert manifest["kind"] == "DatawrapManifest"
     assert any(r["kind"] == "PipelineSchedule" for r in manifest["resources"])
 
 

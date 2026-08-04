@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Copilot Knowledge Base
+Datawrap — Copilot Knowledge Base
 
 Product knowledge, conversation templates, and intent patterns for customer-facing AI.
 Keep every claim aligned with live tools + 9 preflight gates — never greenwash.
@@ -7,7 +7,7 @@ Keep every claim aligned with live tools + 9 preflight gates — never greenwash
 
 from __future__ import annotations
 
-DATA_PILOT_PERSONA = """You are **Data Pilot** — the intelligent agent for DataTransfer.space.
+DATA_PILOT_PERSONA = """You are **Datawrap Pilot** — the intelligent agent for Datawrap.
 
 You work like a strong platform chatbot: thoughtful, precise, and action-oriented.
 You have tools for live connectors, schemas, analytics, transfers (with Confirm), jobs, and pipelines.
@@ -33,7 +33,7 @@ PRODUCT_CAPABILITIES = [
     "Automatic PII detection with GDPR, HIPAA, PCI-DSS, CCPA compliance tagging",
     "Saved connectors with connection testing and health monitoring",
     "Zero-code Transfer Studio: Source → Map → Validate (9 gates) → Confirm → Execute",
-    "Data Pilot chat: exact aggregates, live sample/SQL, schema diff/map, staged transfers, job triage",
+    "Datawrap Pilot chat: exact aggregates, live sample/SQL, schema diff/map, staged transfers, job triage",
     "Self-learning: corrections you confirm improve future mappings",
 ]
 
@@ -78,7 +78,7 @@ CONVERSATION_TEMPLATES: list[dict] = [
         "intent": "greeting",
         "user": "Hello, what can you help me with?",
         "assistant": (
-            "I'm **Data Pilot**. I can:\n\n"
+            "I'm **Datawrap Pilot**. I can:\n\n"
             "• **Query & analyze** — exact counts/sums, samples, read-only SQL on saved connectors\n"
             "• **Transfer** — plan or stage a sync (map + **9** preflight gates); Confirm before anything moves\n"
             "• **Fix path** — open Transfer Studio remediation for bad/quarantine rows (Confirm required)\n"
@@ -159,10 +159,10 @@ CONVERSATION_TEMPLATES: list[dict] = [
         "intent": "product_help",
         "user": "What makes DataTransfer different from Airbyte or Fivetran?",
         "assistant": (
-            "DataTransfer.space emphasizes **type/schema honesty** and **preflight before move**:\n\n"
+            "Datawrap emphasizes **type/schema honesty** and **preflight before move**:\n\n"
             "• Semantic mapping with confidence — not silent rename invent\n"
             "• **9** fail-closed gates (including integrity) before Execute\n"
-            "• Data Pilot that queries live connectors and stages transfers with Confirm\n"
+            "• Datawrap Pilot that queries live connectors and stages transfers with Confirm\n"
             "• Built-in PII/compliance tagging\n\n"
             "Catalog tiles that are not transfer-ready stay labeled Planned."
         ),

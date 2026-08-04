@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+from services.brand_env import getenv_brand
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -24,12 +25,12 @@ _backend: str | None = None  # "minio" | "s3" | None
 
 
 def _disabled() -> bool:
-    return os.environ.get("DATAFLOW_DISABLE_OBJECT_STORE", "").lower() in ("1", "true", "yes")
+    return getenv_brand("DISABLE_OBJECT_STORE", "").lower() in ("1", "true", "yes")
 
 
 def _s3_env_configured() -> bool:
     return bool(
-        os.getenv("DATAFLOW_S3_BUCKET")
+        getenv_brand("S3_BUCKET")
         or os.getenv("AWS_S3_BUCKET")
         or os.getenv("S3_BUCKET")
     )
@@ -41,13 +42,13 @@ def _get_boto3_client() -> Any | None:
         from botocore.client import Config
 
         endpoint = (
-            os.getenv("DATAFLOW_S3_ENDPOINT")
+            getenv_brand("S3_ENDPOINT")
             or os.getenv("AWS_ENDPOINT_URL")
             or os.getenv("MINIO_ENDPOINT")
             or ""
         ).strip()
         if endpoint and "://" not in endpoint:
-            secure = os.getenv("DATAFLOW_S3_SECURE", os.getenv("MINIO_SECURE", "0")).lower() in (
+            secure = getenv_brand("S3_SECURE", os.getenv("MINIO_SECURE", "0")).lower() in (
                 "1",
                 "true",
                 "yes",
@@ -57,18 +58,18 @@ def _get_boto3_client() -> Any | None:
         kwargs: dict[str, Any] = {
             "service_name": "s3",
             "region_name": region,
-            "config": Config(s3={"addressing_style": "path" if os.getenv("DATAFLOW_S3_PATH_STYLE", "1") != "0" else "auto"}),
+            "config": Config(s3={"addressing_style": "path" if getenv_brand("S3_PATH_STYLE", "1") != "0" else "auto"}),
         }
         if endpoint:
             kwargs["endpoint_url"] = endpoint
         access = (
-            os.getenv("DATAFLOW_S3_ACCESS_KEY")
+            getenv_brand("S3_ACCESS_KEY")
             or os.getenv("AWS_ACCESS_KEY_ID")
             or os.getenv("MINIO_ACCESS_KEY")
             or settings.minio_access_key
         )
         secret = (
-            os.getenv("DATAFLOW_S3_SECRET_KEY")
+            getenv_brand("S3_SECRET_KEY")
             or os.getenv("AWS_SECRET_ACCESS_KEY")
             or os.getenv("MINIO_SECRET_KEY")
             or settings.minio_secret_key
@@ -114,7 +115,7 @@ def _get_client() -> Any | None:
 
 def _bucket_name() -> str:
     return (
-        os.getenv("DATAFLOW_S3_BUCKET")
+        getenv_brand("S3_BUCKET")
         or os.getenv("AWS_S3_BUCKET")
         or os.getenv("S3_BUCKET")
         or settings.minio_bucket
@@ -217,6 +218,6 @@ def storage_status() -> dict[str, str | bool]:
     return {
         "backend": _backend or "unknown",
         "available": ok,
-        "endpoint": os.getenv("DATAFLOW_S3_ENDPOINT") or settings.minio_endpoint,
+        "endpoint": getenv_brand("S3_ENDPOINT") or settings.minio_endpoint,
         "bucket": _bucket_name(),
     }

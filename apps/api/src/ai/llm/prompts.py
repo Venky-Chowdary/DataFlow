@@ -1,5 +1,5 @@
 """
-DataTransfer.space — LLM Prompt Templates
+Datawrap — LLM Prompt Templates
 
 Structured prompts for schema analysis, mapping, PII detection, and transformations.
 """
@@ -82,7 +82,7 @@ Steps:
 
 Respond with JSON: {{"transformations": [...], "validation_rules": [...], "lossy": bool, "reasoning": ["step1", ...]}}"""
 
-NATURAL_LANGUAGE_PROMPT = """You are the DataTransfer.space AI assistant. Answer this data engineering question.
+NATURAL_LANGUAGE_PROMPT = """You are the Datawrap AI assistant. Answer this data engineering question.
 
 Question: {query}
 

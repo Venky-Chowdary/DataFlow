@@ -1,4 +1,4 @@
-"""Wave 43 — local DataFlow engine is primary; cloud/Ollama are opt-in only."""
+"""Wave 43 — local Datawrap engine is primary; cloud/Ollama are opt-in only."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def test_product_howto_uses_explain_product(monkeypatch):
 
     agent = DataPilotAgent()
     resp = agent.chat(
-        "How do I transfer data in DataFlow?",
+        "How do I transfer data in Datawrap?",
         data_context={"pilot_session_id": "wave43-howto"},
     )
     names = [t["name"] for t in (resp.tools_used or [])]
@@ -52,7 +52,7 @@ def test_what_is_dataflow_local(monkeypatch):
 
     agent = DataPilotAgent()
     resp = agent.chat(
-        "What is DataFlow?",
+        "What is Datawrap?",
         data_context={"pilot_session_id": "wave43-what"},
     )
     names = [t["name"] for t in (resp.tools_used or [])]

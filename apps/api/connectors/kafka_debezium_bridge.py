@@ -1,6 +1,6 @@
-"""Optional Kafka / Debezium envelope → DataFlow change-stream adapter.
+"""Optional Kafka / Debezium envelope → Datawrap change-stream adapter.
 
-Enterprises that already run Kafka Connect + Debezium can point DataFlow at a
+Enterprises that already run Kafka Connect + Debezium can point Datawrap at a
 topic and consume CDC envelopes without embedding Kafka in the default deploy.
 This module is a thin bridge — not required for native PG/MySQL/Mongo CDC.
 """

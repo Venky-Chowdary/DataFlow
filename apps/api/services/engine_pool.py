@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+from services.brand_env import getenv_brand
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -74,12 +75,12 @@ _KEY_FIELDS = (
 
 def cache_enabled() -> bool:
     """Whether engines are reused. Off restores per-call construction."""
-    return os.getenv("DATAFLOW_ENGINE_CACHE", "1").lower() not in ("0", "false", "off", "no")
+    return getenv_brand("ENGINE_CACHE", "1").lower() not in ("0", "false", "off", "no")
 
 
 def max_engines() -> int:
     try:
-        return max(1, int(os.getenv("DATAFLOW_ENGINE_CACHE_SIZE", str(DEFAULT_MAX_ENGINES))))
+        return max(1, int(getenv_brand("ENGINE_CACHE_SIZE", str(DEFAULT_MAX_ENGINES))))
     except ValueError:
         return DEFAULT_MAX_ENGINES
 

@@ -4,52 +4,98 @@ const LAYERS = [
   {
     phase: "01",
     title: "Isolate",
-    body: "Dedicated tenants, workspace scoping, and per-tenant security posture — no shared control-plane bleed.",
+    tag: "Tenancy",
+    body: "Dedicated tenants, workspace scoping, and per-tenant security posture — no shared control-plane bleed between customers.",
+    proof: "Tenant isolated",
   },
   {
     phase: "02",
     title: "Encrypt",
-    body: "Customer-managed keys wrap connector secrets. Purpose keys stay scoped to the job that needs them.",
+    tag: "Keys",
+    body: "Customer-managed keys wrap connector secrets. Purpose keys stay scoped to the job that needs them — never a global vault shortcut.",
+    proof: "BYOK wrapped",
   },
   {
     phase: "03",
     title: "Reside",
-    body: "Pin jobs and artifacts to the regions your policy requires. Audit trails stay where you choose.",
+    tag: "Regions",
+    body: "Pin jobs and artifacts to the regions your policy requires. Audit trails stay where compliance and residency demand.",
+    proof: "Region pinned",
   },
   {
     phase: "04",
     title: "Prove",
-    body: "Post-load reconciliation verifies counts and content hashes. Quarantine never silently drops rows.",
+    tag: "Reconcile",
+    body: "Post-load reconciliation verifies counts and content hashes. Quarantine never silently drops rows from the load.",
+    proof: "Checksum MATCH",
   },
 ];
 
 export function TrustSection() {
   const reveal = useRevealOnScroll();
   return (
-    <section className={`lp-section lp-section-alt lp-reveal ${reveal.className}`} id="trust" ref={reveal.ref}>
-      <div className="lp-section-head">
-        <p className="lp-section-kicker">Enterprise trust</p>
-        <h2>Security that moves with the data</h2>
-        <p>Four continuous layers on every transfer — not a wall of compliance cards.</p>
-      </div>
+    <section
+      className={`lp-home-trust ${reveal.className}`}
+      id="trust"
+      ref={reveal.ref}
+      aria-label="Enterprise trust"
+    >
+      <div className="lp-home-trust-inner">
+        <header className="lp-home-section-head">
+          <p className="lp-section-kicker">Enterprise trust</p>
+          <h2>Security that moves with the data</h2>
+          <p>
+            Four continuous layers on every transfer — identity stays with the run, secrets stay
+            scoped, residency stays pinned, and proof stays exportable.
+          </p>
+        </header>
 
-      <ol className="lp-trust-timeline">
-        {LAYERS.map((layer) => (
-          <li key={layer.phase} className="lp-trust-step">
-            <span className="lp-trust-phase">{layer.phase}</span>
-            <div>
-              <h3>{layer.title}</h3>
-              <p>{layer.body}</p>
+        <div className="lp-home-trust-layout">
+          <ol className="lp-home-trust-grid">
+            {LAYERS.map((layer) => (
+              <li key={layer.phase} className="lp-home-trust-card">
+                <div className="lp-home-trust-card-top">
+                  <span className="lp-home-trust-num">{layer.phase}</span>
+                  <span className="lp-home-trust-tag">{layer.tag}</span>
+                </div>
+                <h3>{layer.title}</h3>
+                <p>{layer.body}</p>
+                <span className="lp-home-trust-pill">{layer.proof}</span>
+              </li>
+            ))}
+          </ol>
+
+          <aside className="lp-home-trust-panel" aria-label="Live security posture">
+            <header>
+              <strong>Live posture</strong>
+              <span>Enforced</span>
+            </header>
+            <div className="lp-home-trust-panel-row is-ok">
+              <span>Identity</span>
+              <em>SSO · Okta</em>
             </div>
-          </li>
-        ))}
-      </ol>
-
-      <div className="lp-trust-proof" aria-hidden>
-        <div className="lp-trust-proof-row is-ok"><span>Preflight</span><em>8 / 8</em></div>
-        <div className="lp-trust-proof-row is-ok"><span>Write</span><em>quarantine 0</em></div>
-        <div className="lp-trust-proof-row is-ok"><span>Reconcile</span><em>checksum match</em></div>
-        <div className="lp-trust-proof-row"><span>Audit</span><em>logged</em></div>
+            <div className="lp-home-trust-panel-row is-ok">
+              <span>Secrets</span>
+              <em>BYOK · KMS</em>
+            </div>
+            <div className="lp-home-trust-panel-row is-ok">
+              <span>Preflight</span>
+              <em>8 / 8</em>
+            </div>
+            <div className="lp-home-trust-panel-row is-ok">
+              <span>Quarantine</span>
+              <em>surfaced</em>
+            </div>
+            <div className="lp-home-trust-panel-row is-ok">
+              <span>Reconcile</span>
+              <em>checksum MATCH</em>
+            </div>
+            <div className="lp-home-trust-panel-row">
+              <span>Audit</span>
+              <em>jobs · maps · agents</em>
+            </div>
+          </aside>
+        </div>
       </div>
     </section>
   );

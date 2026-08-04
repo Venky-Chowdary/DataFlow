@@ -1,4 +1,4 @@
-# DataTransfer.space — Competitive Analysis & Market Gap Assessment
+# Datawrap — Competitive Analysis & Market Gap Assessment
 
 ## Executive Summary
 
@@ -141,7 +141,7 @@ After deep analysis of existing data integration products, **YES — this produc
 
 ### Key Differentiators
 
-| Feature | Airbyte | Fivetran | Informatica | **DataTransfer.space** |
+| Feature | Airbyte | Fivetran | Informatica | **Datawrap** |
 |---------|---------|----------|-------------|------------------------|
 | AI Semantic Mapping | ❌ | ❌ | ❌ | ✅ Proof-backed confidence |
 | Universal File Support | ❌ | ❌ | Partial | ✅ All formats |

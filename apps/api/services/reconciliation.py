@@ -8,6 +8,7 @@ import heapq
 import json
 import logging
 import os
+from services.brand_env import getenv_brand
 import re
 import struct
 import tempfile
@@ -29,7 +30,7 @@ from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
 
-SPILL_THRESHOLD = int(os.getenv("DATAFLOW_FINGERPRINT_SPILL_THRESHOLD", "1000000"))
+SPILL_THRESHOLD = int(getenv_brand("FINGERPRINT_SPILL_THRESHOLD", "1000000"))
 
 # Quick pre-filter for the expensive Decimal / date normalization in
 # normalize_cell.  Most string columns (names, emails, codes) are clearly not

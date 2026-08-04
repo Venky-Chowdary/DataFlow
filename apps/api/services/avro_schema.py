@@ -1,4 +1,4 @@
-"""Avro writer-schema → DataFlow logical carriers.
+"""Avro writer-schema → Datawrap logical carriers.
 
 Prefer the embedded Avro contract over first-record key inference so empty
 defaults, decimals, and nested types survive Map / preflight (Airbyte-class gap).
@@ -24,7 +24,7 @@ def _unwrap_union(avro_type: Any) -> tuple[Any, bool]:
 
 
 def avro_type_to_logical(avro_type: Any) -> str:
-    """Map an Avro type (string, dict, or union list) to a DataFlow logical carrier."""
+    """Map an Avro type (string, dict, or union list) to a Datawrap logical carrier."""
     avro_type, _nullable = _unwrap_union(avro_type)
 
     if isinstance(avro_type, str):

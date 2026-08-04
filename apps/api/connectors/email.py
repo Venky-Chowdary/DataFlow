@@ -49,8 +49,8 @@ class _EmailConfig:
         self.password = ""  # nosec B105
         self.from_addr = ""
         self.to_addrs: list[str] = []
-        self.subject = "DataFlow export"
-        self.body = "Attached is the data export from DataFlow."
+        self.subject = "Datawrap export"
+        self.body = "Attached is the data export from Datawrap."
         self.use_tls = True
         self.format = "csv"
 
@@ -131,7 +131,7 @@ def _parse_email_config(
     if ssl_flag is not None:
         cfg.use_tls = bool(ssl_flag)
     if not cfg.subject or table_name:
-        cfg.subject = (cfg.subject or "DataFlow export") if not table_name else f"DataFlow export: {table_name}"
+        cfg.subject = (cfg.subject or "Datawrap export") if not table_name else f"Datawrap export: {table_name}"
 
     cfg.use_tls = False if cfg.scheme == "smtp" and cfg.port == 25 else cfg.use_tls
     return cfg

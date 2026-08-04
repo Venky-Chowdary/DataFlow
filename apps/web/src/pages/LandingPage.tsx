@@ -2,7 +2,6 @@ import { useEffect, useState, type ReactNode } from "react";
 import { DtIcon } from "../components/DtIcon";
 import { ConnectorIcon } from "../app/brand-icons";
 import {
-  AlgorithmCinemaBand,
   MappingCinema,
   ProofCinema,
 } from "../components/landing/AlgorithmCinema";
@@ -30,6 +29,95 @@ const STACK_IDS = [
   "salesforce",
   "s3",
 ];
+
+/** Wide marquee set — every branded icon we ship, plus stack staples. */
+const CONNECTOR_MARQUEE_IDS = [
+  "postgresql",
+  "mysql",
+  "mongodb",
+  "snowflake",
+  "bigquery",
+  "redshift",
+  "clickhouse",
+  "dynamodb",
+  "elasticsearch",
+  "kafka",
+  "redis",
+  "s3",
+  "salesforce",
+  "csv",
+  "json",
+  "generic_sql",
+  "postgresql",
+  "snowflake",
+  "bigquery",
+  "mongodb",
+  "kafka",
+  "mysql",
+  "redshift",
+  "s3",
+  "clickhouse",
+  "elasticsearch",
+  "dynamodb",
+  "redis",
+  "salesforce",
+  "csv",
+];
+
+const CONNECTOR_MARQUEE_ROW_B = [
+  "snowflake",
+  "kafka",
+  "postgresql",
+  "bigquery",
+  "redis",
+  "mongodb",
+  "s3",
+  "mysql",
+  "clickhouse",
+  "salesforce",
+  "redshift",
+  "elasticsearch",
+  "dynamodb",
+  "json",
+  "generic_sql",
+  "csv",
+  "snowflake",
+  "postgresql",
+  "kafka",
+  "bigquery",
+  "mongodb",
+  "s3",
+  "mysql",
+  "redis",
+  "clickhouse",
+  "salesforce",
+  "redshift",
+  "elasticsearch",
+];
+
+function ConnectorMarquee({
+  ids,
+  reverse = false,
+  duration = 42,
+}: {
+  ids: string[];
+  reverse?: boolean;
+  duration?: number;
+}) {
+  const loop = [...ids, ...ids];
+  return (
+    <div className={`lp-conn-marquee${reverse ? " is-reverse" : ""}`} aria-hidden>
+      <div className="lp-conn-marquee-track" style={{ ["--lp-marquee-dur" as string]: `${duration}s` }}>
+        {loop.map((id, i) => (
+          <span key={`${id}-${i}`} className="lp-conn-marquee-tile">
+            <ConnectorIcon id={id} size={30} />
+            <em>{id.replace(/_/g, " ")}</em>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 const SURFACES: {
   id: string;
@@ -93,7 +181,7 @@ function SurfaceTabs({ onNavigate, onGetStarted }: Pick<LandingHomeProps, "onNav
           <p className="lp-section-kicker">For operators &amp; agents</p>
           <h2>Your control plane. Our governed engine.</h2>
           <p>
-            Use Transfer Studio, Job Theater, Pipelines, or MCP. DataFlow manages mapping, gates,
+            Use Transfer Studio, Job Theater, Pipelines, or MCP. Datawrap manages mapping, gates,
             quarantine, and proof underneath every surface.
           </p>
         </Reveal>
@@ -150,7 +238,7 @@ function SurfaceTabs({ onNavigate, onGetStarted }: Pick<LandingHomeProps, "onNav
   );
 }
 
-/** Home — Airbyte-class composition, DataFlow product truth. */
+/** Home — Airbyte-class composition, Datawrap product truth. */
 export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: LandingHomeProps) {
   const [liveDrivers, setLiveDrivers] = useState<number | null>(null);
 
@@ -167,8 +255,17 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
 
   return (
     <>
-      {/* 1) Hero — short headline, one job, one visual */}
+      {/* 1) Hero — brand-first, one headline, one visual */}
       <section className="lp-hero lp-hero--home">
+        <div className="lp-hero-home-bg" aria-hidden>
+          <span className="lp-hero-home-mesh" />
+          <span className="lp-hero-home-glow lp-hero-home-glow--a" />
+          <span className="lp-hero-home-glow lp-hero-home-glow--b" />
+          <svg className="lp-hero-home-waves" viewBox="0 0 1440 180" preserveAspectRatio="none">
+            <path d="M0,90 C240,40 480,140 720,90 C960,40 1200,120 1440,70 L1440,180 L0,180 Z" />
+            <path d="M0,120 C300,70 540,160 840,110 C1080,70 1260,130 1440,100 L1440,180 L0,180 Z" />
+          </svg>
+        </div>
         <div className="lp-hero-home-grid">
           <div className="lp-hero-copy">
             <p className="lp-hero-eyebrow">
@@ -180,12 +277,12 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               <span className="lp-hero-title-b">anywhere — proven.</span>
             </h1>
             <p className="lp-hero-sub">
-              Connect once. Semantic mapping, eight preflight gates, quarantine, and checksum
-              reconcile run on every load — in Transfer Studio, Pipelines, Pilot, and MCP.
+              Semantic mapping, eight preflight gates, quarantine, and checksum reconcile on every
+              load — Transfer Studio, Pipelines, Pilot, and MCP.
             </p>
             <div className="lp-hero-cta">
               <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
-                Try DataFlow free
+                Try Datawrap free
                 <DtIcon name="arrow-right" size={16} />
               </button>
               <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("contact")}>
@@ -194,8 +291,6 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             </div>
             <p className="lp-hero-meta">
               {driverLabel}
-              <span aria-hidden>·</span>
-              Catalog tiles labelled honestly
               <span aria-hidden>·</span>
               0 silent drops by design
             </p>
@@ -230,8 +325,8 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               land, did types coerce safely, and what was silently dropped?
             </p>
           </Reveal>
-          <ol className="lp-home-pain-list">
-            <li>
+          <ol className="lp-home-pain-list lp-home-pain-rail">
+            <li className="is-ink">
               <span className="lp-home-pain-num">01</span>
               <div>
                 <h3>String-match mapping</h3>
@@ -241,7 +336,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
                 </p>
               </div>
             </li>
-            <li>
+            <li className="is-soft">
               <span className="lp-home-pain-num">02</span>
               <div>
                 <h3>Best-effort coercion</h3>
@@ -251,7 +346,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
                 </p>
               </div>
             </li>
-            <li>
+            <li className="is-outline">
               <span className="lp-home-pain-num">03</span>
               <div>
                 <h3>No reconcile artifact</h3>
@@ -265,34 +360,75 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
         </div>
       </section>
 
-      {/* 4) Architecture — numbered path */}
+      {/* 4) Architecture — governed path */}
       <section className="lp-home-arch" id="platform">
         <div className="lp-home-arch-inner">
           <Reveal className="lp-home-section-head">
             <p className="lp-section-kicker">The architecture</p>
             <h2>One governed layer between source and destination.</h2>
             <p>
-              DataFlow connects your systems, maps with roles and type fit, fails-fast before write,
+              Datawrap connects your systems, maps with roles and type fit, fails-fast before write,
               and proves every load — for humans and agents.
             </p>
           </Reveal>
-          <ol className="lp-home-arch-steps">
-            <li>
-              <span>01</span>
-              <strong>Map</strong>
-              <p>Semantic roles, synonyms, and continuous confidence — not name equality.</p>
+
+          <ol className="lp-home-arch-flow" aria-label="Governed transfer path">
+            <li className="lp-home-arch-step">
+              <div className="lp-home-arch-step-top">
+                <span className="lp-home-arch-step-num">01</span>
+                <span className="lp-home-arch-step-tag">Map</span>
+              </div>
+              <h3>Semantic mapping</h3>
+              <p>
+                Roles, synonyms, and continuous confidence score every edge — not name equality.
+                Ambiguous matches pause for review before they pin.
+              </p>
+              <ul>
+                <li>Role-aware column matching</li>
+                <li>Confidence thresholds</li>
+                <li>Human review on drift</li>
+              </ul>
             </li>
-            <li>
-              <span>02</span>
-              <strong>Preflight G1–G8</strong>
-              <p>Fail-fast before write. Dry-run isolates coerce failures into quarantine.</p>
+            <li className="lp-home-arch-step lp-home-arch-step--connector" aria-hidden>
+              <span className="lp-home-arch-arrow">→</span>
             </li>
-            <li>
-              <span>03</span>
-              <strong>Write + prove</strong>
-              <p>Quarantine surfaces bad rows. Checksum + counts prove the clean set.</p>
+            <li className="lp-home-arch-step">
+              <div className="lp-home-arch-step-top">
+                <span className="lp-home-arch-step-num">02</span>
+                <span className="lp-home-arch-step-tag">Preflight</span>
+              </div>
+              <h3>Eight fail-fast gates</h3>
+              <p>
+                G1–G8 run before any write. Dry-run isolates coerce failures into quarantine with
+                column, value, and reason — never silent drops.
+              </p>
+              <ul>
+                <li>Schema &amp; type contracts</li>
+                <li>Capacity probes</li>
+                <li>Dry-run coerce samples</li>
+              </ul>
+            </li>
+            <li className="lp-home-arch-step lp-home-arch-step--connector" aria-hidden>
+              <span className="lp-home-arch-arrow">→</span>
+            </li>
+            <li className="lp-home-arch-step">
+              <div className="lp-home-arch-step-top">
+                <span className="lp-home-arch-step-num">03</span>
+                <span className="lp-home-arch-step-tag">Prove</span>
+              </div>
+              <h3>Write with proof</h3>
+              <p>
+                Clean rows land; bad rows quarantine in the open. Checksum + row counts flash MATCH
+                only when source and destination agree.
+              </p>
+              <ul>
+                <li>Quarantine with reasons</li>
+                <li>Checksum reconcile</li>
+                <li>Exportable audit pack</li>
+              </ul>
             </li>
           </ol>
+
           <div className="lp-home-arch-cta">
             <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
               Meet Transfer Studio
@@ -307,28 +443,86 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
       {/* 5) Product surfaces — tabbed like Airbyte CLI/SDK/API/MCP */}
       <SurfaceTabs onNavigate={onNavigate} onGetStarted={onGetStarted} />
 
-      {/* 6) One cinema — mapping as the product story */}
-      <Reveal>
-        <AlgorithmCinemaBand
-          kicker="Semantic mapping"
-          title="Every column earns a confidence score"
-          lead="Format, role, and type compatibility outrank string similarity. Ambiguous edges wait for review before they pin into workspace synonyms."
-        >
-          <MappingCinema />
-        </AlgorithmCinemaBand>
-      </Reveal>
+      {/* 6) Mapping proof — clear chapters + live stage */}
+      <section className="lp-home-proof-band" aria-label="Semantic mapping">
+        <div className="lp-home-proof-inner">
+          <Reveal className="lp-home-section-head">
+            <p className="lp-section-kicker">Semantic mapping</p>
+            <h2>Every column earns a confidence score</h2>
+            <p>
+              Format, role, and type compatibility outrank string similarity. Ambiguous edges wait
+              for review before they pin into workspace synonyms.
+            </p>
+          </Reveal>
+          <div className="lp-home-proof-grid">
+            <div className="lp-home-proof-chapters">
+              <article>
+                <span>01</span>
+                <h3>Role-aware matching</h3>
+                <p>
+                  <code>order_amt</code> pairs with <code>payment_amount</code> because both are
+                  amount roles — not because the strings look alike.
+                </p>
+              </article>
+              <article>
+                <span>02</span>
+                <h3>Continuous confidence</h3>
+                <p>
+                  Each edge gets a score from format, role, and type fit. Low scores never auto-pin.
+                </p>
+              </article>
+              <article>
+                <span>03</span>
+                <h3>Human review gate</h3>
+                <p>
+                  Ambiguous maps pause for confirmation. Operators decide; the workspace remembers.
+                </p>
+              </article>
+            </div>
+            <div className="lp-home-proof-stage">
+              <MappingCinema />
+            </div>
+          </div>
+        </div>
+      </section>
 
-      {/* 7) Proof cinema — second dark band only */}
-      <Reveal>
-        <AlgorithmCinemaBand
-          kicker="Runtime proof"
-          title="Checksum reconcile flashes MATCH"
-          lead="Success is never status alone. The engine hashes mapped source rows, reads the destination, and only then flashes MATCH — with quarantine counts surfaced."
-          compact
-        >
-          <ProofCinema />
-        </AlgorithmCinemaBand>
-      </Reveal>
+      {/* 7) Runtime proof */}
+      <section className="lp-home-proof-band lp-home-proof-band--alt" aria-label="Runtime proof">
+        <div className="lp-home-proof-inner">
+          <Reveal className="lp-home-section-head">
+            <p className="lp-section-kicker">Runtime proof</p>
+            <h2>Checksum reconcile flashes MATCH</h2>
+            <p>
+              Success is never status alone. The engine hashes mapped source rows, reads the
+              destination, and only then flashes MATCH — with quarantine counts surfaced.
+            </p>
+          </Reveal>
+          <div className="lp-home-proof-grid lp-home-proof-grid--reverse">
+            <div className="lp-home-proof-chapters">
+              <article>
+                <span>01</span>
+                <h3>Write clean rows</h3>
+                <p>Only rows that clear coerce land in the destination table.</p>
+              </article>
+              <article>
+                <span>02</span>
+                <h3>Quarantine the rest</h3>
+                <p>
+                  Bad values keep column, sample, and reason — never a silent drop into “complete.”
+                </p>
+              </article>
+              <article>
+                <span>03</span>
+                <h3>Prove with checksums</h3>
+                <p>Row counts and content hashes must agree before MATCH is shown.</p>
+              </article>
+            </div>
+            <div className="lp-home-proof-stage">
+              <ProofCinema />
+            </div>
+          </div>
+        </div>
+      </section>
 
       {/* 8) Use cases */}
       <section className="lp-home-usecases" id="usecases">
@@ -338,8 +532,8 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             <h2>What operators run</h2>
             <p>Migration, recurring sync, and warehouse loading — same eight gates every time.</p>
           </Reveal>
-          <div className="lp-home-usecase-list">
-            <article className="lp-home-usecase">
+          <div className="lp-home-usecase-list lp-home-usecase-bento">
+            <article className="lp-home-usecase is-featured">
               <span>Migration</span>
               <h3>Cross-schema cutover with dual-run proof</h3>
               <p>Pilot a subset for checksum confidence, then cutover with quarantine visible.</p>
@@ -347,7 +541,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
                 Migration path →
               </button>
             </article>
-            <article className="lp-home-usecase">
+            <article className="lp-home-usecase is-soft">
               <span>Sync</span>
               <h3>Recurring sync that still runs preflight</h3>
               <p>Every tick is a real job. Drift blocks the next run until you review.</p>
@@ -355,7 +549,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
                 Sync path →
               </button>
             </article>
-            <article className="lp-home-usecase">
+            <article className="lp-home-usecase is-outline">
               <span>Warehouse</span>
               <h3>Bulk loads finance can archive</h3>
               <p>Snowflake, BigQuery, Redshift with capacity probes and reconcile reports.</p>
@@ -379,14 +573,12 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               {liveDrivers != null ? ` ${liveDrivers} unique transfer-ready drivers today.` : ""}
             </p>
           </Reveal>
-          <div className="lp-home-connectors-grid" aria-hidden>
-            {STACK_IDS.map((id) => (
-              <span key={id} className="lp-home-connectors-tile">
-                <ConnectorIcon id={id} size={32} />
-                <em>{id}</em>
-              </span>
-            ))}
-          </div>
+        </div>
+        <div className="lp-home-connectors-marquee" aria-hidden>
+          <ConnectorMarquee ids={CONNECTOR_MARQUEE_IDS} duration={48} />
+          <ConnectorMarquee ids={CONNECTOR_MARQUEE_ROW_B} reverse duration={56} />
+        </div>
+        <div className="lp-home-connectors-inner">
           <p className="lp-home-connectors-note">
             Only routes with <code>TRANSFER_READY</code> evidence get the transfer-ready badge. Everything
             else is labelled Planned.
@@ -415,7 +607,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
           </p>
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
-              Try DataFlow free
+              Try Datawrap free
             </button>
             <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("pricing")}>
               See pricing

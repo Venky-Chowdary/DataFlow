@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from services.brand_env import getenv_brand
 import sys
 import threading
 import time
@@ -2534,7 +2535,7 @@ class UniversalTransferEngine:
                 )
             except Exception as exc:
                 logger.debug("usage metering suppressed: %s", exc, exc_info=exc)
-            if os.environ.get("DATAFLOW_POST_TRANSFER_TRAINING", "").lower() in {
+            if getenv_brand("POST_TRANSFER_TRAINING", "").lower() in {
                 "1",
                 "true",
                 "on",
@@ -3825,7 +3826,7 @@ class UniversalTransferEngine:
 
     def _idempotency_key(self, request: TransferRequest) -> str:
         """Full claim key for a request, or '' when the guard is disabled."""
-        if os.getenv("DATAFLOW_JOB_IDEMPOTENCY", "1").strip().lower() in {
+        if getenv_brand("JOB_IDEMPOTENCY", "1").strip().lower() in {
             "0",
             "false",
             "off",

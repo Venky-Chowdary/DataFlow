@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+from services.brand_env import getenv_brand
 import socket
 import time
 import uuid
@@ -41,7 +42,7 @@ from services.cdc_lease_store import (
     resolve_backend_name,
 )
 
-_DEFAULT_TTL = float(os.getenv("DATAFLOW_CDC_LEASE_TTL_SEC", "120"))
+_DEFAULT_TTL = float(getenv_brand("CDC_LEASE_TTL_SEC", "120"))
 
 # Re-export for callers / tests.
 __all__ = [

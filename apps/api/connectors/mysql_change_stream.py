@@ -17,6 +17,7 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any
 
+from services.brand_env import getenv_brand
 from services.cdc_engine import ChangeBatch
 from services.cdc_schema_history import (
     connection_fingerprint,
@@ -102,8 +103,8 @@ class MySqlChangeStreamCdc:
             import os as _os
 
             self._signal_poll_interval_sec = float(
-                _os.getenv(
-                    "DATAFLOW_CDC_SIGNAL_POLL_SEC",
+                getenv_brand(
+                    "CDC_SIGNAL_POLL_SEC",
                     str(cfg.get("signal_poll_interval_sec") or 15),
                 )
             )

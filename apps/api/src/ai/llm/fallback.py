@@ -1,5 +1,5 @@
 """
-DataTransfer.space — LLM Fallback Chain
+Datawrap — LLM Fallback Chain
 
 Graceful degradation: LLM → RAG → Pattern matching.
 """

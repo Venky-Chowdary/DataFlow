@@ -2,7 +2,7 @@
 
 Detects sensitive values in samples and masks/de-identifies them in logs,
 telemetry, and prompt payloads.  This is a defensive guard, not a data loss
-prevention replacement; it makes sure DataFlow never leaks sensitive data in
+prevention replacement; it makes sure Datawrap never leaks sensitive data in
 observability or prompts.
 """
 

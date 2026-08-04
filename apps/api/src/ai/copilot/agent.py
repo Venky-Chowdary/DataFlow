@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Copilot Agent
+Datawrap — Copilot Agent
 
 Thin façade: customer chat delegates to DataPilotAgent.
 """
@@ -41,7 +41,7 @@ class DataTransferCopilotAgent:
         history: list[dict] | None = None,
         data_context: dict | None = None,
     ) -> CopilotResponse:
-        """Delegate to Data Pilot — Anthropic/Cursor-style agent with tools."""
+        """Delegate to Datawrap Pilot — Anthropic/Cursor-style agent with tools."""
         from .pilot_agent import get_pilot_agent
         return get_pilot_agent().chat(message, history, data_context)
 

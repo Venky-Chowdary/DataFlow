@@ -1,6 +1,6 @@
 {
-  "name": "DataFlow — Universal Data Platform",
-  "short_name": "DataFlow",
+  "name": "Datawrap — Universal Data Platform",
+  "short_name": "Datawrap",
   "description": "Move data between databases, files, and cloud systems with AI semantic mapping and 8 preflight gates.",
   "start_url": "/",
   "display": "standalone",
@@ -16,10 +16,28 @@
       "purpose": "any"
     },
     {
-      "src": "/apple-touch-icon.svg",
+      "src": "/favicon-32.png",
+      "sizes": "32x32",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/favicon-64.png",
+      "sizes": "64x64",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/apple-touch-icon.png",
       "sizes": "180x180",
-      "type": "image/svg+xml",
-      "purpose": "maskable"
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/datawrap-mark.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
     }
   ]
 }

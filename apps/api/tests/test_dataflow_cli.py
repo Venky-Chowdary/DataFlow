@@ -1,4 +1,4 @@
-"""DataFlow CLI — validate / plan / apply / export proofs."""
+"""Datawrap CLI — validate / plan / apply / export proofs."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def test_cli_validate_and_plan_local(tmp_path, monkeypatch):
 
     manifest = {
         "apiVersion": "dataflow.space/v1",
-        "kind": "DataFlowManifest",
+        "kind": "DatawrapManifest",
         "resources": [
             {
                 "apiVersion": "dataflow.space/v1",
@@ -56,7 +56,7 @@ def test_cli_validate_and_plan_local(tmp_path, monkeypatch):
     out = tmp_path / "out.yaml"
     assert main(["export", "--local", "-o", str(out)]) == 0
     assert out.is_file()
-    assert "DataFlowManifest" in out.read_text(encoding="utf-8")
+    assert "DatawrapManifest" in out.read_text(encoding="utf-8")
 
 
 def test_cli_validate_rejects_empty_manifest(tmp_path):
@@ -69,7 +69,7 @@ def test_cli_validate_rejects_empty_manifest(tmp_path):
 
     path = tmp_path / "bad.yaml"
     path.write_text(
-        "apiVersion: dataflow.space/v1\nkind: DataFlowManifest\nresources: []\n",
+        "apiVersion: dataflow.space/v1\nkind: DatawrapManifest\nresources: []\n",
         encoding="utf-8",
     )
     assert main(["validate", "-f", str(path)]) == 1

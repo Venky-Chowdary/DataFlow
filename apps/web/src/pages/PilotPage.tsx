@@ -219,7 +219,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
     } catch (error) {
       setPilotOnline(false);
       const detail = formatPilotReachError(error, API_BASE);
-      toast({ title: "Data Pilot unavailable", message: detail, tone: "error" });
+      toast({ title: "Datawrap Pilot unavailable", message: detail, tone: "error" });
       updateSession(activeId, {
         messages: [...nextMessages, { role: "assistant", text: detail }],
       });
@@ -284,7 +284,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
 
   return (
     <PageShell
-      title="Data Pilot"
+      title="Datawrap Pilot"
       description="Natural-language triage on the same governed transfer engine."
       wide
       fit
@@ -458,7 +458,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
             <div className="df2-pilot-main-inner">
               <div className="df2-pilot-hero">
                 <div className="df2-pilot-hero-icon"><DtIcon name="sparkle" size={28} /></div>
-                <h1 className="df2-pilot-title">Ask Data Pilot to move, inspect, or govern data.</h1>
+                <h1 className="df2-pilot-title">Ask Datawrap Pilot to move, inspect, or govern data.</h1>
                 <p className="df2-pilot-subtitle">
                   Natural-language data ops — schema, mappings, connectors, and jobs with the same governed engine as Transfer Studio.
                   Chats are saved in this browser so a refresh does not wipe your thread.

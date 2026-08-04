@@ -1,4 +1,4 @@
-"""Data Pilot — app tools the agent can invoke (like Cursor/Claude tool use)."""
+"""Datawrap Pilot — app tools the agent can invoke (like Cursor/Claude tool use)."""
 
 from __future__ import annotations
 
@@ -222,7 +222,7 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "search_knowledge",
-        "description": "Search trained Data Pilot knowledge base — connectors, transfers, PII, mappings, product help.",
+        "description": "Search trained Datawrap Pilot knowledge base — connectors, transfers, PII, mappings, product help.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -341,13 +341,13 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "describe_pilot",
-        "description": "Explain what Data Pilot knows and can do locally — capabilities, not raw RAG dumps.",
+        "description": "Explain what Datawrap Pilot knows and can do locally — capabilities, not raw RAG dumps.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "explain_product",
         "description": (
-            "Answer product how-to questions about DataFlow (transfer, mapping, preflight, "
+            "Answer product how-to questions about Datawrap (transfer, mapping, preflight, "
             "connectors, PII, troubleshooting) from curated local knowledge — not RAG dumps."
         ),
         "input_schema": {
@@ -611,7 +611,7 @@ TOOL_DEFINITIONS: list[dict] = [
         "name": "map_connector_schemas",
         "description": (
             "Live-introspect source and destination tables on saved connectors, then run "
-            "DataFlow's semantic column mapper (same engine as Transfer Studio Map step)."
+            "Datawrap's semantic column mapper (same engine as Transfer Studio Map step)."
         ),
         "input_schema": {
             "type": "object",
@@ -722,7 +722,7 @@ def get_tool_registry() -> dict:
 
 
 class DataPilotTools:
-    """Execute Data Pilot tools against live app state."""
+    """Execute Datawrap Pilot tools against live app state."""
 
     def __init__(self):
         self.analyst = get_data_analyst()
@@ -1253,10 +1253,10 @@ class DataPilotTools:
             name="describe_pilot",
             success=True,
             output={
-                "role": "Data Pilot",
+                "role": "Datawrap Pilot",
                 "runtime": "local_engine",
                 "runtime_note": (
-                    "Primary brain is DataFlow's local Pilot engine "
+                    "Primary brain is Datawrap's local Pilot engine "
                     "(NL → tools → compose). OpenAI / Anthropic / Ollama are optional "
                     "add-ons only — not required."
                 ),
@@ -1327,7 +1327,7 @@ class DataPilotTools:
         )
 
     def _explain_product(self, query: str = "") -> ToolResult:
-        """Curated DataFlow product answers — independent of cloud LLMs and RAG noise."""
+        """Curated Datawrap product answers — independent of cloud LLMs and RAG noise."""
         from ..knowledge.copilot_knowledge import (
             CONVERSATION_TEMPLATES,
             INTENT_PATTERNS,
@@ -1364,7 +1364,7 @@ class DataPilotTools:
                 ),
                 "type_system",
                 (
-                    "**Schema / logical types** in DataFlow are the Map→Validate contract: "
+                    "**Schema / logical types** in Datawrap are the Map→Validate contract: "
                     "source carriers (INTEGER, DECIMAL(p,s), TIMESTAMPTZ, UUID, OBJECTID, INET, "
                     "VECTOR/HALFVEC, …) stamp a destination type before write. Create-new stamps "
                     "**physical** DDL (e.g. MySQL `CHAR(36)` for UUID) with Accept-risk chips when "
@@ -1437,7 +1437,7 @@ class DataPilotTools:
                 ),
                 "local_primary",
                 (
-                    "Yes. **Data Pilot local engine is primary** — NL → tools → compose works with no "
+                    "Yes. **Datawrap Pilot local engine is primary** — NL → tools → compose works with no "
                     "OpenAI, Anthropic, or Ollama key. Optional `DATAFLOW_PILOT_ENGINE=hybrid` can polish "
                     "narration with a cloud/local LLM, but transfers, aggregates, schema, and Confirm "
                     "do not require them."
@@ -1643,7 +1643,7 @@ class DataPilotTools:
                 "preflight blocks incompatible mappings before execution",
                 "reconciliation verifies row counts/checksums after execution",
             ],
-            "not_claimed": "No system can infer perfect business semantics without ground truth; DataFlow fails closed when evidence is ambiguous.",
+            "not_claimed": "No system can infer perfect business semantics without ground truth; Datawrap fails closed when evidence is ambiguous.",
         })
 
     def _recommend_sync_mode(
@@ -3291,7 +3291,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
 
     # List jobs when the operator wants contents — not when they only want the screen.
     _nav_only = any(v in lower for v in ("go to", "take me to", "navigate to", "open "))
-    # Platform inventory — DataFlow's own jobs/connectors, never warehouse tables.
+    # Platform inventory — Datawrap's own jobs/connectors, never warehouse tables.
     # "how many jobs failed" must list jobs, not SELECT COUNT(*) FROM jobs.
     _platform_job_inventory = bool(
         re.search(

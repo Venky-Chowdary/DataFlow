@@ -1,4 +1,4 @@
-"""Wave 29 — live SQLite Data Pilot proofs + inventory / recovery honesty.
+"""Wave 29 — live SQLite Datawrap Pilot proofs + inventory / recovery honesty.
 
 Always-on CI path: no Postgres credentials required. Proves the local engine can
 count, sample, run SQL, and recover from missing connectors/datasets against a

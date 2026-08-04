@@ -16,6 +16,7 @@ from __future__ import annotations
 import csv
 import io
 import os
+from services.brand_env import getenv_brand
 import sys
 import time
 import uuid
@@ -77,7 +78,7 @@ def _bigquery_config() -> dict[str, Any] | None:
         "project": os.environ["DATAFLOW_BENCHMARK_BIGQUERY_PROJECT"],
         "dataset": os.environ["DATAFLOW_BENCHMARK_BIGQUERY_DATASET"],
     }
-    if os.environ.get("DATAFLOW_BENCHMARK_BIGQUERY_KEY_PATH"):
+    if getenv_brand("BENCHMARK_BIGQUERY_KEY_PATH"):
         cfg["service_account"] = os.environ["DATAFLOW_BENCHMARK_BIGQUERY_KEY_PATH"]
     return cfg
 
@@ -91,7 +92,7 @@ def _s3_config() -> dict[str, Any] | None:
         "database": os.environ["DATAFLOW_BENCHMARK_S3_BUCKET"],
         "username": os.environ["DATAFLOW_BENCHMARK_S3_ACCESS_KEY"],
         "password": os.environ["DATAFLOW_BENCHMARK_S3_SECRET_KEY"],
-        "region": os.environ.get("DATAFLOW_BENCHMARK_S3_REGION", "us-east-1"),
+        "region": getenv_brand("BENCHMARK_S3_REGION", "us-east-1"),
     }
 
 
@@ -266,7 +267,7 @@ def run_all(rows: int = 1_000_000) -> list[ScaleResult]:
 if __name__ == "__main__":
     import json
 
-    rows = int(os.environ.get("DATAFLOW_BENCHMARK_ROWS", "1000000"))
+    rows = int(getenv_brand("BENCHMARK_ROWS", "1000000"))
     results = run_all(rows)
     print(json.dumps([r.__dict__ for r in results], indent=2, default=sanitize_json_value))
     any_ran = any(r.error != "No credentials" for r in results)

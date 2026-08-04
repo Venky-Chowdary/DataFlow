@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import os
+from services.brand_env import getenv_brand
 import re
 import unicodedata
 import uuid as uuid_lib
@@ -178,7 +179,7 @@ _DATE_LOCALE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar("date_loc
 
 def _active_date_locale(explicit: str = "") -> str:
     """Return 'DMY' or 'MDY' from explicit > context > env, or '' if unset."""
-    loc = (explicit or _DATE_LOCALE_VAR.get() or os.getenv("DATAFLOW_DATE_ORDER") or "").strip().upper()
+    loc = (explicit or _DATE_LOCALE_VAR.get() or getenv_brand("DATE_ORDER") or "").strip().upper()
     return loc if loc in {"DMY", "MDY"} else ""
 
 
@@ -706,7 +707,7 @@ def _parse_uuid(value: str) -> str | None:
 
 def _hash_pii(value: str) -> str:
     """HMAC-SHA256 digest for PII masking. Requires DATAFLOW_PII_HASH_KEY in prod."""
-    secret = os.getenv("DATAFLOW_PII_HASH_KEY") or os.getenv("DATAFLOW_SECRET")
+    secret = getenv_brand("PII_HASH_KEY") or getenv_brand("SECRET")
     if not secret:
         # Fail closed — never hash with a shared public default (would be reversible
         # across tenants that ship the same binary).

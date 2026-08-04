@@ -1,8 +1,8 @@
-# DataFlow — Universal One-Click Data Platform
+# Datawrap — Universal One-Click Data Platform
 
 ## Product scope
 
-DataFlow is **not** a payment-file-only tool. It is a **universal data operations platform**:
+Datawrap is **not** a payment-file-only tool. It is a **universal data operations platform**:
 
 | Operation | Example |
 |-----------|---------|

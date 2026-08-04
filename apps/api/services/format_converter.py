@@ -82,7 +82,7 @@ def _write_avro_bytes(headers: list[str], rows: list[list[str]]) -> tuple[bytes,
     fields = [{"name": h, "type": ["null", "string"]} for h in headers]
     schema = {
         "type": "record",
-        "name": "DataFlowRow",
+        "name": "DatawrapRow",
         "fields": fields,
     }
     objects = _rows_to_objects(headers, rows)

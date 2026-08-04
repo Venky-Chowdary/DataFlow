@@ -1,4 +1,4 @@
-"""Server-side mutation approval ledger for Data Pilot.
+"""Server-side mutation approval ledger for Datawrap Pilot.
 
 Create-connector drafts (with secrets) stay on the server. The UI only
 receives an ack_id + safe preview; Confirm consumes the ledger once.
@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from services.brand_env import getenv_brand
 import threading
 import time
 import uuid
@@ -25,7 +26,7 @@ _SECRET_KEYS = frozenset({
 
 
 def _default_path() -> Path:
-    override = os.environ.get("DATAFLOW_PILOT_ACK_PATH", "").strip()
+    override = getenv_brand("PILOT_ACK_PATH", "").strip()
     if override:
         return Path(override)
     return Path(__file__).resolve().parents[3] / "data" / "pilot_acks.json"

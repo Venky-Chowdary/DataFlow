@@ -1,6 +1,6 @@
 """Preflight rulebook and user-facing remediation guidance.
 
-Defines the data-governance rules for DataFlow preflight: what blocks a
+Defines the data-governance rules for Datawrap preflight: what blocks a
 transfer, why it blocks, and what the user can do to fix it.  Aligned with the
 universal data-transfer orchestration framework: hard gates block commits,
 soft gates inform confidence, and every blocker carries a concrete
@@ -48,10 +48,10 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
     "g1_source": {
         "title": "Source connectivity",
         "category": "hard",
-        "why": "DataFlow cannot read the source. Without a readable source there is nothing to transfer.",
+        "why": "Datawrap cannot read the source. Without a readable source there is nothing to transfer.",
         "fix": "Check the host/port/credentials, ensure the source is online, and that the chosen table/file/collection exists and is accessible.",
         "examples": [
-            "PostgreSQL connection refused → whitelist the DataFlow host or start the database.",
+            "PostgreSQL connection refused → whitelist the Datawrap host or start the database.",
             "S3 bucket not found → verify the bucket name, region, and access key.",
             "CSV parse error → open the file in a text editor and remove malformed quoted lines.",
         ],
@@ -63,7 +63,7 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         "title": "Destination write access",
         "category": "hard",
         "why": (
-            "DataFlow can connect but cannot prove write privileges on the destination "
+            "Datawrap can connect but cannot prove write privileges on the destination "
             "(INSERT/CREATE, index/write, SET, produce, PutObject). Writes would fail or "
             "silently skip. Privilege probes never mutate operator data."
         ),
@@ -138,7 +138,7 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         "why": "The target table or collection cannot accept the data as mapped. This could be a duplicate primary key, a missing column, a width overflow, or a NOT-NULL constraint.",
         "fix": (
             "Fix every listed issue before Run: remap columns, enable create-new / "
-            "backfill so DataFlow can ADD COLUMN, widen types, or clean source samples. "
+            "backfill so Datawrap can ADD COLUMN, widen types, or clean source samples. "
             "Do not Execute until this gate is green — warehouse errors after Run are too late."
         ),
         "examples": [
@@ -156,7 +156,7 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         "title": "Capacity / staging",
         "category": "soft",
         "why": "The local staging volume may not have enough free space to stage the transfer.",
-        "fix": "Free disk space on the DataFlow host, reduce the batch size, or write directly to the destination without local staging.",
+        "fix": "Free disk space on the Datawrap host, reduce the batch size, or write directly to the destination without local staging.",
         "examples": [
             "A 100 GB export needs at least 300 GB staging free space. Clear old exports or mount a larger volume.",
         ],
@@ -294,7 +294,7 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         "keywords": ["ambiguous mapping"],
         "gate": "g4_mapping_confidence",
         "why": "Two or more target columns are equally plausible for a source column, so the winner is uncertain.",
-        "fix": "Manually select the correct target column in the mapping panel. If the ambiguity is a false positive because the target uses '_id' vs 'id' or another common alias, DataFlow will learn the alias.",
+        "fix": "Manually select the correct target column in the mapping panel. If the ambiguity is a false positive because the target uses '_id' vs 'id' or another common alias, Datawrap will learn the alias.",
         "examples": ["'_id' mapped to 'id' with a low gap between alternatives."],
     },
     {
@@ -384,7 +384,7 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
             "exist on the destination table yet."
         ),
         "fix": (
-            "Go back to Map and confirm create-new columns. Re-run so DataFlow can "
+            "Go back to Map and confirm create-new columns. Re-run so Datawrap can "
             "ADD COLUMN for create_compatible_new mappings, or remap onto an existing "
             "compatible column. Enable 'backfill new fields' if you added columns manually."
         ),
@@ -423,7 +423,7 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
             "create_compatible_new target was written before ALTER TABLE ADD COLUMN."
         ),
         "fix": (
-            "Confirm create-new mappings on Map, re-run so DataFlow ADDs the column, "
+            "Confirm create-new mappings on Map, re-run so Datawrap ADDs the column, "
             "or enable backfill new fields / remap to an existing column."
         ),
         "examples": [
@@ -471,7 +471,7 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
             "typically a create-new mapping without schema evolution."
         ),
         "fix": (
-            "Re-run so DataFlow can ADD the missing column for create_compatible_new, "
+            "Re-run so Datawrap can ADD the missing column for create_compatible_new, "
             "enable backfill new fields, or remap onto an existing Oracle column."
         ),
         "examples": [
@@ -484,7 +484,7 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         "gate": "g6_target_ddl",
         "why": "The mapping references a target column that does not exist and the destination cannot be altered.",
         "fix": (
-            "Enable backfill new fields / create-new so DataFlow can ADD COLUMN, allow "
+            "Enable backfill new fields / create-new so Datawrap can ADD COLUMN, allow "
             "create table for new targets, or map only to existing columns."
         ),
         "examples": ["Target 'email' does not exist in the existing table."],
@@ -500,7 +500,7 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         "keywords": ["unmapped"],
         "gate": "g4_mapping_confidence",
         "why": "A source column has no target, or a target column has no source.",
-        "fix": "Map the column explicitly, or leave it unmapped if it is not needed. For an unknown target, DataFlow will create identity columns automatically.",
+        "fix": "Map the column explicitly, or leave it unmapped if it is not needed. For an unknown target, Datawrap will create identity columns automatically.",
         "examples": ["'notes' source column has no mapped target."],
     },
     {
@@ -564,14 +564,14 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
     {
         "keywords": ["source not connected", "source error"],
         "gate": "g1_source",
-        "why": "DataFlow cannot connect to or read the source.",
+        "why": "Datawrap cannot connect to or read the source.",
         "fix": "Check the connection settings, credentials, network, and that the source object exists.",
         "examples": ["PostgreSQL connection refused."],
     },
     {
         "keywords": ["destination not reachable", "destination error", "authentication failed"],
         "gate": "g2_destination",
-        "why": "DataFlow cannot authenticate to or reach the destination — Validate blocks before any write.",
+        "why": "Datawrap cannot authenticate to or reach the destination — Validate blocks before any write.",
         "fix": (
             "Open Connectors → edit the destination → set Auth source (often `admin` for Railway/Atlas MongoDB) "
             "and re-enter username/password if needed → click Test until it passes → return to Transfer and Re-validate. "

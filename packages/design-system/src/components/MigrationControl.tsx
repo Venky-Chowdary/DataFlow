@@ -21,7 +21,7 @@ interface MigrationControlProps {
   onCancel?: () => void;
 }
 
-function AnimatedDataFlow({ active }: { active: boolean }) {
+function AnimatedDatawrap({ active }: { active: boolean }) {
   return (
     <div className="dt-data-flow">
       <svg viewBox="0 0 400 60" preserveAspectRatio="xMidYMid meet">
@@ -157,7 +157,7 @@ export function MigrationControl({ job, onPause, onResume, onCancel }: Migration
       </div>
 
       <div className="dt-migration-hero">
-        <AnimatedDataFlow active={job.status === "running"} />
+        <AnimatedDatawrap active={job.status === "running"} />
         
         <div className="dt-migration-progress-section">
           <div className="dt-migration-progress-header">

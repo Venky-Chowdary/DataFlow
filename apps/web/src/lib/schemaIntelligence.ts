@@ -52,7 +52,7 @@ export function detectNestedDocumentFields(
       insights.push({
         column: col,
         kind: "dot_notation",
-        detail: "Flattened path detected — DataFlow preserves structure across SQL warehouses.",
+        detail: "Flattened path detected — Datawrap preserves structure across SQL warehouses.",
         flattenTarget: col.replace(/\./g, "_"),
       });
       continue;
@@ -84,7 +84,7 @@ export function detectNestedDocumentFields(
   return insights.slice(0, 8);
 }
 
-/** Why DataFlow vs single-tool import (Compass JSON, manual ETL, etc.) */
+/** Why Datawrap vs single-tool import (Compass JSON, manual ETL, etc.) */
 export function buildCompetitiveAdvantages(ctx: {
   sourceKind?: string;
   destType?: string;

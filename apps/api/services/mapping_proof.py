@@ -49,7 +49,7 @@ IDENTITY_PASSTHROUGH_CONF_CAP = 0.93
 
 QUARANTINE_POSTURE = (
     "Bad or unparseable rows are held out of the primary write and surfaced in "
-    "quarantine for review — DataFlow does not silently drop them or invent NULL "
+    "quarantine for review — Datawrap does not silently drop them or invent NULL "
     "in place (coerce_null policy only)."
 )
 

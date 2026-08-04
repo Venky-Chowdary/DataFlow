@@ -307,7 +307,7 @@ export function ConnectorsPage({
                   page
                   icon="connectors"
                   title="No connections yet"
-                  description="Browse the catalog, enter credentials once, and reuse connections across Transfer Studio, Pipelines, and Data Pilot."
+                  description="Browse the catalog, enter credentials once, and reuse connections across Transfer Studio, Pipelines, and Datawrap Pilot."
                   action={
                     <div className="df2-empty-actions-row">
                       <button type="button" className="df2-btn df2-btn-primary" onClick={() => setTab("catalog")}>

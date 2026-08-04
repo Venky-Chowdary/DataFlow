@@ -1,5 +1,5 @@
 """
-DataTransfer.space — RAG Module
+Datawrap — RAG Module
 
 Retrieval-Augmented Generation pipeline for intelligent data handling.
 """

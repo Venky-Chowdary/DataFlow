@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {
     "name": "dataflow",
-    "title": "DataFlow MCP Server",
+    "title": "Datawrap MCP Server",
     "version": "2.0.0",
 }
 
@@ -130,7 +130,7 @@ def handle_jsonrpc(
                 },
                 "serverInfo": SERVER_INFO,
                 "instructions": (
-                    "DataFlow universal data-movement tools. "
+                    "Datawrap universal data-movement tools. "
                     "Use Authorization: Bearer <workspace API key or JWT> for tools/call."
                 ),
             },
