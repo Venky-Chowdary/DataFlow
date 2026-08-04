@@ -797,6 +797,16 @@ export interface PreflightResult {
     checked_values?: number;
     note?: string;
   };
+  /** Module 11 — opt-in full-table orphan scan (only path to RI proven). */
+  population_orphan_probe?: {
+    ran?: boolean;
+    coverage?: string;
+    population_proof?: boolean;
+    complete?: boolean;
+    orphan_count?: number;
+    child_table?: string;
+    note?: string;
+  };
   /** Soft Snowflake warehouse sizing from G7 volume — never a GateId. */
   snowflake_warehouse_advice?: {
     kind?: string;

@@ -8,7 +8,7 @@ Use this pack instead of marketing screenshots when Fortune 100 teams ask “pro
 |------|---------|
 | G1–G9 | `packages/preflight` (`GateId`, `PREFLIGHT_GATES`) |
 | Host policy extras | Studio Validate may add sync/schema/validation policy gates — distinct from core G1–G9 |
-| Constraint findings | Structured FK findings + optional **sample** orphan probe — block in strict/maximum when dest FK columns are unmapped or sample orphans are found unless `fk_risk_acknowledged`; **never invents population RI proof** (`proven` requires full population orphan scan with zero orphans) |
+| Constraint findings | Structured FK findings + optional **sample** orphan probe; opt-in **population** orphan scan is the only path to RI `proven` (`docs/POPULATION_ORPHAN_SCAN.md`) — never invents population RI from sample alone |
 | Root Cause Engine | `apps/api/services/root_cause_engine.py` — one fidelity root → many impacted gates (no duplicate blockers) |
 | Mapping confidence SSOT | `g4_mapping_confidence` only hard-blocks; proof/G9 report (`docs/MAPPING_CONFIDENCE_AUTHORITY.md`) |
 | Validation modes | `strict` / `maximum` / `balanced` / `migration` / `discovery` / `audit` with guarantees + non-guarantees (`docs/VALIDATION_MODE_CONTRACT.md`); `discovery`/`audit` **never write** |

@@ -253,16 +253,13 @@ def referential_integrity_posture(
         isinstance(f, dict) and f.get("coverage") == "destination_fk_metadata"
         for f in findings
     )
-    has_sample_orphan_finding = any(
-        isinstance(f, dict) and f.get("coverage") == "sample_orphan_probe"
-        for f in findings
-    )
     pop_count = population_orphan_count
+    # Sample findings never veto a completed clean population scan.
+    # Incomplete population work must leave population_orphan_count=None.
     proven = bool(
         population_orphan_probe_ran
         and pop_count is not None
         and int(pop_count) == 0
-        and not has_sample_orphan_finding
     )
     if proven:
         coverage = "population_orphan_probe"

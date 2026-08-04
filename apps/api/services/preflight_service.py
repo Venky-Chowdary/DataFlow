@@ -965,6 +965,7 @@ def run_file_preflight(
     fk_risk_acknowledged: bool = False,
     acknowledgment_actor: str = "",
     acknowledgment_reason: str = "",
+    run_population_orphan_scan: bool = False,
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G9 + host policy)."""
 
@@ -1439,11 +1440,59 @@ def run_file_preflight(
             if isinstance(of, dict):
                 findings.append(of)
 
+        # Module 11 — opt-in full-table population orphan scan (only path to RI proven).
+        pop_report: dict[str, Any] = {
+            "ran": False,
+            "coverage": "none",
+            "population_proof": False,
+            "complete": False,
+            "orphan_count": 0,
+            "note": "Population orphan scan not requested for this Validate.",
+        }
+        if run_population_orphan_scan:
+            from services.population_orphan_probe import probe_population_fk_orphans
+
+            pop_report = probe_population_fk_orphans(
+                child_table=source_table or "",
+                mappings=list(mappings or []),
+                foreign_keys=probe_fks,
+                source_connector_id=source_connector_id or "",
+                source_config=source_config,
+                validation_mode=validation_mode,
+                fk_risk_acknowledged=bool(fk_risk_acknowledged),
+            )
+            for of in pop_report.get("findings") or []:
+                if isinstance(of, dict):
+                    findings.append(of)
+        out["population_orphan_probe"] = {
+            k: pop_report.get(k)
+            for k in (
+                "ran",
+                "coverage",
+                "population_proof",
+                "complete",
+                "orphan_count",
+                "checks",
+                "child_table",
+                "note",
+                "error",
+            )
+            if k in pop_report
+        }
+
         out["constraint_findings"] = findings
         out["constraint_hints"] = findings
+        pop_ran = bool(pop_report.get("ran"))
+        # Incomplete population scan must not invent proven via orphan_count=0.
+        pop_count: int | None
+        if pop_ran and pop_report.get("complete"):
+            pop_count = int(pop_report.get("orphan_count") or 0)
+        else:
+            pop_count = None
         ri_posture = referential_integrity_posture(
             findings,
-            population_orphan_probe_ran=False,
+            population_orphan_probe_ran=pop_ran,
+            population_orphan_count=pop_count,
             sample_orphan_probe_ran=bool(orphan_report.get("ran")),
             sample_orphan_count=int(orphan_report.get("orphan_count") or 0),
         )
@@ -1477,22 +1526,37 @@ def run_file_preflight(
                 if block_msgs
                 else "Destination FK columns unmapped — transfer blocked"
             )
-            coverage = "sample_orphan_probe" if any(
+            if any(
+                isinstance(f, dict)
+                and f.get("coverage") == "population_orphan_probe"
+                and str(f.get("severity") or "").lower() in {"block", "ack_required"}
+                for f in findings
+            ):
+                coverage = "population_orphan_probe"
+            elif any(
                 isinstance(f, dict) and f.get("coverage") == "sample_orphan_probe"
                 for f in findings
                 if str(f.get("severity") or "").lower() in {"block", "ack_required"}
-            ) else "destination_fk_metadata"
+            ):
+                coverage = "sample_orphan_probe"
+            else:
+                coverage = "destination_fk_metadata"
             fk_details = {
                 "findings": findings,
                 "coverage": coverage,
                 "remediation_kind": "acknowledge_fk_risk",
                 "ack_required": True,
-                "population_orphan_proven": False,
+                "population_orphan_proven": bool(ri_posture.get("proven")),
+                "population_orphan_probe_ran": pop_ran,
                 "sample_orphan_probe_ran": bool(orphan_report.get("ran")),
                 "rule_id": (
-                    "constraint_fk.sample_orphan"
-                    if coverage == "sample_orphan_probe"
-                    else "constraint_fk.unmapped"
+                    "constraint_fk.population_orphan"
+                    if coverage == "population_orphan_probe"
+                    else (
+                        "constraint_fk.sample_orphan"
+                        if coverage == "sample_orphan_probe"
+                        else "constraint_fk.unmapped"
+                    )
                 ),
             }
             fk_gate = {

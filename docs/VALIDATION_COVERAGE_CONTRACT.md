@@ -47,6 +47,7 @@ Composite FKs emit `composite_fk_not_probed` instead of a silent skip.
 - `apps/api/services/validation_coverage.py`
 - `apps/api/services/reconciliation.py` (`stamp_post_write_phase`, `reconcile`)
 - `apps/api/services/sample_orphan_probe.py`
+- `apps/api/services/population_orphan_probe.py` (Module 11 — opt-in RI proven)
 - `apps/api/services/data_integrity.py`
 
 ## Guarantees
@@ -58,4 +59,5 @@ Composite FKs emit `composite_fk_not_probed` instead of a silent skip.
 
 - Sample orphan probe ≠ population RI
 - Full checksum match ≠ FK / constraint proof
-- Population orphan scan API is not implemented in Validate yet (`population_orphan_probe_ran` stays false until wired)
+- Population orphan scan is **opt-in** (`run_population_orphan_scan=true`) — default Validate leaves `population_orphan_probe_ran=false` and `proven=false`
+- Composite FKs remain incomplete until tuple anti-join ships — incomplete scans leave `population_orphan_count=null` (never invent proven)

@@ -322,6 +322,8 @@ export async function runPreflight(payload: {
   schema_drift_acknowledged?: boolean;
   /** Operator acknowledged destination FK mapping risk (schema coverage only). */
   fk_risk_acknowledged?: boolean;
+  /** Module 11 — opt-in full-table population orphan scan (only path to RI proven). */
+  run_population_orphan_scan?: boolean;
   /** Who acknowledged (email / display name). */
   acknowledgment_actor?: string;
   /** Why the exception was accepted. */

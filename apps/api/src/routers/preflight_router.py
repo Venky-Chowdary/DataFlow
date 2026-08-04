@@ -93,6 +93,8 @@ class PreflightRequest(BaseModel):
     schema_drift_acknowledged: bool = False
     # Operator acknowledged destination FK mapping risk (schema coverage only).
     fk_risk_acknowledged: bool = False
+    # Module 11 — opt-in full-table population orphan scan (only path to RI proven).
+    run_population_orphan_scan: bool = False
     # Optional acknowledgment trail (who / why). Timestamp is stamped server-side.
     acknowledgment_actor: str = ""
     acknowledgment_reason: str = ""
@@ -270,6 +272,7 @@ async def run_preflight(body: PreflightRequest):
             compliance_acknowledged=bool(body.compliance_acknowledged),
             schema_drift_acknowledged=bool(body.schema_drift_acknowledged),
             fk_risk_acknowledged=bool(body.fk_risk_acknowledged),
+            run_population_orphan_scan=bool(body.run_population_orphan_scan),
             acknowledgment_actor=str(body.acknowledgment_actor or "").strip(),
             acknowledgment_reason=str(body.acknowledgment_reason or "").strip(),
         )
