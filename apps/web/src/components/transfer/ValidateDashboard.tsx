@@ -2768,6 +2768,10 @@ export function ValidateDashboard({
               <strong>ConversionClass</strong>
               <span>{honestyControls.conversionClasses.headline}</span>
             </li>
+            <li>
+              <strong>Historical success</strong>
+              <span>{honestyControls.historicalSuccess.headline}</span>
+            </li>
             {honestyControls.ddlIdentityHash ? (
               <li>
                 <strong>DDL identity</strong>

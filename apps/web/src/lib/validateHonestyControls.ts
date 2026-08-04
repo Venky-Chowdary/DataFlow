@@ -40,6 +40,13 @@ export interface ValidateHonestyControls {
   populationScanRequested: boolean;
   migrationProven: boolean;
   ddlIdentityHash: string | null;
+  /** Module 17 — measured route success or explicitly unmeasured. */
+  historicalSuccess: {
+    measured: boolean;
+    successRate: number | null;
+    runsObserved: number;
+    headline: string;
+  };
   note: string;
 }
 
@@ -83,12 +90,7 @@ export function buildReferentialIntegrityHonesty(
 export function buildConversionClassHonesty(
   preflight: PreflightResult | null | undefined,
 ): ConversionClassHonesty {
-  const raw = (preflight?.proof_bundle as {
-    conversion_contract?: {
-      columns?: Array<Record<string, unknown>>;
-      version?: string;
-    };
-  } | undefined)?.conversion_contract;
+  const raw = preflight?.proof_bundle?.conversion_contract;
 
   const columns = (raw?.columns ?? []).map((c) => ({
     source: c.source != null ? String(c.source) : undefined,

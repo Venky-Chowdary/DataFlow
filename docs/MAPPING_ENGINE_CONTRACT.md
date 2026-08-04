@@ -26,7 +26,7 @@ Locked rows keep target / type / transform. Engine alternatives attach as `engin
 | `lexical_evidence` | BM25 / name similarity / strategy |
 | `datatype_compatibility` | Types + conversion_class / fidelity |
 | `constraint_compatibility` | PK/FK notes when known |
-| `historical_success` | Only when measured — never invented |
+| `historical_success` | Structured measured evidence or unmeasured — see `docs/HISTORICAL_SUCCESS_CONTRACT.md` |
 | `ai_explanation` | Reasoning string |
 | `user_overrides` | Lock posture |
 | `version_history` | Append-only revision crumbs when version supplied |

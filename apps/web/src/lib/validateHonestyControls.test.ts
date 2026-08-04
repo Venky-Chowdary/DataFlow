@@ -91,5 +91,24 @@ describe("validateHonestyControls", () => {
     });
     assert.equal(honesty.populationScanRequested, true);
     assert.equal(honesty.ddlIdentityHash, "abc123");
+    assert.equal(honesty.historicalSuccess.measured, false);
+    assert.match(honesty.historicalSuccess.headline, /unmeasured/i);
+  });
+
+  it("surfaces measured historical success without inventing when absent", () => {
+    const preflight = {
+      proof_bundle: {
+        historical_success: {
+          measured: true,
+          success_rate: 0.97,
+          runs_observed: 4,
+          never_invented: true,
+        },
+      },
+    } as unknown as PreflightResult;
+    const honesty = buildValidateHonestyControls(preflight);
+    assert.equal(honesty.historicalSuccess.measured, true);
+    assert.equal(honesty.historicalSuccess.successRate, 0.97);
+    assert.match(honesty.historicalSuccess.headline, /97\.0%/);
   });
 });

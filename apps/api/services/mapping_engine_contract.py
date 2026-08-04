@@ -214,13 +214,27 @@ def stamp_mapping_evidence(
             "constraint_compatibility": constraint,
             "historical_success": historical_success
             if historical_success is not None
-            else out.get("historical_success"),
+            else (
+                out.get("historical_success")
+                if isinstance(out.get("historical_success"), dict)
+                else None
+            ),
             "ai_explanation": str(ai_explanation),
             "user_overrides": overrides,
             "version_history": history,
             "mapping_engine_contract": MAPPING_ENGINE_CONTRACT_VERSION,
         }
     )
+    # Module 17 — never leave a bare float invent on the mapping.
+    if isinstance(out.get("historical_success"), (int, float)):
+        from services.historical_success_contract import unmeasured_historical_success
+
+        out["historical_success"] = unmeasured_historical_success(
+            reason=(
+                "Numeric historical_success discarded — rates must be measured "
+                "structured evidence (Module 17)."
+            ),
+        )
     return out
 
 

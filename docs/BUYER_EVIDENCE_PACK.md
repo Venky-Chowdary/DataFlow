@@ -24,6 +24,7 @@ Use this pack instead of marketing screenshots when Fortune 100 teams ask “pro
 | Execution engine contract | At-least-once honesty; refuse insert resume without checkpoint; Kafka offset commit fail-closed; never claim exactly-once (`docs/EXECUTION_ENGINE_CONTRACT.md`) |
 | Pair assurance ConversionClass | Offline type cells stamp charter 7-class via `conversion_contract` (`docs/CONVERSION_CONTRACT.md`) |
 | Validate honesty controls | Coverage panel + opt-in population orphan scan; sample ≠ RI proven; ConversionClass / DDL identity surfaced (`docs/VALIDATE_HONESTY_CONTROLS.md`) |
+| Historical success | Measured from route load history or explicitly unmeasured — never invent success rates (`docs/HISTORICAL_SUCCESS_CONTRACT.md`) |
 
 Do **not** claim “8 gates,” “ten gates,” or invent a marketed “G10 constraints” gate. Required core gates remain **G1–G9**.
 

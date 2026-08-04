@@ -1674,6 +1674,23 @@ def run_file_preflight(
             dst_ep,
             schema=column_types,
         )
+        # Module 17 — measured historical success (never invent a rate).
+        from services.historical_success_contract import (
+            measure_route_historical_success,
+            stamp_mappings_historical_success,
+        )
+
+        hs = measure_route_historical_success(src_ep, dst_ep)
+        out["historical_success"] = hs
+        pb = dict(out.get("proof_bundle") or {})
+        pb["historical_success"] = hs
+        out["proof_bundle"] = pb
+        # Stamp route-scoped evidence onto mapping rows carried in conversion contract.
+        conv = dict(pb.get("conversion_contract") or {})
+        if isinstance(conv.get("columns"), list):
+            conv["columns"] = stamp_mappings_historical_success(conv["columns"], hs)
+            pb["conversion_contract"] = conv
+            out["proof_bundle"] = pb
     except Exception as hist_exc:
         logger.warning("load history compare failed during preflight", exc_info=True)
         out["load_history_report"] = {
@@ -1682,6 +1699,18 @@ def run_file_preflight(
             "prior_load_count": 0,
             "warning": f"Load-history compare unavailable: {hist_exc!s}"[:240],
         }
+        try:
+            from services.historical_success_contract import unmeasured_historical_success
+
+            hs = unmeasured_historical_success(
+                reason=f"Load history unavailable: {hist_exc!s}"[:200],
+            )
+            out["historical_success"] = hs
+            pb = dict(out.get("proof_bundle") or {})
+            pb["historical_success"] = hs
+            out["proof_bundle"] = pb
+        except Exception:
+            pass
 
     # Schema drift is its own rule — never masquerade as Target DDL.
     # Airbyte rule: hard-breaking ALWAYS pauses (even under propagate_*).
