@@ -69,6 +69,7 @@ interface TransferMapStepProps {
   requiresCursor?: boolean;
   onOpenIdentitySettings?: () => void;
   uniqueKeySuggestions?: UniqueKeySuggestion[];
+  compositeKeySuggestions?: Array<{ columns: string[]; uniqueCount: number; sampleRows: number }>;
   onApplyPrimaryKey?: (column: string) => void;
 }
 
@@ -119,6 +120,7 @@ export function TransferMapStep({
   requiresCursor = false,
   onOpenIdentitySettings,
   uniqueKeySuggestions = [],
+  compositeKeySuggestions = [],
   onApplyPrimaryKey,
 }: TransferMapStepProps) {
   const [search, setSearch] = useState("");
@@ -373,6 +375,24 @@ export function TransferMapStep({
                 ))}
               </>
             )}
+
+            {compositeKeySuggestions.length > 0 && requiresPrimaryKey && !primaryKeyField && (
+              <span className="df2-map-pk-suggest">
+                Composite sample keys:{" "}
+                {compositeKeySuggestions.slice(0, 2).map((s, i) => (
+                  <button
+                    key={s.columns.join(",")}
+                    type="button"
+                    className="df2-linkish"
+                    onClick={() => onApplyPrimaryKey?.(s.columns.join(","))}
+                    title={`Unique in ${s.sampleRows}-row sample`}
+                  >
+                    {s.columns.join(" + ")}{i === 0 && compositeKeySuggestions.length > 1 ? "," : ""}
+                  </button>
+                ))}
+              </span>
+            )}
+
           </span>
         </div>
         <div className="df2-map-footer-actions">
