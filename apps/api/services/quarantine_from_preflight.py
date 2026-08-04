@@ -182,7 +182,12 @@ def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dic
         rows.append(detail)
         if len(rows) >= 200:
             break
-    return rows
+    try:
+        from services.quarantine_row_contract import normalize_quarantine_rows
+
+        return normalize_quarantine_rows(rows, job_id="", connector="preflight")
+    except Exception:
+        return rows
 
 
 def merge_job_quarantine(job: dict[str, Any] | None) -> list[dict[str, Any]]:

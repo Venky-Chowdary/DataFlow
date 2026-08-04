@@ -94,6 +94,8 @@ def append_write_quarantine_detail(
     the Map-projected source payload when mappings are known — preferred by
     quarantine replay (Wave 32). Never invent source_values from target keys
     without a Map (that would poison canonicalize).
+
+    Module 9: stamp first-class quarantine contract fields before append.
     """
     d = dict(detail)
     if not (isinstance(d.get("values"), dict) and d["values"]):
@@ -104,6 +106,16 @@ def append_write_quarantine_detail(
             src = project_quarantine_source_values(d["values"], maps)
             if src:
                 d["source_values"] = src
+    try:
+        from services.quarantine_row_contract import normalize_quarantine_row
+
+        d = normalize_quarantine_row(
+            d,
+            job_id=str(d.get("job_id") or ""),
+            connector=str(d.get("connector") or ""),
+        )
+    except Exception:
+        pass
     rejected_details.append(d)
 
 def resolve_writer_backfill(

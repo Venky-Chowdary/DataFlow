@@ -150,13 +150,30 @@ def persist_rejected_rows(
     rejected_details: list[dict[str, Any]] | None,
     workspace_id: str = "",
     source: str = "transfer",
+    connector: str = "",
 ) -> dict[str, Any] | None:
-    """Persist rejected/quarantined rows to the DLQ. Returns event or None if empty."""
-    rows = list(rejected_details or [])
-    if not rows:
+    """Persist rejected/quarantined rows to the DLQ. Returns event or None if empty.
+
+    Module 9: normalize to quarantine row contract and fail closed without job_id.
+    """
+    from services.quarantine_row_contract import (
+        QuarantineRowContractError,
+        assert_quarantine_rows_contract,
+        normalize_quarantine_rows,
+    )
+
+    raw = list(rejected_details or [])
+    if not raw:
         return None
+    jid = str(job_id or "").strip()
+    if not jid:
+        raise QuarantineRowContractError(
+            "persist_rejected_rows requires job_id — refuse undurable quarantine"
+        )
+    rows = normalize_quarantine_rows(raw, job_id=jid, connector=connector)
+    assert_quarantine_rows_contract(rows, require_job_id=True)
     return append_dlq_event(
-        job_id=job_id,
+        job_id=jid,
         action="quarantine",
         rows=len(rows),
         workspace_id=workspace_id,

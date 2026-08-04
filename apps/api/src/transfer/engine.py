@@ -811,6 +811,13 @@ def _persist_job_quarantine(
             if request
             else "",
             source="universal_engine",
+            connector=str(
+                getattr(getattr(request, "destination", None), "format", "")
+                or getattr(getattr(request, "destination", None), "kind", "")
+                or ""
+            )
+            if request
+            else "",
         )
     except Exception as exc:
         dest_summary["quarantine_dlq_error"] = str(exc)[:300]

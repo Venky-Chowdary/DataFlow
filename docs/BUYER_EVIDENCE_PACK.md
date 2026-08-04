@@ -17,6 +17,7 @@ Use this pack instead of marketing screenshots when Fortune 100 teams ask “pro
 | Quarantine DLQ | Fail-closed if control-plane DLQ cannot persist rejects (`docs/QUARANTINE_DLQ_FAIL_CLOSED.md`) |
 | Rollback workflow | Signed plans; only `DISCARD_STAGING` executable — no population undo (`docs/MIGRATION_ROLLBACK.md`) |
 | Proof post-write | Signed packs stamp `assurance`; `migration_proven` only for full_checksum post-write — never from pre-write / sample / writer-ack alone (`docs/PROOF_POST_WRITE_CONTRACT.md`) |
+| Quarantine row contract | Every reject stamps original/expected/actual/reason/transform/recovery/PKs/job/connector/retry (`docs/QUARANTINE_ROW_CONTRACT.md`) |
 
 Do **not** claim “8 gates,” “ten gates,” or invent a marketed “G10 constraints” gate. Required core gates remain **G1–G9**.
 
