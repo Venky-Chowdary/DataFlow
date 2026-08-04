@@ -467,8 +467,14 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             not lossy
             and is_precision_collapse_coercion
             and is_precision_collapse_coercion(
-                source_col.inferred_type, target.inferred_type
-            )
+                source_col.inferred_type,
+                target.inferred_type,
+                dest_db=str(
+                    getattr(getattr(ctx.plan, "destination", None), "db_type", "")
+                    or getattr(getattr(ctx.plan, "destination", None), "kind", "")
+                    or ""
+                ),
+                    )
         ):
             lossy = True
         # Nested STRUCT/MAP field contract or nested→document collapse.
@@ -510,7 +516,13 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             (
                 is_precision_collapse_coercion
                 and is_precision_collapse_coercion(
-                    source_col.inferred_type, target.inferred_type
+                    source_col.inferred_type,
+                    target.inferred_type,
+                    dest_db=str(
+                        getattr(getattr(ctx.plan, 'destination', None), 'db_type', '')
+                        or getattr(getattr(ctx.plan, 'destination', None), 'kind', '')
+                        or ''
+                    ),
                 )
             )
             or platform_decimal_trunc

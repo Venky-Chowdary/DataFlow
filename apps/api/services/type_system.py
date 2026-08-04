@@ -1495,14 +1495,96 @@ def is_opaque_document_logical(inferred: str | None) -> bool:
     return normalize_logical_type(inferred) == LOGICAL_JSON
 
 
-def document_domain_would_collapse(source_type: str, target_type: str) -> bool:
+# Document polarity class — JSON / JSONB / VARIANT / SUPER / OBJECT / BSON.
+# Specialty invent is "leave this class"; dialect physical wires may be text LOBs
+# (SQL Server NVARCHAR(MAX), Oracle CLOB) without losing create-new document intent.
+_DOCUMENT_POLARITY_BASES: Final[frozenset[str]] = frozenset(
+    {
+        "JSON",
+        "JSONB",
+        "VARIANT",
+        "SUPER",
+        "OBJECT",
+        "BSON",
+        "M",  # Mongo document envelope alias
+    }
+)
+
+# Unbounded text LOBs that engines use as *the* create-new document wire when they
+# lack a native JSON type. Bounded VARCHAR(n) is never a document wire.
+_DOCUMENT_TEXT_WIRE_TOKENS: Final[frozenset[str]] = frozenset(
+    {
+        "NVARCHAR(MAX)",
+        "VARCHAR(MAX)",
+        "CLOB",
+        "NCLOB",
+        "LONGTEXT",
+        "LONG VARCHAR",
+        "LONG",
+    }
+)
+
+
+def is_document_polarity_carrier(inferred: str | None) -> bool:
+    """True when the carrier is in the opaque document polarity class."""
+    if not inferred:
+        return False
+    if normalize_logical_type(inferred) != LOGICAL_JSON:
+        return False
+    base = strip_identity_qualifier(inferred).upper().strip()
+    bare = re.sub(r"\s*\(\s*\d+\s*\)", "", base).strip()
+    if bare in _DOCUMENT_POLARITY_BASES or bare.startswith("JSON"):
+        return True
+    # Logical JSON aliases (object / variant / super / bson) with no JSON token.
+    return True
+
+
+def is_dialect_native_document_wire(
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when target is the destination's create-new document sink.
+
+    Covers native JSON/JSONB/VARIANT/SUPER and dialect text LOB wires
+    (NVARCHAR(MAX) / CLOB) that are the intentional document projection —
+    not a fidelity collapse.
+    """
+    raw = strip_identity_qualifier(target_type).strip()
+    if not raw:
+        return False
+    upper = raw.upper()
+    bare = re.sub(r"\s*\(\s*\d+\s*\)", "", upper).strip()
+    if bare in _DOCUMENT_POLARITY_BASES or bare.startswith("JSON"):
+        return True
+    if upper in _DOCUMENT_TEXT_WIRE_TOKENS or bare in _DOCUMENT_TEXT_WIRE_TOKENS:
+        return True
+    db = (dest_db or "").strip().lower()
+    if not db:
+        return False
+    try:
+        native = ddl_type(db, "JSON")
+    except Exception:
+        return False
+    native_u = strip_identity_qualifier(native).upper().strip()
+    return upper == native_u or bare == re.sub(r"\s*\(\s*\d+\s*\)", "", native_u).strip()
+
+
+def document_domain_would_collapse(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
     """True when JSON/VARIANT/SUPER/JSONB loses document validation into open text.
 
-    Serializing a document to VARCHAR/STRING/TEXT is value-renderable but drops
-    JSON parse polarity — same Accept-risk class as JSONB→TEXT (specialty path).
-    Never silent-green JSON→STRING while JSONB→STRING blocks.
+    Serializing a document to bounded VARCHAR/STRING/TEXT drops JSON parse
+    polarity. Dialect-native document wires (JSONB, VARIANT, NVARCHAR(MAX),
+    CLOB, …) are create-new projections — not collapse.
     """
     if normalize_logical_type(source_type) != LOGICAL_JSON:
+        return False
+    if is_dialect_native_document_wire(target_type, dest_db=dest_db):
         return False
     tgt = normalize_logical_type(target_type)
     return tgt in {LOGICAL_STRING, LOGICAL_TEXT}
@@ -5031,8 +5113,9 @@ def specialty_domain_would_invent(source_type: str, target_type: str) -> bool:
     if specialty_carrier_base(source_type) is not None:
         return False
     src_l = normalize_logical_type(source_type)
-    # PG JSONB is the physical create-new sink for logical JSON — not a specialty invent.
-    if tgt == "JSONB" and src_l == LOGICAL_JSON:
+    # Document polarity class → document specialty (JSONB) is dialect twin, not invent.
+    # JSON→HSTORE still invents (HSTORE is not in the document class).
+    if tgt in _DOCUMENT_POLARITY_BASES and src_l == LOGICAL_JSON:
         return False
     return src_l in {
         LOGICAL_STRING,
@@ -5820,7 +5903,12 @@ def parse_temporal_fractional_precision(inferred: str | None) -> int | None:
     return int(m.group(1))
 
 
-def temporal_precision_would_narrow(source_type: str, target_type: str) -> bool:
+def temporal_precision_would_narrow(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
     """True when source fractional seconds exceed destination TIME/TIMESTAMP(p).
 
     ``TIME(6)→TIME(0)`` / ``DATETIME2(7)→DATETIME2(0)`` silently truncates
@@ -5828,6 +5916,11 @@ def temporal_precision_would_narrow(source_type: str, target_type: str) -> bool:
 
     ``SMALLDATETIME`` is one-minute accuracy — any second/fraction datetime
     source into SMALLDATETIME is a silent round (Microsoft / UGO class).
+
+    Bare ``TIMESTAMP`` defaults are dialect-aware when ``dest_db`` is set:
+    MySQL/Maria → FSP 0; PostgreSQL-family / Redshift → 6; SQL Server
+    DATETIME2 bare → 7. Without ``dest_db``, bare TIMESTAMP stays fail-closed
+    at 0 (MySQL) so truncation cannot silent-green.
     """
     src_l = normalize_logical_type(source_type)
     tgt_l = normalize_logical_type(target_type)
@@ -5870,9 +5963,18 @@ def temporal_precision_would_narrow(source_type: str, target_type: str) -> bool:
             # PostgreSQL / ANSI spellings default to precision 6.
             tgt_p = 6
         elif bare == "TIMESTAMP":
-            # Ambiguous: MySQL bare TIMESTAMP is FSP 0; PG create-new must stamp
-            # TIMESTAMP(p) via ddl_type — never soft-pass MySQL truncation.
-            tgt_p = 0
+            db = (dest_db or "").strip().lower()
+            if db in {
+                "postgresql", "postgres", "pg", "redshift", "cockroach",
+                "cockroachdb", "alloydb", "timescaledb", "yugabytedb",
+                "citus", "supabase", "greenplum",
+            }:
+                tgt_p = 6
+            elif db in {"sqlserver", "mssql"}:
+                tgt_p = 7
+            else:
+                # MySQL/Maria/unknown: bare TIMESTAMP is FSP 0 — fail closed.
+                tgt_p = 0
         elif bare in {"TIME", "DATETIME"} or bare.startswith("DATETIME"):
             tgt_p = 0
         else:
@@ -6503,7 +6605,12 @@ def unsigned_signed_polarity_invent(source_type: str, target_type: str) -> bool:
     return True
 
 
-def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
+def is_precision_collapse_coercion(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
     """True when source→target collapses precision even if samples appear clean.
 
     Used by DDL compatibility, schema-drift, G3, and integrity sample soft-pass so
@@ -6512,6 +6619,8 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
     BINARY width / UNSIGNED→signed overflow / ENUM·SET domain shrink /
     INTERVAL YM↔DS / GEOGRAPHY SRID·polarity / GENERATED ALWAYS overwrite /
     TIME·TIMESTAMP fractional-second (p) narrow.
+
+    ``dest_db`` threads dialect defaults (document wires, bare TIMESTAMP FSP).
     """
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
@@ -6621,14 +6730,72 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
         return True
     if bfile_locator_would_collapse(source_type, target_type):
         return True
-    if document_domain_would_collapse(source_type, target_type):
+    if document_domain_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
     if document_domain_would_invent(source_type, target_type):
         return True
-    if temporal_precision_would_narrow(source_type, target_type):
+    if temporal_precision_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
     return False
 
+
+
+
+def suggest_remap_target(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> str:
+    """One-click Remap target that preserves fidelity — never invent bare VARCHAR.
+
+    SSOT for Validate / agentic repair CTAs. Prefer create-new physical DDL for
+    the destination; specialty / UUID keep native carriers; same-logical twins
+    keep the destination stamp.
+    """
+    db = (dest_db or "").strip() or "postgresql"
+    src_l = normalize_logical_type(source_type)
+    tgt_l = normalize_logical_type(target_type)
+    specialty = specialty_carrier_base(source_type)
+    if src_l == LOGICAL_UUID and tgt_l in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON}:
+        return create_new_mapping_target_type(source_type, db)
+    if specialty and tgt_l in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON}:
+        # Prefer create-new wire (ObjectId→VARCHAR(24)) over raw specialty token
+        # when the destination has no native carrier.
+        stamped = create_new_mapping_target_type(source_type, db)
+        return stamped or specialty
+    if src_l == tgt_l and src_l in {
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+        LOGICAL_JSON,
+        LOGICAL_DATETIME,
+        LOGICAL_DATE,
+        LOGICAL_TIME,
+    }:
+        stamped = (target_type or "").strip()
+        if stamped and "COLLATE" not in stamped.upper():
+            return promote_create_new_temporal_stamp(source_type, stamped, db)
+        return create_new_mapping_target_type(source_type, db) or stamped or "TEXT"
+    if src_l == LOGICAL_FLOAT and tgt_l in {LOGICAL_DECIMAL, LOGICAL_INTEGER}:
+        return create_new_mapping_target_type("DOUBLE", db) or "DOUBLE"
+    if src_l == LOGICAL_DECIMAL and tgt_l in {LOGICAL_INTEGER, LOGICAL_FLOAT}:
+        return source_type.strip() or create_new_mapping_target_type(source_type, db)
+    if src_l in {LOGICAL_DATETIME, LOGICAL_DATE, LOGICAL_TIME} and tgt_l in {
+        LOGICAL_DATETIME,
+        LOGICAL_DATE,
+        LOGICAL_TIME,
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+    }:
+        return create_new_mapping_target_type(source_type, db) or source_type.strip()
+    if src_l in {LOGICAL_STRING, LOGICAL_TEXT} and tgt_l in {
+        LOGICAL_INTEGER,
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+    }:
+        return create_new_mapping_target_type("TEXT", db) or "TEXT"
+    # Last resort: destination text sink — still dialect-aware, never bare VARCHAR invent.
+    return create_new_mapping_target_type("TEXT", db) or "TEXT"
 
 
 def assess_bson_affinity(

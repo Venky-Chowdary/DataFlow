@@ -40,9 +40,12 @@ def test_mysql_ci_text_to_bare_pg_text_is_normalize():
 
 
 def test_timestamp_ntz6_to_bare_timestamp_fail_closed_mysql_default():
-    # Bare TIMESTAMP is MySQL FSP 0 — still collapse. PG create-new stamps TIMESTAMP(6).
+    # Bare TIMESTAMP without dest_db: MySQL FSP 0 — still collapse.
     assert temporal_precision_would_narrow("TIMESTAMP_NTZ(6)", "TIMESTAMP") is True
     assert is_precision_collapse_coercion("TIMESTAMP_NTZ(6)", "TIMESTAMP") is True
+    assert temporal_precision_would_narrow(
+        "TIMESTAMP_NTZ(6)", "TIMESTAMP", dest_db="postgresql"
+    ) is False
     assert temporal_precision_would_narrow("TIMESTAMP_NTZ(6)", "TIMESTAMP WITHOUT TIME ZONE") is False
     assert temporal_precision_would_narrow("TIMESTAMP_NTZ(6)", "TIMESTAMP(6)") is False
     assert is_precision_collapse_coercion("TIMESTAMP_NTZ(6)", "TIMESTAMP(6)") is False

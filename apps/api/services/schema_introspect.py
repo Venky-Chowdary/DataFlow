@@ -3368,9 +3368,9 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
         columns: dict[str, dict[str, Any]] = {}
         if target:
             for doc in db[target].find().limit(100):
-                if "_id" in doc:
-                    doc["_id"] = str(doc["_id"])
-                for key, val in doc.items():
+                # Sample BSON types BEFORE stringifying _id — otherwise ObjectId
+                # is erased to TEXT and create-new never stamps VARCHAR(24).
+                for key, val in list(doc.items()):
                     inferred = _sample_logical_type(val, key)
                     sample_text = "" if val is None else str(val)
                     if key not in columns:

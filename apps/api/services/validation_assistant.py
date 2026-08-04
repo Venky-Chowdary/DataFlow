@@ -67,40 +67,16 @@ def _parse_type_mismatch_pairs(text: str) -> list[tuple[str, str, str, str]]:
     return out
 
 
-def _remap_to_type_for_mismatch(source_type: str, target_type: str) -> str:
+def _remap_to_type_for_mismatch(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> str:
     """Choose a one-click target type that can actually clear the gate."""
-    from services.type_system import (
-        create_new_mapping_target_type,
-        normalize_logical_type,
-        specialty_carrier_base,
-    )
+    from services.type_system import suggest_remap_target
 
-    src_l = normalize_logical_type(source_type)
-    tgt_l = normalize_logical_type(target_type)
-    specialty = specialty_carrier_base(source_type)
-    # Bare VARCHAR/TEXT is the *problem* for UUID / ObjectId create-new, not the fix.
-    if src_l == "uuid" and tgt_l in {"string", "text", "json"}:
-        return "UUID"
-    if specialty and tgt_l in {"string", "text", "json"}:
-        return specialty
-    # Same-logical text/json/datetime create-new twins: keep destination family
-    # (never invent bare VARCHAR for TEXT COLLATE → TEXT or JSON → JSONB noise).
-    if src_l == tgt_l and src_l in {"string", "text", "json", "datetime", "date", "time"}:
-        stamped = (target_type or "").strip()
-        if stamped and "COLLATE" not in stamped.upper():
-            return stamped
-        return create_new_mapping_target_type(source_type, "postgresql") or stamped or "TEXT"
-    # Numeric / temporal mismatches: preserve source family — never invent VARCHAR.
-    if src_l == "float" and tgt_l in {"decimal", "integer"}:
-        return "DOUBLE"
-    if src_l == "decimal" and tgt_l in {"integer", "float"}:
-        return source_type.strip() or "DECIMAL"
-    if src_l in {"datetime", "date", "time"} and tgt_l in {"datetime", "date", "time", "string", "text"}:
-        return source_type.strip() or src_l.upper()
-    # TEXT/VARCHAR → NUMBER: keep string carrier (do not "fix" by casting).
-    if src_l in {"string", "text"} and tgt_l in {"integer", "decimal", "float"}:
-        return "VARCHAR"
-    return "VARCHAR"
+    return suggest_remap_target(source_type, target_type, dest_db=dest_db)
 
 
 def _is_encoding_blocker(text: str) -> bool:
