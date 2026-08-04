@@ -246,9 +246,31 @@ def refine_mappings_with_llm(
         used_targets: set[str] = set()
         baseline_by_source = {m["source"]: m for m in baseline_mappings}
 
+        # Module 13 — never silently overwrite operator-locked baseline rows.
+        from services.mapping_engine_contract import is_operator_locked
+
         for src in source_columns:
             base = baseline_by_source.get(src)
             llm = llm_by_source.get(src)
+            if base and is_operator_locked(base):
+                kept = dict(base)
+                if llm and (
+                    str(llm.get("target") or "") != str(base.get("target") or "")
+                    or str(llm.get("transform") or "") != str(base.get("transform") or "none")
+                ):
+                    kept["engine_suggestion"] = {
+                        "target": llm.get("target"),
+                        "transform": llm.get("transform"),
+                        "confidence": llm.get("confidence"),
+                        "reasoning": llm.get("reasoning"),
+                        "suppressed": True,
+                        "reason": "operator_locked_mapping_not_silently_overwritten",
+                    }
+                merged.append(kept)
+                tgt = str(kept.get("target") or "").lower()
+                if tgt:
+                    used_targets.add(tgt)
+                continue
             if llm and llm["target"].lower() not in used_targets:
                 pick = {**(base or {}), **llm}
                 if base and llm["confidence"] < base.get("confidence", 0):

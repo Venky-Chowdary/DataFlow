@@ -227,6 +227,9 @@ class MapColumnsRequest(BaseModel):
     # "database"/"warehouse" means source_schema came from introspected DDL, so
     # sample inference must not re-guess DECIMAL(12,2) down to a bare DECIMAL.
     source_kind: str = ""
+    # Module 13 — prior operator mappings (user_override / risk contracts) must
+    # survive re-map; engine alternatives attach as engine_suggestion only.
+    prior_mappings: list[dict] = Field(default_factory=list)
 
 
 @router.get("/capabilities")
@@ -392,6 +395,7 @@ async def map_columns_route(body: MapColumnsRequest):
             source_types_authoritative=source_types_are_authoritative(
                 body.source_kind, body.file_format or ""
             ),
+            prior_mappings=list(body.prior_mappings or []),
         )
     nested_fields: list[dict[str, str]] = []
     try:

@@ -364,6 +364,7 @@ def run_mapping_pipeline(
     sync_mode: str = "",
     destination_table_exists: bool | None = None,
     source_types_authoritative: bool = False,
+    prior_mappings: list[dict] | None = None,
 ) -> dict:
     from services.semantic_analyzer import analyze_schema
 
@@ -469,6 +470,16 @@ def run_mapping_pipeline(
         source_samples=llm_samples,
         enabled=use_llm,
     )
+
+    # Module 13 — re-apply operator-locked priors before constraints / proof.
+    override_report: dict = {}
+    if prior_mappings:
+        from services.mapping_engine_contract import merge_mappings_preserve_overrides
+
+        pruned, override_report = merge_mappings_preserve_overrides(
+            prior_mappings,
+            pruned,
+        )
 
     from services.mapping_constraints import (
         enforce_destination_constraints,
@@ -739,6 +750,10 @@ def run_mapping_pipeline(
 
     from services.semantic_mapper import ml_baseline_status
 
+    from services.mapping_engine_contract import stamp_mappings_evidence
+
+    enriched_mappings = stamp_mappings_evidence(enriched_mappings)
+
     engine = {
         "automapper": "bm25_hungarian_semantic",
         "ml_baseline": ml_baseline_status(),
@@ -749,12 +764,17 @@ def run_mapping_pipeline(
             "provider": llm_meta.get("llm_provider"),
             "error": llm_meta.get("llm_error"),
         },
+        "mapping_engine_contract": override_report or {
+            "contract_version": "mapping_engine_contract.v1",
+            "note": "Evidence stamped; no prior operator mappings supplied.",
+        },
         "deterministic_guarantees": [
             "optimal_bipartite_hungarian",
             "type_compat_penalty",
             "sample_consistency_probe",
             "create_new_type_risk_stamp",
             "g1_g9_preflight",
+            "operator_locked_mapping_preserve",
         ],
     }
 
@@ -774,4 +794,5 @@ def run_mapping_pipeline(
         "agents_used": agents_used,
         "llm": llm_meta,
         "engine": engine,
+        "mapping_override_report": override_report,
     }
