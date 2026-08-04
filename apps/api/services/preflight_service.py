@@ -820,6 +820,7 @@ def run_file_preflight(
     cursor_fields: list[str] | None = None,
     compliance_acknowledged: bool = False,
     schema_drift_acknowledged: bool = False,
+    fk_risk_acknowledged: bool = False,
     acknowledgment_actor: str = "",
     acknowledgment_reason: str = "",
 ) -> dict[str, Any]:
@@ -1077,6 +1078,7 @@ def run_file_preflight(
         destination_pk_columns=list(destination_pk_columns or []),
         destination_unique_keys=list(destination_unique_keys or []),
         destination_foreign_keys=list(destination_foreign_keys or []),
+        fk_risk_acknowledged=bool(fk_risk_acknowledged),
     )
 
     # Source-side duplicate-key probe: a small sample can miss duplicates in large
@@ -1216,14 +1218,106 @@ def run_file_preflight(
         ),
     }
 
-    # Soft FK / relational constraint hints — informational only; never blocks Validate.
+    # FK / relational constraint findings — fail-closed on unmapped dest FK
+    # columns in strict/maximum unless operator acknowledged. Schema metadata
+    # coverage only; never invents population orphan / RI proven.
     try:
-        from preflight.constraint_hints import assess_constraint_compatibility
+        from preflight.constraint_hints import (
+            assess_constraint_compatibility,
+            constraint_findings_block_transfer,
+            referential_integrity_posture,
+        )
 
-        out["constraint_hints"] = list(assess_constraint_compatibility(ctx) or [])
+        findings = list(
+            assess_constraint_compatibility(
+                ctx,
+                validation_mode=validation_mode,
+                fk_risk_acknowledged=bool(fk_risk_acknowledged),
+            )
+            or []
+        )
+        out["constraint_findings"] = findings
+        out["constraint_hints"] = findings
+        ri_posture = referential_integrity_posture(
+            findings, population_orphan_probe_ran=False
+        )
+        if fk_risk_acknowledged:
+            ri_posture = {
+                **ri_posture,
+                "fk_risk_acknowledged": True,
+                "acknowledgment": {
+                    "actor": (acknowledgment_actor or "operator").strip() or "operator",
+                    "reason": (
+                        (acknowledgment_reason or "").strip()
+                        or "Operator acknowledged destination FK mapping risk for this run"
+                    ),
+                },
+            }
+        out["referential_integrity"] = ri_posture
+
+        if constraint_findings_block_transfer(
+            findings,
+            validation_mode=validation_mode,
+            fk_risk_acknowledged=bool(fk_risk_acknowledged),
+        ):
+            block_msgs = [
+                str(f.get("message") or f.get("code") or "Foreign key coverage incomplete")
+                for f in findings
+                if isinstance(f, dict)
+                and str(f.get("severity") or "").lower() in {"block", "ack_required"}
+            ]
+            fk_msg = (
+                block_msgs[0]
+                if block_msgs
+                else "Destination FK columns unmapped — transfer blocked"
+            )
+            fk_details = {
+                "findings": findings,
+                "coverage": "destination_fk_metadata",
+                "remediation_kind": "acknowledge_fk_risk",
+                "ack_required": True,
+                "population_orphan_proven": False,
+                "rule_id": "constraint_fk.unmapped",
+            }
+            fk_gate = {
+                "id": "constraint_fk",
+                "status": "block",
+                "message": fk_msg,
+                "duration_ms": 0,
+                "details": fk_details,
+            }
+            out["gates"] = [*out["gates"], fk_gate]
+            fk_blocker = enrich_blockers(
+                [
+                    {
+                        "id": "constraint_fk",
+                        "message": fk_msg,
+                        "details": fk_details,
+                    }
+                ],
+                dest_kind=dest_kind,
+                validation_mode=validation_mode,
+            )
+            out["blockers"] = [*out["blockers"], *fk_blocker]
+            out["passed"] = False
+            out["passed_count"] = sum(
+                1 for g in out["gates"] if g.get("status") == "pass"
+            )
+            out["total_gates"] = len(out["gates"])
+            out["readiness_score"] = round(
+                out["passed_count"] / max(out["total_gates"], 1) * 100, 1
+            )
     except Exception as hint_exc:
-        logger.debug("constraint hints skipped: %s", hint_exc, exc_info=hint_exc)
+        logger.debug("constraint findings skipped: %s", hint_exc, exc_info=hint_exc)
         out["constraint_hints"] = []
+        out["constraint_findings"] = []
+        out["referential_integrity"] = {
+            "proven": False,
+            "coverage": "none",
+            "population_orphan_probe_ran": False,
+            "finding_count": 0,
+            "note": "Constraint assessment unavailable for this run.",
+        }
 
     # Soft Snowflake warehouse sizing from G7 volume — never a GateId.
     try:
@@ -1667,6 +1761,10 @@ def inspect_destination_for_preflight(
     out["primary_key_columns"] = list(info.get("primary_key_columns") or [])
     out["unique_keys"] = list(info.get("unique_keys") or [])
     out["pk_columns"] = list(out["primary_key_columns"])
+    # Pass through FK metadata when introspect provides it — never invent FKs.
+    out["foreign_keys"] = list(
+        info.get("foreign_keys") or info.get("destination_foreign_keys") or []
+    )
     # Advisory-key / introspect honesty notes (BQ NOT ENFORCED, Redshift
     # informational, Snowflake NOT ENFORCED) — warn-only, never invent blockers.
     dest_warnings = [str(w) for w in (info.get("warnings") or []) if w]

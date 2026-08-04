@@ -344,6 +344,7 @@ export function TransferPage({
   const [validationMode, setValidationMode] = useState<ValidationMode>("strict");
   const [complianceAcknowledged, setComplianceAcknowledged] = useState(false);
   const [schemaDriftAcknowledged, setSchemaDriftAcknowledged] = useState(false);
+  const [fkRiskAcknowledged, setFkRiskAcknowledged] = useState(false);
   const [dateLocale, setDateLocale] = useState<DateLocaleId>("");
   const [backfillNewFields, setBackfillNewFields] = useState(false);
   const [writeViaStaging, setWriteViaStaging] = useState(false);
@@ -973,9 +974,12 @@ export function TransferPage({
           },
         }));
       }
+      const isComposite = column.includes(",");
       toast({
-        title: `Primary key → ${column}`,
-        message: "Unique in the Validate sample only — confirm in Advanced, then Re-run Validate.",
+        title: isComposite ? `Composite PK → ${column.replace(/,/g, " + ")}` : `Primary key → ${column}`,
+        message: isComposite
+          ? "Composite unique in the Validate sample only — use when a single column is a false PK. Confirm in Advanced, then Re-run Validate."
+          : "Unique in the Validate sample only — confirm in Advanced, then Re-run Validate.",
         tone: "success",
       });
     },
@@ -3154,6 +3158,7 @@ export function TransferPage({
     opts?: {
       complianceAcknowledged?: boolean;
       schemaDriftAcknowledged?: boolean;
+      fkRiskAcknowledged?: boolean;
       acknowledgmentReason?: string;
     },
   ) => {
@@ -3161,17 +3166,24 @@ export function TransferPage({
     const activeValidation = validationOverride ?? validationMode;
     const ackCompliance = opts?.complianceAcknowledged ?? complianceAcknowledged;
     const ackSchemaDrift = opts?.schemaDriftAcknowledged ?? schemaDriftAcknowledged;
+    const ackFkRisk = opts?.fkRiskAcknowledged ?? fkRiskAcknowledged;
     const ackActor = readSession()?.email || readSession()?.name || "";
     const ackReason = opts?.acknowledgmentReason || "";
-    if ((opts?.complianceAcknowledged || opts?.schemaDriftAcknowledged) && (!ackActor || ackActor.length < 2)) {
+    if (
+      (opts?.complianceAcknowledged || opts?.schemaDriftAcknowledged || opts?.fkRiskAcknowledged)
+      && (!ackActor || ackActor.length < 2)
+    ) {
       toast({
         title: "Sign in required for acknowledgment",
-        message: "PII and schema-drift acknowledgments need a signed-in operator identity.",
+        message: "PII, schema-drift, and FK-risk acknowledgments need a signed-in operator identity.",
         tone: "warning",
       });
       return;
     }
-    if ((opts?.complianceAcknowledged || opts?.schemaDriftAcknowledged) && ackReason.trim().length < 8) {
+    if (
+      (opts?.complianceAcknowledged || opts?.schemaDriftAcknowledged || opts?.fkRiskAcknowledged)
+      && ackReason.trim().length < 8
+    ) {
       toast({
         title: "Reason required",
         message: "Provide a clear acknowledgment reason before re-validating.",
@@ -3451,6 +3463,7 @@ export function TransferPage({
           stream_contracts: streamContracts,
           compliance_acknowledged: ackCompliance,
           schema_drift_acknowledged: ackSchemaDrift,
+          fk_risk_acknowledged: ackFkRisk,
           acknowledgment_actor: ackActor || undefined,
           acknowledgment_reason: ackReason || undefined,
           write_via_staging: writeViaStaging,
@@ -4575,6 +4588,7 @@ export function TransferPage({
           requiresCursor={requiresCursor}
           onOpenIdentitySettings={openIdentitySettings}
           uniqueKeySuggestions={uniqueKeySuggestions}
+          compositeKeySuggestions={compositeKeySuggestions}
           onApplyPrimaryKey={applyPrimaryKeySuggestion}
           sampleRows={(samplePreviewRows as Record<string, unknown>[]) || []}
         />
@@ -5550,6 +5564,7 @@ export function TransferPage({
             }}
             onOpenIdentitySettings={openIdentitySettings}
             uniqueKeySuggestions={uniqueKeySuggestions}
+            compositeKeySuggestions={compositeKeySuggestions}
             onApplyPrimaryKey={(column) => {
               applyPrimaryKeySuggestion(column);
               openIdentitySettings();
@@ -5579,6 +5594,18 @@ export function TransferPage({
               void executePreflight(undefined, undefined, {
                 schemaDriftAcknowledged: true,
                 acknowledgmentReason: "Keep existing mappings for this run; ignore new/changed columns",
+              });
+            }}
+            onAcknowledgeFkRisk={() => {
+              setFkRiskAcknowledged(true);
+              toast({
+                title: "FK risk acknowledged",
+                message: "Re-running Validate — FK mapping risk accepted for this run (RI not proven).",
+                tone: "info",
+              });
+              void executePreflight(undefined, undefined, {
+                fkRiskAcknowledged: true,
+                acknowledgmentReason: "Accept destination FK mapping risk for this run; population orphans not proven",
               });
             }}
             repairJobId={activeJobId || seedStudioIntent?.jobId || persistedPlanId || ""}

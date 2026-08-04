@@ -60,6 +60,12 @@ export const GATE_CATALOG: GateCatalogEntry[] = [
   { id: "g10_schema_policy", label: "Schema change policy", icon: "gate", rule: "Detected drift is allowed by the schema policy." },
   { id: "g11_validation_posture", label: "Validation posture", icon: "lock", rule: "Overall posture meets the selected validation mode." },
   { id: "schema_drift", label: "Schema drift", icon: "alert", rule: "Live source/destination schema no longer matches the saved mapping contract." },
+  {
+    id: "constraint_fk",
+    label: "Foreign key coverage",
+    icon: "shield",
+    rule: "Destination FK columns must be mapped (or FK risk acknowledged). Schema metadata coverage only — not population orphan proof.",
+  },
 ];
 
 export const CORE_ENGINE_GATE_IDS = [

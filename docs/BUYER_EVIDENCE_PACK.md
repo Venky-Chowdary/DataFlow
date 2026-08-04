@@ -8,7 +8,7 @@ Use this pack instead of marketing screenshots when Fortune 100 teams ask “pro
 |------|---------|
 | G1–G9 | `packages/preflight` (`GateId`, `PREFLIGHT_GATES`) |
 | Host policy extras | Studio Validate may add sync/schema/validation policy gates — distinct from core G1–G9 |
-| Constraint hints | Soft `constraint_hints` strings from `assess_constraint_compatibility` — informational FK awareness only; **not** a numbered gate |
+| Constraint findings | Structured FK findings from `assess_constraint_compatibility` — block in strict/maximum when dest FK columns are unmapped unless `fk_risk_acknowledged`; **schema FK metadata coverage only** (not a numbered gate; never invents population RI proof) |
 
 Do **not** claim “8 gates,” “ten gates,” or invent a marketed “G10 constraints” gate. Required core gates remain **G1–G9**.
 

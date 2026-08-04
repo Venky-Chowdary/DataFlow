@@ -9,7 +9,7 @@ Datawrap is a **governed migration / data-movement workbench**: Source → Desti
 | File → DB | CSV / JSON / Parquet (and related parsers) on PRODUCTION_SKU routes |
 | DB → DB | Proven routes in `apps/api/src/transfer/registry.py` `PRODUCTION_SKU` |
 | Map | BM25 + Hungarian + fidelity / risk ack (Studio `/map`) |
-| Validate | Core preflight **G1–G9** (+ Studio policy gates / soft `constraint_hints` when applicable — not an extra marketed gate) |
+| Validate | Core preflight **G1–G9** (+ Studio policy gates / `constraint_fk` when dest FK metadata shows unmapped columns — not an extra marketed gate; RI not claimed from schema hints) |
 | Run / Jobs | Checkpoint/resume; quarantine (no silent drop); Gate-8 reconcile |
 | CDC | **At-least-once**; destinations must upsert with PK/LSN guards — not exactly-once |
 | Schedules | Recurring sync UI (nav: Schedules) |

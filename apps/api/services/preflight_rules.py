@@ -31,6 +31,7 @@ HARD_GATE_IDS = {
     "g9_data_integrity",
     "g9_sync_contract",
     "schema_drift",
+    "constraint_fk",
     "proof_bundle",
 }
 
@@ -233,6 +234,28 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         ],
         "suggested_actions": [
             {"kind": "review_mappings", "label": "Re-map drifted columns"},
+        ],
+    },
+    "constraint_fk": {
+        "title": "Foreign key coverage",
+        "category": "hard",
+        "why": (
+            "Destination foreign-key columns are not covered by the current mapping. "
+            "Strict/maximum mode fails closed on schema FK metadata. "
+            "This does not prove population orphan detection — only mapping coverage of "
+            "introspected FK columns."
+        ),
+        "fix": (
+            "Map the FK column(s) so parent references are written, confirm parent rows "
+            "exist, or acknowledge FK risk for this run (audit trail required). "
+            "Acknowledgement clears the block but never claims referential integrity proven."
+        ),
+        "examples": [
+            "Mapped table has customer_id FK → customers.id but customer_id is unmapped.",
+        ],
+        "suggested_actions": [
+            {"kind": "map_column", "label": "Map foreign-key columns"},
+            {"kind": "review_mappings", "label": "Review mappings"},
         ],
     },
 }
@@ -516,6 +539,23 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         "why": "The schema has changed since the mapping was last approved.",
         "fix": "Re-run the mapping step and approve the new contract, or set the schema policy to propagate safe changes.",
         "examples": ["A new 'status' column appeared in the source."],
+    },
+    {
+        "keywords": ["foreign key", "fk_column_unmapped", "destination_fk_metadata"],
+        "gate": "constraint_fk",
+        "why": (
+            "Destination FK columns are undeclared in the mapping. Schema FK metadata "
+            "coverage is incomplete — population orphan detection is not claimed."
+        ),
+        "fix": (
+            "Map the FK columns, confirm parent rows exist, or acknowledge FK risk for "
+            "this run with an audit reason."
+        ),
+        "examples": ["customer_id FK unmapped under strict validation."],
+        "suggested_actions": [
+            {"kind": "map_column", "label": "Map foreign-key columns"},
+            {"kind": "review_mappings", "label": "Review mappings"},
+        ],
     },
     {
         # Do NOT match bare "encoding" — column names like encoding_id would

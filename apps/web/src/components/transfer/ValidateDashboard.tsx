@@ -224,6 +224,11 @@ interface ValidateDashboardProps {
    * Re-runs Validate with schema_drift_acknowledged=true.
    */
   onAcknowledgeSchemaDrift?: () => void;
+  /**
+   * Operator acknowledged destination FK mapping risk for this run.
+   * Re-runs Validate with fk_risk_acknowledged=true — does not claim RI proven.
+   */
+  onAcknowledgeFkRisk?: () => void;
   /** Current Studio mappings for durable repair apply. */
   repairMappings?: RepairMapping[];
   /** After Approve & apply — merge updated mappings into Studio. */
@@ -676,6 +681,7 @@ export function ValidateDashboard({
   onRunPreflight,
   onAcknowledgeCompliance,
   onAcknowledgeSchemaDrift,
+  onAcknowledgeFkRisk,
   repairMappings = [],
   onRepairMappingsApplied,
   repairJobId = "",
@@ -1434,17 +1440,40 @@ export function ValidateDashboard({
           )}
 
           {!running && preflight && (
-            (Array.isArray(preflight.constraint_hints) && preflight.constraint_hints.length > 0)
-            || preflight.snowflake_warehouse_advice?.message
+            (
+              (Array.isArray(preflight.constraint_hints) && preflight.constraint_hints.some((hint) => {
+                if (typeof hint === "string") return true;
+                const sev = String((hint as Record<string, unknown>).severity || "info").toLowerCase();
+                return sev === "info";
+              }))
+              || preflight.snowflake_warehouse_advice?.message
+              || (preflight.referential_integrity && preflight.referential_integrity.coverage
+                && preflight.referential_integrity.coverage !== "none")
+            )
           ) && (
             <div className="df2-vd-soft-hints" role="note">
-              <p className="df2-vd-soft-hints-label">Soft advisories (not gates)</p>
+              <p className="df2-vd-soft-hints-label">Constraint coverage & advisories</p>
+              {preflight.referential_integrity?.note && (
+                <p
+                  className="df2-vd-soft-hint"
+                  title="Schema FK coverage is not population orphan proof"
+                >
+                  RI · {preflight.referential_integrity.coverage || "none"}
+                  {preflight.referential_integrity.proven ? " · proven" : " · not proven"}
+                  {" — "}
+                  {preflight.referential_integrity.note}
+                </p>
+              )}
               {preflight.snowflake_warehouse_advice?.message && (
                 <p className="df2-vd-soft-hint" title={preflight.snowflake_warehouse_advice.honesty || undefined}>
                   {preflight.snowflake_warehouse_advice.message}
                 </p>
               )}
               {(preflight.constraint_hints || []).slice(0, 4).map((hint, i) => {
+                if (typeof hint !== "string") {
+                  const sev = String((hint as Record<string, unknown>).severity || "info").toLowerCase();
+                  if (sev === "block" || sev === "ack_required") return null;
+                }
                 const textHint = typeof hint === "string"
                   ? hint
                   : String((hint as Record<string, unknown>).message || (hint as Record<string, unknown>).title || JSON.stringify(hint));
@@ -2789,9 +2818,15 @@ export function ValidateDashboard({
                     </div>
                   )}
                   {(
-                    b.details?.ack_required === true
-                    || b.details?.remediation_kind === "acknowledge_schema_drift"
-                    || /schema change detected|schema drift/i.test(b.message)
+                    (
+                      b.details?.remediation_kind === "acknowledge_schema_drift"
+                      || (
+                        b.details?.ack_required === true
+                        && b.details?.remediation_kind !== "acknowledge_fk_risk"
+                        && b.id !== "constraint_fk"
+                      )
+                      || /schema change detected|schema drift/i.test(b.message)
+                    )
                   ) && onAcknowledgeSchemaDrift && (
                     <div className="df2-vd-blocker-actions df2-vd-fix-actions">
                       <Button
@@ -2811,6 +2846,33 @@ export function ValidateDashboard({
                           onClick={() => onReviewMappings()}
                         >
                           Open Map to include columns
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                  {(
+                    b.id === "constraint_fk"
+                    || b.details?.remediation_kind === "acknowledge_fk_risk"
+                    || /foreign key|fk_column_unmapped|destination_fk_metadata/i.test(b.message)
+                  ) && onAcknowledgeFkRisk && (
+                    <div className="df2-vd-blocker-actions df2-vd-fix-actions">
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        leadingIcon={<DtIcon name="shield" size={14} />}
+                        onClick={() => onAcknowledgeFkRisk()}
+                        disabled={running}
+                        title="Acknowledge FK mapping risk for this run — does not prove population referential integrity"
+                      >
+                        Acknowledge FK risk for this run
+                      </Button>
+                      {onReviewMappings && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => onReviewMappings()}
+                        >
+                          Map foreign-key columns
                         </Button>
                       )}
                     </div>

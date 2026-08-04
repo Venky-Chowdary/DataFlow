@@ -83,6 +83,8 @@ class PreflightRequest(BaseModel):
     compliance_acknowledged: bool = False
     # Operator acknowledged schema drift under manual_review (keep mappings / ignore new cols).
     schema_drift_acknowledged: bool = False
+    # Operator acknowledged destination FK mapping risk (schema coverage only).
+    fk_risk_acknowledged: bool = False
     # Optional acknowledgment trail (who / why). Timestamp is stamped server-side.
     acknowledgment_actor: str = ""
     acknowledgment_reason: str = ""
@@ -255,19 +257,25 @@ async def run_preflight(body: PreflightRequest):
             contract_primary_key=contract_pk,
             destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
             destination_unique_keys=dest_meta.get("unique_keys") or [],
+            destination_foreign_keys=dest_meta.get("foreign_keys") or [],
             date_locale=body.date_locale,
             compliance_acknowledged=bool(body.compliance_acknowledged),
             schema_drift_acknowledged=bool(body.schema_drift_acknowledged),
+            fk_risk_acknowledged=bool(body.fk_risk_acknowledged),
             acknowledgment_actor=str(body.acknowledgment_actor or "").strip(),
             acknowledgment_reason=str(body.acknowledgment_reason or "").strip(),
         )
-    if body.compliance_acknowledged or body.schema_drift_acknowledged:
+    if (
+        body.compliance_acknowledged
+        or body.schema_drift_acknowledged
+        or body.fk_risk_acknowledged
+    ):
         actor = str(body.acknowledgment_actor or "").strip()
         reason = str(body.acknowledgment_reason or "").strip()
         if len(actor) < 2:
             raise HTTPException(
                 status_code=400,
-                detail="acknowledgment_actor is required when acknowledging compliance or schema drift",
+                detail="acknowledgment_actor is required when acknowledging compliance, schema drift, or FK risk",
             )
         if len(reason) < 8:
             raise HTTPException(
@@ -299,6 +307,20 @@ async def run_preflight(body: PreflightRequest):
                         "dest_type": body.dest_type,
                         "schema_policy": body.schema_policy,
                         "validation_mode": body.validation_mode,
+                        "reason": reason,
+                    },
+                )
+            if body.fk_risk_acknowledged:
+                append_audit_event(
+                    action="preflight.acknowledge_fk_risk",
+                    resource="preflight",
+                    actor=actor,
+                    details={
+                        "source_type": body.source_type,
+                        "dest_type": body.dest_type,
+                        "validation_mode": body.validation_mode,
+                        "coverage": "destination_fk_metadata",
+                        "population_orphan_proven": False,
                         "reason": reason,
                     },
                 )

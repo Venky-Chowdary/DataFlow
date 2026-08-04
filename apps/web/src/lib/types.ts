@@ -730,8 +730,19 @@ export interface PreflightResult {
   proof_bundle?: PreflightProofBundle;
   coercion_report?: CoercionReport;
   load_history_report?: LoadHistoryReport;
-  /** Soft FK / relational hints — never a GateId. */
+  /** Soft FK / relational hints — structured findings; block via constraint_fk when severity=block. */
   constraint_hints?: Array<Record<string, unknown> | string>;
+  /** Structured FK findings (same payloads as constraint_hints when present). */
+  constraint_findings?: Array<Record<string, unknown>>;
+  /** Honesty stamp — schema FK coverage ≠ population RI proof. */
+  referential_integrity?: {
+    proven?: boolean;
+    coverage?: string;
+    population_orphan_probe_ran?: boolean;
+    finding_count?: number;
+    note?: string;
+    fk_risk_acknowledged?: boolean;
+  };
   /** Soft Snowflake warehouse sizing from G7 volume — never a GateId. */
   snowflake_warehouse_advice?: {
     kind?: string;

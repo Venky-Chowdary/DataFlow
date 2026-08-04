@@ -11,7 +11,7 @@ Studio severity language must stay consistent across Map, Validate, Jobs, and da
 ## Rules
 
 1. **Never** paint a blocked gate green.
-2. Soft advisories (Snowflake warehouse size, constraint hints) use **review** tone — not block red — unless they escalate to a hard gate.
+2. Soft advisories (Snowflake warehouse size, informational constraint findings) use **review** tone — not block red — unless they escalate to a hard host policy (`constraint_fk`).
 3. Risk ack / Accept-risk actions use **risk** tone distinct from Review.
 4. Dark mode must preserve contrast for safe/review/risk — do not invert severity into decorative pastels.
 

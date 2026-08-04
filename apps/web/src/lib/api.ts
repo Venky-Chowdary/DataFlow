@@ -311,6 +311,8 @@ export async function runPreflight(payload: {
   compliance_acknowledged?: boolean;
   /** Operator acknowledged schema drift under manual_review for this run. */
   schema_drift_acknowledged?: boolean;
+  /** Operator acknowledged destination FK mapping risk (schema coverage only). */
+  fk_risk_acknowledged?: boolean;
   /** Who acknowledged (email / display name). */
   acknowledgment_actor?: string;
   /** Why the exception was accepted. */

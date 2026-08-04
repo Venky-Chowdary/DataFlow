@@ -1,4 +1,4 @@
-"""Unit tests for soft constraint hints (not a GateId)."""
+"""Unit tests for constraint findings (schema FK coverage)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from preflight import (
     SourceConfig,
     TransferPlan,
     assess_constraint_compatibility,
+    constraint_hint_messages,
 )
 
 
@@ -22,7 +23,7 @@ def test_empty_schema_returns_empty_hints():
     assert assess_constraint_compatibility({}) == []
 
 
-def test_fk_mismatch_returns_warning_string():
+def test_fk_mismatch_returns_structured_finding():
     plan = TransferPlan(
         source=SourceConfig(
             kind="database",
@@ -50,10 +51,14 @@ def test_fk_mismatch_returns_warning_string():
             }
         ],
     )
-    hints = assess_constraint_compatibility(PreflightContext(plan=plan))
-    assert len(hints) == 1
-    assert "customer_id" in hints[0]
-    assert "foreign key" in hints[0].lower()
+    findings = assess_constraint_compatibility(PreflightContext(plan=plan))
+    assert len(findings) == 1
+    assert findings[0]["code"] == "fk_column_unmapped"
+    assert "customer_id" in findings[0]["message"]
+    assert "foreign key" in findings[0]["message"].lower()
+    msgs = constraint_hint_messages(findings)
+    assert len(msgs) == 1
+    assert "customer_id" in msgs[0]
 
 
 def test_mapped_fk_produces_no_hint():

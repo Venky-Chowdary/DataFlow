@@ -130,9 +130,13 @@ class TransferPlan:
     destination_pk_columns: list[str] = field(default_factory=list)
     # Introspected UNIQUE indexes/constraints (columns + optional expression CI flags).
     destination_unique_keys: list[dict[str, Any]] = field(default_factory=list)
-    # Optional FK metadata for soft constraint_hints (not a GateId; never blocks).
+    # Optional FK metadata for constraint findings (not a GateId).
     # Shape: {columns, referenced_table, referenced_columns}.
+    # Unmapped FK columns block in strict/maximum unless fk_risk_acknowledged —
+    # schema coverage only; never invents population orphan proof.
     destination_foreign_keys: list[dict[str, Any]] = field(default_factory=list)
+    # Operator acknowledged destination FK mapping risk for this Validate run.
+    fk_risk_acknowledged: bool = False
 
 
 @dataclass

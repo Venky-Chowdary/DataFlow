@@ -1,8 +1,14 @@
-"""Soft relational constraint hints — informational only, never a GateId.
+"""Relational constraint findings — schema FK coverage honesty.
 
-Core Validate remains G1–G9. This module surfaces optional FK / constraint
-awareness for Studio and host policy layers without blocking transfer approval.
-Do not market these hints as an additional numbered gate.
+Core Validate remains G1–G9. This module assesses destination FK metadata
+against write mappings. Findings are structured with severity:
+
+* ``block`` — strict/maximum without acknowledgement (fail closed)
+* ``ack_required`` — operator must acknowledge FK risk
+* ``info`` — advisory only
+
+Never claims population orphan detection from schema hints alone.
+Do not market these as an additional numbered gate unless a GateId is allocated.
 """
 
 from __future__ import annotations
@@ -34,6 +40,8 @@ def _as_mapping(ctx: Any) -> Mapping[str, Any]:
             "table_exists": getattr(
                 getattr(plan, "destination", None), "table_exists", None
             ),
+            "validation_mode": getattr(plan, "validation_mode", None),
+            "fk_risk_acknowledged": getattr(plan, "fk_risk_acknowledged", False),
         }
     return {
         "source_columns": list(getattr(ctx, "source_columns", None) or []),
@@ -47,6 +55,8 @@ def _as_mapping(ctx: Any) -> Mapping[str, Any]:
             getattr(ctx, "destination_unique_keys", None) or []
         ),
         "table_exists": getattr(ctx, "table_exists", None),
+        "validation_mode": getattr(ctx, "validation_mode", None),
+        "fk_risk_acknowledged": getattr(ctx, "fk_risk_acknowledged", False),
     }
 
 
@@ -84,12 +94,33 @@ def _fk_columns(fk: Mapping[str, Any]) -> list[str]:
     return [str(c).strip() for c in raw if str(c).strip()]
 
 
-def assess_constraint_compatibility(ctx: Any) -> list[str]:
-    """Return soft warning strings for relational constraint awareness.
+def _severity_for_unmapped_fk(
+    *,
+    validation_mode: str,
+    fk_risk_acknowledged: bool,
+    table_exists: bool | None,
+) -> str:
+    """Strict/maximum + live dest table → block unless operator acknowledged."""
+    mode = (validation_mode or "strict").strip().lower()
+    if fk_risk_acknowledged:
+        return "info"
+    if table_exists and mode in {"strict", "maximum"}:
+        return "block"
+    if table_exists:
+        return "ack_required"
+    return "info"
 
-    Empty / unknown schemas yield no hints. Foreign-key columns declared on the
-    destination that are not covered by write mappings produce informational
-    warnings. Never raises into a Validate blocker and never allocates a GateId.
+
+def assess_constraint_compatibility(
+    ctx: Any,
+    *,
+    validation_mode: str | None = None,
+    fk_risk_acknowledged: bool | None = None,
+) -> list[dict[str, Any]]:
+    """Return structured FK / constraint findings (never invents RI proven).
+
+    Empty / unknown schemas yield no findings. Destination FK columns not covered
+    by write mappings produce findings with severity based on validation mode.
     """
     data = _as_mapping(ctx)
     source_cols = [_col_name(c) for c in list(data.get("source_columns") or [])]
@@ -97,9 +128,20 @@ def assess_constraint_compatibility(ctx: Any) -> list[str]:
     source_cols = [c for c in source_cols if c]
     dest_cols = [c for c in dest_cols if c]
 
-    # Empty schema → nothing to assess (host may still attach [] on the result).
     if not source_cols and not dest_cols:
         return []
+
+    mode = (
+        validation_mode
+        if validation_mode is not None
+        else str(data.get("validation_mode") or "strict")
+    )
+    ack = (
+        bool(fk_risk_acknowledged)
+        if fk_risk_acknowledged is not None
+        else bool(data.get("fk_risk_acknowledged"))
+    )
+    table_exists = data.get("table_exists")
 
     mappings = list(data.get("mappings") or [])
     fks = [fk for fk in list(data.get("destination_foreign_keys") or []) if isinstance(fk, Mapping)]
@@ -108,7 +150,7 @@ def assess_constraint_compatibility(ctx: Any) -> list[str]:
 
     mapped = _mapped_targets(mappings)
     dest_names = {c.lower() for c in dest_cols}
-    hints: list[str] = []
+    findings: list[dict[str, Any]] = []
 
     for fk in fks:
         cols = _fk_columns(fk)
@@ -129,21 +171,114 @@ def assess_constraint_compatibility(ctx: Any) -> list[str]:
                     [ref_table, ", ".join(ref_cols) if ref_cols else ""]
                 ).rstrip(".")
                 ref_bit = f" → {ref_target}" if ref_target else f" → {ref_table}"
-            hints.append(
-                f"Foreign key column(s) {col_list}{ref_bit} are not covered by "
-                "the current mapping; destination FK checks may reject rows "
-                "(informational — not a core G1–G9 gate)."
+            severity = _severity_for_unmapped_fk(
+                validation_mode=mode,
+                fk_risk_acknowledged=ack,
+                table_exists=bool(table_exists),
+            )
+            findings.append(
+                {
+                    "code": "fk_column_unmapped",
+                    "severity": severity,
+                    "columns": missing,
+                    "referenced_table": ref_table or None,
+                    "referenced_columns": ref_cols,
+                    "coverage": "destination_fk_metadata",
+                    "message": (
+                        f"Foreign key column(s) {col_list}{ref_bit} are not covered by "
+                        "the current mapping; destination FK checks may reject rows "
+                        f"(coverage=destination_fk_metadata · severity={severity} — "
+                        "population orphan detection not claimed)."
+                    ),
+                }
             )
             continue
 
-        # Mapped FK columns that are absent from the known destination schema.
         if dest_names:
             unknown = [c for c in cols if c.lower() not in dest_names]
             if unknown:
-                hints.append(
-                    f"Mapped foreign key column(s) {', '.join(unknown)} are not "
-                    "present on the destination schema snapshot "
-                    "(informational — verify introspected FK metadata)."
+                findings.append(
+                    {
+                        "code": "fk_column_missing_from_schema_snapshot",
+                        "severity": "info",
+                        "columns": unknown,
+                        "coverage": "destination_fk_metadata",
+                        "message": (
+                            f"Mapped foreign key column(s) {', '.join(unknown)} are not "
+                            "present on the destination schema snapshot "
+                            "(informational — verify introspected FK metadata)."
+                        ),
+                    }
                 )
 
-    return hints
+    return findings
+
+
+def constraint_findings_block_transfer(
+    findings: list[dict[str, Any]] | None,
+    *,
+    validation_mode: str = "strict",
+    fk_risk_acknowledged: bool = False,
+) -> bool:
+    """True when FK findings must refuse Execute unlock."""
+    if fk_risk_acknowledged:
+        return False
+    mode = (validation_mode or "strict").strip().lower()
+    for f in findings or []:
+        if not isinstance(f, dict):
+            continue
+        sev = str(f.get("severity") or "").lower()
+        if sev == "block":
+            return True
+        if sev == "ack_required" and mode in {"strict", "maximum"}:
+            return True
+    return False
+
+
+def referential_integrity_posture(
+    findings: list[dict[str, Any]] | None,
+    *,
+    population_orphan_probe_ran: bool = False,
+) -> dict[str, Any]:
+    """Honesty stamp — schema FK hints never equal population RI proof."""
+    findings = list(findings or [])
+    has_schema = any(
+        isinstance(f, dict) and f.get("coverage") == "destination_fk_metadata"
+        for f in findings
+    )
+    if population_orphan_probe_ran and not findings:
+        coverage = "population_orphan_probe"
+        proven = True
+    elif has_schema:
+        coverage = "destination_fk_metadata"
+        proven = False
+    else:
+        coverage = "none"
+        proven = False
+    return {
+        "proven": proven,
+        "coverage": coverage,
+        "population_orphan_probe_ran": bool(population_orphan_probe_ran),
+        "finding_count": len(findings),
+        "note": (
+            "Population orphan detection proven for selected transfer."
+            if proven
+            else (
+                "FK metadata coverage only — population orphan / referential "
+                "integrity is not proven from schema hints alone."
+            )
+        ),
+    }
+
+
+def constraint_hint_messages(findings: list[dict[str, Any]] | None) -> list[str]:
+    """Backward-compatible string list for Studio soft-hint surfaces."""
+    out: list[str] = []
+    for f in findings or []:
+        if isinstance(f, dict):
+            msg = str(f.get("message") or "").strip()
+            if msg:
+                out.append(msg)
+        elif f:
+            out.append(str(f))
+    return out

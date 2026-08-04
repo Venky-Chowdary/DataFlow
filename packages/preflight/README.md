@@ -18,21 +18,30 @@ additional policy gates (sync contract, schema policy, validation posture).
 
 **Required core gates = G1–G9 only.** Do not add a `GateId` for optional extras.
 
-### Soft constraint hints (host / Studio policy — not a gate)
+### Constraint findings (host / Studio policy — not a numbered GateId)
 
-`assess_constraint_compatibility(ctx) -> list[str]` in `constraint_hints.py`
-returns informational FK / relational warnings when destination foreign-key
-metadata is present. Hosts may attach the list as `constraint_hints` on the
-Validate result. Hints never flip `passed` and must not be marketed as a
-numbered gate.
+`assess_constraint_compatibility(ctx) -> list[dict]` in `constraint_hints.py`
+returns structured FK findings when destination foreign-key metadata is present.
+Severity is `block` / `ack_required` / `info` based on validation mode and
+`fk_risk_acknowledged`. Hosts attach findings as `constraint_findings` /
+`constraint_hints` and must flip `passed=false` when
+`constraint_findings_block_transfer(...)` is true. **Coverage is destination FK
+metadata only — never invent population orphan / RI proof.**
 
 ```python
 from preflight import PreflightEngine, PreflightContext, TransferPlan
-from preflight import assess_constraint_compatibility
+from preflight import (
+    assess_constraint_compatibility,
+    constraint_findings_block_transfer,
+    referential_integrity_posture,
+)
 
 engine = PreflightEngine(fail_fast=True)
 result = engine.run(PreflightContext(plan=transfer_plan, sample_rows=samples))
 if not result.passed:
     raise PreflightBlocked(result.blockers)
-hints = assess_constraint_compatibility(ctx)  # soft warnings only
+findings = assess_constraint_compatibility(ctx)
+if constraint_findings_block_transfer(findings, validation_mode="strict"):
+    raise PreflightBlocked("unmapped destination FK columns")
+assert referential_integrity_posture(findings)["proven"] is False
 ```
