@@ -973,12 +973,37 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
             if db_type == "presto":
                 return sa.DECIMAL(int(precision), out_scale)
             return _maybe_nullable(sa.Numeric(int(precision), out_scale))
-        if db_type == "presto":
-            return sa.DECIMAL(38, 15)
-        # PostgreSQL-wire engines store arbitrary-scale NUMERIC without padding.
-        if dialect_name == "postgresql":
+        # Bare DECIMAL/NUMBER — Map≡CREATE must match type_system ddl_type SSOT.
+        # Never invent Numeric(38,15) when the destination default is (38,10)
+        # (SQL Server / Oracle / Databricks / Synapse).
+        dest = (db_type or dialect_name or "").strip() or "generic_sql"
+        wire = ddl_type(dest, raw)
+        wp, ws = parse_numeric_precision_scale(wire)
+        if wp is not None:
+            out_scale = 0 if ws is None else int(ws)
+            if (db_type or "").lower() == "presto" or dialect_name == "presto":
+                return sa.DECIMAL(int(wp), out_scale)
+            return _maybe_nullable(sa.Numeric(int(wp), out_scale))
+        # PostgreSQL-wire: bare NUMERIC (arbitrary scale, no invent).
+        if dialect_name == "postgresql" or (db_type or "").lower() in {
+            "postgresql",
+            "postgres",
+            "cockroachdb",
+            "yugabytedb",
+            "timescale",
+            "supabase",
+            "neon",
+            "risingwave",
+        }:
             return sa.Numeric()
-        return _maybe_nullable(sa.Numeric(38, 15))
+        # Destination has no fixed-point wire (e.g. SQLite TEXT) — do not invent
+        # Numeric(38,15); follow ddl_type collapse.
+        wire_logical = normalize_logical_type(wire)
+        if wire_logical in {LOGICAL_TEXT, LOGICAL_STRING}:
+            if "TEXT" in (wire or "").upper():
+                return _maybe_nullable(sa.Text())
+            return _maybe_nullable(sa.String())
+        return _maybe_nullable(sa.Numeric())
     if t == LOGICAL_FLOAT:
         # Approximate IEEE float — never rewrite to fixed-point Numeric.
         # Honor Map REAL/FLOAT4 stamps (sa.Double invents mantissa widen).

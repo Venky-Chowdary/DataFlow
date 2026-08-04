@@ -38,9 +38,44 @@ def test_sa_type_float_stays_ieee_not_numeric():
     bare_dec = _sa_type_for_logical("decimal", "mssql", "sqlserver")
     name = type(sa_t).__name__.lower()
     assert any(tok in name for tok in ("double", "float", "real")), type(sa_t)
-    # Fixed-point default is Numeric(38,15); FLOAT must not share that scale.
-    assert getattr(sa_t, "scale", None) != 15 or "double" in name or "float" in name
-    assert int(getattr(bare_dec, "scale", 0) or 0) == 15
+    # SQL Server bare DECIMAL SSOT is DECIMAL(38,10) — FLOAT must not share that.
+    assert getattr(sa_t, "scale", None) != 10 or "double" in name or "float" in name
+    assert int(getattr(bare_dec, "precision", 0) or 0) == 38
+    assert int(getattr(bare_dec, "scale", 0) or 0) == 10
+
+
+@pytest.mark.parametrize(
+    "db_type,dialect,expect_p,expect_s",
+    [
+        ("sqlserver", "mssql", 38, 10),
+        ("oracle", "oracle", 38, 10),
+        ("databricks", "duckdb", 38, 10),
+        ("duckdb", "duckdb", 38, 15),
+        ("mysql", "mysql", 38, 15),
+        ("synapse", "mssql", 38, 10),
+    ],
+)
+def test_bare_decimal_sa_matches_ddl_type_ssot(
+    db_type: str, dialect: str, expect_p: int, expect_s: int
+):
+    """Map≡CREATE: bare DECIMAL must not invent a different (p,s) than ddl_type."""
+    from services.type_system import ddl_type, parse_numeric_precision_scale
+
+    wire = ddl_type(db_type, "DECIMAL")
+    wp, ws = parse_numeric_precision_scale(wire)
+    assert (wp, ws) == (expect_p, expect_s), wire
+
+    sa_t = _sa_type_for_logical("DECIMAL", dialect, db_type)
+    assert isinstance(sa_t, (sa.Numeric, sa.DECIMAL)), type(sa_t)
+    assert int(sa_t.precision) == expect_p
+    assert int(sa_t.scale) == expect_s
+
+
+def test_bare_decimal_postgresql_stays_unbounded_numeric():
+    sa_t = _sa_type_for_logical("DECIMAL", "postgresql", "postgresql")
+    assert isinstance(sa_t, sa.Numeric)
+    assert sa_t.precision is None
+    assert sa_t.scale is None
 
 
 def test_to_sa_value_coerces_decimal_carrier_and_iso_z():

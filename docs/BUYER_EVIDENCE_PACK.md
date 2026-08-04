@@ -39,6 +39,7 @@ Live execute + reconcile remains `tests/test_production_sku_matrix.py` (separate
 - Optional LLM assist is hybrid and constrained — not a substitute for gates
 - **Map≡CREATE:** explicit Map `target_type` is preserved by `safe_ddl_logical_type(..., honor_explicit=True)` — writers must not rewrite approved DDL from sample inference; unfit values quarantine on write (`test_map_equals_create_ddl.py`)
 - **Map≡CREATE (BigQuery):** `bq_schema_field` applies Map `NUMERIC`/`BIGNUMERIC(p,s)` via SchemaField `precision`/`scale` — never strips to bare platform invent (`test_bigquery_writer.py`)
+- **Map≡CREATE (bare DECIMAL):** generic_sql `_sa_type_for_logical` uses `ddl_type` SSOT for bare `DECIMAL`/`NUMBER` — never invents `Numeric(38,15)` when the destination default is `(38,10)` (`test_generic_sql_decimal_carrier.py`)
 - **Map≡ALTER:** explicit Map `target_type` is a hard widen ceiling — PostgreSQL/MySQL/Snowflake **and** generic_sql (SQL Server / Oracle / DuckDB) backfill may ALTER **up to** the stamp, never past it (`desired_types_honoring_map_stamps`, `_widen_existing_columns_sa` stamp ceiling, `test_map_equals_alter_ddl.py`); overflow cells quarantine instead of silent widen
 
 ## 4. Delivery / CDC
