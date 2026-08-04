@@ -106,10 +106,11 @@ function stepsForBlocker(
   const gates = (item.gateChips ?? []).map((g) => g.label).join(", ") || "See gate cards";
   const actions = [
     item.fix,
-    ...(item.suggested_actions ?? []).map((a) => a.label || a.action || "").filter(Boolean),
+    ...(item.suggested_actions ?? []).map((a) => a.label || a.kind || "").filter(Boolean),
   ].filter(Boolean) as string[];
   const preview = (item.issues ?? []).slice(0, 4).join(" · ")
-    || (item.suggested_actions?.[0]?.description ?? "Preview remap / policy on Map before Execute.");
+    || (item.suggested_actions?.[0]?.label
+      ?? "Preview remap / policy on Map before Execute.");
 
   const byId: Record<DecisionPathStepId, DecisionPathStep> = {
     root_cause: {
