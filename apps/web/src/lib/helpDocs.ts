@@ -1274,7 +1274,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
         body: "Catalog, preflight, run, and job status endpoints mirror Transfer Studio behavior.",
         steps: [
           "GET /v1/connectors — list with transfer-ready status",
-          "POST /v1/transfers/preflight — run eight gates",
+          "POST /v1/transfers/preflight — run nine core gates",
           "POST /v1/transfers/run — execute governed load",
           "GET /v1/jobs/{id} — status, quarantine, reconciliation",
         ],

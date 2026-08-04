@@ -398,7 +398,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
     <PageShell
       wide
       className="df2-page-pipelines"
-      title="Pipelines"
+      title="Schedules"
       description="Schedule recurring syncs with the same governed transfer engine."
     >
       <PageFrame className="df2-pipeline-page">

@@ -52,7 +52,7 @@ const NAV: { id: Screen; label: string; icon: string; desc: string; group: "plat
   { id: "connectors", label: "Connectors", icon: "connectors", desc: "Saved sources & destinations", group: "platform" },
   { id: "contracts", label: "Contracts", icon: "shield", desc: "Schema agreements and breakers", group: "platform" },
   { id: "jobs", label: "Jobs", icon: "jobs", desc: "Live progress and history", group: "ops" },
-  { id: "schedules", label: "Pipelines", icon: "activity", desc: "Recurring syncs", group: "ops" },
+  { id: "schedules", label: "Schedules", icon: "activity", desc: "Recurring syncs", group: "ops" },
   { id: "transforms", label: "Transforms", icon: "layers", desc: "Post-load SQL models", group: "ops" },
   { id: "query", label: "Query", icon: "search", desc: "Ad-hoc SQL and export", group: "ops" },
   { id: "pilot", label: "Pilot", icon: "sparkle", desc: "Natural-language assistant", group: "ops" },
@@ -687,7 +687,7 @@ function AppShell({
               )}
               {mountedScreens.has("schedules") && (
                 <div className={`df2-screen-keep ${showScreen("schedules")}`} hidden={screen !== "schedules"} aria-hidden={screen !== "schedules"}>
-                <PageErrorBoundary label="Pipelines">
+                <PageErrorBoundary label="Schedules">
                   <SchedulesPage
                     connectors={connectors}
                     onViewJobs={() => setScreen("jobs")}

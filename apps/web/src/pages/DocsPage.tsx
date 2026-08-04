@@ -166,7 +166,7 @@ function ArchitectureDiagram() {
     { x: 230, w: 118, label: "Ingestion", sub: "Parse · Profile · Normalize", tone: "core" },
     { x: 384, w: 118, label: "Canonical", sub: "Schema · Types · Keys", tone: "core" },
     { x: 538, w: 118, label: "Mapper", sub: "AI · Semantic · Rules", tone: "core" },
-    { x: 692, w: 118, label: "Preflight", sub: "8 gates · Evidence", tone: "gate" },
+    { x: 692, w: 118, label: "Preflight", sub: "9 gates · Evidence", tone: "gate" },
     { x: 846, w: 118, label: "Execution", sub: "Chunk · Transform · Write", tone: "core" },
     { x: 1004, w: 148, label: "Targets", sub: "DB · File · Warehouse", tone: "edge" },
   ];

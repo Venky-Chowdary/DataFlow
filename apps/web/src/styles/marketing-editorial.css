@@ -3356,12 +3356,57 @@
     radial-gradient(ellipse 80% 55% at 90% 0%, rgba(45, 212, 191, 0.22), transparent 58%),
     radial-gradient(ellipse 60% 50% at 0% 100%, rgba(245, 158, 11, 0.14), transparent 52%),
     linear-gradient(160deg, #e7f5f2 0%, #f3f8f7 38%, #fbfcfd 100%);
-  /* Must scroll on short laptops — overflow:hidden clipped the Sign-in button. */
+  /* No auth-column scroller in the happy path: card is densified for 100dvh.
+     Only allow scroll if validation/alert chrome expands past the fold. */
   overflow-x: hidden;
-  overflow-y: auto;
+  overflow-y: hidden;
   overscroll-behavior: contain;
   min-height: 0;
   border-left: 1px solid rgba(13, 148, 136, 0.14);
+}
+
+.lp-login-auth:has(.lp-field-error),
+.lp-login-auth:has(.lp-login-alert),
+.lp-login-auth:has([role="alert"]) {
+  overflow-y: auto;
+}
+
+/* Permanent densify — trust/SSO/preview never push Sign-in below the fold. */
+.lp-login--gate .lp-login-auth-steps,
+.lp-login--gate .lp-login-trust,
+.lp-login--gate .lp-login-divider,
+.lp-login--gate .lp-login-sso,
+.lp-login--gate .lp-login-dev-actions,
+.lp-login--gate .lp-login-auth-sub {
+  display: none;
+}
+
+.lp-login--gate .lp-login-auth-banner {
+  height: clamp(48px, 7vh, 72px);
+}
+
+.lp-login--gate .lp-login-auth-mark {
+  margin-top: clamp(10px, 1.6vh, 18px);
+  margin-bottom: clamp(6px, 1vh, 12px);
+  padding: 4px;
+}
+
+.lp-login--gate .lp-login-auth-card {
+  padding: clamp(12px, 1.8vh, 22px) clamp(16px, 2vw, 28px) clamp(12px, 1.6vh, 20px);
+}
+
+.lp-login--gate .lp-login-form {
+  gap: clamp(8px, 1.2vh, 14px);
+}
+
+.lp-login--gate .lp-input {
+  min-height: clamp(40px, 5.5vh, 48px);
+}
+
+.lp-login--gate .lp-login-submit,
+.lp-login--gate .lp-btn.lp-login-submit {
+  min-height: clamp(42px, 5.8vh, 50px);
+  margin-top: 0;
 }
 
 .lp-login-auth-bg {
@@ -3656,6 +3701,62 @@
   margin: 0 0 8px;
 }
 
+@media (max-height: 900px) {
+  .lp-login-auth-banner {
+    height: 56px;
+  }
+
+  .lp-login-auth-mark {
+    margin-top: 12px;
+    margin-bottom: 8px;
+    padding: 4px;
+  }
+
+  .lp-login-auth-mark .dt-logo,
+  .lp-login-auth-mark svg {
+    width: 32px !important;
+    height: 32px !important;
+  }
+
+  .lp-login-auth-steps,
+  .lp-login-trust,
+  .lp-login--gate .lp-login-divider,
+  .lp-login--gate .lp-login-sso {
+    display: none;
+  }
+
+  .lp-login-auth-sub {
+    display: none;
+  }
+
+  .lp-login-dev-actions {
+    display: none;
+  }
+
+  .lp-login-auth-card {
+    padding: 12px 18px 14px;
+  }
+
+  .lp-login--gate .lp-login-form {
+    gap: 8px;
+  }
+
+  .lp-login--gate .lp-input {
+    min-height: 42px;
+  }
+
+  .lp-login--gate .lp-login-submit,
+  .lp-login--gate .lp-btn.lp-login-submit {
+    min-height: 44px;
+    margin-top: 0;
+  }
+
+  .lp-login-auth {
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+}
+
 @media (max-height: 760px) {
   .lp-login-brand-lead {
     display: -webkit-box;
@@ -3668,27 +3769,16 @@
     display: none;
   }
 
-  .lp-login-auth-sub {
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
+  .lp-login-auth-kicker {
+    display: none;
   }
 
   .lp-login-auth-banner {
-    height: 64px;
+    height: 48px;
   }
 
-  .lp-login-auth-mark {
-    margin-top: 16px;
-    margin-bottom: 10px;
-    padding: 5px;
-  }
-
-  .lp-login-auth-mark .dt-logo,
-  .lp-login-auth-mark svg {
-    width: 36px !important;
-    height: 36px !important;
+  .lp-login-auth-head h2 {
+    font-size: 1.35rem;
   }
 
   .lp-login-proof {
@@ -3697,10 +3787,6 @@
 
   .lp-login-proof p {
     display: none;
-  }
-
-  .lp-login-trust li span {
-    font-size: 10px;
   }
 }
 
@@ -3713,59 +3799,16 @@
     display: none;
   }
 
-  .lp-login-auth-steps {
+  .lp-login-auth-mark {
     display: none;
   }
 
-  .lp-login--gate .lp-login-divider,
-  .lp-login--gate .lp-login-sso {
-    display: none;
-  }
-
-  .lp-login-trust {
-    display: none;
-  }
-
-  .lp-login-dev-actions {
-    margin-top: 8px;
-    padding-top: 8px;
-  }
-
-  .lp-login-auth {
-    padding-top: 10px;
-    padding-bottom: 10px;
+  .lp-login-auth-banner {
+    height: 36px;
   }
 
   .lp-login-auth-card {
-    padding: 14px 18px 16px;
-  }
-
-  .lp-login-auth-sub {
-    display: none;
-  }
-
-  .lp-login--gate .lp-login-form {
-    gap: 10px;
-  }
-
-  .lp-login--gate .lp-login-submit,
-  .lp-login--gate .lp-btn.lp-login-submit {
-    min-height: 46px;
-    margin-top: 2px;
-  }
-}
-
-@media (max-height: 600px) {
-  .lp-login-auth-banner {
-    height: 52px;
-  }
-
-  .lp-login-auth-kicker {
-    display: none;
-  }
-
-  .lp-login-auth-head h2 {
-    font-size: 1.35rem;
+    padding: 10px 16px 12px;
   }
 
   .lp-login--gate .lp-field {
@@ -3773,7 +3816,26 @@
   }
 
   .lp-login--gate .lp-input {
-    min-height: 44px;
+    min-height: 40px;
+  }
+
+  .lp-login--gate .lp-login-submit,
+  .lp-login--gate .lp-btn.lp-login-submit {
+    min-height: 42px;
+  }
+}
+
+@media (max-height: 600px) {
+  .lp-login-auth-banner {
+    display: none;
+  }
+
+  .lp-login-auth-card {
+    padding-top: 14px;
+  }
+
+  .lp-login--gate .lp-login-remember {
+    display: none;
   }
 }
 

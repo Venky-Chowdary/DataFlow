@@ -122,7 +122,7 @@ After deep analysis of existing data integration products, **YES — this produc
 ### Gap 5: Affordable Enterprise Features
 **Problem:** Enterprise features (SSO, audit logs, governance) only available at $100K+ pricing.
 
-**Our Solution:** Enterprise security from day one. SOC2, GDPR, HIPAA at SMB-friendly pricing.
+**Our Solution:** Enterprise-oriented security controls from first deploy. SOC 2 / GDPR / HIPAA certification require auditor artifacts and are not claimed complete.
 
 ### Gap 6: Self-Healing Pipelines
 **Problem:** Pipelines break on schema changes, require manual intervention.

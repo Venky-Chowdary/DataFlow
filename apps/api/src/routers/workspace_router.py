@@ -565,6 +565,11 @@ async def rotate_tenant_byok_key(key_id: str, request: Request):
 
 def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
     from services.byok_key_manager import key_status_summary
+    from services.cdc_effectively_once import (
+        DELIVERY_DEFAULT,
+        EXACTLY_ONCE_CLAIMED,
+        honesty_dict,
+    )
     from services.platform_config import is_production, validate_production_config
     from services.secret_vault import secrets_encryption_ready
 
@@ -574,6 +579,7 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
     prod = is_production()
     prod_errors = validate_production_config() if prod else []
     audit_logging = True  # append-only JSONL audit path is always mounted
+    cdc_honesty = honesty_dict()
     return {
         "tenant_id": tenant.id if tenant else None,
         "workspace_id": tenant.workspace_id if tenant else None,
@@ -605,6 +611,10 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
         "mfa_required": tenant.mfa_required if tenant else False,
         "session_timeout_hours": tenant.session_timeout_hours if tenant else 8,
         "tls_version": "1.3",
+        # Surfaced CDC posture — at-least-once; destinations upsert with PK/LSN guards.
+        "cdc_delivery": DELIVERY_DEFAULT,
+        "cdc_exactly_once_claimed": EXACTLY_ONCE_CLAIMED,
+        "cdc_honesty": cdc_honesty,
         "deployment": {
             "models": ["saas_multi_tenant", "customer_vpc_self_host", "air_gapped_compose"],
             "saas_multi_tenant": "Workspace isolation + optional DATAFLOW_REQUIRE_WORKSPACE hard gate",
@@ -621,6 +631,8 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
                 "quarantine_not_silent_drop",
                 "post_load_reconciliation_checksum",
                 "sql_null_vs_empty_preserved",
+                "checkpoint_fail_closed",
+                f"cdc_delivery_{DELIVERY_DEFAULT}_pk_lsn_upsert",
             ],
         },
         "private_networking": {

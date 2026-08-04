@@ -173,7 +173,7 @@ class TestReconcileChecksumIsMemoryBounded:
 
 
 class TestCheckpointFailureIsSurfaced:
-    """A rejected checkpoint write means resume is gone; that must not be silent."""
+    """A rejected checkpoint write means resume is gone; the job must hard-fail."""
 
     def _service(self, ok: bool):
         from services.checkpoint_service import Checkpoint, CheckpointService
@@ -184,31 +184,53 @@ class TestCheckpointFailureIsSurfaced:
 
         return CheckpointService(mongo=_Store()), Checkpoint(job_id="j1")
 
-    def test_failed_save_marks_the_service_degraded(self, caplog):
+    def test_failed_save_marks_has_failed_saves(self, caplog):
         svc, cp = self._service(ok=False)
-        with caplog.at_level("WARNING"):
+        with caplog.at_level("ERROR"):
             assert svc.save(cp) is False
+        assert svc.has_failed_saves is True
         assert svc.degraded is True
         assert svc.failed_saves == 1
-        assert "resumed" in caplog.text.lower() or "resume" in caplog.text.lower()
+        assert "refusing to continue" in caplog.text.lower()
+
+    def test_require_save_raises_on_failure(self):
+        from services.checkpoint_service import (
+            CHECKPOINT_PERSISTENCE_FAILED,
+            CheckpointPersistenceError,
+        )
+
+        svc, cp = self._service(ok=False)
+        with pytest.raises(CheckpointPersistenceError, match="refusing to continue"):
+            svc.require_save(cp)
+        assert svc.has_failed_saves is True
+        assert CHECKPOINT_PERSISTENCE_FAILED in str(
+            CheckpointPersistenceError(CHECKPOINT_PERSISTENCE_FAILED)
+        )
 
     def test_successful_save_stays_healthy(self):
         svc, cp = self._service(ok=True)
         assert svc.save(cp) is True
+        assert svc.has_failed_saves is False
         assert svc.degraded is False
+        svc.require_save(cp)  # must not raise
 
     def test_repeated_failures_log_once_but_keep_counting(self, caplog):
         svc, cp = self._service(ok=False)
-        with caplog.at_level("WARNING"):
+        with caplog.at_level("ERROR"):
             for _ in range(5):
                 svc.save(cp)
         assert svc.failed_saves == 5
+        assert svc.has_failed_saves is True
         assert caplog.text.count("Checkpoint write failed") == 1
 
-    def test_stream_surfaces_the_degraded_checkpoint_to_the_operator(self):
+    def test_stream_fail_closes_on_checkpoint_persistence(self):
         source = Path("src/transfer/stream.py").read_text(encoding="utf-8")
-        assert "Checkpoint persistence is failing" in source
-        assert "_checkpoint_degraded" in source
+        assert "require_save(checkpoint)" in source
+        assert "Checkpoint persistence is failing" not in source
+        assert "_checkpoint_degraded" not in source
+        assert "refusing to continue" in Path(
+            "services/checkpoint_service.py"
+        ).read_text(encoding="utf-8")
 
 
 class TestSchemalessAbsorptionIsThreadSafe:

@@ -5,12 +5,16 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 from services.checkpoint_service import (
+    CHECKPOINT_PERSISTENCE_FAILED,
     Checkpoint,
+    CheckpointPersistenceError,
     CheckpointService,
     resume_or_create_checkpoint,
 )
@@ -70,3 +74,20 @@ def test_mark_failed_sets_checkpoint_and_status():
     assert service.mark_failed("job-cp-4", "connection lost", cp)
     assert mongo.jobs["job-cp-4"]["status"] == "failed"
     assert mongo.jobs["job-cp-4"]["checkpoint"]["chunk_index"] == 2
+
+
+def test_has_failed_saves_and_require_save_fail_closed():
+    class _RejectingMongo(_FakeMongo):
+        def update_job_status(self, job_id: str, status: str, **kwargs) -> bool:
+            return False
+
+    service = CheckpointService(_RejectingMongo())
+    cp = Checkpoint(job_id="job-cp-fail", chunk_index=1)
+    assert service.save(cp) is False
+    assert service.has_failed_saves is True
+    assert service.failed_saves == 1
+
+    with pytest.raises(CheckpointPersistenceError, match="refusing to continue"):
+        service.require_save(cp)
+    assert service.failed_saves == 2
+    assert CHECKPOINT_PERSISTENCE_FAILED.startswith("Checkpoint persistence failed")

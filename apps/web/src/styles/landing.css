@@ -1863,7 +1863,7 @@
     linear-gradient(180deg, #f4faf9 0%, #eef6f4 100%);
   border-left: 1px solid rgba(13, 148, 136, 0.12);
   overflow-x: hidden;
-  overflow-y: auto;
+  overflow-y: hidden;
   overscroll-behavior: contain;
 }
 

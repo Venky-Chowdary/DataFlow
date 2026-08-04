@@ -1050,7 +1050,7 @@ def stream_file_to_database(
         checkpoint.checksum = last_checksum
         checkpoint.phase = "writing"
         checkpoint.status = "running"
-        checkpoint_service.save(checkpoint)
+        checkpoint_service.require_save(checkpoint)
         if on_checkpoint:
             on_checkpoint(idx, chunks, written, checkpoint.to_dict())
 

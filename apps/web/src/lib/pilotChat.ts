@@ -20,7 +20,7 @@ export const PILOT_SCREEN_LABELS: Record<string, string> = {
   connectors: "Connectors",
   jobs: "Jobs",
   settings: "Settings",
-  schedules: "Pipelines",
+  schedules: "Schedules",
   contracts: "Contracts",
   query: "Query",
   mcp: "MCP",

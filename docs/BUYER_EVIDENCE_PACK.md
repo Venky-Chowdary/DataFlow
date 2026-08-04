@@ -1,0 +1,59 @@
+# Buyer evidence pack (diligence)
+
+Use this pack instead of marketing screenshots when Fortune 100 teams ask “prove it.”
+
+## 1. Core preflight gates (G1–G9)
+
+| Gate | Package |
+|------|---------|
+| G1–G9 | `packages/preflight` (`GateId`, `PREFLIGHT_GATES`) |
+| Host policy extras | Studio Validate may add sync/schema/validation policy gates — distinct from core G1–G9 |
+| Constraint hints | Soft `constraint_hints` strings from `assess_constraint_compatibility` — informational FK awareness only; **not** a numbered gate |
+
+Do **not** claim “8 gates,” “ten gates,” or invent a marketed “G10 constraints” gate. Required core gates remain **G1–G9**.
+
+## 2. PRODUCTION_SKU routes
+
+Source of truth: `apps/api/src/transfer/registry.py` → `PRODUCTION_SKU`.
+
+UI ledger: Workspace → Benchmarks → Integrity / PRODUCTION_SKU panel (reads API metrics).
+
+Rule: if a route is not in `PRODUCTION_SKU`, it is not a committed migration claim.
+
+## 3. Mapping engine
+
+- Studio map: BM25 + semantic token graph + Hungarian assignment (`apps/api/services/semantic_mapper.py`)
+- Fidelity SSOT: `preserve` / `cast` / `mutate` / `lossy_cast` (`mapping_proof.py`)
+- Operator risk ack: G4 + web `mapping.ts` tiers (Approve / Review / Accept risk)
+- Optional LLM assist is hybrid and constrained — not a substitute for gates
+
+## 4. Delivery / CDC
+
+- Default CDC delivery: **at-least-once**
+- Destinations must upsert with primary key / LSN (or equivalent) guards
+- Checkpoint persistence failures **abort** the job (`CheckpointPersistenceError`)
+
+Workspace security posture exposes `cdc_delivery` / `cdc_honesty` for questionnaires.
+
+## 5. Security posture (not certification)
+
+| Control | Status |
+|---------|--------|
+| Secret vault (Fernet / AWS SM) | Shipped; prod plaintext ban |
+| Connector / transfer_request encryption | Shipped |
+| MCP auth + RBAC when required | Shipped |
+| BYOK local/wrapped | Shipped |
+| BYOK AWS KMS envelope | Implemented (requires boto3 + IAM) |
+| SOC 2 / HIPAA / PCI auditor letters | **Not claimed** until artifacts exist |
+
+## 6. Suggested test anchors
+
+```text
+apps/api/tests/test_production_sku_*.py
+apps/api/tests/test_production_audit_gates.py
+packages/preflight/tests/test_gates.py
+apps/api/tests/test_checkpoint_service.py
+apps/web/src/lib/mapping.test.ts
+```
+
+Regenerate route counts with `scripts/measure_connector_type_coverage.py` when publishing a diligence PDF.

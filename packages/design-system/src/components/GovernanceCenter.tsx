@@ -1,11 +1,11 @@
 import { useState } from "react";
 
 const COMPLIANCE_FRAMEWORKS = [
-  { id: "soc2", name: "SOC 2 Type II", status: "certified", icon: "🛡️", color: "#00FF9D" },
-  { id: "iso27001", name: "ISO 27001", status: "certified", icon: "🔒", color: "#00D4FF" },
+  { id: "soc2", name: "SOC 2 Type II", status: "posture", icon: "🛡️", color: "#00FF9D" },
+  { id: "iso27001", name: "ISO 27001", status: "posture", icon: "🔒", color: "#00D4FF" },
   { id: "gdpr", name: "GDPR", status: "compliant", icon: "🇪🇺", color: "#7B61FF" },
-  { id: "hipaa", name: "HIPAA", status: "certified", icon: "🏥", color: "#00FF9D" },
-  { id: "pci-dss", name: "PCI DSS", status: "certified", icon: "💳", color: "#00D4FF" },
+  { id: "hipaa", name: "HIPAA", status: "posture", icon: "🏥", color: "#00FF9D" },
+  { id: "pci-dss", name: "PCI DSS", status: "posture", icon: "💳", color: "#00D4FF" },
   { id: "ccpa", name: "CCPA", status: "compliant", icon: "🌴", color: "#FFB800" },
 ];
 

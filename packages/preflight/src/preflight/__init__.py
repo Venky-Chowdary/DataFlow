@@ -1,5 +1,6 @@
-"""DataFlow preflight — 8-gate fail-fast validation before any data transfer."""
+"""DataFlow preflight — G1–G9 fail-fast validation before any data transfer."""
 
+from preflight.constraint_hints import assess_constraint_compatibility
 from preflight.engine import PreflightEngine, PreflightResult
 from preflight.gates import GateId, GateStatus
 from preflight.models import (
@@ -22,4 +23,5 @@ __all__ = [
     "PreflightContext",
     "SourceConfig",
     "TransferPlan",
+    "assess_constraint_compatibility",
 ]

@@ -26,7 +26,7 @@ const TARGET_LABELS: Partial<Record<Screen, string>> = {
 };
 
 const TRUST_METRICS = [
-  { value: "8", label: "Preflight gates" },
+  { value: "9", label: "Core gates (G1–G9)" },
   { value: "Map", label: "Semantic confidence" },
   { value: "Σ", label: "Checksum proof" },
 ];
@@ -186,7 +186,7 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
             <p className="lp-login-brand-kicker">Enterprise data platform</p>
             <h1 className="lp-login-brand-title">Sign in to governed transfers</h1>
             <p className="lp-login-brand-lead">
-              Semantic mapping, eight gates, and checksum proof — for humans and agents.
+              Semantic mapping, nine core gates (G1–G9), and checksum proof — for humans and agents.
             </p>
 
             <div className="lp-login-proof" aria-hidden>

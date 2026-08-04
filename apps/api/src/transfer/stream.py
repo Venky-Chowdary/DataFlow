@@ -1354,7 +1354,6 @@ def stream_database_transfer(
     # batch count on large transfers. Truncating at emit time bounded the output
     # but never the memory.
     warning_samples: BoundedStrings = BoundedStrings(cap=MAX_WARNING_SAMPLES)
-    _checkpoint_degraded = {"reported": False}
     ddb_total = probe.total_rows if src_type == "dynamodb" else None
     running_cursor = checkpoint.cursor_value if checkpoint.cursor_value is not None else watermark
     es_search_after = checkpoint.es_search_after or (ddb_cursor if src_type == "elasticsearch" else None)
@@ -1899,15 +1898,8 @@ def stream_database_transfer(
         checkpoint.phase = "writing"
         checkpoint.chunk_total = chunks
         checkpoint.status = "running"
-        # A rejected checkpoint write is not fatal, but it does mean resume is
-        # gone. Report it once instead of showing healthy progress.
-        if not checkpoint_service.save(checkpoint) and not _checkpoint_degraded["reported"]:
-            _checkpoint_degraded["reported"] = True
-            warning_samples.append(
-                "Checkpoint persistence is failing — the transfer is still "
-                "writing, but it cannot be resumed if it stops. Check that the "
-                "job store is reachable."
-            )
+        # Fail-closed: no durable resume point ⇒ abort (do not keep writing).
+        checkpoint_service.require_save(checkpoint)
         if src_type == "kafka" and kafka_cursor and src_cfg:
             try:
                 from connectors.kafka_reader import commit_kafka_offsets
@@ -1917,8 +1909,15 @@ def stream_database_transfer(
                 if isinstance(kafka_cursor, dict):
                     kafka_cursor = {**kafka_cursor, "pending_offsets": [], "committed": True}
                     checkpoint.kafka_cursor = kafka_cursor
-                    checkpoint_service.save(checkpoint)
+                    checkpoint_service.require_save(checkpoint)
             except Exception as exc:
+                # Checkpoint persistence must abort the job — never swallow it.
+                try:
+                    from services.checkpoint_service import CheckpointPersistenceError
+                except ImportError:  # pragma: no cover
+                    from src.services.checkpoint_service import CheckpointPersistenceError
+                if isinstance(exc, CheckpointPersistenceError):
+                    raise
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         if on_checkpoint:
             on_checkpoint(idx, chunks, written, checkpoint.to_dict())
@@ -2425,8 +2424,17 @@ class _NoOpCheckpointService:
     overwritten by an internal phase.
     """
 
+    failed_saves = 0
+
+    @property
+    def has_failed_saves(self) -> bool:
+        return False
+
     def save(self, checkpoint: Any) -> bool:  # noqa: ARG002
         return True
+
+    def require_save(self, checkpoint: Any) -> None:  # noqa: ARG002
+        return None
 
     def load(self, job_id: str) -> Any | None:  # noqa: ARG002
         return None

@@ -11,9 +11,9 @@ Providers:
                  testing and for a "managed customer key" mode.
 - ``wrapped``  : The customer pastes a base64-encoded 256-bit AES key.
                  The plaintext is encrypted with the platform key and stored.
-- ``aws_kms``  : The key reference is an AWS KMS key ARN.  Envelope encryption
-                 is performed by KMS; Datawrap only stores the encrypted data
-                 key reference (not yet active until KMS integration is wired).
+- ``aws_kms``  : The key reference is an AWS KMS key ARN. Envelope encryption
+                 via ``GenerateDataKey`` / ``Decrypt`` (requires boto3 + IAM).
+                 Ciphertext embeds the encrypted data key.
 - ``azure_keyvault`` / ``gcp_kms`` : references to cloud KMS keys (roadmap).
 """
 
@@ -278,11 +278,61 @@ def _resolve_key(tenant_id: str, key_id: str | None = None) -> BYOKKey:
 
 
 def _data_key_for_key(key: BYOKKey, context: str) -> bytes:
-    """Return 32 raw bytes used for Fernet tenant encryption."""
+    """Return 32 raw bytes used for Fernet tenant encryption (local/wrapped)."""
     if key.provider in ("local", "wrapped"):
         raw = _unwrap_key_material(key.key_reference)
         return _derive_key(raw, context)
-    raise NotImplementedError(f"Data key derivation not implemented for provider '{key.provider}'")
+    raise NotImplementedError(
+        f"Provider '{key.provider}' uses envelope helpers, not _data_key_for_key."
+    )
+
+
+def _aws_kms_client():
+    try:
+        import boto3  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "aws_kms BYOK requires boto3. Install boto3 or use provider=local|wrapped."
+        ) from exc
+    return boto3.client("kms")
+
+
+def _aws_kms_generate_dek(key_arn: str, context: str) -> tuple[bytes, bytes]:
+    """Return (plaintext_32, encrypted_dek_bytes) from KMS GenerateDataKey."""
+    from botocore.exceptions import BotoCoreError, ClientError  # type: ignore
+
+    arn = (key_arn or "").strip()
+    if not arn.startswith("arn:aws:kms:"):
+        raise ValueError("aws_kms key_reference must be a KMS key ARN")
+    try:
+        resp = _aws_kms_client().generate_data_key(
+            KeyId=arn,
+            KeySpec="AES_256",
+            EncryptionContext={"purpose": context[:256]},
+        )
+        plaintext = bytes(resp["Plaintext"])
+        encrypted = bytes(resp["CiphertextBlob"])
+        if len(plaintext) < 32:
+            raise RuntimeError("AWS KMS returned a short data key")
+        return plaintext[:32], encrypted
+    except (BotoCoreError, ClientError) as exc:
+        raise RuntimeError(f"AWS KMS GenerateDataKey failed: {exc}") from exc
+
+
+def _aws_kms_decrypt_dek(encrypted_dek: bytes, context: str) -> bytes:
+    from botocore.exceptions import BotoCoreError, ClientError  # type: ignore
+
+    try:
+        resp = _aws_kms_client().decrypt(
+            CiphertextBlob=encrypted_dek,
+            EncryptionContext={"purpose": context[:256]},
+        )
+        plaintext = bytes(resp["Plaintext"])
+        if len(plaintext) < 32:
+            raise RuntimeError("AWS KMS Decrypt returned a short data key")
+        return plaintext[:32]
+    except (BotoCoreError, ClientError) as exc:
+        raise RuntimeError(f"AWS KMS Decrypt failed: {exc}") from exc
 
 
 def tenant_encrypt(tenant_id: str, plaintext: str, key_id: str | None = None, purpose: str = "data") -> str:
@@ -291,6 +341,11 @@ def tenant_encrypt(tenant_id: str, plaintext: str, key_id: str | None = None, pu
         raise RuntimeError("BYOK encryption requires the cryptography package")
     key = _resolve_key(tenant_id, key_id)
     context = f"dataflow:{tenant_id}:{purpose}"
+    if key.provider == "aws_kms":
+        dek, enc_dek = _aws_kms_generate_dek(key.key_reference, context)
+        token = _fernet_from_bytes(_derive_key(dek, context)).encrypt(plaintext.encode("utf-8")).decode("ascii")
+        enc_b64 = base64.urlsafe_b64encode(enc_dek).decode("ascii").rstrip("=")
+        return f"byok:{key.id}:kms:{enc_b64}:{token}"
     data_key = _data_key_for_key(key, context)
     token = _fernet_from_bytes(data_key).encrypt(plaintext.encode("utf-8")).decode("ascii")
     return f"byok:{key.id}:{token}"
@@ -300,11 +355,26 @@ def tenant_decrypt(tenant_id: str, token: str, key_id: str | None = None, purpos
     """Decrypt a value produced by ``tenant_encrypt``."""
     if not _cryptography_available():
         raise RuntimeError("BYOK encryption requires the cryptography package")
+    context = f"dataflow:{tenant_id}:{purpose}"
+    if token.startswith("byok:") and ":kms:" in token:
+        # byok:{key_id}:kms:{enc_dek_b64}:{fernet}
+        parts = token.split(":", 4)
+        if len(parts) != 5:
+            raise ValueError("Malformed aws_kms BYOK token")
+        _, stored_key_id, _kms, enc_b64, ciphertext = parts
+        key = _resolve_key(tenant_id, key_id or stored_key_id)
+        if key.provider != "aws_kms":
+            raise ValueError("Token is aws_kms envelope but key provider is not aws_kms")
+        pad = "=" * (-len(enc_b64) % 4)
+        enc_dek = base64.urlsafe_b64decode(enc_b64 + pad)
+        dek = _aws_kms_decrypt_dek(enc_dek, context)
+        return _fernet_from_bytes(_derive_key(dek, context)).decrypt(ciphertext.encode("ascii")).decode("utf-8")
     if token.startswith("byok:"):
         _, stored_key_id, ciphertext = token.split(":", 2)
         key_id = key_id or stored_key_id
+    else:
+        ciphertext = token
     key = _resolve_key(tenant_id, key_id)
-    context = f"dataflow:{tenant_id}:{purpose}"
     data_key = _data_key_for_key(key, context)
     return _fernet_from_bytes(data_key).decrypt(ciphertext.encode("ascii")).decode("utf-8")
 

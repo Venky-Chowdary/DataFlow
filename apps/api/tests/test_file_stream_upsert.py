@@ -23,10 +23,24 @@ class _FakeCheckpointService:
 
     def __init__(self):
         self.checkpoints = {}
+        self.failed_saves = 0
+
+    @property
+    def has_failed_saves(self) -> bool:
+        return self.failed_saves > 0
 
     def save(self, checkpoint) -> bool:
         self.checkpoints[checkpoint.job_id] = checkpoint.to_dict()
         return True
+
+    def require_save(self, checkpoint) -> None:
+        if not self.save(checkpoint):
+            from services.checkpoint_service import (
+                CHECKPOINT_PERSISTENCE_FAILED,
+                CheckpointPersistenceError,
+            )
+
+            raise CheckpointPersistenceError(CHECKPOINT_PERSISTENCE_FAILED)
 
     def load(self, job_id: str):
         return self.checkpoints.get(job_id)

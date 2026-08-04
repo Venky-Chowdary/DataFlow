@@ -470,7 +470,7 @@ export function TransferStudioPage({
         </ProofCallout>
       </Chapter>
 
-      <Chapter id="ts-gates" kicker="Preflight · G1–G8" title="Eight gates from the real engine — fail-fast before write">
+      <Chapter id="ts-gates" kicker="Preflight · G1–G8" title="nine core gates from the real engine — fail-fast before write">
         <div className="lp-mkt-prose">
           <p>
             These are not marketing labels. They map to <code>GateId</code> in Datawrap&apos;s preflight package.
@@ -882,7 +882,7 @@ export function DataPilotPage({
         <div className="lp-mkt-prose">
           <p>
             Datawrap Pilot is an operator copilot, not a shadow ETL path. When it proposes a mapping fix or quarantine
-            policy, the change still flows through Transfer Studio’s review and the eight gates. That is how Pilot
+            policy, the change still flows through Transfer Studio’s review and the nine core gates. That is how Pilot
             stays trustworthy for production teams.
           </p>
         </div>
@@ -1065,7 +1065,7 @@ export function MigrationsSolutionPage({
         },
         {
           n: "03",
-          title: "Clear eight gates",
+          title: "Clear nine core gates",
           body: "Contracts, types, capacity, and dry-run must pass before write. One block stops the load.",
         },
         {
@@ -1121,7 +1121,7 @@ export function WarehouseSolutionPage({
             <h1>Bulk loads finance can archive</h1>
             <p className="lp-wh-lead">
               Snowflake, BigQuery, and Redshift — with destination probes, capacity checks, and
-              reconciliation reports. Same eight gates as every other Datawrap path.
+              reconciliation reports. Same nine core gates as every other Datawrap path.
             </p>
             <div className="lp-hero-cta">
               <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
@@ -1333,7 +1333,7 @@ export function SyncSolutionPage({
         },
         {
           title: "Same policy for agents",
-          body: "MCP and Pilot can trigger syncs — they still inherit workspace RBAC and the eight gates.",
+          body: "MCP and Pilot can trigger syncs — they still inherit workspace RBAC and the nine core gates.",
         },
       ]}
       cinema={

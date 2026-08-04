@@ -83,7 +83,7 @@ export function LandingHeroArt() {
             <text x="250" y="325" fontSize="12" fill="#94a3b8">→</text>
             <text x="280" y="325" fontSize="12" fontWeight="700" fill="#0f172a">customer_key</text>
             <rect x="116" y="350" width="140" height="28" rx="8" fill="#ccfbf1" />
-            <text x="186" y="369" textAnchor="middle" fontSize="11" fontWeight="700" fill="#0f766e">8 / 8 gates</text>
+            <text x="186" y="369" textAnchor="middle" fontSize="11" fontWeight="700" fill="#0f766e">9 / 9 gates</text>
             <rect x="272" y="350" width="172" height="28" rx="8" fill="#ecfdf5" />
             <text x="358" y="369" textAnchor="middle" fontSize="11" fontWeight="700" fill="#059669">checksum OK</text>
           </g>

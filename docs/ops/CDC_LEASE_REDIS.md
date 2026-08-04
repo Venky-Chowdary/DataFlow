@@ -1,7 +1,18 @@
 # CDC lease Redis HA runbook
 
 Datawrap CDC leases prevent two workers from consuming the same logical slot /
-binlog `server_id` / capture instance. Delivery remains **at-least-once upsert**.
+binlog `server_id` / capture instance.
+
+## Delivery semantics (honest)
+
+| Claim | Status |
+|---|---|
+| Log / change-stream delivery | **at-least-once** (peek → apply → ack) |
+| Destination apply | Must **upsert on PK** with LSN/SCN/`_df_lsn` guards |
+| Exactly-once end-to-end | **Not claimed** |
+| Leases | Prevent concurrent consumers only — do not upgrade delivery |
+
+Canonical constants: `apps/api/services/cdc_effectively_once.py` (`DELIVERY_DEFAULT = "at-least-once"`).
 
 ## Backends
 

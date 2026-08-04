@@ -2,10 +2,14 @@
 
 This module is the runtime backbone for enterprise transfers:
 - per-chunk retry with bounded exponential backoff
-- durable checkpoint persistence after each committed chunk
+- durable checkpoint persistence after each committed chunk (fail-closed)
 - quarantine of malformed rows without killing the job
 - adaptive chunk sizing to stay memory-safe for large or wide rows
 - idempotent write decisions (upsert vs insert) when a primary key exists
+
+Checkpoint durability is fail-closed: if ``CheckpointService.save`` returns
+False, the batcher raises ``CheckpointPersistenceError`` and aborts rather than
+continuing without a resume point.
 """
 
 from __future__ import annotations
@@ -136,12 +140,12 @@ class ResilientBatcher:
             final_result.rejected_details = checkpoint.rejected_details
             _extend_bounded(final_result.warnings, result.warnings, MAX_RESULT_WARNINGS)
 
-            self.cp.save(checkpoint)
+            self.cp.require_save(checkpoint)
             if self.on_checkpoint:
                 self.on_checkpoint(checkpoint.chunk_index, checkpoint.chunk_total, total_written)
 
         checkpoint.phase = "completed"
-        self.cp.save(checkpoint)
+        self.cp.require_save(checkpoint)
         return total_written, final_result, checkpoint
 
     def _write_with_retry(self, ctx: BatchContext) -> BatchResult:

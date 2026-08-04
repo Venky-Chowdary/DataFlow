@@ -29,7 +29,8 @@ const STEP_GUIDES: Record<number, { title: string; body: string }> = {
   },
   4: {
     title: "Validate",
-    body: "Preflight runs eleven gates — transforms, destination probe, and capacity checks.",
+    body: "Preflight runs G1–G9 core engine gates plus Studio policy checks — transforms, destination probe, and capacity.",
+
   },
   5: {
     title: "Run",

@@ -530,7 +530,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
           <Reveal className="lp-home-section-head">
             <p className="lp-section-kicker">Use cases</p>
             <h2>What operators run</h2>
-            <p>Migration, recurring sync, and warehouse loading — same eight gates every time.</p>
+            <p>Migration, recurring sync, and warehouse loading — same nine core gates every time.</p>
           </Reveal>
           <div className="lp-home-usecase-list lp-home-usecase-bento">
             <article className="lp-home-usecase is-featured">
@@ -603,7 +603,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
           <h2>Ship a governed transfer today</h2>
           <p>
             Start free on the same engine enterprises use for SSO, BYOK, and audit — semantic mapping,
-            eight gates, quarantine, and checksum proof included.
+            nine core gates, quarantine, and checksum proof included.
           </p>
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>

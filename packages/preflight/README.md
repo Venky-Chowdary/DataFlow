@@ -16,11 +16,23 @@ additional policy gates (sync contract, schema policy, validation posture).
 | G8 | Pre-write sample reconciliation (requires Validate samples; post-write checksum runs after Execute) |
 | G9 | Data integrity audit (unproven / not-configured audit fails closed) |
 
+**Required core gates = G1–G9 only.** Do not add a `GateId` for optional extras.
+
+### Soft constraint hints (host / Studio policy — not a gate)
+
+`assess_constraint_compatibility(ctx) -> list[str]` in `constraint_hints.py`
+returns informational FK / relational warnings when destination foreign-key
+metadata is present. Hosts may attach the list as `constraint_hints` on the
+Validate result. Hints never flip `passed` and must not be marketed as a
+numbered gate.
+
 ```python
 from preflight import PreflightEngine, PreflightContext, TransferPlan
+from preflight import assess_constraint_compatibility
 
 engine = PreflightEngine(fail_fast=True)
 result = engine.run(PreflightContext(plan=transfer_plan, sample_rows=samples))
 if not result.passed:
     raise PreflightBlocked(result.blockers)
+hints = assess_constraint_compatibility(ctx)  # soft warnings only
 ```

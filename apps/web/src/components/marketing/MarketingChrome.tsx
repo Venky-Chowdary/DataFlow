@@ -91,7 +91,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
         }}
       >
         <span className="lp-announce-tag">New</span>
-        MCP for agents — governed transfers from Cursor &amp; Claude. Same eight gates.
+        MCP for agents — governed transfers from Cursor &amp; Claude. Same nine core gates.
         <span className="lp-announce-cta" aria-hidden>
           Learn more →
         </span>

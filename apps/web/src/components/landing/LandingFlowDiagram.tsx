@@ -4,7 +4,7 @@ import { useRevealOnScroll } from "../../hooks/useRevealOnScroll";
 const STAGES = [
   { id: "source", label: "Source", sub: "Any schema" },
   { id: "map", label: "Map", sub: "Semantic" },
-  { id: "gates", label: "Preflight", sub: "8 gates" },
+  { id: "gates", label: "Preflight", sub: "G1–G9" },
   { id: "proof", label: "Proof", sub: "Checksum" },
 ] as const;
 

@@ -192,7 +192,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
             <span className="lp-pricing-hero-em"> proof</span>
           </h1>
           <p className="lp-pricing-hero-lead">
-            Semantic mapping, eight gates, quarantine, and checksum reconcile — included from first
+            Semantic mapping, nine core gates, quarantine, and checksum reconcile — included from first
             pilot to regulated pipelines. Pay for cadence and security, not seats.
           </p>
           <div className="lp-hero-cta">
@@ -699,7 +699,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         <div className="lp-shell lp-cust3-cta-inner">
           <div>
             <h2>Join teams shipping with proof</h2>
-            <p>Design partners get a scoped pilot on your sources — same eight gates as production.</p>
+            <p>Design partners get a scoped pilot on your sources — same nine core gates as production.</p>
           </div>
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
@@ -829,7 +829,7 @@ function ContactPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
                 <span>Engineer reply</span>
               </div>
               <div>
-                <strong>8 gates</strong>
+                <strong>9 gates</strong>
                 <span>Same as production</span>
               </div>
               <div>
@@ -1300,7 +1300,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
             </h1>
             <p className="lp-int-hero-lead">
               Catalog tiles are not the same as production drivers. Every transfer-ready route still
-              runs mapping, eight gates, quarantine, and proof.
+              runs mapping, nine core gates, quarantine, and proof.
             </p>
             <div className="lp-hero-cta">
               <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>

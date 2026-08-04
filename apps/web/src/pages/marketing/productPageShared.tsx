@@ -116,55 +116,61 @@ export const PRODUCT_FRAMES = {
   ],
 } as const satisfies Record<string, DocsShotFrame[]>;
 
-/** Real preflight gates from packages/preflight (G1–G8). */
+/** Real preflight gates from packages/preflight (G1–G9). */
 export const REAL_PREFLIGHT_GATES: { id: string; title: string; algorithm: string }[] = [
   {
-    id: "G1",
+    id: "G1", // Source readable / parseable
     title: "Source",
     algorithm:
       "Connect → parse headers/encoding → require ≥1 column. Block on corrupt files, empty schemas, or unreachable sources.",
   },
   {
-    id: "G2",
+    id: "G2", // Destination reachable with write access
     title: "Destination",
     algorithm:
       "Probe reachability and write privileges. Block when credentials fail or the role cannot write the target object.",
   },
   {
-    id: "G3",
+    id: "G3", // Schema contract — typed dest DDL / schemaless SKIP
     title: "Schema contract",
     algorithm:
       "For typed destinations, validate every mapped field against destination DDL (type family, nullability, precision). Schemaless destinations skip DDL but still map.",
   },
   {
-    id: "G4",
+    id: "G4", // Mapping confidence ≥ threshold; required fields mapped
     title: "Mapping confidence",
     algorithm:
       "Score each edge (exact → synonym → semantic role → type compatibility). Edges below the workspace threshold (default 0.85 strict / 0.72 floor) block until pinned or remapped.",
   },
   {
-    id: "G5",
+    id: "G5", // Dry-run transform on sample rows
     title: "Dry-run",
     algorithm:
       "Push a sample through the real transform + coerce path. Surface duplicates, 100% null columns, and irreversible casts before production write.",
   },
   {
-    id: "G6",
+    id: "G6", // Target DDL compatible
     title: "Target DDL",
     algorithm:
       "Verify the target table/collection accepts the write plan (create-if-missing vs existing PKs/required fields).",
   },
   {
-    id: "G7",
+    id: "G7", // Staging capacity — unknown estimate fails closed
     title: "Capacity",
     algorithm:
       "Compare estimated volume to destination limits / warehouse slots. Warn or block per policy — never assume infinite capacity.",
   },
   {
-    id: "G8",
+    id: "G8", // Pre-write sample reconciliation; post-write checksum after Execute
     title: "Reconciliation plan",
     algorithm:
       "Select row-count + content-checksum strategy for post-load proof. Without a reconcile plan, the run cannot claim success.",
+  },
+  {
+    id: "G9", // Data integrity audit — unproven / not-configured fails closed
+    title: "Data integrity",
+    algorithm:
+      "Audit encoding, required nulls, identity-key duplicates, and financial precision on the Validate sample. Unproven or missing audit adapters fail closed.",
   },
 ];
 

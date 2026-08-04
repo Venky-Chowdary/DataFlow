@@ -68,6 +68,9 @@ def test_security_posture_report(client):
     assert posture["environment"] in ("production", "development")
     assert "encryption_at_rest" in posture
     assert "byok" in posture
+    assert posture["cdc_delivery"] == "at-least-once"
+    assert posture["cdc_exactly_once_claimed"] is False
+    assert "checkpoint_fail_closed" in posture["deployment"]["data_loss_controls"]
 
     response = client.get(
         "/api/v1/workspace/security/report",

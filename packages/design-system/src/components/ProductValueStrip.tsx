@@ -1,4 +1,4 @@
-/** Product gates — matches preflight engine G1–G8 */
+/** Product gates — matches preflight engine G1–G9 */
 
 export const PREFLIGHT_GATES = [
   { id: "g1", code: "G1", label: "Source ready" },
@@ -9,6 +9,7 @@ export const PREFLIGHT_GATES = [
   { id: "g6", code: "G6", label: "Target DDL" },
   { id: "g7", code: "G7", label: "Capacity" },
   { id: "g8", code: "G8", label: "Reconciliation" },
+  { id: "g9", code: "G9", label: "Data integrity" },
 ] as const;
 
 interface ProductValueStripProps {
@@ -26,15 +27,15 @@ export function ProductValueStrip({ compact = false }: ProductValueStripProps) {
         </h2>
         {!compact && (
           <p className="df-product-strip-desc">
-            Any source to any destination. No row moves until all eight gates pass — schema, mapping,
-            dry-run, capacity, and reconciliation are validated first.
+            Any source to any destination. No row moves until all nine gates (G1–G9) pass — schema, mapping,
+            dry-run, capacity, reconciliation, and data integrity are validated first.
           </p>
         )}
       </div>
       <div className="df-product-flow" aria-hidden>
         <span className="df-product-flow-node df-product-flow-node--source">Source</span>
         <span className="df-product-flow-line" />
-        <span className="df-product-flow-gate">8 gates</span>
+        <span className="df-product-flow-gate">9 gates</span>
         <span className="df-product-flow-line df-product-flow-line--mint" />
         <span className="df-product-flow-node df-product-flow-node--dest">Destination</span>
       </div>

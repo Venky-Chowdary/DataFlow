@@ -5,12 +5,20 @@ stream and the resume/retry flow can read them from the same record.  A
 checkpoint captures the last successfully committed chunk and the cursor that
 must be used to read the *next* chunk.  This makes resume deterministic:
 re-read from `cursor_after` (or `offset`) instead of starting over.
+
+Fail-closed
+-----------
+A rejected checkpoint write means the job has no durable resume point. Callers
+must **hard-fail** the transfer (via ``require_save`` or by raising
+``CheckpointPersistenceError``) — never continue writing while reporting healthy
+progress. Continuing without a checkpoint creates silent resume risk: a crash
+would re-read from an older cursor and risk duplicate or skipped work under
+at-least-once delivery.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 from services.brand_env import getenv_brand
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -24,6 +32,15 @@ logger = logging.getLogger(__name__)
 #: 16 MB limit and break resume entirely. 500 rows is far more than an operator
 #: reads, and the exact count still lives in ``rejected_rows``.
 MAX_REJECTED_DETAILS = int(getenv_brand("MAX_REJECTED_DETAILS", "500") or 500)
+
+#: Operator-facing message when checkpoint persistence fails (fail-closed).
+CHECKPOINT_PERSISTENCE_FAILED = (
+    "Checkpoint persistence failed — refusing to continue without durable resume point."
+)
+
+
+class CheckpointPersistenceError(RuntimeError):
+    """Raised when a checkpoint cannot be durably persisted — job must abort."""
 
 
 def _now() -> str:
@@ -143,13 +160,18 @@ class CheckpointService:
         self.failed_saves = 0
 
     @property
-    def degraded(self) -> bool:
-        """True once a checkpoint write has failed.
-
-        While degraded the transfer keeps running but is no longer resumable,
-        so callers must surface this rather than reporting healthy progress.
-        """
+    def has_failed_saves(self) -> bool:
+        """True once any checkpoint write has failed (fail-closed signal)."""
         return self.failed_saves > 0
+
+    @property
+    def degraded(self) -> bool:
+        """Alias for ``has_failed_saves`` — checkpoint durability is broken.
+
+        Callers must abort the job when this is True; continuing without a
+        durable resume point is forbidden.
+        """
+        return self.has_failed_saves
 
     def _mongo(self):
         if self.mongo is None:
@@ -164,10 +186,9 @@ class CheckpointService:
         """Persist the checkpoint without overwriting the job status.
 
         ``update_job_status`` returns ``False`` rather than raising when the job
-        store is unreachable, and every caller discards that bool. A Mongo
-        outage therefore left the transfer running and reporting healthy
-        progress while resume was quietly impossible. Log it loudly and record
-        it so the run can report degraded durability.
+        store is unreachable. Callers **must** treat ``False`` / ``has_failed_saves``
+        as a hard failure (prefer ``require_save``). Returning bool lets unit
+        tests assert the failure counter without catching exceptions.
         """
         mongo = self._mongo()
         ok = mongo.update_job_status(
@@ -179,16 +200,24 @@ class CheckpointService:
         if not ok:
             self.failed_saves += 1
             if self.failed_saves == 1:
-                logger.warning(
-                    "Checkpoint write failed for job %s (chunk %s, %s rows). The "
-                    "transfer continues, but it can no longer be resumed from "
-                    "this point — the job store rejected or could not accept the "
-                    "checkpoint.",
+                logger.error(
+                    "Checkpoint write failed for job %s (chunk %s, %s rows). "
+                    "%s The job store rejected or could not accept the checkpoint.",
                     checkpoint.job_id,
                     getattr(checkpoint, "chunk_index", "?"),
                     getattr(checkpoint, "rows_processed", "?"),
+                    CHECKPOINT_PERSISTENCE_FAILED,
                 )
         return ok
+
+    def require_save(self, checkpoint: Checkpoint) -> None:
+        """Persist the checkpoint or raise ``CheckpointPersistenceError``.
+
+        Transfer / stream / resilience paths use this so a failed write aborts
+        the job instead of continuing with resume risk.
+        """
+        if not self.save(checkpoint):
+            raise CheckpointPersistenceError(CHECKPOINT_PERSISTENCE_FAILED)
 
     def load(self, job_id: str) -> Checkpoint | None:
         """Load the most recent checkpoint for a job."""

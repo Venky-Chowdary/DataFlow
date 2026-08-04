@@ -12,15 +12,15 @@
 
 | Gap in Market | Airbyte / Fivetran | Informatica | **Datawrap** |
 |---------------|-------------------|-------------|------------------------|
-| AI semantic mapping | Manual | Manual | **210 patterns + RAG + LLM** |
+| AI semantic mapping | Manual | Manual | **BM25 + Hungarian + synonym/role graph (optional AI path)** |
 | Universal file + DB + API | DB-only or file-only | Partial | **Single platform** |
 | Zero-code + NL interface | DevOps required | Consultants required | **Natural language + wizard** |
-| Pre-flight quality gates | After failure | Batch ETL | **8 gates before transfer** |
-| PII auto-detection | Add-on / manual | Partial | **Built-in, 40+ compliance tags** |
-| Self-healing schema drift | Breaks pipelines | Manual remap | **RAG learns corrections** |
-| Enterprise security at SMB price | $100K+ | $100K+ | **SOC2/GDPR from day one** |
+| Pre-flight quality gates | After failure | Batch ETL | **9 core gates (G1–G9) before transfer** |
+| PII auto-detection | Add-on / manual | Partial | **Built-in compliance tagging on columns** |
+| Schema drift | Breaks pipelines | Manual remap | **Detect + operator approve (Studio policy)** |
+| Enterprise security posture | $100K+ | $100K+ | **Security questionnaire pack / posture report — not auditor-certified SOC 2/GDPR** |
 
-**Why no one fully built this:** Incumbents optimized for *connector count* and *managed pipelines*, not *semantic intelligence*. AI-first data movement requires a new stack: RAG over universal schemas, synonym dictionaries, industry templates, and LLM fallback — not bolted-on column matchers.
+**Why no one fully built this:** Incumbents optimized for *connector count* and *managed pipelines*, not *semantic intelligence + fail-closed preflight*. Studio column mapping is BM25 + Hungarian assignment over synonym/role graphs; optional LLM/RAG assists operators or powers vector destinations — it is not the default Studio mapper.
 
 ---
 
@@ -32,31 +32,37 @@
 | **New Transfer** | Source → AI Analysis → Mapping → Destination → Execute | In progress |
 | **Connectors** | Catalog (certified + roadmap) + saved connections + test/save | Built (certified drivers live; roadmap Planned) |
 | **Connections** | Credential vault, health scores, last used | Partial |
-| **Pipelines** | Scheduled/recurring syncs | Planned |
-| **Monitoring** | Live throughput, errors, SLA | Planned |
+| **Schedules** | Scheduled/recurring syncs (workspace nav) | **Built** |
+| **Monitoring** | Live throughput, errors, SLA | Partial (Jobs / Overview) |
 | **Governance** | PII registry, lineage, policy engine | Planned |
-| **Settings** | SSO/Okta, team, security, API keys, audit | UI mock |
-| **AI Copilot** | "Move Shopify orders to BigQuery" | **Built (floating panel)** |
+| **Settings** | SSO/Okta, team, security posture, API keys, audit | **Built** (audit persistence still deepening) |
+| **AI Copilot / Pilot** | "Move Shopify orders to BigQuery" | **Built** |
 
 ---
 
 ## How AI / ML / LLM Works
 
-### Three-Layer Intelligence Stack
+### Studio column mapper (default path)
 
 ```
-Layer 1: Pattern Engine (always on, <10ms)
-  └─ 210 semantic types, 777 synonyms, regex + token matching
-  └─ Handles: AMT→amount, cust_name→customer_name, email detection
+Always-on (Transfer Studio Map step):
+  └─ Tokenize + synonym / abbreviation dictionaries
+  └─ Semantic role + type compatibility scoring
+  └─ BM25 retrieval over candidate fields
+  └─ Hungarian assignment for globally consistent column pairs
+  └─ Operator pin / remap when confidence is below threshold (G4)
+```
 
-Layer 2: RAG Pipeline (vector retrieval)
-  └─ Embeddings: sentence-transformers (fallback: TF-IDF)
-  └─ Store: ChromaDB (320+ ingested knowledge documents)
-  └─ Retrieves: patterns, industry schemas, past user corrections
+### Optional AI / RAG paths (not the default Studio mapper)
 
-Layer 3: LLM Chain-of-Thought (when API keys available)
-  └─ Providers: Anthropic → OpenAI → Ollama → Local fallback
-  └─ 6-step reasoning: identify → classify → map → validate → transform → recommend
+```
+Optional LLM assist (when workspace API keys are configured):
+  └─ Providers: Anthropic → OpenAI → Ollama → local fallback
+  └─ Used for Pilot NL plans and operator suggestions — still subject to Map review + G1–G9
+
+Optional vector / RAG:
+  └─ Embeddings (e.g. sentence-transformers or hosted embedding APIs) for vector destinations
+      and optional retrieval assist — not required for BM25+Hungarian Studio mapping
 ```
 
 ### Semantic Column Analysis Flow
@@ -64,9 +70,9 @@ Layer 3: LLM Chain-of-Thought (when API keys available)
 1. **Name analysis** — tokenize `cust_email_addr` → [cust, email, addr]
 2. **Synonym lookup** — `cust` ∈ customer group, `amt` ∈ amount group
 3. **Sample validation** — regex match emails, phones, SSN patterns on data
-4. **RAG retrieval** — find similar columns from knowledge base
-5. **Confidence score** — combine name (40%) + sample (40%) + RAG (20%)
-6. **PII + compliance** — tag GDPR/HIPAA/PCI-DSS if applicable
+4. **BM25 + role graph** — rank destination candidates; Hungarian picks a conflict-free map
+5. **Confidence score** — combine name, sample evidence, and type/role compatibility (G4 threshold)
+6. **PII + compliance tags** — surface GDPR/HIPAA/PCI-DSS-style tags when patterns match (operator-visible; not a certification claim)
 
 ### Column Mapping Flow
 
@@ -74,29 +80,25 @@ Layer 3: LLM Chain-of-Thought (when API keys available)
 Source: [cust_id, cust_name, AMT, email_addr]
 Target: [customer_id, full_name, amount, email_address]
 
-Mapping strategies (highest confidence wins):
-  1. Exact match (98%)
-  2. Normalized match (95%)
-  3. Synonym match (88%) — cust ↔ customer
-  4. Semantic type match (85%) — both detected as Email Address
-  5. Token overlap (60-75%)
-  6. RAG-enhanced (boost +10%)
-  7. LLM reasoning (final tie-break)
+Default Studio strategies (highest confidence wins; then Hungarian):
+  1. Exact match
+  2. Normalized match
+  3. Synonym match — cust ↔ customer
+  4. Semantic type / role match — both detected as Email Address
+  5. BM25 / token overlap
+  6. Optional LLM suggestion (tie-break assist only; operator still reviews)
 ```
 
-### How LLMs Are "Trained" on Universal Data
+### How intelligence improves without claiming fine-tuned SOC certifications
 
-We do **not** fine-tune a foundation model from scratch. Instead:
+We do **not** fine-tune a foundation model from scratch as the product path. Instead:
 
-1. **Knowledge base** — 210 hand-curated semantic patterns across 10 industries
-2. **Synonym dictionary** — 777 entries + 80 abbreviation tokens (AMT, QTY, SSN, etc.)
-3. **Synthetic training data** — 2,160+ generated column/mapping examples (`training/data_synthesis.py`)
-4. **Industry schemas** — logistics, finance, healthcare, retail templates
-5. **RAG ingestion** — all knowledge embedded into vector store at startup
-6. **User corrections** — `learn_correction()` adds confirmed mappings to vector store
-7. **Evaluation harness** — classification, mapping, PII recall metrics on every release
-
-Optional: embedding fine-tuning pipeline prepares JSONL pairs from synonyms (prep-only today).
+1. **Pattern + synonym dictionaries** — curated semantic types and abbreviations (AMT, QTY, SSN, etc.)
+2. **BM25 + Hungarian mapper** — deterministic Studio column assignment with confidence floors
+3. **Industry schema templates** — logistics, finance, healthcare, retail starting points
+4. **Operator corrections** — pinned maps become the contract for the route
+5. **Evaluation harness** — classification / mapping golden sets on release (report measured floors, never invent %)
+6. **Optional embeddings** — for vector destinations or AI assist paths when configured
 
 ---
 
@@ -132,8 +134,8 @@ Universal conversion matrix maps semantic types → PostgreSQL, MySQL, MongoDB, 
 | Credential storage | MongoDB today → HashiCorp Vault (planned) |
 | SSO / SAML | Okta, Entra ID, Google Workspace (Settings UI) |
 | RBAC | Admin / Editor / Viewer roles (Settings UI) |
-| Audit logs | All transfer + config events (planned persistence) |
-| Compliance | SOC2, GDPR, HIPAA, PCI-DSS tagging on PII columns |
+| Audit logs | Transfer + config events (persistence deepening) |
+| Compliance posture | Security questionnaire pack / posture report download; PII column tagging (GDPR/HIPAA/PCI-DSS *tags*). **Not** auditor-certified SOC 2 / GDPR attestation from day one. |
 | Network | IP allowlist, Private Link (Settings UI) |
 
 ---
@@ -147,11 +149,11 @@ Web (5177)                     Web (5177)
   └─ file → MongoDB              └─ any source → any dest
 API (8001)                       └─ AI mapping wizard
   ├─ connectors (MongoDB)      API (unified)
-  └─ ai (RAG/LLM)                ├─ connectors (all drivers)
-Legacy API (8000)                ├─ ai (RAG/LLM)
-  ├─ PG/Snowflake transfers      ├─ preflight (8 gates)
+  └─ ai (optional LLM/RAG)       ├─ connectors (all drivers)
+Legacy API (8000)                ├─ mapping (BM25+Hungarian; optional AI)
+  ├─ PG/Snowflake transfers      ├─ preflight (G1–G9)
   └─ preflight gates             └─ orchestration (jobs/SSE)
-MongoDB (local)                PostgreSQL + Vault + ChromaDB
+MongoDB (local)                PostgreSQL + Vault (+ optional vector store)
 ```
 
 ---

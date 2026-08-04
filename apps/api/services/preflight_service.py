@@ -796,6 +796,7 @@ def run_file_preflight(
     contract_primary_key: str | None = None,
     destination_pk_columns: list[str] | None = None,
     destination_unique_keys: list[dict[str, Any]] | None = None,
+    destination_foreign_keys: list[dict[str, Any]] | None = None,
     date_locale: str = "",
     cursor_fields: list[str] | None = None,
     compliance_acknowledged: bool = False,
@@ -803,7 +804,7 @@ def run_file_preflight(
     acknowledgment_actor: str = "",
     acknowledgment_reason: str = "",
 ) -> dict[str, Any]:
-    """Run preflight gates for file/DB Studio transfers (G1–G8 + integrity)."""
+    """Run preflight gates for file/DB Studio transfers (G1–G9 + host policy)."""
 
     if row_count <= 0 and sample_rows:
         row_count = len(sample_rows)
@@ -1056,6 +1057,7 @@ def run_file_preflight(
         contract_primary_key=str(contract_primary_key or "").strip(),
         destination_pk_columns=list(destination_pk_columns or []),
         destination_unique_keys=list(destination_unique_keys or []),
+        destination_foreign_keys=list(destination_foreign_keys or []),
     )
 
     # Source-side duplicate-key probe: a small sample can miss duplicates in large
@@ -1194,6 +1196,16 @@ def run_file_preflight(
             recommended_batch_size(_tgt_fmt) or recommended_batch_size(_src_fmt),
         ),
     }
+
+    # Soft FK / relational constraint hints — informational only; never blocks Validate.
+    try:
+        from preflight.constraint_hints import assess_constraint_compatibility
+
+        out["constraint_hints"] = list(assess_constraint_compatibility(ctx) or [])
+    except Exception as hint_exc:
+        logger.debug("constraint hints skipped: %s", hint_exc, exc_info=hint_exc)
+        out["constraint_hints"] = []
+
 
     # Multi-load intelligence: compare sample to last N loads of this route.
     try:

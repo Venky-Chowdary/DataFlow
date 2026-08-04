@@ -260,7 +260,7 @@ export function GateCinema() {
       </div>
 
       <figcaption>
-        Eight gates from the real engine — one <em>block</em> stops write. No “best-effort” drift.
+        nine core gates from the real engine — one <em>block</em> stops write. No “best-effort” drift.
       </figcaption>
     </figure>
   );
