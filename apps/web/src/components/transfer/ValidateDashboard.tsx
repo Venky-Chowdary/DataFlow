@@ -2504,6 +2504,7 @@ export function ValidateDashboard({
             report={reconciliation as Gate8Reconciliation}
             className="df2-vd-gate8"
             compact
+            jobId={repairJobId || undefined}
             onOpenValidate={
               onReviewMappings
                 ? () => onReviewMappings()

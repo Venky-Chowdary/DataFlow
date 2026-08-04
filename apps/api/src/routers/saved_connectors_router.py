@@ -133,10 +133,29 @@ def _preserve_masked_secrets(data: dict[str, Any], existing: Any) -> dict[str, A
 
 
 def _can_access_connector(request: Request, conn: Any) -> bool:
-    """True if the actor may see or mutate this connector."""
-    if not conn.workspace_id:
-        return True
-    return can_read_workspace(conn.workspace_id, _actor_email(request))
+    """True if the actor may see or mutate this connector (workspace + optional ACL)."""
+    actor = _actor_email(request)
+    if conn.workspace_id and not can_read_workspace(conn.workspace_id, actor):
+        return False
+    try:
+        from services.resource_acl import assert_resource_acl
+
+        user = getattr(request.state, "user", None) or {}
+        is_admin = str(user.get("role") or "").lower() == "admin"
+        assert_resource_acl(
+            tenant_id=conn.workspace_id or "",
+            resource_type="connector",
+            resource_id=str(getattr(conn, "id", "") or ""),
+            principal=actor,
+            min_role="viewer",
+            is_admin=is_admin,
+        )
+    except PermissionError:
+        return False
+    except Exception:
+        # Fail closed: ACL infrastructure errors must not open restricted resources.
+        return False
+    return True
 
 
 @router.get("")
@@ -146,7 +165,13 @@ def get_saved_connectors(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     workspace_id = _resolve_workspace(request, workspace_id)
-    return {"connectors": [_to_ui(c) for c in list_connectors(role, workspace_id=workspace_id)]}
+    return {
+        "connectors": [
+            _to_ui(c)
+            for c in list_connectors(role, workspace_id=workspace_id)
+            if _can_access_connector(request, c)
+        ]
+    }
 
 
 @router.get("/{connector_id}")

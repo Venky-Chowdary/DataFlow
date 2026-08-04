@@ -68,14 +68,23 @@ def _calibrated_confidence(
     score_gap: float,
     requires_review: bool,
     hard_cap: float = 0.99,
+    fidelity: str = "",
 ) -> float:
     """Keep near-tie mappings below auto-approve thresholds.
 
     G4 / Studio auto-approve uses ~0.85 in strict mode. A near-tie with
     confidence 0.93 would pass the gate despite ``requires_review``. Cap
     review rows at 0.84 and scale by gap so operators must confirm.
+
+    Fidelity further spreads the signal: lossless identity stays high;
+    lossy / precision-collapse never looks like an auto-approve slam dunk.
     """
     conf = min(float(score), hard_cap)
+    fid = (fidelity or "").strip().lower()
+    if fid in {"lossy", "lossy_cast", "precision_collapse", "truncate"}:
+        conf = min(conf, 0.78)
+    elif fid in {"safe_normalize", "normalize", "cast"}:
+        conf = min(conf, 0.91)
     if requires_review:
         # gap 0.00 → 0.70, gap 0.07 → ~0.805, never above 0.84
         conf = min(conf, round(0.70 + max(score_gap, 0.0) * 1.5, 3), 0.84)
@@ -1826,5 +1835,28 @@ def _apply_create_new_risk_stamps(
                 and (is_lossy_coercion(src, tgt) or is_precision_collapse_coercion(src, tgt))
             ):
                 row["fidelity"] = "lossy_cast"
+            # Vary confidence: lossy create-new must not look like identity slam-dunk.
+            try:
+                base = float(row.get("confidence") or IDENTITY_PASSTHROUGH_CONFIDENCE)
+            except (TypeError, ValueError):
+                base = IDENTITY_PASSTHROUGH_CONFIDENCE
+            row["confidence"] = _calibrated_confidence(
+                base,
+                score_gap=float(row.get("score_gap") or 0.0),
+                requires_review=True,
+                hard_cap=0.88,
+                fidelity=str(row.get("fidelity") or ""),
+            )
+        elif strategy == "identity_passthrough":
+            # Same semantic form, no risk stamps → keep high but not flat 0.99.
+            src_l = src.strip().upper()
+            tgt_l = str(tgt or "").strip().upper()
+            if src_l and tgt_l and src_l == tgt_l:
+                row["confidence"] = round(min(float(row.get("confidence") or 0.95), 0.96), 3)
+            else:
+                row["confidence"] = round(
+                    min(float(row.get("confidence") or IDENTITY_PASSTHROUGH_CONFIDENCE), 0.93),
+                    3,
+                )
         out.append(row)
     return out

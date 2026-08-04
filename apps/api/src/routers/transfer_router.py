@@ -27,13 +27,35 @@ router = APIRouter(prefix="/transfer", tags=["Universal Transfer"])
 
 
 def _can_access_job(request: Request | None, job: dict) -> bool:
-    """Workspace gate for job-scoped transfer sub-resources (CDC snapshots, etc.)."""
+    """Workspace + optional resource-ACL gate for job-scoped sub-resources."""
     if request is None:
         return True
     workspace_id = (job.get("workspace_id") or "").strip()
-    if not workspace_id:
+    actor = _actor_email(request)
+    if workspace_id and not can_read_workspace(workspace_id, actor):
+        return False
+    job_id = str(job.get("_id") or job.get("id") or "").strip()
+    if not job_id:
         return True
-    return can_read_workspace(workspace_id, _actor_email(request))
+    try:
+        from services.resource_acl import assert_resource_acl
+
+        user = getattr(request.state, "user", None) or {}
+        is_admin = str(user.get("role") or "").lower() == "admin"
+        assert_resource_acl(
+            tenant_id=workspace_id,
+            resource_type="job",
+            resource_id=job_id,
+            principal=actor,
+            min_role="viewer",
+            is_admin=is_admin,
+        )
+    except PermissionError:
+        return False
+    except Exception as exc:
+        logging.getLogger(__name__).warning("resource ACL check fail-closed: %s", exc)
+        return False
+    return True
 
 
 def _stamp_job_mapping_artifacts(
@@ -1180,6 +1202,53 @@ async def get_transfer_mapping_proof(job_id: str):
             "exactly-once CDC."
         ),
     }
+
+
+@router.get("/{job_id}/proof-pack")
+async def get_transfer_proof_pack(job_id: str, request: Request):
+    """Export a signed Gate-8 + mapping proof pack (HMAC + content SHA-256).
+
+    Engineering diligence artifact — not an auditor SOC2 / HIPAA letter.
+    """
+    from services.audit_log import actor_from_request, append_audit_event
+    from services.signed_proof_pack import export_proof_pack_for_job
+
+    from ..services.mongodb_service import get_mongodb_service
+
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    if not job or not _can_access_job(request, job):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    actor = actor_from_request(request)
+    pack = export_proof_pack_for_job(job, actor=actor)
+    try:
+        append_audit_event(
+            action="proof_pack.export",
+            resource=f"job:{job_id}",
+            actor=actor,
+            level="info",
+            details={"content_sha256": pack.get("content_sha256"), "version": pack.get("version")},
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning("proof_pack audit failed: %s", exc, exc_info=exc)
+    return pack
+
+
+class ProofPackVerifyBody(BaseModel):
+    pack: dict = Field(default_factory=dict)
+
+
+@router.post("/proof-pack/verify")
+async def verify_transfer_proof_pack(body: ProofPackVerifyBody):
+    """Verify a previously exported signed proof pack against the platform secret."""
+    from services.signed_proof_pack import verify_signed_proof_pack
+
+    result = verify_signed_proof_pack(body.pack if isinstance(body.pack, dict) else {})
+    return result
 
 
 class JobCdcSnapshotBody(BaseModel):

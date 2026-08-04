@@ -1533,6 +1533,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           <Gate8ProofCard
             report={recon}
             explanation={liveJob.explanation}
+            jobId={selectedId || liveJob._id}
             onOpenValidate={() => {
               setEvidenceDrawer(null);
               openValidateInStudio();

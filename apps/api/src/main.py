@@ -35,6 +35,7 @@ from .routers.automation_router import router as automation_router
 from .routers.catalog_router import router as catalog_router
 from .routers.connectors_router import router as connectors_router
 from .routers.contracts_router import router as contracts_router
+from .routers.resource_acl_router import router as resource_acl_router
 from .routers.transforms_router import router as transforms_router
 from .routers.copilot_router import router as copilot_router
 from .routers.mcp_router import router as mcp_router
@@ -390,6 +391,7 @@ app.include_router(auth_router)
 app.include_router(audit_router, prefix="/api/v1")
 app.include_router(workspace_router, prefix="/api/v1")
 app.include_router(contracts_router, prefix="/api/v1")
+app.include_router(resource_acl_router, prefix="/api/v1")
 app.include_router(transforms_router, prefix="/api/v1")
 app.include_router(query_router, prefix="/api/v1")
 app.include_router(usage_router, prefix="/api/v1")

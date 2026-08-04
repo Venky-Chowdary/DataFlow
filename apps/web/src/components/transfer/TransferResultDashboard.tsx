@@ -393,6 +393,7 @@ export function TransferResultDashboard({
           <Gate8ProofCard
             report={report}
             explanation={result.explanation}
+            jobId={result.job_id}
             className="df2-result-gate8"
             onOpenValidate={onOpenValidate}
             onOpenQuarantine={

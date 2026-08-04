@@ -19,6 +19,8 @@ interface Gate8ProofCardProps {
   explanation?: string;
   className?: string;
   compact?: boolean;
+  /** When set, Export downloads a signed HMAC proof pack from the API. */
+  jobId?: string;
   /** Closed-loop: open Map / Validate when reconcile fails. */
   onOpenValidate?: () => void;
   /** Override default “Open Validate / Map” label when already on Validate. */
@@ -43,17 +45,37 @@ function mismatchLabel(m: Gate8SampleMismatch): string {
   return `${row} · ${col}: ${String(m.source_value ?? "—")} → ${String(m.target_value ?? "—")}`;
 }
 
-function exportGate8Proof(report: Gate8Reconciliation) {
-  const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+function downloadJson(filename: string, payload: unknown) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `dataflow-gate8-proof-${Date.now()}.json`;
+  a.download = filename;
   a.rel = "noopener";
   document.body.appendChild(a);
   a.click();
   a.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+async function exportGate8Proof(report: Gate8Reconciliation, jobId?: string) {
+  if (jobId) {
+    try {
+      const { fetchSignedProofPack } = await import("../../lib/api");
+      const pack = await fetchSignedProofPack(jobId);
+      downloadJson(`datawrap-signed-proof-${jobId}.json`, pack);
+      return;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Signed proof pack export failed";
+      // Do not silently substitute an unsigned snapshot when the CTA promised HMAC.
+      window.alert(`Could not export signed proof pack.\n${message}`);
+      return;
+    }
+  }
+  downloadJson(`dataflow-gate8-proof-${Date.now()}.json`, {
+    honesty: "Unsigned local Gate-8 snapshot — open Jobs with a job id to export HMAC-signed pack.",
+    gate8: report,
+  });
 }
 
 /** True when evidence is writer-ack only — not independent source/target Verified. */
@@ -176,6 +198,7 @@ export function Gate8ProofCard({
   explanation,
   className = "",
   compact = false,
+  jobId,
   onOpenValidate,
   onOpenValidateLabel = "Open Validate / Map",
   onOpenQuarantine,
@@ -463,9 +486,9 @@ export function Gate8ProofCard({
             <button
               type="button"
               className="df2-btn df2-btn-sm df2-btn-secondary"
-              onClick={() => exportGate8Proof(report)}
+              onClick={() => void exportGate8Proof(report, jobId)}
             >
-              Export proof JSON
+              {jobId ? "Export signed proof pack" : "Export proof JSON"}
             </button>
           </div>
         </div>

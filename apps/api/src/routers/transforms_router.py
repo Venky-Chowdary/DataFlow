@@ -71,6 +71,8 @@ class ProjectUpdate(BaseModel):
     run_after_transfer: Optional[bool] = None
     trigger_tables: Optional[list[str]] = None
     description: Optional[str] = None
+    """Optimistic concurrency: client must send the version last loaded."""
+    expected_version: Optional[int] = Field(default=None, ge=0)
 
     model_config = {"populate_by_name": True}
 
@@ -188,6 +190,15 @@ def update_project(
     if not project:
         raise HTTPException(status_code=404, detail="Transformation project not found")
     assert_resource_workspace(request, project.workspace_id or "")
+
+    if body.expected_version is not None and int(body.expected_version) != int(project.version or 0):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Transform version conflict: expected {body.expected_version}, "
+                f"current is {project.version}. Reload and retry."
+            ),
+        )
 
     try:
         if body.name is not None:

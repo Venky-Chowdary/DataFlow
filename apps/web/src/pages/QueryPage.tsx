@@ -114,9 +114,19 @@ export function QueryPage({ connectors }: QueryPageProps) {
       className="df2-page-query"
       title="Query"
       kicker="Operations"
-      description="Run ad-hoc queries against saved connectors and export results."
+      description="Ad-hoc read/export against saved connectors — not a BI warehouse or governed semantic layer."
     >
       <PageFrame className="df2-query-page">
+        <div className="df2-alert df2-alert-info" role="note">
+          <DtIcon name="info" size={18} />
+          <div>
+            <strong>Scope</strong>
+            <p>
+              Query is for operator diagnostics and limited exports. Prefer Transfer Studio with Map → Validate → Execute
+              for production movement; do not treat this as Tableau/Looker replacement.
+            </p>
+          </div>
+        </div>
         {connectors.length === 0 ? (
           <EmptyState
             page

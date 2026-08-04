@@ -1156,6 +1156,7 @@ export function JobTheaterView({
         <Gate8ProofCard
           report={job.reconciliation}
           explanation={job.explanation}
+          jobId={jobId}
           className="df2-theater-gate8"
           onOpenValidate={onBackToValidate}
           onOpenQuarantine={

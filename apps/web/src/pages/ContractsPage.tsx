@@ -208,9 +208,19 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
       className="df2-page-contracts"
       title="Contracts"
       kicker="Platform"
-      description="Signed schema agreements that gate transfers and detect drift."
+      description="Signed schema agreements that gate transfers and detect drift. Sign / deprecate are workspace lifecycle status flips — not cryptographic signatures or an MDM catalog."
     >
       <PageFrame className="df2-contracts-workspace">
+        <div className="df2-alert df2-alert-info" role="note">
+          <DtIcon name="info" size={18} />
+          <div>
+            <strong>Lifecycle honesty</strong>
+            <p>
+              Draft → Signed → Deprecated (or Broken via breaker) controls whether transfers may use the contract.
+              This is governance workflow UX, not a policy graph / MDM product.
+            </p>
+          </div>
+        </div>
         {loadError && contracts.length === 0 ? (
           <div className="df2-alert df2-alert-error" role="alert">
             <DtIcon name="alert" size={18} />

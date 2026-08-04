@@ -191,7 +191,10 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
         description: editing.description,
       };
       if (editing.id) {
-        await updateTransformProject(editing.id, body);
+        await updateTransformProject(editing.id, {
+          ...body,
+          expected_version: editing.version ?? 0,
+        });
         toast({ title: "Transform updated.", tone: "success" });
       } else {
         await createTransformProject(body);
@@ -435,6 +438,8 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
                       <div>
                         <h3>{project.name}</h3>
                         <p>
+                          v{project.version ?? 0}
+                          {" · "}
                           {connectorName(project.destination_connector_id)}
                           {project.schema ? ` · ${project.schema}` : ""}
                           {project.run_after_transfer

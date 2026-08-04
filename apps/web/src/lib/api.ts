@@ -918,6 +918,26 @@ export async function fetchJobMappingProof(jobId: string): Promise<{
   );
 }
 
+/** HMAC-signed Gate-8 + mapping proof pack for diligence export. */
+export async function fetchSignedProofPack(jobId: string): Promise<Record<string, unknown>> {
+  return requestJson(
+    [`${API_BASE}/transfer/${encodeURIComponent(jobId)}/proof-pack`],
+    "Signed proof pack not available"
+  );
+}
+
+export async function verifySignedProofPack(
+  pack: Record<string, unknown>,
+): Promise<{ ok: boolean; errors: string[]; content_sha256?: string }> {
+  const res = await apiFetch(`${API_BASE}/transfer/proof-pack/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pack }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Proof pack verify failed"));
+  return res.json();
+}
+
 export async function renameJob(jobId: string, name: string): Promise<JobProgress> {
   const urls = [
     `${API_BASE}/connectors/jobs/${jobId}`,
@@ -3365,7 +3385,7 @@ export async function createTransformProject(
 
 export async function updateTransformProject(
   projectId: string,
-  body: Partial<TransformProject>,
+  body: Partial<TransformProject> & { expected_version?: number },
 ): Promise<TransformProject> {
   const res = await apiFetch(`${API_BASE}/transforms/${encodeURIComponent(projectId)}`, {
     method: "PATCH",
