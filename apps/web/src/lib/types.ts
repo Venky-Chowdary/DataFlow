@@ -95,6 +95,8 @@ export interface TransferCheckpoint {
   cursor_value?: unknown;
   cursor_column?: string;
   status?: string;
+  /** ISO timestamp from checkpoint_service — used for resume-age display. */
+  updated_at?: string;
 }
 
 /**

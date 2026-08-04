@@ -1658,7 +1658,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
             {typeof destSummary.load_method === "string" && destSummary.load_method && (
               <div><dt>Load method</dt><dd>{String(destSummary.load_method)}</dd></div>
             )}
-            {destSummary.chunk_policy && typeof destSummary.chunk_policy === "object" && (
+            {typeof destSummary.chunk_policy === "object" && destSummary.chunk_policy !== null ? (
               <div>
                 <dt>Chunk policy</dt>
                 <dd>
@@ -1672,7 +1672,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                     : ""}
                 </dd>
               </div>
-            )}
+            ) : null}
             {typeof destSummary.database === "string" && destSummary.database && (
               <div><dt>Database</dt><dd>{String(destSummary.database)}</dd></div>
             )}
