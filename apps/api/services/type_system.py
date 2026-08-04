@@ -2526,6 +2526,9 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
             return "BINARY_FLOAT"
         if db in {"databricks", "spark", "delta", "delta_lake"}:
             return "FLOAT"
+        if db == "spanner":
+            # No HALF — nearest Spanner wire is FLOAT32 (never invent FLOAT64 widen).
+            return "FLOAT32"
         if db in {"snowflake", "bigquery"}:
             return types_h.get(LOGICAL_FLOAT, "FLOAT")
         if db == "iceberg":
@@ -3015,6 +3018,9 @@ def _float_ddl_for_dest(db: str, inferred: str | None) -> str | None:
             return "FLOAT"
         if db == "bigquery":
             return "FLOAT64"
+        if db == "spanner":
+            # Spanner GoogleSQL: FLOAT32 / FLOAT64 only — never invent REAL.
+            return "FLOAT32"
         if db in {"databricks", "spark", "delta"}:
             return "FLOAT"
         if db == "iceberg":
@@ -5738,6 +5744,9 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         # Foreign temporals → TIMESTAMP / TIMESTAMPTZ SSOT.
         "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET", "SMALLDATETIME",
         "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMETZ", "YEAR",
+        # Foreign IEEE aliases → REAL / DOUBLE PRECISION. Keep REAL/DOUBLE PRECISION.
+        "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
+        "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
     }),
     "snowflake": frozenset({
         "JSON", "JSONB", "UUID", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE",
@@ -5750,6 +5759,9 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         # Keep TIMESTAMP_NTZ / TIMESTAMP_LTZ / TIMESTAMP_TZ native.
         "TIMESTAMP", "DATETIME", "DATETIME2", "DATETIME64", "TIMESTAMPTZ",
         "DATETIMEOFFSET", "SMALLDATETIME", "TIMETZ", "YEAR",
+        # Foreign IEEE → FLOAT wire. Keep FLOAT.
+        "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
+        "FLOAT64", "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE",
     }),
     "bigquery": frozenset({
         "UUID", "JSONB", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE", "SUPER",
@@ -5761,6 +5773,9 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         # Foreign temporals → DATETIME/TIMESTAMP SSOT. Keep DATETIME/TIMESTAMP/DATE/TIME.
         "DATETIME2", "DATETIME64", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ",
         "TIMESTAMPTZ", "DATETIMEOFFSET", "SMALLDATETIME", "TIMETZ", "YEAR",
+        # Foreign IEEE → FLOAT64 only. Keep FLOAT64.
+        "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
+        "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
     }),
     "spanner": frozenset({
         "UUID", "JSONB", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE", "SUPER",
@@ -5771,6 +5786,9 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "DATETIME2", "DATETIME64", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ",
         "TIMESTAMPTZ", "DATETIMEOFFSET", "SMALLDATETIME", "TIMETZ", "YEAR",
         "TIMESTAMP",  # NTZ invent — SSOT STRING(30) / TIMESTAMP for aware via ddl
+        # Foreign IEEE → FLOAT32/FLOAT64. Keep FLOAT32/FLOAT64. Never invent REAL.
+        "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16",
+        "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
     }),
     "postgresql": frozenset({
         # Bare JSON is a logical alias; create-new document wire is JSONB.
@@ -5783,6 +5801,9 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         # Foreign temporals → TIMESTAMP/TIMESTAMPTZ. Keep TIMESTAMP/TIMESTAMPTZ/DATE/TIME.
         "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET", "SMALLDATETIME",
         "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMETZ", "YEAR",
+        # Foreign IEEE aliases → REAL / DOUBLE PRECISION. Keep REAL/DOUBLE PRECISION.
+        "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
+        "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
     }),
     "mysql": frozenset({
         "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC",
@@ -5795,6 +5816,9 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ",
         "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET", "SMALLDATETIME",
         "TIME", "TIMETZ",
+        # Foreign IEEE → FLOAT / DOUBLE. Keep FLOAT/DOUBLE.
+        "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
+        "FLOAT64", "BINARY_FLOAT", "BINARY_DOUBLE",
     }),
     "sqlserver": frozenset({
         "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC", "JSON",
@@ -5805,6 +5829,9 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         # to DATETIME2(7). Keep DATETIME2 / DATETIMEOFFSET / SMALLDATETIME / DATE.
         "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ",
         "DATETIME", "DATETIME64", "TIMETZ", "YEAR",
+        # Foreign IEEE → REAL / FLOAT. Keep REAL/FLOAT (incl. FLOAT(n) typmod).
+        "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
+        "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE",
     }),
     "oracle": frozenset({
         "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC", "JSON",
@@ -5817,6 +5844,9 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "DATETIME", "DATETIME2", "DATETIME64", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ",
         "TIMESTAMP_TZ", "TIMESTAMPTZ", "DATETIMEOFFSET", "SMALLDATETIME",
         "TIME", "TIMETZ", "YEAR",
+        # Foreign IEEE → BINARY_FLOAT / BINARY_DOUBLE. Keep BINARY_*.
+        "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
+        "FLOAT64", "DOUBLE", "FLOAT",
     }),
     "databricks": frozenset({
         "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC",
@@ -5826,6 +5856,9 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "TIMESTAMP", "DATETIME", "DATETIME2", "DATETIME64", "TIMESTAMPTZ",
         "DATETIMEOFFSET", "SMALLDATETIME", "TIMETZ", "YEAR",
         "TIMESTAMP_TZ",
+        # Foreign IEEE → FLOAT / DOUBLE. Keep FLOAT/DOUBLE (HALF rematerializes).
+        "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
+        "FLOAT64", "BINARY_FLOAT", "BINARY_DOUBLE",
     }),
     "iceberg": frozenset({
         "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC",
@@ -5835,6 +5868,9 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "DECIMAL", "NUMERIC", "NUMBER",
         "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET", "SMALLDATETIME",
         "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMETZ", "YEAR",
+        # Foreign IEEE → float / double. Keep lowercase float/double.
+        "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
+        "FLOAT64", "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
     }),
     "duckdb": frozenset({
         "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
@@ -5842,6 +5878,9 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "JSONB", "UUID", "SUPER", "VARIANT", "UNIQUEIDENTIFIER", "NVARCHAR2",
         "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET", "SMALLDATETIME",
         "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMETZ", "YEAR",
+        # Foreign IEEE → REAL / DOUBLE. Keep REAL/DOUBLE.
+        "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
+        "BINARY_FLOAT", "BINARY_DOUBLE", "FLOAT",
     }),
     "clickhouse": frozenset({
         "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
@@ -5850,6 +5889,9 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "DATETIME", "DATETIME2", "TIMESTAMP", "TIMESTAMPTZ", "DATETIMEOFFSET",
         "SMALLDATETIME", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ",
         "TIMETZ", "YEAR",
+        # Foreign IEEE → Float32 / Float64. Keep Float32/Float64.
+        "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
+        "FLOAT64", "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
     }),
     "trino": frozenset({
         "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
@@ -5857,6 +5899,8 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "JSONB", "UUID", "SUPER", "VARIANT", "UNIQUEIDENTIFIER", "NVARCHAR2",
         "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET", "SMALLDATETIME",
         "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMETZ", "YEAR",
+        "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
+        "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
     }),
     "presto": frozenset({
         "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
@@ -5864,9 +5908,13 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "JSONB", "UUID", "SUPER", "VARIANT", "UNIQUEIDENTIFIER", "NVARCHAR2",
         "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET", "SMALLDATETIME",
         "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMETZ", "YEAR",
+        "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
+        "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
     }),
     "generic_sql": frozenset({
         "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
+        "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
+        "BINARY_FLOAT", "BINARY_DOUBLE", "REAL", "DOUBLE", "FLOAT",
     }),
     # SQLite has no true fixed-point type. DECIMAL/NUMERIC/NUMBER stamps get
     # NUMERIC affinity and silently store high-precision values as IEEE real.
@@ -5887,6 +5935,9 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "BOOLEAN", "BOOL", "BIT",
         "ENUM", "SET", "INET", "CIDR", "VECTOR", "STRING",
         "STRUCT", "MAP", "RECORD", "ARRAY",
+        # Foreign IEEE aliases → REAL (SQLite affinity SSOT). Keep REAL.
+        "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
+        "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
     }),
 }
 
@@ -5911,7 +5962,24 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
     bare = upper.split("(", 1)[0].strip()
     if bare in _PHYSICAL_STAMP_PASS_THROUGH or upper in _PHYSICAL_STAMP_PASS_THROUGH:
         # Refuse pass-through of tokens illegal / non-create-wire on this dest.
-        if bare in reject:
+        if bare in reject or upper in reject:
+            return False
+        # DOUBLE PRECISION is a multi-word pass-through token. Keep only on
+        # engines whose create-new wire is DOUBLE PRECISION (PG-family /
+        # Redshift). Elsewhere rematerialize via ddl_type (MySQL DOUBLE,
+        # Snowflake FLOAT, SQLite REAL, …).
+        if upper == "DOUBLE PRECISION" and db not in {
+            "postgresql",
+            "postgres",
+            "cockroachdb",
+            "timescaledb",
+            "alloydb",
+            "yugabytedb",
+            "citus",
+            "supabase",
+            "greenplum",
+            "redshift",
+        }:
             return False
         return True
     # MySQL/Maria FLOAT is a real physical stamp (HALF create-new). On PG/etc.
@@ -5927,8 +5995,10 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
         # foreign multi-word temporals as CREATE DDL.
         return False
     if upper.startswith("DOUBLE ") or upper.startswith("CHARACTER "):
-        # SQLite: DOUBLE PRECISION → REAL; CHARACTER VARYING → TEXT.
-        # Other dests: rematerialize aliases via ddl_type when needed.
+        # DOUBLE PRECISION handled above when in pass-through set; remaining
+        # DOUBLE … forms rematerialize. CHARACTER VARYING → ddl on SQLite.
+        if upper.startswith("DOUBLE "):
+            return False
         if db == "sqlite":
             return False
         return True
