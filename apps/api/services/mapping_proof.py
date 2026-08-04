@@ -112,20 +112,41 @@ def mapping_fidelity(
 
     dest = (destination_db_type or "").strip().lower()
     if is_lossy_coercion(src_type, tgt_type, dest_db=dest):
+        from services.conversion_contract import classify_conversion
+
+        conv = classify_conversion(
+            src_type,
+            tgt_type,
+            dest_db=dest,
+            transform=transform,
+            risk_acknowledged=bool(
+                mapping.get("risk_acknowledged") or mapping.get("riskAcknowledged")
+            ),
+        )
         return {
             "verdict": "lossy_cast",
             "reason": f"{src_type} → {tgt_type} can lose precision, range, or domain.",
             "type_narrowing": True,
             "transform_fidelity": t_fidelity,
+            "conversion_class": conv["conversion_class"],
+            "invents_capacity": conv["invents_capacity"],
+            "requires_risk_contract": conv["requires_risk_contract"],
         }
     if t_fidelity == "mutate":
+        from services.conversion_contract import ConversionClass
+
         return {
             "verdict": "mutate",
             "reason": f"Transform '{transform}' rewrites values before write.",
             "type_narrowing": False,
             "transform_fidelity": t_fidelity,
+            "conversion_class": ConversionClass.NEEDS_TRANSFORM.value,
+            "invents_capacity": False,
+            "requires_risk_contract": False,
         }
     if t_fidelity == "lossy_cast":
+        from services.conversion_contract import ConversionClass
+
         return {
             "verdict": "cast",
             "reason": (
@@ -134,12 +155,20 @@ def mapping_fidelity(
             ),
             "type_narrowing": False,
             "transform_fidelity": t_fidelity,
+            "conversion_class": ConversionClass.NEEDS_QUARANTINE.value,
+            "invents_capacity": False,
+            "requires_risk_contract": False,
         }
+    from services.conversion_contract import ConversionClass
+
     return {
         "verdict": "preserve",
         "reason": f"{src_type} → {tgt_type} round-trips without loss.",
         "type_narrowing": False,
         "transform_fidelity": t_fidelity,
+        "conversion_class": ConversionClass.LOSSLESS.value,
+        "invents_capacity": False,
+        "requires_risk_contract": False,
     }
 
 
@@ -171,6 +200,9 @@ def stamp_mapping_fidelity(
             "fidelity": verdict["verdict"],
             "fidelity_reason": verdict["reason"],
             "type_narrowing": verdict["type_narrowing"],
+            "conversion_class": verdict.get("conversion_class"),
+            "invents_capacity": verdict.get("invents_capacity"),
+            "requires_risk_contract": verdict.get("requires_risk_contract"),
         })
     return out
 

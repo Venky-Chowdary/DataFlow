@@ -19,6 +19,7 @@ Use this pack instead of marketing screenshots when Fortune 100 teams ask “pro
 | Proof post-write | Signed packs stamp `assurance`; `migration_proven` only for full_checksum post-write — never from pre-write / sample / writer-ack alone (`docs/PROOF_POST_WRITE_CONTRACT.md`) |
 | Quarantine row contract | Every reject stamps original/expected/actual/reason/transform/recovery/PKs/job/connector/retry (`docs/QUARANTINE_ROW_CONTRACT.md`) |
 | Validate decision path | Root Cause → Affected Gates → Impact → Actions → Preview → Risk Contract → Execute; Execute-ready ≠ `migration_proven` (`docs/VALIDATE_DECISION_PATH.md`) |
+| Conversion contract | Charter 7-class ConversionClass + Map→DDL identity hash; invent (p,s)/FSP/TZ needs approval; AI type matrix non-authoritative (`docs/CONVERSION_CONTRACT.md`) |
 
 Do **not** claim “8 gates,” “ten gates,” or invent a marketed “G10 constraints” gate. Required core gates remain **G1–G9**.
 

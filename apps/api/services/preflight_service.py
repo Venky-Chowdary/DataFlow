@@ -1312,6 +1312,41 @@ def run_file_preflight(
         acknowledgment_reason=acknowledgment_reason,
     )
 
+    # Module 12 — Conversion Contract + Map→DDL identity stamp (never invent green).
+    try:
+        from services.conversion_contract import (
+            classify_mapping,
+            ddl_identity_report,
+        )
+
+        dest_for_ddl = (destination_db_type or "").strip().lower()
+        proof_bundle = {
+            **proof_bundle,
+            "ddl_identity": ddl_identity_report(
+                list(mappings or []),
+                dest_db=dest_for_ddl,
+            ),
+            "conversion_contract": {
+                "version": "conversion_contract.v1",
+                "columns": [
+                    {
+                        "source": m.get("source"),
+                        "target": m.get("target"),
+                        **classify_mapping(
+                            m,
+                            destination_db_type=dest_for_ddl,
+                        ),
+                    }
+                    for m in (mappings or [])[:80]
+                    if isinstance(m, dict)
+                ],
+            },
+        }
+    except Exception as conv_exc:
+        logger.debug(
+            "conversion contract stamp skipped: %s", conv_exc, exc_info=conv_exc
+        )
+
     from services.preflight_rules import enrich_blockers
 
     blockers = [

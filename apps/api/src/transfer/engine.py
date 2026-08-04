@@ -347,6 +347,35 @@ def _validation_plan_for_result(pf: dict | None) -> dict:
     return plan
 
 
+def _enforce_ddl_identity(
+    pf: dict | None,
+    mappings: list,
+    *,
+    dest_db: str,
+) -> str | None:
+    """Module 12 — fail closed when Map→DDL fingerprint drifts after Validate.
+
+    Returns an error message when identity fails; None when check passes or
+    when no Validate fingerprint exists yet (legacy / stamp unavailable).
+    """
+    if not pf:
+        return None
+    approved = ((pf.get("proof_bundle") or {}).get("ddl_identity") or {}).get(
+        "ddl_identity_hash"
+    ) or ""
+    if not approved:
+        return None
+    try:
+        from services.conversion_contract import DdlIdentityError, assert_ddl_identity
+
+        assert_ddl_identity(str(approved), mappings, dest_db=dest_db or "")
+    except DdlIdentityError as exc:
+        return str(exc)
+    except Exception as exc:  # pragma: no cover — never invent soft-pass on check crash
+        return f"DDL identity check failed closed: {exc}"
+    return None
+
+
 def _fail_job_preflight(mongo, job_id: str, pf: dict, *, lineage) -> tuple[str, dict]:
     """Mark job failed at preflight and persist inspectable quarantine rows."""
     from services.quarantine_from_preflight import quarantine_rows_from_preflight
@@ -2104,6 +2133,25 @@ class UniversalTransferEngine:
                     )
 
             if pf:
+                ddl_err = _enforce_ddl_identity(
+                    pf,
+                    mappings,
+                    dest_db=str(getattr(request.destination, "format", None) or ""),
+                )
+                if ddl_err:
+                    mongo.update_job_status(
+                        job_id, "failed", error=ddl_err, phase="failed", progress_pct=0
+                    )
+                    return TransferResult(
+                        success=False,
+                        error=ddl_err,
+                        error_details={
+                            "reason": "ddl_identity_mismatch",
+                            "remediation": "Re-run Validate after Map/DDL changes.",
+                        },
+                        operation=request.operation,
+                        job_id=job_id,
+                    )
                 mongo.update_job_status(
                     job_id, "running", phase="preflight", progress_pct=15, preflight=pf
                 )
@@ -2902,6 +2950,25 @@ class UniversalTransferEngine:
                     )
 
             if pf:
+                ddl_err = _enforce_ddl_identity(
+                    pf,
+                    mappings,
+                    dest_db=str(getattr(request.destination, "format", None) or ""),
+                )
+                if ddl_err:
+                    mongo.update_job_status(
+                        job_id, "failed", error=ddl_err, phase="failed", progress_pct=0
+                    )
+                    return TransferResult(
+                        success=False,
+                        error=ddl_err,
+                        error_details={
+                            "reason": "ddl_identity_mismatch",
+                            "remediation": "Re-run Validate after Map/DDL changes.",
+                        },
+                        operation=request.operation,
+                        job_id=job_id,
+                    )
                 mongo.update_job_status(
                     job_id, "running", phase="preflight", progress_pct=15, preflight=pf
                 )
@@ -3500,6 +3567,25 @@ class UniversalTransferEngine:
                     )
 
             if pf:
+                ddl_err = _enforce_ddl_identity(
+                    pf,
+                    mappings,
+                    dest_db=str(getattr(request.destination, "format", None) or ""),
+                )
+                if ddl_err:
+                    mongo.update_job_status(
+                        job_id, "failed", error=ddl_err, phase="failed", progress_pct=0
+                    )
+                    return TransferResult(
+                        success=False,
+                        error=ddl_err,
+                        error_details={
+                            "reason": "ddl_identity_mismatch",
+                            "remediation": "Re-run Validate after Map/DDL changes.",
+                        },
+                        operation=request.operation,
+                        job_id=job_id,
+                    )
                 mongo.update_job_status(
                     job_id, "running", phase="preflight", progress_pct=15, preflight=pf
                 )
