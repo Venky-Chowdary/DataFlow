@@ -122,6 +122,7 @@ class SavedConnector:
     workspace_id: str = ""
     last_tested_at: str | None = None
     last_test_ok: bool | None = None
+    credentials_rotated_at: str | None = None
     created_at: str = field(default_factory=lambda: _now())
 
     def to_dict(self) -> dict[str, Any]:
@@ -159,6 +160,7 @@ class SavedConnector:
             workspace_id=data.get("workspace_id", ""),
             last_tested_at=data.get("last_tested_at"),
             last_test_ok=data.get("last_test_ok") if "last_test_ok" in data else None,
+            credentials_rotated_at=data.get("credentials_rotated_at"),
             created_at=data.get("created_at", _now()),
         )
 

@@ -622,6 +622,19 @@ class MySqlChangeStreamCdc:
         # lookup against tables[0]'s columns.
         self._column_names_cache[self.table] = list(live["columns"].keys())
         self.last_ddl_at = str(entry.get("recorded_at") or "") or self.last_ddl_at
+        try:
+            from services.cdc_mapping_review import flag_mapping_review
+
+            flag_mapping_review(
+                source_key=self.source_key,
+                table=self.table,
+                reason="cdc_schema_drift",
+                schema_version=int(entry.get("version") or 0) or None,
+                ddl=str(entry.get("ddl") or ""),
+                column_names=list(live["columns"].keys()),
+            )
+        except Exception:
+            _logger.exception("Failed to flag CDC mapping review after MySQL schema drift")
         _logger.info(
             "Recorded MySQL CDC schema change for %s.%s v%s",
             self.database,

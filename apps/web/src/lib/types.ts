@@ -185,6 +185,10 @@ export interface TransferJob {
   cdc_confirmed_flush_lsn?: string | null;
   cdc_heartbeat_at?: string | null;
   cdc_last_ddl_at?: string | null;
+  mapping_review_required?: boolean | null;
+  mapping_review_id?: string | null;
+  mapping_review_reason?: string | null;
+  mapping_review_honesty?: string | null;
   /** Durable CDC resume cursor (slot/LSN, GTID, change-stream token). */
   watermark?: string | null;
   /** True when multi-table shared log reader is active (one slot / server_id). */
@@ -313,6 +317,15 @@ export interface Gate8ReconciliationPayload {
     error?: string;
     alignment?: string;
     identity_warning?: string;
+    /** Deterministic sample set for auditor replay. */
+    sample_seed?: {
+      method?: string;
+      size?: number;
+      sort_key?: string;
+      source_sort_key?: string;
+      pk_values?: string[];
+      content_sha256?: string;
+    };
     mismatches?: {
       row?: string | number;
       source?: string;

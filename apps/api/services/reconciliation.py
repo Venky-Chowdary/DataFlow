@@ -3791,9 +3791,45 @@ def sample_compare_rows(
         source_records, key=lambda r: _sortable(_row_key(r, source_side=True))
     )[:sample_size]
 
+    # Deterministic seed for auditor replay — sorted PK (or positional index) set.
+    import hashlib
+
+    pk_values: list[str] = []
+    for src in source_sorted:
+        key_raw = _row_key(src, source_side=True)
+        pk_values.append(normalize_cell(key_raw) if key_raw is not None else "")
+    seed_canon = json.dumps(
+        {
+            "method": "keyed_sorted" if sort_key else "positional_sorted",
+            "size": len(source_sorted),
+            "sort_key": sort_key or "",
+            "source_sort_key": source_sort_key or "",
+            "pk_values": pk_values,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    sample_seed = {
+        "method": "keyed_sorted" if sort_key else "positional_sorted",
+        "size": len(source_sorted),
+        "sort_key": sort_key or "",
+        "source_sort_key": source_sort_key or "",
+        "pk_values": pk_values[:sample_size],
+        "content_sha256": hashlib.sha256(seed_canon.encode("utf-8")).hexdigest(),
+    }
+
     mismatches: list[dict[str, str]] = []
     compared = 0
     target_fallback = sorted(target_dicts, key=lambda d: _sortable(_row_key(d)))
+
+    def _result(*, passed: bool) -> dict[str, Any]:
+        return {
+            "passed": passed,
+            "compared": compared,
+            "mismatches": mismatches,
+            "sample_seed": sample_seed,
+            "alignment": "keyed" if (sort_key and target_by_key) else "positional",
+        }
 
     for idx, src in enumerate(source_sorted):
         if sort_key and target_by_key:
@@ -3857,17 +3893,9 @@ def sample_compare_rows(
                     }
                 )
                 if len(mismatches) >= 10:
-                    return {
-                        "passed": False,
-                        "compared": compared,
-                        "mismatches": mismatches,
-                    }
+                    return _result(passed=False)
 
-    return {
-        "passed": len(mismatches) == 0,
-        "compared": compared,
-        "mismatches": mismatches,
-    }
+    return _result(passed=len(mismatches) == 0)
 
 
 class TargetSampleUnavailable(RuntimeError):

@@ -758,6 +758,28 @@ class PostgreSqlChangeStreamCdc:
         )
         self.decode_schema = live
         self.last_ddl_at = str(entry.get("recorded_at") or "") or self.last_ddl_at
+        try:
+            from services.cdc_mapping_review import flag_mapping_review
+
+            live_cols = live.get("columns") or {}
+            if isinstance(live_cols, dict):
+                cols = [str(k) for k in live_cols.keys() if k]
+            else:
+                cols = [
+                    str(c.get("name") or c.get("column") or "")
+                    for c in live_cols
+                    if isinstance(c, dict)
+                ]
+            flag_mapping_review(
+                source_key=self.source_key,
+                table=self._qualified_table(),
+                reason="cdc_schema_drift",
+                schema_version=int(entry.get("version") or 0) or None,
+                ddl=str(entry.get("ddl") or ""),
+                column_names=[c for c in cols if c],
+            )
+        except Exception:
+            _logger.exception("Failed to flag CDC mapping review after schema drift")
         _logger.info(
             "Recorded PostgreSQL CDC schema change for %s v%s",
             self._qualified_table(),

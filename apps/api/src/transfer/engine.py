@@ -1544,6 +1544,7 @@ class UniversalTransferEngine:
                 getattr(dst, "type", "") or getattr(dst, "kind", "") or ""
             ),
             "dataflow.sync_mode": str(getattr(request, "sync_mode", "") or ""),
+            "dataflow.workspace_id": str(getattr(request, "workspace_id", "") or ""),
         }
         span_cm = (
             start_span("transfer.execute", attributes=span_attrs, kind="internal")

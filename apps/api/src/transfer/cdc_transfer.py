@@ -170,6 +170,26 @@ def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
         out["cdc_confirmed_flush_lsn"] = str(confirmed)
     if row_filter:
         out["cdc_row_filter"] = str(row_filter)
+    try:
+        from services.cdc_mapping_review import open_review_for_source
+
+        source_key = getattr(cdc, "source_key", None) or ""
+        table = ""
+        if hasattr(cdc, "_qualified_table"):
+            try:
+                table = str(cdc._qualified_table() or "")
+            except Exception:
+                table = str(getattr(cdc, "table", "") or "")
+        else:
+            table = str(getattr(cdc, "table", "") or "")
+        review = open_review_for_source(str(source_key), table) if source_key else None
+        if review:
+            out["mapping_review_required"] = True
+            out["mapping_review_id"] = review.get("id")
+            out["mapping_review_reason"] = review.get("reason")
+            out["mapping_review_honesty"] = review.get("honesty")
+    except Exception as exc:
+        logging.getLogger(__name__).debug("CDC mapping review lookup skipped: %s", exc)
     return out
 
 

@@ -954,6 +954,18 @@ export function JobTheaterView({
             </div>
           </article>
         )}
+        {job.mapping_review_required && (
+          <article
+            className="df2-theater-v3-metric df2-theater-v3-metric-warn"
+            title={String(job.mapping_review_honesty || "CDC schema drifted — open Map before continuing")}
+          >
+            <DtIcon name="alert" size={16} />
+            <div>
+              <strong>Map review required</strong>
+              <span>{String(job.mapping_review_reason || "cdc_schema_drift")}</span>
+            </div>
+          </article>
+        )}
         {job.watermark && (
           <article className="df2-theater-v3-metric">
             <DtIcon name="gate" size={16} />

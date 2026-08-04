@@ -410,7 +410,7 @@ class SqlServerNativeCdc:
                 return
             from services.cdc_schema_history import record_ddl
 
-            record_ddl(
+            entry = record_ddl(
                 self.source_key,
                 f"{self.schema}.{self.table}",
                 ddl=f"cdc.capture_instance={self.capture_instance}",
@@ -422,6 +422,19 @@ class SqlServerNativeCdc:
                 },
             )
             self._last_schema_fingerprint = fingerprint
+            try:
+                from services.cdc_mapping_review import flag_mapping_review
+
+                flag_mapping_review(
+                    source_key=self.source_key,
+                    table=f"{self.schema}.{self.table}",
+                    reason="cdc_schema_drift",
+                    schema_version=int(entry.get("version") or 0) or None,
+                    ddl=str(entry.get("ddl") or ""),
+                    column_names=[str(c.get("name") or "") for c in cols if c.get("name")],
+                )
+            except Exception:
+                logger.debug("SQL Server CDC mapping review flag skipped", exc_info=True)
         except Exception as exc:
             logger.debug("SQL Server CDC schema history skipped: %s", exc)
 

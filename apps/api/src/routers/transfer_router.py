@@ -1135,7 +1135,7 @@ async def run_universal_transfer(
 
 
 @router.get("/{job_id}/explanation")
-async def get_transfer_explanation(job_id: str):
+async def get_transfer_explanation(job_id: str, request: Request):
     """Return the human-readable pipeline explanation for a transfer job."""
     from ..services.mongodb_service import get_mongodb_service
 
@@ -1144,7 +1144,7 @@ async def get_transfer_explanation(job_id: str):
         job = mongo.get_job(job_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
-    if not job:
+    if not job or not _can_access_job(request, job):
         raise HTTPException(status_code=404, detail="Job not found")
     return {
         "job_id": job_id,
@@ -1156,7 +1156,7 @@ async def get_transfer_explanation(job_id: str):
 
 
 @router.get("/{job_id}/mapping-proof")
-async def get_transfer_mapping_proof(job_id: str):
+async def get_transfer_mapping_proof(job_id: str, request: Request):
     """Return persisted per-mapping evidence for Theater / Jobs deep-link."""
     from services.mapping_proof import mapping_proof_or_build
 
@@ -1167,7 +1167,7 @@ async def get_transfer_mapping_proof(job_id: str):
         job = mongo.get_job(job_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
-    if not job:
+    if not job or not _can_access_job(request, job):
         raise HTTPException(status_code=404, detail="Job not found")
 
     proof = job.get("mapping_proof") if isinstance(job.get("mapping_proof"), dict) else {}

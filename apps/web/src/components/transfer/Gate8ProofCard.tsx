@@ -428,6 +428,16 @@ export function Gate8ProofCard({
               : "—"}
           </dd>
         </div>
+        {report.sample_compare?.sample_seed?.content_sha256 && (
+          <div>
+            <dt>Sample seed</dt>
+            <dd
+              title={`method=${report.sample_compare.sample_seed.method || "?"} size=${report.sample_compare.sample_seed.size ?? "?"}`}
+            >
+              {shortChecksum(report.sample_compare.sample_seed.content_sha256)}
+            </dd>
+          </div>
+        )}
         {(missingKeys > 0 || extraKeys > 0 || report.matched_key_count != null) && (
           <div>
             <dt>Keys</dt>
