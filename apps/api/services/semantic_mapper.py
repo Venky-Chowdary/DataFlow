@@ -1802,6 +1802,7 @@ def _apply_create_new_risk_stamps(
         create_new_mapping_target_type,
         is_lossy_coercion,
         is_precision_collapse_coercion,
+        normalize_logical_type as _nlt,
     )
 
     out: list[dict] = []
@@ -1823,11 +1824,23 @@ def _apply_create_new_risk_stamps(
         src = str(row.get("source_type") or "VARCHAR")
         db = destination_db_type or str(row.get("dest_db_type") or "")
         stamped = str(row.get("target_type") or "").strip()
-        physical = create_new_mapping_target_type(src, db) if db else stamped or src
-        tgt = physical or stamped or src
-        if physical and physical != stamped:
-            row["target_type"] = physical
-            tgt = physical
+        physical_from_src = create_new_mapping_target_type(src, db) if db else ""
+        if db and stamped:
+            physical_from_stamp = create_new_mapping_target_type(stamped, db)
+            stamp_l = _nlt(stamped)
+            src_phys_l = _nlt(physical_from_src or src)
+            # Transform/pipeline may widen VARCHAR→DATETIME(6)/JSONB/UUID wire.
+            # Never erase that with source-derived TEXT create-new.
+            if stamp_l not in {"string", "text"} or src_phys_l not in {"string", "text"}:
+                tgt = physical_from_stamp or stamped
+            else:
+                tgt = physical_from_src or physical_from_stamp or stamped
+        elif db:
+            tgt = physical_from_src or src
+        else:
+            tgt = stamped or src
+        if tgt and tgt != stamped:
+            row["target_type"] = tgt
         risks = assess_create_new_type_risk(src, tgt, destination_db_type=db)
         if risks:
             row["create_new_risks"] = risks

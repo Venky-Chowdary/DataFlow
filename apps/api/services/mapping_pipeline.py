@@ -6,7 +6,12 @@ import re
 
 from services.semantic_mapper import map_columns
 from services.transform_engine import infer_transform_for_mapping
-from services.type_system import ddl_carrier_type, ddl_type, normalize_logical_type
+from services.type_system import (
+    create_new_mapping_target_type,
+    ddl_carrier_type,
+    ddl_type,
+    normalize_logical_type,
+)
 
 CONFIDENCE_FLOOR = 0.72
 # Untyped VARCHAR with no samples — refuse inflated confidence (thin SaaS / failed introspect).
@@ -521,9 +526,9 @@ def run_mapping_pipeline(
                 source_samples=col_samples,
                 destination_db_type=destination_db_type,
             )
-        # New/generic destinations: the DDL type should match the chosen typed
-        # transform so a date column is created for "date" transforms, etc.
-        # Do not collapse parametric DECIMAL(p,s) → bare DECIMAL.
+        # New/generic destinations: typed transforms must stamp *physical* DDL
+        # for the destination (DATETIME(6)/CHAR(36)/JSONB) — never bare logical
+        # tokens (DATETIME/UUID/JSON) that later false-block Validate.
         if normalize_logical_type(tgt_type) in {"string", "text", "varchar", "unknown"}:
             typed_target = _TYPED_TRANSFORM_TARGET_TYPE.get(transform)
             if typed_target:
@@ -533,6 +538,14 @@ def run_mapping_pipeline(
                         if destination_db_type
                         else src_type
                     )
+                elif destination_db_type:
+                    seed = (
+                        src_type
+                        if normalize_logical_type(src_type)
+                        == normalize_logical_type(typed_target)
+                        else typed_target
+                    )
+                    tgt_type = create_new_mapping_target_type(seed, destination_db_type)
                 else:
                     tgt_type = typed_target
 

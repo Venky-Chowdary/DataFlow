@@ -17,6 +17,8 @@ from preflight.models import (
 
 GateFn = Callable[[PreflightContext], GateResult]
 
+# Offline fallback when apps.api type_system cannot be imported (package-only).
+# Hosted Validate must use is_lossy_coercion / is_precision_collapse_coercion.
 LOSSY_COERCIONS = {
     ("VARCHAR", "INTEGER"),
     ("VARCHAR", "TIMESTAMP"),
@@ -411,9 +413,11 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             target = ColumnSchema(name=m.target, inferred_type=stamped)
         examined += 1
         pair = (source_col.inferred_type.upper(), target.inferred_type.upper())
-        lossy = pair in LOSSY_COERCIONS
-        if not lossy and is_lossy_coercion:
-            lossy = is_lossy_coercion(source_col.inferred_type, target.inferred_type)
+        # Prefer type_system SSOT when available; LOSSY_COERCIONS is offline fallback only.
+        if is_lossy_coercion:
+            lossy = bool(is_lossy_coercion(source_col.inferred_type, target.inferred_type))
+        else:
+            lossy = pair in LOSSY_COERCIONS
         # Declared type loss (not probe-only domain wraps) — samples cannot soft-pass.
         declared_lossy = bool(lossy)
         # Fractional scale that exceeds destination DECIMAL caps is silent truncation
