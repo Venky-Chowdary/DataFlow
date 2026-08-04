@@ -109,15 +109,23 @@ export function isGate8WriterAckOnly(report: Gate8Reconciliation): boolean {
 export function isGate8SampleVerified(report: Gate8Reconciliation): boolean {
   const phase = String(report.phase || "").toLowerCase();
   if (phase.includes("sample_verified")) return true;
+  if (String(report.coverage || "").toLowerCase() === "sample") return true;
   const msg = String(report.message || "").toLowerCase();
   if (/sample-verified|sample verified/i.test(msg)) return true;
   const compared = Number(report.sample_compare?.compared ?? 0);
-  return Boolean(
+  const sampleOk = Boolean(
     report.passed
     && compared > 0
-    && report.sample_compare?.passed !== false
-    && !String(report.target_checksum || "").trim()
+    && report.sample_compare?.passed !== false,
   );
+  if (!sampleOk) return false;
+  // No independent dest digest — sample is the only proof.
+  if (!String(report.target_checksum || "").trim()) return true;
+  // Whole-table digests diverge — sample authority, not population proof.
+  const src = String(report.source_checksum || "").trim();
+  const tgt = String(report.target_checksum || "").trim();
+  if (src && tgt && src !== tgt) return true;
+  return false;
 }
 
 /** True when evidence is pre-write only — never show Verified / match claims. */
@@ -151,7 +159,11 @@ export function isGate8PreWriteSimulation(report: Gate8Reconciliation): boolean 
 export type Gate8StatusView = {
   label: string;
   tone: "ok" | "warn" | "danger" | "muted";
-  /** Independent post-write source↔dest proof — not writer-ack or pre-write. */
+  /**
+   * Independent full-checksum post-write proof (source↔dest digests match).
+   * Sample-verified / writer-ack / pre-write must keep this false — never invent
+   * population proof from a keyed sample.
+   */
   fullPass: boolean;
 };
 
@@ -188,7 +200,7 @@ export function classifyGate8Status(
     return { label: "Unproven identity", tone: "warn", fullPass: false };
   }
   if (isGate8SampleVerified(report)) {
-    return { label: "Sample verified", tone: "ok", fullPass: true };
+    return { label: "Sample verified", tone: "ok", fullPass: false };
   }
   if (isGate8PreWriteSimulation(report)) {
     return { label: "Pre-write only", tone: "warn", fullPass: false };
@@ -448,6 +460,15 @@ export function Gate8ProofCard({
               : "—"}
           </dd>
         </div>
+        {report.sample_compare?.sample_seed?.method === "stratified" && (
+          <p className="df2-muted" style={{ fontSize: 12, marginTop: 6 }}>
+            Sample plan: <strong>stratified</strong>
+            {report.sample_compare.sample_seed.stratify_by
+              ? ` by ${String(report.sample_compare.sample_seed.stratify_by)}`
+              : ""}{" "}
+            — rare categories included so Gate-8 does not miss skewed type bombs.
+          </p>
+        )}
         {report.sample_compare?.sample_seed?.content_sha256 && (
           <div>
             <dt>Sample seed</dt>

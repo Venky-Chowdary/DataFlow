@@ -197,6 +197,24 @@ describe("Gate-8 sample-verified reverse-ETL honesty", () => {
     assert.equal(isGate8WriterAckOnly(report), false);
     const view = classifyGate8Status(report);
     assert.equal(view.label, "Sample verified");
-    assert.equal(view.fullPass, true);
+    // Sample is not population / full-checksum proof.
+    assert.equal(view.fullPass, false);
+  });
+
+  it("checksum mismatch with sample authority is sample, not fullPass", () => {
+    const report = {
+      passed: true,
+      phase: "post_write_sample_verified",
+      source_checksum: "aaa",
+      target_checksum: "bbb",
+      message:
+        "Transfer verified by key-aligned sample (5 compared; whole-table checksums differed — sample is the authority)",
+      sample_compare: { passed: true, compared: 5, mismatches: [] },
+      coverage: "sample",
+    };
+    assert.equal(isGate8SampleVerified(report), true);
+    const view = classifyGate8Status(report);
+    assert.equal(view.label, "Sample verified");
+    assert.equal(view.fullPass, false);
   });
 });

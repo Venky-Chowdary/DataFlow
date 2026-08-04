@@ -86,7 +86,14 @@ class ReconciliationReport:
 
 
 def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
-    """Stamp explicit post-write phase so UIs never confuse writer-ack with Verified."""
+    """Stamp explicit post-write phase so UIs never confuse writer-ack with Verified.
+
+    Also stamps ``coverage``:
+      * ``full_checksum`` — independent source↔dest digests match
+      * ``sample`` — keyed sample is the authority (checksums missing or diverge)
+      * ``writer_ack`` — writer digest only
+      * ``none`` / omitted — failed / skipped / pending
+    """
     out = dict(report or {})
     if out.get("preview") is True or str(out.get("phase") or "").lower().startswith("pre_write"):
         # Leave preflight simulation alone.
@@ -104,12 +111,14 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         out["phase"] = "post_write_skipped"
         out["post_write_pending"] = False
         out["preview"] = False
+        out["coverage"] = "none"
         return out
 
     if not passed:
         out["phase"] = "post_write_failed"
         out["post_write_pending"] = False
         out["preview"] = False
+        out["coverage"] = "none"
         return out
 
     independent_match = bool(src and tgt and src == tgt)
@@ -121,39 +130,41 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
     )
     sample = out.get("sample_compare") if isinstance(out.get("sample_compare"), dict) else {}
     sample_ok = bool(sample.get("passed")) and int(sample.get("compared") or 0) > 0
-    # Reverse-ETL / Kafka: keyed sample read-back is real proof when full-table
-    # checksum is unavailable (Hightouch/Census-class row sync status).
-    if (
-        passed
-        and sample_ok
-        and (
-            "sample-verified" in msg
-            or "sample verified" in msg
-            or "key-aligned" in msg
-            or writer_only
-            or not tgt
-        )
-    ):
+    # Sample is the authority when digests are missing/diverge or message says so.
+    # Do not require prose keywords — checksum diverge + sample_ok is enough.
+    sample_authority = sample_ok and (
+        not independent_match
+        or "sample-verified" in msg
+        or "sample verified" in msg
+        or "key-aligned" in msg
+        or writer_only
+        or not tgt
+    )
+    if passed and sample_authority:
         out["phase"] = "post_write_sample_verified"
         out["post_write_pending"] = False
         out["preview"] = False
+        out["coverage"] = "sample"
         return out
 
     if independent_match and not writer_only:
         out["phase"] = "post_write_verified"
         out["post_write_pending"] = False
         out["preview"] = False
+        out["coverage"] = "full_checksum"
         return out
 
     if writer_only or (passed and src and not tgt):
         out["phase"] = "post_write_writer_ack"
         out["post_write_pending"] = False
         out["preview"] = False
+        out["coverage"] = "writer_ack"
         return out
 
     out["phase"] = "post_write_pending"
     out["post_write_pending"] = True
     out["preview"] = False
+    out["coverage"] = "none"
     return out
 
 
@@ -3670,6 +3681,63 @@ def build_reconciliation_proof(
     }
 
 
+
+def _stratified_sample_indices(
+    records: list[dict[str, Any]],
+    *,
+    stratify_col: str,
+    sample_size: int,
+    seed: str = "",
+) -> list[int]:
+    """Deterministic per-bucket quota sampling for skewed categoricals.
+
+    Rare classes get at least one slot when present so Gate-8 does not miss
+    type/value bombs hidden behind common categories (first-N trap).
+    """
+    import hashlib
+
+    if sample_size <= 0 or not records or not stratify_col:
+        return list(range(min(sample_size, len(records))))
+    buckets: dict[str, list[int]] = {}
+    for i, rec in enumerate(records):
+        raw = rec.get(stratify_col) if isinstance(rec, dict) else None
+        key = normalize_cell(raw) if raw is not None else ""
+        buckets.setdefault(key or "<null>", []).append(i)
+    # Stable bucket order
+    names = sorted(buckets.keys())
+    if not names:
+        return list(range(min(sample_size, len(records))))
+    base = sample_size // len(names)
+    rem = sample_size % len(names)
+    picked: list[int] = []
+    for bi, name in enumerate(names):
+        idxs = buckets[name]
+        # Deterministic shuffle within bucket
+        scored = sorted(
+            idxs,
+            key=lambda i: hashlib.sha256(f"{seed}:{name}:{i}".encode()).hexdigest(),
+        )
+        take = base + (1 if bi < rem else 0)
+        take = max(1, take) if idxs else 0
+        take = min(take, len(scored))
+        picked.extend(scored[:take])
+    # Trim / pad to sample_size
+    if len(picked) > sample_size:
+        picked = sorted(
+            picked,
+            key=lambda i: hashlib.sha256(f"{seed}:trim:{i}".encode()).hexdigest(),
+        )[:sample_size]
+    elif len(picked) < sample_size:
+        used = set(picked)
+        for i in range(len(records)):
+            if i not in used:
+                picked.append(i)
+                used.add(i)
+            if len(picked) >= sample_size:
+                break
+    return picked[:sample_size]
+
+
 def sample_compare_rows(
     source_records: list[dict[str, Any]],
     target_rows: list[dict[str, Any]] | list[tuple[Any, ...]] | list[list[Any]],
@@ -3680,6 +3748,7 @@ def sample_compare_rows(
     sort_key: str | None = None,
     dest_db_type: str = "",
     dest_types: dict[str, str] | None = None,
+    stratify_by: str | None = None,
 ) -> dict[str, Any]:
     """
     Compare mapped column values between source records and destination read-back.
@@ -3787,33 +3856,63 @@ def sample_compare_rows(
         except Exception:
             return (1, text.lower())
 
-    source_sorted = sorted(
-        source_records, key=lambda r: _sortable(_row_key(r, source_side=True))
-    )[:sample_size]
-
-    # Deterministic seed for auditor replay — sorted PK (or positional index) set.
     import hashlib
 
+    # Auto-stratify: low-cardinality mapped source column (2–20 distinct in sample).
+    strat_col = (stratify_by or "").strip() or None
+    if not strat_col and len(source_records) >= sample_size:
+        for m in mappings:
+            src_col = str(m.get("source") or "")
+            if not src_col:
+                continue
+            distinct = {
+                normalize_cell(r.get(src_col))
+                for r in source_records
+                if isinstance(r, dict)
+            }
+            distinct.discard("")
+            if 2 <= len(distinct) <= 20:
+                strat_col = src_col
+                break
+
+    if strat_col:
+        idxs = _stratified_sample_indices(
+            [r for r in source_records if isinstance(r, dict)],
+            stratify_col=strat_col,
+            sample_size=sample_size,
+            seed=f"{sort_key or ''}:{strat_col}",
+        )
+        source_sorted = [source_records[i] for i in idxs if i < len(source_records)]
+        method = "stratified"
+    else:
+        source_sorted = sorted(
+            source_records, key=lambda r: _sortable(_row_key(r, source_side=True))
+        )[:sample_size]
+        method = "keyed_sorted" if sort_key else "positional_sorted"
+
+    # Deterministic seed for auditor replay — sorted PK (or positional index) set.
     pk_values: list[str] = []
     for src in source_sorted:
         key_raw = _row_key(src, source_side=True)
         pk_values.append(normalize_cell(key_raw) if key_raw is not None else "")
     seed_canon = json.dumps(
         {
-            "method": "keyed_sorted" if sort_key else "positional_sorted",
+            "method": method,
             "size": len(source_sorted),
             "sort_key": sort_key or "",
             "source_sort_key": source_sort_key or "",
+            "stratify_by": strat_col or "",
             "pk_values": pk_values,
         },
         sort_keys=True,
         separators=(",", ":"),
     )
     sample_seed = {
-        "method": "keyed_sorted" if sort_key else "positional_sorted",
+        "method": method,
         "size": len(source_sorted),
         "sort_key": sort_key or "",
         "source_sort_key": source_sort_key or "",
+        "stratify_by": strat_col or "",
         "pk_values": pk_values[:sample_size],
         "content_sha256": hashlib.sha256(seed_canon.encode("utf-8")).hexdigest(),
     }

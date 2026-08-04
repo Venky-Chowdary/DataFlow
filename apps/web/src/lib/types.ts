@@ -289,6 +289,11 @@ export interface Gate8ReconciliationPayload {
   passed?: boolean;
   message?: string;
   phase?: string;
+  /**
+   * Proof population vs sample honesty:
+   * full_checksum | sample | writer_ack | none
+   */
+  coverage?: string;
   preview?: boolean;
   post_write_pending?: boolean;
   /** key_aligned | positional_only | unproven_identity */

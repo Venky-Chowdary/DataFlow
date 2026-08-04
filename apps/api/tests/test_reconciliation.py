@@ -110,6 +110,42 @@ def test_reconcile_balanced_passes_with_key_aligned_sample():
     )
     assert r.passed
     assert "sample" in r.message.lower()
+    stamped = r.to_dict()
+    assert stamped["phase"] == "post_write_sample_verified"
+    assert stamped.get("coverage") == "sample"
+
+
+def test_stamp_sample_verified_when_checksums_diverge_without_keyword_msg():
+    """Sample authority must not depend on message prose keywords."""
+    from services.reconciliation import stamp_post_write_phase
+
+    out = stamp_post_write_phase(
+        {
+            "passed": True,
+            "source_checksum": "aaa",
+            "target_checksum": "bbb",
+            "message": "Transfer completed successfully",
+            "sample_compare": {"passed": True, "compared": 3, "mismatches": []},
+        }
+    )
+    assert out["phase"] == "post_write_sample_verified"
+    assert out.get("coverage") == "sample"
+
+
+def test_stamp_full_checksum_coverage_when_checksums_match():
+    from services.reconciliation import stamp_post_write_phase
+
+    out = stamp_post_write_phase(
+        {
+            "passed": True,
+            "source_checksum": "aaa",
+            "target_checksum": "aaa",
+            "message": "ok",
+            "sample_compare": {"passed": True, "compared": 3},
+        }
+    )
+    assert out["phase"] == "post_write_verified"
+    assert out.get("coverage") == "full_checksum"
 
 
 def test_aggregate_checksum_order_independent():
