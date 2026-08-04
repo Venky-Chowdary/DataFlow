@@ -883,6 +883,39 @@ def stream_file_to_database(
         if is_public_proxy_host(proxy_host) or is_public_proxy_host(proxy_cs):
             max_workers = 1
 
+    pg_conn_state: dict[str, Any] = {"conn": None}
+
+    def _ensure_pg_conn() -> Any:
+        existing = pg_conn_state.get("conn")
+        if existing is not None:
+            try:
+                if getattr(existing, "closed", 0) == 0:
+                    return existing
+            except Exception:
+                pass
+            pg_conn_state["conn"] = None
+        from connectors.postgresql_conn import get_connection as pg_get_connection
+
+        pg_port = int(
+            dest_cfg.get("port")
+            or (5439 if dest_type == "redshift" else 5432)
+        )
+        conn = pg_get_connection(
+            host=dest_cfg.get("host", ""),
+            port=pg_port,
+            database=dest_cfg.get("database", ""),
+            username=dest_cfg.get("username", ""),
+            password=dest_cfg.get("password", ""),
+            connection_string=dest_cfg.get("connection_string", ""),
+            ssl=dest_cfg.get("ssl", False),
+        )
+        try:
+            conn.autocommit = False
+        except Exception:
+            pass
+        pg_conn_state["conn"] = conn
+        return conn
+
     def _process_file_chunk(idx: int, batch: list[dict]) -> dict[str, Any]:
         # Worker threads do not inherit the caller's contextvars, so each chunk
         # must re-apply the resolved date locale before any date coercion runs.
@@ -965,6 +998,15 @@ def stream_file_to_database(
             # it left overwrite jobs on the append path so stale part-* objects
             # survived and Gate-8 aggregated mixed generations.
             sync_mode=effective_sync,
+            **(
+                {
+                    "connection": _ensure_pg_conn(),
+                    "close_connection": False,
+                    "connection_holder": pg_conn_state,
+                }
+                if dest_type in ("postgresql", "redshift") and max_workers == 1
+                else {}
+            ),
         )
         batch_written, last_checksum, dest_summary = with_retry(
             write_op,
@@ -1017,13 +1059,24 @@ def stream_file_to_database(
     except StopIteration:
         raise ValueError("No records found in file")
 
-    # Process the first batch synchronously so DDL (table/index creation) is
-    # committed before any parallel workers try to insert into the new table.
-    _apply_file_result(first_idx, _process_file_chunk(first_idx, first_batch))
+    try:
+        # Process the first batch synchronously so DDL (table/index creation) is
+        # committed before any parallel workers try to insert into the new table.
+        _apply_file_result(first_idx, _process_file_chunk(first_idx, first_batch))
 
-    with OrderedChunkRunner(max_workers=max_workers) as runner:
-        for idx, result in runner.run(batch_enum, _process_file_chunk):
-            _apply_file_result(idx, result)
+        with OrderedChunkRunner(max_workers=max_workers) as runner:
+            for idx, result in runner.run(batch_enum, _process_file_chunk):
+                _apply_file_result(idx, result)
+    finally:
+        conn = pg_conn_state.get("conn")
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as exc:
+                logging.getLogger(__name__).debug(
+                    "Exception suppressed: %s", exc, exc_info=exc
+                )
+            pg_conn_state["conn"] = None
 
     if written == 0 and rejected_total == 0 and coerced_null_total == 0:
         raise ValueError("No records found in file")

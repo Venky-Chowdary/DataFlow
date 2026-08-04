@@ -25,6 +25,66 @@ TERMINAL_JOB_STATUSES = frozenset(
 
 logger = logging.getLogger(__name__)
 
+_CONNECTOR_SECRET_KEYS = (
+    "password",
+    "connection_string",
+    "api_key",
+    "private_key",
+    "service_account",
+    "secret_access_key",
+    "access_key_secret",
+    "token",
+    "refresh_token",
+    "client_secret",
+)
+
+
+def _encrypt_connector_secrets(data: dict) -> dict:
+    """Encrypt secret fields before persisting a connector document."""
+    from services.secret_vault import encrypt_secret
+
+    out = dict(data)
+    for key in _CONNECTOR_SECRET_KEYS:
+        val = out.get(key)
+        if isinstance(val, str) and val and val != "****" and not val.startswith("["):
+            out[key] = encrypt_secret(val, label=f"connector-{key}")
+    return out
+
+
+def _decrypt_connector_secrets(data: dict | None) -> dict | None:
+    """Decrypt secret fields after loading a connector for internal use."""
+    if not data:
+        return data
+    from services.secret_vault import decrypt_secret
+
+    out = dict(data)
+    for key in _CONNECTOR_SECRET_KEYS:
+        val = out.get(key)
+        if isinstance(val, str) and val and val != "****":
+            try:
+                out[key] = decrypt_secret(val)
+            except Exception as exc:
+                logger.warning("Failed to decrypt connector field %s: %s", key, exc)
+    return out
+
+
+def redact_connector_secrets(data: dict | None) -> dict | None:
+    """Mask secrets for API responses — never return live credentials to clients."""
+    if not data:
+        return data
+    import re
+
+    out = dict(data)
+    for key in _CONNECTOR_SECRET_KEYS:
+        val = out.get(key)
+        if not val:
+            continue
+        if key == "connection_string" and isinstance(val, str):
+            out[key] = re.sub(r":([^:@/]+)@", ":****@", val)
+        else:
+            out[key] = "****"
+    return out
+
 
 def _job_name_key(name: str) -> str:
     """Canonical uniqueness key for job display names (case-insensitive)."""
@@ -168,6 +228,7 @@ class MongoDBService:
         db = self.get_database()
         collection = db["connectors"]
 
+        connector_data = _encrypt_connector_secrets(connector_data)
         connector_data["created_at"] = datetime.now(timezone.utc)
         connector_data["updated_at"] = datetime.now(timezone.utc)
 
@@ -186,6 +247,7 @@ class MongoDBService:
         result = collection.find_one({"_id": oid})
         if result:
             result["_id"] = str(result["_id"])
+            return _decrypt_connector_secrets(result)
         return result
 
     def list_connectors(self) -> list[dict]:
@@ -196,7 +258,7 @@ class MongoDBService:
         connectors = []
         for doc in collection.find().sort("created_at", -1):
             doc["_id"] = str(doc["_id"])
-            connectors.append(doc)
+            connectors.append(_decrypt_connector_secrets(doc) or doc)
         return connectors
 
     def update_connector(self, connector_id: str, updates: dict) -> bool:
@@ -208,6 +270,7 @@ class MongoDBService:
         if not oid:
             return False
 
+        updates = _encrypt_connector_secrets(updates)
         updates["updated_at"] = datetime.now(timezone.utc)
         result = collection.update_one(
             {"_id": oid},
@@ -969,7 +1032,7 @@ class MemoryMongoDBService:
 
     def save_connector(self, connector_data: dict) -> str:
         oid = self._new_id()
-        rec = dict(connector_data)
+        rec = _encrypt_connector_secrets(dict(connector_data))
         rec["_id"] = oid
         rec.setdefault("created_at", datetime.now(timezone.utc))
         rec.setdefault("updated_at", datetime.now(timezone.utc))
@@ -981,7 +1044,7 @@ class MemoryMongoDBService:
         if rec:
             rec = dict(rec)
             rec["_id"] = str(rec["_id"])
-            return rec
+            return _decrypt_connector_secrets(rec)
         return None
 
     def list_connectors(self) -> list[dict]:
@@ -990,13 +1053,17 @@ class MemoryMongoDBService:
             key=lambda c: c.get("created_at") or "",
             reverse=True,
         )
-        return [dict(c, _id=str(c["_id"])) for c in items]
+        out = []
+        for c in items:
+            row = dict(c, _id=str(c["_id"]))
+            out.append(_decrypt_connector_secrets(row) or row)
+        return out
 
     def update_connector(self, connector_id: str, updates: dict) -> bool:
         rec = self._connectors.get(connector_id)
         if not rec:
             return False
-        rec.update(updates)
+        rec.update(_encrypt_connector_secrets(updates))
         rec["updated_at"] = datetime.now(timezone.utc)
         return True
 

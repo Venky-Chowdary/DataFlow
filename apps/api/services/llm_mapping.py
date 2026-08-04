@@ -108,8 +108,8 @@ def _compute_llm_review(
     """Compute score gap and review flag from LLM confidence and baseline alternatives.
 
     The LLM confidence is the winner; the strongest baseline alternative that targets a
-    different column is the runner-up.  If the gap is small and the mapping is not an exact
-    identity match, flag it for review.
+    different column is the runner-up. Exact-name identity no longer exempts a narrow
+    gap — operators must approve ambiguous remaps before Execute.
     """
     winner_conf = llm["confidence"]
     target = llm["target"].lower()
@@ -124,10 +124,7 @@ def _compute_llm_review(
             default=0.0,
         )
     score_gap = max(round(winner_conf - runner_up, 3), 0.0)
-
-    reason = str(llm.get("reasoning") or base.get("reasoning") or "")
-    is_exact = source.lower().strip() == target or reason.startswith("Exact")
-    requires_review = score_gap < 0.08 and not is_exact
+    requires_review = score_gap < 0.08
     return score_gap, requires_review
 
 

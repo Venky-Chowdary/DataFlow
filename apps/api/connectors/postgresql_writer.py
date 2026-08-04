@@ -543,6 +543,149 @@ def _copy_rows(cur, schema: str, table_name: str, columns: list[str], rows: list
     cur.copy_expert(copy_sql, buf)
 
 
+def _copy_rows_temp(cur, table_name: str, columns: list[str], rows: list[tuple]) -> None:
+    """COPY into a session TEMP table (unqualified identifier)."""
+    from psycopg2 import sql
+
+    cols_sql = sql.SQL(", ").join(map(sql.Identifier, columns))
+    copy_sql = sql.SQL(
+        "COPY {} ({}) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')"
+    ).format(sql.Identifier(table_name), cols_sql)
+    buf = io.StringIO()
+    for row in rows:
+        buf.write("\t".join(_copy_text_value(v) for v in row))
+        buf.write("\n")
+    buf.seek(0)
+    cur.copy_expert(copy_sql, buf)
+
+
+def _execute_values_insert(cur, insert_sql: Any, rows: list[tuple] | list[list], *, page_size: int = 1000) -> None:
+    """Bulk INSERT via ``execute_values`` (one round-trip per page, not per row)."""
+    try:
+        from psycopg2.extras import execute_values
+    except ImportError:
+        cur.executemany(insert_sql, rows)
+        return
+    # ``execute_values`` expects ``INSERT ... VALUES %s`` template form.
+    sql_text = insert_sql.as_string(cur) if hasattr(insert_sql, "as_string") else str(insert_sql)
+    # Convert ``VALUES (%s, %s, ...)`` → ``VALUES %s`` for execute_values.
+    marker = " VALUES "
+    idx = sql_text.upper().rfind(marker)
+    if idx < 0:
+        cur.executemany(insert_sql, rows)
+        return
+    template_sql = sql_text[: idx + len(marker)] + "%s"
+    # Strip trailing ON CONFLICT clause for the values template — keep it after %s.
+    on_conflict = ""
+    upper = sql_text.upper()
+    oc_idx = upper.find(" ON CONFLICT ")
+    if oc_idx > idx:
+        on_conflict = " " + sql_text[oc_idx:].strip()
+        # Rebuild: INSERT ... VALUES %s ON CONFLICT ...
+        head = sql_text[:idx + len(marker)]
+        template_sql = head + "%s" + on_conflict
+    execute_values(cur, template_sql, rows, page_size=page_size)
+
+
+def _copy_upsert_batch(
+    cur: Any,
+    sql_mod: Any,
+    *,
+    schema: str,
+    table_name: str,
+    target_cols: list[str],
+    conflict_cols: list[str],
+    batch: list[tuple] | list[list],
+    insert_sql: Any,
+) -> int:
+    """Stage via COPY into a TEMP table, then INSERT…ON CONFLICT from the stage.
+
+    Avoids per-row RTTs on upsert paths while preserving conflict semantics.
+    Falls back to ``execute_values`` when COPY staging is unavailable.
+    """
+    import uuid
+
+    if not batch or not conflict_cols:
+        if batch:
+            _execute_values_insert(cur, insert_sql, [tuple(r) for r in batch])
+        return len(batch)
+
+    # Per-call UUID so a failed prior stage left on a reused session cannot collide.
+    stage = f"_df_copy_ups_{uuid.uuid4().hex[:16]}"
+    conn = getattr(cur, "connection", None)
+
+    def _drop_stage_best_effort() -> None:
+        drop = sql_mod.SQL("DROP TABLE IF EXISTS {}").format(sql_mod.Identifier(stage))
+        try:
+            cur.execute(drop)
+            return
+        except Exception:
+            pass
+        if conn is None:
+            return
+        # Aborted transaction blocks DDL until rollback.
+        try:
+            conn.rollback()
+        except Exception:
+            return
+        try:
+            cur.execute(drop)
+        except Exception as exc:
+            logger.debug("TEMP upsert stage drop skipped: %s", exc)
+
+    try:
+        cur.execute(
+            sql_mod.SQL("CREATE TEMP TABLE {} AS SELECT * FROM {}.{} WHERE 0=1").format(
+                sql_mod.Identifier(stage),
+                sql_mod.Identifier(schema),
+                sql_mod.Identifier(table_name),
+            )
+        )
+        _copy_rows_temp(cur, stage, target_cols, [tuple(r) for r in batch])
+        col_list = sql_mod.SQL(", ").join(sql_mod.Identifier(c) for c in target_cols)
+        conflict = sql_mod.SQL(", ").join(sql_mod.Identifier(c) for c in conflict_cols)
+        update_cols = [c for c in target_cols if c not in conflict_cols]
+        if update_cols:
+            set_clause = sql_mod.SQL(", ").join(
+                sql_mod.SQL("{} = EXCLUDED.{}").format(
+                    sql_mod.Identifier(c), sql_mod.Identifier(c)
+                )
+                for c in update_cols
+            )
+            merge = sql_mod.SQL(
+                "INSERT INTO {}.{} ({}) SELECT {} FROM {} "
+                "ON CONFLICT ({}) DO UPDATE SET {}"
+            ).format(
+                sql_mod.Identifier(schema),
+                sql_mod.Identifier(table_name),
+                col_list,
+                col_list,
+                sql_mod.Identifier(stage),
+                conflict,
+                set_clause,
+            )
+        else:
+            merge = sql_mod.SQL(
+                "INSERT INTO {}.{} ({}) SELECT {} FROM {} "
+                "ON CONFLICT ({}) DO NOTHING"
+            ).format(
+                sql_mod.Identifier(schema),
+                sql_mod.Identifier(table_name),
+                col_list,
+                col_list,
+                sql_mod.Identifier(stage),
+                conflict,
+            )
+        cur.execute(merge)
+        _drop_stage_best_effort()
+        return len(batch)
+    except Exception:
+        # Clear aborted txn + orphan stage, then values-based upsert.
+        _drop_stage_best_effort()
+        _execute_values_insert(cur, insert_sql, [tuple(r) for r in batch])
+        return len(batch)
+
+
 def _open_pg(
     *,
     host: str,
@@ -587,6 +730,9 @@ def write_mapped_rows(
     write_mode: str = "insert",
     conflict_columns: list[str] | None = None,
     backfill_new_fields: bool = False,
+    connection: Any | None = None,
+    close_connection: bool | None = None,
+    connection_holder: dict[str, Any] | None = None,
     **_kwargs: Any,
 ) -> WriteResult:
     from connectors.writer_common import resolve_writer_backfill
@@ -596,6 +742,13 @@ def write_mapped_rows(
         mappings=mappings,
         schema_policy=_kwargs.get("schema_policy"),
     )
+    # Shared connection (stream reuse): default to not closing the caller's conn.
+    if close_connection is None:
+        close_connection = connection is None
+    # Prefer explicit holder; also accept kwargs for older call sites.
+    if connection_holder is None:
+        raw_holder = _kwargs.get("connection_holder")
+        connection_holder = raw_holder if isinstance(raw_holder, dict) else None
     if importlib.util.find_spec("psycopg2") is None:
         from connectors.driver_guard import require_driver, stub_writes_allowed
         from connectors.stub_writer import simulate_stub_write
@@ -924,7 +1077,8 @@ def write_mapped_rows(
         )
 
     def _reconnect():
-        nonlocal conn, cur
+        nonlocal conn, cur, close_connection
+        # Drop the dead handle.
         close_quietly(conn)
         conn = _open_pg(
             host=host,
@@ -935,6 +1089,13 @@ def write_mapped_rows(
             connection_string=connection_string,
             ssl=ssl,
         )
+        if connection_holder is not None:
+            # Hand the replacement back to the stream so later chunks reuse it
+            # and we do not close the live socket at the end of this write.
+            connection_holder["conn"] = conn
+            close_connection = False
+        else:
+            close_connection = True
         cur = conn.cursor()
 
     def _run_setup(cursor) -> None:
@@ -1043,15 +1204,22 @@ def write_mapped_rows(
         conn.commit()
 
     try:
-        conn = _open_pg(
-            host=host,
-            port=port,
-            database=database,
-            username=username,
-            password=password,
-            connection_string=connection_string,
-            ssl=ssl,
-        )
+        if connection is not None:
+            conn = connection
+            try:
+                conn.autocommit = False
+            except Exception:
+                pass
+        else:
+            conn = _open_pg(
+                host=host,
+                port=port,
+                database=database,
+                username=username,
+                password=password,
+                connection_string=connection_string,
+                ssl=ssl,
+            )
         cur = conn.cursor()
         try:
             setup_attempt = 0
@@ -1166,7 +1334,29 @@ def write_mapped_rows(
                                 )
                                 rows_skipped += skipped
                             if write_batch:
-                                cur.executemany(insert, write_batch)
+                                conflict_for_copy = [
+                                    c for c in (conflict_columns or []) if c in target_cols
+                                ]
+                                if (
+                                    write_mode == "upsert"
+                                    and conflict_for_copy
+                                    and uses_pg_on_conflict_upsert(engine)
+                                    and DF_LSN_COL not in target_cols
+                                ):
+                                    _copy_upsert_batch(
+                                        cur,
+                                        sql,
+                                        schema=schema,
+                                        table_name=table_name,
+                                        target_cols=target_cols,
+                                        conflict_cols=conflict_for_copy,
+                                        batch=write_batch,
+                                        insert_sql=insert,
+                                    )
+                                else:
+                                    _execute_values_insert(
+                                        cur, insert, [tuple(r) for r in write_batch]
+                                    )
                         landed = len(batch if use_copy else write_batch)
                         if use_ledger:
                             mark_raw_chunk_committed(
@@ -1189,8 +1379,11 @@ def write_mapped_rows(
                         if is_sql_data_error(chunk_exc) and policy in {"quarantine", "coerce_null"}:
                             if insert is None:
                                 insert = _build_insert()
+                            # SAVEPOINT per row + single commit — avoids one RTT/commit
+                            # per rejected cell (was the CDC/quarantine throughput cliff).
                             for row_i, row in enumerate(batch):
                                 try:
+                                    cur.execute("SAVEPOINT df_row_sp")
                                     write_rows = [row]
                                     if redshift_upsert_cols:
                                         write_rows = _redshift_delete_by_keys(
@@ -1204,13 +1397,19 @@ def write_mapped_rows(
                                         )
                                     if write_rows:
                                         cur.execute(insert, write_rows[0])
-                                    conn.commit()
+                                    cur.execute("RELEASE SAVEPOINT df_row_sp")
                                     chunk_written += 1
                                 except Exception as row_exc:
                                     try:
-                                        conn.rollback()
+                                        cur.execute("ROLLBACK TO SAVEPOINT df_row_sp")
                                     except Exception as exc:
                                         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+                                        try:
+                                            conn.rollback()
+                                        except Exception as exc2:
+                                            logger.warning(
+                                                "Exception suppressed: %s", exc2, exc_info=exc2
+                                            )
                                     if is_connection_lost(row_exc):
                                         raise
                                     col_name = extract_column_from_sql_error(row_exc) or "*"
@@ -1228,8 +1427,8 @@ def write_mapped_rows(
                                         "policy": policy,
                                     })
                                     transform_errors.append(str(row_exc)[:200])
-                            if use_ledger and chunk_written:
-                                try:
+                            try:
+                                if use_ledger and chunk_written:
                                     mark_raw_chunk_committed(
                                         cur,
                                         dialect="postgresql",
@@ -1239,9 +1438,9 @@ def write_mapped_rows(
                                         chunk_idx=chunk_idx,
                                         rows_written=chunk_written,
                                     )
-                                    conn.commit()
-                                except Exception as exc:
-                                    logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+                                conn.commit()
+                            except Exception as exc:
+                                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
                             break
                         attempt += 1
                         if not is_connection_lost(chunk_exc) or not should_retry_connection_lost(
@@ -1263,7 +1462,8 @@ def write_mapped_rows(
             except Exception as exc:
                 logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
-        close_quietly(conn)
+        if close_connection:
+            close_quietly(conn)
         return WriteResult(
             ok=True,
             rows_written=written,
@@ -1284,7 +1484,8 @@ def write_mapped_rows(
             load_method="copy" if use_copy else "insert",
         )
     except Exception as exc:
-        close_quietly(conn)
+        if close_connection:
+            close_quietly(conn)
         return WriteResult(
             ok=False,
             rows_written=written,

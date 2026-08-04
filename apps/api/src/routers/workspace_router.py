@@ -578,6 +578,20 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
         "tenant_id": tenant.id if tenant else None,
         "workspace_id": tenant.workspace_id if tenant else None,
         "custom_domain": tenant.custom_domain if tenant else None,
+        "custom_domain_cors": {
+            "enabled": True,
+            "origin": (
+                f"https://{(tenant.custom_domain or '').strip()}"
+                if tenant and (tenant.custom_domain or "").strip()
+                else None
+            ),
+            "hint": (
+                "Set tenant.custom_domain (e.g. data.customer.com) and point DNS to the "
+                "Datawrap web host. API CORS accepts the tenant origin live via "
+                "TenantAwareCORSMiddleware. Also set DATAWRAP_WEB_DOMAIN / CORS_EXTRA_ORIGINS "
+                "for the primary SPA origin."
+            ),
+        },
         "data_region": region,
         "environment": "production" if prod else "development",
         "encryption_at_rest": encryption_ready,

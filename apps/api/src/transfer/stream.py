@@ -520,6 +520,7 @@ def _write_batch(
     error_policy: str | None = None,
     connection: Any | None = None,
     close_connection: bool | None = None,
+    connection_holder: dict[str, Any] | None = None,
     skip_session_setup: bool = False,
     job_id: str | None = None,
     skip_preflight: bool = False,
@@ -556,6 +557,9 @@ def _write_batch(
             ),
             file_batch_idx=chunk_idx,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
+            connection=connection,
+            close_connection=close_connection,
+            connection_holder=connection_holder,
         )
         if not result.ok:
             _raise_write_failure(result, f"{dest_type} batch write failed")
@@ -1652,8 +1656,9 @@ def stream_database_transfer(
         if is_public_proxy_host(proxy_host) or is_public_proxy_host(proxy_cs):
             max_workers = 1
 
-    # Shared Snowflake connection for the life of this stream job (open once).
+    # Shared destination connections for the life of this stream job (open once).
     sf_conn_state: dict[str, Any] = {"conn": None, "session_ready": False}
+    pg_conn_state: dict[str, Any] = {"conn": None}
     batches_completed = 0
     # Only the distinct set matters (the summary asks "did any batch COPY?"),
     # so dedupe instead of appending one entry per batch.
@@ -1678,6 +1683,37 @@ def stream_database_transfer(
             role=dest_cfg.get("role", ""),
         )
         return sf_conn_state["conn"]
+
+    def _ensure_pg_conn() -> Any:
+        existing = pg_conn_state.get("conn")
+        if existing is not None:
+            try:
+                if getattr(existing, "closed", 0) == 0:
+                    return existing
+            except Exception:
+                pass
+            pg_conn_state["conn"] = None
+        from connectors.postgresql_conn import get_connection as pg_get_connection
+
+        pg_port = int(
+            dest_cfg.get("port")
+            or (5439 if dest_type == "redshift" else 5432)
+        )
+        conn = pg_get_connection(
+            host=dest_cfg.get("host", ""),
+            port=pg_port,
+            database=dest_cfg.get("database", ""),
+            username=dest_cfg.get("username", ""),
+            password=dest_cfg.get("password", ""),
+            connection_string=dest_cfg.get("connection_string", ""),
+            ssl=dest_cfg.get("ssl", False),
+        )
+        try:
+            conn.autocommit = False
+        except Exception:
+            pass
+        pg_conn_state["conn"] = conn
+        return conn
 
     def _process_db_chunk(idx: int, batch: Any) -> dict[str, Any]:
         """Timed wrapper around the transform + destination write for one chunk.
@@ -1743,6 +1779,11 @@ def stream_database_transfer(
             write_kwargs["connection"] = _ensure_snowflake_conn()
             write_kwargs["close_connection"] = False
             write_kwargs["skip_session_setup"] = bool(sf_conn_state["session_ready"])
+        elif dest_type in ("postgresql", "redshift") and max_workers == 1:
+            # psycopg2 connections are not safely shared across worker threads.
+            write_kwargs["connection"] = _ensure_pg_conn()
+            write_kwargs["close_connection"] = False
+            write_kwargs["connection_holder"] = pg_conn_state
 
         write_op = partial(
             _write_batch,
@@ -1938,13 +1979,16 @@ def stream_database_transfer(
                 dispatcher.abort()
                 raise
     finally:
-        conn = sf_conn_state.get("conn")
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception as exc:
-                logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
-            sf_conn_state["conn"] = None
+        for state in (sf_conn_state, pg_conn_state):
+            conn = state.get("conn")
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception as exc:
+                    logging.getLogger(__name__).debug(
+                        "Exception suppressed: %s", exc, exc_info=exc
+                    )
+                state["conn"] = None
 
     if written == 0 and incremental:
         ddl_log.append("INCREMENTAL — no new rows since last watermark")

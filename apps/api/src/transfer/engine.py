@@ -1501,6 +1501,27 @@ class UniversalTransferEngine:
         deep-link an operator from a job card into their APM.
         """
         self._resolve_saved_connectors(request)
+        # Hard-block Execute when Map still has unresolved requires_review rows —
+        # skip_preflight must never green-path ambiguous remaps into a write.
+        try:
+            from services.mapping_pipeline import assert_mappings_executable
+
+            assert_mappings_executable(request.mappings)
+        except ValueError as mapping_exc:
+            mongo = get_mongodb_service()
+            mongo.update_job_status(
+                job_id,
+                "failed",
+                phase="failed",
+                message=str(mapping_exc),
+                error=str(mapping_exc),
+            )
+            return TransferResult(
+                success=False,
+                job_id=job_id,
+                error=str(mapping_exc),
+                records_transferred=0,
+            )
         locale_token = set_active_date_locale(request.date_locale)
         try:
             from services.tracing import (

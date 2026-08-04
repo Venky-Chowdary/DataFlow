@@ -13,8 +13,8 @@ import uuid
 from contextlib import asynccontextmanager, nullcontext
 
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
+from services.cors_policy import TenantAwareCORSMiddleware
 from services.health_service import aggregate_health
 from services.platform_config import (
     apply_railway_defaults,
@@ -267,7 +267,7 @@ _ALLOW_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
 _EXPOSE_HEADERS = ["X-Correlation-ID", "X-Process-Time", "X-Trace-Id"]
 
 app.add_middleware(
-    CORSMiddleware,
+    TenantAwareCORSMiddleware,
     allow_origins=_cors_origins,
     allow_origin_regex=_cors_origin_regex,
     allow_credentials=True,

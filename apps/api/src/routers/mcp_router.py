@@ -25,6 +25,27 @@ def _mcp_authenticated(http_request: Request) -> bool:
     return bool(getattr(http_request.state, "user", None) or getattr(http_request.state, "api_key_auth", False))
 
 
+def _require_mcp_tool_auth(http_request: Request) -> None:
+    """Refuse tool execution unless a Bearer JWT / workspace API key is present.
+
+    When platform auth is off (local/dev), tools remain callable without a token
+    so developers can exercise the MCP surface without spinning up users.
+    """
+    from src.services.auth_service import auth_required
+
+    if not auth_required():
+        return
+    if _mcp_authenticated(http_request):
+        return
+    raise HTTPException(
+        status_code=401,
+        detail={
+            "error": "Authentication required",
+            "hint": "Pass Authorization: Bearer <workspace-api-key-or-jwt>",
+        },
+    )
+
+
 @router.api_route("", methods=["GET", "POST", "DELETE"], include_in_schema=True)
 @router.api_route("/", methods=["GET", "POST", "DELETE"], include_in_schema=False)
 async def mcp_streamable(http_request: Request):
@@ -150,6 +171,7 @@ async def list_mcp_tools():
 @router.post("/tools/call")
 async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     """Execute a Datawrap Pilot tool — same surface external agents use."""
+    _require_mcp_tool_auth(http_request)
     from services.mcp_invocation_log import log_mcp_invocation
 
     from ..ai.copilot.tools import get_pilot_tools
@@ -196,8 +218,9 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
 
 
 @router.get("/logs")
-async def mcp_request_logs(limit: int = 50):
+async def mcp_request_logs(http_request: Request, limit: int = 50):
     """Recent MCP tool invocations from persistent log."""
+    _require_mcp_tool_auth(http_request)
     from services.mcp_invocation_log import list_mcp_invocations
 
     rows = list_mcp_invocations(limit=min(limit, 200))

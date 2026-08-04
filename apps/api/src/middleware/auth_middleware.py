@@ -19,8 +19,6 @@ _PUBLIC_PREFIXES = (
     # Marketing / docs / landing need catalog stats without a session.
     "/api/v1/catalog",
     "/catalog",
-    # MCP discovery + Streamable HTTP handshake (tools/call still checks auth in-handler)
-    "/api/v1/mcp",
 )
 
 if docs_enabled():
@@ -30,6 +28,22 @@ if docs_enabled():
 def _is_public_sso_path(path: str) -> bool:
     if path.startswith("/api/v1/auth/sso/") or path.startswith("/auth/sso/"):
         return path.endswith("/start") or path.endswith("/callback") or path.endswith("/providers")
+    return False
+
+
+def _is_public_mcp_path(path: str, method: str) -> bool:
+    """MCP discovery + Streamable handshake are public; tool execution is not.
+
+    ``POST /api/v1/mcp`` stays public so Cursor can ``initialize`` / ``tools/list``
+    without a Bearer token. ``tools/call`` (JSON-RPC and REST) requires auth —
+    enforced here for REST and in ``mcp_protocol`` for Streamable HTTP.
+    """
+    if path in ("/api/v1/mcp", "/api/v1/mcp/"):
+        return True
+    if path.startswith("/api/v1/mcp/manifest") or path.startswith("/api/v1/mcp/status"):
+        return True
+    if path.rstrip("/") == "/api/v1/mcp/tools" and method.upper() == "GET":
+        return True
     return False
 
 
@@ -81,6 +95,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             or path == "/"
             or any(path.startswith(p) for p in _PUBLIC_PREFIXES)
             or _is_public_sso_path(path)
+            or _is_public_mcp_path(path, request.method)
         ):
             # Public routes still attach identity when a Bearer token is present
             # (MCP tools/call uses this; discovery works without a token).

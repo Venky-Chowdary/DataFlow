@@ -141,6 +141,77 @@ class TransferRequest:
         return "transfer"
 
 
+_SECRET_ENDPOINT_KEYS = (
+    "password",
+    "connection_string",
+    "api_key",
+    "service_account",
+    "private_key",
+    "secret_access_key",
+    "access_key_secret",
+    "token",
+    "refresh_token",
+    "client_secret",
+)
+
+
+def _encrypt_endpoint_secrets(ep: dict) -> dict:
+    """Encrypt secret fields before persisting a transfer_request on a job."""
+    from services.secret_vault import encrypt_secret
+
+    out = dict(ep or {})
+    for key in _SECRET_ENDPOINT_KEYS:
+        val = out.get(key)
+        if isinstance(val, str) and val and val != "****" and not val.startswith("["):
+            out[key] = encrypt_secret(val, label=f"job-{key}")
+    extra = out.get("extra")
+    if isinstance(extra, dict):
+        extra_out = dict(extra)
+        for key, val in list(extra_out.items()):
+            lk = str(key).lower()
+            if (
+                isinstance(val, str)
+                and val
+                and val != "****"
+                and any(s in lk for s in ("password", "secret", "token", "private_key", "api_key"))
+            ):
+                extra_out[key] = encrypt_secret(val, label=f"job-extra-{key}")
+        out["extra"] = extra_out
+    return out
+
+
+def _decrypt_endpoint_secrets(ep: dict) -> dict:
+    """Decrypt secret fields when reconstituting a TransferRequest from storage."""
+    from services.secret_vault import decrypt_secret
+
+    out = dict(ep or {})
+    for key in _SECRET_ENDPOINT_KEYS:
+        val = out.get(key)
+        if isinstance(val, str) and val and val != "****":
+            try:
+                out[key] = decrypt_secret(val)
+            except Exception:
+                # Leave as-is — resume will fail loudly if the value is unusable.
+                pass
+    extra = out.get("extra")
+    if isinstance(extra, dict):
+        extra_out = dict(extra)
+        for key, val in list(extra_out.items()):
+            lk = str(key).lower()
+            if (
+                isinstance(val, str)
+                and val
+                and val != "****"
+                and any(s in lk for s in ("password", "secret", "token", "private_key", "api_key"))
+            ):
+                try:
+                    extra_out[key] = decrypt_secret(val)
+                except Exception:
+                    pass
+        out["extra"] = extra_out
+    return out
+
+
 def endpoint_to_dict(ep: EndpointConfig) -> dict:
     return {
         "kind": ep.kind,
@@ -173,8 +244,8 @@ def endpoint_to_dict(ep: EndpointConfig) -> dict:
 
 def transfer_request_to_dict(request: TransferRequest) -> dict:
     return {
-        "source": endpoint_to_dict(request.source),
-        "destination": endpoint_to_dict(request.destination),
+        "source": _encrypt_endpoint_secrets(endpoint_to_dict(request.source)),
+        "destination": _encrypt_endpoint_secrets(endpoint_to_dict(request.destination)),
         "mappings": request.mappings,
         "column_types": request.column_types,
         "skip_preflight": request.skip_preflight,
@@ -199,20 +270,6 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "idempotency_key": request.idempotency_key,
         "requires_file_reupload": request.source.kind == "file" and bool(request.source_content),
     }
-
-
-_SECRET_ENDPOINT_KEYS = (
-    "password",
-    "connection_string",
-    "api_key",
-    "service_account",
-    "private_key",
-    "secret_access_key",
-    "access_key_secret",
-    "token",
-    "refresh_token",
-    "client_secret",
-)
 
 
 def _mask_endpoint_secrets(ep: dict | None) -> dict:
@@ -253,8 +310,8 @@ def sanitize_job_for_api(job: dict) -> dict:
 
 
 def transfer_request_from_dict(data: dict) -> TransferRequest:
-    src = data.get("source") or {}
-    dst = data.get("destination") or {}
+    src = _decrypt_endpoint_secrets(data.get("source") or {})
+    dst = _decrypt_endpoint_secrets(data.get("destination") or {})
     return TransferRequest(
         source=EndpointConfig.from_dict(src.get("kind", "database"), src),
         destination=EndpointConfig.from_dict(dst.get("kind", "database"), dst),

@@ -153,6 +153,11 @@ def _load_users() -> list[dict[str, str]]:
     if users:
         return users
 
+    # Never expose the hard-coded test@gmail.com account in production — even
+    # when ALLOW_DEV_USER is mistakenly set (validate_production_config rejects it).
+    if is_production():
+        return []
+
     if _ALLOW_DEV_USER or not is_production():
         return [_DEV_USER]
     return []

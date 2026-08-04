@@ -294,6 +294,14 @@ def _fernet_decrypt(stored: str) -> str:
         except Exception:
             return stored
 
+    # Plaintext passthrough is a local-dev convenience only. In production every
+    # secret must be an enc:v1 / sm: reference — otherwise a job document or
+    # connector row can silently hold live credentials forever.
+    if _is_production():
+        raise SecretVaultError(
+            "Production refuses plaintext secret passthrough. "
+            "Re-save the connector or job so credentials are Fernet-encrypted (enc:v1:…)."
+        )
     return stored
 
 

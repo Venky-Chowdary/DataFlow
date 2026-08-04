@@ -16,14 +16,30 @@ def is_railway() -> bool:
 
 
 def is_production() -> bool:
+    """Return True when the process must enforce production security policy.
+
+    Fail-closed rules:
+    - Explicit ``ENV=production|prod`` → production
+    - Explicit ``ENV=development|dev|local|test`` → not production
+    - Railway (unless explicitly marked development) → production
+    - ``ASSUME_PRODUCTION=1`` → production (bare-metal / k8s without ENV)
+    - ``REQUIRE_AUTH=1`` with unset ENV → production (misconfigured host)
+    - Otherwise unset ENV stays non-production for local developer UX
+    """
     env = (getenv_brand("ENV", os.getenv("ENVIRONMENT", "")) or "").lower()
-    if is_railway():
-        if env in ("development", "dev", "local"):
-            return False
-        return True
-    if not env:
+    if env in ("development", "dev", "local", "test"):
         return False
-    return env in ("production", "prod")
+    if env in ("production", "prod"):
+        return True
+    if is_railway():
+        return True
+    if getenv_brand("ASSUME_PRODUCTION", "0").lower() in ("1", "true", "yes"):
+        return True
+    # Operator set auth-required without declaring ENV — treat as production so
+    # vault / DEV_USER / docs gates cannot silently fail open on a public host.
+    if not env and getenv_brand("REQUIRE_AUTH", "").lower() in ("1", "true", "yes"):
+        return True
+    return False
 
 
 def _railway_volume_root() -> Path | None:
@@ -107,6 +123,28 @@ def cors_origins() -> list[str]:
         else:
             origins.append(web_domain)
 
+    # Operator-managed customer vanity URLs (pre-DNS or multi-tenant hosts).
+    extra = os.getenv("CORS_EXTRA_ORIGINS", "").strip()
+    if extra:
+        origins.extend(o.strip() for o in extra.split(",") if o.strip())
+
+    # Tenant custom domains configured via workspace APIs — customers set these
+    # so the SPA at https://data.customer.com can call the API with credentials.
+    if getenv_brand("CORS_INCLUDE_TENANT_DOMAINS", "1").lower() not in ("0", "false", "no"):
+        try:
+            from services.tenant_store import list_tenants
+
+            for tenant in list_tenants():
+                host = (getattr(tenant, "custom_domain", None) or "").strip().lower()
+                if not host:
+                    continue
+                if host.startswith("http://") or host.startswith("https://"):
+                    origins.append(host.rstrip("/"))
+                else:
+                    origins.append(f"https://{host}")
+        except Exception:
+            pass
+
     seen: set[str] = set()
     unique: list[str] = []
     for o in origins:
@@ -153,21 +191,20 @@ def validate_production_config() -> list[str]:
         errors.append("DATAWRAP_REQUIRE_AUTH (or DATAFLOW_REQUIRE_AUTH) must be 1 in production")
 
     # At least one real login path: admin pair and/or AUTH_USERS JSON.
-    # DATAWRAP_ALLOW_DEV_USER is staging-only and must not be required in prod.
+    # DATAWRAP_ALLOW_DEV_USER is forbidden in production — never a login path.
     admin_email = (getenv_brand("ADMIN_EMAIL") or "").strip()
     admin_password = (getenv_brand("ADMIN_PASSWORD") or "").strip()
     users_raw = (getenv_brand("AUTH_USERS") or "").strip()
     allow_dev = getenv_brand("ALLOW_DEV_USER", "0").lower() in ("1", "true", "yes")
-    if not ((admin_email and admin_password) or users_raw or allow_dev):
+    if allow_dev:
+        errors.append(
+            "DATAWRAP_ALLOW_DEV_USER must not be enabled in production "
+            "(hard-coded test@gmail.com login is forbidden for customer tenants)"
+        )
+    if not ((admin_email and admin_password) or users_raw):
         errors.append(
             "Set DATAWRAP_ADMIN_EMAIL + DATAWRAP_ADMIN_PASSWORD "
             "(or legacy DATAFLOW_ADMIN_*), or a valid DATAWRAP_AUTH_USERS JSON array"
-        )
-    if allow_dev:
-        print(
-            "[!] DATAWRAP_ALLOW_DEV_USER=1 is set — staging/dev login only; "
-            "disable for real production tenants",
-            file=sys.stderr,
         )
     if not getenv_brand("SECRETS_KEY", "").strip():
         errors.append(

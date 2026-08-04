@@ -320,6 +320,29 @@ def validate_mappings(mappings: list[dict], *, confidence_threshold: float = 0.8
     }
 
 
+def assert_mappings_executable(mappings: list[dict] | None) -> None:
+    """Hard-block Execute when any mapping still requires operator review.
+
+    ``user_override`` / ``approved`` clear the block after an explicit Studio
+    confirmation. ``skip_preflight`` must never bypass this gate.
+    """
+    pending: list[str] = []
+    for m in mappings or []:
+        if not m.get("requires_review"):
+            continue
+        if m.get("user_override") or m.get("approved") or m.get("operator_approved"):
+            continue
+        src = str(m.get("source") or "?")
+        tgt = str(m.get("target") or "?")
+        pending.append(f"{src} → {tgt}")
+    if pending:
+        sample = "; ".join(pending[:8])
+        more = f" (+{len(pending) - 8} more)" if len(pending) > 8 else ""
+        raise ValueError(
+            f"{len(pending)} mapping(s) require review before Execute: {sample}{more}"
+        )
+
+
 def run_mapping_pipeline(
     source_columns: list[str],
     target_columns: list[str],

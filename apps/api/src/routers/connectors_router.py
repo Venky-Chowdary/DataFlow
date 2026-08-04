@@ -576,6 +576,8 @@ async def retry_transfer_job(job_id: str, background_tasks: BackgroundTasks, req
             )
 
         xfer_req = transfer_request_from_dict(payload)
+        # Retries from start also re-run preflight — never inherit skip_preflight.
+        xfer_req.skip_preflight = False
         engine = get_transfer_engine()
         new_job_id = engine._create_pending_job(xfer_req)
         mongo.update_job_status(
@@ -629,6 +631,8 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
             )
 
         xfer_req = transfer_request_from_dict(payload)
+        # Resume must never inherit a stale skip_preflight flag — gates re-run.
+        xfer_req.skip_preflight = False
         # Resume is the one sanctioned exit from a terminal status, and it must
         # also drop any stale cancel request or the resumed run would abort at
         # its first checkpoint.
@@ -1313,13 +1317,15 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
 async def get_connector(connector_id: str):
     """Get a specific connector"""
     try:
+        from services.mongodb_service import redact_connector_secrets
+
         mongo = get_mongodb_service()
         connector = mongo.get_connector(connector_id)
 
         if not connector:
             raise HTTPException(status_code=404, detail="Connector not found")
 
-        return connector
+        return redact_connector_secrets(connector)
 
     except HTTPException:
         raise

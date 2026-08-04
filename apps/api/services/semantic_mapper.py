@@ -1542,7 +1542,7 @@ def map_columns(
         winner = alternatives[0]["confidence"] if alternatives else score
         runner_up = alternatives[1]["confidence"] if len(alternatives) > 1 else 0.0
         score_gap = round(max(winner - runner_up, 0.0), 3)
-        requires_review = score_gap < 0.08 and not reason.startswith("Exact")
+        requires_review = score_gap < 0.08
         src_type = src_types.get(source, "VARCHAR")
         tgt_type = tgt_types.get(target, "VARCHAR")
         try:
@@ -1556,6 +1556,9 @@ def map_columns(
             requires_review = True
             score = min(float(score), 0.84)
             reason = f"{reason} · lossy type pair"
+        elif reason.startswith("Exact") and score_gap >= 0.08:
+            # Decisive Exact with compatible types — review not required.
+            requires_review = False
         assigned_sources.add(source)
         used_targets.add(target)
         mappings.append(
@@ -1737,7 +1740,7 @@ def map_columns(
         winner = alternatives[0]["confidence"] if alternatives else best_score
         runner_up = alternatives[1]["confidence"] if len(alternatives) > 1 else 0.0
         score_gap = round(max(winner - runner_up, 0.0), 3)
-        requires_review = score_gap < 0.08 and not best_reason.startswith("Exact")
+        requires_review = score_gap < 0.08
         src_type = src_types.get(source, "VARCHAR")
         tgt_type = tgt_types.get(best_target, "VARCHAR") if best_target else "VARCHAR"
         try:
