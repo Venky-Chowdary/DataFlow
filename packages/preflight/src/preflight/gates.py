@@ -880,6 +880,16 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             # explicit Map risk acknowledgment (Fivetran/Airbyte still sample-
             # bound; we refuse silent truncation on clean heads).
             force_block = bool(declared_lossy and not risk_ack)
+            # Probe may still mark declared collapse as block; Map Accept risk
+            # with clean samples must not re-block G3 after the operator ack.
+            sample_clean = int(probe.get("failed") or 0) == 0
+            if (
+                risk_ack
+                and declared_lossy
+                and severity == "block"
+                and sample_clean
+            ):
+                severity = "warn"
             json_wraps = int(probe.get("json_scalar_wraps") or 0)
             detail = {
                 "source": m.source,

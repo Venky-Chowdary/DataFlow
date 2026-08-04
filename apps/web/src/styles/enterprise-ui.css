@@ -10180,10 +10180,10 @@
     flex-shrink: 0;
   }
   .df2-page-transfer-studio .df2-vd-hero-ring-label strong {
-    font-size: 12px;
+    font-size: 11px;
   }
   .df2-page-transfer-studio .df2-vd-hero-ring-label strong small {
-    font-size: 8px;
+    font-size: 7px;
   }
   .df2-page-transfer-studio .df2-vd-hero-ring-label span {
     display: none; /* READY label overflows 48px ring */
@@ -10277,7 +10277,11 @@
   }
 
   .df2-page-transfer-studio .df2-vd-hero-ring-label strong {
-    font-size: 11px;
+    font-size: 10px;
+  }
+
+  .df2-page-transfer-studio .df2-vd-hero-ring-label span {
+    display: none;
   }
 
   .df2-page-transfer-studio .df2-map-identity-chip {

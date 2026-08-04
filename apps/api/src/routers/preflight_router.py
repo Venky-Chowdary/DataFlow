@@ -39,6 +39,12 @@ class MappingItem(BaseModel):
     struct_policy: str | None = None
     struct_derived: bool = False
     struct_parent: str | None = None
+    # Map Accept risk must survive /preflight/run — stripping these left G3/G4/G9
+    # blocking after the operator already acknowledged lossy TEXT→INTEGER (etc.).
+    fidelity: str | None = None
+    type_narrowing: bool = False
+    risk_acknowledged: bool = False
+    intentional_omit: bool = False
 
 
 class PreflightRequest(BaseModel):

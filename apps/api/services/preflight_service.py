@@ -72,6 +72,36 @@ class FilePreflightContext(PreflightContext):
         self.source_duplicate_probe_ran = bool(source_duplicate_probe_ran)
         self.source_duplicate_probe_pk = str(source_duplicate_probe_pk or "")
 
+    def _mapping_dict_for_probe(self, m: Any, dest_types: dict[str, str]) -> dict[str, Any]:
+        """Serialize plan mappings for coercion / integrity — keep Map Accept risk.
+
+        Stripping risk_acknowledged / fidelity left Validate blocked after Map
+        Accept risk (G3 probe severity + G9 coercion_safety).
+        """
+        return {
+            "source": m.source,
+            "target": m.target,
+            "confidence": getattr(m, "confidence", 0.0),
+            "transform": getattr(m, "transform", None),
+            "requires_review": bool(getattr(m, "requires_review", False)),
+            "user_override": bool(getattr(m, "user_override", False)),
+            # Prefer live dest DDL; keep stamped create-new type when absent.
+            "target_type": dest_types.get(m.target) or getattr(m, "target_type", None),
+            "source_type": next(
+                (
+                    c.inferred_type
+                    for c in self.plan.source.columns
+                    if c.name == m.source
+                ),
+                None,
+            ),
+            "create_new": bool(getattr(m, "create_new", False)),
+            "fidelity": getattr(m, "fidelity", None) or None,
+            "type_narrowing": bool(getattr(m, "type_narrowing", False)),
+            "risk_acknowledged": bool(getattr(m, "risk_acknowledged", False)),
+            "intentional_omit": bool(getattr(m, "intentional_omit", False)),
+        }
+
     def run_dry_run(self, sample_size: int = 1000) -> tuple[bool, list[str]]:
         if not self.sample_rows:
             return False, [
@@ -97,15 +127,7 @@ class FilePreflightContext(PreflightContext):
             c.name: c.inferred_type for c in self.plan.destination.target_columns
         }
         mapping_dicts = [
-            {
-                "source": m.source,
-                "target": m.target,
-                "transform": getattr(m, "transform", ""),
-                # Prefer live dest DDL; keep stamped create-new type when absent.
-                "target_type": dest_types_by_name.get(m.target)
-                or getattr(m, "target_type", None),
-                "create_new": bool(getattr(m, "create_new", False)),
-            }
+            self._mapping_dict_for_probe(m, dest_types_by_name)
             for m in self.plan.mappings
         ]
 
@@ -149,14 +171,7 @@ class FilePreflightContext(PreflightContext):
                 c.name: c.inferred_type for c in self.plan.destination.target_columns
             }
             mapping_dicts = [
-                {
-                    "source": m.source,
-                    "target": m.target,
-                    "transform": getattr(m, "transform", None),
-                    "target_type": dest_types.get(m.target)
-                    or getattr(m, "target_type", None),
-                    "create_new": bool(getattr(m, "create_new", False)),
-                }
+                self._mapping_dict_for_probe(m, dest_types)
                 for m in self.plan.mappings
             ]
             report = analyze_coercion(
@@ -253,24 +268,11 @@ class FilePreflightContext(PreflightContext):
         from services.data_integrity import run_integrity_audit as audit
 
         source_columns = [c.name for c in self.plan.source.columns]
+        dest_types = {
+            c.name: c.inferred_type for c in self.plan.destination.target_columns
+        }
         mapping_dicts = [
-            {
-                "source": m.source,
-                "target": m.target,
-                "confidence": m.confidence,
-                "transform": m.transform,
-                "requires_review": m.requires_review,
-                "target_type": next(
-                    (
-                        c.inferred_type
-                        for c in self.plan.destination.target_columns
-                        if c.name == m.target
-                    ),
-                    None,
-                )
-                or getattr(m, "target_type", None),
-                "create_new": bool(getattr(m, "create_new", False)),
-            }
+            self._mapping_dict_for_probe(m, dest_types)
             for m in self.plan.mappings
         ]
         source_schemas = [

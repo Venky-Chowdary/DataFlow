@@ -1106,6 +1106,10 @@ export function ValidateDashboard({
     () => (preflight ? buildDisplayBlockers(preflight, syncMode) : []),
     [preflight, syncMode],
   );
+  const fidelityRoot = useMemo(
+    () => displayBlockers.find((d) => d.kind === "fidelity_root") ?? null,
+    [displayBlockers],
+  );
   const explainParts = useMemo(
     () => (explain?.issues?.length ? partitionExplainIssues(explain.issues) : null),
     [explain],
@@ -1688,6 +1692,23 @@ export function ValidateDashboard({
                   </Button>
                 )}
                 {isTypeMismatchBlock && (() => {
+                  // Fidelity root already owns the Map CTA — avoid N Remap chips
+                  // that restate the same TEXT→INTEGER collapse.
+                  if (fidelityRoot) {
+                    return onReviewMappings ? (
+                      <Button
+                        key="fidelity-open-map"
+                        size="sm"
+                        variant="primary"
+                        disabled={remediating}
+                        leadingIcon={<DtIcon name="layers" size={14} />}
+                        onClick={() => onReviewMappings()}
+                        title={fidelityRoot.fix || "Open Map to remap or Accept risk"}
+                      >
+                        Open Map · remap / Accept risk
+                      </Button>
+                    ) : null;
+                  }
                   const isNoopTextRemap = (sug: string, cur: string) => {
                     const s = (sug || "").toUpperCase().trim();
                     const c = (cur || "").toUpperCase().trim();
@@ -1740,7 +1761,7 @@ export function ValidateDashboard({
                     </Button>
                   ));
                 })()}
-                {isTypeMismatchBlock && onReviewMappings && (
+                {isTypeMismatchBlock && !fidelityRoot && onReviewMappings && (
                   <Button
                     size="sm"
                     variant="secondary"
@@ -2019,7 +2040,7 @@ export function ValidateDashboard({
 
       {!running && preflight && (
         <div className="df2-vd-metrics" aria-label="Proof metrics">
-          <MetricChip value={readiness} label="Readiness" tone={heroTone} />
+          {/* Readiness lives in the hero ring — do not duplicate as a MetricChip. */}
           <MetricChip
             value={semantic * 100}
             label="Semantic"

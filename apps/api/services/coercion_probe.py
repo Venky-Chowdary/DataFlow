@@ -519,13 +519,23 @@ def analyze_coercion(
             structural=structural,
         )
         if severity != "block" and fidelity_collapse:
-            severity = "block"
+            # Map Accept risk: keep fidelity_collapse=true for honesty, but do not
+            # keep severity=block — G3 trusts probe severity and would re-block.
+            risk_ack = bool(
+                m.get("risk_acknowledged") or m.get("riskAcknowledged")
+            )
+            severity = "warn" if risk_ack else "block"
             if not fix:
                 fix = (
                     f"Column '{src}' → {tgt_type}: declared mapping collapses fidelity "
                     f"({src_type} → {tgt_type}) even when preview samples coerce. "
                     f"Widen the destination type, add an explicit transform, or accept "
                     f"lossy remapping under a non-strict policy after review."
+                    if not risk_ack
+                    else (
+                        f"Column '{src}' → {tgt_type}: declared fidelity collapse "
+                        f"({src_type} → {tgt_type}) — risk acknowledged on Map."
+                    )
                 )
         if wire_normalize and not fix:
             example = wire_examples[0] if wire_examples else {}

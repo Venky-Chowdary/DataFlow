@@ -278,6 +278,14 @@ export async function runPreflight(payload: {
     create_new?: boolean;
     assignment_strategy?: string;
     semantic_role?: string;
+    /** Map Accept risk — must reach G3/G4/G9 (do not strip on /preflight/run). */
+    fidelity?: string;
+    type_narrowing?: boolean;
+    risk_acknowledged?: boolean;
+    intentional_omit?: boolean;
+    struct_policy?: string;
+    struct_derived?: boolean;
+    struct_parent?: string;
   }[];
   connector_id?: string;
   source_connector_id?: string;
