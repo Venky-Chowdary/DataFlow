@@ -219,8 +219,9 @@ def test_uuid_bigquery_create_new_stamps_string_and_warns_not_silent_green():
     )
     from services.type_system import create_new_mapping_target_type
 
-    assert create_new_mapping_target_type("UUID", "bigquery") == "STRING"
-    assert create_new_mapping_target_type("UUID", "databricks") == "STRING"
+    # Width-safe create-new wires — bare STRING still collapses ObjectId/UUID polarity.
+    assert create_new_mapping_target_type("UUID", "bigquery") == "STRING(36)"
+    assert create_new_mapping_target_type("UUID", "databricks") == "VARCHAR(36)"
     assert create_new_mapping_target_type("UUID", "sqlite") == "TEXT"
 
     mappings = map_columns(
@@ -234,7 +235,7 @@ def test_uuid_bigquery_create_new_stamps_string_and_warns_not_silent_green():
         destination_db_type="bigquery",
         destination_table_exists=False,
     )
-    assert mappings[0]["target_type"] == "STRING"
+    assert mappings[0]["target_type"] == "STRING(36)"
 
     issues = validate_mapping_coercions(
         mappings=[{

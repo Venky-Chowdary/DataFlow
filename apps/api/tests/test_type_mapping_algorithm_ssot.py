@@ -431,3 +431,48 @@ def test_objectid_bare_string_still_collapses_on_bq():
     from services.type_system import is_lossy_coercion
 
     assert is_lossy_coercion("OBJECTID", "STRING", dest_db="bigquery") is True
+
+def test_create_new_false_self_blocks_cleared():
+    from services.type_system import (
+        create_new_mapping_target_type,
+        is_lossy_coercion,
+        is_precision_collapse_coercion,
+        materialize_dest_ddl,
+    )
+
+    cases = [
+        ("DOUBLE", "sqlserver"),
+        ("DOUBLE", "snowflake"),
+        ("DECIMAL(18,4)", "bigquery"),
+        ("MONEY", "bigquery"),
+        ("TIMESTAMP_NTZ(6)", "sqlserver"),
+        ("TIMESTAMP_NTZ(6)", "databricks"),
+        ("TIMESTAMP_NTZ(6)", "iceberg"),
+        ("TIME(6)", "redshift"),
+        ("JSONB", "sqlserver"),
+        ("UUID", "bigquery"),
+        ("OBJECTID", "oracle"),
+        ("INET", "mysql"),
+        ("INET", "sqlserver"),
+    ]
+    for src, dest in cases:
+        stamp = create_new_mapping_target_type(src, dest)
+        assert materialize_dest_ddl(dest, stamp).upper().replace(" ", "") == stamp.upper().replace(
+            " ", ""
+        ), (src, dest, stamp)
+        assert is_lossy_coercion(src, stamp, dest_db=dest) is False, (src, dest, stamp)
+        assert is_precision_collapse_coercion(src, stamp, dest_db=dest) is False, (
+            src,
+            dest,
+            stamp,
+        )
+
+
+def test_oracle_time_and_iceberg_objectid_remain_declared_lossy():
+    from services.type_system import create_new_mapping_target_type, is_lossy_coercion
+
+    oracle_time = create_new_mapping_target_type("TIME(6)", "oracle")
+    assert "VARCHAR2" in oracle_time.upper()
+    assert is_lossy_coercion("TIME(6)", oracle_time, dest_db="oracle") is True
+    iceberg_oid = create_new_mapping_target_type("OBJECTID", "iceberg")
+    assert is_lossy_coercion("OBJECTID", iceberg_oid, dest_db="iceberg") is True

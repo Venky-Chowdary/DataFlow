@@ -1453,7 +1453,16 @@ def bignumeric_capacity_would_invent(source_type: str, target_type: str) -> bool
     tgt_u = strip_identity_qualifier(target_type).upper().replace(" ", "")
     src_big = src_u.startswith("BIGNUMERIC") or src_u.startswith("BIGDECIMAL")
     tgt_big = tgt_u.startswith("BIGNUMERIC") or tgt_u.startswith("BIGDECIMAL")
-    return bool(tgt_big and not src_big)
+    if tgt_big and not src_big:
+        # Same (p,s) BIGNUMERIC is BigQuery create-new physical wire — not invent.
+        sp, ss = parse_numeric_precision_scale(source_type)
+        tp, ts = parse_numeric_precision_scale(target_type)
+        if sp is not None and tp is not None and sp == tp and (
+            (ss is None and ts is None) or ss == ts
+        ):
+            return False
+        return True
+    return False
 
 
 def decimal_fixed_point_would_collapse_to_text(
@@ -3396,7 +3405,8 @@ _TZ_NAIVE_DDL: Final[dict[str, str]] = {
     "duckdb": "TIMESTAMP",
     "timescaledb": "timestamp",
     # Keep lakehouse NTZ spellings aligned with DDL_TYPES[LOGICAL_DATETIME].
-    "databricks": "TIMESTAMP",
+    # Databricks TIMESTAMP is session-TZ aware; NTZ sources must stamp TIMESTAMP_NTZ.
+    "databricks": "TIMESTAMP_NTZ",
     "clickhouse": "DateTime64(3)",
     "trino": "timestamp(3)",
     "presto": "timestamp",
@@ -5202,14 +5212,26 @@ def specialty_wire_preserves_value(source_specialty: str, target_type: str) -> b
     if spec == "OBJECTID":
         if upper in {"BINARY(12)", "VARBINARY(12)"}:
             return True
-        m = re.match(r"^(?:N?VAR)?CHAR(?:ACTER)?\s*\(\s*(\d+)\s*\)$", upper)
+        m = re.match(
+            r"^(?:N?VAR)?CHAR(?:ACTER)?(?:\s+VARYING)?\s*\(\s*(\d+)\s*\)$",
+            upper,
+        )
         if m and int(m.group(1)) >= 24:
             return True
-        # BigQuery STRING(n) / Databricks VARCHAR(n) create-new hex wires.
+        m = re.match(r"^VARCHAR2\s*\(\s*(\d+)\s*(?:BYTE|CHAR)?\s*\)$", upper)
+        if m and int(m.group(1)) >= 24:
+            return True
+        # BigQuery STRING(n) create-new hex wire.
         m = re.match(r"^STRING\s*\(\s*(\d+)\s*\)$", upper)
         return bool(m and int(m.group(1)) >= 24)
     if spec in {"INET", "CIDR", "IPV4", "IPV6", "IP", "MACADDR", "MACADDR8"}:
-        m = re.match(r"^(?:N?VAR)?CHAR(?:ACTER)?\s*\(\s*(\d+)\s*\)$", upper)
+        m = re.match(r"^(?:N?VAR)?CHAR(?:ACTER)?(?:\s+VARYING)?\s*\(\s*(\d+)\s*\)$", upper)
+        if m and int(m.group(1)) >= 45:
+            return True
+        m = re.match(r"^VARCHAR2\s*\(\s*(\d+)\s*(?:BYTE|CHAR)?\s*\)$", upper)
+        if m and int(m.group(1)) >= 45:
+            return True
+        m = re.match(r"^STRING\s*\(\s*(\d+)\s*\)$", upper)
         return bool(m and int(m.group(1)) >= 45)
     return False
 
@@ -5244,7 +5266,12 @@ def specialty_domain_would_invent(source_type: str, target_type: str) -> bool:
         LOGICAL_BINARY,
     }
 
-def specialty_carrier_would_collapse(source_type: str, target_type: str) -> bool:
+def specialty_carrier_would_collapse(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
     """True when a native specialty carrier would collapse to opaque/scalar sink.
 
     Airbyte maps inet/hstore/pg_lsn/geometric → string. Datawrap preserves natives
@@ -5267,6 +5294,11 @@ def specialty_carrier_would_collapse(source_type: str, target_type: str) -> bool
     if specialty_wire_preserves_value(src, target_type):
         return False
     tgt_l = normalize_logical_type(target_type)
+    # JSONB → dialect document LOB wire (NVARCHAR(MAX)/CLOB/STRING) is create-new twin.
+    if src in _DOCUMENT_POLARITY_BASES and is_dialect_native_document_wire(
+        target_type, dest_db=dest_db
+    ):
+        return False
     # JSONB→JSON / VARIANT / SUPER keep document polarity (dialect twin, not TEXT).
     if src == "JSONB" and tgt_l == LOGICAL_JSON:
         tgt_u = strip_identity_qualifier(target_type).upper().strip()
@@ -5347,16 +5379,27 @@ def promote_create_new_temporal_stamp(src_type: str, stamped: str, dest_db_type:
     bare = re.sub(r"\s*\(\s*\d+\s*\)", "", out.upper()).strip()
     db = (dest_db_type or "").strip().lower()
     # Destinations that cannot take typmod: strip illegal (p) if present.
+    # Keep TIMESTAMP_NTZ / TIMESTAMPTZ polarity tokens — never collapse NTZ→TIMESTAMP
+    # on Databricks (TIMESTAMP is session-TZ aware).
     if db in _NO_TEMPORAL_TYPMOD_ENGINES and bare in {
         "TIMESTAMP",
         "TIME",
         "DATETIME",
         "TIMESTAMP_NTZ",
         "TIMESTAMPTZ",
+        "TIMESTAMP_LTZ",
+        "TIMESTAMP_TZ",
     }:
-        return bare if bare != "TIMESTAMP_NTZ" else "TIMESTAMP"
+        if "(" in out.upper():
+            # Strip typmod only; preserve polarity token.
+            return bare
+        return out
     src_p = parse_temporal_fractional_precision(src_type)
     if src_p is None:
+        # Already-parameterized stamps must not be upgraded (DATETIME2(6)→(7)
+        # via materialize_dest_ddl empty-src promote).
+        if parse_temporal_fractional_precision(out) is not None:
+            return out
         # SQL Server bare DATETIME2 defaults to precision 7 — stamp it so G3
         # does not treat create-new as FSP-0 collapse vs TIMESTAMP_NTZ(6+).
         if bare == "DATETIME2" and db in {"sqlserver", "mssql", ""}:
@@ -5446,6 +5489,17 @@ def create_new_mapping_target_type(src_type: str, dest_db_type: str = "") -> str
         if phys_base in {"UUID"}:
             return "UUID"
         # Exact-wire / STRING / TEXT sinks — stamp physical so Map ≡ CREATE.
+        phys_u = strip_identity_qualifier(physical_uuid).upper().strip()
+        if phys_u in {"STRING", "TEXT", "VARCHAR", "NVARCHAR"} and not uuid_exact_wire_carrier(
+            physical_uuid
+        ):
+            db_l = db_uuid.strip().lower()
+            if db_l in {"bigquery", "bq"}:
+                return "STRING(36)"
+            if db_l in {"databricks", "spark", "delta", "delta_lake"}:
+                return "VARCHAR(36)"
+            if db_l == "iceberg":
+                return "string"
         return physical_uuid
     specialty = specialty_carrier_base(src_type)
     db = (dest_db_type or "").strip()
@@ -5455,9 +5509,19 @@ def create_new_mapping_target_type(src_type: str, dest_db_type: str = "") -> str
             # Dest keeps a native specialty token (PG→PG INET) — stamp that.
             if specialty_carrier_base(physical) is not None:
                 return physical
-            # Off-engine wire (ObjectId→VARCHAR(24), INET→VARCHAR/TEXT) — stamp
-            # the physical sink so Map/Validate show polarity (Accept risk), not
-            # silent specialty→specialty identity while CREATE emits VARCHAR.
+            # Off-engine IP/INET host-address wire — VARCHAR(45) hex/text, not bare TEXT.
+            if specialty in {"INET", "CIDR", "IPV4", "IPV6", "IP", "MACADDR", "MACADDR8"}:
+                if specialty_wire_preserves_value(specialty, physical):
+                    return physical
+                db_l = db.lower()
+                if db_l in {"bigquery", "bq"}:
+                    return "STRING(45)"
+                if db_l in {"sqlserver", "mssql"}:
+                    return "VARCHAR(45)"
+                if db_l == "oracle":
+                    return "VARCHAR2(45)"
+                return "VARCHAR(45)"
+            # Off-engine wire (ObjectId→VARCHAR(24), …) — stamp physical sink.
             return physical
         return specialty
     if db:
@@ -5546,6 +5610,9 @@ def uuid_exact_wire_carrier(target_type: str | None) -> bool:
     if m and int(m.group(1)) == 36:
         return True
     m = re.match(r"^VARCHAR2\s*\(\s*(\d+)\s*\)$", upper)
+    if m and int(m.group(1)) == 36:
+        return True
+    m = re.match(r"^STRING\s*\(\s*(\d+)\s*\)$", upper)
     return bool(m and int(m.group(1)) == 36)
 
 
@@ -5571,10 +5638,13 @@ def uuid_capacity_string_carrier(target_type: str | None) -> bool:
         r"^(?:N?VAR)?CHAR(?:ACTER)?\s*\(\s*(\d+)\s*\)$",
         upper,
     )
-    if m and int(m.group(1)) > 36:
+    if m and int(m.group(1)) >= 36:
         return True
     m = re.match(r"^VARCHAR2\s*\(\s*(\d+)\s*\)$", upper)
-    return bool(m and int(m.group(1)) > 36)
+    if m and int(m.group(1)) >= 36:
+        return True
+    m = re.match(r"^STRING\s*\(\s*(\d+)\s*\)$", upper)
+    return bool(m and int(m.group(1)) >= 36)
 
 
 
@@ -6211,6 +6281,9 @@ def temporal_precision_would_narrow(
                 "postgresql", "postgres", "pg", "redshift", "cockroach",
                 "cockroachdb", "alloydb", "timescaledb", "yugabytedb",
                 "citus", "supabase", "greenplum",
+                # Lakehouse bare TIMESTAMP is microsecond (no typmod engines).
+                "databricks", "spark", "delta", "delta_lake", "iceberg",
+                "duckdb", "bigquery", "bq",
             }:
                 tgt_p = 6
             elif db in {"sqlserver", "mssql"}:
@@ -6229,8 +6302,14 @@ def temporal_precision_would_narrow(
                 tgt_p = 0
         elif bare == "TIME":
             db = (dest_db or "").strip().lower()
-            if db in {"bigquery", "bq"}:
+            if db in {
+                "bigquery", "bq", "postgresql", "postgres", "pg", "redshift",
+                "duckdb", "databricks", "spark", "delta", "iceberg",
+                "cockroachdb", "alloydb", "timescaledb",
+            }:
                 tgt_p = 6
+            elif db in {"sqlserver", "mssql"}:
+                tgt_p = 7
             else:
                 tgt_p = 0
         elif bare.startswith("DATETIME"):
@@ -6609,8 +6688,13 @@ def integer_width_would_narrow(source_type: str, target_type: str) -> bool:
     return src_w > tgt_w
 
 
-def float_mantissa_bits(inferred: str | None) -> int | None:
-    """IEEE significand bits for float carriers (53=double, 24=single, 11=half)."""
+def float_mantissa_bits(inferred: str | None, *, dest_db: str = "") -> int | None:
+    """IEEE significand bits for float carriers (53=double, 24=single, 11=half).
+
+    Bare ``FLOAT`` is dialect-dependent: SQL Server / Snowflake FLOAT is IEEE-64;
+    MySQL FLOAT is IEEE-32. When ``dest_db`` is known, use the dialect default so
+    DOUBLE→FLOAT create-new on those engines is not a false mantissa collapse.
+    """
     if normalize_logical_type(inferred) != LOGICAL_FLOAT:
         return None
     # Strip UNSIGNED so REAL UNSIGNED / FLOAT UNSIGNED keep single-width tokens.
@@ -6642,17 +6726,25 @@ def float_mantissa_bits(inferred: str | None) -> int | None:
         "BINARY_DOUBLE",
     } or upper.startswith("DOUBLE"):
         return 53
-    # Bare FLOAT is dialect-dependent (PG≈double, MySQL=single). Fail-closed
-    # treat as single so DOUBLE→FLOAT never silent-greens.
+    # Bare FLOAT is dialect-dependent.
     if upper == "FLOAT" or upper.startswith("FLOAT"):
+        db = (dest_db or "").strip().lower()
+        if db in {"sqlserver", "mssql", "snowflake"}:
+            return 53
+        # Fail-closed single so DOUBLE→FLOAT never silent-greens without dest.
         return 24
     return 53
 
 
-def float_mantissa_would_narrow(source_type: str, target_type: str) -> bool:
+def float_mantissa_would_narrow(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
     """True when DOUBLE/FLOAT64 lands on REAL/FLOAT32/HALF (silent IEEE drop)."""
-    src_b = float_mantissa_bits(source_type)
-    tgt_b = float_mantissa_bits(target_type)
+    src_b = float_mantissa_bits(source_type, dest_db=dest_db)
+    tgt_b = float_mantissa_bits(target_type, dest_db=dest_db)
     if src_b is None or tgt_b is None:
         return False
     return src_b > tgt_b
@@ -6924,7 +7016,7 @@ def is_precision_collapse_coercion(
         return True
     if integer_width_would_narrow(source_type, target_type):
         return True
-    if float_mantissa_would_narrow(source_type, target_type):
+    if float_mantissa_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
     if year_domain_would_collapse(source_type, target_type):
         return True
@@ -6948,7 +7040,7 @@ def is_precision_collapse_coercion(
         return True
     if geography_contract_would_collapse(source_type, target_type):
         return True
-    if specialty_carrier_would_collapse(source_type, target_type):
+    if specialty_carrier_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
     if specialty_domain_would_invent(source_type, target_type):
         return True
@@ -7346,7 +7438,7 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
             return True
         if integer_width_would_narrow(source_type, target_type):
             return True
-        if float_mantissa_would_narrow(source_type, target_type):
+        if float_mantissa_would_narrow(source_type, target_type, dest_db=dest_db):
             return True
         if enum_set_domain_would_reject(source_type, target_type):
             return True
@@ -7364,7 +7456,7 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
             return True
         if geography_contract_would_collapse(source_type, target_type):
             return True
-        if specialty_carrier_would_collapse(source_type, target_type):
+        if specialty_carrier_would_collapse(source_type, target_type, dest_db=dest_db):
             return True
         if specialty_domain_would_invent(source_type, target_type):
             return True
@@ -7462,7 +7554,7 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
         return True
     if integer_width_would_narrow(source_type, target_type):
         return True
-    if float_mantissa_would_narrow(source_type, target_type):
+    if float_mantissa_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
     if string_width_would_narrow(source_type, target_type):
         return True
@@ -7494,7 +7586,7 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
         return True
     if geography_contract_would_collapse(source_type, target_type):
         return True
-    if specialty_carrier_would_collapse(source_type, target_type):
+    if specialty_carrier_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
     if specialty_domain_would_invent(source_type, target_type):
         return True
