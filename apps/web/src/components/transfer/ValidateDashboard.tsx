@@ -31,6 +31,7 @@ import {
   remapToTypeForMismatch,
 } from "../../lib/validateIssueGrouping";
 import { buildValidateDecisionPath } from "../../lib/validateDecisionPath";
+import { buildValidateHonestyControls } from "../../lib/validateHonestyControls";
 import { BadDataFixDrawer, type BadDataIssue } from "./BadDataFixDrawer";
 import { Gate8ProofCard, type Gate8Reconciliation } from "./Gate8ProofCard";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
@@ -230,6 +231,12 @@ interface ValidateDashboardProps {
    * Re-runs Validate with fk_risk_acknowledged=true — does not claim RI proven.
    */
   onAcknowledgeFkRisk?: () => void;
+  /**
+   * Module 16 — opt-in full-table population orphan scan (only path to RI proven).
+   * Expensive; default off. Sample Validate never equals population RI.
+   */
+  runPopulationOrphanScan?: boolean;
+  onRunPopulationOrphanScanChange?: (enabled: boolean) => void;
   /** Current Studio mappings for durable repair apply. */
   repairMappings?: RepairMapping[];
   /** After Approve & apply — merge updated mappings into Studio. */
@@ -685,6 +692,8 @@ export function ValidateDashboard({
   onAcknowledgeCompliance,
   onAcknowledgeSchemaDrift,
   onAcknowledgeFkRisk,
+  runPopulationOrphanScan = false,
+  onRunPopulationOrphanScanChange,
   repairMappings = [],
   onRepairMappingsApplied,
   repairJobId = "",
@@ -1119,6 +1128,12 @@ export function ValidateDashboard({
       && !preflight.proof_bundle?.risk_contracts?.incomplete;
     return buildValidateDecisionPath(preflight, { syncMode, executeUnlocked });
   }, [preflight, syncMode, running, decision]);
+  const honestyControls = useMemo(
+    () => buildValidateHonestyControls(preflight, {
+      populationScanRequested: runPopulationOrphanScan,
+    }),
+    [preflight, runPopulationOrphanScan],
+  );
   const explainParts = useMemo(
     () => (explain?.issues?.length ? partitionExplainIssues(explain.issues) : null),
     [explain],
@@ -2729,6 +2744,60 @@ export function ValidateDashboard({
               </li>
             ))}
           </ol>
+        </div>
+      )}
+
+      {!running && (
+        <div className="df2-vd-honesty" aria-label="Validate honesty controls">
+          <div className="df2-vd-honesty-head">
+            <DtIcon name="shield" size={15} />
+            <strong>Coverage honesty</strong>
+            {honestyControls.referentialIntegrity.proven ? (
+              <span className="df2-vd-decision-path-badge is-proven">RI proven</span>
+            ) : (
+              <span className="df2-vd-decision-path-badge">RI not proven</span>
+            )}
+          </div>
+          <p className="df2-vd-honesty-note">{honestyControls.note}</p>
+          <ul className="df2-vd-honesty-list">
+            <li>
+              <strong>Referential integrity</strong>
+              <span>{honestyControls.referentialIntegrity.headline}</span>
+            </li>
+            <li>
+              <strong>ConversionClass</strong>
+              <span>{honestyControls.conversionClasses.headline}</span>
+            </li>
+            {honestyControls.ddlIdentityHash ? (
+              <li>
+                <strong>DDL identity</strong>
+                <span title={honestyControls.ddlIdentityHash}>
+                  Map→DDL fingerprint {honestyControls.ddlIdentityHash.slice(0, 12)}…
+                </span>
+              </li>
+            ) : null}
+          </ul>
+          {onRunPopulationOrphanScanChange && (
+            <label className="df2-vd-honesty-toggle">
+              <input
+                type="checkbox"
+                checked={runPopulationOrphanScan}
+                onChange={(e) => onRunPopulationOrphanScanChange(e.target.checked)}
+                disabled={Boolean(running)}
+              />
+              <span>
+                Run population orphan scan on next Validate
+                <em> (expensive full-table anti-join — only path to RI proven)</em>
+              </span>
+            </label>
+          )}
+          {onRunPopulationOrphanScanChange && runPopulationOrphanScan && onRunPreflight && (
+            <div className="df2-vd-honesty-actions">
+              <Button size="sm" variant="secondary" onClick={() => onRunPreflight()}>
+                Re-run Validate with population scan
+              </Button>
+            </div>
+          )}
         </div>
       )}
 

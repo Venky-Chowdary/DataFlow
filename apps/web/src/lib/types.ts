@@ -538,6 +538,24 @@ export interface PreflightProofBundle {
    * Never infer from Validate / sample / writer-ack alone.
    */
   migration_proven?: boolean;
+  /** Module 12 — Map→DDL identity fingerprint. */
+  ddl_identity?: {
+    ddl_identity_hash?: string;
+    matches_approved?: boolean;
+    note?: string;
+  };
+  /** Module 12 — per-column ConversionClass stamps. */
+  conversion_contract?: {
+    version?: string;
+    columns?: Array<{
+      source?: string;
+      target?: string;
+      conversion_class?: string;
+      invents_capacity?: boolean;
+      requires_risk_contract?: boolean;
+      reason?: string;
+    }>;
+  };
 }
 
 export interface CoercionSampleFailure {

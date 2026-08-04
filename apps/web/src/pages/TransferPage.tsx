@@ -345,6 +345,8 @@ export function TransferPage({
   const [complianceAcknowledged, setComplianceAcknowledged] = useState(false);
   const [schemaDriftAcknowledged, setSchemaDriftAcknowledged] = useState(false);
   const [fkRiskAcknowledged, setFkRiskAcknowledged] = useState(false);
+  /** Module 16 — opt-in population orphan scan (only path to RI proven). */
+  const [runPopulationOrphanScan, setRunPopulationOrphanScan] = useState(false);
   const [dateLocale, setDateLocale] = useState<DateLocaleId>("");
   const [backfillNewFields, setBackfillNewFields] = useState(false);
   const [writeViaStaging, setWriteViaStaging] = useState(false);
@@ -3464,6 +3466,7 @@ export function TransferPage({
           compliance_acknowledged: ackCompliance,
           schema_drift_acknowledged: ackSchemaDrift,
           fk_risk_acknowledged: ackFkRisk,
+          run_population_orphan_scan: runPopulationOrphanScan,
           acknowledgment_actor: ackActor || undefined,
           acknowledgment_reason: ackReason || undefined,
           write_via_staging: writeViaStaging,
@@ -5608,6 +5611,8 @@ export function TransferPage({
                 acknowledgmentReason: "Accept destination FK mapping risk for this run; population orphans not proven",
               });
             }}
+            runPopulationOrphanScan={runPopulationOrphanScan}
+            onRunPopulationOrphanScanChange={setRunPopulationOrphanScan}
             repairJobId={activeJobId || seedStudioIntent?.jobId || persistedPlanId || ""}
             seedRepairProposalId={seedRepairProposalId}
             onSeedRepairConsumed={() => setSeedRepairProposalId(null)}
