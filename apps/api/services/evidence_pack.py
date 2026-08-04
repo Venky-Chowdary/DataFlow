@@ -121,10 +121,31 @@ CLAIM_REGISTRY: list[dict[str, Any]] = [
             "aggregate_score": 0.90,
         },
         "honesty": (
-            "Algorithm name-match / golden overlap proof with destination_db_type "
-            "set — not a full type-fidelity bake-off (UNSIGNED, OBJECTID, "
-            "TIMESTAMPTZ polarity are covered by dedicated type_system / G3 tests). "
-            "Live introspect is optional (LIVE_MAPPING_MATRIX=1) and skipped by default."
+            "Name-match / golden overlap proof with destination_db_type set — "
+            "**not** datatype/DDL/checksum/constraint fidelity. "
+            "For offline type+DDL+coercion pair assurance see claim "
+            "`pair_assurance_offline` (services/pair_assurance.py). "
+            "Live introspect optional (LIVE_MAPPING_MATRIX=1), skipped by default."
+        ),
+    },
+    {
+        "id": "pair_assurance_offline",
+        "claim": "PRODUCTION_SKU DB×DB offline type/DDL/coercion pair assurance",
+        "buyer_line": (
+            "Every committed database→database PRODUCTION_SKU pair passes an "
+            "offline fail-closed type inventory, create-new DDL stamp, coercion "
+            "validator, mapping contract, and fixture transform check."
+        ),
+        "floors": {
+            "pair_count": 20,
+            "all_passed": 1,
+            "type_cell_failures_zero": 1,
+        },
+        "honesty": (
+            "Offline only — uses real type_system / type_coercion_validator / "
+            "mapping_pipeline / apply_transform. Does **not** prove live transfer, "
+            "checksum/Gate-8 population, FK/orphan RI, rollback, or CDC exactly-once. "
+            "Live execute+reconcile remains test_production_sku_matrix."
         ),
     },
     {
@@ -488,6 +509,24 @@ def measure_connector_pair_matrix() -> dict[str, Any]:
     }
 
 
+def measure_pair_assurance_offline() -> dict[str, Any]:
+    """PRODUCTION_SKU DB×DB offline type/DDL/coercion assurance (real engines)."""
+    from services.pair_assurance import run_committed_pair_assurance
+
+    summary = run_committed_pair_assurance(write_proof=True)
+    failures = int(summary.get("type_cell_failures") or 0)
+    return {
+        "pair_count": int(summary.get("pair_count") or 0),
+        "passed_count": int(summary.get("passed_count") or 0),
+        "all_passed": int(bool(summary.get("all_passed"))),
+        "type_cell_failures": failures,
+        "type_cell_failures_zero": int(failures == 0),
+        "failed_pairs": list(summary.get("failed_pairs") or []),
+        "mode": "offline",
+        "scope": summary.get("scope") or {},
+    }
+
+
 def measure_abbreviation_coverage() -> dict[str, Any]:
     # Prefer fresh measurement; fall back to last proof artifact.
     from services.semantic_mapper import ABBREVIATIONS, _normalize
@@ -574,6 +613,7 @@ _MEASUREMENTS: dict[str, Callable[[], dict[str, Any]]] = {
     "sample_aware_type_demotion": measure_sample_aware_demotion,
     "enterprise_mapping_accuracy": measure_enterprise_accuracy,
     "connector_pair_matrix": measure_connector_pair_matrix,
+    "pair_assurance_offline": measure_pair_assurance_offline,
     "abbreviation_coverage": measure_abbreviation_coverage,
     "create_new_type_risk_stamp": measure_create_new_type_risk,
 }

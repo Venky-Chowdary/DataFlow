@@ -1,6 +1,12 @@
-"""N×M source×dest connector pair proof matrix.
+"""Name-match mapping matrix across dialect labels (NOT type/DDL fidelity).
 
 Parametric pytest across top dialects with golden enterprise cases.
+Proves column-name assignment score ≥ 85% with destination_db_type set.
+
+For enterprise offline **type + DDL stamp + coercion + transform** pair
+assurance, see ``services/pair_assurance.py`` and
+``tests/test_pair_assurance_offline.py`` (claim ``pair_assurance_offline``).
+
 Live fixtures are optional — skip when LIVE_MAPPING_MATRIX=0 / unset.
 """
 

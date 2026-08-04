@@ -20,6 +20,17 @@ UI ledger: Workspace → Benchmarks → Integrity / PRODUCTION_SKU panel (reads 
 
 Rule: if a route is not in `PRODUCTION_SKU`, it is not a committed migration claim.
 
+### Offline pair assurance (datatype / DDL / coercion)
+
+| Claim | Module | Proves | Does **not** prove |
+|-------|--------|--------|--------------------|
+| `pair_assurance_offline` | `apps/api/services/pair_assurance.py` | Every PRODUCTION_SKU **database→database** pair: type inventory × create-new DDL stamp × lossy/risk/coercion fail-closed × mapping contract × fixture transforms | Live transfer, checksum/Gate-8 population, FK/orphan RI, rollback, CDC exactly-once |
+| `connector_pair_matrix` | `tests/test_mapping_connector_pair_matrix.py` | Name-match golden score across dialect labels | Type/DDL fidelity |
+
+Proof artifacts: `apps/api/data/proofs/pair_assurance/{src}__{dst}.json` + `_summary.json`.
+
+Live execute + reconcile remains `tests/test_production_sku_matrix.py` (separate claim).
+
 ## 3. Mapping engine
 
 - Studio map: BM25 + semantic token graph + Hungarian assignment (`apps/api/services/semantic_mapper.py`)
