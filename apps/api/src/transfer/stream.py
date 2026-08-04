@@ -1148,24 +1148,49 @@ def stream_database_transfer(
     # thresholds; Mongo already used 64MB — extend the same class to SF/BQ/RS.
     _warehouse_dests = {"mongodb", "snowflake", "bigquery", "redshift"}
     target_memory_bytes = 64 * 1024 * 1024 if dest_type in _warehouse_dests else 8 * 1024 * 1024
+    requested_chunk = int(CHUNK_SIZE)
     chunk_size = adaptive_chunk_size(CHUNK_SIZE, avg_row_size, max_size=CHUNK_SIZE, target_memory_bytes=target_memory_bytes)
+    adaptive_chunk = int(chunk_size)
+    proxy_capped = False
+    object_store_single_shot = False
     # Cap stream batches on public TCP proxies so one socket never holds a 20k-row window.
     try:
         from connectors.write_resilience import proxy_stream_batch_size
     except ImportError:
         proxy_stream_batch_size = None  # type: ignore
     if proxy_stream_batch_size is not None:
+        before_proxy = int(chunk_size)
         chunk_size = proxy_stream_batch_size(
             dest_cfg.get("host"),
             connection_string=dest_cfg.get("connection_string") or dest_cfg.get("uri") or "",
             default=chunk_size,
         )
+        proxy_capped = int(chunk_size) < before_proxy
     # Object-store writers (S3/GCS/ADLS) emit a single destination object per call.
     # Chunked writes would overwrite the same key and silently lose data.
     # Always force a single shot — gating on truthy total_rows failed open after
     # honesty waves set total_rows=None for unknown cardinality.
     if dest_type in ("s3", "gcs", "adls"):
         chunk_size = max(1, int(sample_probe.total_rows or 10_000_000))
+        object_store_single_shot = True
+    chunk_policy = {
+        "requested": requested_chunk,
+        "adaptive": adaptive_chunk,
+        "final": int(chunk_size),
+        "avg_row_bytes": int(avg_row_size),
+        "target_memory_bytes": int(target_memory_bytes),
+        "proxy_capped": bool(proxy_capped),
+        "object_store_single_shot": bool(object_store_single_shot),
+        "reason": (
+            "object-store single-shot"
+            if object_store_single_shot
+            else "proxy batch cap"
+            if proxy_capped
+            else "adaptive memory target"
+            if adaptive_chunk != requested_chunk
+            else "default chunk"
+        ),
+    }
 
     def _batch_limit(offset: int = 0, *, default: int = chunk_size) -> int:
         if limit > 0:
@@ -2182,6 +2207,7 @@ def stream_database_transfer(
     dest_summary["sync_mode"] = effective_sync
     dest_summary["watermark"] = running_cursor
     dest_summary["chunk_size"] = chunk_size
+    dest_summary["chunk_policy"] = chunk_policy
     dest_summary["batches"] = batches_completed
     if not isinstance(dest_summary.get("source_row_count"), int) or dest_summary.get("source_row_count", 0) <= 0:
         held_out = max(int(rejected_total or 0) - int(coerced_null_total or 0), 0)

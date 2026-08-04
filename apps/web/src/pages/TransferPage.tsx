@@ -77,6 +77,8 @@ import {
   type SchemaPolicyId,
   type SyncModeId,
   type ValidationModeId,
+  multiStreamScd2MirrorBlockCopy,
+  MULTI_STREAM_SCD2_MIRROR_BLOCK,
 } from "../lib/transferConstants";
 import { isJobSuccess } from "../lib/uiUtils";
 import {
@@ -3617,7 +3619,7 @@ export function TransferPage({
     if (multiStreamUnsupportedMode) {
       toast({
         title: "Multi-stream not supported for this mode",
-        message: "SCD2/mirror require a single stream. Use full/incremental/CDC for multi-table, or select one table.",
+        message: multiStreamScd2MirrorBlockCopy("toast"),
         tone: "error",
       });
       setStep(STEP_DESTINATION);
@@ -3966,7 +3968,7 @@ export function TransferPage({
     if (multiStreamUnsupportedMode) {
       toast({
         title: "Multi-stream not supported for this mode",
-        message: "SCD2/mirror cannot be scheduled for multiple streams — use full/incremental/CDC or a single stream.",
+        message: multiStreamScd2MirrorBlockCopy("schedule"),
         tone: "error",
       });
       return;
@@ -5445,7 +5447,7 @@ export function TransferPage({
             )}
             {multiStreamUnsupportedMode && (
               <p className="df2-label-hint df2-dest-sync-warning" role="alert">
-                Multi-stream SCD2/mirror is not supported. Switch to full/incremental/CDC, or enter a single table.
+                {MULTI_STREAM_SCD2_MIRROR_BLOCK}
               </p>
             )}
           </div>
@@ -5656,7 +5658,7 @@ export function TransferPage({
             executeBlocked={multiStreamUnsupportedMode}
             executeBlockedReason={
               multiStreamUnsupportedMode
-                ? "Multi-stream SCD2/mirror is not supported — switch to full/incremental/CDC or a single stream."
+                ? MULTI_STREAM_SCD2_MIRROR_BLOCK
                 : undefined
             }
             cdcRetentionSlot={
@@ -5799,7 +5801,7 @@ export function TransferPage({
                 disabled={!canExecute || multiStreamUnsupportedMode}
                 title={
                   multiStreamUnsupportedMode
-                    ? "Multi-stream SCD2/mirror is not supported — switch mode or select a single stream"
+                    ? MULTI_STREAM_SCD2_MIRROR_BLOCK
                     : !canExecute
                       ? "Requires API Validate with decision approve"
                       : undefined

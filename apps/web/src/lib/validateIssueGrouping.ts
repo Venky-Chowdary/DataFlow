@@ -609,3 +609,57 @@ export function buildExecutiveSummary(
     aiPromptHint: root ? "Why are duplicate IDs blocking this transfer?" : null,
   };
 }
+
+
+/** Cap and dedupe Validate remediation CTAs — one primary per kind/column family. */
+export function rankAndDedupeSuggestedActions(
+  actions: ValidationSuggestedAction[] | null | undefined,
+  max = 6,
+): ValidationSuggestedAction[] {
+  if (!actions?.length) return [];
+  const priority = (kind: string): number => {
+    switch (kind) {
+      case "fix_source_keys":
+        return 0;
+      case "change_target_type":
+        return 1;
+      case "add_transform":
+        return 2;
+      case "open_bad_data_fix":
+      case "normalize_control_chars":
+      case "quarantine_and_rerun":
+        return 3;
+      case "map_column":
+      case "review_mappings":
+      case "rerun_mapping":
+        return 4;
+      case "check_connection":
+        return 5;
+      default:
+        return 9;
+    }
+  };
+  const sorted = [...actions].sort((a, b) => priority(String(a.kind)) - priority(String(b.kind)));
+  const seenExact = new Set<string>();
+  const seenFamily = new Set<string>();
+  const out: ValidationSuggestedAction[] = [];
+  for (const action of sorted) {
+    const kind = String(action.kind || "");
+    const col = String(action.column || action.target || "");
+    const exact = [kind, col, String(action.to_type || ""), String(action.transform || ""), String(action.label || "")].join("|");
+    if (seenExact.has(exact)) continue;
+    const family =
+      kind === "map_column" || kind === "review_mappings" || kind === "rerun_mapping"
+        ? `map:${col || "*"}`
+        : kind === "normalize_control_chars" || kind === "quarantine_and_rerun" || kind === "open_bad_data_fix"
+          ? "encoding"
+          : `${kind}:${col || "*"}`;
+    if (seenFamily.has(family)) continue;
+    seenExact.add(exact);
+    seenFamily.add(family);
+    out.push(action);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+

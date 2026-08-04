@@ -757,6 +757,33 @@ export function ColumnReviewPanel({
                         )}
                       </div>
                       )}
+                      {!omitted && m.flattenCollisions && m.flattenCollisions.length > 0 && (
+                        <div className="df2-flatten-collision" role="note">
+                          <p className="df2-label-hint">Flatten collisions (kept as JSON path owners)</p>
+                          <table className="df2-flatten-collision-table">
+                            <thead>
+                              <tr><th>Flat name</th><th>Paths</th></tr>
+                            </thead>
+                            <tbody>
+                              {m.flattenCollisions.map((c) => (
+                                <tr key={c.flat}>
+                                  <td className="df2-mono">{c.flat}</td>
+                                  <td className="df2-mono">{c.paths.map((p) => p.join(".")).join(" · ")}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                          <button
+                            type="button"
+                            className="df2-btn df2-btn-sm"
+                            onClick={() =>
+                              onChange(applyStructPolicyChange(mappings, index, "store_as_json"))
+                            }
+                          >
+                            Keep as JSON blob
+                          </button>
+                        </div>
+                      )}
                       {!omitted && isExistingEnumBooleanConflict(m) && (
                         <button
                           type="button"

@@ -470,7 +470,14 @@ async def prometheus_metrics():
 
 @app.get("/api/v1")
 async def api_info():
-    return {"version": "1.0.0", "status": "ok"}
+    return {
+        "version": "1.0.0",
+        "status": "ok",
+        "api_prefix": "/api/v1",
+        "policy_url": "/docs/API_VERSIONING.md",
+        "deprecation": None,
+        "honesty": "Public control-plane API is /api/v1 only until a documented /api/v2 exists.",
+    }
 
 
 @app.exception_handler(DuplicateTransferSubmission)

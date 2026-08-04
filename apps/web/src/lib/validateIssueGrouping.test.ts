@@ -16,6 +16,7 @@ import {
   partitionCoercionColumns,
   partitionExplainIssues,
   remapToTypeForMismatch,
+  rankAndDedupeSuggestedActions,
 } from "./validateIssueGrouping.js";
 
 describe("remapToTypeForMismatch", () => {
@@ -393,5 +394,27 @@ describe("findFidelityCollapseRoot", () => {
     const display = buildDisplayBlockers(pf);
     assert.equal(display.filter((d) => d.kind === "fidelity_root").length, 1);
     assert.ok(display.every((d) => d.kind !== "blocker" || !/fidelity|precision loss/i.test(d.message)));
+  });
+});
+
+describe("rankAndDedupeSuggestedActions", () => {
+  it("dedupes encoding and map families and caps density", () => {
+    const out = rankAndDedupeSuggestedActions([
+      { kind: "normalize_control_chars", label: "Strip controls" },
+      { kind: "quarantine_and_rerun", label: "Quarantine" },
+      { kind: "open_bad_data_fix", label: "Fix bad data" },
+      { kind: "map_column", column: "id", label: "Map id" },
+      { kind: "review_mappings", column: "id", label: "Review id" },
+      { kind: "change_target_type", column: "amt", to_type: "DECIMAL", label: "Widen amt" },
+      { kind: "change_target_type", column: "amt", to_type: "DECIMAL", label: "Widen amt" },
+      { kind: "add_transform", column: "x", label: "t1" },
+      { kind: "add_transform", column: "y", label: "t2" },
+      { kind: "add_transform", column: "z", label: "t3" },
+      { kind: "check_connection", label: "Reconnect" },
+    ], 6);
+    assert.ok(out.length <= 6);
+    assert.equal(out.filter((a) => a.kind === "open_bad_data_fix" || a.kind === "normalize_control_chars" || a.kind === "quarantine_and_rerun").length, 1);
+    assert.equal(out.filter((a) => a.kind === "map_column" || a.kind === "review_mappings").length, 1);
+    assert.equal(out.filter((a) => a.kind === "change_target_type").length, 1);
   });
 });

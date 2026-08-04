@@ -718,6 +718,8 @@ def start_transfer(
         "skip_preflight": False,
         "preflight_run_id": preflight.get("run_id"),
     }
+    # Belt-and-suspenders: ignore any injected/mutated skip even if schema drifts.
+    payload["skip_preflight"] = False  # hard deny - Pilot never bypasses Validate
     preview = {
         "source": f"{source['connector_name']}.{source['table']}",
         "destination": f"{destination['connector_name']}.{destination['table']}",

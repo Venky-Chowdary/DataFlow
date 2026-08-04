@@ -22,6 +22,7 @@ import {
 import {
   buildDisplayBlockers,
   buildExecutiveSummary,
+  rankAndDedupeSuggestedActions,
   findDuplicateKeyRoot,
   isDeclaredFidelityCollapse,
   isEncodingIntegritySignal,
@@ -346,7 +347,7 @@ function collapseEncodingSuggestedActions(
     }
     out.push(action);
   }
-  return out;
+  return rankAndDedupeSuggestedActions(out);
 }
 
 /** Per-column value-aware coercion table with expandable offending-value rows. */

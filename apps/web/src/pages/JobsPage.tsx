@@ -1658,6 +1658,21 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
             {typeof destSummary.load_method === "string" && destSummary.load_method && (
               <div><dt>Load method</dt><dd>{String(destSummary.load_method)}</dd></div>
             )}
+            {destSummary.chunk_policy && typeof destSummary.chunk_policy === "object" && (
+              <div>
+                <dt>Chunk policy</dt>
+                <dd>
+                  {String((destSummary.chunk_policy as { reason?: string }).reason || "adaptive")}
+                  {" · final "}
+                  {String((destSummary.chunk_policy as { final?: number }).final
+                    ?? destSummary.chunk_size
+                    ?? "—")}
+                  {(destSummary.chunk_policy as { proxy_capped?: boolean }).proxy_capped
+                    ? " · proxy-capped"
+                    : ""}
+                </dd>
+              </div>
+            )}
             {typeof destSummary.database === "string" && destSummary.database && (
               <div><dt>Database</dt><dd>{String(destSummary.database)}</dd></div>
             )}

@@ -734,6 +734,13 @@ ABBREVIATIONS: dict[str, str] = {
     "bill": "billing",
     "billing": "billing",
 }
+try:
+    from services.domain_gazetteers import merge_abbreviations
+
+    ABBREVIATIONS = merge_abbreviations(ABBREVIATIONS)
+except Exception:  # pragma: no cover - gazetteer optional at import
+    pass
+
 
 
 def _normalize(name: str) -> str:

@@ -114,6 +114,8 @@ export interface EditableMapping {
    * Required by G4 for lossy_cast / typeNarrowing — bare Approve is not enough.
    */
   riskAcknowledged?: boolean;
+  /** Underscore-path collisions from STRUCT flatten — fail-closed, operator-visible. */
+  flattenCollisions?: { flat: string; paths: string[][] }[];
 }
 
 const STATUS_ENUM_TOKENS = new Set([
@@ -661,7 +663,13 @@ export function applyStructPolicyChange(
     ...withoutDerived[parentIdx],
     structPolicy: policy,
     approved: false,
-    requiresReview: flattenish || exploding ? true : withoutDerived[parentIdx].requiresReview,
+    // Leaving flatten clears collision metadata so the Map table does not stick.
+    flattenCollisions: flattenish ? withoutDerived[parentIdx].flattenCollisions : undefined,
+    requiresReview: flattenish || exploding
+      ? true
+      : withoutDerived[parentIdx].flattenCollisions?.length
+        ? false
+        : withoutDerived[parentIdx].requiresReview,
     reason: exploding
       ? "ARRAY explode — one output row per element (capped); parent array kept"
       : policy === "flatten_deep"
@@ -733,10 +741,15 @@ export function applyStructPolicyChange(
     [...flatOwners.entries()].filter(([, owners]) => owners.length > 1).map(([flat]) => flat),
   );
   if (collisionFlats.size) {
+    const collisions = [...collisionFlats].map((flat) => ({
+      flat,
+      paths: flatOwners.get(flat) || [],
+    }));
     next[parentIdx] = {
       ...nextParent,
       approved: false,
       requiresReview: true,
+      flattenCollisions: collisions,
       reason: [
         nextParent.reason,
         `Flatten path collision on ${[...collisionFlats].join(", ")} — keep as JSON or rename source keys`,

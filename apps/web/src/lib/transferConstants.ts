@@ -136,3 +136,20 @@ export const DATE_LOCALES: { id: DateLocaleId; label: string; detail: string }[]
   { id: "DMY", label: "DMY (day/month/year)", detail: "European / Indian / Australian date order." },
   { id: "MDY", label: "MDY (month/day/year)", detail: "United States date order." },
 ];
+
+/** Single operator-facing copy for SCD2/mirror + multi-stream block (rank 74). */
+export const MULTI_STREAM_SCD2_MIRROR_BLOCK =
+  "Multi-stream SCD2/mirror is not supported. Switch to full/incremental/CDC, or select a single table.";
+
+export function multiStreamScd2MirrorBlockCopy(kind: "alert" | "toast" | "schedule" | "execute" = "alert"): string {
+  if (kind === "schedule") {
+    return "SCD2/mirror cannot be scheduled for multiple streams — use full/incremental/CDC or a single stream.";
+  }
+  if (kind === "toast" || kind === "execute") {
+    return MULTI_STREAM_SCD2_MIRROR_BLOCK;
+  }
+  return MULTI_STREAM_SCD2_MIRROR_BLOCK;
+}
+
+export const MULTI_STREAM_SCD2_PRIMARY_CTA = "Switch to full append";
+
