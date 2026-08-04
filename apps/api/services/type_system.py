@@ -2466,6 +2466,8 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
             return "BINARY_FLOAT"
         if db in {"snowflake", "bigquery", "databricks"}:
             return types_h.get(LOGICAL_FLOAT, "FLOAT")
+        if db == "iceberg":
+            return "float"
         return types_h.get(LOGICAL_FLOAT, "FLOAT")
     # Opaque PG USER-DEFINED / UDT — stamp open text; specialty collapse forces Accept risk.
     if base_early in {"USER-DEFINED", "USER_DEFINED"}:
@@ -2955,6 +2957,20 @@ def _float_ddl_for_dest(db: str, inferred: str | None) -> str | None:
         if db in {"trino", "presto"}:
             return "real"
         return "REAL"
+    # Bare FLOAT with single-precision fail-closed bits: keep IEEE-32 on engines
+    # whose FLOAT/float token is single (never invent list<double> from ARRAY<FLOAT>).
+    # PostgreSQL-family FLOAT ≡ DOUBLE PRECISION — fall through to dialect default.
+    if bits <= 24 and upper == "FLOAT":
+        if db in {"mysql", "mariadb", "tidb"}:
+            return "FLOAT"
+        if db in {"databricks", "spark", "delta", "delta_lake", "databricks_sql"}:
+            return "FLOAT"
+        if db == "iceberg":
+            return "float"
+        if db == "clickhouse":
+            return "Float32"
+        if db in {"trino", "presto"}:
+            return "real"
     # Double / bare FLOAT — dialect default.
     return _FLOAT_DDL.get(db)
 

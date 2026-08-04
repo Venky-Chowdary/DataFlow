@@ -203,7 +203,7 @@ def is_wider_type(old_type: str, new_type: str) -> bool:
         return new_len >= min_len
 
     # Other cross-logical promotions rely on the type-system safe-promotion list.
-    return not is_lossy_coercion(old_type, new_type)
+    return not is_lossy_coercion(old_type, new_type, dest_db="")
 
 
 def _information_schema_type_to_str(

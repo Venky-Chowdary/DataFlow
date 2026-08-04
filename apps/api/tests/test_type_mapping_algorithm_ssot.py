@@ -372,3 +372,31 @@ def test_safe_ddl_honors_explicit_real_stamp():
     # Without honor_explicit, float soften may still collapse.
     soft = safe_ddl_logical_type("REAL", ["1.5", "2.0"], honor_explicit=False)
     assert soft in {"FLOAT", "REAL"}
+
+def test_iceberg_and_generic_materialize_honor_stamps():
+    from services.type_system import materialize_dest_ddl, ddl_type
+    from connectors.iceberg_writer import _logical_to_iceberg_type
+
+    assert _logical_to_iceberg_type("ARRAY<FLOAT>") in {"ARRAY<FLOAT>", "list<float>"}
+    assert "double" not in ddl_type("iceberg", "ARRAY<FLOAT>").lower()
+    assert materialize_dest_ddl("duckdb", "REAL") == "REAL"
+    assert materialize_dest_ddl("databricks", "ARRAY<FLOAT>") == "ARRAY<FLOAT>"
+
+
+def test_sa_float_stamp_not_always_double():
+    from connectors.generic_sql import _sa_type_for_logical
+    import sqlalchemy as sa
+
+    real_t = _sa_type_for_logical("REAL", "postgresql", "postgresql")
+    nested = getattr(real_t, "nested_type", None) or real_t
+    assert not isinstance(nested, sa.Double), type(nested)
+
+
+def test_iceberg_array_float_create_new_keeps_float_leaf():
+    from services.type_system import create_new_mapping_target_type, ddl_type
+
+    stamped = create_new_mapping_target_type("ARRAY<FLOAT>", "iceberg")
+    assert "double" not in stamped.lower(), stamped
+    assert "float" in stamped.lower(), stamped
+    assert "double" not in ddl_type("iceberg", "ARRAY<FLOAT>").lower()
+    assert create_new_mapping_target_type("ARRAY<FLOAT>", "databricks").upper() == "ARRAY<FLOAT>"

@@ -44,6 +44,7 @@ from services import reflection_cache
 from services.engine_pool import release_engine
 from services.type_system import (
     ddl_type,
+    materialize_dest_ddl,
     normalize_logical_type,
     parse_numeric_precision_scale,
 )
@@ -980,6 +981,20 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
         return _maybe_nullable(sa.Numeric(38, 15))
     if t == LOGICAL_FLOAT:
         # Approximate IEEE float — never rewrite to fixed-point Numeric.
+        # Honor Map REAL/FLOAT4 stamps (sa.Double invents mantissa widen).
+        float_u = raw.upper().split("(", 1)[0].strip()
+        if float_u in {"REAL", "FLOAT4", "HALF", "FLOAT16", "BINARY_FLOAT"}:
+            if dialect_name == "postgresql" and hasattr(postgresql, "REAL"):
+                return _maybe_nullable(postgresql.REAL())
+            return _maybe_nullable(sa.Float())
+        if float_u == "FLOAT" and (db_type or "").lower() in {
+            "mysql",
+            "mariadb",
+            "tidb",
+            "sqlserver",
+            "mssql",
+        }:
+            return _maybe_nullable(sa.Float())
         return _maybe_nullable(sa.Double())
     if t == LOGICAL_BOOLEAN:
         return _maybe_nullable(sa.Boolean())
@@ -3938,18 +3953,21 @@ def write_mapped_rows(
         mappings = [mappings[i] for i in keep_idx if i < len(mappings)]
     dest_db = (cfg.get("type") or "").lower()
     target_column_types = {}
+    explicit_stamps: set[str] = set()
     for i, col in enumerate(target_cols):
         explicit = mappings[i].get("target_type") if i < len(mappings) else None
         source_type = (
             column_types.get(mappings[i]["source"]) if i < len(mappings) else None
         ) or (logical_types[i] if i < len(logical_types) else "string")
-        # Map source logical types to destination-native DDL so default
-        # identity mappings create the right physical column. DuckDB DECIMAL
-        # sources keep their (p,s) DDL when present — never silently collapse
-        # to DOUBLE, which loses scale and breaks financial fidelity.
-        derived = explicit or (
-            ddl_type(dest_db, source_type) if dest_db else source_type
-        )
+        # Map stamps / logicals through materialize_dest_ddl so CREATE cannot
+        # invent REAL→DOUBLE or BQ TIMESTAMP→DATETIME after Map stamped.
+        if explicit:
+            derived = materialize_dest_ddl(dest_db, explicit) if dest_db else str(explicit)
+            explicit_stamps.add(col)
+        elif dest_db:
+            derived = materialize_dest_ddl(dest_db, source_type)
+        else:
+            derived = source_type
         # DuckDB only: if preflight is skipped and the source DECIMAL has no
         # declared precision/scale (typical for CSV / file inference), fall
         # back to DOUBLE. This avoids inventing a scale that pads values like
@@ -3959,6 +3977,7 @@ def write_mapped_rows(
             and _kwargs.get("skip_preflight")
             and not mappings[i].get("user_override")
             and normalize_logical_type(derived) == "decimal"
+            and not explicit
         ):
             p, s = parse_numeric_precision_scale(source_type)
             if p is None and s is None:
@@ -3968,12 +3987,17 @@ def write_mapped_rows(
 
     # Widen target types to at least the source DDL so schema drift to a wider
     # source column does not truncate or overflow in the destination.
+    # Never overwrite an explicit Map/operator stamp (create-new fidelity).
     for i, col in enumerate(target_cols):
+        if col in explicit_stamps:
+            continue
         target_ddl = target_column_types[col]
         mapping_source = mappings[i].get("source_type")
         catalog_source = column_types.get(mappings[i].get("source"))
         source_type = _source_ddl_for_widen(mapping_source, catalog_source) or "string"
-        source_ddl = ddl_type(dest_db, source_type) if dest_db else source_type
+        source_ddl = (
+            materialize_dest_ddl(dest_db, source_type) if dest_db else source_type
+        )
         if is_wider_type(target_ddl, source_ddl):
             target_column_types[col] = source_ddl
             mappings[i] = {**mappings[i], "target_type": source_ddl}

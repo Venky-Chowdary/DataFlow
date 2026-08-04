@@ -59,10 +59,20 @@ def _warehouse_root(host: str, database: str, connection_string: str) -> Path:
 
 
 def _logical_to_iceberg_type(logical: str) -> str:
-    """Single source of truth: type_system.ddl_type — never a parallel scale map."""
-    from services.type_system import ddl_type
+    """Iceberg DDL from Map stamps / logicals — never invent float→double leaves."""
+    from services.type_system import ddl_type, materialize_dest_ddl
 
-    return ddl_type("iceberg", logical or "string")
+    raw = (logical or "string").strip()
+    upper = raw.upper()
+    # ARRAY<> / T[] must become list<...> spelling; float leaves stay float.
+    if upper.startswith("ARRAY<") or upper.startswith("ARRAY(") or upper.endswith("[]"):
+        return ddl_type("iceberg", raw)
+    stamped = materialize_dest_ddl("iceberg", raw)
+    # Normalize single-precision aliases to Iceberg's float token.
+    bare = stamped.upper().split("(", 1)[0].strip()
+    if bare in {"REAL", "FLOAT4", "FLOAT32", "HALF", "FLOAT16", "FLOAT"}:
+        return "float"
+    return stamped
 
 
 def _ensure_iceberg_decimal_carrier(type_str: str) -> str:
@@ -142,7 +152,7 @@ def _decimal_target_types_for_iceberg_write(
         # Preserve fixed(L) / BINARY(n) from mapped create-new carriers.
         from services.type_system import (
             LOGICAL_BINARY,
-            ddl_type,
+            materialize_dest_ddl,
             normalize_logical_type,
             parse_binary_carrier_width,
         )
@@ -150,7 +160,7 @@ def _decimal_target_types_for_iceberg_write(
         if normalize_logical_type(raw) == LOGICAL_BINARY:
             width = parse_binary_carrier_width(raw)
             if width is not None:
-                out.append(ddl_type("iceberg", raw) or f"fixed({width})")
+                out.append(materialize_dest_ddl("iceberg", raw) or f"fixed({width})")
                 continue
             out.append("BINARY")
             continue
@@ -422,6 +432,9 @@ def _logical_to_arrow_type(logical: str, pa: Any) -> Any:
     if logical_n == LOGICAL_INTEGER:
         return pa.int64()
     if logical_n == LOGICAL_FLOAT:
+        raw_u = raw.upper().split("(", 1)[0].strip()
+        if raw_u in {"REAL", "FLOAT4", "HALF", "FLOAT16", "FLOAT32", "BINARY_FLOAT", "FLOAT"}:
+            return pa.float32()
         return pa.float64()
     if logical_n == LOGICAL_DECIMAL:
         precision, scale = parse_numeric_precision_scale(raw)
