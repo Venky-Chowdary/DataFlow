@@ -78,8 +78,9 @@ def _bigquery_config() -> dict[str, Any] | None:
         "project": os.environ["DATAFLOW_BENCHMARK_BIGQUERY_PROJECT"],
         "dataset": os.environ["DATAFLOW_BENCHMARK_BIGQUERY_DATASET"],
     }
-    if getenv_brand("BENCHMARK_BIGQUERY_KEY_PATH"):
-        cfg["service_account"] = os.environ["DATAFLOW_BENCHMARK_BIGQUERY_KEY_PATH"]
+    key_path = getenv_brand("BENCHMARK_BIGQUERY_KEY_PATH")
+    if key_path:
+        cfg["service_account"] = key_path
     return cfg
 
 

@@ -327,6 +327,8 @@ export function engineStampedRiskChip(m: EditableMapping): {
   detail: string;
   severity: "block" | "warn";
 } | null {
+  // Safe normalize (email/trim/case) is Approve-tier — do not scare with mutate/cast chips.
+  if (isSafeNormalizeMapping(m)) return null;
   const fidelity = (m.fidelity || "").toLowerCase();
   if (fidelity === "lossy_cast" || fidelity === "mutate" || fidelity === "cast") {
     return {

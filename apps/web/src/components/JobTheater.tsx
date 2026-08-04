@@ -1380,7 +1380,26 @@ export function JobTheaterView({
               </button>
             )}
             {(isComplete || isCancelled || isFailed || isQuarantine) && onNewTransfer && (
-              <button type="button" className="df2-btn df2-btn-primary" onClick={onNewTransfer}>
+              <button
+                type="button"
+                className={
+                  // One primary only: PK Map / Resume own the failed/cancelled recover path.
+                  (isCancelled || isFailed)
+                    && (
+                      (duplicateKeyFailure && onBackToMap)
+                      || (
+                        onResume
+                        && (job.chunk_current != null || job.checkpoint)
+                        && !job.cdc_lease_conflict
+                        && !job.cdc_cursor_gap
+                        && !duplicateKeyFailure
+                      )
+                    )
+                    ? "df2-btn df2-btn-ghost"
+                    : "df2-btn df2-btn-primary"
+                }
+                onClick={onNewTransfer}
+              >
                 <DtIcon name="plus" size={16} /> New transfer
               </button>
             )}

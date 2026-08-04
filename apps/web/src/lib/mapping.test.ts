@@ -179,6 +179,7 @@ describe("fail-closed Map approve", () => {
     assert.equal(isSafeNormalizeMapping(email), true);
     assert.equal(mappingRequiresRiskAck(email), false);
     assert.equal(mappingAckLabel(email), "Approve");
+    assert.equal(engineStampedRiskChip(email), null);
     const next = approveMappingHonestly(email);
     assert.equal(next.approved, true);
     assert.equal(next.riskAcknowledged, undefined);
