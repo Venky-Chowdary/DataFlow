@@ -125,7 +125,7 @@ def create_migration_risk_contract(
     expected_nulls: bool = False,
     quarantine_policy: str = "holdout_rejected_rows",
     retry_policy: str = "none",
-    rollback_strategy: str = "not_productized_see_MIGRATION_ROLLBACK",
+    rollback_strategy: str = "DOCUMENT_ONLY",
     proof_pack_ref: str | None = None,
     mapping_hash: str = "",
     plan_id: str | None = None,

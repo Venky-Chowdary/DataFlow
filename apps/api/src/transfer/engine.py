@@ -844,6 +844,37 @@ def _persist_job_quarantine(
     assert_quarantine_durable_or_raise(dest_summary)
 
 
+def _attach_job_rollback_plan(
+    job_id: str, dest_summary: dict[str, Any], request: Any = None
+) -> None:
+    """Module 6: stamp signed rollback plan onto destination_summary."""
+    try:
+        from services.migration_rollback import attach_rollback_plan
+
+        dest = getattr(request, "destination", None) if request is not None else None
+        attach_rollback_plan(
+            dest_summary,
+            job_id=job_id,
+            sync_mode=str(getattr(request, "sync_mode", "") or "") if request else "",
+            destination_table=str(
+                dest_summary.get("table")
+                or dest_summary.get("collection")
+                or getattr(dest, "table", "")
+                or getattr(dest, "collection", "")
+                or ""
+            ),
+            dest_type=str(
+                getattr(dest, "format", "") or getattr(dest, "kind", "") or ""
+            ),
+        )
+    except Exception as rb_exc:
+        logger.warning(
+            "rollback plan attach failed (plan stamp only): %s",
+            rb_exc,
+            exc_info=rb_exc,
+        )
+
+
 _CDC_JOB_FIELDS = (
     "cdc_lag_seconds",
     "replication_lag_bytes",
@@ -2314,6 +2345,7 @@ class UniversalTransferEngine:
                     if dest_summary.get("promote_blocked"):
                         # Strict/maximum + staging: primary untouched; persist DLQ then fail.
                         _persist_job_quarantine(job_id, dest_summary, request)
+                        _attach_job_rollback_plan(job_id, dest_summary, request)
                         block_msg = (
                             (dest_summary.get("pre_ingestion_staging") or {}).get(
                                 "blocked_reason"
@@ -2525,6 +2557,7 @@ class UniversalTransferEngine:
             if load_history_report:
                 dest_summary["load_history_report"] = load_history_report
             _persist_job_quarantine(job_id, dest_summary, request)
+            _attach_job_rollback_plan(job_id, dest_summary, request)
             _apply_post_load_transforms(request, dest_summary)
             mongo.update_job_status(
                 job_id,
@@ -3157,6 +3190,7 @@ class UniversalTransferEngine:
                 mappings=mappings,
             )
             _persist_job_quarantine(job_id, dest_summary, request)
+            _attach_job_rollback_plan(job_id, dest_summary, request)
             _apply_post_load_transforms(request, dest_summary)
             mongo.update_job_status(
                 job_id,
@@ -3678,6 +3712,7 @@ class UniversalTransferEngine:
                 mappings=mappings,
             )
             _persist_job_quarantine(job_id, dest_summary, request)
+            _attach_job_rollback_plan(job_id, dest_summary, request)
             _apply_post_load_transforms(request, dest_summary)
             mongo.update_job_status(
                 job_id,

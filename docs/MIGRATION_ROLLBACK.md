@@ -1,45 +1,46 @@
-# Migration rollback strategies (honest)
+# Migration rollback strategies (Module 6)
 
-Datawrap is a **Migration Assurance Workbench**. This document states what rollback
-operators can rely on today — and what is **not** productized.
+DataWrap is a **Migration Assurance Platform**. This document states what rollback
+operators can rely on — and what is **not** claimed.
 
-## What exists today
+## Productized workflow
 
-| Capability | Reality |
-|------------|---------|
-| Quarantine (not silent drop) | Bad cells/rows held out of the primary write path; remediations re-enter Validate |
-| Mapping repair + re-Validate | Change Map transforms/risk ack → re-run G1–G9 before Execute |
-| Checkpoint / resume | Fail-closed persistence; resume refuses unsafe age/write_mode combinations |
-| CDC leases | Prevent concurrent consumers; delivery remains **at-least-once** |
-| Iceberg / upsert writers (SKU routes) | Idempotent upserts where the destination contract allows PK/LSN guards |
-| Gate-8 proof export | Portable HMAC packs for cutover evidence — not an undo button |
+Every job receives a signed **rollback plan** (`destination_summary.rollback_plan`):
 
-## What is not productized (do not claim)
+| Strategy | Executable | What it does |
+|----------|------------|--------------|
+| `DOCUMENT_ONLY` | No | Audit posture + runbook (default for append/incremental) |
+| `DISCARD_STAGING` | **Yes** | Drops `{table}_df_staging` only — never mutates primary |
+| `REQUIRE_WAREHOUSE_RESTORE` | No | Overwrite landed on primary — DBA time-travel / PITR required |
 
-- One-click **staging swap** / blue-green table rename orchestration
-- Destination **snapshot restore** as a first-class Studio action
+API SSOT: `services.migration_rollback` (`plan_rollback`, `execute_rollback`).
+
+## Guarantees
+
+- Rollback plan is immutable (HMAC signature) — tampered plans refuse execution
+- `DISCARD_STAGING` never touches the primary table
+- `population_undo_claimed` is always `false`
+- Execution requires `approved_by` + `reason` (audit)
+
+## Non-guarantees / not productized
+
+- One-click **transfer undo** of committed production rows
+- Destination **snapshot restore** as a Studio action
+- Blue-green / synonym **staging swap**
 - Branch/undo for warehouse DDL after create-new
-- Exactly-once CDC rewind / Qlik-class continuous replication undo
-- Automatic financial reverse-ETL of already-committed business rows
+- Exactly-once CDC rewind
 
 ## Operator runbook (cutover)
 
-1. **Before Execute** — Validate must pass G1–G9; export Gate-8 sample plan + mapping proof.
-2. **Prefer create-new or staging schema** — land into a non-production schema/table; Gate-8 reconcile against source samples.
-3. **Cutover** — swap consumers (view, synonym, app config) only after proof review + risk ack.
-4. **If Validate fails mid-flight** — quarantine + Map repair; do not force `skip_preflight`.
-5. **If Execute fails after partial write** — use checkpoint resume only when safety evaluation allows; otherwise re-land into a clean staging target.
-6. **If production already swapped** — restore from **your** warehouse backup / time-travel (Snowflake Time Travel, PG PITR, etc.). Datawrap does not replace DBA restore tooling.
+1. **Before Execute** — Validate must pass; export Gate-8 + mapping proof.
+2. **Prefer staging** — land into `{table}_df_staging` / non-prod schema; Gate-8 reconcile.
+3. **If promote blocked** — primary untouched; execute `DISCARD_STAGING` or re-Validate.
+4. **Cutover** — swap consumers only after proof review + risk contract.
+5. **If Execute fails after partial primary write** — checkpoint resume only when safe; else re-land staging.
+6. **If production already swapped** — restore from **your** warehouse backup / time-travel. DataWrap does not replace DBA restore tooling.
 
-## Related docs
+## Related
 
-- `docs/PRODUCT_SCOPE.md` — what the product is / is not
-- `docs/BUYER_EVIDENCE_PACK.md` — diligence artifacts
-- `docs/ops/` — custom domain, CDC leases, tip-anchor honesty
-
-## API honesty SSOT
-
-Workspace security posture exposes `recovery_honesty` (and top-level
-`transfer_undo_claimed: false`) from `services.recovery_honesty.honesty_dict`.
-Machine-readable claims must stay aligned with this document — never invent
-product undo in UI or marketing without flipping those flags with tests.
+- `services/recovery_honesty.py` — machine-readable claims (`staging_discard` available; `transfer_undo` not)
+- `docs/MIGRATION_RISK_CONTRACT.md` — default `rollback_strategy=DOCUMENT_ONLY`
+- `docs/QUARANTINE_DLQ_FAIL_CLOSED.md` — rejected rows must be durable

@@ -90,7 +90,7 @@ def _hydrate_risk_contract(m: dict[str, Any]) -> dict[str, Any] | None:
             retry_policy=str(raw.get("retry_policy") or "none"),
             rollback_strategy=str(
                 raw.get("rollback_strategy")
-                or "not_productized_see_MIGRATION_ROLLBACK"
+                or "DOCUMENT_ONLY"
             ),
             proof_pack_ref=raw.get("proof_pack_ref"),
             mapping_hash=str(raw.get("mapping_hash") or ""),

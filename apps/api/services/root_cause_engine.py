@@ -76,7 +76,7 @@ class MigrationRootCause:
     recovery_strategy: str = ""
     expected_runtime_impact: str = ""
     quarantine_policy: str = "holdout_rejected_rows"
-    rollback_policy: str = "not_productized_see_MIGRATION_ROLLBACK"
+    rollback_policy: str = "DOCUMENT_ONLY"
     documentation: str = "docs/MIGRATION_RISK_CONTRACT.md"
     impacted_gates: list[str] = field(default_factory=list)
     absorbed_blocker_ids: list[str] = field(default_factory=list)
@@ -380,7 +380,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                         "holdout_rejected_rows under CAST_AND_CONTINUE "
                         "(see docs/MIGRATION_RISK_CONTRACT.md)"
                     ),
-                    rollback_policy="not_productized_see_MIGRATION_ROLLBACK",
+                    rollback_policy="DOCUMENT_ONLY",
                     documentation="docs/MIGRATION_RISK_CONTRACT.md",
                     impacted_gates=gate_ids or absorbed,
                     absorbed_blocker_ids=absorbed,
@@ -455,7 +455,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 ),
                 expected_runtime_impact="Re-Validate only — no dest rewrite until Execute",
                 quarantine_policy="n/a — confidence is a Map decision, not a row quarantine",
-                rollback_policy="not_productized_see_MIGRATION_ROLLBACK",
+                rollback_policy="DOCUMENT_ONLY",
                 documentation="docs/MAPPING_CONFIDENCE_AUTHORITY.md",
                 impacted_gates=absorbed or ["g4_mapping_confidence"],
                 absorbed_blocker_ids=absorbed,
@@ -520,7 +520,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     ),
                     expected_runtime_impact="Re-Validate sample; full table rewrite if sync mode changes",
                     quarantine_policy="n/a — identity must be fixed, not quarantined away",
-                    rollback_policy="not_productized_see_MIGRATION_ROLLBACK",
+                    rollback_policy="DOCUMENT_ONLY",
                     documentation="docs/MIGRATION_ROLLBACK.md",
                     impacted_gates=absorbed,
                     absorbed_blocker_ids=absorbed,

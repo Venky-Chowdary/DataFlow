@@ -566,7 +566,7 @@ export function acknowledgeMappingRisk(
         ? "QUARANTINE_ROW_on_failure"
         : "holdout_rejected_rows",
     retry_policy: "none",
-    rollback_strategy: "not_productized_see_MIGRATION_ROLLBACK",
+    rollback_strategy: "DOCUMENT_ONLY",
     approved_by: actor,
     reason: why,
     root_cause: `${srcType} → ${dstType} fidelity risk`,

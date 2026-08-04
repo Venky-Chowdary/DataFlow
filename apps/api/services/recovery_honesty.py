@@ -54,6 +54,13 @@ def honesty_dict() -> dict[str, Any]:
                 "available": True,
                 "note": "HMAC proof packs are cutover evidence — not an undo button.",
             },
+            "staging_discard": {
+                "available": True,
+                "note": (
+                    "Module 6: DISCARD_STAGING drops `{table}_df_staging` only — "
+                    "never mutates the primary table; population undo not claimed."
+                ),
+            },
             "transfer_undo": {
                 "available": False,
                 "note": "One-click destination undo of committed rows is not productized.",
@@ -66,7 +73,7 @@ def honesty_dict() -> dict[str, Any]:
                 "available": False,
                 "note": (
                     "Snowflake Time Travel / PG PITR / vendor restore remain DBA tooling — "
-                    "Datawrap does not replace them."
+                    "Datawrap does not replace them. REQUIRE_WAREHOUSE_RESTORE plans point here."
                 ),
             },
             "branch_switch": {
@@ -78,9 +85,15 @@ def honesty_dict() -> dict[str, Any]:
                 "note": "Exactly-once CDC rewind / continuous replication undo is not claimed.",
             },
         },
+        "rollback_strategies": {
+            "DOCUMENT_ONLY": {"executable": False},
+            "DISCARD_STAGING": {"executable": True},
+            "REQUIRE_WAREHOUSE_RESTORE": {"executable": False},
+        },
         "operator_runbook": "docs/MIGRATION_ROLLBACK.md",
         "notes": [
             "Prefer create-new or staging schema before cutover.",
+            "DISCARD_STAGING is the only executable DataWrap rollback today.",
             "If production already swapped — restore from your warehouse backup / time-travel.",
             "Never claim Datawrap replaces DBA restore tooling.",
         ],

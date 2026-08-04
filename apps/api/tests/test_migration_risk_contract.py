@@ -154,7 +154,7 @@ def test_run_file_preflight_signs_draft_contract_and_approves():
         "expected_precision_loss": True,
         "quarantine_policy": "QUARANTINE_ROW_on_cast_failure",
         "retry_policy": "none",
-        "rollback_strategy": "not_productized_see_MIGRATION_ROLLBACK",
+        "rollback_strategy": "DOCUMENT_ONLY",
     }
     result = run_file_preflight(
         columns=[col],

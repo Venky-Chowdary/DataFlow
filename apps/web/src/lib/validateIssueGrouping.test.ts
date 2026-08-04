@@ -419,7 +419,7 @@ describe("findFidelityCollapseRoot", () => {
           alternative_fixes: ["Remap to TEXT"],
           recovery_strategy: "Re-Validate after contract",
           quarantine_policy: "holdout_rejected_rows",
-          rollback_policy: "not_productized_see_MIGRATION_ROLLBACK",
+          rollback_policy: "DOCUMENT_ONLY",
           impacted_gates: ["g3_schema_contract", "g4_mapping_confidence", "g9_data_integrity"],
           absorbed_blocker_ids: ["g3_schema_contract", "g4_mapping_confidence", "g9_data_integrity"],
         },
