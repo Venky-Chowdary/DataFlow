@@ -78,6 +78,22 @@ def test_contract_never_claims_exactly_once():
     assert blob["never_silent_drop"] is True
     assert blob["capabilities"]["exactly_once"]["available"] is False
     assert "refuse_insert_resume_without_checkpoint" in blob["duplicate_prevention"]
+    assert "exactly_once" not in blob["selectable_delivery"]
+
+
+def test_assert_delivery_refuses_exactly_once():
+    from services.execution_engine_contract import (
+        DeliveryGuaranteeError,
+        assert_delivery_guarantee_allowed,
+    )
+
+    assert assert_delivery_guarantee_allowed("at_least_once") == "at_least_once"
+    try:
+        assert_delivery_guarantee_allowed("exactly_once")
+        raised = False
+    except DeliveryGuaranteeError:
+        raised = True
+    assert raised is True
 
 
 def test_recovery_honesty_embeds_execution_contract():

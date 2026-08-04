@@ -144,6 +144,9 @@ def append_dlq_event(
     raise last_exc
 
 
+_DLQ_CHUNK_SIZE = 200
+
+
 def persist_rejected_rows(
     *,
     job_id: str,
@@ -152,9 +155,10 @@ def persist_rejected_rows(
     source: str = "transfer",
     connector: str = "",
 ) -> dict[str, Any] | None:
-    """Persist rejected/quarantined rows to the DLQ. Returns event or None if empty.
+    """Persist rejected/quarantined rows to the DLQ. Returns summary event or None.
 
-    Module 9: normalize to quarantine row contract and fail closed without job_id.
+    Module 9 / GA: normalize to quarantine row contract and fail closed without
+    job_id. Chunk appends so row bodies are never silently truncated to 500.
     """
     from services.quarantine_row_contract import (
         QuarantineRowContractError,
@@ -172,13 +176,30 @@ def persist_rejected_rows(
         )
     rows = normalize_quarantine_rows(raw, job_id=jid, connector=connector)
     assert_quarantine_rows_contract(rows, require_job_id=True)
-    return append_dlq_event(
-        job_id=jid,
-        action="quarantine",
-        rows=len(rows),
-        workspace_id=workspace_id,
-        details={"source": source, "rejected_details": rows[:500]},
-    )
+    chunk_size = _DLQ_CHUNK_SIZE
+    chunks = [rows[i : i + chunk_size] for i in range(0, len(rows), chunk_size)]
+    last_event: dict[str, Any] | None = None
+    for idx, chunk in enumerate(chunks):
+        last_event = append_dlq_event(
+            job_id=jid,
+            action="quarantine" if idx == 0 else "quarantine_chunk",
+            rows=len(chunk),
+            workspace_id=workspace_id,
+            details={
+                "source": source,
+                "rejected_details": chunk,
+                "chunk_index": idx,
+                "chunk_count": len(chunks),
+                "total_rejected": len(rows),
+            },
+        )
+    return {
+        **(last_event or {}),
+        "rows": len(rows),
+        "chunks": len(chunks),
+        "quarantine_durable": True,
+        "total_rejected": len(rows),
+    }
 
 
 def list_dlq_events(*, job_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:

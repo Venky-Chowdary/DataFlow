@@ -6,7 +6,9 @@ Accepting a fidelity risk is not a boolean checkbox. It is an immutable, signed
 **Migration Risk Contract** that records what may be lost and what the writer
 must do.
 
-`risk_acknowledged: true` alone **does not** unlock Execute-approve.
+`risk_acknowledged: true` alone **does not** clear G3/G4/G6 (DDL) / type
+coercion severity and **does not** unlock Execute-approve. Only a verified
+continue-policy Risk Contract clears lossy gates.
 
 ## Default policy
 
@@ -22,20 +24,23 @@ Never silently continue. A continue policy must be chosen explicitly.
 | `TRANSFORM_AND_CONTINUE` | Named transform owns the conversion |
 | `QUARANTINE_ROW` | Rejecting cells go to quarantine / DLQ; job may continue |
 | `SKIP_ROW` | Drop the row from the primary write (must be audited) |
-| `RETRY` | Transient retry only — not a fidelity escape |
 
-## Fail-closed policies (awareness only)
+## Fail-closed policies (awareness only / write abort)
 
 | Policy | Meaning |
 |--------|---------|
 | `FAIL_JOB` | Default — job fails if this path would lose fidelity |
 | `STOP_TABLE` | Stop the current table/stream |
+| `STOP_COLUMN` | Fail closed for the mapped column write path |
 | `ABORT_TRANSACTION` | Abort the active transaction when available |
+| `RETRY` | Reserved — no cell-level retry engine; **fail closed** (never invent quarantine) |
 
 ## Contract fields
 
 - Risk ID, severity, root cause
-- Column, source type, destination type, transform
+- Migration ID, table, column
+- Source type, destination type, transform
+- Loss classification (precision_loss / truncation / cast / mutate / …)
 - Rows sampled, estimated rows, expected failure %
 - Expected precision loss / truncation / nulls
 - Execution / quarantine / retry / rollback policies

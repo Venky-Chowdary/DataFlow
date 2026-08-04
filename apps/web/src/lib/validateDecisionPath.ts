@@ -20,6 +20,7 @@ export type DecisionPathStepId =
   | "affected_gates"
   | "business_impact"
   | "recommended_actions"
+  | "execution_policy"
   | "preview_changes"
   | "risk_contract"
   | "execute";
@@ -54,6 +55,7 @@ const STEP_ORDER: DecisionPathStepId[] = [
   "affected_gates",
   "business_impact",
   "recommended_actions",
+  "execution_policy",
   "preview_changes",
   "risk_contract",
   "execute",
@@ -87,7 +89,8 @@ function riskContractState(preflight: PreflightResult | null | undefined): {
   }
   return {
     incomplete: false,
-    summary: "Open Map · Accept risk to mint a signed Risk Contract when fidelity is lossy.",
+    summary:
+      "Open Map → sign a Migration Risk Contract with an explicit continue policy when fidelity is lossy.",
     status: "info",
   };
 }
@@ -127,6 +130,16 @@ function stepsForBlocker(
       id: "business_impact",
       label: "Business Impact",
       summary: item.impact || item.why || "Execute stays locked until this root cause is resolved.",
+      detail: [
+        typeof item.affectedRowsSample === "number"
+          ? `Affected sample rows: ${item.affectedRowsSample}`
+          : "",
+        typeof item.estimatedTotalRows === "number"
+          ? `Estimated population: ${item.estimatedTotalRows.toLocaleString()}`
+          : "",
+        item.confidenceNote || "",
+        "Sample counts are not population proof.",
+      ].filter(Boolean).join(" · ") || undefined,
       status: "blocked",
     },
     recommended_actions: {
@@ -135,6 +148,25 @@ function stepsForBlocker(
       summary: actions[0] || "Remap on Map or mint a Migration Risk Contract.",
       detail: actions.slice(1).join(" · ") || undefined,
       status: "action",
+    },
+    execution_policy: {
+      id: "execution_policy",
+      label: "Execution Policy",
+      summary: risk.incomplete
+        ? (item.quarantinePolicy
+          ? `Quarantine posture: ${item.quarantinePolicy}. Choose an explicit continue policy on Map (no hidden default).`
+          : "Choose an explicit execution policy on Map — FAIL_JOB / STOP_* / QUARANTINE_ROW / CAST_AND_CONTINUE / …")
+        : "Signed continue-policy Risk Contract(s) present — write path follows those policies.",
+      detail: [
+        item.rollbackPolicy
+          ? `Rollback posture: ${item.rollbackPolicy}`
+          : "Rollback posture: DOCUMENT_ONLY",
+        item.rollbackExecutable === true
+          ? "Rollback availability: DISCARD_STAGING executable (staging only)."
+          : "Rollback availability: not executable here — warehouse restore / DBA runbook only.",
+        "No hidden defaults — policy must be selected before Sign Risk Contract.",
+      ].join(" "),
+      status: risk.incomplete ? "action" : "ready",
     },
     preview_changes: {
       id: "preview_changes",
@@ -152,7 +184,7 @@ function stepsForBlocker(
       id: "execute",
       label: "Execute",
       summary: executeUnlocked
-        ? "Execute unlocked — still not migration_proven until post-write Gate-8."
+        ? "Execute unlocked — still not migration_proven until post-write Gate-8 full_checksum."
         : "Execute locked until root causes and required Risk Contracts clear.",
       status: executeUnlocked ? "unlocked" : "locked",
     },
@@ -220,6 +252,12 @@ export function buildValidateDecisionPath(
           status: "info",
         },
         {
+          id: "execution_policy",
+          label: "Execution Policy",
+          summary: "No continue policy active — Map must choose an explicit policy before signing a Risk Contract",
+          status: "info",
+        },
+        {
           id: "preview_changes",
           label: "Preview Changes",
           summary: "No pending remap / contract changes required",
@@ -266,6 +304,7 @@ export function decisionPathStepLabels(): string[] {
     "Affected Gates",
     "Business Impact",
     "Recommended Actions",
+    "Execution Policy",
     "Preview Changes",
     "Risk Contract",
     "Execute",

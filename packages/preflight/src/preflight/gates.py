@@ -14,8 +14,14 @@ from preflight.models import (
     GateStatus,
     PreflightContext,
 )
+from preflight.risk_contract import mapping_risk_cleared
 
 GateFn = Callable[[PreflightContext], GateResult]
+
+
+def _risk_cleared(m: Any) -> bool:
+    """Continue-policy Risk Contract only — boolean risk_acknowledged never clears."""
+    return mapping_risk_cleared(m)
 
 # Offline fallback when apps.api type_system cannot be imported (package-only).
 # Hosted Validate must use is_lossy_coercion / is_precision_collapse_coercion.
@@ -288,14 +294,16 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                         "kind": risk.get("kind"),
                         "severity": risk.get("severity"),
                         "message": risk.get("message"),
-                        "risk_acknowledged": bool(getattr(m, "risk_acknowledged", False)),
+                        "risk_acknowledged": _risk_cleared(m),
                     }
                     affinity_detail.append(detail)
                     if risk.get("severity") == "block":
-                        if getattr(m, "risk_acknowledged", False):
-                            affinity_warnings.append(label + " (risk acknowledged)")
+                        if _risk_cleared(m):
+                            affinity_warnings.append(label + " (risk contract)")
                         else:
-                            affinity_issues.append(label + " — accept risk or remap")
+                            affinity_issues.append(
+                                label + " — sign Migration Risk Contract or remap"
+                            )
                     else:
                         affinity_warnings.append(label)
 
@@ -711,7 +719,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         if uuid_string_create_new or uuid_exact_wire_domain:
             # Domain polarity needs Accept risk — never soft-pass create-new
             # UUID→STRING/CHAR(36) while Map CTA stays silent.
-            risk_ack = bool(getattr(m, "risk_acknowledged", False))
+            risk_ack = _risk_cleared(m)
             uuid_label = (
                 f"{label} — create-new stores UUID as {target.inferred_type} "
                 "(UUID domain is not enforced at destination)"
@@ -734,19 +742,21 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 "sentinel_nulls": (probe or {}).get("sentinel_nulls", 0) if probe else 0,
                 "sample_failures": (probe or {}).get("sample_failures", []) if probe else [],
                 "suggested_fix": (
-                    "Accept risk on Map for UUID string-wire polarity, or choose a "
-                    "destination with native UUID."
+                    "Sign a Migration Risk Contract (continue policy) for UUID "
+                    "string-wire polarity, or choose a destination with native UUID."
                 ),
                 "suggested_target_type": (probe or {}).get("suggested_target_type") if probe else None,
                 "suggested_transform": (probe or {}).get("suggested_transform") if probe else None,
             }
             issues_detail.append(detail)
             if risk_ack:
-                warnings.append(uuid_label + " (risk acknowledged)")
+                warnings.append(uuid_label + " (risk contract)")
             else:
-                issues.append(uuid_label + " — accept risk or remap to native UUID")
+                issues.append(
+                    uuid_label + " — sign Migration Risk Contract or remap to native UUID"
+                )
         elif objectid_text_polarity:
-            risk_ack = bool(getattr(m, "risk_acknowledged", False))
+            risk_ack = _risk_cleared(m)
             oid_label = (
                 f"{label} — ObjectId→TEXT keeps hex values; ObjectId domain "
                 "is not enforced at destination"
@@ -768,29 +778,31 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 "sentinel_nulls": (probe or {}).get("sentinel_nulls", 0) if probe else 0,
                 "sample_failures": (probe or {}).get("sample_failures", []) if probe else [],
                 "suggested_fix": (
-                    "Accept risk on Map for ObjectId→TEXT, or remap to VARCHAR(24) / BINARY(12)."
+                    "Sign a Migration Risk Contract for ObjectId→TEXT, or remap to "
+                    "VARCHAR(24) / BINARY(12)."
                 ),
                 "suggested_target_type": "VARCHAR(24)",
                 "suggested_transform": None,
             }
             issues_detail.append(detail)
             if risk_ack:
-                warnings.append(oid_label + " (risk acknowledged)")
+                warnings.append(oid_label + " (risk contract)")
             else:
-                issues.append(oid_label + " — accept risk or remap to VARCHAR(24)")
+                issues.append(
+                    oid_label + " — sign Migration Risk Contract or remap to VARCHAR(24)"
+                )
         elif fidelity_collapse or field_shape_loss:
             # Nested field mismatch always hard-blocks. Declared fidelity collapses
-            # (IEEE, width, specialty polarity) honor Map Accept risk — otherwise
-            # G4/CTA say cleared while G3/G6 still block (client-deploy confusion).
-            risk_ack = bool(getattr(m, "risk_acknowledged", False))
+            # honor verified continue-policy Risk Contract only.
+            risk_ack = _risk_cleared(m)
             collapse_warn = bool(fidelity_collapse and risk_ack and not field_shape_loss)
             if collapse_warn:
-                warnings.append(label + " (risk acknowledged)")
+                warnings.append(label + " (risk contract)")
             else:
                 issues.append(
                     label
                     if field_shape_loss or not fidelity_collapse
-                    else (label + " — accept risk or remap")
+                    else (label + " — sign Migration Risk Contract or remap")
                 )
             detail = {
                 "source": m.source,
@@ -875,13 +887,10 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             warnings.append(label + f" — acknowledged via struct_policy={policy}")
         elif probe is not None:
             severity = probe.get("severity", "ok")
-            risk_ack = bool(getattr(m, "risk_acknowledged", False))
-            # Head-sample "ok" must never soft-pass declared lossy without
-            # explicit Map risk acknowledgment (Fivetran/Airbyte still sample-
-            # bound; we refuse silent truncation on clean heads).
+            risk_ack = _risk_cleared(m)
+            # Head-sample "ok" must never soft-pass declared lossy without a
+            # verified continue-policy Migration Risk Contract.
             force_block = bool(declared_lossy and not risk_ack)
-            # Probe may still mark declared collapse as block; Map Accept risk
-            # with clean samples must not re-block G3 after the operator ack.
             sample_clean = int(probe.get("failed") or 0) == 0
             if (
                 risk_ack
@@ -904,11 +913,11 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 "sample_failures": probe.get("sample_failures", []),
                 "suggested_fix": probe.get("suggested_fix", "")
                 or (
-                    "Accept loss risk on Map, widen the destination type, or remap"
+                    "Sign a Migration Risk Contract, widen the destination type, or remap"
                     if force_block
                     else (
-                        "Accept risk on Map if wrapping bare scalars as JSON strings "
-                        "is intentional, or emit real JSON objects/arrays upstream."
+                        "Sign a Migration Risk Contract if wrapping bare scalars as "
+                        "JSON strings is intentional, or emit real JSON objects/arrays upstream."
                         if json_wraps
                         else ""
                     )
@@ -921,7 +930,9 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             issues_detail.append(detail)
             if force_block:
                 issues.append(
-                    label + " — declared lossy; accept risk or remap (samples cannot soft-pass)"
+                    label
+                    + " — declared lossy; sign Migration Risk Contract or remap "
+                    "(samples cannot soft-pass)"
                 )
             elif severity == "block":
                 issues.append(label)
@@ -931,10 +942,11 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     + " — bare scalar(s) wrapped as JSON string (domain change)"
                 )
                 if risk_ack:
-                    warnings.append(wrap_label + " (risk acknowledged)")
+                    warnings.append(wrap_label + " (risk contract)")
                 else:
-                    # Domain change must not look Validate-cleared without Map Accept risk.
-                    issues.append(wrap_label + " — Accept risk if intentional")
+                    issues.append(
+                        wrap_label + " — sign Migration Risk Contract if intentional"
+                    )
                     detail["severity"] = "block"
                     detail["suggested_fix"] = (
                         "Accept risk on Map if wrapping bare scalars as JSON "
@@ -970,14 +982,17 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     ),
                 })
         else:
-            # No samples — declared lossy blocks unless risk_acknowledged.
-            # Accept risk must not fall through to a hard block (operator CTA broken).
-            risk_ack = bool(getattr(m, "risk_acknowledged", False))
+            # No samples — declared lossy blocks unless verified Risk Contract.
+            risk_ack = _risk_cleared(m)
             mode = (ctx.plan.validation_mode or "strict").strip().lower()
             if lossy and risk_ack:
-                warnings.append(label + " — declared lossy; risk acknowledged (no samples)")
+                warnings.append(
+                    label + " — declared lossy; risk contract (no samples)"
+                )
             elif lossy and not risk_ack:
-                issues.append(label + " — declared lossy; accept risk or remap")
+                issues.append(
+                    label + " — declared lossy; sign Migration Risk Contract or remap"
+                )
             elif mode in {"balanced", "review"}:
                 warnings.append(label + " (declared; no samples — balanced warn)")
             else:
@@ -1173,37 +1188,36 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
             _with_scope({"unmapped": unmapped_required}, g4_scope),
         )
 
-    # Lossy / mutate / narrowing cannot clear via bare user_override.
+    # Lossy / mutate / narrowing cannot clear via bare user_override or boolean ack.
     risk_unacked = [
-        m
-        for m in active
-        if _requires_risk_ack(m) and not getattr(m, "risk_acknowledged", False)
+        m for m in active if _requires_risk_ack(m) and not _risk_cleared(m)
     ]
     if risk_unacked:
         names = [f"{m.source}→{m.target}" for m in risk_unacked]
         return _block(
             GateId.G4_MAPPING_CONFIDENCE,
-            f"{len(risk_unacked)} mapping(s) require explicit risk acknowledgment "
-            "(lossy/narrowing/mutate)",
+            f"{len(risk_unacked)} mapping(s) require a signed Migration Risk Contract "
+            "with a continue execution policy (lossy/narrowing/mutate)",
             start,
             _with_scope({"risk_unacknowledged": names}, g4_scope),
         )
 
-    # STRUCT flatten / specialty — API user_override alone is insufficient.
+    # STRUCT flatten / specialty — boolean ack alone is insufficient.
     structural_unacked = [
         m
         for m in active
         if (
             (m.requires_review or _is_structural_review_mapping(m))
             and _is_structural_review_mapping(m)
-            and not getattr(m, "risk_acknowledged", False)
+            and not _risk_cleared(m)
         )
     ]
     if structural_unacked:
         names = [f"{m.source}→{m.target}" for m in structural_unacked]
         return _block(
             GateId.G4_MAPPING_CONFIDENCE,
-            f"{len(structural_unacked)} STRUCT/specialty mapping(s) require explicit acknowledgment",
+            f"{len(structural_unacked)} STRUCT/specialty mapping(s) require a "
+            "signed Migration Risk Contract",
             start,
             _with_scope({"structural_unacknowledged": names}, g4_scope),
         )

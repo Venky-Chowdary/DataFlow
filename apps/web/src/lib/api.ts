@@ -951,6 +951,23 @@ export async function verifySignedProofPack(
   return res.json();
 }
 
+/** Execute signed rollback plan — DISCARD_STAGING only (never population undo). */
+export async function executeJobRollback(
+  jobId: string,
+  body: { approved_by: string; reason: string; plan?: Record<string, unknown> },
+): Promise<Record<string, unknown>> {
+  const res = await apiFetch(
+    `${API_BASE}/transfer/${encodeURIComponent(jobId)}/rollback/execute`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Rollback execute failed"));
+  return res.json();
+}
+
 export async function renameJob(jobId: string, name: string): Promise<JobProgress> {
   const urls = [
     `${API_BASE}/connectors/jobs/${jobId}`,

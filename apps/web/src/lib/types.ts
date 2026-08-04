@@ -837,6 +837,16 @@ export interface PreflightResult {
     honesty?: string;
     current_warehouse?: string | null;
   };
+  /**
+   * Signed Migration Risk Contracts echoed from Validate hydrate.
+   * Merge onto Map so Execute sees risk_id + signature (not unsigned drafts).
+   */
+  signed_mappings?: Array<{
+    source?: string;
+    target?: string;
+    risk_contract?: Record<string, unknown>;
+    risk_acknowledged?: boolean;
+  }>;
 }
 
 /** Machine-readable next step from POST /preflight/explain — mapped to Studio controls. */

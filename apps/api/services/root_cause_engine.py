@@ -20,6 +20,9 @@ _FIDELITY_RE = re.compile(
     r"nested.?shape.?collapse|declared type path collapses|"
     r"width.?truncat|timezone.?shift|type coercion|"
     r"require(?:s)? explicit risk acknowledgment|"
+    r"migration risk contract|"
+    r"risk contract required|"
+    r"execution policy|"
     r"\(\s*[A-Z][A-Z0-9_()\s,]+\s*\)\s*→\s*\(?\s*[A-Z]",
     re.I,
 )
@@ -45,9 +48,13 @@ _FIDELITY_GATE_IDS = frozenset(
         "g5_sample",
         "g5_sample_validation",
         "g6_target_ddl",
+        "g6_ddl_compatibility",
         "g8_reconciliation",
         "g9_data_integrity",
+        "g9_type_coercion",
         "proof_bundle",
+        "risk_contracts",
+        "migration_risk_contract",
     }
 )
 
@@ -298,9 +305,9 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
 
     roots: list[MigrationRootCause] = []
 
-    # Fidelity: require ≥2 gate/blocker faces so we do not invent a root for a
-    # single unrelated gate message.
-    if len(fidelity_gates) + len(fidelity_blockers) >= 2:
+    # Fidelity: collapse even a single fidelity-facing block into one root so
+    # operators never see N duplicate CTAs for one lossy mapping path.
+    if len(fidelity_gates) + len(fidelity_blockers) >= 1:
         gate_ids = sorted(
             {
                 *[str(g.get("id")) for g in fidelity_gates if g.get("id")],
@@ -311,7 +318,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 ],
             }
         )
-        if len(gate_ids) >= 2 or len(fidelity_blockers) >= 2:
+        if gate_ids or fidelity_blockers:
             cols: list[str] = []
             for g in fidelity_gates:
                 cols.extend(_columns_from_details(g.get("details") or {}))
@@ -537,6 +544,9 @@ def apply_root_causes_to_preflight(preflight: dict[str, Any]) -> dict[str, Any]:
     Gate results stay intact for audit. Absorbed gate blockers are removed from
     ``blockers`` so the UI never lists the same TEXT→INTEGER failure N times.
     Non-absorbed blockers (privilege, connection, etc.) remain.
+
+    Also rewrites ``proof_bundle.transfer_decision.blockers`` so proof copy
+    matches the collapsed operator list (GA hardening).
     """
     roots = build_root_causes(preflight)
     preflight = {**preflight, "root_causes": [r.to_dict() for r in roots]}
@@ -554,5 +564,22 @@ def apply_root_causes_to_preflight(preflight: dict[str, Any]) -> dict[str, Any]:
         and not (b.get("details") or {}).get("root_cause")
     ]
     # Roots first — operator sees cause before residual issues.
-    preflight["blockers"] = [r.as_operator_blocker() for r in roots] + remaining
+    collapsed = [r.as_operator_blocker() for r in roots] + remaining
+    preflight["blockers"] = collapsed
+
+    pb = preflight.get("proof_bundle")
+    if isinstance(pb, dict):
+        td = pb.get("transfer_decision")
+        if isinstance(td, dict):
+            td = {
+                **td,
+                "blockers": [
+                    str(b.get("message") or b.get("id") or "")
+                    for b in collapsed
+                    if b
+                ],
+                "root_causes": [r.to_dict() for r in roots],
+            }
+            preflight["proof_bundle"] = {**pb, "transfer_decision": td}
+
     return preflight

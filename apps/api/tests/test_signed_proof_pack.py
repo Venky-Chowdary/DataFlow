@@ -57,3 +57,59 @@ def test_export_from_job_document():
     assert pack["job_id"] == "job-xyz"
     assert pack["preflight_summary"]["total_gates"] == 9
     assert verify_signed_proof_pack(pack)["ok"] is True
+
+
+def test_export_includes_accepted_risks_policies_and_rollback():
+    """Module H — diligence export must not drop risk contracts / policies."""
+    contract = {
+        "risk_id": "mrc-abc123",
+        "column": "amount",
+        "source_type": "TEXT",
+        "destination_type": "INTEGER",
+        "execution_policy": "CAST_AND_CONTINUE",
+        "quarantine_policy": "holdout_rejected_rows",
+        "retry_policy": "none",
+        "rollback_strategy": "DOCUMENT_ONLY",
+        "approved_by": "ops@example.com",
+        "reason": "legacy cast",
+        "signature": "mrc-sha256:deadbeef",
+    }
+    job = {
+        "_id": "job-risks",
+        "mappings": [
+            {
+                "source": "amount",
+                "target": "amount",
+                "risk_contract": contract,
+            }
+        ],
+        "reconciliation": {
+            "passed": True,
+            "coverage": "full_checksum",
+            "source_checksum": "aaa",
+            "target_checksum": "aaa",
+        },
+        "mapping_proof": {"mapping_hash": "map-h1"},
+        "destination_summary": {
+            "ddl_hash": "ddl-h1",
+            "rejected_details": [{"row": 1, "reason": "cast"}],
+            "rollback_plan": {
+                "strategy": "DISCARD_STAGING",
+                "executable": True,
+                "staging_table": "t_df_staging",
+            },
+        },
+        "source": {"format": "postgresql"},
+        "destination": {"format": "snowflake"},
+    }
+    pack = export_proof_pack_for_job(job, actor="ops@example.com")
+    assert len(pack["accepted_risks"]) == 1
+    assert pack["accepted_risks"][0]["risk_id"] == "mrc-abc123"
+    assert pack["risk_contracts"][0]["execution_policy"] == "CAST_AND_CONTINUE"
+    assert pack["execution_policies"][0]["execution_policy"] == "CAST_AND_CONTINUE"
+    assert pack["rollback_plan"]["strategy"] == "DISCARD_STAGING"
+    assert pack["rejected_rows_count"] == 1
+    assert pack["hashes"]["ddl_hash"] == "ddl-h1"
+    assert pack["hashes"]["mapping_hash"] == "map-h1"
+    assert pack["connector_versions"]["source"] == "postgresql"
+    assert verify_signed_proof_pack(pack)["ok"] is True

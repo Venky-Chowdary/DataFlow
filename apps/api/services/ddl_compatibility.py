@@ -288,18 +288,18 @@ def evaluate_ddl_compatibility(
                 f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type or 'proposed'}) "
                 f"— precision clamps on {dest_kind}"
             )
-        risk_ack = bool(
-            m.get("risk_acknowledged") or m.get("riskAcknowledged")
-        )
+        # GA: boolean risk_acknowledged alone never clears G6 — need verified
+        # continue-policy Migration Risk Contract (G3/G4/Execute SSOT).
+        from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+        risk_cleared = mapping_has_clearing_risk_contract(m)
         if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type, dest_db=dest_kind):
             # Align with G3: declared lossy never soft-passes on head samples
-            # without explicit Map risk_acknowledged. Accept risk clears the DDL
-            # gate (still warn via G3) so Map CTA and Validate agree.
+            # without a clearing Risk Contract.
             src_logical = normalize_logical_type(src_type)
             tgt_logical = normalize_logical_type(tgt_type)
-            # Accept risk clears declared lossy / fidelity collapse (G3/G4 parity).
-            # Without ack: never sample soft-pass precision collapses.
-            if not risk_ack:
+            # Without clearing contract: never sample soft-pass precision collapses.
+            if not risk_cleared:
                 note = ""
                 if src_logical == "float" and tgt_logical == "decimal":
                     note = " — float→decimal (IEEE precision risk; accept risk or remap)"
@@ -334,12 +334,12 @@ def evaluate_ddl_compatibility(
                     f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type}){note}"
                 )
 
-        # Declared width / specialty collapse — skip when Accept risk already cleared.
+        # Declared width / specialty collapse — skip when Risk Contract cleared.
         if (
             not schemaless
             and tgt_type
             and is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest_kind)
-            and not risk_ack
+            and not risk_cleared
         ):
             if specialty_carrier_would_collapse(src_type, tgt_type):
                 msg = (

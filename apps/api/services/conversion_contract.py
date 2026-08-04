@@ -115,6 +115,19 @@ def invents_unproven_capacity(
         tgt_has_fsp = "(" in tgt_u
         if not src_has_fsp and tgt_has_fsp:
             return True
+    # INTEGER→DECIMAL(p,s) invents scale/precision the integer never proved.
+    if src_l in {"integer", "bigint", "smallint", "tinyint"} and tgt_l == "decimal":
+        tp, ts = parse_numeric_precision_scale(target_type)
+        if tp is not None or ts is not None:
+            return True
+    # Bare/unbounded string → VARCHAR(n) invents length the source never proved.
+    if src_l in {"string", "text"} and tgt_l in {"string", "text"}:
+        from services.type_system import parse_string_carrier_width
+
+        src_w = parse_string_carrier_width(source_type)
+        tgt_w = parse_string_carrier_width(target_type)
+        if tgt_w is not None and src_w is None:
+            return True
     _ = LOGICAL_DECIMAL  # documented domain; invent handled above
     return False
 
@@ -255,14 +268,19 @@ def classify_mapping(
         mapping.get("intentional_omit") or mapping.get("intentionalOmit")
     )
     mapped = bool(mapping.get("source") and mapping.get("target")) and not intentional_omit
+    # Boolean ack alone never clears invent/lossy — verified continue-policy only.
+    try:
+        from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+        cleared = mapping_has_clearing_risk_contract(mapping)
+    except Exception:
+        cleared = False
     return classify_conversion(
         src,
         tgt,
         dest_db=destination_db_type,
         transform=str(mapping.get("transform") or "none"),
-        risk_acknowledged=bool(
-            mapping.get("risk_acknowledged") or mapping.get("riskAcknowledged")
-        ),
+        risk_acknowledged=cleared,
         mapped=mapped,
     )
 

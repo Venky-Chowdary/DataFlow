@@ -124,12 +124,11 @@ def _check_coercion_safety(
             continue
         from services.type_system import is_lossy_coercion
 
-        risk_ack = bool(
-            mapping
-            and (mapping.get("risk_acknowledged") or mapping.get("riskAcknowledged"))
-        )
-        # Match G3: declared lossy cannot be sample-cleared without risk ack.
-        if mapping and is_lossy_coercion(src_t, tgt_t, dest_db=dest_kind) and not risk_ack:
+        from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+        risk_cleared = bool(mapping and mapping_has_clearing_risk_contract(mapping))
+        # Match G3/G6: declared lossy cannot be sample-cleared without Risk Contract.
+        if mapping and is_lossy_coercion(src_t, tgt_t, dest_db=dest_kind) and not risk_cleared:
             hardened.append(issue)
             continue
         if mapping and samples_coerce_mapping(
@@ -138,6 +137,10 @@ def _check_coercion_safety(
             target_types=target_types,
             rows=sample_rows,
         ):
+            # Sample coerce still requires a continue-policy contract to demote.
+            if not risk_cleared:
+                hardened.append(issue)
+                continue
             sample_cleared.append(issue.get("message") or src)
             hardened.append({**issue, "severity": "warn", "sample_cleared": True})
             continue

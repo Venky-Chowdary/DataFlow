@@ -25,6 +25,7 @@ from typing import Any, Literal
 ExecutionPolicy = Literal[
     "FAIL_JOB",
     "STOP_TABLE",
+    "STOP_COLUMN",
     "QUARANTINE_ROW",
     "SKIP_ROW",
     "RETRY",
@@ -34,13 +35,14 @@ ExecutionPolicy = Literal[
 ]
 
 # Policies that may clear Validate / Execute for a lossy mapping.
+# RETRY is intentionally excluded — there is no cell-level retry engine; claiming
+# RETRY as a continue policy would invent silent quarantine (fail closed).
 CONTINUE_POLICIES: frozenset[str] = frozenset(
     {
         "QUARANTINE_ROW",
         "SKIP_ROW",
         "CAST_AND_CONTINUE",
         "TRANSFORM_AND_CONTINUE",
-        "RETRY",
     }
 )
 
@@ -49,7 +51,9 @@ FAIL_CLOSED_POLICIES: frozenset[str] = frozenset(
     {
         "FAIL_JOB",
         "STOP_TABLE",
+        "STOP_COLUMN",
         "ABORT_TRANSACTION",
+        "RETRY",  # reserved — no cell retry engine; write fails closed
     }
 )
 
@@ -87,6 +91,10 @@ class MigrationRiskContract:
     mapping_hash: str = ""
     plan_id: str | None = None
     target: str = ""
+    # Charter audit fields (Enterprise GA) — included in newly signed bodies.
+    migration_id: str = ""
+    table: str = ""
+    loss_classification: str = ""
     version: int = 1
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -104,6 +112,30 @@ def sign_risk_contract(payload: dict[str, Any]) -> str:
     """Tamper-evident digest of the contract body (not a PKI signature)."""
     digest = hashlib.sha256(_canonical_payload(payload).encode("utf-8")).hexdigest()
     return f"mrc-sha256:{digest}"
+
+
+def infer_loss_classification(
+    *,
+    source_type: str = "",
+    destination_type: str = "",
+    expected_precision_loss: bool = False,
+    expected_truncation: bool = False,
+    expected_nulls: bool = False,
+    fidelity: str = "",
+) -> str:
+    """Stable loss label for audit — never invents a green/lossless class."""
+    fid = (fidelity or "").strip().lower()
+    if fid in {"lossy_cast", "mutate", "cast"}:
+        return fid
+    if expected_truncation:
+        return "truncation"
+    if expected_precision_loss:
+        return "precision_loss"
+    if expected_nulls:
+        return "null_coercion"
+    if (source_type or "").strip() and (destination_type or "").strip():
+        return "type_narrowing_or_domain"
+    return "fidelity_risk"
 
 
 def create_migration_risk_contract(
@@ -130,6 +162,10 @@ def create_migration_risk_contract(
     mapping_hash: str = "",
     plan_id: str | None = None,
     target: str = "",
+    migration_id: str = "",
+    table: str = "",
+    loss_classification: str = "",
+    fidelity: str = "",
     metadata: dict[str, Any] | None = None,
 ) -> MigrationRiskContract:
     """Build a signed contract. Default policy is FAIL_JOB (Execute stays locked)."""
@@ -151,6 +187,21 @@ def create_migration_risk_contract(
         f"{(source_type or '').strip() or '?'} → "
         f"{(destination_type or '').strip() or '?'} fidelity risk"
     )
+    mig = str(migration_id or plan_id or "").strip()
+    loss = (loss_classification or "").strip() or infer_loss_classification(
+        source_type=source_type,
+        destination_type=destination_type,
+        expected_precision_loss=expected_precision_loss,
+        expected_truncation=expected_truncation,
+        expected_nulls=expected_nulls,
+        fidelity=fidelity,
+    )
+    meta = dict(metadata or {})
+    meta.setdefault("loss_classification", loss)
+    if table:
+        meta.setdefault("table", table)
+    if mig:
+        meta.setdefault("migration_id", mig)
     draft: dict[str, Any] = {
         "risk_id": risk_id,
         "severity": severity or "high",
@@ -176,16 +227,26 @@ def create_migration_risk_contract(
         "mapping_hash": mapping_hash or "",
         "plan_id": plan_id,
         "target": (target or column).strip(),
+        "migration_id": mig,
+        "table": (table or "").strip(),
+        "loss_classification": loss,
         "version": 1,
-        "metadata": dict(metadata or {}),
+        "metadata": meta,
     }
     signature = sign_risk_contract(draft)
     return MigrationRiskContract(**draft, signature=signature)
 
 
 def verify_risk_contract(contract: MigrationRiskContract | dict[str, Any]) -> bool:
-    """True when signature matches canonical body."""
-    payload = contract.to_dict() if isinstance(contract, MigrationRiskContract) else dict(contract)
+    """True when signature matches canonical body.
+
+    Dict path verifies the stored payload as-is (backward compatible with older
+    field sets). Dataclass path uses ``to_dict()``.
+    """
+    if isinstance(contract, MigrationRiskContract):
+        payload = contract.to_dict()
+    else:
+        payload = dict(contract or {})
     expected = sign_risk_contract(payload)
     return bool(payload.get("signature")) and payload.get("signature") == expected
 
@@ -194,6 +255,19 @@ def contract_from_dict(raw: dict[str, Any] | None) -> MigrationRiskContract | No
     if not raw or not isinstance(raw, dict):
         return None
     try:
+        meta = dict(raw.get("metadata") or {})
+        mig = str(
+            raw.get("migration_id")
+            or meta.get("migration_id")
+            or raw.get("plan_id")
+            or ""
+        )
+        table = str(raw.get("table") or meta.get("table") or "")
+        loss = str(
+            raw.get("loss_classification")
+            or meta.get("loss_classification")
+            or ""
+        )
         return MigrationRiskContract(
             risk_id=str(raw.get("risk_id") or ""),
             severity=str(raw.get("severity") or "high"),
@@ -220,8 +294,11 @@ def contract_from_dict(raw: dict[str, Any] | None) -> MigrationRiskContract | No
             mapping_hash=str(raw.get("mapping_hash") or ""),
             plan_id=raw.get("plan_id"),
             target=str(raw.get("target") or raw.get("column") or ""),
+            migration_id=mig,
+            table=table,
+            loss_classification=loss,
             version=int(raw.get("version") or 1),
-            metadata=dict(raw.get("metadata") or {}),
+            metadata=meta,
         )
     except (TypeError, ValueError):
         return None
@@ -234,18 +311,23 @@ def boolean_ack_is_execution_contract() -> bool:
 
 def contract_clears_validate_block(contract: MigrationRiskContract | dict[str, Any] | None) -> bool:
     """Only a verified continue-policy contract may unlock lossy Validate→Execute."""
-    c = (
-        contract
-        if isinstance(contract, MigrationRiskContract)
-        else contract_from_dict(contract if isinstance(contract, dict) else None)
-    )
-    if c is None:
+    # Dict path: verify stored payload as-is so legacy field sets still clear.
+    if isinstance(contract, dict):
+        if not verify_risk_contract(contract):
+            return False
+        if not (str(contract.get("approved_by") or "").strip()):
+            return False
+        if not (str(contract.get("reason") or "").strip()):
+            return False
+        policy = str(contract.get("execution_policy") or "").strip().upper()
+        return policy in CONTINUE_POLICIES
+    if not isinstance(contract, MigrationRiskContract):
         return False
-    if not verify_risk_contract(c):
+    if not verify_risk_contract(contract):
         return False
-    if not (c.approved_by or "").strip() or not (c.reason or "").strip():
+    if not (contract.approved_by or "").strip() or not (contract.reason or "").strip():
         return False
-    policy = (c.execution_policy or "").strip().upper()
+    policy = (contract.execution_policy or "").strip().upper()
     return policy in CONTINUE_POLICIES
 
 
@@ -265,7 +347,50 @@ def mapping_has_clearing_risk_contract(mapping: Any) -> bool:
         raw = getattr(mapping, "risk_contract", None)
         if raw is None and bool(getattr(mapping, "risk_acknowledged", False)):
             return False
+    # Verify stored dict as-is (preserves older field sets).
+    if isinstance(raw, dict):
+        if not verify_risk_contract(raw):
+            return False
+        policy = str(raw.get("execution_policy") or "").strip().upper()
+        if policy not in CONTINUE_POLICIES:
+            return False
+        if not (str(raw.get("approved_by") or "").strip()):
+            return False
+        if not (str(raw.get("reason") or "").strip()):
+            return False
+        return True
     return contract_clears_validate_block(raw)
+
+
+# Align with Map FE ``SAFE_NORMALIZE_TRANSFORMS`` — trim/case/email/phone are
+# not fidelity Risk Contract paths (Approve is enough).
+_SAFE_NORMALIZE_TRANSFORMS: frozenset[str] = frozenset(
+    {
+        "trim",
+        "lower",
+        "upper",
+        "email",
+        "phone",
+        "strip_controls",
+    }
+)
+
+
+def _is_safe_normalize_mapping(m: Any) -> bool:
+    """True when transform is a safe normalize and fidelity is not lossy_cast."""
+    if isinstance(m, dict):
+        if m.get("type_narrowing") or m.get("typeNarrowing"):
+            return False
+        if str(m.get("fidelity") or "").lower() == "lossy_cast":
+            return False
+        transform = str(m.get("transform") or "").strip().lower()
+    else:
+        if getattr(m, "type_narrowing", False):
+            return False
+        if str(getattr(m, "fidelity", None) or "").lower() == "lossy_cast":
+            return False
+        transform = str(getattr(m, "transform", None) or "").strip().lower()
+    return transform in _SAFE_NORMALIZE_TRANSFORMS
 
 
 def lossy_mappings_missing_risk_contracts(
@@ -277,7 +402,8 @@ def lossy_mappings_missing_risk_contracts(
 
     ``requires_contract`` — optional callable(mapping) -> bool. When omitted,
     any mapping with risk_acknowledged or fidelity lossy_cast/type_narrowing
-    is treated as needing a contract for Execute-approve.
+    is treated as needing a contract for Execute-approve. Safe normalize
+    transforms (email/trim/case/phone) are excluded unless risk_acknowledged.
     """
 
     def _needs(m: Any) -> bool:
@@ -286,8 +412,11 @@ def lossy_mappings_missing_risk_contracts(
         if isinstance(m, dict):
             if m.get("intentional_omit") or m.get("intentionalOmit"):
                 return False
+            # Explicit boolean ack without contract is always incomplete.
             if m.get("risk_acknowledged") or m.get("riskAcknowledged"):
                 return True
+            if _is_safe_normalize_mapping(m):
+                return False
             fidelity = str(m.get("fidelity") or "").lower()
             if fidelity in {"lossy_cast", "mutate", "cast"}:
                 return True
@@ -296,6 +425,8 @@ def lossy_mappings_missing_risk_contracts(
             return False
         if getattr(m, "risk_acknowledged", False):
             return True
+        if _is_safe_normalize_mapping(m):
+            return False
         fidelity = str(getattr(m, "fidelity", None) or "").lower()
         if fidelity in {"lossy_cast", "mutate", "cast"}:
             return True
@@ -325,7 +456,11 @@ def _normalize_job_write_policy(job_error_policy: str | None) -> str:
 
 
 def mapping_risk_contract(mapping: Any) -> MigrationRiskContract | None:
-    """Return verified contract from a mapping, or None."""
+    """Return verified contract from a mapping, or None.
+
+    Verifies the stored dict as-is (legacy field sets) before hydrating the
+    dataclass — never re-sign/re-serialize new defaults into the digest check.
+    """
     if mapping is None:
         return None
     raw = (
@@ -333,10 +468,13 @@ def mapping_risk_contract(mapping: Any) -> MigrationRiskContract | None:
         if isinstance(mapping, dict)
         else getattr(mapping, "risk_contract", None)
     )
-    c = contract_from_dict(raw if isinstance(raw, dict) else None)
-    if c is None or not verify_risk_contract(c):
-        return None
-    return c
+    if isinstance(raw, dict):
+        if not verify_risk_contract(raw):
+            return None
+        return contract_from_dict(raw)
+    if isinstance(raw, MigrationRiskContract):
+        return raw if verify_risk_contract(raw) else None
+    return None
 
 
 def resolve_write_action_for_mapping(
@@ -350,9 +488,10 @@ def resolve_write_action_for_mapping(
 
     Rules (contract narrows / specializes job policy — never silent invent):
     - No verified contract → job error_policy
-    - FAIL_JOB / STOP_TABLE / ABORT_TRANSACTION → ``fail`` (wins over quarantine)
+    - FAIL_JOB / STOP_* / ABORT_TRANSACTION / RETRY → ``fail`` (RETRY has no
+      cell-retry engine; fail-closed)
     - QUARANTINE_ROW / SKIP_ROW → ``quarantine`` holdout
-    - CAST_AND_CONTINUE / TRANSFORM_AND_CONTINUE / RETRY → on failure, honor
+    - CAST_AND_CONTINUE / TRANSFORM_AND_CONTINUE → on failure, honor
       ``quarantine_policy`` (default quarantine holdout; never invent NULL unless
       the contract's quarantine_policy explicitly asks for coerce/null)
     """
@@ -365,6 +504,7 @@ def resolve_write_action_for_mapping(
     risk_id = c.risk_id
 
     if exec_pol in FAIL_CLOSED_POLICIES:
+        # FAIL_JOB / STOP_* / ABORT / RETRY — never invent silent continue.
         return "fail", exec_pol, risk_id
 
     if exec_pol in {"QUARANTINE_ROW", "SKIP_ROW"}:
@@ -379,7 +519,8 @@ def resolve_write_action_for_mapping(
         # Default: hold out bad cells; good rows continue (cast & continue).
         return "quarantine", exec_pol, risk_id
 
-    return job, exec_pol, risk_id
+    # Unknown policy — fail closed (never fall through to job quarantine default).
+    return "fail", exec_pol or DEFAULT_EXECUTION_POLICY, risk_id
 
 
 def rejected_details_require_job_abort(rejected_details: list[dict[str, Any]] | None) -> bool:

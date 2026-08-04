@@ -4,7 +4,14 @@ import { DtIcon } from "./DtIcon";
 import { Spinner } from "./LoadingState";
 import { CopyIdChip } from "./ui/CopyIdChip";
 import { JobPhase, JobProgress, LoadHistoryReport, PreflightResult } from "../lib/types";
-import { cancelJob, fetchJobMappingProof, resumeJob, streamJobProgress, type RepairMapping } from "../lib/api";
+import {
+  cancelJob,
+  executeJobRollback,
+  fetchJobMappingProof,
+  resumeJob,
+  streamJobProgress,
+  type RepairMapping,
+} from "../lib/api";
 import { useActiveData } from "../lib/DataContext";
 import { isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
@@ -386,6 +393,7 @@ export function JobTheaterView({
   onBackToMap,
   onOpenJob,
 }: JobTheaterViewProps) {
+  const { toast } = useToast();
   const total = job.total_rows ?? 0;
   const processed = job.records_processed ?? 0;
   const isFailed = job.status === "failed";
@@ -398,6 +406,7 @@ export function JobTheaterView({
     ? PHASES.findIndex((p) => p.id === "reconcile")
     : phaseIndex(job.phase, job.status);
   const [mappingProofOpen, setMappingProofOpen] = useState(false);
+  const [rollbackBusy, setRollbackBusy] = useState(false);
   const [resolvedProof, setResolvedProof] = useState<MappingProof | null>(() => asMappingProof(job.mapping_proof));
 
   useEffect(() => {
@@ -473,6 +482,17 @@ export function JobTheaterView({
   const elapsed = Math.max(0, endMs - startMs);
 
   const destinationSummary = (job.destination_summary ?? {}) as Record<string, unknown>;
+  const rollbackPlan = (destinationSummary.rollback_plan ?? null) as {
+    strategy?: string;
+    executable?: boolean;
+    staging_table?: string;
+    population_undo_claimed?: boolean;
+  } | null;
+  const canDiscardStaging =
+    Boolean(isComplete)
+    && String(rollbackPlan?.strategy || "") === "DISCARD_STAGING"
+    && rollbackPlan?.executable === true
+    && Boolean(rollbackPlan?.staging_table);
   const rejectedRows = Number(job.rejected_rows ?? destinationSummary.rejected_rows ?? 0);
   const coercedNullRows = Number(job.coerced_null_rows ?? destinationSummary.coerced_null_rows ?? 0);
   const droppedRows = Math.max(rejectedRows - coercedNullRows, 0);
@@ -1200,6 +1220,60 @@ export function JobTheaterView({
               : undefined
           }
         />
+      )}
+
+      {canDiscardStaging && (
+        <section className="df2-theater-rollback" aria-label="Staging rollback">
+          <div>
+            <strong>Discard staging table</strong>
+            <p>
+              Signed plan <code>DISCARD_STAGING</code> for{" "}
+              <code>{String(rollbackPlan?.staging_table)}</code>. Drops staging only —
+              never undoes promoted destination rows (population_undo_claimed=false).
+            </p>
+          </div>
+          <button
+            type="button"
+            className="df2-btn df2-btn-sm df2-btn-danger"
+            disabled={rollbackBusy}
+            onClick={() => {
+              const reason = window.prompt(
+                "Reason for discarding staging (required for audit):",
+                "Operator discarded unused staging after migration review",
+              );
+              if (!reason?.trim()) return;
+              const actor = window.prompt("Approver identity:", "job-theater-operator");
+              if (!actor?.trim()) return;
+              setRollbackBusy(true);
+              void executeJobRollback(jobId, {
+                approved_by: actor.trim(),
+                reason: reason.trim(),
+                plan: rollbackPlan as Record<string, unknown>,
+              })
+                .then((res) => {
+                  toast({
+                    title: "Staging discarded",
+                    message: String(
+                      (res as { staging_table?: string }).staging_table
+                      || rollbackPlan?.staging_table
+                      || "OK",
+                    ),
+                    tone: "success",
+                  });
+                })
+                .catch((err) => {
+                  toast({
+                    title: "Rollback refused",
+                    message: err instanceof Error ? err.message : String(err),
+                    tone: "error",
+                  });
+                })
+                .finally(() => setRollbackBusy(false));
+            }}
+          >
+            {rollbackBusy ? "Discarding…" : "Discard staging"}
+          </button>
+        </section>
       )}
 
       {resolvedProof && (

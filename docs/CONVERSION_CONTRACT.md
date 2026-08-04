@@ -43,3 +43,9 @@ Offline `pair_assurance.evaluate_type_cell` stamps both:
 - Charter `conversion_class`: from `classify_conversion` (7-class)
 
 Proof artifacts include `conversion_class_counts`. Sample/fixture scope unchanged — never population proof.
+
+## Related
+
+- `docs/MIGRATION_RISK_CONTRACT.md`
+- `docs/BUYER_EVIDENCE_PACK.md` Map≡CREATE / pair assurance
+- `docs/EXECUTION_ENGINE_CONTRACT.md`

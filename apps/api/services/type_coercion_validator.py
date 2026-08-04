@@ -32,9 +32,10 @@ def validate_mapping_coercions(
     confidence or whether the coercion is usually lossy. This prevents silent
     data loss from schema drift.
 
-    Declared lossy coercions always block unless ``risk_acknowledged`` is set
-    (aligned with G3). Balanced/review may only soften non-lossy declared
-    mismatches below the confidence floor.
+    Declared lossy coercions always block under strict unless a verified
+    continue-policy Migration Risk Contract clears the mapping (aligned with
+    G3/G4/G6). Boolean ``risk_acknowledged`` alone never softens. Balanced/
+    review may still warn for Map-time advisory without a contract.
 
     Same-logical pairs still run precision-collapse checks (DECIMAL/VARCHAR/TZ
     narrowing) — an early ``continue`` used to green G9 while G3/G6 blocked.
@@ -91,14 +92,17 @@ def validate_mapping_coercions(
         elif type_locked and precision_collapse:
             severity = "block"
         elif uuid_string_create_new:
-            risk_ack = bool(m.get("risk_acknowledged") or m.get("riskAcknowledged"))
-            # ObjectId→TEXT parity: create-new UUID→STRING needs Accept risk.
-            severity = "warn" if risk_ack or balanced else "block"
+            from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+            risk_cleared = mapping_has_clearing_risk_contract(m)
+            # ObjectId→TEXT parity: create-new UUID→STRING needs Risk Contract.
+            severity = "warn" if risk_cleared or balanced else "block"
         elif lossy:
-            risk_ack = bool(m.get("risk_acknowledged") or m.get("riskAcknowledged"))
-            # Balanced Map-time advisory matches G3 posture; Validate still
-            # fail-fasts via sample/risk gates. Strict: Accept risk → warn.
-            if risk_ack or balanced:
+            from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+            risk_cleared = mapping_has_clearing_risk_contract(m)
+            # Balanced Map-time advisory may warn; strict needs clearing contract.
+            if risk_cleared or balanced:
                 severity = "warn"
             else:
                 severity = "block"

@@ -128,12 +128,36 @@ export interface EditableMapping {
 export type ExecutionPolicy =
   | "FAIL_JOB"
   | "STOP_TABLE"
+  | "STOP_COLUMN"
   | "QUARANTINE_ROW"
   | "SKIP_ROW"
-  | "RETRY"
   | "CAST_AND_CONTINUE"
   | "TRANSFORM_AND_CONTINUE"
   | "ABORT_TRANSACTION";
+
+/** Policies that unlock Validate→Execute (must match BE CONTINUE_POLICIES). RETRY is never continue. */
+export const CONTINUE_EXECUTION_POLICIES = new Set<ExecutionPolicy>([
+  "QUARANTINE_ROW",
+  "SKIP_ROW",
+  "CAST_AND_CONTINUE",
+  "TRANSFORM_AND_CONTINUE",
+]);
+
+/** Operator-selectable policies — no hidden default; RETRY omitted (fail-closed on write). */
+export const EXECUTION_POLICY_OPTIONS: Array<{
+  id: ExecutionPolicy;
+  label: string;
+  continueUnlock: boolean;
+}> = [
+  { id: "FAIL_JOB", label: "FAIL_JOB — stop the job", continueUnlock: false },
+  { id: "STOP_TABLE", label: "STOP_TABLE — stop this table", continueUnlock: false },
+  { id: "STOP_COLUMN", label: "STOP_COLUMN — stop this column", continueUnlock: false },
+  { id: "ABORT_TRANSACTION", label: "ABORT_TRANSACTION — abort txn", continueUnlock: false },
+  { id: "QUARANTINE_ROW", label: "QUARANTINE_ROW — holdout bad rows", continueUnlock: true },
+  { id: "SKIP_ROW", label: "SKIP_ROW — skip bad rows", continueUnlock: true },
+  { id: "CAST_AND_CONTINUE", label: "CAST_AND_CONTINUE — cast & write", continueUnlock: true },
+  { id: "TRANSFORM_AND_CONTINUE", label: "TRANSFORM_AND_CONTINUE — transform & write", continueUnlock: true },
+];
 
 export type MigrationRiskContractDraft = {
   risk_id?: string;
@@ -160,6 +184,9 @@ export type MigrationRiskContractDraft = {
   proof_pack_ref?: string | null;
   mapping_hash?: string;
   plan_id?: string | null;
+  migration_id?: string;
+  table?: string;
+  loss_classification?: string;
   target?: string;
   version?: number;
 };
@@ -462,9 +489,19 @@ export function mappingAckTier(m: EditableMapping): MappingAckTier {
 
 export function mappingAckLabel(m: EditableMapping): string {
   const tier = mappingAckTier(m);
-  if (tier === "accept_risk") return "Accept · cast & continue";
+  if (tier === "accept_risk") return "Sign Risk Contract";
   if (tier === "review") return "Review";
   return "Approve";
+}
+
+/** True when a signed/draft contract uses a continue policy that clears Validate. */
+export function mappingHasClearingRiskContract(m: EditableMapping): boolean {
+  const pol = String(m.riskContract?.execution_policy || "").toUpperCase() as ExecutionPolicy;
+  return Boolean(
+    m.riskAcknowledged
+    && m.riskContract
+    && CONTINUE_EXECUTION_POLICIES.has(pol),
+  );
 }
 
 export function mappingAckDoneLabel(m: EditableMapping): string {
@@ -472,7 +509,7 @@ export function mappingAckDoneLabel(m: EditableMapping): string {
     const policy = m.riskContract?.execution_policy;
     if (policy === "CAST_AND_CONTINUE") return "Contracted · cast";
     if (policy) return `Contracted · ${policy}`;
-    return mappingAckTier(m) === "accept_risk" ? "Risk accepted" : "Reviewed";
+    return mappingAckTier(m) === "accept_risk" ? "Risk Contract signed" : "Reviewed";
   }
   return "Ready";
 }
@@ -514,8 +551,8 @@ export function mappingRequiresManualApproval(m: EditableMapping): boolean {
 
 /**
  * Explicit operator acceptance of fidelity / structural risk.
- * Emits a Migration Risk Contract draft. Default Map action uses
- * CAST_AND_CONTINUE (lossy write allowed) — never silent FAIL_JOB continue.
+ * Emits a Migration Risk Contract draft. ``executionPolicy`` is required —
+ * no hidden CAST_AND_CONTINUE default (Enterprise GA).
  * Server signs on Validate; boolean riskAcknowledged alone does not unlock Execute.
  */
 export function acknowledgeMappingRisk(
@@ -526,10 +563,24 @@ export function acknowledgeMappingRisk(
     reason?: string;
     rowsSampled?: number;
     estimatedRows?: number | null;
+    migrationId?: string;
+    table?: string;
+    planId?: string;
   },
 ): EditableMapping {
   if (!mappingRequiresRiskAck(m)) {
     return approveMappingHonestly(m);
+  }
+  const policy = opts?.executionPolicy;
+  if (!policy || !EXECUTION_POLICY_OPTIONS.some((p) => p.id === policy)) {
+    return {
+      ...m,
+      approved: false,
+      requiresReview: true,
+      reason: [m.reason, "Choose an execution policy before signing Risk Contract"]
+        .filter(Boolean)
+        .join(" · "),
+    };
   }
   const fidelity = (m.fidelity || "").toLowerCase();
   const ackNote =
@@ -544,11 +595,17 @@ export function acknowledgeMappingRisk(
             : isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType) || m.transform === "identity_specialty"
               ? "Operator acknowledged specialty identity transport"
               : "Operator acknowledged type/precision loss risk";
-  const policy: ExecutionPolicy = opts?.executionPolicy || "CAST_AND_CONTINUE";
   const actor = (opts?.approvedBy || "map-operator").trim() || "map-operator";
   const why = (opts?.reason || ackNote).trim() || ackNote;
   const srcType = m.inferredType || "UNKNOWN";
   const dstType = m.destType || m.inferredType || "UNKNOWN";
+  const lossClassification =
+    fidelity === "mutate" || fidelity === "lossy_cast" || fidelity === "cast"
+      ? fidelity
+      : m.typeNarrowing
+        ? "truncation"
+        : "precision_loss";
+  const clears = CONTINUE_EXECUTION_POLICIES.has(policy);
   const riskContract: MigrationRiskContractDraft = {
     column: m.source,
     target: m.target || m.source,
@@ -571,14 +628,19 @@ export function acknowledgeMappingRisk(
     reason: why,
     root_cause: `${srcType} → ${dstType} fidelity risk`,
     severity: "high",
+    migration_id: opts?.migrationId || opts?.planId || "",
+    plan_id: opts?.planId || opts?.migrationId || null,
+    table: opts?.table || "",
+    loss_classification: lossClassification,
     version: 1,
   };
   return {
     ...m,
     riskAcknowledged: true,
     riskContract,
-    approved: true,
-    requiresReview: false,
+    // Fail-closed policies stamp the contract but do not Approve/unlock Execute.
+    approved: clears,
+    requiresReview: !clears,
     transform:
       (isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType))
       && (!m.transform || m.transform === "none")
@@ -586,6 +648,44 @@ export function acknowledgeMappingRisk(
         : m.transform,
     reason: [m.reason, createNewRiskDetail(m) || m.fidelityReason, ackNote, `policy=${policy}`].filter(Boolean).join(" · "),
   };
+}
+
+/** Merge Validate-echoed signed risk contracts onto Map rows (risk_id + signature). */
+export function mergeSignedRiskContracts(
+  mappings: EditableMapping[],
+  signed: Array<{
+    source?: string;
+    target?: string;
+    risk_contract?: MigrationRiskContractDraft | Record<string, unknown>;
+    risk_acknowledged?: boolean;
+  }> | null | undefined,
+): EditableMapping[] {
+  if (!signed?.length) return mappings;
+  const bySourceTarget = new Map<string, (typeof signed)[number]>();
+  const bySource = new Map<string, (typeof signed)[number]>();
+  for (const row of signed) {
+    const src = String(row.source || "").trim();
+    const tgt = String(row.target || "").trim();
+    if (!src || !row.risk_contract) continue;
+    bySourceTarget.set(`${src}\0${tgt}`, row);
+    if (!bySource.has(src)) bySource.set(src, row);
+  }
+  return mappings.map((m) => {
+    const hit =
+      bySourceTarget.get(`${m.source}\0${m.target || m.source}`)
+      || bySource.get(m.source);
+    if (!hit?.risk_contract) return m;
+    const contract = hit.risk_contract as MigrationRiskContractDraft;
+    const pol = String(contract.execution_policy || "").toUpperCase() as ExecutionPolicy;
+    const clears = CONTINUE_EXECUTION_POLICIES.has(pol);
+    return {
+      ...m,
+      riskContract: { ...m.riskContract, ...contract },
+      riskAcknowledged: hit.risk_acknowledged !== false,
+      approved: clears ? true : m.approved,
+      requiresReview: clears ? false : m.requiresReview,
+    };
+  });
 }
 
 /**
@@ -605,7 +705,8 @@ export function approveMappingHonestly(m: EditableMapping): EditableMapping {
     return { ...widenMappingToVarchar(m), approved: true, requiresReview: false };
   }
   if (mappingRequiresRiskAck(m)) {
-    if (m.riskAcknowledged) {
+    // GA: only continue-policy Risk Contracts approve — FAIL_JOB/STOP_* do not unlock.
+    if (mappingHasClearingRiskContract(m)) {
       return { ...m, approved: true, requiresReview: false };
     }
     return {

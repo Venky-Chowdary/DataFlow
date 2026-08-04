@@ -123,13 +123,24 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     (m) => m.transform === "omit" || (m as { intentionalOmit?: boolean }).intentionalOmit,
   );
   const activeMaps = input.mappings.filter((m) => m.transform !== "omit");
+  // GA: boolean riskAcknowledged alone never clears — need Risk Contract policy.
+  const CONTINUE_POLICIES = new Set([
+    "QUARANTINE_ROW",
+    "SKIP_ROW",
+    "CAST_AND_CONTINUE",
+    "TRANSFORM_AND_CONTINUE",
+  ]);
+  const hasClearingContract = (m: (typeof activeMaps)[number]) => {
+    const pol = String(m.riskContract?.execution_policy || "").toUpperCase();
+    return Boolean(m.riskAcknowledged && m.riskContract && CONTINUE_POLICIES.has(pol));
+  };
   const riskUnacked = activeMaps.filter(
-    (m) => mappingRequiresRiskAck(m) && !m.riskAcknowledged,
+    (m) => mappingRequiresRiskAck(m) && !hasClearingContract(m),
   );
   // Ready ≡ operator Approve — never invent G4 PASS from confidence alone.
   const unapproved = activeMaps.filter((m) => !m.approved);
   const lowConfidence = activeMaps.filter(
-    (m) => !m.approved && m.confidence < threshold && !m.riskAcknowledged,
+    (m) => !m.approved && m.confidence < threshold && !hasClearingContract(m),
   );
   if (unmapped.length > 0) {
     block("g3_schema_contract", `${unmapped.length} source column(s) have no mapping.`, {

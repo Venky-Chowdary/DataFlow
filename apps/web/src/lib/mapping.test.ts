@@ -24,6 +24,7 @@ import {
   mappingHealthSummary,
   mappingRequiresRiskAck,
   mappingsFromAnalysis,
+  mergeSignedRiskContracts,
   uiTransformToEngine,
   widenMappingToVarchar,
   type EditableMapping,
@@ -126,7 +127,43 @@ describe("fail-closed Map approve", () => {
   });
 
   it("acknowledgeMappingRisk stamps risk_acknowledged for G4", () => {
-    const next = acknowledgeMappingRisk({
+    const next = acknowledgeMappingRisk(
+      {
+        source: "amount",
+        target: "amount",
+        confidence: 0.99,
+        approved: false,
+        fidelity: "lossy_cast",
+        typeNarrowing: true,
+        inferredType: "DECIMAL",
+        destType: "INTEGER",
+        fidelityReason: "precision collapse",
+      },
+      {
+        executionPolicy: "CAST_AND_CONTINUE",
+        migrationId: "mig-42",
+        table: "orders",
+        planId: "mig-42",
+      },
+    );
+    assert.equal(next.approved, true);
+    assert.equal(next.riskAcknowledged, true);
+    assert.equal(next.requiresReview, false);
+    assert.ok(next.riskContract);
+    assert.equal(next.riskContract?.execution_policy, "CAST_AND_CONTINUE");
+    assert.equal(next.riskContract?.column, "amount");
+    assert.equal(next.riskContract?.migration_id, "mig-42");
+    assert.equal(next.riskContract?.table, "orders");
+    assert.equal(next.riskContract?.loss_classification, "lossy_cast");
+    const pf = buildPreflightMappings([], [next]);
+    assert.equal(pf[0].risk_acknowledged, true);
+    assert.equal(pf[0].fidelity, "lossy_cast");
+    assert.ok(pf[0].risk_contract);
+    assert.equal(pf[0].risk_contract?.execution_policy, "CAST_AND_CONTINUE");
+  });
+
+  it("approveMappingHonestly refuses boolean riskAcknowledged without Risk Contract", () => {
+    const next = approveMappingHonestly({
       source: "amount",
       target: "amount",
       confidence: 0.99,
@@ -135,19 +172,11 @@ describe("fail-closed Map approve", () => {
       typeNarrowing: true,
       inferredType: "DECIMAL",
       destType: "INTEGER",
-      fidelityReason: "precision collapse",
+      riskAcknowledged: true,
+      // no riskContract — GA fail-closed
     });
-    assert.equal(next.approved, true);
-    assert.equal(next.riskAcknowledged, true);
-    assert.equal(next.requiresReview, false);
-    assert.ok(next.riskContract);
-    assert.equal(next.riskContract?.execution_policy, "CAST_AND_CONTINUE");
-    assert.equal(next.riskContract?.column, "amount");
-    const pf = buildPreflightMappings([], [next]);
-    assert.equal(pf[0].risk_acknowledged, true);
-    assert.equal(pf[0].fidelity, "lossy_cast");
-    assert.ok(pf[0].risk_contract);
-    assert.equal(pf[0].risk_contract?.execution_policy, "CAST_AND_CONTINUE");
+    assert.equal(next.approved, false);
+    assert.equal(next.requiresReview, true);
   });
 
   it("approve-all refuses mutate fidelity without risk ack", () => {
@@ -165,9 +194,83 @@ describe("fail-closed Map approve", () => {
     ]);
     assert.equal(next[0].approved, false);
     assert.equal(next[0].requiresReview, true);
-    const acked = acknowledgeMappingRisk(next[0]);
+    const acked = acknowledgeMappingRisk(next[0], {
+      executionPolicy: "CAST_AND_CONTINUE",
+    });
     assert.equal(acked.riskAcknowledged, true);
     assert.equal(acked.approved, true);
+  });
+
+  it("acknowledgeMappingRisk refuses hidden CAST_AND_CONTINUE default", () => {
+    const next = acknowledgeMappingRisk({
+      source: "amount",
+      target: "amount",
+      confidence: 0.99,
+      approved: false,
+      fidelity: "lossy_cast",
+      inferredType: "DECIMAL",
+      destType: "INTEGER",
+    });
+    assert.equal(next.approved, false);
+    assert.equal(next.requiresReview, true);
+    assert.equal(next.riskAcknowledged, undefined);
+    assert.ok(String(next.reason || "").includes("execution policy"));
+  });
+
+  it("FAIL_JOB contract does not unlock Approve", () => {
+    const next = acknowledgeMappingRisk(
+      {
+        source: "amount",
+        target: "amount",
+        confidence: 0.99,
+        approved: false,
+        fidelity: "lossy_cast",
+        inferredType: "DECIMAL",
+        destType: "INTEGER",
+      },
+      { executionPolicy: "FAIL_JOB" },
+    );
+    assert.equal(next.riskAcknowledged, true);
+    assert.equal(next.approved, false);
+    assert.equal(next.requiresReview, true);
+  });
+
+  it("mergeSignedRiskContracts echoes risk_id and signature", () => {
+    const merged = mergeSignedRiskContracts(
+      [{
+        source: "amount",
+        target: "amount",
+        confidence: 0.99,
+        approved: true,
+        fidelity: "lossy_cast",
+        riskAcknowledged: true,
+        riskContract: {
+          column: "amount",
+          source_type: "DECIMAL",
+          destination_type: "INTEGER",
+          execution_policy: "CAST_AND_CONTINUE",
+          approved_by: "map-operator",
+          reason: "draft",
+        },
+      }],
+      [{
+        source: "amount",
+        target: "amount",
+        risk_acknowledged: true,
+        risk_contract: {
+          column: "amount",
+          source_type: "DECIMAL",
+          destination_type: "INTEGER",
+          execution_policy: "CAST_AND_CONTINUE",
+          approved_by: "ops",
+          reason: "signed",
+          risk_id: "mrc-abc",
+          signature: "mrc-sha256:deadbeef",
+        },
+      }],
+    );
+    assert.equal(merged[0].riskContract?.risk_id, "mrc-abc");
+    assert.equal(merged[0].riskContract?.signature, "mrc-sha256:deadbeef");
   });
 
   it("safe normalize (email/trim) Approves without Accept risk wording", () => {
@@ -215,7 +318,7 @@ describe("fail-closed Map approve", () => {
     assert.equal(mappingAckTier(castRow), "review");
     assert.equal(mappingAckLabel(castRow), "Review");
     assert.equal(mappingAckTier(lossy), "accept_risk");
-    assert.equal(mappingAckLabel(lossy), "Accept · cast & continue");
+    assert.equal(mappingAckLabel(lossy), "Sign Risk Contract");
   });
 });
 

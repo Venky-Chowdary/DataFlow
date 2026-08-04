@@ -10,6 +10,7 @@ from preflight import (
     TransferPlan,
 )
 from preflight.models import GateStatus
+from preflight.risk_contract import make_clearing_risk_contract
 
 
 def _happy_plan() -> TransferPlan:
@@ -138,14 +139,30 @@ def test_g4_blocks_lossy_even_with_user_override():
     assert any(b.gate_id.value == "g4_mapping_confidence" for b in result.blockers)
 
 
-def test_g4_allows_lossy_with_risk_acknowledged():
+def test_g4_allows_lossy_with_risk_contract():
+    plan = _happy_plan()
+    plan.mappings[0].fidelity = "lossy_cast"
+    plan.mappings[0].type_narrowing = True
+    plan.mappings[0].risk_acknowledged = True
+    plan.mappings[0].user_override = True
+    plan.mappings[0].risk_contract = make_clearing_risk_contract(
+        column=plan.mappings[0].source,
+        source_type="DECIMAL",
+        destination_type="INTEGER",
+    )
+    result = PreflightEngine().run(_happy_ctx(plan))
+    assert result.passed
+
+
+def test_g4_boolean_ack_alone_does_not_clear_lossy():
     plan = _happy_plan()
     plan.mappings[0].fidelity = "lossy_cast"
     plan.mappings[0].type_narrowing = True
     plan.mappings[0].risk_acknowledged = True
     plan.mappings[0].user_override = True
     result = PreflightEngine().run(_happy_ctx(plan))
-    assert result.passed
+    assert not result.passed
+    assert any(b.gate_id.value == "g4_mapping_confidence" for b in result.blockers)
 
 
 def test_g4_blocks_mutate_without_risk_ack():

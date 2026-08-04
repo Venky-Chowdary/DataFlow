@@ -353,18 +353,30 @@ def _enforce_ddl_identity(
     *,
     dest_db: str,
 ) -> str | None:
-    """Module 12 — fail closed when Map→DDL fingerprint drifts after Validate.
+    """Module 12 / GA — fail closed when Map→DDL fingerprint drifts after Validate.
 
-    Returns an error message when identity fails; None when check passes or
-    when no Validate fingerprint exists yet (legacy / stamp unavailable).
+    Returns an error message when identity fails. When Validate preflight is
+    present, a missing ``ddl_identity_hash`` also fails closed (no soft-skip).
+
+    Enterprise GA: mappings without a Validate preflight also fail closed —
+    never skip Map→DDL identity on a silent ``pf is None`` path.
     """
+    has_maps = bool(mappings)
     if not pf:
+        if has_maps:
+            return (
+                "DDL identity requires Validate preflight before Execute — "
+                "refuse write without Map→DDL fingerprint (re-run Validate)."
+            )
         return None
     approved = ((pf.get("proof_bundle") or {}).get("ddl_identity") or {}).get(
         "ddl_identity_hash"
     ) or ""
     if not approved:
-        return None
+        return (
+            "DDL identity fingerprint missing after Validate — refuse Execute "
+            "(Map→DDL identity not stamped; re-run Validate)."
+        )
     try:
         from services.conversion_contract import DdlIdentityError, assert_ddl_identity
 
@@ -815,31 +827,36 @@ def _apply_post_load_transforms(request: Any, dest_summary: dict[str, Any]) -> N
         }
 
 
-def _persist_job_quarantine(
-    job_id: str, dest_summary: dict[str, Any], request: Any = None
+def _persist_checkpoint_quarantine_delta(
+    job_id: str,
+    checkpoint: dict[str, Any] | None,
+    *,
+    request: Any = None,
+    last_persisted: list[int],
 ) -> None:
-    """Durable DLQ write for rejected rows — fail closed if control-plane persist fails.
+    """Persist new rejected rows from a buffered checkpoint before continuing.
 
-    Writes control-plane JSONL/Mongo **and** (when supported) a destination
-    ``{table}_df_quarantine`` table so operators can query/promote with SQL.
-
-    Module 5: never complete as success/quarantine-ok when rejected rows exist
-    but control-plane DLQ is not durable (replay would find nothing).
+    Stream path already fail-closes per batch. Buffered writers must not wait
+    until terminal status — crash mid-write must not lose quarantine durability.
+    ``last_persisted`` is a single-element list holding the count already written.
     """
-    details = dest_summary.get("rejected_details") or []
+    details = list((checkpoint or {}).get("rejected_details") or [])
     if not details:
-        dest_summary["quarantine_durable"] = True
         return
+    prev = int(last_persisted[0] or 0)
+    if len(details) <= prev:
+        return
+    new_details = details[prev:]
     try:
         from services.quarantine_dlq import persist_rejected_rows
 
         persist_rejected_rows(
             job_id=job_id,
-            rejected_details=details,
+            rejected_details=new_details,
             workspace_id=str(getattr(request, "workspace_id", "") or "")
             if request
             else "",
-            source="universal_engine",
+            source="buffered_checkpoint",
             connector=str(
                 getattr(getattr(request, "destination", None), "format", "")
                 or getattr(getattr(request, "destination", None), "kind", "")
@@ -848,6 +865,68 @@ def _persist_job_quarantine(
             if request
             else "",
         )
+        last_persisted[0] = len(details)
+        if isinstance(checkpoint, dict):
+            checkpoint["quarantine_dlq_persisted_count"] = len(details)
+    except Exception as exc:
+        raise RuntimeError(
+            "Quarantine DLQ persist failed at buffered checkpoint — refuse to "
+            f"continue (rows cannot disappear): {exc}"
+        ) from exc
+
+
+def _persist_job_quarantine(
+    job_id: str,
+    dest_summary: dict[str, Any],
+    request: Any = None,
+    *,
+    already_persisted: list[int] | None = None,
+) -> None:
+    """Durable DLQ write for rejected rows — fail closed if control-plane persist fails.
+
+    Writes control-plane JSONL/Mongo **and** (when supported) a destination
+    ``{table}_df_quarantine`` table so operators can query/promote with SQL.
+
+    Module 5: never complete as success/quarantine-ok when rejected rows exist
+    but control-plane DLQ is not durable (replay would find nothing).
+
+    When checkpoint/stream already persisted a prefix of ``rejected_details``,
+    only the delta is appended to the control-plane DLQ (no duplicate rows).
+    Destination quarantine table is still written once here (not mid-stream).
+    """
+    details = list(dest_summary.get("rejected_details") or [])
+    if not details:
+        dest_summary["quarantine_durable"] = True
+        return
+    already = int(
+        (already_persisted[0] if already_persisted else None)
+        or dest_summary.get("quarantine_dlq_persisted_count")
+        or 0
+    )
+    already = max(0, min(already, len(details)))
+    delta = details[already:]
+    try:
+        from services.quarantine_dlq import persist_rejected_rows
+
+        if delta:
+            persist_rejected_rows(
+                job_id=job_id,
+                rejected_details=delta,
+                workspace_id=str(getattr(request, "workspace_id", "") or "")
+                if request
+                else "",
+                source="universal_engine",
+                connector=str(
+                    getattr(getattr(request, "destination", None), "format", "")
+                    or getattr(getattr(request, "destination", None), "kind", "")
+                    or ""
+                )
+                if request
+                else "",
+            )
+        dest_summary["quarantine_dlq_persisted_count"] = len(details)
+        if already_persisted is not None:
+            already_persisted[0] = len(details)
     except Exception as exc:
         dest_summary["quarantine_dlq_error"] = str(exc)[:300]
         dest_summary["quarantine_durable"] = False
@@ -856,7 +935,12 @@ def _persist_job_quarantine(
 
     # Destination-side DLQ table (SQL sinks). Failures are surfaced — never silent.
     # Control-plane durability remains the fail-closed authority for Module 5.
-    if request is not None and getattr(request, "destination", None) is not None:
+    # Skip when a prior finalize already wrote the dest quarantine for this job.
+    if (
+        request is not None
+        and getattr(request, "destination", None) is not None
+        and not dest_summary.get("dest_quarantine_rows")
+    ):
         try:
             from services.dest_quarantine import write_dest_quarantine
 
@@ -1579,11 +1663,19 @@ class UniversalTransferEngine:
         self._resolve_saved_connectors(request)
         # Hard-block Execute when Map still has unresolved requires_review rows —
         # skip_preflight must never green-path ambiguous remaps into a write.
-        try:
-            from services.mapping_pipeline import assert_mappings_executable
+        # Also refuse impossible CDC delivery guarantees (exactly_once / at_most_once).
+        from services.execution_engine_contract import (
+            DeliveryGuaranteeError,
+            assert_delivery_guarantee_allowed,
+        )
+        from services.mapping_pipeline import assert_mappings_executable
 
+        try:
+            assert_delivery_guarantee_allowed(
+                getattr(request, "delivery_guarantee", None) or "at_least_once"
+            )
             assert_mappings_executable(request.mappings)
-        except ValueError as mapping_exc:
+        except (ValueError, DeliveryGuaranteeError) as mapping_exc:
             mongo = get_mongodb_service()
             mongo.update_job_status(
                 job_id,
@@ -1598,6 +1690,58 @@ class UniversalTransferEngine:
                 error=str(mapping_exc),
                 records_transferred=0,
             )
+        # Persist accepted Risk Contracts on the job for Proof Pack / audit
+        # (mappings alone can be dropped from transfer_request redaction paths).
+        from services.signed_proof_pack import collect_accepted_risks_from_job
+
+        accepted = collect_accepted_risks_from_job(
+            {"mappings": list(request.mappings or [])}
+        )
+        if accepted:
+            mongo = get_mongodb_service()
+            stamped = mongo.update_job_fields(
+                job_id,
+                {
+                    "accepted_risks": accepted,
+                    "delivery_guarantee": getattr(
+                        request, "delivery_guarantee", "at_least_once"
+                    )
+                    or "at_least_once",
+                },
+            )
+            if not stamped:
+                mongo.update_job_status(
+                    job_id,
+                    "failed",
+                    phase="failed",
+                    message=(
+                        "Failed to persist accepted Migration Risk Contracts "
+                        "before Execute — refuse write"
+                    ),
+                    error="accepted_risks_persist_failed",
+                )
+                return TransferResult(
+                    success=False,
+                    job_id=job_id,
+                    error="accepted_risks_persist_failed",
+                    records_transferred=0,
+                )
+            try:
+                from services.audit_log import append_audit_event
+
+                append_audit_event(
+                    action="migration_risk_contract.execute_bound",
+                    resource=f"job:{job_id}",
+                    actor=str(getattr(request, "triggered_by", None) or "system"),
+                    details={
+                        "job_id": job_id,
+                        "risk_ids": [r.get("risk_id") for r in accepted if isinstance(r, dict)],
+                        "count": len(accepted),
+                    },
+                )
+            except Exception:
+                # Audit best-effort — contracts are already on the job document.
+                pass
         locale_token = set_active_date_locale(request.date_locale)
         try:
             from services.tracing import (
@@ -2137,26 +2281,26 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
-            if pf:
-                ddl_err = _enforce_ddl_identity(
-                    pf,
-                    mappings,
-                    dest_db=str(getattr(request.destination, "format", None) or ""),
+            ddl_err = _enforce_ddl_identity(
+                pf,
+                mappings,
+                dest_db=str(getattr(request.destination, "format", None) or ""),
+            )
+            if ddl_err:
+                mongo.update_job_status(
+                    job_id, "failed", error=ddl_err, phase="failed", progress_pct=0
                 )
-                if ddl_err:
-                    mongo.update_job_status(
-                        job_id, "failed", error=ddl_err, phase="failed", progress_pct=0
-                    )
-                    return TransferResult(
-                        success=False,
-                        error=ddl_err,
-                        error_details={
-                            "reason": "ddl_identity_mismatch",
-                            "remediation": "Re-run Validate after Map/DDL changes.",
-                        },
-                        operation=request.operation,
-                        job_id=job_id,
-                    )
+                return TransferResult(
+                    success=False,
+                    error=ddl_err,
+                    error_details={
+                        "reason": "ddl_identity_mismatch",
+                        "remediation": "Re-run Validate after Map/DDL changes.",
+                    },
+                    operation=request.operation,
+                    job_id=job_id,
+                )
+            if pf:
                 mongo.update_job_status(
                     job_id, "running", phase="preflight", progress_pct=15, preflight=pf
                 )
@@ -2239,6 +2383,8 @@ class UniversalTransferEngine:
                 except Exception as exc:
                     logger.warning("Cancellation check failed: %s", exc, exc_info=exc)
 
+            _quarantine_persisted = [0]
+
             def on_checkpoint(
                 chunk: int, chunks: int, rows: int, checkpoint: dict | None = None
             ) -> None:
@@ -2259,13 +2405,20 @@ class UniversalTransferEngine:
                 if pct is not None:
                     update["progress_pct"] = pct
                 if checkpoint:
+                    _persist_checkpoint_quarantine_delta(
+                        job_id,
+                        checkpoint if isinstance(checkpoint, dict) else None,
+                        request=request,
+                        last_persisted=_quarantine_persisted,
+                    )
+                    details = list(checkpoint.get("rejected_details") or [])
                     update["checkpoint"] = checkpoint
                     update["destination_summary"] = {
                         "checksum": checkpoint.get("checksum", ""),
                         "rejected_rows": checkpoint.get("rejected_rows", 0),
-                        "rejected_details": (checkpoint.get("rejected_details") or [])[
-                            :50
-                        ],
+                        "rejected_details": details[:50],
+                        "rejected_details_total": len(details),
+                        "quarantine_checkpoint_durable": True,
                     }
                     _promote_cdc_job_fields(checkpoint, update)
                 mongo.update_job_status(job_id, "running", **update)
@@ -2432,7 +2585,12 @@ class UniversalTransferEngine:
                     )
                     if dest_summary.get("promote_blocked"):
                         # Strict/maximum + staging: primary untouched; persist DLQ then fail.
-                        _persist_job_quarantine(job_id, dest_summary, request)
+                        _persist_job_quarantine(
+                            job_id,
+                            dest_summary,
+                            request,
+                            already_persisted=_quarantine_persisted,
+                        )
                         _attach_job_rollback_plan(job_id, dest_summary, request)
                         block_msg = (
                             (dest_summary.get("pre_ingestion_staging") or {}).get(
@@ -2644,7 +2802,12 @@ class UniversalTransferEngine:
             )
             if load_history_report:
                 dest_summary["load_history_report"] = load_history_report
-            _persist_job_quarantine(job_id, dest_summary, request)
+            _persist_job_quarantine(
+                job_id,
+                dest_summary,
+                request,
+                already_persisted=_quarantine_persisted,
+            )
             _attach_job_rollback_plan(job_id, dest_summary, request)
             _apply_post_load_transforms(request, dest_summary)
             mongo.update_job_status(
@@ -2954,26 +3117,26 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
-            if pf:
-                ddl_err = _enforce_ddl_identity(
-                    pf,
-                    mappings,
-                    dest_db=str(getattr(request.destination, "format", None) or ""),
+            ddl_err = _enforce_ddl_identity(
+                pf,
+                mappings,
+                dest_db=str(getattr(request.destination, "format", None) or ""),
+            )
+            if ddl_err:
+                mongo.update_job_status(
+                    job_id, "failed", error=ddl_err, phase="failed", progress_pct=0
                 )
-                if ddl_err:
-                    mongo.update_job_status(
-                        job_id, "failed", error=ddl_err, phase="failed", progress_pct=0
-                    )
-                    return TransferResult(
-                        success=False,
-                        error=ddl_err,
-                        error_details={
-                            "reason": "ddl_identity_mismatch",
-                            "remediation": "Re-run Validate after Map/DDL changes.",
-                        },
-                        operation=request.operation,
-                        job_id=job_id,
-                    )
+                return TransferResult(
+                    success=False,
+                    error=ddl_err,
+                    error_details={
+                        "reason": "ddl_identity_mismatch",
+                        "remediation": "Re-run Validate after Map/DDL changes.",
+                    },
+                    operation=request.operation,
+                    job_id=job_id,
+                )
+            if pf:
                 mongo.update_job_status(
                     job_id, "running", phase="preflight", progress_pct=15, preflight=pf
                 )
@@ -3040,6 +3203,8 @@ class UniversalTransferEngine:
                 except Exception as exc:
                     logger.warning("Cancellation check failed: %s", exc, exc_info=exc)
 
+            _quarantine_persisted = [0]
+
             def on_checkpoint(
                 chunk: int, chunks: int, rows: int, checkpoint: dict | None = None
             ) -> None:
@@ -3074,13 +3239,20 @@ class UniversalTransferEngine:
                 if pct is not None:
                     update["progress_pct"] = pct
                 if checkpoint:
+                    _persist_checkpoint_quarantine_delta(
+                        job_id,
+                        checkpoint if isinstance(checkpoint, dict) else None,
+                        request=request,
+                        last_persisted=_quarantine_persisted,
+                    )
+                    details = list(checkpoint.get("rejected_details") or [])
                     update["checkpoint"] = checkpoint
                     update["destination_summary"] = {
                         "checksum": checkpoint.get("checksum", ""),
                         "rejected_rows": checkpoint.get("rejected_rows", 0),
-                        "rejected_details": (checkpoint.get("rejected_details") or [])[
-                            :50
-                        ],
+                        "rejected_details": details[:50],
+                        "rejected_details_total": len(details),
+                        "quarantine_checkpoint_durable": True,
                     }
                     _promote_cdc_job_fields(checkpoint, update)
                 mongo.update_job_status(job_id, "running", **update)
@@ -3296,7 +3468,12 @@ class UniversalTransferEngine:
                 row_count=rows_written or total_rows,
                 mappings=mappings,
             )
-            _persist_job_quarantine(job_id, dest_summary, request)
+            _persist_job_quarantine(
+                job_id,
+                dest_summary,
+                request,
+                already_persisted=_quarantine_persisted,
+            )
             _attach_job_rollback_plan(job_id, dest_summary, request)
             _apply_post_load_transforms(request, dest_summary)
             mongo.update_job_status(
@@ -3571,26 +3748,26 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
-            if pf:
-                ddl_err = _enforce_ddl_identity(
-                    pf,
-                    mappings,
-                    dest_db=str(getattr(request.destination, "format", None) or ""),
+            ddl_err = _enforce_ddl_identity(
+                pf,
+                mappings,
+                dest_db=str(getattr(request.destination, "format", None) or ""),
+            )
+            if ddl_err:
+                mongo.update_job_status(
+                    job_id, "failed", error=ddl_err, phase="failed", progress_pct=0
                 )
-                if ddl_err:
-                    mongo.update_job_status(
-                        job_id, "failed", error=ddl_err, phase="failed", progress_pct=0
-                    )
-                    return TransferResult(
-                        success=False,
-                        error=ddl_err,
-                        error_details={
-                            "reason": "ddl_identity_mismatch",
-                            "remediation": "Re-run Validate after Map/DDL changes.",
-                        },
-                        operation=request.operation,
-                        job_id=job_id,
-                    )
+                return TransferResult(
+                    success=False,
+                    error=ddl_err,
+                    error_details={
+                        "reason": "ddl_identity_mismatch",
+                        "remediation": "Re-run Validate after Map/DDL changes.",
+                    },
+                    operation=request.operation,
+                    job_id=job_id,
+                )
+            if pf:
                 mongo.update_job_status(
                     job_id, "running", phase="preflight", progress_pct=15, preflight=pf
                 )
@@ -3657,6 +3834,8 @@ class UniversalTransferEngine:
                 except Exception as exc:
                     logger.warning("Cancellation check failed: %s", exc, exc_info=exc)
 
+            _quarantine_persisted = [0]
+
             def on_checkpoint(
                 chunk: int, chunks: int, rows: int, checkpoint: dict | None = None
             ) -> None:
@@ -3677,13 +3856,20 @@ class UniversalTransferEngine:
                 if pct is not None:
                     update["progress_pct"] = pct
                 if checkpoint:
+                    _persist_checkpoint_quarantine_delta(
+                        job_id,
+                        checkpoint if isinstance(checkpoint, dict) else None,
+                        request=request,
+                        last_persisted=_quarantine_persisted,
+                    )
+                    details = list(checkpoint.get("rejected_details") or [])
                     update["checkpoint"] = checkpoint
                     update["destination_summary"] = {
                         "checksum": checkpoint.get("checksum", ""),
                         "rejected_rows": checkpoint.get("rejected_rows", 0),
-                        "rejected_details": (checkpoint.get("rejected_details") or [])[
-                            :50
-                        ],
+                        "rejected_details": details[:50],
+                        "rejected_details_total": len(details),
+                        "quarantine_checkpoint_durable": True,
                     }
                     _promote_cdc_job_fields(checkpoint, update)
                 mongo.update_job_status(job_id, "running", **update)
@@ -3837,7 +4023,12 @@ class UniversalTransferEngine:
                 row_count=rows_written or total_rows,
                 mappings=mappings,
             )
-            _persist_job_quarantine(job_id, dest_summary, request)
+            _persist_job_quarantine(
+                job_id,
+                dest_summary,
+                request,
+                already_persisted=_quarantine_persisted,
+            )
             _attach_job_rollback_plan(job_id, dest_summary, request)
             _apply_post_load_transforms(request, dest_summary)
             mongo.update_job_status(

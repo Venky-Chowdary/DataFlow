@@ -330,6 +330,9 @@ def assert_mappings_executable(mappings: list[dict] | None) -> None:
 
     ``user_override`` / ``approved`` clear the block after an explicit Studio
     confirmation. ``skip_preflight`` must never bypass this gate.
+
+    Enterprise GA: boolean ``risk_acknowledged`` alone never unlocks a lossy
+    write — lossy mappings must carry a verified continue-policy Risk Contract.
     """
     pending: list[str] = []
     for m in mappings or []:
@@ -345,6 +348,21 @@ def assert_mappings_executable(mappings: list[dict] | None) -> None:
         more = f" (+{len(pending) - 8} more)" if len(pending) > 8 else ""
         raise ValueError(
             f"{len(pending)} mapping(s) require review before Execute: {sample}{more}"
+        )
+
+    from services.migration_risk_contract import lossy_mappings_missing_risk_contracts
+
+    missing_contracts = lossy_mappings_missing_risk_contracts(mappings or [])
+    if missing_contracts:
+        sample = "; ".join(missing_contracts[:8])
+        more = (
+            f" (+{len(missing_contracts) - 8} more)"
+            if len(missing_contracts) > 8
+            else ""
+        )
+        raise ValueError(
+            f"{len(missing_contracts)} lossy mapping(s) lack a verified Migration "
+            f"Risk Contract (execution policy): {sample}{more}"
         )
 
 

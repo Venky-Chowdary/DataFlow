@@ -14,7 +14,19 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 from preflight.gates import gate_g3_schema_contract  # noqa: E402
+from preflight.risk_contract import make_clearing_risk_contract  # noqa: E402
 from preflight.models import ColumnMapping, ColumnSchema, DestinationConfig, PreflightContext, SourceConfig, TransferPlan  # noqa: E402
+
+
+def _clear_with_contract(mapping: ColumnMapping, **kwargs) -> None:
+    """Attach a verified continue-policy Risk Contract (boolean alone never clears)."""
+    mapping.risk_acknowledged = True  # legacy flag may still be set by UI
+    mapping.risk_contract = make_clearing_risk_contract(
+        column=mapping.source,
+        source_type=kwargs.get("source_type", "TEXT"),
+        destination_type=kwargs.get("destination_type", "INTEGER"),
+        **{k: v for k, v in kwargs.items() if k not in ("source_type", "destination_type")},
+    )
 
 
 def _ctx(source_types: dict[str, str], dest_types: dict[str, str], mappings: list[tuple[str, str]]):
@@ -100,11 +112,41 @@ def test_g3_float_to_decimal_not_sample_soft_passed():
     assert result.status.value == "block"
     assert any("float→decimal" in i.lower() or "ieee" in i.lower() for i in (result.details or {}).get("issues", []))
 
-    plan.mappings[0].risk_acknowledged = True
+    _clear_with_contract(
+        plan.mappings[0], source_type="FLOAT", destination_type="DECIMAL(12,4)"
+    )
     cleared = gate_g3_schema_contract(_Ctx(plan=plan))
     assert cleared.status.value == "pass"
     warns = (cleared.details or {}).get("warnings", []) or []
-    assert any("risk acknowledged" in str(w).lower() for w in warns)
+    assert any("risk contract" in str(w).lower() or "risk" in str(w).lower() for w in warns)
+
+
+def test_g3_boolean_ack_alone_does_not_clear_fidelity_collapse():
+    """GA: risk_acknowledged without signed contract must keep G3 blocked."""
+
+    class _Ctx(PreflightContext):
+        def coercion_report(self):
+            return {
+                "sampled_rows": 2,
+                "by_source": {
+                    "amt": {
+                        "severity": "ok",
+                        "sampled": 2,
+                        "failed": 0,
+                        "sentinel_nulls": 0,
+                        "sample_failures": [],
+                    }
+                },
+            }
+
+    plan = _ctx(
+        {"amt": "FLOAT"},
+        {"amt": "DECIMAL(12,4)"},
+        [("amt", "amt")],
+    ).plan
+    plan.mappings[0].risk_acknowledged = True
+    still = gate_g3_schema_contract(_Ctx(plan=plan))
+    assert still.status.value == "block"
 
 
 def test_g3_not_null_does_not_block_on_nullable_meta_with_clean_samples():
@@ -173,13 +215,15 @@ def test_g3_declared_lossy_not_sample_soft_passed_without_risk_ack():
     issues = (result.details or {}).get("issues", [])
     assert any("soft-pass" in i.lower() or "declared lossy" in i.lower() for i in issues)
 
-    plan.mappings[0].risk_acknowledged = True
+    _clear_with_contract(
+        plan.mappings[0], source_type="VARCHAR", destination_type="INTEGER"
+    )
     result_ack = gate_g3_schema_contract(_Ctx(plan=plan))
     assert result_ack.status.value == "pass"
 
 
-def test_g3_objectid_to_text_accept_risk_clears_block():
-    """ObjectId→TEXT is domain polarity — Accept risk unlocks; hex values stay."""
+def test_g3_objectid_to_text_risk_contract_clears_block():
+    """ObjectId→TEXT is domain polarity — Risk Contract unlocks; hex values stay."""
     plan = _ctx(
         {"_id": "OBJECTID"},
         {"user_id": "TEXT"},
@@ -192,9 +236,11 @@ def test_g3_objectid_to_text_accept_risk_clears_block():
     ]))
     assert blocked.status.value == "block"
     blob = str((blocked.details or {}).get("issues", [])) + blocked.message
-    assert "ObjectId" in blob or "accept risk" in blob.lower()
+    assert "ObjectId" in blob or "risk" in blob.lower()
 
-    plan.mappings[0].risk_acknowledged = True
+    _clear_with_contract(
+        plan.mappings[0], source_type="OBJECTID", destination_type="TEXT"
+    )
     cleared = gate_g3_schema_contract(PreflightContext(plan=plan, sample_rows=[
         {"_id": "507f1f77bcf86cd799439011"},
     ]))
@@ -622,7 +668,9 @@ def test_g3_json_scalar_wrap_blocks_without_risk_ack():
     assert blocked.status.value == "block", (blocked.status, blocked.message, blocked.details)
     assert any("json" in i.lower() or "wrap" in i.lower() for i in (blocked.details or {}).get("issues", []))
 
-    plan.mappings[0].risk_acknowledged = True
+    _clear_with_contract(
+        plan.mappings[0], source_type="VARCHAR", destination_type="VARIANT"
+    )
     cleared = gate_g3_schema_contract(_Ctx(plan=plan))
     assert cleared.status.value == "pass", (cleared.status, cleared.message, cleared.details)
     warns = (cleared.details or {}).get("warnings", []) or []

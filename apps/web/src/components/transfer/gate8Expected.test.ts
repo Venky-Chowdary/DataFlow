@@ -197,6 +197,7 @@ describe("Gate-8 sample-verified reverse-ETL honesty", () => {
     assert.equal(isGate8WriterAckOnly(report), false);
     const view = classifyGate8Status(report);
     assert.equal(view.label, "Sample verified");
+    assert.equal(view.tone, "warn");
     // Sample is not population / full-checksum proof.
     assert.equal(view.fullPass, false);
   });
@@ -218,6 +219,7 @@ describe("Gate-8 sample-verified reverse-ETL honesty", () => {
     assert.equal(isGate8SampleVerified(report), true);
     const view = classifyGate8Status(report);
     assert.equal(view.label, "Sample verified");
+    assert.equal(view.tone, "warn");
     assert.equal(view.fullPass, false);
   });
 });

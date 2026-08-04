@@ -96,12 +96,14 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     coerced = int(getattr(result, "coerced_null_rows", 0) or 0)
     skipped = int(getattr(result, "rows_skipped", 0) or 0)
     warnings = list(getattr(result, "warnings", []) or [])
+    # GA: never truncate rejected_details before quarantine / proof harvest.
     rejected_details = list(getattr(result, "rejected_details", []) or [])
     out: dict[str, Any] = {
         "rejected_rows": rejected,
         "coerced_null_rows": coerced,
         "rows_skipped": skipped,
-        "rejected_details": rejected_details[:2000],
+        "rejected_details": rejected_details,
+        "rejected_details_sample": rejected_details[:200],
         "warnings": warnings[:10],
         "error_policy": "quarantine" if (rejected or coerced) else "none",
     }

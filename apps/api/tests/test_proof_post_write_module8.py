@@ -108,6 +108,9 @@ def test_signed_pack_with_full_checksum_may_claim_row_fidelity():
             "target_rows": 10,
         },
         actor="ops",
+        ddl_hash="ddl-abc",
+        mapping_hash="map-abc",
+        connector_versions={"source": "postgresql@14.0", "destination": "snowflake@7.0"},
     )
     assert pack["assurance"]["migration_proven"] is True
     assert_pack_may_claim_migration_proven(pack)

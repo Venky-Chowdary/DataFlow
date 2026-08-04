@@ -1163,11 +1163,17 @@ def reject_on_strict_policy(
             1
             for d in details
             if str(d.get("execution_policy") or "").upper()
-            in {"FAIL_JOB", "STOP_TABLE", "ABORT_TRANSACTION"}
+            in {
+                "FAIL_JOB",
+                "STOP_TABLE",
+                "STOP_COLUMN",
+                "ABORT_TRANSACTION",
+                "RETRY",
+            }
         )
         return (
             f"{label} rejected {n or len(details)} row(s); "
-            "Migration Risk Contract FAIL_JOB blocks partial write"
+            "Migration Risk Contract fail-closed policy blocks partial write"
         )
 
     if (
@@ -1521,10 +1527,12 @@ def resolve_target_columns(
     Prefers an explicit ``target_type`` on each mapping, then ``dest_types``,
     then the source logical type, and finally ``VARCHAR``.
 
-    For **new tables** (``table_exists is False``), non-explicit proposals may be
-    widened via ``safe_ddl_logical_type`` when samples cannot all coerce.
     Explicit Map ``target_type`` is always preserved (Map≡CREATE) — unfit values
     quarantine on write instead of rewriting approved DDL.
+
+    Enterprise GA: create-new without an explicit Map ``target_type`` must **not**
+    invent BOOLEAN/INTEGER/DECIMAL from head samples. Keep the source/carrier
+    proposal; values that cannot coerce quarantine on write.
     """
     from services.schema_inference import safe_ddl_logical_type
 
@@ -1552,12 +1560,14 @@ def resolve_target_columns(
             src = str(m.get("source") or "")
             src_type = column_types.get(src) or m.get("source_type")
             if table_exists is False:
+                # Explicit Map stamp OR non-explicit source/carrier proposal:
+                # honor_explicit=True prevents sample-driven invent of tighter types.
                 proposed = safe_ddl_logical_type(
                     str(proposed),
-                    samples.get(src),
+                    samples.get(src) if explicit_target else None,
                     field_name=src,
                     source_type=str(src_type) if src_type else None,
-                    honor_explicit=explicit_target,
+                    honor_explicit=True,
                 )
             target_types.append(str(proposed))
     return target_cols, target_types

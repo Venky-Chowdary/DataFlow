@@ -95,6 +95,7 @@ import {
   engineTransformToUi,
   isEnumToBooleanConflict,
   mappingRequiresRiskAck,
+  mergeSignedRiskContracts,
   uiTransformToEngine,
   widenMappingToVarchar,
   mappingsFromAnalysis,
@@ -3493,6 +3494,10 @@ export function TransferPage({
         }
       }
       setPreflight(pf);
+      // Echo signed Risk Contracts from Validate onto Map — Execute verifies signatures.
+      if (Array.isArray(pf.signed_mappings) && pf.signed_mappings.length) {
+        setColumnMappings((prev) => mergeSignedRiskContracts(prev, pf.signed_mappings));
+      }
       setValidatedContractKey(buildValidateContractKey(activeMappings));
       if (!pf.passed) {
         toast({

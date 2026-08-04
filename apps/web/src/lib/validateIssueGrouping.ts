@@ -109,6 +109,16 @@ export interface DisplayBlocker {
   issues?: string[];
   fix?: string;
   why?: string;
+  quarantinePolicy?: string;
+  rollbackPolicy?: string;
+  /** Sample rows examined for this root (honesty — not population proof). */
+  affectedRowsSample?: number | null;
+  /** Estimated population when known. */
+  estimatedTotalRows?: number | null;
+  /** Confidence band / score when present on the root. */
+  confidenceNote?: string | null;
+  /** Whether any rollback strategy is executable (usually false except staging discard). */
+  rollbackExecutable?: boolean | null;
   suggested_actions?: ValidationSuggestedAction[];
   /** Original blocker for dry-run / encoding action hooks. */
   source?: PreflightResult["blockers"][number];
@@ -502,6 +512,13 @@ export function buildDisplayBlockers(
         ...(r.alternative_fixes ?? []).slice(0, 3),
       ],
       fix: r.recommended_fix,
+      quarantinePolicy: r.quarantine_policy,
+      rollbackPolicy: r.rollback_policy,
+      affectedRowsSample: typeof r.affected_rows_sample === "number" ? r.affected_rows_sample : null,
+      estimatedTotalRows: typeof r.estimated_total_rows === "number" ? r.estimated_total_rows : null,
+      confidenceNote: r.risk_level ? `Risk level: ${r.risk_level}` : null,
+      // Engine roots document DOCUMENT_ONLY — staging discard is the only executable product path.
+      rollbackExecutable: String(r.rollback_policy || "").toUpperCase() === "DISCARD_STAGING",
       why: [
         r.business_impact,
         r.recovery_strategy,

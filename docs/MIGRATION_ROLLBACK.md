@@ -15,6 +15,10 @@ Every job receives a signed **rollback plan** (`destination_summary.rollback_pla
 
 API SSOT: `services.migration_rollback` (`plan_rollback`, `execute_rollback`).
 
+HTTP: `POST /api/v1/transfer/{job_id}/rollback/execute` with
+`{ approved_by, reason }` — executes `DISCARD_STAGING` only; other strategies
+return HTTP 409 refuse (warehouse restore is never invented).
+
 ## Guarantees
 
 - Rollback plan is immutable (HMAC signature) — tampered plans refuse execution

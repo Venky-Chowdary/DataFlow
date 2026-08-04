@@ -1420,7 +1420,7 @@ export function ValidateDashboard({
                 : preflight
                   ? executiveSummary?.title ?? (
                     decision === "approve" && preflight.passed
-                      ? "Ready to transfer"
+                      ? "Execute-ready · not migration proven"
                       : preflight.passed
                         ? "Review before Execute"
                         : "Action needed before transfer"
@@ -1440,13 +1440,16 @@ export function ValidateDashboard({
               }
             >
               <strong>{displayBlockers.length > 0 ? displayBlockers.length : blockedCount}</strong>
-              {displayBlockers.length > 0 && displayBlockers.length !== blockedCount
-                ? " issues"
+              {displayBlockers.length > 0
+                ? " root cause(s)"
                 : " blocked"}
             </span>
-            {displayBlockers.length > 0 && displayBlockers.length !== blockedCount && (
-              <span className="df2-vd-count skip" title="Individual gate checks that share a root cause">
-                <strong>{blockedCount}</strong> gate checks
+            {displayBlockers.length > 0 && blockedCount > displayBlockers.length && (
+              <span
+                className="df2-vd-count skip"
+                title="Gate checks absorbed into root causes — not separate operator blockers"
+              >
+                <strong>{blockedCount}</strong> absorbed gates
               </span>
             )}
             <span className="df2-vd-count skip"><strong>{skippedCount}</strong> skipped</span>
@@ -2678,7 +2681,7 @@ export function ValidateDashboard({
             <p className="df2-vd-diff-clean">
               <DtIcon name="check" size={13} />{" "}
               {sampleCompare.alignment === "key_aligned"
-                ? "Every keyed sample value matched — no drift between source and destination."
+                ? "Every keyed sample value matched — sample-scoped only; not full population proof."
                 : sampleCompare.alignment === "positional_only"
                   || sampleCompare.alignment === "unproven_identity"
                   || sampleCompare.identity_warning
@@ -2744,6 +2747,23 @@ export function ValidateDashboard({
               </li>
             ))}
           </ol>
+          {(decisionPath.decisions?.length ?? 0) > 1 && (
+            <div className="df2-vd-decision-path-more" aria-label="Additional root causes">
+              <strong>Additional root causes</strong>
+              <ul>
+                {decisionPath.decisions!.slice(1).map((d) => (
+                  <li key={d.key}>
+                    <span>{d.title}</span>
+                    <span className="df2-vd-decision-path-step-detail">
+                      {d.steps.find((s) => s.id === "business_impact")?.summary
+                        || d.steps.find((s) => s.id === "recommended_actions")?.summary
+                        || ""}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
 

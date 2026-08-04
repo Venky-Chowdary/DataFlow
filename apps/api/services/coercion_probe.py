@@ -519,22 +519,22 @@ def analyze_coercion(
             structural=structural,
         )
         if severity != "block" and fidelity_collapse:
-            # Map Accept risk: keep fidelity_collapse=true for honesty, but do not
-            # keep severity=block — G3 trusts probe severity and would re-block.
-            risk_ack = bool(
-                m.get("risk_acknowledged") or m.get("riskAcknowledged")
-            )
-            severity = "warn" if risk_ack else "block"
+            # Keep fidelity_collapse=true for honesty. Soften severity only with a
+            # verified continue-policy Risk Contract (boolean ack never enough).
+            from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+            risk_cleared = mapping_has_clearing_risk_contract(m)
+            severity = "warn" if risk_cleared else "block"
             if not fix:
                 fix = (
                     f"Column '{src}' → {tgt_type}: declared mapping collapses fidelity "
                     f"({src_type} → {tgt_type}) even when preview samples coerce. "
-                    f"Widen the destination type, add an explicit transform, or accept "
-                    f"lossy remapping under a non-strict policy after review."
-                    if not risk_ack
+                    f"Widen the destination type, add an explicit transform, or sign a "
+                    f"Migration Risk Contract with CAST_AND_CONTINUE."
+                    if not risk_cleared
                     else (
                         f"Column '{src}' → {tgt_type}: declared fidelity collapse "
-                        f"({src_type} → {tgt_type}) — risk acknowledged on Map."
+                        f"({src_type} → {tgt_type}) — continue-policy Risk Contract signed."
                     )
                 )
         if wire_normalize and not fix:

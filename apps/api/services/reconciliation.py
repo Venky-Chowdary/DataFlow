@@ -140,18 +140,27 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
     )
     sample = out.get("sample_compare") if isinstance(out.get("sample_compare"), dict) else {}
     sample_ok = bool(sample.get("passed")) and int(sample.get("compared") or 0) > 0
-    # Sample is the authority when digests are missing/diverge or message says so.
-    # Do not require prose keywords — checksum diverge + sample_ok is enough.
+    # GA: diverging independent digests never become sample-verified success.
+    # Sample may only classify when digests are missing (not when they disagree).
+    if src and tgt and not independent_match:
+        out["phase"] = "post_write_failed"
+        out["post_write_pending"] = False
+        out["preview"] = False
+        out["passed"] = False
+        out["coverage"] = "none"
+        out["assurance_level"] = "none"
+        out["checksum_match"] = False
+        return out
+
     sample_authority = sample_ok and (
-        not independent_match
+        writer_only
+        or not tgt
         or "sample-verified" in msg
         or "sample verified" in msg
         or "key-aligned" in msg
         or "sample-only assurance" in msg
-        or writer_only
-        or not tgt
     )
-    if passed and sample_authority:
+    if passed and sample_authority and not (src and tgt):
         out["phase"] = "post_write_sample_verified"
         out["post_write_pending"] = False
         out["preview"] = False
@@ -576,99 +585,32 @@ def reconcile(
         )
 
     if source_checksum != target_checksum:
-        # When the target legitimately contains extra rows (append/upsert),
-        # whole-table checksums are not comparable; require a key-aligned
-        # sample compare that actually compared rows (fail-closed otherwise).
-        if allow_extra_rows and target_rows > expected_rows:
-            compared = int((sample_compare or {}).get("compared") or 0)
-            sample_ok = (
-                bool(sample_compare)
-                and bool(sample_compare.get("passed", False))
-                and compared > 0
-            )
-            if sample_ok:
-                return ReconciliationReport(
-                    passed=True,
-                    source_rows=source_rows,
-                    target_rows=target_rows,
-                    source_checksum=source_checksum,
-                    target_checksum=target_checksum,
-                    message=(
-                        f"Sample-only assurance: {compared} key-aligned row(s) compared "
-                        f"({target_rows} dest rows"
-                        + (f", {rejected_rows} rejected" if rejected_rows else "")
-                        + f"; {target_rows - expected_rows} pre-existing rows skipped in checksum). "
-                        "Whole-table checksums are not comparable — population / full-checksum "
-                        "fidelity NOT proven."
-                    ),
-                    rejected_rows=rejected_rows,
-                    rows_skipped=rows_skipped,
-                    sample_compare=sample_compare,
-                    checksum_match=False,
-                    population_proof=False,
-                    assurance_level="sample",
-                )
-            return ReconciliationReport(
-                passed=False,
-                source_rows=source_rows,
-                target_rows=target_rows,
-                source_checksum=source_checksum,
-                target_checksum=target_checksum,
-                message=(
-                    "Checksum mismatch with extra destination rows: key-aligned "
-                    "sample compare with compared>0 is required (fail-closed; "
-                    "whole-table checksums are not comparable under append/upsert)"
-                ),
-                rejected_rows=rejected_rows,
-                coerced_null_rows=coerced_null_rows,
-                rows_skipped=rows_skipped,
-                sample_compare=sample_compare,
-            )
-        if strict_checksum:
-            return ReconciliationReport(
-                passed=False,
-                source_rows=source_rows,
-                target_rows=target_rows,
-                source_checksum=source_checksum,
-                target_checksum=target_checksum,
-                message=(
-                    f"Checksum mismatch in strict mode: source {source_checksum} "
-                    f"vs target {target_checksum}"
-                ),
-                rejected_rows=rejected_rows,
-                rows_skipped=rows_skipped,
-            )
-        # Balanced: never soft-pass a checksum mismatch without key-aligned
-        # sample proof (compared>0). Cross-engine "rendering" is not an excuse
-        # for green Gate-8 — bind-aware fingerprints close that class of drift.
+        # Enterprise GA: checksum mismatch always fails Gate-8.
+        # Sample compare may attach diagnostics only — never green-pass / override.
         compared = int((sample_compare or {}).get("compared") or 0)
         sample_ok = (
             bool(sample_compare)
             and bool(sample_compare.get("passed", False))
             and compared > 0
         )
-        if sample_ok:
-            return ReconciliationReport(
-                passed=True,
-                source_rows=source_rows,
-                target_rows=target_rows,
-                source_checksum=source_checksum,
-                target_checksum=target_checksum,
-                message=(
-                    f"Sample-only assurance: {compared} key-aligned row(s) compared "
-                    f"({target_rows} rows"
-                    + (f", {rejected_rows} rejected" if rejected_rows else "")
-                    + "; whole-table checksums differed). "
-                    "Population / full-checksum fidelity NOT proven — sample coverage only."
-                ),
-                rejected_rows=rejected_rows,
-                coerced_null_rows=coerced_null_rows,
-                rows_skipped=rows_skipped,
-                sample_compare=sample_compare,
-                checksum_match=False,
-                population_proof=False,
-                assurance_level="sample",
+        extra_note = ""
+        if allow_extra_rows and target_rows > expected_rows:
+            extra_note = (
+                f" Destination has {target_rows - expected_rows} extra row(s) "
+                "(append/upsert); whole-table digests are not comparable."
             )
+        sample_note = ""
+        if sample_ok:
+            sample_note = (
+                f" Key-aligned sample compared {compared} row(s) without value "
+                "mismatches — diagnostic only; does NOT override checksum failure."
+            )
+        elif sample_compare:
+            sample_note = (
+                " Key-aligned sample compare incomplete or failed — not used to "
+                "soften checksum mismatch."
+            )
+        mode_label = "strict" if strict_checksum else "balanced"
         return ReconciliationReport(
             passed=False,
             source_rows=source_rows,
@@ -676,13 +618,17 @@ def reconcile(
             source_checksum=source_checksum,
             target_checksum=target_checksum,
             message=(
-                "Checksum mismatch in balanced mode: key-aligned sample compare "
-                "with compared>0 is required (refuse unverified soft-pass)"
+                f"Checksum mismatch ({mode_label}): source {source_checksum} vs "
+                f"target {target_checksum}.{extra_note}{sample_note} "
+                "Sample success cannot override full-table checksum mismatch."
             ),
             rejected_rows=rejected_rows,
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             sample_compare=sample_compare,
+            checksum_match=False,
+            population_proof=False,
+            assurance_level="none",
         )
     if coerced_null_rows:
         # Row counts and checksums can still match here because the SAME failed

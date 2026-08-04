@@ -411,7 +411,9 @@ export function DestinationAdvancedDrawer({
               <option value="when_needed">when_needed — snapshot if resume missing/broken</option>
             </select>
             <small className="df2-label-hint">
-              Delivery remains <strong>at-least-once upsert</strong> unless the destination stamps `_df_lsn` for PK LSN-guarded idempotent upsert.
+              Delivery guarantee is fixed to <strong>at_least_once</strong> (API field{" "}
+              <code>delivery_guarantee</code>). Exactly-once and at-most-once are refused.
+              Prefer PK upsert / <code>_df_lsn</code> guards — append-only opt-in below allows duplicates on redelivery.
             </small>
             {onAllowAppendOnlyChange && (
               <label className="df2-policy-toggle" style={{ marginTop: "0.75rem" }}>

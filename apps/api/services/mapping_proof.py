@@ -533,7 +533,7 @@ def _mapping_risks(
                 "severity": "info",
                 "message": (
                     "CDC/incremental into lakehouse defaults to at-least-once upsert/MERGE; "
-                    "exactly-once is not claimed unless the route proves idempotent keys + watermark handoff."
+                    "exactly-once is never claimed by DataWrap."
                 ),
             })
 

@@ -72,12 +72,17 @@ def enforce_or_create_contract(
     return contract.id
 
 
-def finalize_contract(contract_id: str, success: bool) -> None:
-    """Update the circuit breaker and optionally mark contract as broken."""
+def finalize_contract(contract_id: str, success: bool, *, workspace_id: str = "") -> None:
+    """Update the circuit breaker and optionally mark contract as broken.
+
+    When the breaker transitions to OPEN, notify the workspace (fail-open on
+    notify errors — transfer finalization must not crash on Slack/email).
+    """
     if not contract_id:
         return
     store = get_contract_store()
     breaker = store.get_breaker(contract_id)
+    prior = breaker.state.value
     if success:
         breaker.record_success()
     else:
@@ -85,6 +90,49 @@ def finalize_contract(contract_id: str, success: bool) -> None:
     store.save_breaker(breaker)
 
     contract = store.get_contract(contract_id)
+    opened = prior != "open" and breaker.state.value == "open"
     if contract and not success and breaker.state.value == "open":
         contract.status = ContractStatus.BROKEN
         store.save_contract(contract)
+
+    if opened:
+        _notify_breaker_open(
+            contract_id,
+            workspace_id=workspace_id or getattr(contract, "workspace_id", "") or "",
+            failure_count=breaker.failure_count,
+            canary_pct=getattr(breaker, "canary_pct", 100),
+        )
+
+
+def _notify_breaker_open(
+    contract_id: str,
+    *,
+    workspace_id: str,
+    failure_count: int,
+    canary_pct: int,
+) -> None:
+    try:
+        from services.notification_service import notify_workspace
+    except Exception:
+        return
+    if not workspace_id:
+        return
+    try:
+        notify_workspace(
+            workspace_id,
+            {
+                "kind": "contract_breaker_open",
+                "title": f"Contract breaker OPEN · {contract_id[:12]}",
+                "text": (
+                    f"Circuit breaker opened after {failure_count} failure(s). "
+                    f"Transfers enforcing this contract are blocked "
+                    f"(canary_pct={canary_pct}; 100=fail-closed). "
+                    "Reset the breaker after remediating, or re-sign the contract."
+                ),
+                "contract_id": contract_id,
+                "urgency": "2",
+            },
+        )
+    except Exception:
+        # Notify must never break finalize.
+        return

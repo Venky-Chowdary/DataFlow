@@ -99,7 +99,8 @@ def test_reconcile_refuses_unverified_checksum_mismatch_balanced():
     assert "compared>0" in r.message or "sample" in r.message.lower()
 
 
-def test_reconcile_balanced_passes_with_key_aligned_sample():
+def test_reconcile_balanced_fails_even_with_key_aligned_sample():
+    """GA: sample diagnostics never green-pass a checksum mismatch."""
     r = reconcile(
         source_rows=10,
         target_rows=10,
@@ -108,15 +109,17 @@ def test_reconcile_balanced_passes_with_key_aligned_sample():
         strict_checksum=False,
         sample_compare={"passed": True, "compared": 5, "mismatches": []},
     )
-    assert r.passed
-    assert "sample" in r.message.lower()
+    assert not r.passed
+    assert "checksum mismatch" in r.message.lower()
+    assert "diagnostic" in r.message.lower() or "cannot override" in r.message.lower()
     stamped = r.to_dict()
-    assert stamped["phase"] == "post_write_sample_verified"
-    assert stamped.get("coverage") == "sample"
+    assert stamped["phase"] == "post_write_failed"
+    assert stamped.get("checksum_match") is False
+    assert (stamped.get("sample_compare") or {}).get("compared") == 5
 
 
-def test_stamp_sample_verified_when_checksums_diverge_without_keyword_msg():
-    """Sample authority must not depend on message prose keywords."""
+def test_stamp_fails_when_checksums_diverge_even_if_sample_ok():
+    """GA: diverging digests force failed — sample cannot soft-verify."""
     from services.reconciliation import stamp_post_write_phase
 
     out = stamp_post_write_phase(
@@ -128,8 +131,9 @@ def test_stamp_sample_verified_when_checksums_diverge_without_keyword_msg():
             "sample_compare": {"passed": True, "compared": 3, "mismatches": []},
         }
     )
-    assert out["phase"] == "post_write_sample_verified"
-    assert out.get("coverage") == "sample"
+    assert out["passed"] is False
+    assert out["phase"] == "post_write_failed"
+    assert out.get("coverage") == "none"
 
 
 def test_stamp_full_checksum_coverage_when_checksums_match():
@@ -315,9 +319,8 @@ def test_normalize_cell_utc_wall_clock_equates_aware_and_ntz():
     assert normalize_cell("2024-06-01T12:00:00Z") == normalize_cell(aware_utc)
 
 
-def test_reconcile_extra_rows_requires_sample_proof():
-    """Gate-8 soft-pass under allow_extra_rows must fail-closed without sample proof."""
-    # No sample_compare → fail
+def test_reconcile_extra_rows_checksum_mismatch_always_fails():
+    """GA: allow_extra_rows + sample proof still cannot override checksum mismatch."""
     r = reconcile(
         source_rows=10,
         target_rows=15,
@@ -327,9 +330,8 @@ def test_reconcile_extra_rows_requires_sample_proof():
         strict_checksum=True,
     )
     assert not r.passed
-    assert "sample" in r.message.lower()
+    assert "checksum mismatch" in r.message.lower()
 
-    # Empty compared=0 → fail
     r2 = reconcile(
         source_rows=10,
         target_rows=15,
@@ -340,7 +342,6 @@ def test_reconcile_extra_rows_requires_sample_proof():
     )
     assert not r2.passed
 
-    # Real sample proof → pass
     r3 = reconcile(
         source_rows=10,
         target_rows=15,
@@ -349,8 +350,8 @@ def test_reconcile_extra_rows_requires_sample_proof():
         allow_extra_rows=True,
         sample_compare={"passed": True, "compared": 10, "mismatches": []},
     )
-    assert r3.passed
-    assert "sample" in r3.message.lower()
+    assert not r3.passed
+    assert "cannot override" in r3.message.lower() or "diagnostic" in r3.message.lower()
 
 
 def test_sample_compare_aligns_renamed_primary_key():

@@ -205,11 +205,48 @@ def capability_matrix() -> dict[str, Any]:
     }
 
 
+SELECTABLE_DELIVERY_SEMANTICS: frozenset[str] = frozenset(
+    {
+        "at_least_once",
+        # at_most_once only when a sink path explicitly supports fire-and-forget;
+        # not offered as a default product selector.
+    }
+)
+
+
+class DeliveryGuaranteeError(ValueError):
+    """Raised when a client requests an impossible delivery guarantee."""
+
+
+def assert_delivery_guarantee_allowed(requested: str | None) -> str:
+    """Normalize / refuse delivery guarantee selection. Exactly-once is never allowed."""
+    raw = (requested or DEFAULT_DELIVERY_SEMANTICS).strip().lower().replace("-", "_")
+    if not raw:
+        return DEFAULT_DELIVERY_SEMANTICS
+    if raw in {"exactly_once", "eos", "exactlyonce"}:
+        raise DeliveryGuaranteeError(
+            "exactly_once delivery is not available — DataWrap delivery is "
+            "at_least_once only (never invent exactly-once)."
+        )
+    if raw == "at_most_once":
+        raise DeliveryGuaranteeError(
+            "at_most_once is not a selectable product guarantee — "
+            "default remains at_least_once with upsert/idempotent writes."
+        )
+    if raw not in SELECTABLE_DELIVERY_SEMANTICS:
+        raise DeliveryGuaranteeError(
+            f"Unknown delivery guarantee {requested!r} — allowed: "
+            f"{sorted(SELECTABLE_DELIVERY_SEMANTICS)}"
+        )
+    return raw
+
+
 def execution_contract_dict() -> dict[str, Any]:
     """Canonical posture for proof packs / Theater / workspace security."""
     return {
         "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
         "delivery_default": DEFAULT_DELIVERY_SEMANTICS,
+        "selectable_delivery": sorted(SELECTABLE_DELIVERY_SEMANTICS),
         "never_silent_drop": True,
         "never_claim_exactly_once": True,
         "duplicate_prevention": [
@@ -226,6 +263,7 @@ def execution_contract_dict() -> dict[str, Any]:
             "Kafka offset commit after checkpoint must fail closed.",
             "Quarantine / rejected_rows is the partial-failure SSOT.",
             "Exactly-once and one-click undo are not claimed.",
+            "Append sinks require ack / watermark persistence fail-closed.",
         ],
         "docs": "docs/EXECUTION_ENGINE_CONTRACT.md",
     }

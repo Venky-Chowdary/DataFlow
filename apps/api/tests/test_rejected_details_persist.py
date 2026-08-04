@@ -31,7 +31,7 @@ def test_merge_falls_back_to_destination_summary():
     assert rows[0]["column"] == "amt"
 
 
-def test_writer_diagnostics_caps_but_keeps_details():
+def test_writer_diagnostics_keeps_full_rejected_details():
     class _WR:
         rejected_rows = 2
         coerced_null_rows = 0
@@ -42,5 +42,6 @@ def test_writer_diagnostics_caps_but_keeps_details():
 
     summary = _writer_diagnostics(_WR())
     assert len(summary["rejected_details"]) == 250
+    assert len(summary["rejected_details_sample"]) == 200
     assert summary["rejected_details"][0]["column"] == "c"
     assert summary["rejected_rows"] == 2

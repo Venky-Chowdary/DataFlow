@@ -145,6 +145,57 @@ def test_apply_collapses_operator_blockers():
     assert len([g for g in pf["gates"] if g["status"] == "block"]) == 3
 
 
+def test_single_fidelity_gate_collapses_to_one_root():
+    pf = {
+        "gates": [
+            {
+                "id": "g3_schema_contract",
+                "status": "block",
+                "message": "TEXT → INTEGER lossy",
+                "details": {
+                    "fidelity_collapse": True,
+                    "issues_detail": [
+                        {
+                            "source": "amt",
+                            "source_type": "TEXT",
+                            "target_type": "INTEGER",
+                            "fidelity_collapse": True,
+                        }
+                    ],
+                },
+            }
+        ],
+        "blockers": [
+            {
+                "id": "g3_schema_contract",
+                "message": "TEXT → INTEGER lossy",
+                "details": {"fidelity_collapse": True},
+            }
+        ],
+    }
+    roots = build_root_causes(pf)
+    assert len([r for r in roots if r.kind == "fidelity_collapse"]) == 1
+
+
+def test_apply_rewrites_proof_transfer_decision_blockers():
+    base = _fidelity_preflight()
+    base["proof_bundle"] = {
+        "transfer_decision": {
+            "decision": "block",
+            "blockers": [
+                "g3 coercion",
+                "g4 risk ack",
+                "g9 integrity",
+            ],
+        }
+    }
+    pf = apply_root_causes_to_preflight(base)
+    td = pf["proof_bundle"]["transfer_decision"]
+    assert len(td["blockers"]) == 1
+    assert "fidelity" in td["blockers"][0].lower() or "lossy" in td["blockers"][0].lower()
+    assert td["root_causes"]
+
+
 def test_single_unrelated_blocker_does_not_invent_fidelity_root():
     pf = {
         "gates": [

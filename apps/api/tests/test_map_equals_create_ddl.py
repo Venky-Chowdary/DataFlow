@@ -42,8 +42,8 @@ def test_resolve_target_columns_map_equals_create_for_explicit_boolean():
     assert by["id"] == "INTEGER"
 
 
-def test_inferred_boolean_without_map_stamp_may_still_widen():
-    """Without explicit target_type, safe DDL may widen unfit BOOLEAN proposals."""
+def test_inferred_boolean_helper_may_widen_when_not_honoring_explicit():
+    """Helper still widens when honor_explicit=False — resolve_target_columns never uses that path for CREATE."""
     assert (
         safe_ddl_logical_type(
             "BOOLEAN",
@@ -54,3 +54,13 @@ def test_inferred_boolean_without_map_stamp_may_still_widen():
         )
         == "VARCHAR"
     )
+
+
+def test_create_new_without_map_stamp_keeps_source_carrier_not_sample_invent():
+    cols, types = resolve_target_columns(
+        [{"source": "status", "target": "status"}],
+        {"status": "VARCHAR"},
+        sample_values_by_source={"status": ["true", "false"]},
+        table_exists=False,
+    )
+    assert dict(zip(cols, types))["status"].upper() != "BOOLEAN"

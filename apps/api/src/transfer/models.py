@@ -126,6 +126,9 @@ class TransferRequest:
     # fingerprint, letting a caller make its own HTTP retries safe. When empty,
     # the fingerprint still guards against accidental double submission.
     idempotency_key: str = ""
+    # CDC / stream delivery honesty — selectable set is enforced by
+    # ``assert_delivery_guarantee_allowed`` (exactly_once / at_most_once refused).
+    delivery_guarantee: str = "at_least_once"
 
     @property
     def operation(self) -> str:
@@ -268,6 +271,7 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "triggered_by": request.triggered_by,
         "date_locale": request.date_locale,
         "idempotency_key": request.idempotency_key,
+        "delivery_guarantee": request.delivery_guarantee or "at_least_once",
         "requires_file_reupload": request.source.kind == "file" and bool(request.source_content),
     }
 
@@ -338,6 +342,7 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         triggered_by=(data.get("triggered_by") or "").strip(),
         date_locale=(data.get("date_locale") or "").strip().upper(),
         idempotency_key=(data.get("idempotency_key") or "").strip(),
+        delivery_guarantee=(data.get("delivery_guarantee") or "at_least_once").strip().lower(),
     )
 
 

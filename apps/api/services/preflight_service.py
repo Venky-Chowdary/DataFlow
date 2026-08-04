@@ -42,27 +42,49 @@ from services.validation_plan import build_validation_plan
 from services.value_serializer import cell_to_string
 
 
-def _hydrate_risk_contract(m: dict[str, Any]) -> dict[str, Any] | None:
-    """Sign or verify a Migration Risk Contract draft on the mapping.
+def _hydrate_risk_contract(
+    m: dict[str, Any],
+    *,
+    table: str = "",
+    migration_id: str = "",
+) -> dict[str, Any] | None:
+    """Verify or sign a Migration Risk Contract draft on the mapping.
 
-    Client may send an unsigned draft after Map Accept risk. Preflight signs it
-    so proof_bundle can trust continue-policy contracts. Tampered signatures
-    are rejected (returned None → Execute-approve stays locked).
+    - Valid signature → return as-is.
+    - Signature present but invalid → refuse (None). Never re-sign tamper.
+    - Unsigned draft → sign from fields (Map draft path) + audit event.
     """
     raw = m.get("risk_contract") or m.get("riskContract")
     if not isinstance(raw, dict):
         return None
     try:
         from services.migration_risk_contract import (
-            contract_from_dict,
             create_migration_risk_contract,
             verify_risk_contract,
         )
 
-        existing = contract_from_dict(raw)
-        if existing is not None and verify_risk_contract(existing):
-            return existing.to_dict()
-        # Unsigned / stale draft — re-sign from authoritative fields.
+        has_sig = bool(str(raw.get("signature") or "").strip())
+        # Verify stored payload as-is — never re-serialize (field-set compat).
+        if has_sig and verify_risk_contract(raw):
+            return dict(raw)
+        if has_sig:
+            # Tampered or stale signature — fail closed; do not re-sign.
+            return None
+        # Unsigned draft — sign from authoritative fields.
+        meta = dict(raw.get("metadata") or {})
+        if raw.get("loss_classification") and "loss_classification" not in meta:
+            meta["loss_classification"] = raw.get("loss_classification")
+        table_stamp = str(
+            raw.get("table") or m.get("table") or table or ""
+        ).strip()
+        mig_stamp = str(
+            raw.get("migration_id")
+            or raw.get("plan_id")
+            or m.get("migration_id")
+            or m.get("plan_id")
+            or migration_id
+            or ""
+        ).strip()
         signed = create_migration_risk_contract(
             column=str(raw.get("column") or m.get("source") or ""),
             source_type=str(raw.get("source_type") or m.get("source_type") or ""),
@@ -94,11 +116,32 @@ def _hydrate_risk_contract(m: dict[str, Any]) -> dict[str, Any] | None:
             ),
             proof_pack_ref=raw.get("proof_pack_ref"),
             mapping_hash=str(raw.get("mapping_hash") or ""),
-            plan_id=raw.get("plan_id"),
+            plan_id=raw.get("plan_id") or (mig_stamp or None),
             target=str(raw.get("target") or m.get("target") or m.get("source") or ""),
-            metadata=dict(raw.get("metadata") or {}),
+            migration_id=mig_stamp,
+            table=table_stamp,
+            loss_classification=str(raw.get("loss_classification") or ""),
+            fidelity=str(m.get("fidelity") or ""),
+            metadata=meta,
         )
-        return signed.to_dict()
+        payload = signed.to_dict()
+        try:
+            from services.audit_log import append_audit_event
+
+            append_audit_event(
+                action="migration_risk_contract.signed",
+                resource=f"risk_contract:{payload.get('risk_id')}",
+                actor=str(payload.get("approved_by") or "system"),
+                details={
+                    "risk_id": payload.get("risk_id"),
+                    "column": payload.get("column"),
+                    "execution_policy": payload.get("execution_policy"),
+                    "approved_by": payload.get("approved_by"),
+                },
+            )
+        except Exception:
+            pass
+        return payload
     except (TypeError, ValueError):
         return None
 
@@ -245,6 +288,20 @@ class FilePreflightContext(PreflightContext):
                 table_exists=getattr(self.plan.destination, "table_exists", None),
                 validation_mode=getattr(self.plan, "validation_mode", None) or "strict",
             )
+            if isinstance(report, dict):
+                from services.validation_coverage import stamp_validation_coverage
+
+                report = {
+                    **report,
+                    "validation_coverage": stamp_validation_coverage(
+                        layer="datatype",
+                        rows_examined=len(self.sample_rows or []),
+                        note=(
+                            "Datatype / coercion classification only — "
+                            "not sample population proof."
+                        ),
+                    ),
+                }
         except Exception as exc:
             logger.warning(
                 "coercion probe failed during preflight: %s", exc, exc_info=exc
@@ -981,10 +1038,15 @@ def run_file_preflight(
         sample_rows = sample_rows[:PREFLIGHT_SAMPLE_LIMIT]
 
     # Sign Migration Risk Contract drafts before gates / proof_bundle see them.
+    # Stamp destination table onto unsigned drafts (audit field — never invent DDL).
     hydrated_mappings: list[dict[str, Any]] = []
     for m in mappings or []:
         row = dict(m) if isinstance(m, dict) else dict(m or {})
-        signed = _hydrate_risk_contract(row)
+        signed = _hydrate_risk_contract(
+            row,
+            table=str(destination_table or ""),
+            migration_id="",
+        )
         if signed is not None:
             row["risk_contract"] = signed
             # Continue-policy contract implies operator ack for G3/G4.
@@ -1102,7 +1164,10 @@ def run_file_preflight(
                 m.get("risk_acknowledged") or m.get("riskAcknowledged", False)
             ),
             intentional_omit=is_intentional_omit(m),
-            risk_contract=_hydrate_risk_contract(m),
+            risk_contract=_hydrate_risk_contract(
+                m if isinstance(m, dict) else dict(m or {}),
+                table=str(destination_table or ""),
+            ),
         )
         for m in mappings
     ]
@@ -1343,9 +1408,23 @@ def run_file_preflight(
             },
         }
     except Exception as conv_exc:
-        logger.debug(
-            "conversion contract stamp skipped: %s", conv_exc, exc_info=conv_exc
+        # GA: never soft-skip conversion / DDL identity stamp — surface fail-closed.
+        logger.warning(
+            "conversion contract stamp failed closed: %s", conv_exc, exc_info=conv_exc
         )
+        proof_bundle = {
+            **proof_bundle,
+            "ddl_identity": {
+                "ddl_identity_hash": "",
+                "error": str(conv_exc)[:400],
+                "stamp_failed": True,
+            },
+            "conversion_contract": {
+                "version": "conversion_contract.v1",
+                "stamp_failed": True,
+                "error": str(conv_exc)[:400],
+            },
+        }
 
     from services.preflight_rules import enrich_blockers
 
@@ -1353,6 +1432,24 @@ def run_file_preflight(
         {"id": b.gate_id.value, "message": b.message, "details": b.details}
         for b in result.blockers
     ]
+    # Missing DDL identity after stamp failure → operator-facing blocker.
+    ddl_id = (proof_bundle.get("ddl_identity") or {}) if isinstance(proof_bundle, dict) else {}
+    if ddl_id.get("stamp_failed") or (
+        isinstance(proof_bundle, dict)
+        and proof_bundle.get("ddl_identity") is not None
+        and not str(ddl_id.get("ddl_identity_hash") or "").strip()
+        and ddl_id.get("error")
+    ):
+        blockers.append(
+            {
+                "id": "ddl_identity",
+                "message": (
+                    "Map→DDL identity stamp failed — re-run Validate after fixing "
+                    f"conversion contract: {ddl_id.get('error') or 'unknown'}"
+                ),
+                "details": {"ddl_identity": ddl_id},
+            }
+        )
     enriched_blockers = enrich_blockers(
         blockers,
         dest_kind=dest_kind,
@@ -1410,6 +1507,18 @@ def run_file_preflight(
             recommended_batch_size(_src_fmt),
             recommended_batch_size(_tgt_fmt) or recommended_batch_size(_src_fmt),
         ),
+        # Echo signed Risk Contracts so Map/Execute share the same stamped rows
+        # Validate greened — never leave FE with unsigned drafts after hydrate.
+        "signed_mappings": [
+            {
+                "source": str(m.get("source") or ""),
+                "target": str(m.get("target") or ""),
+                "risk_contract": m.get("risk_contract"),
+                "risk_acknowledged": bool(m.get("risk_acknowledged")),
+            }
+            for m in (mappings or [])
+            if isinstance(m, dict) and isinstance(m.get("risk_contract"), dict)
+        ],
     }
 
     # FK / relational constraint findings + sample orphan probe.

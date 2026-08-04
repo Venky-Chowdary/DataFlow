@@ -84,11 +84,14 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     rejected = int(getattr(result, "rejected_rows", 0) or 0)
     coerced = int(getattr(result, "coerced_null_rows", 0) or 0)
     skipped = int(getattr(result, "rows_skipped", 0) or 0)
+    # GA: never truncate rejected_details before merge/DLQ — rows cannot disappear.
+    details = list(getattr(result, "rejected_details", []) or [])
     return {
         "rejected_rows": rejected,
         "coerced_null_rows": coerced,
         "rows_skipped": skipped,
-        "rejected_details": list(getattr(result, "rejected_details", []) or [])[:500],
+        "rejected_details": details,
+        "rejected_details_sample": details[:200],
         "warnings": list(getattr(result, "warnings", []) or [])[:10],
         "error_policy": "quarantine" if (rejected or coerced) else "none",
         "load_method": getattr(result, "load_method", None),
@@ -1915,7 +1918,9 @@ def stream_database_transfer(
                     detail["batch_offset"] = batch_start
                     detail["row"] = batch_start + local_row  # 1-based absolute across the transfer
                 new_details.append(detail)
-            merged_details = (prev_details + new_details)[:2000]
+            # GA: keep full rejected_details across batches — never drop for a
+            # UI sample cap (sample is stamped separately at finalize).
+            merged_details = prev_details + new_details
             dest_summary = {
                 **prev,
                 **incoming,
@@ -1924,6 +1929,32 @@ def stream_database_transfer(
                 "coerced_null_rows": coerced_null_total,
             }
             batches_completed += 1
+            # Persist rejected rows before continuing — crash must not lose quarantine.
+            if new_details and job_id:
+                try:
+                    from services.quarantine_dlq import persist_rejected_rows
+
+                    persist_rejected_rows(
+                        job_id=str(job_id),
+                        rejected_details=new_details,
+                        source="stream_batch",
+                        connector=str(
+                            getattr(destination, "format", None)
+                            or getattr(destination, "kind", None)
+                            or ""
+                        ),
+                    )
+                    dest_summary["quarantine_stream_durable"] = True
+                    dest_summary["quarantine_durable"] = True
+                    # Prefix already on control-plane DLQ — finalize must not re-append.
+                    dest_summary["quarantine_dlq_persisted_count"] = len(merged_details)
+                except Exception as qexc:
+                    dest_summary["quarantine_durable"] = False
+                    dest_summary["quarantine_dlq_error"] = str(qexc)[:300]
+                    raise RuntimeError(
+                        "Quarantine DLQ persist failed after batch — refuse to "
+                        f"continue (rows cannot disappear): {qexc}"
+                    ) from qexc
 
         # Persist durable checkpoint after the batch is committed.  We use the
         # ordered result stream so checkpoint offsets/cursors can never skip
@@ -2217,10 +2248,13 @@ def stream_database_transfer(
     dest_summary["rejected_rows"] = rejected_total
     dest_summary["coerced_null_rows"] = coerced_null_total
     all_details = list(dest_summary.get("rejected_details") or [])
-    dest_summary["rejected_details"] = all_details[:2000]
+    # GA: keep full rejected_details for DLQ durability — never truncate bodies
+    # before quarantine persist. UI may use rejected_details_sample.
+    dest_summary["rejected_details"] = all_details
+    dest_summary["rejected_details_sample"] = all_details[:2000]
+    dest_summary["rejected_details_total"] = len(all_details)
     if len(all_details) > 2000:
-        # Say so rather than letting the operator assume 2000 is the whole story.
-        dest_summary["rejected_details_truncated"] = len(all_details) - 2000
+        dest_summary["rejected_details_sample_capped"] = True
     dest_summary["warnings"] = warning_samples[:10]
     suppressed_warnings = max(len(warning_samples) - 10, 0) + getattr(
         warning_samples, "dropped", 0

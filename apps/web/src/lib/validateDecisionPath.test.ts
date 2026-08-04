@@ -1,5 +1,5 @@
 /**
- * Module 10 — Validate decision path must follow charter order.
+ * Module 10 / GA — Validate decision path must follow charter order.
  * Run: npx --yes tsx --test apps/web/src/lib/validateDecisionPath.test.ts
  */
 import assert from "node:assert/strict";
@@ -17,6 +17,7 @@ describe("validateDecisionPath", () => {
       "Affected Gates",
       "Business Impact",
       "Recommended Actions",
+      "Execution Policy",
       "Preview Changes",
       "Risk Contract",
       "Execute",
@@ -63,7 +64,7 @@ describe("validateDecisionPath", () => {
 
     const path = buildValidateDecisionPath(preflight, { executeUnlocked: false });
     assert.equal(path.decisions.length, 1);
-    assert.equal(path.steps.length, 7);
+    assert.equal(path.steps.length, 8);
     assert.deepEqual(
       path.steps.map((s) => s.id),
       [
@@ -71,6 +72,7 @@ describe("validateDecisionPath", () => {
         "affected_gates",
         "business_impact",
         "recommended_actions",
+        "execution_policy",
         "preview_changes",
         "risk_contract",
         "execute",
@@ -80,8 +82,11 @@ describe("validateDecisionPath", () => {
     assert.match(path.steps[1].summary, /Schema|Mapping|Integrity|g3|g4|g9/i);
     assert.match(path.steps[2].summary, /Execute locked/i);
     assert.match(path.steps[3].summary, /Accept|cast|Map/i);
-    assert.equal(path.steps[5].status, "action");
-    assert.equal(path.steps[6].status, "locked");
+    assert.match(path.steps[4].summary, /FAIL_JOB|continue|policy/i);
+    assert.match(path.steps[4].detail || "", /Rollback availability/i);
+    assert.match(path.steps[2].detail || "", /population proof|Sample/i);
+    assert.equal(path.steps[6].status, "action");
+    assert.equal(path.steps[7].status, "locked");
     assert.equal(path.migrationProven, false);
     assert.equal(path.riskContractIncomplete, true);
     assert.match(path.note, /population/i);
@@ -102,7 +107,7 @@ describe("validateDecisionPath", () => {
     assert.equal(path.decisions.length, 0);
     assert.equal(path.executeUnlocked, true);
     assert.equal(path.migrationProven, false);
-    assert.equal(path.steps[6].status, "unlocked");
-    assert.match(path.steps[6].summary, /migration_proven/i);
+    assert.equal(path.steps[7].status, "unlocked");
+    assert.match(path.steps[7].summary, /migration_proven/i);
   });
 });

@@ -4,12 +4,13 @@ Module 4 SSOT for DataWrap Migration Assurance.
 
 Every validation surface stamps:
 
-* ``layer`` — schema | sample | population | execution | post_write
+* ``layer`` — schema | datatype | sample | population | execution | post_write
 * ``population_proof`` — True only when layer is population AND probe completed
 * ``guarantees`` / ``non_guarantees`` — operator-facing honesty
 * optional row counts for explainability
 
 Gate-8 full_checksum coverage is post-write digest equality — still not RI proof.
+Datatype layer never implies sample or population correctness.
 """
 
 from __future__ import annotations
@@ -17,13 +18,17 @@ from __future__ import annotations
 from typing import Any
 
 VALIDATION_LAYERS = frozenset(
-    {"schema", "sample", "population", "execution", "post_write"}
+    {"schema", "datatype", "sample", "population", "execution", "post_write"}
 )
 
 _DEFAULT_NON_GUARANTEES = {
     "schema": [
         "Schema metadata does not prove row fidelity or referential integrity.",
         "Population orphan detection is not proven from FK hints alone.",
+    ],
+    "datatype": [
+        "Declared type / ConversionClass checks do not prove sample or population values.",
+        "Datatype compatibility is not Gate-8 checksum proof.",
     ],
     "sample": [
         "Sample validation does not prove full population correctness.",
@@ -43,6 +48,9 @@ _DEFAULT_NON_GUARANTEES = {
 
 _DEFAULT_GUARANTEES = {
     "schema": ["Declared types and mapping targets were inspected."],
+    "datatype": [
+        "Source→destination type path was classified (lossless/lossy/unsupported).",
+    ],
     "sample": ["Examined rows were checked under the active validation mode."],
     "population": ["Full selected population probe completed for the stated check."],
     "execution": ["Write-path policies were applied for accepted risk contracts."],

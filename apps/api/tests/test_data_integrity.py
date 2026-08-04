@@ -261,7 +261,17 @@ def test_integrity_blocks_varchar_to_number_without_risk_ack():
 
 
 def test_integrity_sample_clears_varchar_to_number_with_risk_ack():
-    """With Accept risk, clean numeric-string samples may clear the coercion block."""
+    """With a continue-policy Risk Contract, clean samples may clear the coercion block."""
+    from services.migration_risk_contract import create_migration_risk_contract
+
+    contract = create_migration_risk_contract(
+        column="population",
+        source_type="VARCHAR",
+        destination_type="NUMBER(38,0)",
+        approved_by="admin@dataflow.app",
+        reason="Numeric VARCHAR population cast",
+        execution_policy="CAST_AND_CONTINUE",
+    ).to_dict()
     mappings = [{
         "source": "population",
         "target": "population",
@@ -269,6 +279,7 @@ def test_integrity_sample_clears_varchar_to_number_with_risk_ack():
         "transform": "none",
         "target_type": "NUMBER(38,0)",
         "risk_acknowledged": True,
+        "risk_contract": contract,
     }]
     report = run_integrity_audit(
         source_columns=["population"],
@@ -287,6 +298,34 @@ def test_integrity_sample_clears_varchar_to_number_with_risk_ack():
     coercion = next((c for c in report["checks"] if c["check"] == "coercion_safety"), None)
     assert coercion is not None
     assert coercion["blocks_transfer"] is False
+
+
+def test_integrity_boolean_ack_alone_does_not_sample_clear():
+    """GA: bare risk_acknowledged must not soft-pass G9 coercion_safety."""
+    mappings = [{
+        "source": "population",
+        "target": "population",
+        "confidence": 0.93,
+        "transform": "none",
+        "target_type": "NUMBER(38,0)",
+        "risk_acknowledged": True,
+    }]
+    report = run_integrity_audit(
+        source_columns=["population"],
+        target_columns=["population"],
+        mappings=mappings,
+        source_schemas=[{"name": "population", "inferred_type": "VARCHAR"}],
+        target_schemas=[{"name": "population", "inferred_type": "NUMBER(38,0)"}],
+        sample_rows=[
+            {"population": "331002651"},
+            {"population": "1402112000"},
+        ],
+        destination_db_type="snowflake",
+        validation_mode="strict",
+    )
+    coercion = next((c for c in report["checks"] if c["check"] == "coercion_safety"), None)
+    assert coercion is not None
+    assert coercion["blocks_transfer"] is True
 
 
 # ── Mapping confidence ───────────────────────────────────────────────────────

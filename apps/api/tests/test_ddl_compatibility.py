@@ -50,6 +50,41 @@ def test_varchar_to_number_blocks_without_risk_ack_even_when_samples_coerce():
 
 
 def test_varchar_to_number_passes_when_samples_coerce_and_risk_acked():
+    from services.migration_risk_contract import create_migration_risk_contract
+
+    contract = create_migration_risk_contract(
+        column="population",
+        source_type="VARCHAR",
+        destination_type="NUMBER(38,0)",
+        approved_by="admin@dataflow.app",
+        reason="Numeric VARCHAR population; cast with quarantine",
+        execution_policy="CAST_AND_CONTINUE",
+    ).to_dict()
+    ok, issues = evaluate_ddl_compatibility(
+        mappings=[{
+            "source": "population",
+            "target": "population",
+            "confidence": 0.93,
+            "target_type": "NUMBER(38,0)",
+            "risk_acknowledged": True,
+            "risk_contract": contract,
+        }],
+        source_schema={"population": "VARCHAR"},
+        target_schema={"population": "NUMBER(38,0)"},
+        table_exists=True,
+        dest_connected=True,
+        dest_db_type="snowflake",
+        sample_rows=[
+            {"population": "331002651"},
+            {"population": "1402112000"},
+        ],
+    )
+    assert ok, issues
+    assert not any("Lossy type coercion" in i for i in issues)
+
+
+def test_varchar_to_number_blocks_boolean_ack_without_risk_contract():
+    """GA: bare risk_acknowledged must not clear G6."""
     ok, issues = evaluate_ddl_compatibility(
         mappings=[{
             "source": "population",
@@ -68,8 +103,8 @@ def test_varchar_to_number_passes_when_samples_coerce_and_risk_acked():
             {"population": "1402112000"},
         ],
     )
-    assert ok, issues
-    assert not any("Lossy type coercion" in i for i in issues)
+    assert not ok
+    assert any("Lossy type coercion" in i for i in issues)
 
 
 def test_varchar_to_number_blocks_when_samples_fail():
@@ -300,13 +335,24 @@ def test_float_to_decimal_not_soft_passed_by_samples():
 
 
 def test_float_to_decimal_clears_when_risk_acknowledged():
-    """Map Accept risk must clear G6 so Validate agrees with G3/G4."""
+    """Verified Risk Contract must clear G6 so Validate agrees with G3/G4."""
+    from services.migration_risk_contract import create_migration_risk_contract
+
+    contract = create_migration_risk_contract(
+        column="amt",
+        source_type="FLOAT",
+        destination_type="DECIMAL(12,4)",
+        approved_by="admin@dataflow.app",
+        reason="IEEE float→decimal accepted with cast policy",
+        execution_policy="CAST_AND_CONTINUE",
+    ).to_dict()
     ok, issues = evaluate_ddl_compatibility(
         mappings=[{
             "source": "amt",
             "target": "amt",
             "confidence": 0.99,
             "risk_acknowledged": True,
+            "risk_contract": contract,
         }],
         source_schema={"amt": "FLOAT"},
         target_schema={"amt": "DECIMAL(12,4)"},
@@ -320,12 +366,23 @@ def test_float_to_decimal_clears_when_risk_acknowledged():
 
 
 def test_objectid_to_text_clears_g6_when_risk_acknowledged():
+    from services.migration_risk_contract import create_migration_risk_contract
+
+    contract = create_migration_risk_contract(
+        column="_id",
+        source_type="OBJECTID",
+        destination_type="TEXT",
+        approved_by="admin@dataflow.app",
+        reason="ObjectId→TEXT polarity accepted",
+        execution_policy="CAST_AND_CONTINUE",
+    ).to_dict()
     ok, issues = evaluate_ddl_compatibility(
         mappings=[{
             "source": "_id",
             "target": "user_id",
             "confidence": 0.95,
             "risk_acknowledged": True,
+            "risk_contract": contract,
         }],
         source_schema={"_id": "OBJECTID"},
         target_schema={"user_id": "TEXT"},

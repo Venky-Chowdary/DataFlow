@@ -54,6 +54,8 @@ Live execute + reconcile remains `tests/test_production_sku_matrix.py` (separate
 - Operator risk ack: G4 + web `mapping.ts` tiers (Approve / Review / Accept risk)
 - Optional LLM assist is hybrid and constrained — not a substitute for gates
 - **Map≡CREATE:** explicit Map `target_type` is preserved by `safe_ddl_logical_type(..., honor_explicit=True)` — writers must not rewrite approved DDL from sample inference; unfit values quarantine on write (`test_map_equals_create_ddl.py`)
+- **CREATE without Map stamp:** `resolve_target_columns` keeps source/carrier proposal — head samples must not invent BOOLEAN/INTEGER/DECIMAL (`test_ga_cycle7_fail_closed.py`)
+- **Map Risk Contract UX:** operator must choose an explicit execution policy (no hidden `CAST_AND_CONTINUE`); Validate echoes `signed_mappings` with `risk_id`/`signature` onto Map; Gate-8 always offers proof-pack export + honesty strip (`test_ga_cycle8_signed_mappings_echo.py`, `mapping.test.ts`)
 - **Map≡CREATE (BigQuery):** `bq_schema_field` applies Map `NUMERIC`/`BIGNUMERIC(p,s)` via SchemaField `precision`/`scale` — never strips to bare platform invent (`test_bigquery_writer.py`)
 - **Map≡CREATE (bare DECIMAL):** generic_sql `_sa_type_for_logical` uses `ddl_type` SSOT for bare `DECIMAL`/`NUMBER` — never invents `Numeric(38,15)` when the destination default is `(38,10)` (`test_generic_sql_decimal_carrier.py`)
 - **Map≡CREATE (Iceberg):** bare `DECIMAL` → `decimal(38,10)` for quarantine + Arrow; oversize stamps fail closed to `string` — never silent `decimal128` clamp (`test_iceberg_decimal_map_create.py`)

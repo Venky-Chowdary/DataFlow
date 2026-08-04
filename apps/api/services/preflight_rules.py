@@ -748,6 +748,36 @@ def explain_issue(
 
 def explain_gate(gate_id: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return the rule for a gate failure."""
+    details = details or {}
+    coverage = str(details.get("coverage") or "").lower()
+    # Module 4 residual: orphan coverage must not get the "Map FK columns" CTA alone.
+    if gate_id == "constraint_fk" and coverage in {
+        "sample_orphan_probe",
+        "population_orphan_probe",
+    }:
+        orphan_msg = message or coverage
+        issue_match = explain_issue(orphan_msg, dest_kind="", validation_mode="balanced")
+        if not issue_match.get("suggested_actions") or all(
+            (a.get("kind") == "map_column") for a in (issue_match.get("suggested_actions") or [])
+        ):
+            issue_match = explain_issue(
+                f"{coverage} orphan probe {message}",
+                dest_kind="",
+                validation_mode="balanced",
+            )
+        rule = PREFLIGHT_GATE_RULES.get(gate_id) or {}
+        return {
+            "gate": gate_id,
+            "title": rule.get("title") or "Foreign key / referential integrity",
+            "category": rule.get("category", "hard"),
+            "why": issue_match.get("why") or rule.get("why", ""),
+            "fix": issue_match.get("fix") or rule.get("fix", ""),
+            "examples": issue_match.get("examples") or rule.get("examples", []),
+            "suggested_actions": issue_match.get("suggested_actions") or [
+                {"kind": "fix_orphans", "label": "Fix parent rows / load order"},
+                {"kind": "run_population_orphan_scan", "label": "Run population orphan scan"},
+            ],
+        }
     # Prefer issue-catalog match so encoding/nulls beat generic gate CTAs.
     issue_match = explain_issue(message, dest_kind="", validation_mode="balanced")
     if issue_match.get("suggested_actions"):

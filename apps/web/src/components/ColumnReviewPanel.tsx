@@ -14,6 +14,7 @@ import {
   approveMappingsHonestly,
   canWidenMapping,
   countApproveEligible,
+  EXECUTION_POLICY_OPTIONS,
   flagExistingEnumBooleanConflict,
   isArrayLogicalType,
   isEnumToBooleanConflict,
@@ -31,6 +32,7 @@ import {
   pipelineTransformChip,
   widenMappingToVarchar,
   type EditableMapping,
+  type ExecutionPolicy,
   type MappingTransform,
   type StructPolicy,
 } from "../lib/mapping";
@@ -75,6 +77,10 @@ interface ColumnReviewPanelProps {
   onSearchChange?: (value: string) => void;
   filter?: ColumnFilter;
   onFilterChange?: (value: ColumnFilter) => void;
+  /** Plan / migration id stamped onto Risk Contracts for audit. */
+  migrationId?: string;
+  /** Destination table stamped onto Risk Contracts. */
+  tableName?: string;
 }
 
 function confidenceClass(
@@ -124,6 +130,8 @@ export function ColumnReviewPanel({
   onSearchChange,
   filter: filterProp,
   onFilterChange,
+  migrationId = "",
+  tableName = "",
 }: ColumnReviewPanelProps) {
   const [internalSearch, setInternalSearch] = useState("");
   const [internalFilter, setInternalFilter] = useState<ColumnFilter>("review");
@@ -212,6 +220,9 @@ export function ColumnReviewPanel({
     return undefined;
   }, [focusSource, pageItems, filtered, onFocusHandled]);
 
+  /** Per-row execution policy choice — no hidden CAST_AND_CONTINUE default. */
+  const [policyBySource, setPolicyBySource] = useState<Record<string, ExecutionPolicy | "">>({});
+
   const updateMapping = (index: number, patch: Partial<EditableMapping>) => {
     const next = mappings.map((m, i) => (i === index ? { ...m, ...patch } : m));
     onChange(next);
@@ -225,10 +236,33 @@ export function ColumnReviewPanel({
     const m = mappings[index];
     if (!m) return;
     // Fidelity / STRUCT / specialty need explicit risk ack — bare Approve must not clear G4.
-    updateMapping(
-      index,
-      mappingRequiresRiskAck(m) ? acknowledgeMappingRisk(m) : approveMappingHonestly(m),
-    );
+    if (mappingRequiresRiskAck(m)) {
+      const chosen = policyBySource[m.source];
+      if (!chosen) {
+        // Fail closed: refuse to invent CAST_AND_CONTINUE.
+        updateMapping(index, {
+          ...m,
+          approved: false,
+          requiresReview: true,
+          reason: [m.reason, "Choose an execution policy before signing Risk Contract"]
+            .filter(Boolean)
+            .join(" · "),
+        });
+        return;
+      }
+      updateMapping(
+        index,
+        acknowledgeMappingRisk(m, {
+          executionPolicy: chosen,
+          migrationId: migrationId || undefined,
+          table: tableName || undefined,
+          planId: migrationId || undefined,
+          estimatedRows: rowCount ?? null,
+        }),
+      );
+      return;
+    }
+    updateMapping(index, approveMappingHonestly(m));
   };
 
   const eligibleApproveCount = countApproveEligible(mappings);
@@ -856,26 +890,72 @@ export function ColumnReviewPanel({
                     {omitted ? (
                       <span className="df2-badge df2-badge-muted df2-badge-xs">Omitted</span>
                     ) : ready ? (
-                      <span className="df2-badge df2-badge-live df2-badge-xs">
-                        {mappingAckDoneLabel(m)}
-                      </span>
+                      <div className="df2-column-contract-done">
+                        <span className="df2-badge df2-badge-live df2-badge-xs">
+                          {mappingAckDoneLabel(m)}
+                        </span>
+                        {m.riskContract?.risk_id && (
+                          <span
+                            className="df2-column-risk-id"
+                            title={[
+                              m.riskContract.signature
+                                ? `sig ${String(m.riskContract.signature).slice(0, 24)}…`
+                                : "unsigned draft — Validate will sign",
+                              m.riskContract.loss_classification
+                                ? `loss=${m.riskContract.loss_classification}`
+                                : "",
+                              m.riskContract.approved_by
+                                ? `by ${m.riskContract.approved_by}`
+                                : "",
+                            ].filter(Boolean).join(" · ")}
+                          >
+                            {m.riskContract.risk_id}
+                          </span>
+                        )}
+                      </div>
                     ) : (
-                      <button
-                        type="button"
-                        className={`df2-btn df2-btn-sm${mappingAckTier(m) === "accept_risk" ? " df2-btn-danger" : ""}`}
-                        onClick={() => approveOne(index)}
-                        title={
-                          mappingRequiresRiskAck(m)
-                            ? createNewRiskDetail(m)
-                              || m.fidelityReason
-                              || (mappingAckTier(m) === "review"
-                                ? "Review this conversion before Execute"
-                                : "Accept fidelity / structural risk for this column")
-                            : undefined
-                        }
-                      >
-                        {mappingAckLabel(m)}
-                      </button>
+                      <div className="df2-column-risk-actions">
+                        {mappingRequiresRiskAck(m) && (
+                          <select
+                            className="df2-input df2-select df2-select-xs"
+                            value={policyBySource[m.source] || ""}
+                            onChange={(e) => {
+                              const v = e.target.value as ExecutionPolicy | "";
+                              setPolicyBySource((prev) => ({ ...prev, [m.source]: v }));
+                            }}
+                            aria-label={`Execution policy for ${m.source}`}
+                            title="Required — no hidden default"
+                          >
+                            <option value="">Policy…</option>
+                            {EXECUTION_POLICY_OPTIONS.map((p) => (
+                              <option key={p.id} value={p.id}>
+                                {p.label}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                        <button
+                          type="button"
+                          className={`df2-btn df2-btn-sm${mappingAckTier(m) === "accept_risk" ? " df2-btn-danger" : ""}`}
+                          onClick={() => approveOne(index)}
+                          disabled={
+                            mappingRequiresRiskAck(m) && !policyBySource[m.source]
+                          }
+                          title={
+                            mappingRequiresRiskAck(m)
+                              ? (!policyBySource[m.source]
+                                ? "Choose an execution policy first — no hidden defaults"
+                                : createNewRiskDetail(m)
+                                  || m.fidelityReason
+                                  || (mappingAckTier(m) === "review"
+                                    ? "Review this conversion before Execute"
+                                    : "Sign Migration Risk Contract for this column"))
+                              : undefined
+                          }
+                        >
+                          {mappingAckLabel(m)}
+                        </button>
+                      </div>
                     )}
                   </td>
                 </tr>

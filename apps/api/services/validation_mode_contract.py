@@ -104,8 +104,8 @@ def mode_contract(mode: str | None) -> dict[str, Any]:
                 "Sample validation never claims population proof.",
             ],
             "non_guarantees": [
-                "Balanced Gate-8 may use sample assurance when digests diverge — "
-                "checksum_match=false; population proof false.",
+                "Checksum mismatch always fails Gate-8 — sample success never "
+                "overrides diverging digests; population proof remains false.",
                 "Not a substitute for Strict on financial cutovers.",
             ],
         },

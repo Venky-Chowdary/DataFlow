@@ -207,6 +207,8 @@ class ExecuteTransferRequest(BaseModel):
     require_signed_contract: bool = False
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian), 'MDY' (US), or ''.
     date_locale: str = ""
+    # Delivery guarantee selector — only at_least_once is allowed (GA).
+    delivery_guarantee: str = "at_least_once"
 
 
 class MapColumnsRequest(BaseModel):
@@ -628,9 +630,18 @@ async def execute_transfer_json(
     idempotency_key: str = Header(default="", alias="Idempotency-Key"),
 ):
     """JSON transfer execute for SDK/GitOps — Form upload remains on POST /transfer/run."""
+    from services.execution_engine_contract import (
+        DeliveryGuaranteeError,
+        assert_delivery_guarantee_allowed,
+    )
     from ..transfer.background import run_transfer_async
     from ..transfer.engine import DuplicateTransferSubmission, get_transfer_engine
     from ..transfer.models import EndpointConfig, TransferRequest
+
+    try:
+        assert_delivery_guarantee_allowed(body.delivery_guarantee)
+    except DeliveryGuaranteeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     workspace_id = _resolve_write_workspace(request, workspace_id)
     src = EndpointConfig.from_dict(body.source.kind, body.source.model_dump(by_alias=True))
@@ -665,6 +676,7 @@ async def execute_transfer_json(
         date_locale=body.date_locale,
         triggered_by=_actor_email(request),
         idempotency_key=idempotency_key,
+        delivery_guarantee=body.delivery_guarantee or "at_least_once",
     )
     from services.batch_progress import effective_backfill_new_fields
 
@@ -844,6 +856,7 @@ async def run_universal_transfer(
     stream_contracts_json: str = Form(""),
     data_region: str = Form(""),
     date_locale: str = Form(""),
+    delivery_guarantee: str = Form("at_least_once"),
     request: Request = None,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
     idempotency_key: str = Header(default="", alias="Idempotency-Key"),
@@ -852,9 +865,18 @@ async def run_universal_transfer(
     Execute universal transfer: file/db → db/file/warehouse.
     Auto-creates tables, collections, and typed schemas.
     """
+    from services.execution_engine_contract import (
+        DeliveryGuaranteeError,
+        assert_delivery_guarantee_allowed,
+    )
     from ..transfer.background import run_transfer_async
     from ..transfer.engine import DuplicateTransferSubmission, get_transfer_engine
     from ..transfer.models import EndpointConfig, TransferRequest
+
+    try:
+        assert_delivery_guarantee_allowed(delivery_guarantee)
+    except DeliveryGuaranteeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     workspace_id = _resolve_write_workspace(request, workspace_id)
 
@@ -963,6 +985,7 @@ async def run_universal_transfer(
         date_locale=date_locale,
         triggered_by=_actor_email(request),
         idempotency_key=idempotency_key,
+        delivery_guarantee=delivery_guarantee or "at_least_once",
     )
     # Explicit form fields win over stored plan policies (plan used to force
     # validation_mode=strict and re-block encoding after Studio quarantine).
@@ -1267,6 +1290,127 @@ async def verify_transfer_proof_pack(body: ProofPackVerifyBody):
     from services.signed_proof_pack import verify_signed_proof_pack
 
     result = verify_signed_proof_pack(body.pack if isinstance(body.pack, dict) else {})
+    return result
+
+
+class RollbackExecuteBody(BaseModel):
+    approved_by: str = ""
+    reason: str = ""
+    # Optional override — defaults to job destination_summary.rollback_plan
+    plan: dict | None = None
+
+
+@router.post("/{job_id}/rollback/execute")
+async def execute_job_rollback(job_id: str, body: RollbackExecuteBody, request: Request):
+    """Execute a signed rollback plan — DISCARD_STAGING only.
+
+    Warehouse restore / population undo are never executed here (fail closed).
+    """
+    from services.audit_log import actor_from_request, append_audit_event
+    from services.migration_rollback import (
+        RollbackContractError,
+        RollbackRefuseError,
+        discard_staging_table,
+        execute_rollback,
+    )
+
+    from ..services.mongodb_service import get_mongodb_service
+    from ..transfer.models import EndpointConfig
+
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    if not job or not _can_access_job(request, job):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    actor = (body.approved_by or actor_from_request(request) or "").strip()
+    reason = (body.reason or "").strip()
+    if not actor or not reason:
+        raise HTTPException(
+            status_code=400,
+            detail="approved_by and reason are required for rollback execution",
+        )
+
+    dest = job.get("destination_summary") if isinstance(job.get("destination_summary"), dict) else {}
+    plan = body.plan if isinstance(body.plan, dict) else dest.get("rollback_plan")
+    if not isinstance(plan, dict) or not plan:
+        raise HTTPException(
+            status_code=400,
+            detail="No signed rollback_plan on job — refuse execution",
+        )
+    # Fail closed: never execute a plan bound to a different job (cross-job drop).
+    plan_job = str(plan.get("job_id") or "").strip()
+    if body.plan is not None and not plan_job:
+        raise HTTPException(
+            status_code=400,
+            detail="rollback_plan.job_id required when supplying an explicit plan",
+        )
+    if plan_job and plan_job != str(job_id):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"rollback_plan.job_id {plan_job!r} does not match path job "
+                f"{job_id!r} — refuse execution"
+            ),
+        )
+
+    dest_ep = None
+    req = job.get("request") if isinstance(job.get("request"), dict) else {}
+    raw_dest = req.get("destination") if isinstance(req.get("destination"), dict) else {}
+    if not raw_dest:
+        raw_dest = job.get("destination") if isinstance(job.get("destination"), dict) else {}
+
+    def _drop(staging: str) -> bool:
+        nonlocal dest_ep
+        if dest_ep is None:
+            dest_ep = EndpointConfig.from_dict(
+                str(raw_dest.get("kind") or "database"),
+                {**raw_dest, "table": staging},
+            )
+        return bool(discard_staging_table(dest_ep, staging))
+
+    try:
+        result = execute_rollback(
+            plan,
+            approved_by=actor,
+            reason=reason,
+            drop_staging_fn=_drop,
+        )
+    except RollbackContractError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RollbackRefuseError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    try:
+        append_audit_event(
+            action="migration_rollback.executed",
+            resource=f"job:{job_id}",
+            actor=actor,
+            level="warning",
+            details={
+                "rollback_id": result.get("rollback_id"),
+                "strategy": result.get("strategy"),
+                "staging_table": result.get("staging_table"),
+                "reason": reason,
+                "population_undo_claimed": False,
+            },
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning("rollback audit failed: %s", exc, exc_info=exc)
+
+    try:
+        mongo.update_job_status(
+            job_id,
+            job.get("status") or "completed",
+            rollback_execution=result,
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "rollback result persist failed: %s", exc, exc_info=exc
+        )
+
     return result
 
 

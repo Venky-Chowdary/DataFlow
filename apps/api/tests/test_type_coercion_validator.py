@@ -51,6 +51,50 @@ def test_lossy_coercion_warns_under_balanced():
     assert coerce_blocks_transfer(issues) is False
 
 
+def test_strict_boolean_ack_alone_still_blocks_lossy():
+    """GA: risk_acknowledged without Risk Contract must not soften strict blocks."""
+    issues = validate_mapping_coercions(
+        [{
+            "source": "note",
+            "target": "amount",
+            "confidence": 0.95,
+            "risk_acknowledged": True,
+        }],
+        source_types={"note": "VARCHAR"},
+        target_types={"amount": "INTEGER"},
+        validation_mode="strict",
+    )
+    assert issues
+    assert issues[0]["severity"] == "block"
+
+
+def test_strict_clearing_risk_contract_softens_to_warn():
+    from services.migration_risk_contract import create_migration_risk_contract
+
+    contract = create_migration_risk_contract(
+        column="note",
+        source_type="VARCHAR",
+        destination_type="INTEGER",
+        approved_by="admin@dataflow.app",
+        reason="Cast with quarantine",
+        execution_policy="CAST_AND_CONTINUE",
+    ).to_dict()
+    issues = validate_mapping_coercions(
+        [{
+            "source": "note",
+            "target": "amount",
+            "confidence": 0.95,
+            "risk_acknowledged": True,
+            "risk_contract": contract,
+        }],
+        source_types={"note": "VARCHAR"},
+        target_types={"amount": "INTEGER"},
+        validation_mode="strict",
+    )
+    assert issues
+    assert issues[0]["severity"] == "warn"
+
+
 def test_type_locked_blocks_any_logical_type_change():
     """When target type is locked, any logical type change is a hard blocker."""
     issues = validate_mapping_coercions(

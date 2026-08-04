@@ -15,17 +15,16 @@ Every validation surface stamps an explicit coverage contract:
 
 ## P0 fixes in this module
 
-### Gate-8 sample cannot hide checksum mismatch
+### Gate-8 checksum mismatch always fails (Enterprise GA)
 
-When whole-table checksums diverge and a key-aligned sample passes:
+When whole-table checksums diverge (both digests present):
 
-- `passed` may be `true` in balanced mode (job continues under sample assurance)
+- `passed` is **always** `false` — sample success cannot override
 - `checksum_match` is **always** `false`
 - `population_proof` is **always** `false`
-- `coverage` / `assurance_level` = `sample`
-- Message says **Sample-only assurance** and **NOT proven** — never “Row fidelity verified”
-
-Strict mode still fails on checksum mismatch.
+- `assurance_level` = `none` (failed)
+- Key-aligned sample may attach as **diagnostic only** (`sample_compare` retained)
+- Message states checksum mismatch and that sample cannot override
 
 ### FK / orphan fail-closed
 

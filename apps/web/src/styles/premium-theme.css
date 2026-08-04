@@ -1074,6 +1074,87 @@
   font-size: 12px;
 }
 
+.df2-column-risk-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
+  min-width: 9.5rem;
+}
+
+.df2-column-risk-actions .df2-select-xs {
+  font-size: 11px;
+  padding: 2px 6px;
+  min-height: 28px;
+}
+
+.df2-column-contract-done {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+
+.df2-column-risk-id {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  color: #64748b;
+  max-width: 9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.df2-gate8-proof-honesty {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px 12px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  font-size: 12px;
+}
+
+.df2-gate8-proof-honesty dt {
+  color: #64748b;
+  font-weight: 500;
+  margin: 0 0 2px;
+}
+
+.df2-gate8-proof-honesty dd {
+  margin: 0;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.df2-gate8-proof-honesty dd.is-warn {
+  color: #b45309;
+}
+
+.df2-gate8-proof-honesty dd.is-ok {
+  color: #047857;
+}
+
+.df2-theater-rollback {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  background: #fef2f2;
+}
+
+.df2-theater-rollback p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #7f1d1d;
+}
+
 .df2-column-reason {
   max-width: 280px;
   font-size: 12px;

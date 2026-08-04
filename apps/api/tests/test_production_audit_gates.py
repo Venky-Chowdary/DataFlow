@@ -131,6 +131,7 @@ def test_assert_mappings_executable_blocks_review_rows():
         assert_mappings_executable(
             [{"source": "a", "target": "b", "requires_review": True}]
         )
+    # approved review row with no fidelity risk still executable
     assert_mappings_executable(
         [{"source": "a", "target": "b", "requires_review": True, "approved": True}]
     )

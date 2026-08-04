@@ -327,6 +327,7 @@ export function TransferMapStep({
                 destTableExists={destTableExists}
                 destConnected={destConnected}
                 destConnectionError={destConnectionError}
+                tableName={targetCollection}
                 compact
                 hideTitle
                 search={search}
@@ -504,6 +505,7 @@ export function TransferMapStep({
           destTableExists={destTableExists}
           destConnected={destConnected}
           destConnectionError={destConnectionError}
+          tableName={targetCollection}
           presentation="dialog"
           search={search}
           onSearchChange={setSearch}

@@ -199,6 +199,151 @@ def assert_pack_may_claim_migration_proven(pack: dict[str, Any]) -> None:
         )
 
 
+def collect_accepted_risks_from_job(job: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Harvest Migration Risk Contracts from job mappings / preflight (deduped by risk_id)."""
+    if not isinstance(job, dict):
+        return []
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+
+    def _absorb(raw: Any) -> None:
+        if not isinstance(raw, dict):
+            return
+        rid = str(raw.get("risk_id") or "").strip()
+        key = rid or canonical_json(raw)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(dict(raw))
+
+    for m in job.get("mappings") or []:
+        if isinstance(m, dict):
+            _absorb(m.get("risk_contract") or m.get("riskContract"))
+    pf = job.get("preflight") if isinstance(job.get("preflight"), dict) else {}
+    for m in pf.get("mappings") or []:
+        if isinstance(m, dict):
+            _absorb(m.get("risk_contract") or m.get("riskContract"))
+    pb = pf.get("proof_bundle") if isinstance(pf.get("proof_bundle"), dict) else {}
+    for raw in pb.get("accepted_risks") or pb.get("risk_contracts") or []:
+        _absorb(raw)
+    for raw in job.get("accepted_risks") or []:
+        _absorb(raw)
+    return out
+
+
+def execution_policies_from_risks(accepted_risks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One execution-policy stamp per accepted risk (auditable, not inferred)."""
+    policies: list[dict[str, Any]] = []
+    for r in accepted_risks or []:
+        if not isinstance(r, dict):
+            continue
+        policies.append(
+            {
+                "risk_id": r.get("risk_id"),
+                "column": r.get("column") or r.get("target"),
+                "execution_policy": r.get("execution_policy"),
+                "quarantine_policy": r.get("quarantine_policy"),
+                "retry_policy": r.get("retry_policy"),
+                "rollback_strategy": r.get("rollback_strategy"),
+            }
+        )
+    return policies
+
+
+def mapping_risk_contracts_expected(job: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Risk contracts present on job mappings (expected in Proof Pack)."""
+    if not isinstance(job, dict):
+        return []
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for m in job.get("mappings") or []:
+        if not isinstance(m, dict):
+            continue
+        raw = m.get("risk_contract") or m.get("riskContract")
+        if not isinstance(raw, dict):
+            continue
+        rid = str(raw.get("risk_id") or "").strip()
+        key = rid or canonical_json(raw)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(dict(raw))
+    return out
+
+
+def proof_pack_risk_completeness_errors(
+    *,
+    accepted_risks: list[dict[str, Any]] | None,
+    expected_from_mappings: list[dict[str, Any]] | None = None,
+    job_success: bool = False,
+) -> list[str]:
+    """Fail-closed checks: mapping contracts must appear in accepted_risks.
+
+    Incomplete packs may still be signed for audit, but must never claim
+    ``migration_proven`` (caller strips that). Errors are also surfaced on verify.
+    """
+    errors: list[str] = []
+    accepted = [r for r in (accepted_risks or []) if isinstance(r, dict)]
+    expected = [r for r in (expected_from_mappings or []) if isinstance(r, dict)]
+    if not expected:
+        return errors
+    accepted_ids = {
+        str(r.get("risk_id") or "").strip() for r in accepted if str(r.get("risk_id") or "").strip()
+    }
+    missing = []
+    for exp in expected:
+        rid = str(exp.get("risk_id") or "").strip()
+        if rid and rid not in accepted_ids:
+            missing.append(rid)
+        elif not rid and not accepted:
+            missing.append(str(exp.get("column") or "?"))
+    if missing:
+        errors.append(
+            "accepted_risks incomplete vs mapping Risk Contracts: "
+            + ", ".join(missing[:8])
+            + (f" (+{len(missing) - 8} more)" if len(missing) > 8 else "")
+        )
+    if job_success and expected and not accepted:
+        errors.append(
+            "successful job exported without accepted_risks while mappings "
+            "carry Risk Contracts — refuse proof completeness"
+        )
+    return errors
+
+
+def proof_pack_evidence_completeness_errors(
+    *,
+    job_success: bool,
+    ddl_hash: str | None,
+    mapping_hash: str | None,
+    connector_versions: dict[str, Any] | None,
+    reconciliation: dict[str, Any] | None,
+    claim_migration_proven: bool,
+) -> list[str]:
+    """Refuse hollow proven packs — hashes / connector attribution must exist."""
+    if not job_success and not claim_migration_proven:
+        return []
+    errors: list[str] = []
+    ddl = str(ddl_hash or "").strip()
+    mph = str(mapping_hash or "").strip()
+    if claim_migration_proven and not ddl and not mph:
+        errors.append(
+            "migration_proven refused: ddl_hash and mapping_hash both absent"
+        )
+    if claim_migration_proven:
+        recon = reconciliation if isinstance(reconciliation, dict) else {}
+        src = str(recon.get("source_checksum") or "").strip()
+        tgt = str(recon.get("target_checksum") or "").strip()
+        if not src or not tgt or src != tgt:
+            errors.append(
+                "migration_proven refused: independent matching checksums required"
+            )
+    versions = connector_versions if isinstance(connector_versions, dict) else {}
+    if claim_migration_proven and not versions:
+        errors.append("migration_proven refused: connector_versions absent")
+    return errors
+
+
 def build_signed_proof_pack(
     *,
     job_id: str,
@@ -214,6 +359,11 @@ def build_signed_proof_pack(
     ddl_hash: str | None = None,
     mapping_hash: str | None = None,
     transformation_hash: str | None = None,
+    rollback_plan: dict[str, Any] | None = None,
+    risk_contracts: list[dict[str, Any]] | None = None,
+    expected_risks_from_mappings: list[dict[str, Any]] | None = None,
+    job_success: bool = False,
+    require_risk_completeness: bool | None = None,
 ) -> dict[str, Any]:
     """Build a signed proof pack for a completed (or failed) job.
 
@@ -221,6 +371,48 @@ def build_signed_proof_pack(
     for audit chain integrity — they must not set ``migration_proven``.
     """
     assurance = classify_post_write_assurance(reconciliation)
+    risks = list(accepted_risks or risk_contracts or [])
+    policies = execution_policies_from_risks(risks)
+    completeness_errors = proof_pack_risk_completeness_errors(
+        accepted_risks=risks,
+        expected_from_mappings=expected_risks_from_mappings,
+        job_success=job_success,
+    )
+    assurance = dict(assurance)
+    claim_proven = bool(assurance.get("migration_proven"))
+    completeness_errors.extend(
+        proof_pack_evidence_completeness_errors(
+            job_success=job_success,
+            ddl_hash=ddl_hash,
+            mapping_hash=mapping_hash,
+            connector_versions=connector_versions,
+            reconciliation=reconciliation if isinstance(reconciliation, dict) else None,
+            claim_migration_proven=claim_proven,
+        )
+    )
+    if completeness_errors:
+        # Never allow incomplete harvest / hollow evidence to keep proven claim.
+        assurance["migration_proven"] = False
+        if assurance.get("claim_level") == "full_checksum":
+            assurance["claim_level"] = "incomplete_proof_evidence"
+        assurance["proof_incomplete_reasons"] = list(completeness_errors)
+    rb = rollback_plan if isinstance(rollback_plan, dict) and rollback_plan else {
+        "strategy": "DOCUMENT_ONLY",
+        "executable": False,
+        "population_undo_claimed": False,
+        "note": "No signed rollback plan — warehouse restore not productized.",
+    }
+    require_complete = (
+        bool(require_risk_completeness)
+        if require_risk_completeness is not None
+        else bool(job_success and (completeness_errors or expected_risks_from_mappings))
+    )
+    versions = dict(connector_versions or {})
+    # Honesty: format/kind fallback is not a package version string.
+    versions_are_format_only = bool(versions) and all(
+        isinstance(v, str) and not any(ch.isdigit() for ch in v)
+        for v in versions.values()
+    )
     body = {
         "version": PROOF_PACK_VERSION,
         "issued_at": datetime.now(timezone.utc).isoformat(),
@@ -231,14 +423,30 @@ def build_signed_proof_pack(
         "preflight_summary": preflight_summary or {},
         "assurance": assurance,
         "validation_mode": validation_mode,
-        "accepted_risks": list(accepted_risks or []),
+        "accepted_risks": risks,
+        "risk_contracts": risks,
+        "execution_policies": policies,
+        "proof_incomplete_reasons": list(completeness_errors),
+        "require_risk_completeness": require_complete,
         "rejected_rows_count": len(rejected_rows or []),
         "rejected_rows_sample": list(rejected_rows or [])[:50],
-        "connector_versions": connector_versions or {},
+        "connector_versions": versions,
+        "connector_versions_honesty": (
+            "format_or_kind_only"
+            if versions_are_format_only
+            else ("absent" if not versions else "provided")
+        ),
+        "rollback_plan": rb,
         "hashes": {
             "ddl_hash": ddl_hash,
             "mapping_hash": mapping_hash,
             "transformation_hash": transformation_hash,
+            "source_checksum": (reconciliation or {}).get("source_checksum")
+            if isinstance(reconciliation, dict)
+            else None,
+            "target_checksum": (reconciliation or {}).get("target_checksum")
+            if isinstance(reconciliation, dict)
+            else None,
         },
         "prev_audit_hash": prev_audit_hash,
         "delivery_semantics": {
@@ -287,11 +495,23 @@ def verify_signed_proof_pack(pack: dict[str, Any]) -> dict[str, Any]:
     assurance = pack.get("assurance") if isinstance(pack.get("assurance"), dict) else {}
     if assurance.get("migration_proven") and assurance.get("claim_level") != "full_checksum":
         errors.append("migration_proven claimed without full_checksum assurance")
+    incomplete = pack.get("proof_incomplete_reasons") or assurance.get(
+        "proof_incomplete_reasons"
+    )
+    if incomplete:
+        if assurance.get("migration_proven"):
+            errors.append("migration_proven claimed while proof_incomplete_reasons present")
+        # Completeness errors are informational for failed/unsigned harvests;
+        # only fail verify when a green proven claim was attempted (above) or
+        # when pack explicitly marks completeness as required.
+        if pack.get("require_risk_completeness") is True:
+            for reason in incomplete:
+                errors.append(str(reason))
     return {"ok": not errors, "errors": errors, "content_sha256": actual_hash}
 
 
 def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> dict[str, Any]:
-    """Convenience: pull Gate-8 + mapping proof off a job document."""
+    """Convenience: pull Gate-8 + mapping proof + risk contracts off a job document."""
     from services.audit_log import latest_event_hash
 
     prev = None
@@ -302,25 +522,73 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
     dest = job.get("destination_summary") if isinstance(job.get("destination_summary"), dict) else {}
     rejected = dest.get("rejected_details") or job.get("rejected_details") or []
     mapping_proof = job.get("mapping_proof") if isinstance(job.get("mapping_proof"), dict) else {}
+    accepted = collect_accepted_risks_from_job(job)
+    expected_risks = mapping_risk_contracts_expected(job)
+    # If mappings were stripped but accepted_risks stamped at execute, expected
+    # may be empty — still fine. If mappings carry contracts and harvest is
+    # empty, completeness errors strip migration_proven.
+    rollback = dest.get("rollback_plan") if isinstance(dest.get("rollback_plan"), dict) else {}
+    if not rollback and isinstance(job.get("rollback_plan"), dict):
+        rollback = job["rollback_plan"]
+    connector_versions = {}
+    if isinstance(job.get("connector_versions"), dict):
+        connector_versions = dict(job["connector_versions"])
+    else:
+        for key in ("source_connector_version", "destination_connector_version"):
+            if job.get(key):
+                connector_versions[key] = job[key]
+        src = job.get("source") if isinstance(job.get("source"), dict) else {}
+        dst = job.get("destination") if isinstance(job.get("destination"), dict) else {}
+        if src.get("format") or src.get("kind"):
+            connector_versions["source"] = src.get("format") or src.get("kind")
+        if dst.get("format") or dst.get("kind"):
+            connector_versions["destination"] = dst.get("format") or dst.get("kind")
+    pf = job.get("preflight") if isinstance(job.get("preflight"), dict) else {}
+    ddl_identity = (
+        (pf.get("proof_bundle") or {}).get("ddl_identity")
+        if isinstance(pf.get("proof_bundle"), dict)
+        else {}
+    )
+    ddl_hash = (
+        str(dest.get("ddl_hash") or "")
+        or str((ddl_identity or {}).get("ddl_identity_hash") or "")
+        or None
+    )
+    xform_hash = str(dest.get("transformation_hash") or job.get("transformation_hash") or "") or None
+    job_success = str(job.get("status") or "").lower() in {
+        "completed",
+        "completed_with_quarantine",
+        "success",
+        "succeeded",
+    }
     return build_signed_proof_pack(
         job_id=str(job.get("_id") or job.get("id") or ""),
         reconciliation=job.get("reconciliation") if isinstance(job.get("reconciliation"), dict) else None,
         mapping_proof=mapping_proof or None,
         preflight_summary=(
             {
-                "passed": (job.get("preflight") or {}).get("passed"),
-                "decision": (job.get("preflight") or {}).get("decision"),
-                "passed_count": (job.get("preflight") or {}).get("passed_count"),
-                "total_gates": (job.get("preflight") or {}).get("total_gates"),
-                "readiness_score": (job.get("preflight") or {}).get("readiness_score"),
+                "passed": pf.get("passed"),
+                "decision": pf.get("decision")
+                or ((pf.get("proof_bundle") or {}).get("transfer_decision") or {}).get("decision"),
+                "passed_count": pf.get("passed_count"),
+                "total_gates": pf.get("total_gates"),
+                "readiness_score": pf.get("readiness_score"),
             }
-            if isinstance(job.get("preflight"), dict)
+            if pf
             else None
         ),
         actor=actor,
         prev_audit_hash=prev,
         validation_mode=str(job.get("validation_mode") or dest.get("validation_mode") or "") or None,
+        accepted_risks=accepted,
         rejected_rows=list(rejected) if isinstance(rejected, list) else [],
-        ddl_hash=str(dest.get("ddl_hash") or "") or None,
+        connector_versions=connector_versions,
+        ddl_hash=ddl_hash,
         mapping_hash=str(mapping_proof.get("mapping_hash") or "") or None,
+        transformation_hash=xform_hash,
+        rollback_plan=rollback or None,
+        expected_risks_from_mappings=expected_risks,
+        job_success=job_success,
+        require_risk_completeness=bool(job_success and expected_risks)
+        or bool(job_success and not accepted and expected_risks),
     )

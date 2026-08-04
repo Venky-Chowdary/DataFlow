@@ -138,6 +138,57 @@ def test_continue_contract_on_mapping_clears():
     assert lossy_mappings_missing_risk_contracts([mapping]) == []
 
 
+def test_create_stamps_migration_id_table_loss_classification():
+    c = create_migration_risk_contract(
+        column="amt",
+        source_type="DECIMAL(18,4)",
+        destination_type="INTEGER",
+        approved_by="admin@dataflow.app",
+        reason="Collapse precision for legacy sink",
+        execution_policy="CAST_AND_CONTINUE",
+        migration_id="mig-99",
+        table="orders",
+        expected_precision_loss=True,
+        expected_truncation=True,
+    )
+    d = c.to_dict()
+    assert d["migration_id"] == "mig-99"
+    assert d["table"] == "orders"
+    assert d["loss_classification"] == "truncation"
+    assert verify_risk_contract(c) is True
+
+
+def test_safe_normalize_mutate_does_not_require_risk_contract():
+    mappings = [
+        {
+            "source": "email",
+            "target": "email",
+            "fidelity": "mutate",
+            "transform": "email",
+            "approved": True,
+        }
+    ]
+    assert lossy_mappings_missing_risk_contracts(mappings) == []
+
+
+def test_assert_mappings_executable_blocks_boolean_ack_without_contract():
+    from services.mapping_pipeline import assert_mappings_executable
+
+    with pytest.raises(ValueError, match="Risk Contract"):
+        assert_mappings_executable(
+            [
+                {
+                    "source": "amt",
+                    "target": "amt",
+                    "fidelity": "lossy_cast",
+                    "risk_acknowledged": True,
+                    "approved": True,
+                    "requires_review": False,
+                }
+            ]
+        )
+
+
 def test_run_file_preflight_signs_draft_contract_and_approves():
     """Map draft CAST_AND_CONTINUE contract is signed on Validate and unlocks approve."""
     from services.preflight_service import run_file_preflight

@@ -20,6 +20,7 @@ from services.validation_coverage import (
 
 def test_coverage_layers_are_explicit():
     assert "schema" in VALIDATION_LAYERS
+    assert "datatype" in VALIDATION_LAYERS
     assert "sample" in VALIDATION_LAYERS
     assert "population" in VALIDATION_LAYERS
     assert "execution" in VALIDATION_LAYERS
@@ -51,7 +52,7 @@ def test_population_proof_requires_population_layer():
 
 
 def test_gate8_checksum_mismatch_sample_never_claims_population():
-    """P0: sample authority must not hide checksum mismatch as full verify."""
+    """P0/GA: checksum mismatch always fails — sample is diagnostic only."""
     r = reconcile(
         source_rows=10,
         target_rows=10,
@@ -61,15 +62,17 @@ def test_gate8_checksum_mismatch_sample_never_claims_population():
         sample_compare={"passed": True, "compared": 5, "mismatches": []},
     )
     d = r.to_dict()
+    assert d.get("passed") is False
     assert d.get("checksum_match") is False
     assert d.get("population_proof") is False
-    assert d.get("coverage") == "sample"
-    assert d.get("assurance_level") == "sample"
+    assert d.get("assurance_level") == "none"
     msg = (d.get("message") or "").lower()
-    assert "not" in msg and ("population" in msg or "full-checksum" in msg or "full checksum" in msg)
-    # Must not claim unqualified population / full-table verification.
+    assert "checksum mismatch" in msg
+    assert "cannot override" in msg or "diagnostic" in msg
     assert "row fidelity verified" not in msg
-    assert d.get("phase") == "post_write_sample_verified"
+    # Sample diagnostics remain attached for operators.
+    assert (d.get("sample_compare") or {}).get("compared") == 5
+    assert d.get("phase") == "post_write_failed"
 
 
 def test_gate8_matching_checksum_is_full_checksum_not_sample_lie():
@@ -87,6 +90,7 @@ def test_gate8_matching_checksum_is_full_checksum_not_sample_lie():
 
 
 def test_stamp_phase_preserves_checksum_honesty_fields():
+    """Diverging digests force failed — sample cannot soft-verify."""
     out = stamp_post_write_phase(
         {
             "passed": True,
@@ -99,11 +103,12 @@ def test_stamp_phase_preserves_checksum_honesty_fields():
             "assurance_level": "sample",
         }
     )
-    assert out["phase"] == "post_write_sample_verified"
-    assert out["coverage"] == "sample"
+    assert out["passed"] is False
+    assert out["phase"] == "post_write_failed"
+    assert out["coverage"] == "none"
     assert out["checksum_match"] is False
     assert out["population_proof"] is False
-    assert out["assurance_level"] == "sample"
+    assert out["assurance_level"] == "none"
 
 
 def test_fk_probe_unavailable_emits_fail_closed_finding():
