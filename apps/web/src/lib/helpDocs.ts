@@ -1119,7 +1119,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
     slug: "job-theater",
     category: "Operations",
     title: "Job Theater & reconciliation",
-    description: "Monitor every run from queue to checksum MATCH — quarantine, proof, and recovery.",
+    description: "Monitor every run from queue to checksum MATCH — quarantine, proof, and checkpoint resume (not one-click destination undo).",
     readTime: "10 min",
     icon: "jobs",
     sections: [

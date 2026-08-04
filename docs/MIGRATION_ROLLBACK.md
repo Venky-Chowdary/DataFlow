@@ -36,3 +36,10 @@ operators can rely on today — and what is **not** productized.
 - `docs/PRODUCT_SCOPE.md` — what the product is / is not
 - `docs/BUYER_EVIDENCE_PACK.md` — diligence artifacts
 - `docs/ops/` — custom domain, CDC leases, tip-anchor honesty
+
+## API honesty SSOT
+
+Workspace security posture exposes `recovery_honesty` (and top-level
+`transfer_undo_claimed: false`) from `services.recovery_honesty.honesty_dict`.
+Machine-readable claims must stay aligned with this document — never invent
+product undo in UI or marketing without flipping those flags with tests.

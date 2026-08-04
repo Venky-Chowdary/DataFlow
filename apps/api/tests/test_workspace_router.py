@@ -74,7 +74,10 @@ def test_security_posture_report(client):
     assert posture["cdc_honesty"]["delivery_classes"]["at_least_once"]["claimed"] is True
     assert posture["cdc_honesty"]["delivery_classes"]["exactly_once"]["claimed"] is False
     assert posture["cdc_honesty"]["delivery_classes"]["at_most_once"]["claimed"] is False
+    assert posture["transfer_undo_claimed"] is False
+    assert posture["recovery_honesty"]["transfer_undo_claimed"] is False
     assert "checkpoint_fail_closed" in posture["deployment"]["data_loss_controls"]
+    assert "no_product_transfer_undo" in posture["deployment"]["data_loss_controls"]
 
     response = client.get(
         "/api/v1/workspace/security/report",

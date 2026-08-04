@@ -571,6 +571,7 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
         honesty_dict,
     )
     from services.platform_config import is_production, validate_production_config
+    from services.recovery_honesty import honesty_dict as recovery_honesty_dict
     from services.secret_vault import secrets_encryption_ready
 
     region = tenant.data_region if tenant else "us-east-1"
@@ -580,6 +581,7 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
     prod_errors = validate_production_config() if prod else []
     audit_logging = True  # append-only JSONL audit path is always mounted
     cdc_honesty = honesty_dict()
+    recovery_honesty = recovery_honesty_dict()
     return {
         "tenant_id": tenant.id if tenant else None,
         "workspace_id": tenant.workspace_id if tenant else None,
@@ -616,6 +618,9 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
         "cdc_exactly_once_claimed": EXACTLY_ONCE_CLAIMED,
         "cdc_at_most_once_claimed": False,
         "cdc_honesty": cdc_honesty,
+        # Recovery Integrity — refuse invent of one-click undo / restore product.
+        "transfer_undo_claimed": bool(recovery_honesty.get("transfer_undo_claimed")),
+        "recovery_honesty": recovery_honesty,
         "deployment": {
             "models": ["saas_multi_tenant", "customer_vpc_self_host", "air_gapped_compose"],
             "saas_multi_tenant": "Workspace isolation + optional DATAFLOW_REQUIRE_WORKSPACE hard gate",
@@ -634,6 +639,7 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
                 "sql_null_vs_empty_preserved",
                 "checkpoint_fail_closed",
                 f"cdc_delivery_{DELIVERY_DEFAULT}_pk_lsn_upsert",
+                "no_product_transfer_undo",
             ],
         },
         "private_networking": {
