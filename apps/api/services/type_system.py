@@ -2680,6 +2680,9 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
             return "MONEY"
         if db == "postgresql":
             return "DECIMAL(19,4)"
+        # SQLite has no fixed-point — TEXT avoids NUMERIC affinity IEEE loss.
+        if db == "sqlite":
+            return "TEXT"
         return (
             _decimal_ddl_for_dest(db, "DECIMAL(19,4)")
             if db in _DECIMAL_PARAM_TEMPLATES
@@ -2688,6 +2691,8 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
     if base_early == "SMALLMONEY":
         if db == "sqlserver":
             return "SMALLMONEY"
+        if db == "sqlite":
+            return "TEXT"
         return (
             _decimal_ddl_for_dest(db, "DECIMAL(10,4)")
             if db in _DECIMAL_PARAM_TEMPLATES
@@ -5765,6 +5770,13 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC",
         "UNIQUEIDENTIFIER", "NVARCHAR2", "HSTORE", "INET", "CIDR", "JSON",
     }),
+    # SQLite has no true fixed-point type. DECIMAL/NUMERIC/NUMBER stamps get
+    # NUMERIC affinity and silently store high-precision values as IEEE real.
+    # Rematerialize via ddl_type → TEXT (Map≡CREATE honesty).
+    "sqlite": frozenset({
+        "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+    }),
 }
 
 
@@ -5774,14 +5786,21 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
     if not raw:
         return False
     upper = raw.upper()
-    # Typmod / nested / array brackets are always physical.
+    db = _normalize_dest_db(dest_db) if dest_db else ""
+    reject = _PASS_THROUGH_REJECT_ON_DEST.get(db, frozenset()) if db else frozenset()
+    # Typmod / nested / array brackets are physical unless the bare token is
+    # illegal on this dest (e.g. DECIMAL(38,18) on SQLite → TEXT rematerialize).
     if "(" in upper or "[" in upper or "<" in upper:
+        if "<" in upper or "[" in upper:
+            return True
+        bare_typmod = upper.split("(", 1)[0].strip()
+        if bare_typmod in reject:
+            return False
         return True
     bare = upper.split("(", 1)[0].strip()
-    db = _normalize_dest_db(dest_db) if dest_db else ""
     if bare in _PHYSICAL_STAMP_PASS_THROUGH or upper in _PHYSICAL_STAMP_PASS_THROUGH:
         # Refuse pass-through of tokens illegal / non-create-wire on this dest.
-        if db and bare in _PASS_THROUGH_REJECT_ON_DEST.get(db, frozenset()):
+        if bare in reject:
             return False
         return True
     # MySQL/Maria FLOAT is a real physical stamp (HALF create-new). On PG/etc.
@@ -5815,9 +5834,11 @@ def materialize_dest_ddl(db_type: str, carrier: str | None) -> str:
     must become ``list<…>`` (float leaves stay float) — not pass-through Spark
     ARRAY tokens the Iceberg writer cannot CREATE.
 
-    Known limitation: typmod-bearing stamps (``VARCHAR(n)``) always pass through
-    even when ``n`` exceeds a destination cap — width collapse is Validate's job,
-    not silent CREATE rewrite.
+    Known limitation: typmod-bearing stamps (``VARCHAR(n)``) usually pass
+    through even when ``n`` exceeds a destination cap — width collapse is
+    Validate's job, not silent CREATE rewrite. Exception: tokens listed in
+    ``_PASS_THROUGH_REJECT_ON_DEST`` (e.g. ``DECIMAL(p,s)`` on SQLite) always
+    rematerialize via ``ddl_type`` so CREATE cannot invent NUMERIC affinity.
     """
     raw = strip_identity_qualifier(carrier).strip()
     if not raw:
