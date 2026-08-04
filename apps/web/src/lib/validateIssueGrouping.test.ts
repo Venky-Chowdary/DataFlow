@@ -8,6 +8,7 @@ import {
   buildDisplayBlockers,
   buildExecutiveSummary,
   findDuplicateKeyRoot,
+  findFidelityCollapseRoot,
   groupIsoNormalizeIssues,
   isDeclaredFidelityCollapse,
   isEncodingIntegritySignal,
@@ -351,5 +352,46 @@ describe("isEncodingIntegritySignal", () => {
       ),
       false,
     );
+  });
+});
+
+describe("findFidelityCollapseRoot", () => {
+  it("collapses multi-gate fidelity blockers into one root", () => {
+    const pf = basePreflight({
+      gates: [
+        {
+          id: "g3_type_compat",
+          name: "Type",
+          status: "block",
+          message: "DECIMAL → FLOAT fidelity collapse on amt",
+          details: { fidelity_collapse: true },
+        },
+        {
+          id: "g5_sample",
+          name: "Sample",
+          status: "block",
+          message: "Sample shows precision loss on amt",
+          details: { framing: { kind: "fidelity_collapse" } },
+        },
+      ],
+      blockers: [
+        {
+          id: "g3_type_compat",
+          message: "DECIMAL → FLOAT fidelity collapse on amt",
+          details: { fidelity_collapse: true },
+        },
+        {
+          id: "g5_sample",
+          message: "Sample shows precision loss on amt",
+          details: { framing: { kind: "fidelity_collapse" } },
+        },
+      ],
+    });
+    const root = findFidelityCollapseRoot(pf);
+    assert.ok(root);
+    assert.match(root!.title, /fidelity/i);
+    const display = buildDisplayBlockers(pf);
+    assert.equal(display.filter((d) => d.kind === "fidelity_root").length, 1);
+    assert.ok(display.every((d) => d.kind !== "blocker" || !/fidelity|precision loss/i.test(d.message)));
   });
 });

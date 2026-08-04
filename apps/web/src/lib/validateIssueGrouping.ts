@@ -94,7 +94,7 @@ export interface ExecutiveSummary {
 
 export interface DisplayBlocker {
   key: string;
-  kind: "duplicate_root" | "blocker";
+  kind: "duplicate_root" | "fidelity_root" | "blocker";
   title: string;
   message: string;
   impact?: string;
@@ -105,6 +105,81 @@ export interface DisplayBlocker {
   suggested_actions?: ValidationSuggestedAction[];
   /** Original blocker for dry-run / encoding action hooks. */
   source?: PreflightResult["blockers"][number];
+}
+
+const FIDELITY_RE =
+  /fidelity.?collapse|lossy|precision.?loss|scale.?truncat|nested.?shape.?collapse|declared type path collapses|width.?truncat|timezone.?shift/i;
+
+const FIDELITY_GATE_IDS = new Set([
+  "g3_type_compat",
+  "g3_type_compatibility",
+  "g4_transform",
+  "g5_sample",
+  "g5_sample_validation",
+  "g8_reconciliation",
+]);
+
+export function isFidelityCollapseSignal(
+  message: string,
+  details?: Record<string, unknown> | null,
+  gateId?: string,
+): boolean {
+  const blob = textBlob(message, details);
+  if (FIDELITY_RE.test(blob)) return true;
+  if (details?.fidelity_collapse === true) return true;
+  const framing = asRecord(details?.framing);
+  const kind = String(framing?.kind || details?.kind || "").toLowerCase();
+  if (
+    kind === "fidelity_collapse"
+    || kind === "nested_shape_collapse"
+    || kind === "nested_document_serialization"
+  ) {
+    return true;
+  }
+  if (gateId && FIDELITY_GATE_IDS.has(gateId) && /loss|truncat|collapse|\bcast\b/i.test(blob)) {
+    return true;
+  }
+  return false;
+}
+
+/** Collapse multi-gate fidelity/lossy failures into one operator-facing root. */
+export function findFidelityCollapseRoot(
+  preflight: PreflightResult | null | undefined,
+): {
+  title: string;
+  impact: string;
+  fixHint: string;
+  gateIds: string[];
+  messages: string[];
+  absorbedBlockerIds: string[];
+} | null {
+  if (!preflight) return null;
+  const gateHits = (preflight.gates ?? []).filter(
+    (g) => g.status === "block" && isFidelityCollapseSignal(g.message, g.details, g.id),
+  );
+  const blockerHits = (preflight.blockers ?? []).filter((b) =>
+    isFidelityCollapseSignal(b.message, b.details, b.id),
+  );
+  if (gateHits.length + blockerHits.length < 2) return null;
+  const gateIds = [...new Set([
+    ...gateHits.map((g) => g.id),
+    ...blockerHits.map((b) => b.id).filter((id) => FIDELITY_GATE_IDS.has(id)),
+  ])];
+  if (gateIds.length < 2 && blockerHits.length < 2) return null;
+  const messages = [
+    ...gateHits.map((g) => g.message),
+    ...blockerHits.map((b) => b.message),
+  ].filter(Boolean);
+  return {
+    title: "Lossy / fidelity collapse across type path",
+    impact:
+      "Declared types or nested shapes collapse fidelity on write — Accept risk on Map or remap carriers before Execute.",
+    fixHint:
+      "Open Map → review Approve/Review/Accept risk tiers → remap width/scale or ack intentional loss → re-run Validate.",
+    gateIds,
+    messages,
+    absorbedBlockerIds: blockerHits.map((b) => b.id),
+  };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -393,7 +468,11 @@ export function buildDisplayBlockers(
   syncMode?: string,
 ): DisplayBlocker[] {
   const root = findDuplicateKeyRoot(preflight, syncMode);
-  const absorbed = new Set(root?.absorbedBlockerIds ?? []);
+  const fidelityRoot = findFidelityCollapseRoot(preflight);
+  const absorbed = new Set([
+    ...(root?.absorbedBlockerIds ?? []),
+    ...(fidelityRoot?.absorbedBlockerIds ?? []),
+  ]);
   const items: DisplayBlocker[] = [];
 
   if (root) {
@@ -410,9 +489,24 @@ export function buildDisplayBlockers(
     });
   }
 
+  if (fidelityRoot) {
+    items.push({
+      key: "fidelity-collapse",
+      kind: "fidelity_root",
+      title: fidelityRoot.title,
+      message: fidelityRoot.messages[0] || fidelityRoot.impact,
+      impact: fidelityRoot.impact,
+      gateChips: fidelityRoot.gateIds.map((id) => ({ id, label: gateLabel(id) })),
+      issues: fidelityRoot.messages.slice(1),
+      fix: fidelityRoot.fixHint,
+      why: "The same lossy carrier path failed multiple gates — one Map risk decision, not N separate warnings.",
+    });
+  }
+
   for (const b of preflight.blockers) {
     if (absorbed.has(b.id)) continue;
     if (root && isDuplicateIdentitySignal(b.message, b.details, b.id)) continue;
+    if (fidelityRoot && isFidelityCollapseSignal(b.message, b.details, b.id)) continue;
     items.push({
       key: b.id,
       kind: "blocker",
@@ -491,8 +585,11 @@ export function buildExecutiveSummary(
 
   const untilLines: string[] = [];
   if (root) untilLines.push("Duplicate identity keys resolved");
+  if (displayBlockers.some((b) => b.kind === "fidelity_root")) {
+    untilLines.push("Lossy / fidelity risk acknowledged or remapped on Map");
+  }
   for (const item of displayBlockers) {
-    if (item.kind === "duplicate_root") continue;
+    if (item.kind === "duplicate_root" || item.kind === "fidelity_root") continue;
     untilLines.push(item.title);
   }
   // Cap bullets so the hero stays scannable.

@@ -44,6 +44,7 @@ const EMPTY_MODEL = (): TransformModelDef => ({
 const EMPTY_DRAFT = (): Omit<TransformProject, "id"> & { id?: string } => ({
   name: "",
   destination_connector_id: "",
+  contract_id: "",
   schema: "",
   models: [EMPTY_MODEL()],
   enabled: true,
@@ -183,6 +184,7 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
       const body = {
         name: editing.name.trim(),
         destination_connector_id: editing.destination_connector_id,
+        contract_id: (editing.contract_id || "").trim(),
         schema: editing.schema,
         models: editing.models,
         enabled: editing.enabled,
@@ -318,6 +320,15 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
                     </option>
                   ))}
                 </select>
+              </label>
+
+              <label className="df2-field">
+                <span>Linked data contract (optional)</span>
+                <input
+                  value={editing.contract_id || ""}
+                  onChange={(e) => setEditing({ ...editing, contract_id: e.target.value })}
+                  placeholder="dfc-… — when set, post-load auto-run requires SIGNED"
+                />
               </label>
 
               <label className="df2-field">

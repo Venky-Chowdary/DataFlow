@@ -109,6 +109,39 @@ def run_post_load_transforms(
     return summary
 
 
+def _assert_linked_contract(project: Any) -> str | None:
+    """When ``contract_id`` is set, auto-run requires a SIGNED contract (fail-closed)."""
+    cid = str(getattr(project, "contract_id", "") or "").strip()
+    if not cid:
+        return None
+    try:
+        from services.contract_store import get_contract_store
+        from services.data_contract import ContractStatus
+    except ImportError:  # pragma: no cover
+        from src.services.contract_store import get_contract_store
+        from src.services.data_contract import ContractStatus
+
+    try:
+        contract = get_contract_store().get_contract(cid)
+    except Exception as exc:
+        # Malformed store docs must not abort sibling projects in the post-load loop.
+        return (
+            f"Linked data contract {cid} could not be loaded ({exc}) — "
+            "clear contract_id or repair the contract store."
+        )
+    if contract is None:
+        return (
+            f"Linked data contract {cid} was not found — clear contract_id or restore the contract."
+        )
+    status = getattr(contract.status, "value", contract.status)
+    if contract.status != ContractStatus.SIGNED and str(status).lower() != "signed":
+        return (
+            f"Linked data contract {cid} is {status}, not SIGNED — "
+            "sign the contract before post-load transforms auto-run."
+        )
+    return None
+
+
 def _run_one_project(
     project: Any,
     destination: Any,
@@ -122,7 +155,13 @@ def _run_one_project(
         "status": "failed",
         "models": [],
         "message": "",
+        "contract_id": str(getattr(project, "contract_id", "") or ""),
     }
+    gate = _assert_linked_contract(project)
+    if gate:
+        entry["status"] = "failed"
+        entry["message"] = gate
+        return entry
     try:
         cfg = dest_cfg
         if cfg is None:

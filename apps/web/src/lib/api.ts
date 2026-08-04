@@ -3363,6 +3363,8 @@ export interface TransformProject {
   id: string;
   name: string;
   destination_connector_id: string;
+  /** Optional signed DataContract — post-load auto-run requires SIGNED when set. */
+  contract_id?: string;
   schema: string;
   models: TransformModelDef[];
   enabled: boolean;

@@ -52,6 +52,7 @@ class ModelPayload(BaseModel):
 class ProjectCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
     destination_connector_id: str = Field(..., min_length=1)
+    contract_id: str = ""
     schema_name: str = Field(default="", alias="schema")
     models: list[ModelPayload] = Field(default_factory=list)
     enabled: bool = True
@@ -65,6 +66,7 @@ class ProjectCreate(BaseModel):
 class ProjectUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=120)
     destination_connector_id: Optional[str] = None
+    contract_id: Optional[str] = None
     schema_name: Optional[str] = Field(default=None, alias="schema")
     models: Optional[list[ModelPayload]] = None
     enabled: Optional[bool] = None
@@ -164,6 +166,7 @@ def create_project(
         project = TransformProject(
             name=body.name,
             destination_connector_id=body.destination_connector_id,
+            contract_id=(body.contract_id or "").strip(),
             schema=body.schema_name,
             models=_to_models(body.models),
             enabled=body.enabled,
@@ -205,6 +208,8 @@ def update_project(
             project.name = body.name
         if body.destination_connector_id is not None:
             project.destination_connector_id = body.destination_connector_id
+        if body.contract_id is not None:
+            project.contract_id = (body.contract_id or "").strip()
         if body.schema_name is not None:
             project.schema = body.schema_name
         if body.models is not None:

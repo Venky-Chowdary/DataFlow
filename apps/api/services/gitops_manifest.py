@@ -68,7 +68,47 @@ def schedule_artifact(sched: Any) -> dict[str, Any]:
     }
 
 
-def build_dataflow_manifest(*, include_contracts: bool = True) -> dict[str, Any]:
+def mapping_bundle_spec(contract: Any) -> dict[str, Any]:
+    """Thin declarative shape: mappings + endpoints (not full contract lifecycle)."""
+    payload = contract.to_dict() if hasattr(contract, "to_dict") else dict(contract)
+    return {
+        "id": payload.get("id"),
+        "name": payload.get("name"),
+        "source": payload.get("source") or {},
+        "destination": payload.get("destination") or {},
+        "mappings": list(payload.get("mappings") or []),
+        "columns": list(payload.get("columns") or []),
+        "strict": bool(payload.get("strict", True)),
+        "metadata": {
+            **(payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}),
+            "exported_as": "MappingBundle",
+        },
+    }
+
+
+def mapping_bundle_artifact(contract: Any) -> dict[str, Any]:
+    """``dataflow-mapping-bundle.yaml`` — import always lands as DRAFT contract."""
+    spec = mapping_bundle_spec(contract)
+    return {
+        "apiVersion": "dataflow.space/v1",
+        "kind": "MappingBundle",
+        "metadata": {
+            "name": spec.get("name") or spec.get("id"),
+            "id": spec.get("id"),
+        },
+        "spec": spec,
+        "honesty": (
+            "Import creates/updates a DRAFT DataContract from mappings — "
+            "sign separately before CD require_signed_contracts."
+        ),
+    }
+
+
+def build_dataflow_manifest(
+    *,
+    include_contracts: bool = True,
+    include_mapping_bundles: bool = False,
+) -> dict[str, Any]:
     """Build a multi-resource manifest of schedules (and optional contracts)."""
     from services.schedule_store import list_schedules
 
@@ -76,7 +116,7 @@ def build_dataflow_manifest(*, include_contracts: bool = True) -> dict[str, Any]
     for sched in list_schedules():
         resources.append(schedule_artifact(sched))
 
-    if include_contracts:
+    if include_contracts or include_mapping_bundles:
         try:
             from services.contract_store import get_contract_store
         except ImportError:  # pragma: no cover
@@ -88,7 +128,10 @@ def build_dataflow_manifest(*, include_contracts: bool = True) -> dict[str, Any]
         if callable(list_fn):
             contracts = list_fn() or []
         for contract in contracts:
-            resources.append(contract_artifact(contract))
+            if include_contracts:
+                resources.append(contract_artifact(contract))
+            if include_mapping_bundles:
+                resources.append(mapping_bundle_artifact(contract))
 
     return {
         "apiVersion": "dataflow.space/v1",
@@ -107,7 +150,7 @@ def _normalize_resources(payload: dict[str, Any] | list[Any]) -> list[dict[str, 
     if kind == "DatawrapManifest":
         raw = payload.get("resources") or []
         return [r for r in raw if isinstance(r, dict)]
-    if kind in {"PipelineSchedule", "DataContract"}:
+    if kind in {"PipelineSchedule", "DataContract", "MappingBundle"}:
         return [payload]
     # Bare schedule/contract dict without kind — treat as schedule if it looks like one.
     if payload.get("source_connector_id") or payload.get("source_table"):
@@ -176,7 +219,7 @@ def plan_manifest(payload: dict[str, Any] | list[Any] | str) -> dict[str, Any]:
                 "id": (existing.id if existing else sid) or None,
                 "name": name or (existing.name if existing else None),
             })
-        elif kind == "DataContract":
+        elif kind in {"DataContract", "MappingBundle"}:
             cid = str(spec.get("id") or "").strip()
             existing = store.get_contract(cid) if cid else None
             action = "update" if existing else "create"
@@ -185,6 +228,11 @@ def plan_manifest(payload: dict[str, Any] | list[Any] | str) -> dict[str, Any]:
                 "action": action,
                 "id": cid or None,
                 "name": str(spec.get("name") or "") or None,
+                "note": (
+                    "lands as DRAFT DataContract"
+                    if kind == "MappingBundle"
+                    else None
+                ),
             })
         else:
             actions.append({
@@ -270,8 +318,16 @@ def apply_manifest(
                         "id": created.id,
                         "name": created.name,
                     })
-            elif kind == "DataContract":
-                contract = DataContract.from_dict(spec)
+            elif kind in {"DataContract", "MappingBundle"}:
+                # MappingBundle is a thin mappings export; persist as DataContract DRAFT.
+                contract_payload = dict(spec)
+                if kind == "MappingBundle":
+                    meta = contract_payload.get("metadata")
+                    if not isinstance(meta, dict):
+                        meta = {}
+                    meta = {**meta, "imported_from": "MappingBundle"}
+                    contract_payload["metadata"] = meta
+                contract = DataContract.from_dict(contract_payload)
                 # Imported contracts stay draft until explicitly signed.
                 contract.status = ContractStatus.DRAFT
                 existing = store.get_contract(contract.id) if contract.id else None

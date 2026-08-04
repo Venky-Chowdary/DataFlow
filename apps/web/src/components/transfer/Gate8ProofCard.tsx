@@ -1,5 +1,6 @@
 /** Gate-8 reconciliation proof — source vs destination rows + checksums. */
 
+import { useEffect, useRef, useState } from "react";
 import type { Gate8ReconciliationPayload } from "../../lib/types";
 
 /**
@@ -76,6 +77,15 @@ async function exportGate8Proof(report: Gate8Reconciliation, jobId?: string) {
     honesty: "Unsigned local Gate-8 snapshot — open Jobs with a job id to export HMAC-signed pack.",
     gate8: report,
   });
+}
+
+async function verifyProofFile(
+  file: File,
+): Promise<{ ok: boolean; errors: string[]; content_sha256?: string }> {
+  const text = await file.text();
+  const pack = JSON.parse(text) as Record<string, unknown>;
+  const { verifySignedProofPack } = await import("../../lib/api");
+  return verifySignedProofPack(pack);
 }
 
 /** True when evidence is writer-ack only — not independent source/target Verified. */
@@ -205,6 +215,16 @@ export function Gate8ProofCard({
   onRerun,
   onRerunLabel = "Re-run transfer",
 }: Gate8ProofCardProps) {
+  const verifyInputRef = useRef<HTMLInputElement>(null);
+  const [verifyState, setVerifyState] = useState<
+    | { status: "idle" }
+    | { status: "working" }
+    | { status: "ok"; sha?: string }
+    | { status: "fail"; errors: string[] }
+  >({ status: "idle" });
+  useEffect(() => {
+    setVerifyState({ status: "idle" });
+  }, [jobId, report.source_checksum, report.target_checksum, report.phase, report.passed]);
   const preWrite = isGate8PreWriteSimulation(report);
   const sampleVerified = !preWrite && isGate8SampleVerified(report);
   const writerAck = !preWrite && !sampleVerified && isGate8WriterAckOnly(report);
@@ -500,7 +520,56 @@ export function Gate8ProofCard({
             >
               {jobId ? "Export signed proof pack" : "Export proof JSON"}
             </button>
+            <input
+              ref={verifyInputRef}
+              type="file"
+              accept="application/json,.json"
+              hidden
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = "";
+                if (!file) return;
+                setVerifyState({ status: "working" });
+                void verifyProofFile(file)
+                  .then((res) => {
+                    if (res.ok) {
+                      setVerifyState({ status: "ok", sha: res.content_sha256 });
+                    } else {
+                      setVerifyState({
+                        status: "fail",
+                        errors: res.errors?.length ? res.errors : ["Signature verification failed"],
+                      });
+                    }
+                  })
+                  .catch((err) => {
+                    setVerifyState({
+                      status: "fail",
+                      errors: [err instanceof Error ? err.message : "Verify failed"],
+                    });
+                  });
+              }}
+            />
+            <button
+              type="button"
+              className="df2-btn df2-btn-sm"
+              disabled={verifyState.status === "working"}
+              onClick={() => verifyInputRef.current?.click()}
+              title="Re-check an exported HMAC proof pack (buyer diligence)"
+            >
+              {verifyState.status === "working" ? "Verifying…" : "Verify proof pack"}
+            </button>
           </div>
+          {verifyState.status === "ok" && (
+            <p className="df2-gate8-proof-verify is-ok" role="status">
+              HMAC proof pack verified
+              {verifyState.sha ? ` · content ${verifyState.sha.slice(0, 12)}…` : ""}.
+            </p>
+          )}
+          {verifyState.status === "fail" && (
+            <p className="df2-gate8-proof-verify is-fail" role="alert">
+              Proof verify failed: {verifyState.errors.join("; ")}
+            </p>
+          )}
         </div>
       )}
 

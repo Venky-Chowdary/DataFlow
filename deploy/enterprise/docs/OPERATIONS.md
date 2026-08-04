@@ -62,3 +62,24 @@
 - Enable `enable_istio=true` in Terraform for mTLS between pods (requires Istio installed separately).
 - DocumentDB `MONGODB_URL` uses `ssl=false` in the default template; for production, either use a custom parameter group with TLS disabled or mount the AWS CA bundle and set `tls=true`.
 - Enable AWS WAF on the ALB and restrict `ingress` source IPs.
+
+## Custom domain + CORS (tenant vanity host)
+
+- API env: `DATAFLOW_CORS_ORIGINS` (comma-separated) must include the Studio origin
+  (`https://app.example.com`) and any tenant custom domain (`https://data.acme.com`).
+- Custom domain DNS CNAME → platform ingress; TLS via cert-manager / ACM.
+- After DNS cutover, verify:
+  1. `OPTIONS` preflight on `/api/health` returns `Access-Control-Allow-Origin` for the vanity host.
+  2. Browser Studio login cookie / bearer flow against the vanity host (SameSite=None + Secure when cross-site).
+- Honesty: vanity host is routing + CORS allowlist — not a separate multi-tenant isolation boundary.
+  Workspace RBAC / resource ACLs still gate data.
+
+## Audit tip anchors (WORM honesty)
+
+- `GET /audit/tip` returns the current HMAC chain tip + optional external anchor metadata.
+- `POST /audit/tip` (requires `WORKSPACE_MANAGE`) records an **external anchor stub**
+  (hash reference + timestamp). This is **not** Amazon S3 Object Lock, Glacier Vault Lock,
+  or a TSA timestamp authority.
+- Production WORM: ship tip hashes to an immutable store (S3 Object Lock / Azure WORM /
+  vendor TSA) out-of-band, then POST the receipt id back into the stub fields for auditors.
+- Do not claim SOC2 control evidence from the stub alone — auditor letters remain org-owned.

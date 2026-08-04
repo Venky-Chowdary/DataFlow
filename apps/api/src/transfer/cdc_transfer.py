@@ -74,6 +74,34 @@ CHUNK_SIZE = 1000
 logger = logging.getLogger(__name__)
 
 
+def _cdc_span(name: str, **attrs: Any):
+    """OTEL span for CDC phases. Fail-open — tracing must never block apply."""
+    from contextlib import contextmanager, nullcontext
+
+    @contextmanager
+    def _inner():
+        try:
+            from services.tracing import start_span
+        except ImportError:  # pragma: no cover
+            yield None
+            return
+        cleaned = {
+            "dataflow.cdc.delivery": "at-least-once",
+            **{
+                (f"dataflow.{k}" if not str(k).startswith("dataflow.") else str(k)): v
+                for k, v in attrs.items()
+                if isinstance(v, (str, int, float, bool)) or v is None
+            },
+        }
+        with start_span(name, attributes=cleaned, kind="internal") as span:
+            yield span
+
+    try:
+        return _inner()
+    except Exception:
+        return nullcontext()
+
+
 def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
     """Collect lag / heartbeat / last-DDL / plugin fields from a CDC reader."""
     lag_bytes = None
@@ -1150,21 +1178,28 @@ def _run_cdc_shared_multi_table(
             sample = (change.inserts or change.updates)[0]
             headers = list(sample.keys())
         _assert_cdc_lease_before_apply(cdc)
-        rows_written, checksum, dest_summary, deleted = _apply_change_batch(
-            dest_type,
-            destination,
-            dest_cfg,
-            dest_table,
-            change,
-            use_maps,
-            col_types,
-            headers,
-            pk_target,
-            chunk_idx,
-            max(1, chunk_idx + 1),
-            backfill_new_fields=backfill_new_fields,
+        with _cdc_span(
+            "cdc.apply_batch",
             job_id=str(job_id or ""),
-        )
+            dest_table=str(dest_table or ""),
+            stream=str(stream or ""),
+            chunk_idx=int(chunk_idx),
+        ):
+            rows_written, checksum, dest_summary, deleted = _apply_change_batch(
+                dest_type,
+                destination,
+                dest_cfg,
+                dest_table,
+                change,
+                use_maps,
+                col_types,
+                headers,
+                pk_target,
+                chunk_idx,
+                max(1, chunk_idx + 1),
+                backfill_new_fields=backfill_new_fields,
+                job_id=str(job_id or ""),
+            )
         chunk_idx += 1
         total_rows += rows_written + deleted
         stream_health[stream]["records_processed"] = (
@@ -1234,29 +1269,31 @@ def _run_cdc_shared_multi_table(
 
     try:
         if run_snapshot:
-            for change in cdc.snapshot():
-                _apply_tagged(change)
-                if limit and total_rows >= limit:
-                    break
+            with _cdc_span("cdc.snapshot", job_id=str(job_id or ""), shared_reader=True):
+                for change in cdc.snapshot():
+                    _apply_tagged(change)
+                    if limit and total_rows >= limit:
+                        break
         if run_stream and not (limit and total_rows >= limit):
             max_idle = max(1, int(getenv_brand("CDC_MAX_IDLE_POLLS", "3")))
             max_rounds = max(1, int(getenv_brand("CDC_MAX_POLL_ROUNDS", "50")))
             idle = 0
-            for _ in range(max_rounds):
-                had = False
-                for change in cdc.poll():
-                    if _apply_tagged(change):
-                        had = True
+            with _cdc_span("cdc.poll", job_id=str(job_id or ""), shared_reader=True):
+                for _ in range(max_rounds):
+                    had = False
+                    for change in cdc.poll():
+                        if _apply_tagged(change):
+                            had = True
+                        if limit and total_rows >= limit:
+                            break
                     if limit and total_rows >= limit:
                         break
-                if limit and total_rows >= limit:
-                    break
-                if had:
-                    idle = 0
-                else:
-                    idle += 1
-                    if idle >= max_idle:
-                        break
+                    if had:
+                        idle = 0
+                    else:
+                        idle += 1
+                        if idle >= max_idle:
+                            break
     finally:
         if original_dest_table is not None:
             destination.table = original_dest_table
@@ -1847,21 +1884,27 @@ def _run_cdc_single_stream(
         # must not upsert. Still at-least-once — new holder may redeliver.
         _assert_cdc_lease_before_apply(cdc)
 
-        rows_written, last_checksum, dest_summary, deleted = _apply_change_batch(
-            dest_type,
-            destination,
-            dest_cfg,
-            dest_table,
-            change,
-            mappings,
-            column_types,
-            headers,
-            pk_target_col,
-            chunk_idx,
-            total_chunks,
-            backfill_new_fields=backfill_new_fields,
+        with _cdc_span(
+            "cdc.apply_batch",
             job_id=str(job_id or ""),
-        )
+            dest_table=str(dest_table or ""),
+            chunk_idx=int(chunk_idx),
+        ):
+            rows_written, last_checksum, dest_summary, deleted = _apply_change_batch(
+                dest_type,
+                destination,
+                dest_cfg,
+                dest_table,
+                change,
+                mappings,
+                column_types,
+                headers,
+                pk_target_col,
+                chunk_idx,
+                total_chunks,
+                backfill_new_fields=backfill_new_fields,
+                job_id=str(job_id or ""),
+            )
         state.rows_written += rows_written
         state.inserts += len(change.inserts)
         state.updates += len(change.updates)
@@ -1990,29 +2033,31 @@ def _run_cdc_single_stream(
     ddl_log.append(f"CDC snapshot_mode={snapshot_mode.value}")
 
     if run_snapshot:
-        for change in cdc.snapshot():
-            _apply_and_checkpoint(change)
+        with _cdc_span("cdc.snapshot", job_id=str(job_id or "")):
+            for change in cdc.snapshot():
+                _apply_and_checkpoint(change)
 
     # Query CDC (CdcEngine): one incremental pass when resuming. Log CDC adapters
     # continuously poll until idle so a single job drains the slot/binlog/CT stream.
     if run_stream:
-        if isinstance(cdc, CdcEngine):
-            if watermark is not None or not run_snapshot:
-                for change in cdc.poll():
-                    _apply_and_checkpoint(change)
-        else:
-            idle_polls = 0
-            for _round in range(max_poll_rounds):
-                had_data = False
-                for change in cdc.poll():
-                    if _apply_and_checkpoint(change):
-                        had_data = True
-                if had_data:
-                    idle_polls = 0
-                else:
-                    idle_polls += 1
-                    if idle_polls >= max_idle_polls:
-                        break
+        with _cdc_span("cdc.poll", job_id=str(job_id or "")):
+            if isinstance(cdc, CdcEngine):
+                if watermark is not None or not run_snapshot:
+                    for change in cdc.poll():
+                        _apply_and_checkpoint(change)
+            else:
+                idle_polls = 0
+                for _round in range(max_poll_rounds):
+                    had_data = False
+                    for change in cdc.poll():
+                        if _apply_and_checkpoint(change):
+                            had_data = True
+                    if had_data:
+                        idle_polls = 0
+                    else:
+                        idle_polls += 1
+                        if idle_polls >= max_idle_polls:
+                            break
 
     final_watermark = state.running_cursor if state.running_cursor is not None else watermark
     lag_fields = _cdc_lag_fields(cdc)

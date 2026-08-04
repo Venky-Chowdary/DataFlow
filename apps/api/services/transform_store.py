@@ -56,6 +56,8 @@ class TransformProject:
     name: str = ""
     #: Saved connector id for the destination the models run against.
     destination_connector_id: str = ""
+    #: Optional signed DataContract id — when set, post-load auto-run requires SIGNED.
+    contract_id: str = ""
     #: Schema/dataset the models are materialized into.
     schema: str = ""
     models: list[TransformModel] = field(default_factory=list)
@@ -93,6 +95,7 @@ class TransformProject:
             "id": self.id,
             "name": self.name,
             "destination_connector_id": self.destination_connector_id,
+            "contract_id": self.contract_id,
             "schema": self.schema,
             "models": [m.to_dict() for m in self.models],
             "enabled": self.enabled,
@@ -111,6 +114,7 @@ class TransformProject:
             id=str(data.get("id") or ""),
             name=str(data.get("name") or ""),
             destination_connector_id=str(data.get("destination_connector_id") or ""),
+            contract_id=str(data.get("contract_id") or ""),
             schema=str(data.get("schema") or ""),
             models=[TransformModel.from_dict(m) for m in (data.get("models") or [])],
             enabled=bool(data.get("enabled", True)),
