@@ -135,6 +135,7 @@ def desired_types_honoring_map_stamps(
     mappings: list[dict[str, Any]] | None,
     candidate_by_col: dict[str, str] | None = None,
     preserve_case: bool = False,
+    explicit_columns: set[str] | frozenset[str] | None = None,
 ) -> tuple[list[str], list[dict[str, Any]]]:
     """Map≡ALTER: never widen past an explicit Map ``target_type`` stamp.
 
@@ -142,6 +143,11 @@ def desired_types_honoring_map_stamps(
     honor_explicit). ``candidate_by_col`` may propose a wider source/batch DDL.
     Explicit stamps are a hard ceiling — overflow cells quarantine on write;
     silent ALTER past the approved mapping is refuse-closed.
+
+    When ``explicit_columns`` is provided, that set is the authoritative
+    Map-stamp membership (needed when writers temporarily stamp
+    ``target_type`` onto non-explicit widen proposals). When omitted, a column
+    is explicit iff its mapping carries ``target_type``.
 
     Returns ``(desired_types, refusals)`` where each refusal is audit evidence:
     ``{column, mapped_type, refused_wider, reason}``.
@@ -164,8 +170,11 @@ def desired_types_honoring_map_stamps(
         mapping = by_tgt.get(col) or {}
         candidate = str(candidates.get(col) or cur_type or "").strip() or str(cur_type)
         ceiling = str(cur_type or "").strip() or candidate
-        explicit = str(mapping.get("target_type") or "").strip()
-        if explicit:
+        if explicit_columns is not None:
+            is_explicit = col in explicit_columns
+        else:
+            is_explicit = bool(str(mapping.get("target_type") or "").strip())
+        if is_explicit:
             if candidate and is_wider_type(ceiling, candidate):
                 refusals.append(
                     {

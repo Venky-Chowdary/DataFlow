@@ -1564,6 +1564,9 @@ def _widen_existing_columns_sa(
     target_cols: list[str],
     target_column_types: dict[str, str],
     conflict_columns: list[str] | None = None,
+    *,
+    stamp_ceiling_by_col: dict[str, str] | None = None,
+    refusals_out: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     """Issue ALTER COLUMN / MODIFY COLUMN to widen any columns that drifted wider.
 
@@ -1571,6 +1574,9 @@ def _widen_existing_columns_sa(
     every SQLAlchemy-backed dialect (DuckDB, SQL Server, Oracle, SQLite skipped).
     Primary-key / conflict columns are skipped because most engines cannot
     ALTER the type of a key column in place.
+
+    Map≡ALTER: when ``stamp_ceiling_by_col`` is set, never ALTER past the
+    approved Map stamp — refuse-closed with audit evidence in ``refusals_out``.
     """
     if not target_cols or not target_column_types:
         return []
@@ -1580,6 +1586,11 @@ def _widen_existing_columns_sa(
         return []
 
     skip_cols = set(conflict_columns or [])
+    ceilings = {
+        str(k): str(v)
+        for k, v in (stamp_ceiling_by_col or {}).items()
+        if k and v
+    }
 
     try:
         inspector = sa.inspect(conn)
@@ -1596,7 +1607,25 @@ def _widen_existing_columns_sa(
         if not existing:
             continue
         existing_type = str(existing["type"].compile(dialect=engine.dialect))
-        desired_type = target_column_types.get(col, existing_type)
+        proposed = target_column_types.get(col, existing_type)
+        stamp = ceilings.get(col)
+        desired_type = proposed
+        if stamp:
+            # Hard ceiling: align live up to stamp only; never past it.
+            if proposed and is_wider_type(stamp, proposed):
+                refusal = {
+                    "column": col,
+                    "mapped_type": stamp,
+                    "refused_wider": proposed,
+                    "reason": "explicit_map_stamp_ceiling",
+                }
+                if refusals_out is not None:
+                    refusals_out.append(refusal)
+                else:
+                    logger.info(
+                        "generic_sql Map≡ALTER refusal (stamp ceiling): %s", refusal
+                    )
+            desired_type = stamp
         if not is_wider_type(existing_type, desired_type):
             continue
         try:
@@ -3985,22 +4014,44 @@ def write_mapped_rows(
                 mappings[i] = {**mappings[i], "target_type": "DOUBLE"}
         target_column_types[col] = derived
 
-    # Widen target types to at least the source DDL so schema drift to a wider
-    # source column does not truncate or overflow in the destination.
-    # Never overwrite an explicit Map/operator stamp (create-new fidelity).
+    # Map≡ALTER: source DDL may propose a wider type; explicit Map stamps are a
+    # hard ceiling (same helper as PostgreSQL / MySQL writers). Overflow cells
+    # quarantine on write — never silent ALTER past the approved mapping.
+    from connectors.writer_common import desired_types_honoring_map_stamps
+
+    ceiling_types = [target_column_types[col] for col in target_cols]
+    candidate_by_col: dict[str, str] = {}
     for i, col in enumerate(target_cols):
         if col in explicit_stamps:
             continue
-        target_ddl = target_column_types[col]
-        mapping_source = mappings[i].get("source_type")
-        catalog_source = column_types.get(mappings[i].get("source"))
+        mapping_source = mappings[i].get("source_type") if i < len(mappings) else None
+        catalog_source = (
+            column_types.get(mappings[i].get("source")) if i < len(mappings) else None
+        )
         source_type = _source_ddl_for_widen(mapping_source, catalog_source) or "string"
         source_ddl = (
             materialize_dest_ddl(dest_db, source_type) if dest_db else source_type
         )
-        if is_wider_type(target_ddl, source_ddl):
-            target_column_types[col] = source_ddl
-            mappings[i] = {**mappings[i], "target_type": source_ddl}
+        candidate_by_col[col] = source_ddl
+
+    desired_list, alter_refusals = desired_types_honoring_map_stamps(
+        target_cols=target_cols,
+        current_target_types=ceiling_types,
+        mappings=mappings,
+        candidate_by_col=candidate_by_col,
+        preserve_case=True,
+        explicit_columns=explicit_stamps,
+    )
+    if alter_refusals:
+        logger.info(
+            "generic_sql Map≡ALTER refusals (stamp ceiling): %s", alter_refusals
+        )
+    for i, col in enumerate(target_cols):
+        new_typ = desired_list[i]
+        old_typ = target_column_types[col]
+        target_column_types[col] = new_typ
+        if col not in explicit_stamps and new_typ != old_typ and i < len(mappings):
+            mappings[i] = {**mappings[i], "target_type": new_typ}
 
     policy = transform_error_policy(error_policy)
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
@@ -4208,6 +4259,12 @@ def write_mapped_rows(
                     backfill=True,
                     connection=conn,
                 )
+                stamp_ceiling_by_col = {
+                    col: target_column_types[col]
+                    for col in target_cols
+                    if col in explicit_stamps and col in target_column_types
+                }
+                alter_widen_refusals: list[dict[str, Any]] = []
                 _widen_existing_columns_sa(
                     conn,
                     engine,
@@ -4217,7 +4274,14 @@ def write_mapped_rows(
                     target_cols,
                     target_column_types,
                     conflict_columns=conflict_columns,
+                    stamp_ceiling_by_col=stamp_ceiling_by_col or None,
+                    refusals_out=alter_widen_refusals,
                 )
+                if alter_widen_refusals:
+                    logger.info(
+                        "generic_sql Map≡ALTER live refusals: %s",
+                        alter_widen_refusals,
+                    )
                 # Drift backfill may have added or widened columns; anything
                 # reflected before this point describes the old shape.
                 reflection_cache.invalidate_table(engine, schema_name, table_name)
