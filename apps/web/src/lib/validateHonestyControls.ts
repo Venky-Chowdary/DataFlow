@@ -143,6 +143,27 @@ export function buildValidateHonestyControls(
   const migrationProven = Boolean(preflight?.proof_bundle?.migration_proven);
   const ddlIdentityHash =
     preflight?.proof_bundle?.ddl_identity?.ddl_identity_hash || null;
+  const hsRaw =
+    (preflight?.proof_bundle as Record<string, unknown> | undefined)?.historical_success
+    ?? (preflight as Record<string, unknown> | null | undefined)?.historical_success;
+  const hs = (hsRaw && typeof hsRaw === "object")
+    ? (hsRaw as {
+      measured?: boolean;
+      success_rate?: number | null;
+      runs_observed?: number;
+    })
+    : undefined;
+  const hsMeasured = Boolean(hs?.measured);
+  const hsRate = typeof hs?.success_rate === "number" ? hs.success_rate : null;
+  const hsRuns = typeof hs?.runs_observed === "number" ? hs.runs_observed : 0;
+  const historicalSuccess = {
+    measured: hsMeasured,
+    successRate: hsMeasured ? hsRate : null,
+    runsObserved: hsRuns,
+    headline: hsMeasured && hsRate != null
+      ? `Historical success measured: ${(hsRate * 100).toFixed(1)}% over ${hsRuns} load(s)`
+      : "Historical success unmeasured — no invented rate",
+  };
 
   return {
     referentialIntegrity: ri,
@@ -150,10 +171,12 @@ export function buildValidateHonestyControls(
     populationScanRequested: Boolean(opts?.populationScanRequested),
     migrationProven,
     ddlIdentityHash,
+    historicalSuccess,
     note: [
       "Sample Validate never claims population correctness.",
       "RI proven requires opt-in population orphan scan with zero orphans.",
       "Execute-ready is not migration_proven.",
+      "Historical success is measured or unmeasured — never invented.",
     ].join(" "),
   };
 }
