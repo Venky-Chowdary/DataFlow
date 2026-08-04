@@ -312,3 +312,96 @@ def lossy_mappings_missing_risk_contracts(
         else:
             missing.append(str(getattr(m, "source", None) or "?"))
     return missing
+
+
+# ── Module 1b: write-path enforcement ───────────────────────────────────────
+
+_VALID_WRITE_ACTIONS = frozenset({"fail", "quarantine", "coerce_null"})
+
+
+def _normalize_job_write_policy(job_error_policy: str | None) -> str:
+    selected = (job_error_policy or "quarantine").strip().lower()
+    return selected if selected in _VALID_WRITE_ACTIONS else "quarantine"
+
+
+def mapping_risk_contract(mapping: Any) -> MigrationRiskContract | None:
+    """Return verified contract from a mapping, or None."""
+    if mapping is None:
+        return None
+    raw = (
+        mapping.get("risk_contract") or mapping.get("riskContract")
+        if isinstance(mapping, dict)
+        else getattr(mapping, "risk_contract", None)
+    )
+    c = contract_from_dict(raw if isinstance(raw, dict) else None)
+    if c is None or not verify_risk_contract(c):
+        return None
+    return c
+
+
+def resolve_write_action_for_mapping(
+    mapping: Any,
+    job_error_policy: str | None,
+) -> tuple[str, str | None, str | None]:
+    """Resolve effective writer action for one mapping on cell failure.
+
+    Returns ``(write_action, execution_policy, risk_id)`` where write_action is
+    ``fail`` | ``quarantine`` | ``coerce_null``.
+
+    Rules (contract narrows / specializes job policy — never silent invent):
+    - No verified contract → job error_policy
+    - FAIL_JOB / STOP_TABLE / ABORT_TRANSACTION → ``fail`` (wins over quarantine)
+    - QUARANTINE_ROW / SKIP_ROW → ``quarantine`` holdout
+    - CAST_AND_CONTINUE / TRANSFORM_AND_CONTINUE / RETRY → on failure, honor
+      ``quarantine_policy`` (default quarantine holdout; never invent NULL unless
+      the contract's quarantine_policy explicitly asks for coerce/null)
+    """
+    job = _normalize_job_write_policy(job_error_policy)
+    c = mapping_risk_contract(mapping)
+    if c is None:
+        return job, None, None
+
+    exec_pol = (c.execution_policy or DEFAULT_EXECUTION_POLICY).strip().upper()
+    risk_id = c.risk_id
+
+    if exec_pol in FAIL_CLOSED_POLICIES:
+        return "fail", exec_pol, risk_id
+
+    if exec_pol in {"QUARANTINE_ROW", "SKIP_ROW"}:
+        return "quarantine", exec_pol, risk_id
+
+    if exec_pol in CONTINUE_POLICIES:
+        qp = (c.quarantine_policy or "").strip().upper()
+        if "FAIL" in qp and "QUARANTINE" not in qp:
+            return "fail", exec_pol, risk_id
+        if "NULL" in qp or "COERCE" in qp:
+            return "coerce_null", exec_pol, risk_id
+        # Default: hold out bad cells; good rows continue (cast & continue).
+        return "quarantine", exec_pol, risk_id
+
+    return job, exec_pol, risk_id
+
+
+def rejected_details_require_job_abort(rejected_details: list[dict[str, Any]] | None) -> bool:
+    """True when any rejected cell carries a fail-closed Migration Risk Contract."""
+    for d in rejected_details or []:
+        pol = str(d.get("execution_policy") or "").strip().upper()
+        if pol in FAIL_CLOSED_POLICIES:
+            return True
+        if d.get("policy") == "fail" and pol in FAIL_CLOSED_POLICIES:
+            return True
+    return False
+
+
+def rejected_details_are_continue_contract_only(
+    rejected_details: list[dict[str, Any]] | None,
+) -> bool:
+    """True when every rejection is under a continue-policy contract (quarantine OK)."""
+    details = list(rejected_details or [])
+    if not details:
+        return False
+    for d in details:
+        pol = str(d.get("execution_policy") or "").strip().upper()
+        if pol not in CONTINUE_POLICIES:
+            return False
+    return True

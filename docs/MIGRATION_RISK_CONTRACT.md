@@ -49,16 +49,27 @@ Never silently continue. A continue policy must be chosen explicitly.
 2. Validate hydrates/signs the draft (`services.migration_risk_contract`).
 3. Proof bundle refuses `decision=approve` when lossy mappings lack a
    **verified continue-policy** contract.
-4. Writers must honor the contract policy (Module 1b — quarantine / cast path).
+4. **Writers honor the contract** (`build_mapped_rows_with_details` +
+   `reject_on_strict_policy`):
+   - `FAIL_JOB` / `STOP_TABLE` / `ABORT_TRANSACTION` → abort partial write
+     even when the job error_policy is `quarantine`
+   - `CAST_AND_CONTINUE` / `TRANSFORM_AND_CONTINUE` → cast failures follow
+     `quarantine_policy` (default: row holdout to DLQ; never invent NULL)
+   - `QUARANTINE_ROW` / `SKIP_ROW` → hold out bad rows; batch may continue
+   - Rejected cells stamp `execution_policy` + `risk_id` for audit
 
 ## Honesty
 
 - Rollback remains **not productized** (`docs/MIGRATION_ROLLBACK.md`).
 - Sample rows on the contract do not prove population outcomes.
 - Signature is a tamper-evident digest, not a PKI certificate.
+- Fit/type quarantine matrix (`apply_write_quarantine_matrix`) still uses
+  job-level policy for post-transform DECIMAL/width failures — transform-path
+  contract enforcement is Module 1b; matrix per-column contracts are 1c.
 
 ## Code SSOT
 
 - `apps/api/services/migration_risk_contract.py`
 - Proof enforcement: `apps/api/services/preflight_proof_bundle.py`
+- Write enforcement: `apps/api/connectors/writer_common.py`
 - Map emit: `apps/web/src/lib/mapping.ts` → `acknowledgeMappingRisk`

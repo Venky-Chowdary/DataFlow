@@ -1127,10 +1127,47 @@ def reject_on_strict_policy(
     rejected_details: list[dict[str, Any]] | None,
     label: str,
 ) -> str | None:
-    """Return an error message when strict mode must refuse a partial write."""
-    if transform_error_policy(policy) == "fail" and rejected_details:
+    """Return an error message when the write must refuse a partial primary write.
+
+    Module 1b: Migration Risk Contract FAIL_JOB aborts even when the job-level
+    error_policy is ``quarantine``. Continue-policy contract failures
+    (CAST_AND_CONTINUE / QUARANTINE_ROW) may hold out rows without aborting.
+    """
+    details = list(rejected_details or [])
+    if not details:
+        return None
+
+    try:
+        from services.migration_risk_contract import (
+            rejected_details_are_continue_contract_only,
+            rejected_details_require_job_abort,
+        )
+    except Exception:
+        rejected_details_require_job_abort = None  # type: ignore[assignment]
+        rejected_details_are_continue_contract_only = None  # type: ignore[assignment]
+
+    if rejected_details_require_job_abort and rejected_details_require_job_abort(details):
+        n = sum(
+            1
+            for d in details
+            if str(d.get("execution_policy") or "").upper()
+            in {"FAIL_JOB", "STOP_TABLE", "ABORT_TRANSACTION"}
+        )
         return (
-            f"{label} rejected {len(rejected_details)} row(s); "
+            f"{label} rejected {n or len(details)} row(s); "
+            "Migration Risk Contract FAIL_JOB blocks partial write"
+        )
+
+    if (
+        rejected_details_are_continue_contract_only
+        and rejected_details_are_continue_contract_only(details)
+    ):
+        # Operator contracted continue + quarantine — do not abort the batch.
+        return None
+
+    if transform_error_policy(policy) == "fail":
+        return (
+            f"{label} rejected {len(details)} row(s); "
             "strict error policy blocks partial write"
         )
     return None
@@ -1256,18 +1293,24 @@ def build_mapped_rows_with_details(
             transform,
             src,
             tgt,
+            m,
         ))
 
     # Resolve once per call, not once per cell. This import sat inside the
     # innermost loop, so a 20-column table paid an import-system lookup per cell
     # — billions of them on a large transfer.
     from services.value_serializer import DF_MISSING_SENTINEL, is_missing_sentinel
+    try:
+        from services.migration_risk_contract import resolve_write_action_for_mapping
+    except Exception:
+        resolve_write_action_for_mapping = None  # type: ignore[assignment]
 
     mapped: list[tuple] = []
     for row_number, raw in enumerate(data_rows, start=1):
         out = [None] * len(sanitized_target_cols)
         row_has_error = False
-        for source_idx, target_idx, transform, src_name, tgt_name in mapping_infos:
+        row_action = "ok"  # ok | fail | quarantine | coerce_null
+        for source_idx, target_idx, transform, src_name, tgt_name, mapping in mapping_infos:
             val = raw[source_idx] if source_idx is not None and source_idx < len(raw) else None
             # Preserve sparse-CDC missing before transforms (omit-from-SET, never NULL wipe).
             if is_missing_sentinel(val):
@@ -1277,6 +1320,13 @@ def build_mapped_rows_with_details(
             converted, err = apply_transform(val, transform)
             if err:
                 row_has_error = True
+                cell_policy = policy
+                exec_pol: str | None = None
+                risk_id: str | None = None
+                if resolve_write_action_for_mapping is not None:
+                    cell_policy, exec_pol, risk_id = resolve_write_action_for_mapping(
+                        mapping, policy
+                    )
                 values = {
                     h: (str(raw[i]) if i < len(raw) and raw[i] is not None else "")
                     for i, h in enumerate(headers)
@@ -1287,12 +1337,16 @@ def build_mapped_rows_with_details(
                     "target": tgt_name,
                     "value": str(val) if val is not None else "",
                     "reason": err,
-                    "policy": policy,
+                    "policy": cell_policy,
                     # Full source row so quarantine replay can rewrite without re-reading.
                     "values": values,
                     # Dual-stamp: transform quarantine is already source-shaped.
                     "source_values": dict(values),
                 }
+                if exec_pol:
+                    detail["execution_policy"] = exec_pol
+                if risk_id:
+                    detail["risk_id"] = risk_id
                 # Stamp durable identity for upsert replay (composite / non-id PKs).
                 pk_cols: list[str] = []
                 try:
@@ -1308,9 +1362,9 @@ def build_mapped_rows_with_details(
                         pk_cols = [src_key]
                     elif tgt_key:
                         # Map target → source via mapping when needed.
-                        for m in mappings:
-                            if str(m.get("target") or "") == tgt_key and m.get("source"):
-                                pk_cols = [str(m["source"])]
+                        for mm in mappings:
+                            if str(mm.get("target") or "") == tgt_key and mm.get("source"):
+                                pk_cols = [str(mm["source"])]
                                 break
                         if not pk_cols and tgt_key in values:
                             pk_cols = [tgt_key]
@@ -1318,11 +1372,11 @@ def build_mapped_rows_with_details(
                     pk_cols = []
                 if not pk_cols:
                     flagged = [
-                        str(m.get("source") or m.get("target") or "")
-                        for m in mappings
-                        if m.get("primary_key")
-                        or m.get("is_primary_key")
-                        or m.get("identity")
+                        str(mm.get("source") or mm.get("target") or "")
+                        for mm in mappings
+                        if mm.get("primary_key")
+                        or mm.get("is_primary_key")
+                        or mm.get("identity")
                     ]
                     pk_cols = [c for c in flagged if c]
                 if not pk_cols:
@@ -1339,19 +1393,26 @@ def build_mapped_rows_with_details(
                 rejected_details.append(detail)
                 if len(errors) < 10:
                     errors.append(f"row {row_number} {src_name}→{tgt_name}: {err}")
-                if policy == "coerce_null":
-                    # Explicit NULL-in-place — operator opted into altered primary rows.
+                if cell_policy == "fail":
+                    row_action = "fail"
                     converted = None
-                elif policy == "quarantine":
-                    # Hold the whole row out of the primary write — never invent NULL
-                    # in place of a bad cell (that is silent primary alteration).
-                    row_has_error = True
+                elif cell_policy == "quarantine":
+                    if row_action != "fail":
+                        row_action = "quarantine"
+                    converted = None
+                elif cell_policy == "coerce_null":
+                    if row_action == "ok":
+                        row_action = "coerce_null"
+                    # Explicit NULL-in-place — operator opted into altered primary rows.
                     converted = None
                 else:
                     continue
             if target_idx >= 0:
                 out[target_idx] = converted
-        if row_has_error and policy in {"fail", "quarantine"}:
+        if row_has_error and row_action in {"fail", "quarantine"}:
+            continue
+        if row_has_error and row_action == "ok" and policy in {"fail", "quarantine"}:
+            # Legacy path when resolve unavailable — keep prior job semantics.
             continue
         mapped.append(tuple(out))
 
