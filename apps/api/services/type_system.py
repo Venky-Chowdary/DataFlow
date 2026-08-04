@@ -5731,51 +5731,70 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
     "redshift": frozenset({
         "JSON", "JSONB", "UUID", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE",
         "NVARCHAR2", "VARCHAR2", "NUMBER", "BIGNUMERIC", "UNIQUEIDENTIFIER",
+        # Foreign binary typmod → VARBYTE(n) create-new wire.
+        "BINARY", "VARBINARY", "BYTES", "FIXED",
     }),
     "snowflake": frozenset({
         "JSON", "JSONB", "UUID", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE",
         "SUPER", "NVARCHAR2", "BIGNUMERIC", "UNIQUEIDENTIFIER",
+        # Native wire is BINARY(n); rematerialize foreign aliases.
+        "VARBINARY", "BYTES", "VARBYTE", "FIXED",
     }),
     "bigquery": frozenset({
         "UUID", "JSONB", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE", "SUPER",
         "VARIANT", "NVARCHAR2", "VARCHAR2", "NUMBER", "UNIQUEIDENTIFIER",
+        # Native wire is BYTES(n); rematerialize BINARY/VARBINARY/fixed typmods.
+        "BINARY", "VARBINARY", "VARBYTE", "FIXED",
     }),
     "spanner": frozenset({
         "UUID", "JSONB", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE", "SUPER",
         "VARIANT", "NVARCHAR2", "VARCHAR2", "BIGNUMERIC", "UNIQUEIDENTIFIER",
         "DATETIME", "TIME",  # Spanner has no DATETIME/TIME — use STRING wire
+        "BINARY", "VARBINARY", "VARBYTE", "FIXED",
     }),
     "postgresql": frozenset({
         # Bare JSON is a logical alias; create-new document wire is JSONB.
         "JSON",
         "SUPER", "VARIANT", "BIGNUMERIC", "UNIQUEIDENTIFIER", "NVARCHAR2",
+        # Native wire is BYTEA; rematerialize BINARY(n)/BYTES(n)/fixed(n).
+        "BINARY", "VARBINARY", "BYTES", "VARBYTE", "FIXED",
     }),
     "mysql": frozenset({
         "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC",
         "UNIQUEIDENTIFIER", "NVARCHAR2", "HSTORE",
+        # Native BINARY(n)/VARBINARY(n); rematerialize foreign aliases only.
+        "BYTES", "VARBYTE", "FIXED",
     }),
     "sqlserver": frozenset({
         "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC", "JSON",
         "NVARCHAR2", "HSTORE", "INET", "CIDR",
+        "BYTES", "VARBYTE", "FIXED",
     }),
     "oracle": frozenset({
         "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC", "JSON",
         "UNIQUEIDENTIFIER", "HSTORE", "INET", "CIDR",
+        # Typmod BINARY(n) → RAW(n); bare BINARY already rematerializes to BLOB.
+        "BINARY", "VARBINARY", "BYTES", "VARBYTE", "FIXED",
     }),
     "databricks": frozenset({
         "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC",
         "UNIQUEIDENTIFIER", "NVARCHAR2", "HSTORE", "INET", "CIDR",
+        "BINARY", "VARBINARY", "BYTES", "VARBYTE", "FIXED",
     }),
     "iceberg": frozenset({
         "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC",
         "UNIQUEIDENTIFIER", "NVARCHAR2", "HSTORE", "INET", "CIDR", "JSON",
+        # Widthed binary → fixed(n); bare BINARY already → binary. Keep FIXED native.
+        "BINARY", "VARBINARY", "BYTES", "VARBYTE",
     }),
     # SQLite has no true fixed-point type. DECIMAL/NUMERIC/NUMBER stamps get
     # NUMERIC affinity and silently store high-precision values as IEEE real.
     # Rematerialize via ddl_type → TEXT (Map≡CREATE honesty).
+    # Foreign binary typmods → BLOB (SQLite ignores length; no affinity invent).
     "sqlite": frozenset({
         "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
         "MONEY", "SMALLMONEY", "CURRENCY",
+        "BINARY", "VARBINARY", "BYTES", "VARBYTE", "BYTEA", "FIXED",
     }),
 }
 
