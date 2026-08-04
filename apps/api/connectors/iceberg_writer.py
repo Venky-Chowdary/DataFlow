@@ -59,8 +59,18 @@ def _warehouse_root(host: str, database: str, connection_string: str) -> Path:
 
 
 def _logical_to_iceberg_type(logical: str) -> str:
-    """Iceberg DDL from Map stamps / logicals — never invent float→double leaves."""
-    from services.type_system import materialize_dest_ddl
+    """Iceberg DDL from Map stamps / logicals — never invent float→double leaves.
+
+    Bare / oversize DECIMAL stamps rematerialize through ``ddl_type`` SSOT so
+    CREATE cannot leave bare ``DECIMAL`` (quarantine no-op) or pass through
+    ``DECIMAL(40,10)`` that Arrow would silently clamp.
+    """
+    from services.type_system import (
+        LOGICAL_DECIMAL,
+        ddl_type,
+        materialize_dest_ddl,
+        normalize_logical_type,
+    )
 
     raw = (logical or "string").strip()
     # Nested ARRAY/LIST/T[] stamps go through materialize so list<float> spelling
@@ -70,20 +80,27 @@ def _logical_to_iceberg_type(logical: str) -> str:
     bare = stamped.upper().split("(", 1)[0].strip()
     if bare in {"REAL", "FLOAT4", "FLOAT32", "HALF", "FLOAT16", "FLOAT"}:
         return "float"
+    # Map≡CREATE decimal honesty: bare → decimal(38,10); oversize → string.
+    if normalize_logical_type(raw) == LOGICAL_DECIMAL or normalize_logical_type(
+        stamped
+    ) == LOGICAL_DECIMAL:
+        return ddl_type("iceberg", raw)
     return stamped
 
 
 def _ensure_iceberg_decimal_carrier(type_str: str) -> str:
-    """Bare ``decimal`` → ``decimal(38,10)`` so shared fit quarantine can parse (p,s)."""
-    from services.type_system import normalize_logical_type
-    from connectors.writer_common import parse_decimal_precision_scale
+    """Map≡CREATE: decimal carriers match ``ddl_type('iceberg', …)`` SSOT.
+
+    Bare ``DECIMAL`` → ``decimal(38,10)`` so shared fit quarantine can parse
+    ``(p,s)``. Over Iceberg max precision → ``string`` (fail-closed) — never
+    leave a bare or oversize stamp that Arrow would invent/clamp.
+    """
+    from services.type_system import LOGICAL_DECIMAL, ddl_type, normalize_logical_type
 
     raw = (type_str or "string").strip()
-    if normalize_logical_type(raw) != "decimal":
+    if normalize_logical_type(raw) != LOGICAL_DECIMAL:
         return raw
-    if parse_decimal_precision_scale(raw) is not None:
-        return raw
-    return _logical_to_iceberg_type(raw)
+    return ddl_type("iceberg", raw)
 
 
 def _decimal_target_types_for_iceberg_write(
@@ -150,7 +167,7 @@ def _decimal_target_types_for_iceberg_write(
         # Preserve fixed(L) / BINARY(n) from mapped create-new carriers.
         from services.type_system import (
             LOGICAL_BINARY,
-            materialize_dest_ddl,
+            ddl_type,
             normalize_logical_type,
             parse_binary_carrier_width,
         )
@@ -158,7 +175,9 @@ def _decimal_target_types_for_iceberg_write(
         if normalize_logical_type(raw) == LOGICAL_BINARY:
             width = parse_binary_carrier_width(raw)
             if width is not None:
-                out.append(materialize_dest_ddl("iceberg", raw) or f"fixed({width})")
+                # ddl_type legalizes VARBINARY(n) → fixed(n); materialize may
+                # pass through illegal Iceberg tokens.
+                out.append(ddl_type("iceberg", raw) or f"fixed({width})")
                 continue
             out.append("BINARY")
             continue
@@ -435,11 +454,21 @@ def _logical_to_arrow_type(logical: str, pa: Any) -> Any:
             return pa.float32()
         return pa.float64()
     if logical_n == LOGICAL_DECIMAL:
-        precision, scale = parse_numeric_precision_scale(raw)
-        p = int(precision) if precision is not None else 38
-        s = int(scale) if scale is not None else 10
-        p = max(1, min(p, 38))
-        s = max(0, min(s, p))
+        # Map≡CREATE: honor ddl_type SSOT — bare → (38,10); oversize → string.
+        # Never silently clamp DECIMAL(40,10) → decimal128(38,10).
+        from services.type_system import ddl_type
+
+        wire = ddl_type("iceberg", raw)
+        if normalize_logical_type(wire) != LOGICAL_DECIMAL:
+            return pa.large_string()
+        precision, scale = parse_numeric_precision_scale(wire)
+        if precision is None:
+            # SSOT should always parameterize Iceberg decimals; refuse invent.
+            return pa.large_string()
+        p = int(precision)
+        s = int(scale) if scale is not None else 0
+        if p < 1 or p > 38 or s < 0 or s > p:
+            return pa.large_string()
         return pa.decimal128(p, s)
     if logical_n == LOGICAL_DATE:
         return pa.date32()
