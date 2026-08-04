@@ -5022,6 +5022,8 @@ def specialty_domain_would_invent(source_type: str, target_type: str) -> bool:
     ``TEXT→INET`` / ``TEXT→TSVECTOR`` / ``JSON→HSTORE`` look like free casts but
     invent validation algorithms the source never had — Accept risk required.
     CITEXT invent is handled by :func:`case_fold_polarity_invent`.
+
+    ``JSON→JSONB`` is a create-new dialect twin (same ``LOGICAL_JSON``) — not invent.
     """
     tgt = specialty_carrier_base(target_type)
     if tgt is None or tgt == "CITEXT":
@@ -5029,6 +5031,9 @@ def specialty_domain_would_invent(source_type: str, target_type: str) -> bool:
     if specialty_carrier_base(source_type) is not None:
         return False
     src_l = normalize_logical_type(source_type)
+    # PG JSONB is the physical create-new sink for logical JSON — not a specialty invent.
+    if tgt == "JSONB" and src_l == LOGICAL_JSON:
+        return False
     return src_l in {
         LOGICAL_STRING,
         LOGICAL_TEXT,
@@ -5039,7 +5044,6 @@ def specialty_domain_would_invent(source_type: str, target_type: str) -> bool:
         LOGICAL_BOOLEAN,
         LOGICAL_BINARY,
     }
-
 
 def specialty_carrier_would_collapse(source_type: str, target_type: str) -> bool:
     """True when a native specialty carrier would collapse to opaque/scalar sink.
@@ -5060,6 +5064,12 @@ def specialty_carrier_would_collapse(source_type: str, target_type: str) -> bool
     if specialty_wire_preserves_value(src, target_type):
         return False
     tgt_l = normalize_logical_type(target_type)
+    # JSONB→JSON / VARIANT / SUPER keep document polarity (dialect twin, not TEXT).
+    if src == "JSONB" and tgt_l == LOGICAL_JSON:
+        tgt_u = strip_identity_qualifier(target_type).upper().strip()
+        bare = re.sub(r"\s*\(\s*\d+\s*\)", "", tgt_u).strip()
+        if bare in {"JSON", "VARIANT", "OBJECT", "SUPER", "BSON", "JSONB"}:
+            return False
     # Opaque / scalar sinks — specialty validation algorithms would not run.
     return tgt_l in {
         LOGICAL_STRING,
@@ -5075,7 +5085,6 @@ def specialty_carrier_would_collapse(source_type: str, target_type: str) -> bool
         LOGICAL_TIME,
         LOGICAL_BINARY,
     }
-
 
 def resolve_mapping_target_type(
     mapping: dict,
@@ -5105,19 +5114,43 @@ def resolve_mapping_target_type(
         or "VARCHAR"
     )
     if mapping.get("create_new"):
-        if stamped:
-            return stamped
-        if live:
-            return live
-        # Empty stamp must not fall back to source identity (BQ UUID→UUID lie).
         db = (
             (dest_db_type or "").strip()
             or str(mapping.get("dest_db_type") or mapping.get("destination_db") or "").strip()
         )
+        if stamped:
+            # Upgrade legacy bare TIMESTAMP stamps when source declares FSP.
+            return promote_create_new_temporal_stamp(src, stamped, db)
+        if live:
+            return live
+        # Empty stamp must not fall back to source identity (BQ UUID→UUID lie).
         if db:
             return create_new_mapping_target_type(src, db)
         return src
     return live or stamped or src
+
+
+
+def promote_create_new_temporal_stamp(src_type: str, stamped: str, dest_db_type: str = "") -> str:
+    """Upgrade bare TIMESTAMP stamps when source declares fractional precision.
+
+    PG create-new must emit TIMESTAMP(p); bare TIMESTAMP is MySQL FSP-0 territory
+    and would false-block (or worse, silent-truncate) Validate.
+    """
+    out = (stamped or "").strip()
+    if not out:
+        return out
+    bare = re.sub(r"\s*\(\s*\d+\s*\)", "", out.upper()).strip()
+    if bare != "TIMESTAMP":
+        return out
+    src_p = parse_temporal_fractional_precision(src_type)
+    if src_p is None:
+        return out
+    db = (dest_db_type or "").strip().lower()
+    # PostgreSQL-family create-new: preserve source FSP on the physical stamp.
+    if db in {"", "postgresql", "postgres", "pg", "redshift", "cockroach", "cockroachdb", "alloydb"}:
+        return f"TIMESTAMP({src_p})"
+    return out
 
 
 def create_new_mapping_target_type(src_type: str, dest_db_type: str = "") -> str:
@@ -5168,7 +5201,7 @@ def create_new_mapping_target_type(src_type: str, dest_db_type: str = "") -> str
             return physical
         return specialty
     if db:
-        return ddl_type(db, src_type)
+        return promote_create_new_temporal_stamp(src_type, ddl_type(db, src_type), dest_db_type)
     return (src_type or "VARCHAR").strip() or "VARCHAR"
 
 
@@ -5820,23 +5853,31 @@ def temporal_precision_would_narrow(source_type: str, target_type: str) -> bool:
         else:
             return False
     if tgt_p is None:
-        # Bare TIME/DATETIME/TIMESTAMP often defaults to FSP 0 (MySQL) — treat
-        # missing typmod as 0 so TIME(6)→TIME is not silent-green. PG defaults
-        # higher, but Accept risk beats silent fractional truncation.
+        # MySQL bare TIME/DATETIME/TIMESTAMP default FSP 0 — TIME(6)→TIME must
+        # not silent-green. PostgreSQL bare TIMESTAMP / TIMESTAMP WITHOUT TIME
+        # ZONE defaults to precision 6 — TIMESTAMP_NTZ(6)→TIMESTAMP is preserve
+        # on create-new PG, not a fractional collapse.
         bare = re.sub(r"\s*\(\s*\d+\s*\)", "", tgt_u).strip()
         if bare in {
-            "TIME",
-            "DATETIME",
-            "TIMESTAMP",
             "TIME WITHOUT TIME ZONE",
             "TIMESTAMP WITHOUT TIME ZONE",
             "TIMESTAMP NTZ",
-        } or bare.startswith("DATETIME"):
+            "TIMESTAMPTZ",
+            "TIMESTAMP WITH TIME ZONE",
+            "TIMETZ",
+            "TIME WITH TIME ZONE",
+        }:
+            # PostgreSQL / ANSI spellings default to precision 6.
+            tgt_p = 6
+        elif bare == "TIMESTAMP":
+            # Ambiguous: MySQL bare TIMESTAMP is FSP 0; PG create-new must stamp
+            # TIMESTAMP(p) via ddl_type — never soft-pass MySQL truncation.
+            tgt_p = 0
+        elif bare in {"TIME", "DATETIME"} or bare.startswith("DATETIME"):
             tgt_p = 0
         else:
             return False
     return src_p > tgt_p
-
 
 def strip_identity_qualifier(inferred: str | None) -> str:
     """Remove GENERATED / AUTO_INCREMENT / COLLATE qualifiers for logical lookup."""
@@ -6273,8 +6314,10 @@ def specialty_polarity_mismatch(source_type: str, target_type: str) -> bool:
 def case_fold_polarity_invent(source_type: str, target_type: str) -> bool:
     """True when mapping invents or drops case-fold equality polarity.
 
-    Covers TEXT→CITEXT / CS→CI invent and CI→CS / CITEXT→TEXT drop (unique
-    keys that collided under CI become distinct — or the reverse).
+    Covers TEXT→CITEXT / CS→CI invent and CITEXT→TEXT / explicit CS drop.
+    MySQL/SQL Server CI collation metadata → bare create-new TEXT/VARCHAR is
+    dialect normalization (values round-trip); uniqueness follows the destination
+    platform default and must not block every string column on Validate.
     """
     src_l = normalize_logical_type(source_type)
     tgt_l = normalize_logical_type(target_type)
@@ -6298,11 +6341,23 @@ def case_fold_polarity_invent(source_type: str, target_type: str) -> bool:
     )
     if not src_declares and not tgt_declares:
         return False
-    return src_ci != tgt_ci
-
+    # Inventing CI / CITEXT on the target from a CS source.
+    if tgt_ci and not src_ci:
+        return True
+    # Dropping CITEXT specialty into bare CS text — real polarity loss.
+    if specialty_carrier_base(source_type) == "CITEXT" and not tgt_ci:
+        return True
+    # Explicit CS (or non-CI) collation on target vs CI source.
+    if src_ci and tgt_declares and not tgt_ci:
+        return True
+    # Source CI collation metadata + bare destination TEXT/VARCHAR: normalize.
+    return False
 
 def accent_polarity_invent(source_type: str, target_type: str) -> bool:
-    """True when mapping invents accent-insensitive equality (AS→AI)."""
+    """True when mapping invents or explicitly drops accent-insensitive equality.
+
+    Source AI collation → bare create-new TEXT is dialect strip, not invent.
+    """
     src_l = normalize_logical_type(source_type)
     tgt_l = normalize_logical_type(target_type)
     if src_l not in {LOGICAL_STRING, LOGICAL_TEXT} or tgt_l not in {
@@ -6314,8 +6369,13 @@ def accent_polarity_invent(source_type: str, target_type: str) -> bool:
         return False
     src_ai = is_accent_insensitive_collation(source_type)
     tgt_ai = is_accent_insensitive_collation(target_type)
-    return src_ai != tgt_ai
-
+    # Invent AI on an explicitly collated target.
+    if tgt_ai and not src_ai:
+        return True
+    # Drop AI only when the target declares an accent-sensitive collation.
+    if src_ai and not tgt_ai and parse_collation(target_type):
+        return True
+    return False
 
 def width_fold_polarity_invent(source_type: str, target_type: str) -> bool:
     """True when mapping invents/drops width-insensitive equality (WS omit).

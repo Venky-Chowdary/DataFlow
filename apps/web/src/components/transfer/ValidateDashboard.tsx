@@ -190,6 +190,12 @@ interface ValidateDashboardProps {
     uniqueCount: number;
     sampleRows: number;
   }>;
+  /** Sample-unique composite suggestions (false-PK when single col duplicates). */
+  compositeKeySuggestions?: Array<{
+    columns: string[];
+    uniqueCount: number;
+    sampleRows: number;
+  }>;
   /** Apply a suggested primary key, then open Advanced / re-validate. */
   onApplyPrimaryKey?: (column: string) => void;
   /** Open Mapping proof drawer — evidence only (Column matches card). */
@@ -664,6 +670,7 @@ export function ValidateDashboard({
   onOpenIdentitySettings,
   uniqueKeySuggestions = [],
   onApplyPrimaryKey,
+  compositeKeySuggestions = [],
   onOpenMappingProof,
   mappingProofSummary = null,
   onRunPreflight,
@@ -1561,11 +1568,32 @@ export function ValidateDashboard({
                         disabled={remediating}
                         leadingIcon={<DtIcon name="check" size={14} />}
                         onClick={() => onApplyPrimaryKey(s.column)}
-                        title={`Unique in ${s.sampleRows}-row sample`}
+                        title={`Unique in ${s.sampleRows}-row sample — not full-table proof`}
                       >
                         Try PK · {s.column}
                       </Button>
                     ))}
+                  </>
+                )}
+                {compositeKeySuggestions && compositeKeySuggestions.length > 0 && onApplyPrimaryKey && (
+                  <>
+                    {compositeKeySuggestions.slice(0, 2).map((s) => {
+                      const joined = s.columns.join(",");
+                      const label = s.columns.join(" + ");
+                      return (
+                        <Button
+                          key={joined}
+                          size="sm"
+                          variant="secondary"
+                          disabled={remediating}
+                          leadingIcon={<DtIcon name="check" size={14} />}
+                          onClick={() => onApplyPrimaryKey(joined)}
+                          title={`Composite unique in ${s.sampleRows}-row sample — prefer when single-col is a false PK`}
+                        >
+                          Try composite · {label}
+                        </Button>
+                      );
+                    })}
                   </>
                 )}
                 <Button
@@ -1629,16 +1657,32 @@ export function ValidateDashboard({
                   </Button>
                 )}
                 {isTypeMismatchBlock && (() => {
+                  const isNoopTextRemap = (sug: string, cur: string) => {
+                    const s = (sug || "").toUpperCase().trim();
+                    const c = (cur || "").toUpperCase().trim();
+                    if (!s || s === c) return true;
+                    // Hide invent-VARCHAR for unbounded TEXT sinks — not a fidelity fix.
+                    if (/^VARCHAR$/.test(s) && /^(TEXT|STRING|CLOB|LONGTEXT)\b/.test(c)) return true;
+                    // Unbounded TEXT↔TEXT only; keep VARCHAR(n)↔TEXT / width widens.
+                    const unbound = /^(TEXT|STRING|CLOB|LONGTEXT|NTEXT)$/;
+                    const sBase = s.replace(/\s+.*$/, "");
+                    const cBase = c.replace(/\s+.*$/, "");
+                    return unbound.test(sBase) && unbound.test(cBase);
+                  };
                   const coercionBlocks = (preflight?.coercion_report?.columns ?? [])
                     .filter((c) => c.severity === "block" && c.suggested_target_type)
-                    .slice(0, 4);
+                    .filter((c) => !isNoopTextRemap(String(c.suggested_target_type), String(c.target_type || "")))
+                    .slice(0, 2);
                   const remapCols = coercionBlocks.length > 0
                     ? coercionBlocks.map((c) => ({
                       source: c.source,
                       target: c.target,
                       toType: c.suggested_target_type || "VARCHAR",
                     }))
-                    : typeMismatchColumns.slice(0, 4).map((c) => ({
+                    : typeMismatchColumns
+                      .filter((c) => !isNoopTextRemap(c.toType, c.targetType || ""))
+                      .slice(0, 2)
+                      .map((c) => ({
                       source: c.source,
                       target: c.target,
                       toType: c.toType,

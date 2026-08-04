@@ -54,6 +54,13 @@ export function remapToTypeForMismatch(sourceType: string, targetType: string): 
   if (/VARCHAR|TEXT|STRING|CHAR/.test(srcU) && /INT|DECIMAL|NUMBER|FLOAT|DOUBLE/.test(tgtU)) {
     return "VARCHAR";
   }
+  // Same-logical text/json create-new twins — keep destination type, never invent VARCHAR.
+  if (
+    (/VARCHAR|TEXT|STRING|CHAR|CLOB/.test(srcU) && /VARCHAR|TEXT|STRING|CHAR|CLOB/.test(tgtU))
+    || (/JSON/.test(srcU) && /JSON/.test(tgtU))
+  ) {
+    return tgt || src || "TEXT";
+  }
   return "VARCHAR";
 }
 

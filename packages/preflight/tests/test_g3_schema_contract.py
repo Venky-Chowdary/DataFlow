@@ -5,8 +5,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-_PREFLIGHT_ROOT = Path(__file__).resolve().parents[2] / "packages" / "preflight" / "src"
-_API_ROOT = Path(__file__).resolve().parents[2] / "apps" / "api"
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_PREFLIGHT_ROOT = _REPO_ROOT / "packages" / "preflight" / "src"
+_API_ROOT = _REPO_ROOT / "apps" / "api"
 if str(_PREFLIGHT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PREFLIGHT_ROOT))
 if str(_API_ROOT) not in sys.path:

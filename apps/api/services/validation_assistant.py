@@ -70,6 +70,7 @@ def _parse_type_mismatch_pairs(text: str) -> list[tuple[str, str, str, str]]:
 def _remap_to_type_for_mismatch(source_type: str, target_type: str) -> str:
     """Choose a one-click target type that can actually clear the gate."""
     from services.type_system import (
+        create_new_mapping_target_type,
         normalize_logical_type,
         specialty_carrier_base,
     )
@@ -82,6 +83,13 @@ def _remap_to_type_for_mismatch(source_type: str, target_type: str) -> str:
         return "UUID"
     if specialty and tgt_l in {"string", "text", "json"}:
         return specialty
+    # Same-logical text/json/datetime create-new twins: keep destination family
+    # (never invent bare VARCHAR for TEXT COLLATE → TEXT or JSON → JSONB noise).
+    if src_l == tgt_l and src_l in {"string", "text", "json", "datetime", "date", "time"}:
+        stamped = (target_type or "").strip()
+        if stamped and "COLLATE" not in stamped.upper():
+            return stamped
+        return create_new_mapping_target_type(source_type, "postgresql") or stamped or "TEXT"
     # Numeric / temporal mismatches: preserve source family — never invent VARCHAR.
     if src_l == "float" and tgt_l in {"decimal", "integer"}:
         return "DOUBLE"
