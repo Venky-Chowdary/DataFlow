@@ -276,7 +276,18 @@ def _mapping_risks(
 
     src_logical = normalize_logical_type(src_type)
     tgt_logical = normalize_logical_type(tgt_type)
-    dest = (destination_db_type or "").lower()
+    # Normalize engine aliases BEFORE fidelity SSOT — otherwise spark/delta miss
+    # Databricks TIMESTAMP instant polarity and false-flag TIMESTAMPTZ→TIMESTAMP.
+    try:
+        from services.type_system import _normalize_dest_db
+
+        dest = _normalize_dest_db(destination_db_type)
+    except ImportError:  # pragma: no cover
+        dest = (destination_db_type or "").lower()
+        if dest in {"spark", "delta", "delta_lake", "databricks_sql", "unity_catalog"}:
+            dest = "databricks"
+        if dest in {"apache_iceberg", "iceberg_rest", "nessie"}:
+            dest = "iceberg"
     if is_lossy_coercion(src_type, tgt_type, dest_db=dest):
         risks.append({
             "code": "type_narrowing",
@@ -286,10 +297,6 @@ def _mapping_risks(
                 "review before production."
             ),
         })
-    if dest in {"spark", "delta", "delta_lake", "databricks_sql", "unity_catalog"}:
-        dest = "databricks"
-    if dest in {"apache_iceberg", "iceberg_rest", "nessie"}:
-        dest = "iceberg"
     src_raw = src_type.lower()
     lakehouse = dest in {"databricks", "iceberg", "snowflake", "bigquery", "redshift"}
 
@@ -307,7 +314,9 @@ def _mapping_risks(
         is_precision_collapse_coercion = None  # type: ignore
         is_timezone_polarity_loss = None  # type: ignore
 
-    if is_timezone_polarity_loss and is_timezone_polarity_loss(src_type, tgt_type):
+    if is_timezone_polarity_loss and is_timezone_polarity_loss(
+        src_type, tgt_type, dest_db=dest
+    ):
         risks.append({
             "code": "timezone_polarity_loss",
             "severity": "warn",
@@ -354,7 +363,9 @@ def _mapping_risks(
                 "native STRUCT/OBJECT."
             ),
         })
-    elif is_nested_shape_collapse and is_nested_shape_collapse(src_type, tgt_type):
+    elif is_nested_shape_collapse and is_nested_shape_collapse(
+        src_type, tgt_type, dest_db=dest
+    ):
         risks.append({
             "code": "nested_shape_collapse",
             "severity": "warn",

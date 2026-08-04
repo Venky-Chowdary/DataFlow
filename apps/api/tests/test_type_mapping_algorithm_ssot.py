@@ -445,15 +445,35 @@ def test_create_new_false_self_blocks_cleared():
         ("DOUBLE", "snowflake"),
         ("DECIMAL(18,4)", "bigquery"),
         ("MONEY", "bigquery"),
+        ("SMALLMONEY", "postgresql"),
+        ("TIMESTAMP", "bigquery"),
+        ("TIMESTAMP", "databricks"),
         ("TIMESTAMP_NTZ(6)", "sqlserver"),
         ("TIMESTAMP_NTZ(6)", "databricks"),
         ("TIMESTAMP_NTZ(6)", "iceberg"),
+        ("DATETIMEOFFSET", "sqlserver"),
         ("TIME(6)", "redshift"),
         ("JSONB", "sqlserver"),
         ("UUID", "bigquery"),
+        ("UNIQUEIDENTIFIER", "bigquery"),
         ("OBJECTID", "oracle"),
         ("INET", "mysql"),
         ("INET", "sqlserver"),
+        ("ARRAY<INTEGER>", "bigquery"),
+        ("BIT(8)", "oracle"),
+        ("BINARY(16)", "postgresql"),
+        ("BINARY(16)", "bigquery"),
+        ("BINARY(16)", "redshift"),
+        ("VARBINARY(32)", "snowflake"),
+        ("TEXT", "sqlserver"),
+        ("TEXT", "redshift"),
+        ("XML", "oracle"),
+        ("GEOMETRY", "oracle"),
+        ("VECTOR(768)", "duckdb"),
+        ("VECTOR(768)", "clickhouse"),
+        ("VECTOR(768)", "iceberg"),
+        ("STRUCT<a:INT>", "clickhouse"),
+        ("STRUCT<a:INT>", "duckdb"),
     ]
     for src, dest in cases:
         stamp = create_new_mapping_target_type(src, dest)
@@ -466,6 +486,49 @@ def test_create_new_false_self_blocks_cleared():
             dest,
             stamp,
         )
+
+
+def test_mapping_proof_uses_dest_db_for_timestamptz_instant_sinks():
+    """spark/delta aliases must normalize before TZ SSOT — no false TIMESTAMPTZ→TIMESTAMP."""
+    from services.mapping_proof import _mapping_risks
+
+    for dest in ("bigquery", "databricks", "spark", "delta"):
+        risks = _mapping_risks(
+            {
+                "source_type": "TIMESTAMPTZ",
+                "target_type": "TIMESTAMP",
+                "transform": "none",
+            },
+            dest_mode="create_new",
+            destination_db_type=dest,
+        )
+        codes = {r.get("code") for r in risks}
+        assert "timezone_polarity_loss" not in codes, (dest, risks)
+        assert "type_narrowing" not in codes, (dest, risks)
+
+
+def test_iceberg_materialize_array_vector_spelling():
+    from services.type_system import materialize_dest_ddl
+
+    assert materialize_dest_ddl("iceberg", "ARRAY<FLOAT>").lower() == "list<float>"
+    assert materialize_dest_ddl("iceberg", "FLOAT[]").lower() == "list<float>"
+    assert materialize_dest_ddl("iceberg", "VECTOR(768)").lower() == "list<float>"
+    assert materialize_dest_ddl("iceberg", "list<float>").lower() == "list<float>"
+
+
+def test_dest_db_aliases_normalize_inside_lossy_ssot():
+    """spark/delta must not dual-path vs databricks inside is_lossy_coercion."""
+    from services.type_system import is_lossy_coercion, is_timezone_polarity_loss
+
+    for dest in ("databricks", "spark", "delta", "delta_lake"):
+        assert is_timezone_polarity_loss(
+            "TIMESTAMPTZ", "TIMESTAMP", dest_db=dest
+        ) is False, dest
+        assert is_lossy_coercion(
+            "TIMESTAMPTZ", "TIMESTAMP", dest_db=dest
+        ) is False, dest
+    assert is_timezone_polarity_loss("TIMESTAMPTZ", "TIMESTAMP") is True
+    assert is_lossy_coercion("TIMESTAMPTZ", "DATETIME(6)", dest_db="mysql") is True
 
 
 def test_oracle_time_and_iceberg_objectid_remain_declared_lossy():

@@ -478,7 +478,7 @@ def analyze_coercion(
         fidelity_collapse = bool(
             is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest_db_type)
             or is_lossy_coercion(src_type, tgt_type, dest_db=dest_db_type)
-            or is_nested_shape_collapse(src_type, tgt_type)
+            or is_nested_shape_collapse(src_type, tgt_type, dest_db=dest_db_type)
         )
         coercion_required = src_logical != tgt_logical
         structural_pair = (
@@ -562,7 +562,9 @@ def analyze_coercion(
         framing = None
         if structural_preserve:
             nested_to_doc = is_nested_document_collapse(src_type, tgt_type)
-            nested_shape_loss = is_nested_shape_collapse(src_type, tgt_type)
+            nested_shape_loss = is_nested_shape_collapse(
+                src_type, tgt_type, dest_db=dest_db_type
+            )
             shape_ok = (
                 not nested_to_doc
                 and not nested_shape_loss

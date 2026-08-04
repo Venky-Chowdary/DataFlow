@@ -32,11 +32,12 @@ def test_duckdb_struct_paren_form():
         ("b", "VARCHAR"),
     ]
     assert normalize_logical_type("STRUCT(a INTEGER, b VARCHAR)") == "struct"
+    # Nested integer leaves keep declared width — never invent BIGINT from INTEGER.
     assert ddl_type("duckdb", "STRUCT(a INTEGER, b VARCHAR)") == (
-        "STRUCT(a BIGINT, b VARCHAR)"
+        "STRUCT(a INTEGER, b VARCHAR)"
     )
     assert ddl_type("trino", "STRUCT(a INTEGER, b VARCHAR)") == (
-        "row(a bigint, b varchar)"
+        "row(a integer, b varchar)"
     )
     assert ddl_type("postgresql", "STRUCT(a INTEGER, b VARCHAR)") == "JSONB"
     assert is_nested_document_collapse("STRUCT(a INTEGER, b VARCHAR)", "JSON") is True
@@ -55,10 +56,10 @@ def test_trino_row_form():
     ]
     assert normalize_logical_type("row(a integer, b varchar)") == "struct"
     assert ddl_type("trino", "row(a integer, b varchar)") == (
-        "row(a bigint, b varchar)"
+        "row(a integer, b varchar)"
     )
     assert ddl_type("duckdb", "ROW(a INTEGER, b VARCHAR)") == (
-        "STRUCT(a BIGINT, b VARCHAR)"
+        "STRUCT(a INTEGER, b VARCHAR)"
     )
     assert ddl_type("clickhouse", "ROW(a INTEGER, b VARCHAR)").startswith("Tuple(")
     assert ddl_type("snowflake", "ROW(a INTEGER, b VARCHAR)").startswith("OBJECT(")

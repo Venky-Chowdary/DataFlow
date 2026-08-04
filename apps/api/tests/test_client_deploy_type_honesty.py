@@ -843,9 +843,9 @@ def test_g3_same_logical_and_specialty_invent_wave12():
     )
 
     # Map fidelity lossy must also surface in G3 coercion validator.
+    # MONEY→DECIMAL(19,4) is the intentional create-new money-scale wire (not lossy).
     for src, tgt in (
         ("YEAR", "SMALLINT"),
-        ("MONEY", "DECIMAL(19,4)"),
         ("BIT(8)", "BYTEA"),
         ("OID", "INTEGER"),
         ("TEXT", "INET"),
@@ -862,6 +862,8 @@ def test_g3_same_logical_and_specialty_invent_wave12():
             validation_mode="strict",
         )
         assert issues and issues[0]["lossy"] is True, (src, tgt, issues)
+    assert is_lossy_coercion("MONEY", "DECIMAL(19,4)", dest_db="postgresql") is False
+    assert is_lossy_coercion("MONEY", "SMALLINT") is True
 
     assert specialty_domain_would_invent("TEXT", "INET") is True
     assert specialty_domain_would_invent("JSON", "HSTORE") is True

@@ -35,8 +35,12 @@ def probe_type(src: str) -> list[dict]:
             "ddl": ddl_type(db, src),
             "stamp": phys,
             "risks": [r["kind"] for r in risks],
-            "lossy": is_lossy_coercion(src, phys),
-            "tz_loss": is_timezone_polarity_loss(src, phys) if "TIME" in src.upper() or "DATE" in src.upper() else None,
+            "lossy": is_lossy_coercion(src, phys, dest_db=db),
+            "tz_loss": (
+                is_timezone_polarity_loss(src, phys, dest_db=db)
+                if "TIME" in src.upper() or "DATE" in src.upper()
+                else None
+            ),
             "greenwash": (
                 phys.upper().replace(" ", "") == src.upper().replace(" ", "")
                 and db not in {"postgresql", "redshift", "duckdb", "mongodb"}

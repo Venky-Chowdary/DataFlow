@@ -60,13 +60,11 @@ def _warehouse_root(host: str, database: str, connection_string: str) -> Path:
 
 def _logical_to_iceberg_type(logical: str) -> str:
     """Iceberg DDL from Map stamps / logicals — never invent float→double leaves."""
-    from services.type_system import ddl_type, materialize_dest_ddl
+    from services.type_system import materialize_dest_ddl
 
     raw = (logical or "string").strip()
-    upper = raw.upper()
-    # ARRAY<> / T[] must become list<...> spelling; float leaves stay float.
-    if upper.startswith("ARRAY<") or upper.startswith("ARRAY(") or upper.endswith("[]"):
-        return ddl_type("iceberg", raw)
+    # Nested ARRAY/LIST/T[] stamps go through materialize so list<float> spelling
+    # and float leaves stay authoritative (no dual ddl_type invent path).
     stamped = materialize_dest_ddl("iceberg", raw)
     # Normalize single-precision aliases to Iceberg's float token.
     bare = stamped.upper().split("(", 1)[0].strip()
