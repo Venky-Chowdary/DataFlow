@@ -54,8 +54,8 @@ QUARANTINE_POSTURE = (
 )
 
 DELIVERY_SEMANTICS = (
-    "Default delivery is at-least-once with upsert/idempotent write where supported; "
-    "exactly-once is not claimed unless a route proves it."
+    "Default delivery is at-least-once with upsert/idempotent write where supported. "
+    "Exactly-once and at-most-once are not claimed (at-most-once would allow silent loss)."
 )
 
 

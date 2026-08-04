@@ -2035,7 +2035,7 @@ export function ValidateDashboard({
                   ? " Re-runs may duplicate rows — prefer overwrite or upsert if that is not intended."
                   : ""}
                 {upsertLikeSync
-                  ? " Delivery is at-least-once upsert until exactly-once is proven."
+                  ? " Delivery is at-least-once upsert; exactly-once and at-most-once are not claimed."
                   : ""}
               </p>
             </div>

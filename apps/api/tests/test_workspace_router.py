@@ -70,6 +70,10 @@ def test_security_posture_report(client):
     assert "byok" in posture
     assert posture["cdc_delivery"] == "at-least-once"
     assert posture["cdc_exactly_once_claimed"] is False
+    assert posture["cdc_at_most_once_claimed"] is False
+    assert posture["cdc_honesty"]["delivery_classes"]["at_least_once"]["claimed"] is True
+    assert posture["cdc_honesty"]["delivery_classes"]["exactly_once"]["claimed"] is False
+    assert posture["cdc_honesty"]["delivery_classes"]["at_most_once"]["claimed"] is False
     assert "checkpoint_fail_closed" in posture["deployment"]["data_loss_controls"]
 
     response = client.get(

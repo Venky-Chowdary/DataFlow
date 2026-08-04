@@ -271,7 +271,7 @@ export function buildClientMappingProof(
     quarantine_posture:
       "Bad or unparseable rows are held out of the primary write and surfaced in quarantine — not silently dropped or NULL-invented (coerce_null only).",
     delivery_semantics:
-      "Default delivery is at-least-once with upsert/idempotent write where supported; exactly-once is not claimed unless a route proves it. Incremental snapshots use Debezium-style windows (stream events win over snapshot READ on PK collision).",
+      "Default delivery is at-least-once with upsert/idempotent write where supported. Exactly-once and at-most-once are not claimed (at-most-once would allow silent loss). Incremental snapshots use Debezium-style windows (stream events win over snapshot READ on PK collision).",
     summary: {
       mapped_count: rows.length,
       create_ddl_count: destMode === "create_new" ? rows.length : rows.filter((r) => r.schema_decision?.startsWith("ADD")).length,

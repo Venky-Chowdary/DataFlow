@@ -70,7 +70,13 @@ def build_signed_proof_pack(
         "prev_audit_hash": prev_audit_hash,
         "delivery_semantics": {
             "cdc_default": "at_least_once",
-            "note": "Destinations must upsert with PK/LSN guards; not exactly-once.",
+            "exactly_once": False,
+            "at_least_once": True,
+            "at_most_once": False,
+            "note": (
+                "Destinations must upsert with PK/LSN guards under at-least-once capture; "
+                "exactly-once and at-most-once are not claimed."
+            ),
         },
     }
     canon = canonical_json(body)

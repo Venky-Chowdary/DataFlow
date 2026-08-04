@@ -611,9 +611,10 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
         "mfa_required": tenant.mfa_required if tenant else False,
         "session_timeout_hours": tenant.session_timeout_hours if tenant else 8,
         "tls_version": "1.3",
-        # Surfaced CDC posture — at-least-once; destinations upsert with PK/LSN guards.
+        # Surfaced CDC posture — explicit EO/ALO/AMO; only ALO is claimed.
         "cdc_delivery": DELIVERY_DEFAULT,
         "cdc_exactly_once_claimed": EXACTLY_ONCE_CLAIMED,
+        "cdc_at_most_once_claimed": False,
         "cdc_honesty": cdc_honesty,
         "deployment": {
             "models": ["saas_multi_tenant", "customer_vpc_self_host", "air_gapped_compose"],
