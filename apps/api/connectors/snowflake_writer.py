@@ -125,6 +125,29 @@ def _snowflake_decimal_type(col_idx: int, mapped_rows: list[tuple]) -> str:
     return f"NUMBER({precision},{scale})"
 
 
+def resolve_snowflake_create_types(
+    logical_types: list[str],
+    mapped_rows: list[tuple],
+) -> list[str]:
+    """CREATE column types — honor Map-stamped DECIMAL(p,s); invent only for bare DECIMAL.
+
+    DDL must match the approved mapping. Explicit NUMBER/DECIMAL(p,s) stamps are
+    never overridden by batch inference; unfit cells are quarantined instead.
+    """
+    from services.type_system import normalize_logical_type
+
+    out: list[str] = []
+    for i, t in enumerate(logical_types):
+        if normalize_logical_type(t) == "decimal":
+            if _parse_number_type(t) is not None:
+                out.append(sf_type(t))
+            else:
+                out.append(_snowflake_decimal_type(i, mapped_rows))
+        else:
+            out.append(sf_type(t))
+    return out
+
+
 def _quarantine_unfit_decimals(
     mapped_rows: list[tuple],
     target_cols: list[str],
@@ -755,14 +778,10 @@ def write_mapped_rows(
         error_policy=policy,
     )
 
-    # Size Snowflake NUMBER columns from the actual batch data.  Prefer
-    # integer capacity over fractional digits so NUMBER(38,s) never under-fits.
-    target_types = [
-        _snowflake_decimal_type(i, mapped_rows)
-        if normalize_logical_type(t) == "decimal"
-        else sf_type(t)
-        for i, t in enumerate(logical_types)
-    ]
+    # Size Snowflake NUMBER columns from the actual batch data only when Map
+    # did not stamp an explicit DECIMAL/NUMBER(p,s). Prefer integer capacity
+    # over fractional digits so NUMBER(38,s) never under-fits bare DECIMAL.
+    target_types = resolve_snowflake_create_types(logical_types, mapped_rows)
     mapped_rows = _quarantine_unfit_decimals(
         mapped_rows, target_cols, target_types, rejected_details, policy
     )

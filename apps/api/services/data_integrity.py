@@ -1361,6 +1361,11 @@ def run_integrity_audit(
         },
         "summary": (
             f"{len(passed_checks)}/{len(checks)} integrity checks passed"
+            + (
+                " (Validate sample — population uniqueness not proven)"
+                if not source_duplicate_probe_ran
+                else " (full-selected uniqueness probe · other checks on sample)"
+            )
             if checks
             else "No integrity checks run (missing mappings or samples)"
         ),

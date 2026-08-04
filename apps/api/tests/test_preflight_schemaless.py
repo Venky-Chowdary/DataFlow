@@ -40,6 +40,41 @@ def test_preflight_passes_high_null_rate_for_schemaless(dest_type: str) -> None:
     assert gate_status.get("g5_dry_run") == "pass"
 
 
+@pytest.mark.parametrize(
+    "dest_type",
+    ["documentdb", "firestore", "amazon_dynamodb", "redis-kv", "cosmos-mongodb"],
+)
+def test_preflight_schemaless_aliases_normalize(dest_type: str) -> None:
+    """Aliases must hit schemaless SKIP path — not invent relational DDL blocks."""
+    from preflight.constants import is_schemaless_dest
+
+    assert is_schemaless_dest(dest_type) is True
+    sample_rows = [
+        {"_id": "1", "name": "Alice", "address": ""},
+        {"_id": "2", "name": "Bob", "address": ""},
+        {"_id": "3", "name": "Charlie", "address": ""},
+    ]
+    columns = list(sample_rows[0].keys())
+    result = run_file_preflight(
+        columns=columns,
+        column_types={c: "VARCHAR" for c in columns},
+        row_count=len(sample_rows),
+        mappings=[{"source": c, "target": c, "confidence": 0.99} for c in columns],
+        destination_connected=True,
+        source_connected=True,
+        source_kind="database",
+        sample_rows=sample_rows,
+        destination_column_types={},
+        destination_table_exists=False,
+        destination_can_create=True,
+        destination_db_type=dest_type,
+        validation_mode="strict",
+    )
+    assert result["passed"] is True, result.get("blockers")
+    gate_status = {g["id"]: g["status"] for g in result["gates"]}
+    assert gate_status.get("g6_target_ddl") == "pass"
+
+
 def test_preflight_redis_ignores_stale_target_fingerprint() -> None:
     """Mapping revision on Redis must not fail G6 with 'Destination schema changed'."""
     from services.schema_fingerprint import fingerprint_schema

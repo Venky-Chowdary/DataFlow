@@ -401,6 +401,22 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_ARRAY: "JSON",
         LOGICAL_BINARY: "BYTES",
     },
+    # Google Cloud Spanner — INT64/NUMERIC/TIMESTAMP only. No DATETIME, TIME,
+    # BIGNUMERIC, or GEOGRAPHY. Wall-clock NTZ lands on STRING (fail-closed).
+    "spanner": {
+        LOGICAL_STRING: "STRING(MAX)",
+        LOGICAL_TEXT: "STRING(MAX)",
+        LOGICAL_INTEGER: "INT64",
+        LOGICAL_DECIMAL: "NUMERIC",
+        LOGICAL_BOOLEAN: "BOOL",
+        LOGICAL_DATE: "DATE",
+        LOGICAL_DATETIME: "STRING(30)",
+        LOGICAL_TIME: "STRING(18)",
+        LOGICAL_UUID: "STRING(36)",
+        LOGICAL_JSON: "JSON",
+        LOGICAL_ARRAY: "JSON",
+        LOGICAL_BINARY: "BYTES(MAX)",
+    },
     "mongodb": {
         LOGICAL_STRING: "string",
         LOGICAL_TEXT: "string",
@@ -608,6 +624,7 @@ _OBJECTID_DDL_DEFAULTS: Final[dict[str, str]] = {
     "elasticsearch": "keyword",
     # Width-safe hex wires — bare STRING drops ObjectId polarity (false Validate).
     "bigquery": "STRING(24)",
+    "spanner": "STRING(24)",
     "databricks": "VARCHAR(24)",
     "sqlite": "TEXT",
     "oracle": "VARCHAR2(24)",
@@ -659,6 +676,12 @@ _NATIVE_SPECIALTY_DDL: Final[dict[str, dict[str, str]]] = {
         LOGICAL_INTERVAL: "INTERVAL",
         LOGICAL_GEOGRAPHY: "GEOGRAPHY",
         LOGICAL_VECTOR: "STRING",
+    },
+    "spanner": {
+        # No native INTERVAL / GEOGRAPHY / VECTOR — lossless text, never invent BQ types.
+        LOGICAL_INTERVAL: "STRING(64)",
+        LOGICAL_GEOGRAPHY: "STRING(MAX)",
+        LOGICAL_VECTOR: "STRING(MAX)",
     },
     "redshift": {
         LOGICAL_INTERVAL: "VARCHAR(65535)",
@@ -718,6 +741,7 @@ _FLOAT_DDL: Final[dict[str, str]] = {
     "oracle": "BINARY_DOUBLE",
     "snowflake": "FLOAT",
     "bigquery": "FLOAT64",
+    "spanner": "FLOAT64",
     "mongodb": "double",
     "redshift": "DOUBLE PRECISION",
     "sqlite": "REAL",
@@ -742,6 +766,7 @@ DEFAULT_DDL: Final[dict[str, str]] = {
     "oracle": "VARCHAR2(4000)",
     "snowflake": "VARCHAR",
     "bigquery": "STRING",
+    "spanner": "STRING(MAX)",
     "mongodb": "string",
     "redshift": "VARCHAR(65535)",
     "sqlite": "TEXT",
@@ -778,6 +803,8 @@ _DECIMAL_CAPS: Final[dict[str, tuple[int, int]]] = {
     # BigQuery NUMERIC is (38,9); BIGNUMERIC is (76,38). We emit BIGNUMERIC
     # for DECIMAL logicals; caps used when source params force a check.
     "bigquery": (76, 38),
+    # Spanner NUMERIC is fixed (38,9) — never invent BIGNUMERIC.
+    "spanner": (38, 9),
 }
 
 # DDL templates that accept (precision, scale). Bare NUMERIC / BIGNUMERIC /
@@ -797,6 +824,7 @@ _DECIMAL_PARAM_TEMPLATES: Final[dict[str, str]] = {
     "duckdb": "DECIMAL({p},{s})",
     "postgresql": "NUMERIC({p},{s})",
     "bigquery": "BIGNUMERIC({p},{s})",
+    "spanner": "NUMERIC({p},{s})",
 }
 
 _DECIMAL_DEFAULT_SCALE: Final[dict[str, int]] = {
@@ -814,6 +842,7 @@ _DECIMAL_DEFAULT_SCALE: Final[dict[str, int]] = {
     "presto": 15,
     "postgresql": 0,
     "bigquery": 38,
+    "spanner": 9,
 }
 
 
@@ -2300,8 +2329,9 @@ def _normalize_dest_db(db_type: str | None) -> str:
         return "snowflake"
     if db in {"athena", "amazon_athena", "aws_athena", "dremio"}:
         return "trino"
+    # Spanner is NOT BigQuery — inventing DATETIME/BIGNUMERIC/TIME is illegal DDL.
     if db in {"spanner", "google_spanner", "cloud_spanner"}:
-        return "bigquery"
+        return "spanner"
     if db in {"duckdb", "motherduck"}:
         return "duckdb"
     if db in {"sqlite", "libsql", "turso"}:
@@ -3381,9 +3411,11 @@ def _geography_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     srid = parse_geography_srid(inferred)
     if db == "postgresql":
         if pol == "geography":
-            return f"GEOGRAPHY(Geometry,{srid})" if srid else "GEOGRAPHY"
+            kind = geometry_kind(inferred) or "Geometry"
+            return f"GEOGRAPHY({kind},{srid})" if srid else "GEOGRAPHY"
         if pol == "geometry":
-            return f"GEOMETRY(Geometry,{srid})" if srid else "GEOMETRY"
+            kind = geometry_kind(inferred) or "Geometry"
+            return f"GEOMETRY({kind},{srid})" if srid else "GEOMETRY"
         return None
     if db == "sqlserver":
         if pol == "geometry":
@@ -3413,6 +3445,7 @@ _TZ_AWARE_DDL: Final[dict[str, str]] = {
     "sqlserver": "DATETIMEOFFSET",
     "oracle": "TIMESTAMP WITH TIME ZONE",
     "bigquery": "TIMESTAMP",
+    "spanner": "TIMESTAMP",
     "duckdb": "TIMESTAMPTZ",
     "timescaledb": "timestamptz",
     "databricks": "TIMESTAMP",
@@ -3429,6 +3462,8 @@ _TZ_NAIVE_DDL: Final[dict[str, str]] = {
     "sqlserver": "DATETIME2(7)",
     "oracle": "TIMESTAMP",
     "bigquery": "DATETIME",
+    # Spanner has no DATETIME — wall-clock NTZ must not invent UTC TIMESTAMP.
+    "spanner": "STRING(30)",
     "duckdb": "TIMESTAMP",
     "timescaledb": "timestamp",
     # Keep lakehouse NTZ spellings aligned with DDL_TYPES[LOGICAL_DATETIME].
@@ -3579,6 +3614,7 @@ _TZ_LTZ_DDL: Final[dict[str, str]] = {
     "sqlserver": "DATETIMEOFFSET",
     "mysql": "DATETIME(6)",
     "bigquery": "TIMESTAMP",
+    "spanner": "TIMESTAMP",
     "databricks": "TIMESTAMP",
     "clickhouse": "DateTime64(6, 'UTC')",
     "trino": "timestamp(6) with time zone",
@@ -3594,6 +3630,7 @@ _TZ_OFFSET_DDL: Final[dict[str, str]] = {
     "sqlserver": "DATETIMEOFFSET",
     "mysql": "DATETIME(6)",
     "bigquery": "TIMESTAMP",
+    "spanner": "TIMESTAMP",
     "databricks": "TIMESTAMP",
     "clickhouse": "DateTime64(6, 'UTC')",
     "trino": "timestamp(6) with time zone",
@@ -3995,6 +4032,9 @@ def datetime_timezone_polarity(inferred: str | None, *, dest_db: str = "") -> st
             if db in {
                 "bigquery",
                 "bq",
+                "spanner",
+                "google_spanner",
+                "cloud_spanner",
                 "databricks",
                 "spark",
                 "delta",
@@ -4975,11 +5015,17 @@ def interval_family(inferred: str | None) -> str | None:
     return None
 
 
-def interval_family_would_collapse(source_type: str, target_type: str) -> bool:
+def interval_family_would_collapse(
+    source_type: str, target_type: str, *, dest_db: str = ""
+) -> bool:
     """True when YEAR-MONTH ↔ DAY-SECOND polarity would be lost or invented.
 
     Bare ``INTERVAL`` ↔ explicit YM/DS invents a family the operator never
     declared — fail closed (Snowflake AIM / Oracle INTERVAL class).
+
+    Engines whose single native INTERVAL type holds both families
+    (PostgreSQL, DuckDB, BigQuery) treat YM/DS → bare INTERVAL as create-new
+    wire, not invent/drop — when ``dest_db`` names that engine.
     """
     if normalize_logical_type(source_type) != LOGICAL_INTERVAL:
         return False
@@ -4992,9 +5038,16 @@ def interval_family_would_collapse(source_type: str, target_type: str) -> bool:
         return True
     # Unqualified ↔ qualified family invent/drop.
     if (src_f is None) != (tgt_f is None):
+        db = _normalize_dest_db(dest_db) if dest_db else ""
+        # Unified INTERVAL engines — qualified source → bare INTERVAL is native.
+        if (
+            db in {"postgresql", "duckdb", "bigquery"}
+            and src_f is not None
+            and tgt_f is None
+        ):
+            return False
         return True
     return False
-
 
 def spatial_polarity(inferred: str | None) -> str | None:
     """Return ``geography`` / ``geometry`` / ``sdo``, or None.
@@ -5666,6 +5719,54 @@ _PHYSICAL_STAMP_PASS_THROUGH: Final[frozenset[str]] = frozenset({
     "ENUM", "SET", "ARRAY", "STRUCT", "MAP", "RECORD",
 })
 
+# Pass-through tokens that are illegal or not the create-new wire on a dest.
+# Explicit — never infer. Bare JSON on PG rematerializes to JSONB (create-new).
+# UUID/JSON on Redshift/Snowflake/BQ must not invent non-existent DDL.
+_PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
+    "redshift": frozenset({
+        "JSON", "JSONB", "UUID", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE",
+        "NVARCHAR2", "VARCHAR2", "NUMBER", "BIGNUMERIC", "UNIQUEIDENTIFIER",
+    }),
+    "snowflake": frozenset({
+        "JSON", "JSONB", "UUID", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE",
+        "SUPER", "NVARCHAR2", "BIGNUMERIC", "UNIQUEIDENTIFIER",
+    }),
+    "bigquery": frozenset({
+        "UUID", "JSONB", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE", "SUPER",
+        "VARIANT", "NVARCHAR2", "VARCHAR2", "NUMBER", "UNIQUEIDENTIFIER",
+    }),
+    "spanner": frozenset({
+        "UUID", "JSONB", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE", "SUPER",
+        "VARIANT", "NVARCHAR2", "VARCHAR2", "BIGNUMERIC", "UNIQUEIDENTIFIER",
+        "DATETIME", "TIME",  # Spanner has no DATETIME/TIME — use STRING wire
+    }),
+    "postgresql": frozenset({
+        # Bare JSON is a logical alias; create-new document wire is JSONB.
+        "JSON",
+        "SUPER", "VARIANT", "BIGNUMERIC", "UNIQUEIDENTIFIER", "NVARCHAR2",
+    }),
+    "mysql": frozenset({
+        "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC",
+        "UNIQUEIDENTIFIER", "NVARCHAR2", "HSTORE",
+    }),
+    "sqlserver": frozenset({
+        "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC", "JSON",
+        "NVARCHAR2", "HSTORE", "INET", "CIDR",
+    }),
+    "oracle": frozenset({
+        "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC", "JSON",
+        "UNIQUEIDENTIFIER", "HSTORE", "INET", "CIDR",
+    }),
+    "databricks": frozenset({
+        "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC",
+        "UNIQUEIDENTIFIER", "NVARCHAR2", "HSTORE", "INET", "CIDR",
+    }),
+    "iceberg": frozenset({
+        "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC",
+        "UNIQUEIDENTIFIER", "NVARCHAR2", "HSTORE", "INET", "CIDR", "JSON",
+    }),
+}
+
 
 def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
     """True when carrier is already dest DDL (Map stamp) — do not re-ddl invent."""
@@ -5677,12 +5778,15 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
     if "(" in upper or "[" in upper or "<" in upper:
         return True
     bare = upper.split("(", 1)[0].strip()
+    db = _normalize_dest_db(dest_db) if dest_db else ""
     if bare in _PHYSICAL_STAMP_PASS_THROUGH or upper in _PHYSICAL_STAMP_PASS_THROUGH:
+        # Refuse pass-through of tokens illegal / non-create-wire on this dest.
+        if db and bare in _PASS_THROUGH_REJECT_ON_DEST.get(db, frozenset()):
+            return False
         return True
     # MySQL/Maria FLOAT is a real physical stamp (HALF create-new). On PG/etc.
     # bare FLOAT is the logical alias that must still map via ddl_type → DOUBLE.
     if bare == "FLOAT":
-        db = (dest_db or "").strip().lower()
         return db in {"mysql", "mariadb", "tidb", "sqlserver", "mssql"}
     if specialty_carrier_base(raw) is not None:
         return True
@@ -5701,9 +5805,19 @@ def materialize_dest_ddl(db_type: str, carrier: str | None) -> str:
     NVARCHAR2→VARCHAR2 BYTE, or ARRAY<FLOAT>→ARRAY<DOUBLE> after Map stamped.
     Illegal typmod on no-typmod engines is still legalized via promote.
 
+    Pass-through is dest-gated via ``_PASS_THROUGH_REJECT_ON_DEST``: tokens that
+    are illegal on the destination (Redshift ``JSON``/``UUID``, BQ ``UUID``, …)
+    or are logical aliases of the create-new wire (PG ``JSON``→``JSONB``) always
+    rematerialize. Native stamps (``SUPER``, ``JSONB``, ``VARIANT``, PG ``UUID``)
+    still pass through unchanged.
+
     Iceberg nested spelling is an exception: ``ARRAY<T>`` / ``T[]`` / ``VECTOR``
     must become ``list<…>`` (float leaves stay float) — not pass-through Spark
     ARRAY tokens the Iceberg writer cannot CREATE.
+
+    Known limitation: typmod-bearing stamps (``VARCHAR(n)``) always pass through
+    even when ``n`` exceeds a destination cap — width collapse is Validate's job,
+    not silent CREATE rewrite.
     """
     raw = strip_identity_qualifier(carrier).strip()
     if not raw:
@@ -5723,6 +5837,10 @@ def materialize_dest_ddl(db_type: str, carrier: str | None) -> str:
     if _is_explicit_physical_stamp(raw, db):
         legalized = promote_create_new_temporal_stamp("", raw, db)
         return legalized or raw
+    # Rematerialized UUID aliases must use create-new width-safe wire
+    # (BQ STRING(36), not bare STRING) so writers match Map stamps.
+    if normalize_logical_type(raw) == LOGICAL_UUID:
+        return create_new_mapping_target_type(raw, db_type)
     return ddl_type(db, raw)
 
 
@@ -7165,7 +7283,7 @@ def is_precision_collapse_coercion(
         return True
     if enum_domain_would_collapse(source_type, target_type):
         return True
-    if interval_family_would_collapse(source_type, target_type):
+    if interval_family_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
     if interval_precision_would_narrow(source_type, target_type):
         return True
@@ -7582,7 +7700,7 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
             return True
         if enum_domain_would_collapse(source_type, target_type):
             return True
-        if interval_family_would_collapse(source_type, target_type):
+        if interval_family_would_collapse(source_type, target_type, dest_db=dest_db):
             return True
         if interval_precision_would_narrow(source_type, target_type):
             return True
@@ -7712,7 +7830,7 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
         return True
     if enum_domain_would_collapse(source_type, target_type):
         return True
-    if interval_family_would_collapse(source_type, target_type):
+    if interval_family_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
     if interval_precision_would_narrow(source_type, target_type):
         return True

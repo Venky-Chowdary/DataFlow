@@ -6,7 +6,7 @@ import tempfile
 import time
 from typing import Any, Callable
 
-from preflight.constants import SCHEMALESS_DESTS
+from preflight.constants import is_schemaless_dest
 from preflight.models import (
     ColumnSchema,
     GateId,
@@ -248,7 +248,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
     # column-level type contract — but declared BSON/AttributeValue affinity
     # still matters (ObjectId↛NUMBER). Never invent green PASS from SKIP alone.
     dest_kind = (ctx.plan.destination.db_type or "").lower()
-    schemaless = dest_kind in SCHEMALESS_DESTS
+    schemaless = is_schemaless_dest(dest_kind)
     if schemaless:
         affinity_issues: list[str] = []
         affinity_warnings: list[str] = []
@@ -1347,7 +1347,7 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
         )
 
     dest_kind = (ctx.plan.destination.db_type or "").lower()
-    schemaless = dest_kind in SCHEMALESS_DESTS
+    schemaless = is_schemaless_dest(dest_kind)
     # Host apps must never fold fingerprint drift into DDL. Scrub defensively so
     # a stale process cannot block Redis/Mongo/Dynamo as "Target DDL incompatible".
     raw_issues = [str(i) for i in (ctx.plan.ddl_issues or [])]
@@ -2070,7 +2070,12 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
 
 
 def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
-    """Critical data integrity — financial precision, required nulls, duplicate keys."""
+    """Critical data integrity — financial precision, required nulls, duplicate keys.
+
+    Coverage honesty: sample-only passes must never claim population / full-table
+    uniqueness. When ``source_uniqueness_probe.ran`` is true, coverage is
+    ``full_selected`` for that probe only — other checks remain sample-scoped.
+    """
     start = time.perf_counter()
     audit = getattr(ctx, "run_integrity_audit", None)
     if not callable(audit):
@@ -2125,18 +2130,29 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
         )
     probe = report.get("source_uniqueness_probe") or {}
     probe_ran = bool(probe.get("ran")) or bool(getattr(ctx, "source_duplicate_probe_ran", False))
+    coverage = "full_selected" if probe_ran else "sample"
+    if probe_ran:
+        pk_label = (
+            probe.get("primary_key")
+            or getattr(ctx, "source_duplicate_probe_pk", "")
+            or "pk"
+        )
+        g9_note = (
+            f"Source uniqueness probe on identity key {pk_label} "
+            f"(GROUP BY / aggregate over selected transfer) · "
+            f"other integrity checks use Validate sample — not a full population proof"
+        )
+    else:
+        g9_note = (
+            "Integrity checks on Validate sample only — source uniqueness probe "
+            "did not run; full-table / population uniqueness is not proven"
+        )
     g9_scope = evidence_scope(
         kind="data_integrity",
         sample_rows=len(sample_rows) or None,
         columns=len(ctx.plan.mappings),
-        coverage="full_selected" if probe_ran else "sample",
-        note=(
-            f"Source uniqueness probe on identity key "
-            f"{probe.get('primary_key') or getattr(ctx, 'source_duplicate_probe_pk', '') or 'pk'} "
-            f"(GROUP BY / aggregate over selected transfer) · other integrity checks use Validate sample"
-            if probe_ran
-            else "Integrity checks on Validate sample — full-table uniqueness when source probe is unavailable"
-        ),
+        coverage=coverage,
+        note=g9_note,
     )
     encoding = next(
         (c for c in (report.get("checks") or []) if c.get("check") == "encoding_anomalies"),
@@ -2163,9 +2179,23 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
     warnings = list(report.get("warnings") or [])
     if encoding_issues and not warnings:
         warnings = [str(i.get("message") if isinstance(i, dict) else i) for i in encoding_issues[:8]]
+    base_summary = str(report.get("summary") or "Data integrity checks passed")
+    # Operator-facing message must distinguish sample vs population coverage.
+    if coverage == "sample":
+        if "sample" not in base_summary.lower():
+            pass_msg = f"{base_summary} (Validate sample only — population uniqueness not proven)"
+        else:
+            pass_msg = base_summary
+    else:
+        if "full" not in base_summary.lower() and "population" not in base_summary.lower():
+            pass_msg = (
+                f"{base_summary} (full-selected uniqueness probe · other checks on sample)"
+            )
+        else:
+            pass_msg = base_summary
     return _pass(
         GateId.G9_DATA_INTEGRITY,
-        report.get("summary", "Data integrity checks passed"),
+        pass_msg,
         start,
         _with_scope(
             {
@@ -2173,6 +2203,7 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
                 "warnings": warnings[:12],
                 "encoding_issues": encoding_issues[:12],
                 "source_uniqueness_probe": probe,
+                "coverage": coverage,
             },
             g9_scope,
         ),

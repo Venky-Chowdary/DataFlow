@@ -539,3 +539,51 @@ def test_oracle_time_and_iceberg_objectid_remain_declared_lossy():
     assert is_lossy_coercion("TIME(6)", oracle_time, dest_db="oracle") is True
     iceberg_oid = create_new_mapping_target_type("OBJECTID", "iceberg")
     assert is_lossy_coercion("OBJECTID", iceberg_oid, dest_db="iceberg") is True
+
+
+def test_spanner_does_not_invent_bigquery_types():
+    """Spanner ≠ BigQuery — never invent DATETIME / TIME / BIGNUMERIC via alias."""
+    from services.type_system import (
+        _normalize_dest_db,
+        create_new_mapping_target_type,
+        is_lossy_coercion,
+    )
+
+    assert _normalize_dest_db("spanner") == "spanner"
+    assert _normalize_dest_db("google_spanner") == "spanner"
+    assert create_new_mapping_target_type("INTEGER", "spanner") == "INT64"
+
+    ntz = create_new_mapping_target_type("TIMESTAMP_NTZ", "spanner")
+    assert "DATETIME" not in ntz.upper()
+    assert "TIMESTAMP" not in ntz.upper() or "STRING" in ntz.upper()
+
+    dec = create_new_mapping_target_type("DECIMAL(10,2)", "spanner")
+    assert "BIGNUMERIC" not in dec.upper()
+    assert "NUMERIC" in dec.upper()
+    assert "(10,2)" in dec.replace(" ", "")
+
+    time_stamp = create_new_mapping_target_type("TIME(6)", "spanner")
+    assert time_stamp.upper() != "TIME"
+    assert "TIME(" not in time_stamp.upper()
+
+    # Instant carriers may use Spanner TIMESTAMP; wall-clock invent must stay lossy.
+    assert is_lossy_coercion(
+        "TIMESTAMP_NTZ", "TIMESTAMP", dest_db="spanner"
+    ) is True
+
+
+def test_interval_ym_bq_and_postgis_geography_create_new_not_self_lossy():
+    from services.type_system import create_new_mapping_target_type, is_lossy_coercion
+
+    for src, dest in (
+        ("INTERVAL YEAR TO MONTH", "bigquery"),
+        ("INTERVAL DAY TO SECOND", "bigquery"),
+        ("INTERVAL YEAR TO MONTH", "postgresql"),
+        ("GEOGRAPHY(POINT,4326)", "postgresql"),
+    ):
+        stamp = create_new_mapping_target_type(src, dest)
+        assert is_lossy_coercion(src, stamp, dest_db=dest) is False, (src, dest, stamp)
+
+    geo = create_new_mapping_target_type("GEOGRAPHY(POINT,4326)", "postgresql")
+    assert "POINT" in geo.upper()
+    assert "GEOMETRY," not in geo.upper().replace(" ", "")

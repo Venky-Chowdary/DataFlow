@@ -2486,7 +2486,7 @@ export function ValidateDashboard({
                 {status === "pass" && message && (
                   <p className="df2-vd-rule-msg is-compact-msg" title={message}>{message}</p>
                 )}
-                {status !== "pending" && status !== "pass" && evidenceScope && (
+                {status !== "pending" && evidenceScope && (
                   <p className="df2-vd-rule-scope" title={scopeNote || undefined}>
                     <span className={`df2-vd-scope-chip cov-${scopeCoverage || "na"}`}>
                       {scopeCoverage === "sample"

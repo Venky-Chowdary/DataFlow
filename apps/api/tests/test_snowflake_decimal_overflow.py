@@ -44,6 +44,22 @@ def test_quarantine_unfit_decimal_holds_out_row():
     assert details and "does not fit" in details[0]["reason"]
 
 
+def test_create_path_honors_map_decimal_stamp():
+    """CREATE DDL must match approved Map NUMBER/DECIMAL(p,s) — never batch-invent."""
+    from connectors.snowflake_writer import resolve_snowflake_create_types
+    from connectors.writer_common import parse_decimal_precision_scale
+
+    logical_types = ["DECIMAL(10,2)", "NUMBER(18,4)", "VARCHAR", "DECIMAL"]
+    mapped_rows = [("1.5", "2.5", "x", "3.1"), ("9.99", "1.0", "y", "4.2")]
+    types = resolve_snowflake_create_types(logical_types, mapped_rows)
+    assert parse_decimal_precision_scale(types[0]) == (10, 2)
+    assert parse_decimal_precision_scale(types[1]) == (18, 4)
+    assert types[2].upper().startswith("VARCHAR")
+    # Bare DECIMAL may still size from batch — but Map-stamped (p,s) stays fixed.
+    assert types[0] in {"DECIMAL(10,2)", "NUMBER(10,2)"}
+    assert types[1] in {"NUMBER(18,4)", "DECIMAL(18,4)"}
+
+
 def test_coerce_null_unfit_decimal_nulls_cell():
     rows = [("99999999999999999999", "ok")]
     details: list[dict] = []
