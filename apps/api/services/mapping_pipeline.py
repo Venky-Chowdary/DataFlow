@@ -504,7 +504,7 @@ def run_mapping_pipeline(
                 # INT/MEDIUMINT/SMALLINT UNSIGNED → BIGINT create-new (signed INT overflows).
                 tgt_type = "BIGINT"
             elif destination_db_type:
-                tgt_type = ddl_type(destination_db_type, src_type)
+                tgt_type = create_new_mapping_target_type(src_type, destination_db_type)
             else:
                 tgt_type = src_type
         else:

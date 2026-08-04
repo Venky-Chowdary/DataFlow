@@ -400,3 +400,34 @@ def test_iceberg_array_float_create_new_keeps_float_leaf():
     assert "float" in stamped.lower(), stamped
     assert "double" not in ddl_type("iceberg", "ARRAY<FLOAT>").lower()
     assert create_new_mapping_target_type("ARRAY<FLOAT>", "databricks").upper() == "ARRAY<FLOAT>"
+
+def test_create_new_stamps_not_self_lossy():
+    from services.type_system import (
+        create_new_mapping_target_type,
+        is_lossy_coercion,
+        is_precision_collapse_coercion,
+    )
+
+    cases = [
+        ("VECTOR(1536)", "databricks"),
+        ("TIMESTAMP_NTZ(6)", "bigquery"),
+        ("JSON", "oracle"),
+        ("OBJECTID", "bigquery"),
+        ("OBJECTID", "databricks"),
+        ("MONEY", "postgresql"),
+        ("HALF", "databricks"),
+    ]
+    for src, dest in cases:
+        stamp = create_new_mapping_target_type(src, dest)
+        assert is_lossy_coercion(src, stamp, dest_db=dest) is False, (src, dest, stamp)
+        assert is_precision_collapse_coercion(src, stamp, dest_db=dest) is False, (
+            src,
+            dest,
+            stamp,
+        )
+
+
+def test_objectid_bare_string_still_collapses_on_bq():
+    from services.type_system import is_lossy_coercion
+
+    assert is_lossy_coercion("OBJECTID", "STRING", dest_db="bigquery") is True

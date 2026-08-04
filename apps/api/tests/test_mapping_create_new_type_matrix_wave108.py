@@ -145,8 +145,11 @@ def test_decimal_narrow_same_logical_blocks_g9_coercion():
 def test_float_to_decimal_remediation_not_bare_varchar():
     from services.validation_assistant import _remap_to_type_for_mismatch
 
-    assert _remap_to_type_for_mismatch("FLOAT", "DECIMAL(38,10)") == "DOUBLE"
-    assert _remap_to_type_for_mismatch("OBJECTID", "VARCHAR") == "OBJECTID"
+    # Default dest_db is postgresql — physical IEEE64 stamp is DOUBLE PRECISION.
+    assert _remap_to_type_for_mismatch("FLOAT", "DECIMAL(38,10)") == "DOUBLE PRECISION"
+    assert _remap_to_type_for_mismatch("FLOAT", "DECIMAL(38,10)", dest_db="mysql") == "DOUBLE"
+    # ObjectId remap stamps the width-safe create-new wire (not bare specialty token).
+    assert _remap_to_type_for_mismatch("OBJECTID", "VARCHAR") == "VARCHAR(24)"
     assert _remap_to_type_for_mismatch("UUID", "TEXT") == "UUID"
 
 

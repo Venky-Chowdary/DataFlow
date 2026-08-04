@@ -606,8 +606,9 @@ _OBJECTID_DDL_DEFAULTS: Final[dict[str, str]] = {
     "dynamodb": "S",
     "redis": "string",
     "elasticsearch": "keyword",
-    "bigquery": "STRING",
-    "databricks": "STRING",
+    # Width-safe hex wires — bare STRING drops ObjectId polarity (false Validate).
+    "bigquery": "STRING(24)",
+    "databricks": "VARCHAR(24)",
     "sqlite": "TEXT",
     "oracle": "VARCHAR2(24)",
     "sqlserver": "CHAR(24)",
@@ -2464,7 +2465,9 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
             return "FLOAT"
         if db == "oracle":
             return "BINARY_FLOAT"
-        if db in {"snowflake", "bigquery", "databricks"}:
+        if db in {"databricks", "spark", "delta", "delta_lake"}:
+            return "FLOAT"
+        if db in {"snowflake", "bigquery"}:
             return types_h.get(LOGICAL_FLOAT, "FLOAT")
         if db == "iceberg":
             return "float"
@@ -3763,6 +3766,56 @@ def vector_encoding_polarity(inferred: str | None) -> str | None:
     return "dense"
 
 
+
+def vector_to_array_wire_preserved(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True for VECTOR(n) → ARRAY<FLOAT>/FLOAT[] create-new on lakehouse sinks.
+
+    Databricks/Spark/Iceberg have no native VECTOR — ARRAY<FLOAT>/list<float>
+    is the intentional embedding wire. PostgreSQL/Snowflake native VECTOR must
+    not silent-green an ARRAY sink (embedding domain drop).
+    """
+    if normalize_logical_type(source_type) != LOGICAL_VECTOR:
+        return False
+    if normalize_logical_type(target_type) != LOGICAL_ARRAY:
+        return False
+    el = parse_array_element(target_type)
+    if not el:
+        # Bare ARRAY / LIST drops element contract.
+        return False
+    if normalize_logical_type(el) != LOGICAL_FLOAT:
+        return False
+    db = (dest_db or "").strip().lower()
+    if not db:
+        # Fail closed without destination — ARRAY wire is not universal.
+        return False
+    if db in {
+        "postgresql",
+        "postgres",
+        "pg",
+        "cockroachdb",
+        "timescaledb",
+        "alloydb",
+        "snowflake",
+        "redshift",
+    }:
+        return False
+    return db in {
+        "databricks",
+        "spark",
+        "delta",
+        "delta_lake",
+        "databricks_sql",
+        "unity_catalog",
+        "iceberg",
+        "bigquery",
+    }
+
+
 def vector_encoding_would_collapse(source_type: str, target_type: str) -> bool:
     """True when HALFVEC/SPARSEVEC ↔ dense VECTOR invents a different encoding."""
     src = vector_encoding_polarity(source_type)
@@ -4100,6 +4153,12 @@ def money_domain_would_collapse(source_type: str, target_type: str) -> bool:
     named = {"MONEY", "SMALLMONEY", "CURRENCY"}
     src_named = src_base in named
     tgt_named = tgt_base in named
+    if src_named and not tgt_named:
+        # Create-new PG/warehouse money-scale wire — not a polarity invent.
+        p, s = parse_numeric_precision_scale(target_type)
+        if p == 19 and s == 4:
+            return False
+        return True
     if src_named != tgt_named:
         return True
     if src_base == "MONEY" and tgt_base == "SMALLMONEY":
@@ -5144,6 +5203,10 @@ def specialty_wire_preserves_value(source_specialty: str, target_type: str) -> b
         if upper in {"BINARY(12)", "VARBINARY(12)"}:
             return True
         m = re.match(r"^(?:N?VAR)?CHAR(?:ACTER)?\s*\(\s*(\d+)\s*\)$", upper)
+        if m and int(m.group(1)) >= 24:
+            return True
+        # BigQuery STRING(n) / Databricks VARCHAR(n) create-new hex wires.
+        m = re.match(r"^STRING\s*\(\s*(\d+)\s*\)$", upper)
         return bool(m and int(m.group(1)) >= 24)
     if spec in {"INET", "CIDR", "IPV4", "IPV6", "IP", "MACADDR", "MACADDR8"}:
         m = re.match(r"^(?:N?VAR)?CHAR(?:ACTER)?\s*\(\s*(\d+)\s*\)$", upper)
@@ -6155,7 +6218,22 @@ def temporal_precision_would_narrow(
             else:
                 # MySQL/Maria/unknown: bare TIMESTAMP is FSP 0 — fail closed.
                 tgt_p = 0
-        elif bare in {"TIME", "DATETIME"} or bare.startswith("DATETIME"):
+        elif bare == "DATETIME" or (
+            bare.startswith("DATETIME") and bare not in {"DATETIME2", "DATETIMEOFFSET"}
+        ):
+            db = (dest_db or "").strip().lower()
+            # BigQuery DATETIME is microsecond; MySQL/Maria bare DATETIME is FSP 0.
+            if db in {"bigquery", "bq"}:
+                tgt_p = 6
+            else:
+                tgt_p = 0
+        elif bare == "TIME":
+            db = (dest_db or "").strip().lower()
+            if db in {"bigquery", "bq"}:
+                tgt_p = 6
+            else:
+                tgt_p = 0
+        elif bare.startswith("DATETIME"):
             tgt_p = 0
         else:
             return False
@@ -7338,10 +7416,18 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
     # BIT(n) → VARCHAR(n) create-new is 0/1 digit text — not opaque BYTEA packing.
     if is_bitstring_carrier(source_type) and tgt in {LOGICAL_STRING, LOGICAL_TEXT}:
         return False
-    # ObjectId → VARCHAR(24)/BINARY(12) is the industry create-new wire — not lossy.
+    # ObjectId → VARCHAR(24)/BINARY(12)/STRING(24) is the industry create-new wire.
     if (
         normalize_logical_type(source_type) == LOGICAL_OBJECTID
         and specialty_wire_preserves_value("OBJECTID", target_type)
+    ):
+        return False
+    # VECTOR(n) → ARRAY<FLOAT> lakehouse create-new wire — not embedding invent.
+    if vector_to_array_wire_preserved(source_type, target_type, dest_db=dest_db):
+        return False
+    # JSON → dialect-native document wire (CLOB/NVARCHAR(MAX)/JSONB/…) — not lossy.
+    if src == LOGICAL_JSON and is_dialect_native_document_wire(
+        target_type, dest_db=dest_db
     ):
         return False
     # Dialect-aware collapse SSOT — same rules as G3/probe (never MySQL-default FSP
