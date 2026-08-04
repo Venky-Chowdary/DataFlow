@@ -37,6 +37,7 @@ Live execute + reconcile remains `tests/test_production_sku_matrix.py` (separate
 - Fidelity SSOT: `preserve` / `cast` / `mutate` / `lossy_cast` (`mapping_proof.py`)
 - Operator risk ack: G4 + web `mapping.ts` tiers (Approve / Review / Accept risk)
 - Optional LLM assist is hybrid and constrained — not a substitute for gates
+- **Map≡CREATE:** explicit Map `target_type` is preserved by `safe_ddl_logical_type(..., honor_explicit=True)` — writers must not rewrite approved DDL from sample inference; unfit values quarantine on write (`test_map_equals_create_ddl.py`)
 
 ## 4. Delivery / CDC
 

@@ -269,7 +269,8 @@ def test_resolve_target_columns_preserves_timestamptz_ltz_stamp():
     assert types == ["TIMESTAMP_LTZ"]
 
 
-def test_resolve_target_columns_new_table_widens_status_boolean():
+def test_resolve_target_columns_new_table_honors_explicit_boolean_despite_enums():
+    """Map≡CREATE: explicit BOOLEAN stamp must survive enum samples (quarantine values, not rewrite DDL)."""
     headers = ["status", "id"]
     rows = [["active"], ["invalidated"], ["pending"]]
     mappings = [
@@ -284,7 +285,7 @@ def test_resolve_target_columns_new_table_widens_status_boolean():
         table_exists=False,
     )
     by = dict(zip(cols, types))
-    assert by["status"].upper() == "VARCHAR"
+    assert by["status"].upper() == "BOOLEAN"
 
 
 def test_resolve_target_columns_existing_table_keeps_proposed_when_no_widen_flag():

@@ -1383,9 +1383,10 @@ def resolve_target_columns(
     Prefers an explicit ``target_type`` on each mapping, then ``dest_types``,
     then the source logical type, and finally ``VARCHAR``.
 
-    For **new tables** (``table_exists is False``), proposed typed DDL is
-    widened via ``safe_ddl_logical_type`` when samples cannot all coerce —
-    e.g. status enums never CREATE as BOOLEAN.
+    For **new tables** (``table_exists is False``), non-explicit proposals may be
+    widened via ``safe_ddl_logical_type`` when samples cannot all coerce.
+    Explicit Map ``target_type`` is always preserved (Map≡CREATE) — unfit values
+    quarantine on write instead of rewriting approved DDL.
     """
     from services.schema_inference import safe_ddl_logical_type
 

@@ -592,8 +592,9 @@ def safe_ddl_logical_type(
 
     When ``honor_explicit`` is True (operator / Map set ``target_type``), preserve
     the **physical stamp** unchanged (``TIMESTAMP_LTZ``, ``CHAR(36)``, ``INET``,
-    …). Never collapse Map≡CREATE polarity through ``LOGICAL_TYPES`` membership.
-    Only widen when samples cannot coerce into that stamp's logical class.
+    ``BOOLEAN``, …). Migration Assurance: Map≡CREATE — never rewrite approved
+    DDL from sample inference. Values that do not coerce quarantine on write;
+    they must not mutate the approved schema.
     """
     from services.type_system import (
         LOGICAL_DECIMAL,
@@ -628,6 +629,10 @@ def safe_ddl_logical_type(
         if not samples or samples_fit_logical_type(samples, "FLOAT", field_name=field_name):
             return "FLOAT"
 
+    # Explicit Map / operator target_type: Map≡CREATE. Never infer_type-replace.
+    if honor_explicit:
+        return original
+
     # Map dest-native / alias DDL → canonical logical vocabulary used by writers.
     _NORM_TO_LOGICAL = {
         "integer": "INTEGER",
@@ -648,16 +653,6 @@ def safe_ddl_logical_type(
         "vector": "VECTOR",
         "timestamptz": "TIMESTAMPTZ",
     }
-
-    # Explicit Map / operator target_type: keep physical DDL (CHAR(36),
-    # TIMESTAMP_LTZ, INET, …). LOGICAL_TYPES membership must not invent VARCHAR.
-    if honor_explicit:
-        fit_key = _NORM_TO_LOGICAL.get(normalize_logical_type(original), "VARCHAR")
-        if not samples:
-            return original
-        if samples_fit_logical_type(samples, fit_key, field_name=field_name):
-            return original
-        return infer_type(samples, field_name=field_name)
 
     canonical = _NORM_TO_LOGICAL.get(normalize_logical_type(proposed_u))
     if canonical:
