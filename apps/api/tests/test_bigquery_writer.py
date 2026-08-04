@@ -16,6 +16,13 @@ def test_bq_type_strips_string_bytes_width():
     assert bq_type("STRING(64)") == "STRING"
     assert bq_type("BINARY(16)") == "BYTES"
     assert bq_type("DECIMAL(20,6)") == "BIGNUMERIC"
+    assert bq_type("NUMERIC(10,2)") == "NUMERIC"
+    assert bq_type("BIGNUMERIC(20,6)") == "BIGNUMERIC"
+
+
+def test_bq_type_over_bignumeric_cap_fails_closed_to_string():
+    assert bq_type("BIGNUMERIC(80,40)") == "STRING"
+    assert bq_type("DECIMAL(100,0)") == "STRING"
 
 
 def test_bq_schema_field_sets_max_length():
@@ -27,6 +34,34 @@ def test_bq_schema_field_sets_max_length():
     field2 = bq_schema_field(bq, "name", "VARCHAR(32)")
     assert field2.args == ("name", "STRING")
     assert field2.kwargs.get("max_length") == 32
+
+
+def test_bq_schema_field_honors_map_decimal_stamp():
+    """Map≡CREATE: SchemaField must carry approved (p,s), never bare invent."""
+    bq = MagicMock()
+    bq.SchemaField = MagicMock(side_effect=lambda *a, **k: SimpleNamespace(args=a, kwargs=k))
+
+    bn = bq_schema_field(bq, "amount", "DECIMAL(20,6)")
+    assert bn.args == ("amount", "BIGNUMERIC")
+    assert bn.kwargs == {"precision": 20, "scale": 6}
+
+    num = bq_schema_field(bq, "price", "NUMERIC(10,2)")
+    assert num.args == ("price", "NUMERIC")
+    assert num.kwargs == {"precision": 10, "scale": 2}
+
+    bare = bq_schema_field(bq, "loose", "DECIMAL")
+    assert bare.args == ("loose", "BIGNUMERIC")
+    assert "precision" not in bare.kwargs
+    assert "scale" not in bare.kwargs
+
+
+def test_bq_schema_field_numeric_over_cap_promotes_keeping_stamp():
+    """NUMERIC(40,4) exceeds NUMERIC caps — BIGNUMERIC with same (p,s)."""
+    bq = MagicMock()
+    bq.SchemaField = MagicMock(side_effect=lambda *a, **k: SimpleNamespace(args=a, kwargs=k))
+    field = bq_schema_field(bq, "wide", "NUMERIC(40,4)")
+    assert field.args == ("wide", "BIGNUMERIC")
+    assert field.kwargs == {"precision": 40, "scale": 4}
 
 
 def test_bigquery_writer_stub(monkeypatch):
@@ -75,11 +110,11 @@ def test_resolve_bigquery_decimal_prefers_physical_schema():
 
 def test_resolve_bigquery_decimal_uses_ddl_without_table():
     types = resolve_bigquery_decimal_target_types(
-        ["amount"],
-        ["DECIMAL(20,6)"],
+        ["amount", "price"],
+        ["DECIMAL(20,6)", "NUMERIC(10,2)"],
         None,
     )
-    assert types == ["BIGNUMERIC(20,6)"]
+    assert types == ["BIGNUMERIC(20,6)", "NUMERIC(10,2)"]
 
 
 def test_bigquery_numeric_quarantine_holds_out_overflow():

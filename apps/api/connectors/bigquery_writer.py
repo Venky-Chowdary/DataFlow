@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from services.type_system import ddl_type, materialize_dest_ddl
+from services.type_system import ddl_type
 
 from connectors.driver_guard import stub_writes_allowed
 from connectors.stub_writer import simulate_stub_write
@@ -50,36 +50,106 @@ class WriteResult(_WriteResult):
     driver: str = "google-cloud-bigquery"
 
 
-def bq_type(inferred: str) -> str:
-    """Map logical type to a BigQuery SchemaField type string.
+# BigQuery fixed-point platform caps (SchemaField precision/scale kwargs).
+_BQ_NUMERIC_MAX_P, _BQ_NUMERIC_MAX_S = 38, 9
+_BQ_BIGNUMERIC_MAX_P, _BQ_BIGNUMERIC_MAX_S = 76, 38
 
-    BigQuery's NUMERIC / BIGNUMERIC are fixed-point types with fixed caps
-    (38,9) and (76,38); the Python client does not accept arbitrary
-    ``BIGNUMERIC(p,s)`` parameter strings and the emulator hangs when given
-    one.  Strip parameters and fall back to STRING when the source scale
-    or precision exceeds what BIGNUMERIC can store.
 
-    ``STRING(n)`` / ``BYTES(n)`` widths are applied via SchemaField.max_length —
-    never as ``field_type`` (client rejects parameterized type names).
+def _bq_fixed_point_spec(
+    inferred: str,
+) -> tuple[str, int | None, int | None] | None:
+    """Map≡CREATE fixed-point: ``(NUMERIC|BIGNUMERIC|STRING, p|None, s|None)``.
+
+    Explicit Map ``NUMERIC(p,s)`` keeps NUMERIC polarity within (38,9).
+    ``DECIMAL`` / ``NUMBER`` / ``BIGNUMERIC`` stamps become BIGNUMERIC with the
+    approved ``(p,s)``. Over BIGNUMERIC caps → STRING (fail-closed; no invent).
+    Bare ``DECIMAL`` / ``BIGNUMERIC`` → bare BIGNUMERIC (platform default).
+    Returns None when ``inferred`` is not a fixed-point carrier.
     """
     import re
 
-    raw = materialize_dest_ddl("bigquery", inferred)
-    match = re.match(r"(BIGNUMERIC|NUMERIC)\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)", raw, re.IGNORECASE)
-    if match:
-        precision = int(match.group(2))
-        scale = int(match.group(3))
-        if scale > 38 or precision > 76:
-            return "STRING"
-        return "BIGNUMERIC"
-    widthed = re.match(r"(STRING|BYTES)\s*\(\s*\d+\s*\)", raw, re.IGNORECASE)
+    from services.type_system import strip_identity_qualifier
+
+    raw = strip_identity_qualifier(inferred).strip()
+    if not raw:
+        return None
+    m = re.match(
+        r"^(BIGNUMERIC|BIGDECIMAL|NUMERIC|DECIMAL|NUMBER)\s*"
+        r"(?:\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\))?\s*$",
+        raw,
+        re.IGNORECASE,
+    )
+    if not m:
+        # Legalize logicals (e.g. money aliases) via ddl_type wire.
+        wire = ddl_type("bigquery", raw)
+        m = re.match(
+            r"^(BIGNUMERIC|NUMERIC)\s*"
+            r"(?:\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\))?\s*$",
+            wire,
+            re.IGNORECASE,
+        )
+        if not m:
+            return None
+        family = m.group(1).upper()
+        if m.group(2) is None:
+            return family, None, None
+        p = int(m.group(2))
+        s = int(m.group(3) or 0)
+        if p > _BQ_BIGNUMERIC_MAX_P or s > _BQ_BIGNUMERIC_MAX_S:
+            return "STRING", None, None
+        return family, p, s
+
+    family = m.group(1).upper()
+    if m.group(2) is None:
+        if family == "NUMERIC":
+            return "NUMERIC", None, None
+        return "BIGNUMERIC", None, None
+    p = int(m.group(2))
+    s = int(m.group(3) or 0)
+    if p > _BQ_BIGNUMERIC_MAX_P or s > _BQ_BIGNUMERIC_MAX_S:
+        return "STRING", None, None
+    if family == "NUMERIC":
+        if p <= _BQ_NUMERIC_MAX_P and s <= _BQ_NUMERIC_MAX_S:
+            return "NUMERIC", p, s
+        # Explicit NUMERIC that exceeds NUMERIC caps — promote to BIGNUMERIC
+        # keeping the Map (p,s), never invent (76,38).
+        return "BIGNUMERIC", p, s
+    return "BIGNUMERIC", p, s
+
+
+def bq_type(inferred: str) -> str:
+    """Map logical / Map stamp to a BigQuery SchemaField ``field_type`` string.
+
+    Never returns parameterized type names — the Python client rejects
+    ``BIGNUMERIC(p,s)`` / ``STRING(n)`` as ``field_type``. Precision/scale and
+    max_length are applied via :func:`bq_schema_field` kwargs (Map≡CREATE).
+
+    Over BIGNUMERIC capacity fails closed to STRING (no silent invent).
+    """
+    import re
+
+    fp = _bq_fixed_point_spec(inferred)
+    if fp is not None:
+        return fp[0]
+
+    # Legalize non-BQ carriers (BINARY→BYTES, VARCHAR→STRING) via ddl_type.
+    wire = ddl_type("bigquery", inferred)
+    widthed = re.match(r"(STRING|BYTES)\s*\(\s*\d+\s*\)", wire, re.IGNORECASE)
     if widthed:
         return widthed.group(1).upper()
-    return raw
+    # Reject illegal parameterized leftovers as field_type.
+    if re.match(r"^[A-Z_][A-Z0-9_]*\s*\(", wire, re.IGNORECASE):
+        base = wire.split("(", 1)[0].strip().upper()
+        return base or wire
+    return wire
 
 
 def bq_schema_field(bigquery_mod: Any, col: str, inferred: str) -> Any:
-    """Build SchemaField with NUMERIC bare type + STRING/BYTES max_length."""
+    """Build SchemaField honoring Map ``(p,s)`` / ``max_length`` stamps.
+
+    Map≡CREATE: explicit NUMERIC/BIGNUMERIC(p,s) become SchemaField
+    ``precision`` / ``scale`` — never bare platform invent (76,38) / (38,9).
+    """
     from services.type_system import (
         parse_binary_carrier_width,
         parse_string_carrier_width,
@@ -87,7 +157,12 @@ def bq_schema_field(bigquery_mod: Any, col: str, inferred: str) -> Any:
 
     field_type = bq_type(inferred)
     kwargs: dict[str, Any] = {}
-    if field_type == "STRING":
+    if field_type in {"NUMERIC", "BIGNUMERIC"}:
+        fp = _bq_fixed_point_spec(inferred)
+        if fp is not None and fp[1] is not None and fp[2] is not None:
+            kwargs["precision"] = int(fp[1])
+            kwargs["scale"] = int(fp[2])
+    elif field_type == "STRING":
         width = parse_string_carrier_width(ddl_type("bigquery", inferred))
         if width is None:
             width = parse_string_carrier_width(inferred)
@@ -107,12 +182,11 @@ def resolve_bigquery_decimal_target_types(
     logical_types: list[str],
     table_schema: list[Any] | None = None,
 ) -> list[str]:
-    """Prefer physical SchemaField (p,s / max_length); else mapped ``ddl_type``.
+    """Prefer physical SchemaField (p,s / max_length); else Map/ddl wire.
 
-    CREATE uses bare ``BIGNUMERIC`` / SchemaField.max_length (client limitation),
-    but quarantine must still honor a narrower existing column
-    (``NUMERIC(p,s)``, ``STRING(n)``, ``BYTES(n)``) so append paths never
-    silently overflow into streaming/load errors.
+    After Map≡CREATE, physical NUMERIC/BIGNUMERIC fields carry the approved
+    ``(p,s)``. Quarantine must gate on that stamp (or mapped ddl) so append
+    paths never silently overflow into streaming/load errors.
     """
     by_name: dict[str, Any] = {}
     if table_schema:
@@ -150,8 +224,14 @@ def resolve_bigquery_decimal_target_types(
                 continue
             out.append(ftype or bq_type(logical))
             continue
-        # No physical field yet — use parameterized ddl when available.
-        out.append(materialize_dest_ddl("bigquery", logical))
+        # No physical field yet — legalize Map stamp to BQ wire for quarantine.
+        fp = _bq_fixed_point_spec(logical)
+        if fp is not None and fp[0] != "STRING" and fp[1] is not None and fp[2] is not None:
+            out.append(f"{fp[0]}({fp[1]},{fp[2]})")
+        elif fp is not None and fp[0] != "STRING":
+            out.append(fp[0])
+        else:
+            out.append(ddl_type("bigquery", logical))
     return out
 
 
