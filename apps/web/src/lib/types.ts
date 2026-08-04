@@ -527,6 +527,17 @@ export interface PreflightProofBundle {
     /** True when the only pending item is PII governance acknowledgment. */
     compliance_only?: boolean;
   };
+  /** Module 1 — incomplete Risk Contracts block Execute-approve. */
+  risk_contracts?: {
+    incomplete?: boolean;
+    missing_columns?: string[];
+    note?: string;
+  };
+  /**
+   * Module 8 — true only after post-write Gate-8 full_checksum.
+   * Never infer from Validate / sample / writer-ack alone.
+   */
+  migration_proven?: boolean;
 }
 
 export interface CoercionSampleFailure {

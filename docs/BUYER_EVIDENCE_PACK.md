@@ -18,6 +18,7 @@ Use this pack instead of marketing screenshots when Fortune 100 teams ask “pro
 | Rollback workflow | Signed plans; only `DISCARD_STAGING` executable — no population undo (`docs/MIGRATION_ROLLBACK.md`) |
 | Proof post-write | Signed packs stamp `assurance`; `migration_proven` only for full_checksum post-write — never from pre-write / sample / writer-ack alone (`docs/PROOF_POST_WRITE_CONTRACT.md`) |
 | Quarantine row contract | Every reject stamps original/expected/actual/reason/transform/recovery/PKs/job/connector/retry (`docs/QUARANTINE_ROW_CONTRACT.md`) |
+| Validate decision path | Root Cause → Affected Gates → Impact → Actions → Preview → Risk Contract → Execute; Execute-ready ≠ `migration_proven` (`docs/VALIDATE_DECISION_PATH.md`) |
 
 Do **not** claim “8 gates,” “ten gates,” or invent a marketed “G10 constraints” gate. Required core gates remain **G1–G9**.
 

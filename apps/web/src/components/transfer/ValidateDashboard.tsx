@@ -30,6 +30,7 @@ import {
   partitionExplainIssues,
   remapToTypeForMismatch,
 } from "../../lib/validateIssueGrouping";
+import { buildValidateDecisionPath } from "../../lib/validateDecisionPath";
 import { BadDataFixDrawer, type BadDataIssue } from "./BadDataFixDrawer";
 import { Gate8ProofCard, type Gate8Reconciliation } from "./Gate8ProofCard";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
@@ -1110,6 +1111,14 @@ export function ValidateDashboard({
     () => displayBlockers.find((d) => d.kind === "fidelity_root") ?? null,
     [displayBlockers],
   );
+  const decisionPath = useMemo(() => {
+    if (!preflight || running) return null;
+    const executeUnlocked =
+      Boolean(preflight.passed)
+      && String(decision || "").toLowerCase() === "approve"
+      && !preflight.proof_bundle?.risk_contracts?.incomplete;
+    return buildValidateDecisionPath(preflight, { syncMode, executeUnlocked });
+  }, [preflight, syncMode, running, decision]);
   const explainParts = useMemo(
     () => (explain?.issues?.length ? partitionExplainIssues(explain.issues) : null),
     [explain],
@@ -2694,6 +2703,35 @@ export function ValidateDashboard({
         </div>
       )}
 
+      {decisionPath && !running && (
+        <div
+          className={`df2-vd-decision-path${decisionPath.executeUnlocked ? " is-ready" : " is-blocked"}`}
+          aria-label="Migration decision path"
+        >
+          <div className="df2-vd-decision-path-head">
+            <DtIcon name="gate" size={15} />
+            <strong>{decisionPath.headline}</strong>
+            {decisionPath.migrationProven ? (
+              <span className="df2-vd-decision-path-badge is-proven">migration proven</span>
+            ) : (
+              <span className="df2-vd-decision-path-badge">not migration proven</span>
+            )}
+          </div>
+          <p className="df2-vd-decision-path-note">{decisionPath.note}</p>
+          <ol className="df2-vd-decision-path-steps">
+            {decisionPath.steps.map((step) => (
+              <li key={step.id} className={`is-${step.status}`} data-step={step.id}>
+                <span className="df2-vd-decision-path-step-label">{step.label}</span>
+                <span className="df2-vd-decision-path-step-summary">{step.summary}</span>
+                {step.detail ? (
+                  <span className="df2-vd-decision-path-step-detail">{step.detail}</span>
+                ) : null}
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+
       {preflight && displayBlockers.length > 0 && !running && (
         <div className="df2-vd-blockers">
           <div className="df2-vd-blockers-head">
@@ -2703,8 +2741,8 @@ export function ValidateDashboard({
           </div>
           <p className="df2-vd-blocker-precaution">
             Schema mismatches, bad data, and type hazards are blocked here on purpose.
-            Resolve each root cause below (why + fix), re-validate, then Execute — Run should
-            only surface operational issues like timeouts or connectivity.
+            Follow the decision path above (root cause → risk contract → execute), re-validate,
+            then Execute — Run should only surface operational issues like timeouts or connectivity.
             {duplicateRoot
               ? " Duplicate identity keys may fail several gates; they are grouped as one cause here while each gate card below still records its own check."
               : ""}
