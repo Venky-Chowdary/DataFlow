@@ -230,9 +230,24 @@ def build_preflight_proof_bundle(
         )
 
     passed = decision == "approve"
+    post_write_proof = bool(
+        not reconciliation.get("preview")
+        and not reconciliation.get("post_write_pending")
+        and reconciliation.get("passed")
+        and str(reconciliation.get("phase") or "").startswith("post_write")
+    )
+    # Module 8: Execute-ready (decision=approve) is never migration_proven.
+    # migration_proven requires post-write full_checksum — see signed_proof_pack.
+    from services.signed_proof_pack import classify_post_write_assurance
+
+    assurance = classify_post_write_assurance(reconciliation)
+    migration_proven = bool(assurance.get("migration_proven"))
 
     return {
         "passed": passed,
+        "migration_proven": migration_proven,
+        "post_write_proof": post_write_proof,
+        "proof_assurance": assurance,
         "semantic_mapping_score": semantic_score,
         "min_confidence": min_confidence,
         "confidence_threshold": effective_threshold,
@@ -260,5 +275,12 @@ def build_preflight_proof_bundle(
             "blockers": blockers,
             "compliance_only": bool(blockers) and blockers == compliance_blockers,
             "reason": "No blocking issues detected" if not blockers else "; ".join(blockers),
+            "note": (
+                "decision=approve means Execute-ready under current gates — "
+                "not migration_proven. Post-write Gate-8 proof is required for "
+                "migration correctness claims."
+                if decision == "approve"
+                else None
+            ),
         },
     }
