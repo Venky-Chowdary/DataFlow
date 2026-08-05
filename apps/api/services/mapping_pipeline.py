@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 import re
+from typing import Any
 
 from services.semantic_mapper import map_columns
 from services.transform_engine import infer_transform_for_mapping
@@ -376,6 +378,89 @@ def assert_mappings_executable(mappings: list[dict] | None) -> None:
             f"{len(missing_contracts)} lossy mapping(s) lack a verified Migration "
             f"Risk Contract (execution policy): {sample}{more}"
         )
+
+
+def _build_decision_artifact(
+    source_columns: list[str],
+    target_columns: list[str],
+    *,
+    source_schemas: list[dict] | None,
+    target_schemas: list[dict] | None,
+    destination_db_type: str,
+    validation_mode: str,
+    sync_mode: str,
+    source_samples: dict[str, list[str]] | None,
+) -> dict[str, Any] | None:
+    """Produce the authoritative MigrationDecision from current schemas."""
+    from services.migration_kernel import (
+        ColumnModel,
+        MigrationKernel,
+        SchemaModel,
+        TypeCarrier,
+    )
+
+    def _schema_for_side(columns: list[str], schemas: list[dict] | None) -> SchemaModel | None:
+        if not columns:
+            return None
+        schema_by_name = {s.get("name"): s for s in (schemas or []) if s.get("name")}
+        kernel = MigrationKernel()
+        col_models: list[ColumnModel] = []
+        for name in columns:
+            s = schema_by_name.get(name) or {}
+            native = str(
+                s.get("native_type") or s.get("inferred_type") or "VARCHAR"
+            ).strip()
+            carrier = kernel.canonicalize_type(native)
+            col_models.append(
+                ColumnModel(
+                    name=str(name),
+                    source_name=str(s.get("source_name") or ""),
+                    carrier=TypeCarrier(
+                        logical=carrier.logical,
+                        native=native,
+                        precision=carrier.precision,
+                        scale=carrier.scale,
+                        length=carrier.length,
+                        timezone=carrier.timezone,
+                        nullable=bool(s.get("nullable", True)),
+                        is_identity=bool(s.get("is_identity")) or carrier.is_identity,
+                        is_generated=bool(s.get("is_generated"))
+                        or carrier.is_generated,
+                        is_auto_increment=bool(s.get("auto_increment"))
+                        or carrier.is_auto_increment,
+                        metadata=carrier.metadata,
+                    ),
+                    primary_key=bool(s.get("primary_key")),
+                    default_value=str(s["default_value"])
+                    if s.get("default_value") is not None
+                    else None,
+                    position=int(s.get("position") or 0),
+                )
+            )
+        return SchemaModel(
+            kind="database",
+            format=destination_db_type or "",
+            name="",
+            columns=tuple(col_models),
+        )
+
+    source_schema = _schema_for_side(source_columns, source_schemas)
+    destination_schema = _schema_for_side(target_columns, target_schemas)
+    if source_schema is None or destination_schema is None:
+        return None
+    try:
+        kernel = MigrationKernel()
+        decision = kernel.build_decision(
+            source_schema,
+            destination_schema,
+            dest_db=destination_db_type or "",
+            validation_mode=validation_mode,
+            sync_mode=sync_mode,
+            source_samples=source_samples,
+        )
+    except Exception:
+        return None
+    return dataclasses.asdict(decision)
 
 
 def run_mapping_pipeline(
@@ -808,6 +893,17 @@ def run_mapping_pipeline(
         ],
     }
 
+    migration_decision = _build_decision_artifact(
+        source_columns,
+        target_columns,
+        source_schemas=source_schemas,
+        target_schemas=target_schemas,
+        destination_db_type=destination_db_type or "",
+        validation_mode=validation_mode,
+        sync_mode=sync_mode or "full_refresh_overwrite",
+        source_samples=source_samples,
+    )
+
     return {
         "mappings": enriched_mappings,
         "transforms": transforms,
@@ -825,4 +921,5 @@ def run_mapping_pipeline(
         "llm": llm_meta,
         "engine": engine,
         "mapping_override_report": override_report,
+        "migration_decision": migration_decision,
     }
