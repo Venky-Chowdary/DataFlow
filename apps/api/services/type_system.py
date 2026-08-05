@@ -4848,7 +4848,7 @@ def pg_enum_type_name(members: list[str] | tuple[str, ...]) -> str:
     import hashlib
 
     key = "\0".join(str(m) for m in members)
-    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha1(key.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
     return f"df_enum_{digest}"
 
 
