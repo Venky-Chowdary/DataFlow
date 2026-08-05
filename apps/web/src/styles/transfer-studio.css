@@ -4656,12 +4656,24 @@ th.df2-type-string .df2-type-badge {
   flex: 0 0 auto !important;
 }
 
-@media (max-width: 1100px) {
-  .df2-validate-footer {
+@media (max-width: 1100px) and (min-width: 641px) {
+  .df2-page-transfer-studio .df2-validate-footer {
+    flex-wrap: nowrap;
+  }
+
+  .df2-page-transfer-studio .df2-validate-footer-actions {
+    width: auto;
+    justify-content: flex-end;
+    flex-wrap: nowrap;
+  }
+}
+
+@media (max-width: 640px) {
+  .df2-page-transfer-studio .df2-validate-footer {
     flex-wrap: wrap;
   }
 
-  .df2-validate-footer-actions {
+  .df2-page-transfer-studio .df2-validate-footer-actions {
     width: 100%;
     justify-content: flex-end;
     flex-wrap: wrap;
@@ -8964,9 +8976,9 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-result-notify { margin-top: 4px; }
 
 /* ── Transfer Studio density: equal rail buttons, visible Map/Source rows ── */
-.df2-validate-footer-actions > .df2-btn {
-  height: var(--df-btn-height, 36px) !important;
-  min-height: var(--df-btn-height, 36px) !important;
+.df2-page-transfer-studio .df2-validate-footer-actions > .df2-btn {
+  height: 32px !important;
+  min-height: 32px !important;
 }
 
 /* Full-width Map editor — intel aside removed; status lives in footer */
@@ -9510,7 +9522,8 @@ button.df2-vd-assist-toggle:focus-visible {
     position: sticky;
     bottom: 0;
     z-index: 5;
-    padding-bottom: max(8px, env(safe-area-inset-bottom, 0px)) !important;
+    padding: 6px 12px !important;
+    padding-bottom: max(6px, env(safe-area-inset-bottom, 0px)) !important;
     background: var(--df-surface, #fff);
     box-shadow: 0 -1px 0 rgba(15, 23, 42, 0.08);
   }
@@ -9537,7 +9550,7 @@ button.df2-vd-assist-toggle:focus-visible {
   .df2-transfer-step-viewport > .df2-card-body {
     min-height: 0;
     overflow-y: auto;
-    padding-bottom: 12px !important;
+    padding-bottom: 8px !important;
   }
 
   .df2-dest-step.df2-transfer-step-viewport > .df2-card-body,
@@ -9545,13 +9558,30 @@ button.df2-vd-assist-toggle:focus-visible {
   .df2-map-step-panel > .df2-card-body,
   .df2-validate-step > .df2-card-body {
     overflow: hidden !important;
-    padding-bottom: 8px !important;
+    padding-bottom: 4px !important;
+  }
+}
+
+/* Beat responsive-shell 1100px full-width action wrap — keep one compact band */
+@media (max-width: 1100px) and (min-width: 641px) {
+  .df2-page-transfer-studio .df2-wizard-footer,
+  .df2-page-transfer-studio .df2-card-footer.df2-wizard-footer {
+    flex-wrap: nowrap !important;
+  }
+
+  .df2-page-transfer-studio .df2-run-footer-actions,
+  .df2-page-transfer-studio .df2-map-footer-actions,
+  .df2-page-transfer-studio .df2-validate-footer-actions {
+    width: auto !important;
+    flex-wrap: nowrap !important;
   }
 }
 
 @media (max-width: 640px) {
   .df2-page-transfer-studio .df2-wizard-footer .df2-btn,
-  .df2-page-transfer-studio .df2-studio-actions .df2-btn {
-    min-height: 40px;
+  .df2-page-transfer-studio .df2-studio-actions .df2-btn,
+  .df2-page-transfer-studio .df2-validate-footer-actions .df2-btn {
+    min-height: 34px !important;
+    height: 34px !important;
   }
 }
