@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from services.brand_env import getenv_brand
 import sys
 import threading
 import unittest.mock
@@ -26,7 +27,7 @@ def _fakesnow_exit_patch() -> None:
         _fakesnow_refcount -= 1
         # Keep the fakesnow mock active for the rest of the process when requested
         # (test suites verify by issuing their own snowflake.connector.connect calls).
-        if os.getenv("DATAFLOW_FAKESNOW_KEEP_PATCH") == "1":
+        if getenv_brand("FAKESNOW_KEEP_PATCH") == "1":
             if _fakesnow_refcount < 0:
                 _fakesnow_refcount = 0
             return
@@ -52,7 +53,7 @@ def _is_local_account(account: str) -> bool:
 def resolve_snowflake_table_name(cur: Any, schema: str, table: str) -> str | None:
     """Return the exact ``TABLE_NAME`` as stored, or ``None`` if not visible.
 
-    DataFlow historically created quoted lowercase tables via
+    Datawrap historically created quoted lowercase tables via
     ``sanitize_identifier`` + ``"name"`` quoting (e.g. ``"csvtestfile"``), while
     readers fold unquoted-style names to ``CSVTESTFILE``. Preview then fails with
     ``002003 Object 'DATAFLOW.PUBLIC.CSVTESTFILE' does not exist`` even though the

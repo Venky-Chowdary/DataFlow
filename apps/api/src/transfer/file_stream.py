@@ -12,6 +12,7 @@ import itertools
 import json
 import logging
 import os
+from services.brand_env import getenv_brand
 import sys
 import tempfile
 from collections.abc import Callable
@@ -27,6 +28,7 @@ try:
     from services.checkpoint_service import Checkpoint, CheckpointService
     from services.error_handling import RetryBudget, with_retry
     from services.parallel_chunks import OrderedChunkRunner
+    from services.replay_safety import classify_replay_safety
     from services.resilience import adaptive_chunk_size
     from services.row_filter import apply_row_filter
     from services.transform_engine import infer_date_locale, set_active_date_locale
@@ -34,6 +36,7 @@ except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.checkpoint_service import Checkpoint, CheckpointService
     from src.services.error_handling import RetryBudget, with_retry
     from src.services.parallel_chunks import OrderedChunkRunner
+    from src.services.replay_safety import classify_replay_safety
     from src.services.resilience import adaptive_chunk_size
     from src.services.row_filter import apply_row_filter
     from src.services.transform_engine import infer_date_locale, set_active_date_locale
@@ -70,9 +73,9 @@ from .adapters import records_to_matrix, resolve_connector_config, resolve_dest_
 from .stream import _write_batch
 
 STREAMABLE_TYPES = {"csv", "tsv", "jsonl", "ndjson", "json", "excel", "parquet", "avro", "orc"}
-STREAM_THRESHOLD = int(os.getenv("DATAFLOW_STREAM_FILE_ROWS", "1"))
-FILE_SPILL_THRESHOLD = int(os.getenv("DATAFLOW_FILE_SPILL_THRESHOLD", str(50 * 1024 * 1024)))
-SPILL_DIR = os.getenv("DATAFLOW_SPILL_DIR") or None
+STREAM_THRESHOLD = int(getenv_brand("STREAM_FILE_ROWS", "1"))
+FILE_SPILL_THRESHOLD = int(getenv_brand("FILE_SPILL_THRESHOLD", str(50 * 1024 * 1024)))
+SPILL_DIR = getenv_brand("SPILL_DIR") or None
 
 
 _JSONL_SCALAR_ERROR = (
@@ -182,7 +185,7 @@ def _excel_preview(content: bytes | str | os.PathLike, preview_rows: int = 100) 
         from openpyxl import load_workbook
     except ImportError as exc:
         raise ValueError(
-            "Excel import is not ready on this platform node. DataFlow bundles file parsers — retry shortly."
+            "Excel import is not ready on this platform node. Datawrap bundles file parsers — retry shortly."
         ) from exc
 
     wb = load_workbook(content, read_only=True, data_only=True) if _is_path(content) else load_workbook(
@@ -217,7 +220,7 @@ def _excel_batches(content: bytes | str | os.PathLike, chunk_size: int):
         from openpyxl import load_workbook
     except ImportError as exc:
         raise ValueError(
-            "Excel import is not ready on this platform node. DataFlow bundles file parsers — retry shortly."
+            "Excel import is not ready on this platform node. Datawrap bundles file parsers — retry shortly."
         ) from exc
 
     wb = load_workbook(content, read_only=True, data_only=True) if _is_path(content) else load_workbook(
@@ -263,7 +266,7 @@ def _excel_count(content: bytes | str | os.PathLike) -> int:
         from openpyxl import load_workbook
     except ImportError as exc:
         raise ValueError(
-            "Excel import is not ready on this platform node. DataFlow bundles file parsers — retry shortly."
+            "Excel import is not ready on this platform node. Datawrap bundles file parsers — retry shortly."
         ) from exc
 
     wb = load_workbook(content, read_only=True, data_only=True) if _is_path(content) else load_workbook(
@@ -804,6 +807,25 @@ def stream_file_to_database(
     checkpoint.conflict_columns = pk_target_cols or []
     checkpoint.chunk_total = chunks
     retry = retry_budget or RetryBudget()
+    # File loads are the classic duplicate case: an insert-mode CSV replayed after
+    # an ambiguous failure appends the batch a second time. Object-store writes
+    # replace the whole object per call, so they are idempotent by construction.
+    replay_safety = (
+        classify_replay_safety(
+            dest_type=dest_type,
+            write_mode="replace",
+            conflict_columns=["__object__"],
+            job_id=job_id,
+        )
+        if object_store
+        else classify_replay_safety(
+            dest_type=dest_type,
+            write_mode=write_mode,
+            conflict_columns=pk_target_cols or None,
+            job_id=job_id,
+            has_primary_key=bool(pk_target_cols),
+        )
+    )
 
     written = checkpoint.rows_processed or 0
     chunk_idx = checkpoint.chunk_index or 0
@@ -838,7 +860,7 @@ def stream_file_to_database(
         )
     drift_detector = BatchDriftDetector()
 
-    max_workers = int(os.getenv("DATAFLOW_PARALLEL_WORKERS", str(min(2, os.cpu_count() or 1))))
+    max_workers = int(getenv_brand("PARALLEL_WORKERS", str(min(2, os.cpu_count() or 1))))
     # SQLite handles concurrency poorly with a single shared file, so keep it sequential.
     # Snowflake COPY INTO uses a named temporary stage per table; concurrent batches
     # overwrite each other's stage files, so it must also be sequential.
@@ -860,6 +882,39 @@ def stream_file_to_database(
         )
         if is_public_proxy_host(proxy_host) or is_public_proxy_host(proxy_cs):
             max_workers = 1
+
+    pg_conn_state: dict[str, Any] = {"conn": None}
+
+    def _ensure_pg_conn() -> Any:
+        existing = pg_conn_state.get("conn")
+        if existing is not None:
+            try:
+                if getattr(existing, "closed", 0) == 0:
+                    return existing
+            except Exception:
+                pass
+            pg_conn_state["conn"] = None
+        from connectors.postgresql_conn import get_connection as pg_get_connection
+
+        pg_port = int(
+            dest_cfg.get("port")
+            or (5439 if dest_type == "redshift" else 5432)
+        )
+        conn = pg_get_connection(
+            host=dest_cfg.get("host", ""),
+            port=pg_port,
+            database=dest_cfg.get("database", ""),
+            username=dest_cfg.get("username", ""),
+            password=dest_cfg.get("password", ""),
+            connection_string=dest_cfg.get("connection_string", ""),
+            ssl=dest_cfg.get("ssl", False),
+        )
+        try:
+            conn.autocommit = False
+        except Exception:
+            pass
+        pg_conn_state["conn"] = conn
+        return conn
 
     def _process_file_chunk(idx: int, batch: list[dict]) -> dict[str, Any]:
         # Worker threads do not inherit the caller's contextvars, so each chunk
@@ -939,6 +994,19 @@ def stream_file_to_database(
             error_policy=stream_error_policy,
             job_id=job_id,
             skip_preflight=skip_preflight,
+            # Object-store purge vs append-run isolation keys off this. Omitting
+            # it left overwrite jobs on the append path so stale part-* objects
+            # survived and Gate-8 aggregated mixed generations.
+            sync_mode=effective_sync,
+            **(
+                {
+                    "connection": _ensure_pg_conn(),
+                    "close_connection": False,
+                    "connection_holder": pg_conn_state,
+                }
+                if dest_type in ("postgresql", "redshift") and max_workers == 1
+                else {}
+            ),
         )
         batch_written, last_checksum, dest_summary = with_retry(
             write_op,
@@ -949,6 +1017,7 @@ def stream_file_to_database(
                 exponential_base=retry.exponential_base,
                 jitter=retry.jitter,
             ),
+            replay_safety=replay_safety,
         )
         return {
             "batch_written": batch_written,
@@ -981,7 +1050,7 @@ def stream_file_to_database(
         checkpoint.checksum = last_checksum
         checkpoint.phase = "writing"
         checkpoint.status = "running"
-        checkpoint_service.save(checkpoint)
+        checkpoint_service.require_save(checkpoint)
         if on_checkpoint:
             on_checkpoint(idx, chunks, written, checkpoint.to_dict())
 
@@ -990,13 +1059,24 @@ def stream_file_to_database(
     except StopIteration:
         raise ValueError("No records found in file")
 
-    # Process the first batch synchronously so DDL (table/index creation) is
-    # committed before any parallel workers try to insert into the new table.
-    _apply_file_result(first_idx, _process_file_chunk(first_idx, first_batch))
+    try:
+        # Process the first batch synchronously so DDL (table/index creation) is
+        # committed before any parallel workers try to insert into the new table.
+        _apply_file_result(first_idx, _process_file_chunk(first_idx, first_batch))
 
-    with OrderedChunkRunner(max_workers=max_workers) as runner:
-        for idx, result in runner.run(batch_enum, _process_file_chunk):
-            _apply_file_result(idx, result)
+        with OrderedChunkRunner(max_workers=max_workers) as runner:
+            for idx, result in runner.run(batch_enum, _process_file_chunk):
+                _apply_file_result(idx, result)
+    finally:
+        conn = pg_conn_state.get("conn")
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as exc:
+                logging.getLogger(__name__).debug(
+                    "Exception suppressed: %s", exc, exc_info=exc
+                )
+            pg_conn_state["conn"] = None
 
     if written == 0 and rejected_total == 0 and coerced_null_total == 0:
         raise ValueError("No records found in file")

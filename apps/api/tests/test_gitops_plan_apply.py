@@ -1,4 +1,4 @@
-"""GitOps plan/apply proofs for DataFlowManifest."""
+"""GitOps plan/apply proofs for DatawrapManifest."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ def test_gitops_plan_and_apply_schedule(tmp_path, monkeypatch):
 
     manifest = {
         "apiVersion": "dataflow.space/v1",
-        "kind": "DataFlowManifest",
+        "kind": "DatawrapManifest",
         "resources": [
             {
                 "apiVersion": "dataflow.space/v1",
@@ -70,6 +70,57 @@ def test_contract_artifact_shape(tmp_path, monkeypatch):
     assert "metadata" in art
 
 
+def test_mapping_bundle_plan_and_apply(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    import services.contract_store as cs
+    import services.gitops_manifest as gm
+    import services.platform_config as pc
+    from services.data_contract import ContractStatus
+
+    reload(pc)
+    reload(cs)
+    reload(gm)
+
+    manifest = {
+        "apiVersion": "dataflow.space/v1",
+        "kind": "DatawrapManifest",
+        "resources": [
+            {
+                "apiVersion": "dataflow.space/v1",
+                "kind": "MappingBundle",
+                "metadata": {"name": "orders-map"},
+                "spec": {
+                    "name": "orders-map",
+                    "source": {"format": "postgresql"},
+                    "destination": {"format": "snowflake"},
+                    "mappings": [
+                        {"source": "id", "target": "id", "target_type": "NUMBER"},
+                        {"source": "email", "target": "email", "target_type": "VARCHAR"},
+                    ],
+                    "columns": [],
+                },
+            }
+        ],
+    }
+    plan = gm.plan_manifest(manifest)
+    assert plan["creates"] == 1
+    assert plan["actions"][0]["kind"] == "MappingBundle"
+
+    applied = gm.apply_manifest(manifest)
+    assert applied["applied"] == 1
+    store = cs.get_contract_store()
+    rows = store.list_contracts() if hasattr(store, "list_contracts") else []
+    match = next((c for c in rows if c.name == "orders-map"), None)
+    assert match is not None
+    assert match.status == ContractStatus.DRAFT
+    assert len(match.mappings) == 2
+    assert (match.metadata or {}).get("imported_from") == "MappingBundle"
+
+    art = gm.mapping_bundle_artifact(match)
+    assert art["kind"] == "MappingBundle"
+    assert "honesty" in art
+
+
 def test_apply_require_signed_contracts_blocks_unsigned(tmp_path, monkeypatch):
     monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
     import services.contract_store as cs
@@ -94,7 +145,7 @@ def test_apply_require_signed_contracts_blocks_unsigned(tmp_path, monkeypatch):
 
     manifest = {
         "apiVersion": "dataflow.space/v1",
-        "kind": "DataFlowManifest",
+        "kind": "DatawrapManifest",
         "resources": [
             {
                 "apiVersion": "dataflow.space/v1",

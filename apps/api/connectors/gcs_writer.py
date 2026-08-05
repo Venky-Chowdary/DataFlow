@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from connectors.gcs_common import gcs_client
+from connectors.object_store_common import (
+    purge_object_store_parts,
+    resolve_object_write_layout,
+)
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
     apply_write_quarantine_matrix,
@@ -57,6 +61,9 @@ def write_mapped_rows(
 ) -> WriteResult:
     del ssl, username, backfill_new_fields
     policy = transform_error_policy(error_policy)
+    sync_mode = str(_kwargs.pop("sync_mode", "") or "")
+    file_batch_idx = int(_kwargs.pop("file_batch_idx", 0) or 0)
+    total_chunks = int(_kwargs.pop("total_chunks", 1) or 1)
     bucket = database
     if not bucket:
         return WriteResult(
@@ -68,9 +75,21 @@ def write_mapped_rows(
             chunks_completed=0,
             error="GCS bucket is required (set the Database field).",
         )
-    key = table_name or schema or "exports/dataflow_export.json"
-    if not key.endswith((".json", ".jsonl", ".csv")):
-        key = f"{key.rstrip('/')}/export.json"
+    try:
+        layout = resolve_object_write_layout(
+            table_name=table_name,
+            schema=schema,
+            sync_mode=sync_mode,
+            file_batch_idx=file_batch_idx,
+            total_chunks=total_chunks,
+            job_id=str(_kwargs.pop("job_id", "") or ""),
+        )
+    except ValueError as exc:
+        return WriteResult(
+            ok=False, rows_written=0, table_name=table_name, target_schema=bucket,
+            checksum="", chunks_completed=0, error=str(exc),
+        )
+    key = layout.write_key
 
     cfg = {
         "host": host,
@@ -168,6 +187,18 @@ def write_mapped_rows(
                 raise RuntimeError(
                     f"Cannot verify GCS bucket {bucket!r}: {exc}"
                 ) from exc
+        if layout.should_purge:
+            from connectors.gcs_reader import list_objects
+
+            def _delete_gcs(k: str) -> None:
+                bucket_obj.blob(k).delete()
+
+            purge_object_store_parts(
+                list_keys=lambda prefix: list_objects(cfg, bucket, prefix),
+                delete_key=_delete_gcs,
+                parts_prefix=layout.purge_prefix,
+                legacy_base_key=layout.purge_legacy_key,
+            )
         blob = bucket_obj.blob(key)
         blob.upload_from_string(body, content_type=content_type)
         checksum = row_checksum(mapped_rows, target_cols, dest_db_type="gcs")

@@ -2,10 +2,14 @@
 
 This module is the runtime backbone for enterprise transfers:
 - per-chunk retry with bounded exponential backoff
-- durable checkpoint persistence after each committed chunk
+- durable checkpoint persistence after each committed chunk (fail-closed)
 - quarantine of malformed rows without killing the job
 - adaptive chunk sizing to stay memory-safe for large or wide rows
 - idempotent write decisions (upsert vs insert) when a primary key exists
+
+Checkpoint durability is fail-closed: if ``CheckpointService.save`` returns
+False, the batcher raises ``CheckpointPersistenceError`` and aborts rather than
+continuing without a resume point.
 """
 
 from __future__ import annotations
@@ -24,6 +28,31 @@ from .error_handling import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Cap on accumulated warning strings. Warnings arrive per chunk, so on a
+#: multi-million-row transfer an uncapped list grows with the chunk count.
+#: Truncating only at display time bounded the *output*, never the memory.
+MAX_RESULT_WARNINGS = 200
+
+
+def _extend_bounded(target: list[str], incoming: list[str] | None, cap: int) -> None:
+    """Append to ``target`` while keeping it at or under ``cap`` entries.
+
+    Deduplicates as it goes: repeated per-chunk warnings are almost always the
+    same few messages, so the first ``cap`` distinct ones carry the full signal.
+    """
+    if not incoming:
+        return
+    if len(target) >= cap:
+        return
+    seen = set(target)
+    for item in incoming:
+        if item in seen:
+            continue
+        target.append(item)
+        seen.add(item)
+        if len(target) >= cap:
+            return
 
 
 @dataclass
@@ -99,21 +128,24 @@ class ResilientBatcher:
             checkpoint.rows_processed = total_written
             checkpoint.chunk_index += 1
             checkpoint.rejected_rows += result.rejected_rows
-            checkpoint.rejected_details.extend(result.rejected_details or [])
+            # Bounded: the checkpoint is re-persisted every chunk, so an
+            # uncapped detail list eventually exceeds the 16 MB BSON limit and
+            # takes resume down with it.
+            checkpoint.add_rejected_details(result.rejected_details)
 
             # Update summary metadata
             final_result.rows_written = total_written
             final_result.checksum = result.checksum
             final_result.rejected_rows = checkpoint.rejected_rows
             final_result.rejected_details = checkpoint.rejected_details
-            final_result.warnings.extend(result.warnings or [])
+            _extend_bounded(final_result.warnings, result.warnings, MAX_RESULT_WARNINGS)
 
-            self.cp.save(checkpoint)
+            self.cp.require_save(checkpoint)
             if self.on_checkpoint:
                 self.on_checkpoint(checkpoint.chunk_index, checkpoint.chunk_total, total_written)
 
         checkpoint.phase = "completed"
-        self.cp.save(checkpoint)
+        self.cp.require_save(checkpoint)
         return total_written, final_result, checkpoint
 
     def _write_with_retry(self, ctx: BatchContext) -> BatchResult:

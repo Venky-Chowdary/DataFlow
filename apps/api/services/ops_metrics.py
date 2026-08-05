@@ -1,4 +1,4 @@
-"""In-process Prometheus-compatible ops metrics for DataFlow transfers.
+"""In-process Prometheus-compatible ops metrics for Datawrap transfers.
 
 Exposes counters/gauges for job outcomes, quarantine, CDC lag, and reconcile
 results without requiring an external APM dependency. Scrapable at ``GET /metrics``.

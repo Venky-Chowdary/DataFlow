@@ -114,7 +114,7 @@ def test_blank_pdf_with_ocr_when_unavailable_fail_closed():
 def test_text_layer_pdf_does_not_need_ocr():
     from services.file_parser import FileParser
 
-    result = FileParser.parse(_make_text_pdf("Hello DataFlow OCR"), "text.pdf", enable_ocr=False)
+    result = FileParser.parse(_make_text_pdf("Hello Datawrap OCR"), "text.pdf", enable_ocr=False)
     assert result.success, result.error
     assert result.row_count >= 1
     assert result.ocr_used is False
@@ -160,7 +160,7 @@ def test_live_ocr_image_roundtrip():
 
     img = Image.new("RGB", (400, 80), color=(255, 255, 255))
     draw = ImageDraw.Draw(img)
-    draw.text((10, 20), "DataFlow", fill=(0, 0, 0), font=ImageFont.load_default())
+    draw.text((10, 20), "Datawrap", fill=(0, 0, 0), font=ImageFont.load_default())
     text = ocr_image(img)
     assert text
     # OCR of tiny default font can be imperfect — require at least a letter match.

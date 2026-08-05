@@ -48,9 +48,12 @@ export function WizardSteps({ steps, current, onStepClick, canGoTo, variant = "d
                 title={`${s.n}. ${s.label}`}
               >
                 <span className="df2-wizard-num">
-                  {done ? <DtIcon name="check" size={14} /> : <DtIcon name={s.icon} size={16} />}
+                  {done ? <DtIcon name="check" size={12} /> : <DtIcon name={s.icon} size={14} />}
                 </span>
                 <span className="df2-wizard-label">{s.label}</span>
+                <span className="df2-wizard-label-short" aria-hidden>
+                  {s.shortLabel || s.label}
+                </span>
               </button>
               {!isLast && <div className={`df2-wizard-line ${done ? "done" : ""}`} aria-hidden />}
             </div>

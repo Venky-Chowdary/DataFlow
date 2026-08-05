@@ -4,7 +4,7 @@ import { useRevealOnScroll } from "../../hooks/useRevealOnScroll";
 const STAGES = [
   { id: "source", label: "Source", sub: "Any schema" },
   { id: "map", label: "Map", sub: "Semantic" },
-  { id: "gates", label: "Preflight", sub: "8 gates" },
+  { id: "gates", label: "Preflight", sub: "G1–G9" },
   { id: "proof", label: "Proof", sub: "Checksum" },
 ] as const;
 
@@ -99,7 +99,7 @@ export function LandingFlowDiagram() {
         <circle className="lp-flow-particle" r="5" style={particleStyle} />
       </svg>
       <p className="lp-flow-diagram-caption">
-        One governed path — Transfer Studio, Pipelines, Pilot, and MCP never skip a gate.
+        One governed path — Transfer Studio, Schedules, Pilot, and MCP never skip a gate.
       </p>
     </div>
   );

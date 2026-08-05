@@ -11,6 +11,10 @@ from typing import Any, Callable
 from services.value_serializer import cell_to_string, json_default
 
 from connectors.adls_common import blob_service_client
+from connectors.object_store_common import (
+    purge_object_store_parts,
+    resolve_object_write_layout,
+)
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
@@ -54,6 +58,9 @@ def write_mapped_rows(
     **_kwargs: Any,
 ) -> WriteResult:
     del warehouse, backfill_new_fields
+    sync_mode = str(_kwargs.pop("sync_mode", "") or "")
+    file_batch_idx = int(_kwargs.pop("file_batch_idx", 0) or 0)
+    total_chunks = int(_kwargs.pop("total_chunks", 1) or 1)
     container = database
     if not container:
         return WriteResult(
@@ -62,9 +69,21 @@ def write_mapped_rows(
             error="Azure container is required (set the Database field).",
         )
 
-    key = table_name or schema or "exports/dataflow_export.json"
-    if not key.endswith((".json", ".jsonl", ".csv")):
-        key = f"{key.rstrip('/')}/export.json"
+    try:
+        layout = resolve_object_write_layout(
+            table_name=table_name,
+            schema=schema,
+            sync_mode=sync_mode,
+            file_batch_idx=file_batch_idx,
+            total_chunks=total_chunks,
+            job_id=str(_kwargs.pop("job_id", "") or ""),
+        )
+    except ValueError as exc:
+        return WriteResult(
+            ok=False, rows_written=0, table_name=table_name, target_schema=container,
+            checksum="", chunks_completed=0, error=str(exc),
+        )
+    key = layout.write_key
 
     cfg = {
         "host": host,
@@ -140,6 +159,18 @@ def write_mapped_rows(
                     error=f"ADLS container {container!r} is missing and create_table is disabled",
                 )
             container_client.create_container()
+        if layout.should_purge:
+            from connectors.adls_reader import list_objects
+
+            def _delete_adls(k: str) -> None:
+                client.get_blob_client(container, k).delete_blob()
+
+            purge_object_store_parts(
+                list_keys=lambda prefix: list_objects(cfg, container, prefix),
+                delete_key=_delete_adls,
+                parts_prefix=layout.purge_prefix,
+                legacy_base_key=layout.purge_legacy_key,
+            )
         blob = client.get_blob_client(container, key)
         blob.upload_blob(body, overwrite=True, content_type=content_type)
         checksum = row_checksum(mapped_rows, target_cols, dest_db_type="adls")

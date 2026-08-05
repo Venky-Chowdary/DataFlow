@@ -13,13 +13,20 @@ import {
 } from "../lib/api";
 import { useActiveData } from "../lib/DataContext";
 import {
-  confirmPilotPending,
-  isDestructiveTransfer,
-  transferOverwriteMessage,
-} from "../lib/pilotConfirm";
+  applyPilotSafeActions,
+  buildPilotDataContext,
+  nextPilotResultId,
+  pilotActionChipLabel,
+  runPilotConfirm,
+} from "../lib/pilotChat";
+import { useStudioActions } from "../lib/StudioActionsContext";
 import { API_BASE, Screen } from "../lib/types";
 import { renderSafeMarkdown } from "../lib/safeMarkdown";
-import { loadRailChat, PilotMessage, saveRailChat } from "../lib/pilotChatStore";
+import {
+  loadRailChat,
+  PilotMessage,
+  saveRailChat,
+} from "../lib/pilotChatStore";
 
 interface Message extends PilotMessage {
   dataInsight?: {
@@ -33,7 +40,7 @@ interface Message extends PilotMessage {
 
 const DEFAULT_GREETING: Message = {
   role: "assistant",
-  text: "I'm **Data Pilot** — I can plan routes, inspect schema risk, explain mappings, and take you to the right workspace. Paste a `pf_…` validation run ID or a job ID to triage failures.",
+  text: "I'm **Datawrap Pilot** — I can plan routes, inspect schema risk, explain mappings, and take you to the right workspace. Paste a `pf_…` validation run ID or a job ID to triage failures.",
 };
 
 interface AICopilotProps {
@@ -42,25 +49,21 @@ interface AICopilotProps {
   onClose?: () => void;
 }
 
-const SCREEN_LABELS: Record<string, string> = {
-  dashboard: "Overview",
-  pilot: "Data Pilot",
-  transfer: "Transfer Studio",
-  connectors: "Connectors",
-  jobs: "Jobs",
-  settings: "Settings",
-};
-
 export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotProps) {
   const { activeData } = useActiveData();
   const { toast } = useToast();
   const { confirm } = useConfirm();
+  const { dispatchStudioAction } = useStudioActions();
   const [open, setOpen] = useState(variant === "rail");
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [prompts, setPrompts] = useState<string[]>([]);
   const restored = useRef(loadRailChat());
+  const [sessionId] = useState(() => restored.current?.sessionId || crypto.randomUUID());
+  const [lastResultId, setLastResultId] = useState<string | undefined>(
+    () => restored.current?.lastResultId,
+  );
   const [history, setHistory] = useState<CopilotChatMessage[]>(() => restored.current?.history ?? []);
   const [messages, setMessages] = useState<Message[]>(() => {
     const saved = restored.current?.messages;
@@ -77,24 +80,16 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
   useEffect(() => {
     // Persist rail chat so close/refresh does not wipe the conversation.
     if (messages.length > 1 || history.length > 0) {
-      saveRailChat({ messages, history });
+      saveRailChat({ messages, history, sessionId, lastResultId });
     }
-  }, [messages, history]);
+  }, [messages, history, sessionId, lastResultId]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
   const applyActions = (actions?: CopilotAction[]) => {
-    if (!actions?.length) return;
-    for (const action of actions) {
-      if (action.risk === "mutate" || action.type === "studio") continue;
-      if (action.type === "navigate" && action.screen && onNavigate) {
-        onNavigate(action.screen as Screen);
-      } else if (action.route && onNavigate) {
-        onNavigate(action.route as Screen);
-      }
-    }
+    applyPilotSafeActions(actions, onNavigate);
   };
 
   const clearPending = (msgIndex: number, actionId: string) => {
@@ -109,47 +104,15 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
 
   const confirmPending = async (msgIndex: number, action: CopilotPendingAction) => {
     if (confirmingId) return;
-    if (action.type !== "create_connector" && action.type !== "start_transfer") {
-      // Studio / schedule mutations belong on the full Pilot page where the
-      // surrounding workspace is ready. Send the operator there instead of
-      // silently dropping the approval.
-      onNavigate?.("pilot");
-      toast({
-        title: "Open Data Pilot to confirm",
-        message: action.label || action.type,
-        tone: "info",
-      });
-      return;
-    }
     setConfirmingId(action.id);
     try {
-      if (action.type === "start_transfer" && isDestructiveTransfer(action)) {
-        const ok = await confirm({
-          title: "Overwrite the destination?",
-          message: transferOverwriteMessage(action),
-          confirmLabel: "Overwrite & run",
-          tone: "danger",
-        });
-        if (!ok) return;
-      }
-      const res = await confirmPilotPending(action);
-      if (res.kind === "create_connector") {
-        window.dispatchEvent(new CustomEvent("df2:connectors-changed"));
-        onNavigate?.("connectors");
-        toast({
-          title: res.idempotent ? "Connector already saved" : "Connector saved",
-          message: `“${res.name}” (${res.type}) is ready in Connectors.`,
-          tone: "success",
-        });
-      } else {
-        toast({
-          title: res.idempotent ? "Transfer already running" : "Transfer started",
-          message: `${res.source} → ${res.destination}`,
-          tone: "success",
-        });
-        onNavigate?.("jobs");
-      }
-      clearPending(msgIndex, action.id);
+      const outcome = await runPilotConfirm(action, {
+        onNavigate,
+        toast,
+        confirm,
+        dispatchStudioAction,
+      });
+      if (outcome === "cleared") clearPending(msgIndex, action.id);
     } catch (error) {
       toast({
         title: "Action failed",
@@ -169,13 +132,22 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
     setLoading(true);
 
     try {
-      const res = await copilotChat(q, history, activeData);
+      const pilotContext = buildPilotDataContext(activeData, {
+        sessionId,
+        lastResultId,
+        nameFallback: "pilot-rail",
+      });
+      const res = await copilotChat(q, history, pilotContext);
       const newHistory: CopilotChatMessage[] = [
         ...history,
         { role: "user", content: q },
         { role: "assistant", content: res.answer },
       ];
       setHistory(newHistory.slice(-20));
+      setLastResultId(
+        nextPilotResultId(res.tools_used, res.data_insight?.last_result_id, lastResultId),
+      );
+
       setMessages((m) => [
         ...m,
         {
@@ -184,6 +156,8 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
           actions: res.suggested_actions,
           pending_actions: res.pending_actions,
           dataInsight: res.data_insight,
+          tools_used: res.tools_used,
+          suggested_prompts: res.suggested_prompts,
         },
       ]);
       // Stay on the Confirm card — never auto-navigate away from an approval.
@@ -207,7 +181,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
     <div className="df2-copilot">
       <div className="df2-copilot-head">
         <div>
-          <div style={{ fontWeight: 600, fontSize: 14 }}>Data Pilot</div>
+          <div style={{ fontWeight: 600, fontSize: 14 }}>Datawrap Pilot</div>
           <div style={{ fontSize: 12, color: "#64748b" }}>
             {activeData?.preflight_run_id
               ? `Run ${activeData.preflight_run_id}`
@@ -266,7 +240,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
               <div className="df2-copilot-actions">
                 {msg.actions.map((action, j) => {
                   const screen = action.screen || action.route;
-                  const label = action.label || (screen ? `Open ${SCREEN_LABELS[screen] || screen}` : "Action");
+                  const label = pilotActionChipLabel(action);
                   return (
                     <button
                       key={j}
@@ -280,11 +254,21 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
                 })}
               </div>
             )}
+            {msg.role === "assistant"
+              && i === messages.length - 1
+              && !(msg.pending_actions && msg.pending_actions.length > 0)
+              && (msg.suggested_prompts?.length || (prompts.length > 0 && messages.length > 2)) && (
+              <div className="df2-copilot-suggestions" style={{ marginTop: 8 }}>
+                {(msg.suggested_prompts?.length ? msg.suggested_prompts : prompts).slice(0, 3).map((p) => (
+                  <button key={p} type="button" onClick={() => send(p)}>{p}</button>
+                ))}
+              </div>
+            )}
           </div>
         ))}
         {loading && (
           <div className="df2-copilot-msg assistant df2-copilot-thinking">
-            <span className="df2-loader-bars" aria-label="Data Pilot is working"><i /><i /><i /></span>
+            <span className="df2-loader-bars" aria-label="Datawrap Pilot is working"><i /><i /><i /></span>
             <span>Looking that up…</span>
           </div>
         )}
@@ -326,7 +310,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
         className="df2-btn df2-btn-primary"
         style={{ position: "fixed", bottom: 24, right: 24, width: 48, height: 48, borderRadius: "50%", padding: 0 }}
         onClick={() => setOpen(!open)}
-        aria-label="Data Pilot"
+        aria-label="Datawrap Pilot"
       >
         <DtIcon name="sparkle" size={22} />
       </button>

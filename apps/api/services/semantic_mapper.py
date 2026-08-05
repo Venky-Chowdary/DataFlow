@@ -13,10 +13,28 @@ from pathlib import Path
 
 _model_cache = None
 
+
+def ml_baseline_status() -> dict:
+    """Operator-facing status for Map UI / Pilot — never silent about ML availability."""
+    model = _load_ml_baseline()
+    path = Path(__file__).resolve().parents[3] / "packages" / "ml" / "models" / "baseline.pkl"
+    return {
+        "available": model is not None,
+        "path": str(path),
+        "path_exists": path.exists(),
+        "role": "optional_boost",
+        "note": (
+            "ML baseline available — high-confidence predictions can boost matches."
+            if model is not None
+            else "ML baseline unavailable — automapping uses lexical + semantic + Hungarian only."
+        ),
+    }
+
+
 def _load_ml_baseline():
     global _model_cache
     if _model_cache is not None:
-        return _model_cache
+        return _model_cache if _model_cache is not False else None
 
     # Try to load the ML baseline model if it exists
     try:
@@ -26,11 +44,21 @@ def _load_ml_baseline():
             pkg_path = str(Path(__file__).resolve().parents[3] / "packages")
             if pkg_path not in sys.path:
                 sys.path.append(pkg_path)
+            # Ensure the picklable class is importable under a stable module path.
+            try:
+                import ml.baseline  # noqa: F401
+            except Exception:
+                pass
             with model_path.open("rb") as f:
                 _model_cache = pickle.load(f)  # nosec B301
                 return _model_cache
     except Exception as exc:
-        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        # Cache negative result so a broken pickle does not spam every map_columns call.
+        _model_cache = False
+        logging.getLogger(__name__).warning(
+            "ML baseline unavailable (%s); using lexical/semantic mapper only",
+            type(exc).__name__,
+        )
     return None
 
 
@@ -40,14 +68,23 @@ def _calibrated_confidence(
     score_gap: float,
     requires_review: bool,
     hard_cap: float = 0.99,
+    fidelity: str = "",
 ) -> float:
     """Keep near-tie mappings below auto-approve thresholds.
 
     G4 / Studio auto-approve uses ~0.85 in strict mode. A near-tie with
     confidence 0.93 would pass the gate despite ``requires_review``. Cap
     review rows at 0.84 and scale by gap so operators must confirm.
+
+    Fidelity further spreads the signal: lossless identity stays high;
+    lossy / precision-collapse never looks like an auto-approve slam dunk.
     """
     conf = min(float(score), hard_cap)
+    fid = (fidelity or "").strip().lower()
+    if fid in {"lossy", "lossy_cast", "precision_collapse", "truncate"}:
+        conf = min(conf, 0.78)
+    elif fid in {"safe_normalize", "normalize", "cast"}:
+        conf = min(conf, 0.91)
     if requires_review:
         # gap 0.00 → 0.70, gap 0.07 → ~0.805, never above 0.84
         conf = min(conf, round(0.70 + max(score_gap, 0.0) * 1.5, 3), 0.84)
@@ -179,7 +216,114 @@ ABBREVIATIONS: dict[str, str] = {
     "dept": "department",
     "department": "department",
     "dept_code": "department_code",
+    "dept_cd": "department_code",
     "department_code": "department_code",
+    "ssn": "social_security_number",
+    "social_security_number": "social_security_number",
+    "ssn_num": "social_security_number",
+    "cc_num": "credit_card_number",
+    "cc_no": "credit_card_number",
+    "credit_card_number": "credit_card_number",
+    "card_num": "credit_card_number",
+    "gstin": "gst_number",
+    "gst_num": "gst_number",
+    "gst_number": "gst_number",
+    "pan_num": "pan_number",
+    "pan_number": "pan_number",
+    "iban": "iban",
+    "swift": "swift_code",
+    "swift_code": "swift_code",
+    # Warehouse / lake / object-store / CRM SaaS (demo-critical cloud routes)
+    "acct_id": "account_id",
+    "account_id": "account_id",
+    "org": "organization",
+    "org_id": "organization_id",
+    "organization_id": "organization_id",
+    "opp": "opportunity",
+    "opp_amt": "opportunity_amount",
+    "opportunity_amount": "opportunity_amount",
+    "lead_src": "lead_source",
+    "lead_source": "lead_source",
+    "close_dt": "close_date",
+    "close_date": "close_date",
+    "stage_nm": "stage_name",
+    "stage_name": "stage_name",
+    "rec_type": "record_type",
+    "record_type": "record_type",
+    "ext_id": "external_id",
+    "external_id": "external_id",
+    # Prefer compound abbreviations — bare wh/db/pk/fk/arr collide with
+    # unrelated columns (array payloads, key values, catalog shorthand).
+    "wh_id": "warehouse_id",
+    "warehouse_id": "warehouse_id",
+    "db_nm": "database_name",
+    "database_name": "database_name",
+    "sch_nm": "schema_name",
+    "schema_name": "schema_name",
+    "tbl_nm": "table_name",
+    "table_name": "table_name",
+    "col_nm": "column_name",
+    "column_name": "column_name",
+    "pk_col": "primary_key_column",
+    "primary_key_column": "primary_key_column",
+    "fk_col": "foreign_key_column",
+    "foreign_key_column": "foreign_key_column",
+    "row_cnt": "row_count",
+    "row_count": "row_count",
+    "byte_sz": "byte_size",
+    "byte_size": "byte_size",
+    "obj_key": "object_key",
+    "object_key": "object_key",
+    "bkt_nm": "bucket_name",
+    "bucket_name": "bucket_name",
+    "cont_nm": "container_name",
+    "container_name": "container_name",
+    "last_mod": "last_modified",
+    "last_modified": "last_modified",
+    "mrr": "monthly_recurring_revenue",
+    "monthly_recurring_revenue": "monthly_recurring_revenue",
+    "ann_rev": "annual_recurring_revenue",
+    "annual_recurring_revenue": "annual_recurring_revenue",
+    "tz_nm": "timezone_name",
+    "timezone_name": "timezone_name",
+    "churn_dt": "churn_date",
+    "churn_date": "churn_date",
+    "utm_src": "utm_source",
+    "utm_source": "utm_source",
+    "utm_med": "utm_medium",
+    "utm_medium": "utm_medium",
+    "utm_camp": "utm_campaign",
+    "utm_campaign": "utm_campaign",
+    "ip_addr": "ip_address",
+    "ip_address": "ip_address",
+    "mac_addr": "mac_address",
+    "mac_address": "mac_address",
+    "geo_cd": "geo_code",
+    "geo_code": "geo_code",
+    "reg_cd": "region_code",
+    "region_code": "region_code",
+    "lang_cd": "language_code",
+    "language_code": "language_code",
+    "locale_cd": "locale_code",
+    "locale_code": "locale_code",
+    "vat_num": "vat_number",
+    "vat_number": "vat_number",
+    "tin": "tax_identification_number",
+    "tax_identification_number": "tax_identification_number",
+    "ein": "employer_identification_number",
+    "employer_identification_number": "employer_identification_number",
+    "routing_num": "routing_number",
+    "routing_number": "routing_number",
+    "chk_num": "check_number",
+    "check_number": "check_number",
+    "wire_ref": "wire_reference",
+    "wire_reference": "wire_reference",
+    "fx_rate": "exchange_rate",
+    "exchange_rate": "exchange_rate",
+    "base_ccy": "base_currency",
+    "base_currency": "base_currency",
+    "quote_ccy": "quote_currency",
+    "quote_currency": "quote_currency",
     "product": "product",
     "prod": "product",
     "prod_id": "product_id",
@@ -205,6 +349,37 @@ ABBREVIATIONS: dict[str, str] = {
     "description": "description",
     "addr": "address",
     "address": "address",
+    "addr1": "address_line_1",
+    "addr_1": "address_line_1",
+    "address_line_1": "address_line_1",
+    "address1": "address_line_1",
+    "addr2": "address_line_2",
+    "addr_2": "address_line_2",
+    "address_line_2": "address_line_2",
+    "address2": "address_line_2",
+    "city_nm": "city_name",
+    "state_cd": "state_code",
+    "zip_cd": "postal_code",
+    "lat": "latitude",
+    "latitude": "latitude",
+    "lng": "longitude",
+    "lon": "longitude",
+    "longitude": "longitude",
+    "is_actv": "is_active",
+    "is_active": "is_active",
+    "amt_usd": "amount_usd",
+    "amount_usd": "amount_usd",
+    "disc_pct": "discount_percent",
+    "discount_percent": "discount_percent",
+    "discount_pct": "discount_percent",
+    "line_tot": "line_total",
+    "line_total": "line_total",
+    "cust_seg": "customer_segment",
+    "customer_segment": "customer_segment",
+    "po_num": "purchase_order_number",
+    "po_no": "purchase_order_number",
+    "purchase_order_number": "purchase_order_number",
+    "inv_num": "invoice_number",
     "email": "email",
     "e_mail": "email",
     "email_addr": "email_address",
@@ -528,7 +703,44 @@ ABBREVIATIONS: dict[str, str] = {
     "ward_code": "ward_code",
     "bed_no": "bed_number",
     "bed_number": "bed_number",
+    # Evidence-grown from enterprise golden unresolved tokens (abbrev coverage CI).
+    "cd": "code",
+    "flg": "flag",
+    "flag": "flag",
+    "cnt": "count",
+    "count": "count",
+    "ctr": "center",
+    "msg": "message",
+    "message": "message",
+    "lim": "limit",
+    "limit": "limit",
+    "yr": "year",
+    "year": "year",
+    "qtr": "quarter",
+    "quarter": "quarter",
+    "hrs": "hours",
+    "hours": "hours",
+    "tm": "time",
+    "kg": "kilogram",
+    "kilogram": "kilogram",
+    "lb": "pound",
+    "pound": "pound",
+    "cvv": "card_verification_value",
+    "card_verification_value": "card_verification_value",
+    "bp": "blood_pressure",
+    "blood_pressure": "blood_pressure",
+    "vitals_hr": "vitals_heart_rate",
+    "vitals_heart_rate": "vitals_heart_rate",
+    "bill": "billing",
+    "billing": "billing",
 }
+try:
+    from services.domain_gazetteers import merge_abbreviations
+
+    ABBREVIATIONS = merge_abbreviations(ABBREVIATIONS)
+except Exception:  # pragma: no cover - gazetteer optional at import
+    pass
+
 
 
 def _normalize(name: str) -> str:
@@ -653,13 +865,90 @@ def _qualifier_tokens(name: str) -> set[str]:
     return {t for t in _semantic_form(name).split("_") if t} - _DOMAIN_LEAVES - _ENTITY_STOPWORDS
 
 
+# Lightweight English stem rules for entity qualifiers (paid≈payment, create≈creation).
+# Not a full Porter stemmer — just high-frequency migration stems.
+_STEM_SUFFIXES: tuple[tuple[str, str], ...] = (
+    ("izations", ""),
+    ("isation", ""),
+    ("ations", ""),
+    ("ation", ""),
+    ("ments", ""),
+    ("ment", ""),
+    ("ings", ""),
+    ("ing", ""),
+    ("tions", ""),
+    ("tion", ""),
+    ("sion", ""),
+    ("ness", ""),
+    ("ities", "ity"),
+    ("ity", ""),
+    ("iers", "y"),
+    ("ies", "y"),
+    ("ied", "y"),
+    ("ously", ""),
+    ("ally", ""),
+    ("ers", ""),
+    ("ors", ""),
+    ("er", ""),
+    ("or", ""),
+    ("als", "al"),
+    ("al", ""),
+    ("eds", ""),
+    ("ed", ""),
+    ("es", ""),
+    ("s", ""),
+)
+
+_STEM_IRREGULAR: dict[str, str] = {
+    "paid": "pay",
+    "payment": "pay",
+    "payments": "pay",
+    "bought": "buy",
+    "purchase": "buy",
+    "purchased": "buy",
+    "created": "create",
+    "creation": "create",
+    "creator": "create",
+    "updated": "update",
+    "updation": "update",  # common misspelling in schemas
+    "shipped": "ship",
+    "shipping": "ship",
+    "shipment": "ship",
+    "customer": "cust",
+    "customers": "cust",
+    "transaction": "txn",
+    "transactions": "txn",
+    "amount": "amt",
+    "amounts": "amt",
+}
+
+
+def _light_stem(token: str) -> str:
+    t = (token or "").strip().lower()
+    if not t:
+        return ""
+    if t in _STEM_IRREGULAR:
+        return _STEM_IRREGULAR[t]
+    for suf, repl in _STEM_SUFFIXES:
+        if len(t) > len(suf) + 2 and t.endswith(suf):
+            return t[: -len(suf)] + repl
+    return t
+
+
 def _qualifier_stems_overlap(a: set[str], b: set[str]) -> bool:
-    """True when qualifiers share a stem (ship ≈ shipping, cust ≈ customer)."""
+    """True when qualifiers share a stem (ship ≈ shipping, paid ≈ payment)."""
+    stems_a = {_light_stem(x) for x in a} | set(a)
+    stems_b = {_light_stem(y) for y in b} | set(b)
+    if stems_a & stems_b:
+        return True
     for x in a:
         for y in b:
             if x == y:
                 return True
             if len(x) >= 3 and len(y) >= 3 and (x.startswith(y) or y.startswith(x)):
+                return True
+            sx, sy = _light_stem(x), _light_stem(y)
+            if sx and sy and (sx == sy or (len(sx) >= 3 and len(sy) >= 3 and (sx.startswith(sy) or sy.startswith(sx)))):
                 return True
     return False
 
@@ -723,25 +1012,60 @@ def _near_target_by_form(
     return best_tgt, best
 
 
-def _type_compat_penalty(src_type: str, tgt_type: str) -> float:
-    """Reduce score for incompatible type pairs using the canonical type-system rules."""
+def _identity_onto_numeric_landmine(source: str, src_type: str, tgt_type: str) -> bool:
+    """True when Mongo/document identity would land on a numeric warehouse PK.
+
+    Without samples the old mapper bound ``_id``→NUMBER ``id`` (~0.73). Hex
+    ObjectIds never fit INTEGER/NUMBER — refuse that Map landmine up front.
+    """
+    from services.type_system import normalize_logical_type, specialty_carrier_base
+
+    tgt = normalize_logical_type(tgt_type)
+    if tgt not in {"integer", "decimal", "float"}:
+        return False
+    if specialty_carrier_base(src_type) == "OBJECTID":
+        return True
+    src = normalize_logical_type(src_type)
+    if src not in {"string", "text", "unknown"}:
+        return False
+    form = _normalize(source).replace(" ", "")
+    return form in {"_id", "id", "objectid", "object_id", "oid", "mongo_id"}
+
+
+def _type_compat_penalty(
+    src_type: str,
+    tgt_type: str,
+    *,
+    source_name: str = "",
+    dest_db: str = "",
+) -> float:
+    """Reduce score for incompatible type pairs using the canonical type-system rules.
+
+    Lossy pairs must not clear Map auto-approve / G4 after an Exact-name boost —
+    demote hard enough that calibrated confidence stays ≤0.84.
+    """
     from services.type_system import is_lossy_coercion, normalize_logical_type
 
     if not src_type or not tgt_type:
         return 0.0
-    if is_lossy_coercion(src_type, tgt_type):
+    if source_name and _identity_onto_numeric_landmine(source_name, src_type, tgt_type):
+        # Stronger than generic lossy — must lose to create-new text path.
+        return 0.92
+    if is_lossy_coercion(src_type, tgt_type, dest_db=dest_db):
         src = normalize_logical_type(src_type)
         tgt = normalize_logical_type(tgt_type)
         if src == "binary" and tgt != "binary":
-            return 0.4
+            return 0.8
         if src in ("json", "array") and tgt in ("integer", "decimal", "boolean", "date", "datetime", "time", "binary", "uuid"):
-            return 0.35
-        if src in ("decimal",) and tgt == "integer":
-            return 0.15
-        return 0.25
+            return 0.7
+        if src in ("decimal", "float", "double") and tgt == "integer":
+            return 0.55
+        if src in ("datetime", "timestamp") and tgt == "date":
+            return 0.5
+        return 0.5
     return 0.0
 
-def _type_aware_boost(src_type: str, tgt_type: str) -> float:
+def _type_aware_boost(src_type: str, tgt_type: str, *, dest_db: str = "") -> float:
     """Boost score for exact or highly compatible type matches."""
     from services.type_system import is_lossy_coercion, normalize_logical_type
 
@@ -751,7 +1075,7 @@ def _type_aware_boost(src_type: str, tgt_type: str) -> float:
     tgt = normalize_logical_type(tgt_type)
     if src == tgt:
         return 0.05
-    if is_lossy_coercion(src_type, tgt_type):
+    if is_lossy_coercion(src_type, tgt_type, dest_db=dest_db):
         return 0.0
     # Safe widening / cross-cast pairs that are not lossy.
     safe_pairs: set[tuple[str, str]] = {
@@ -809,6 +1133,7 @@ def _score_pair(
     source_type: str = "VARCHAR",
     target_type: str = "VARCHAR",
     source_samples: list[str] | None = None,
+    dest_db: str = "",
 ) -> tuple[float, str]:
     from services.semantic_analyzer import role_match_boost
     from services.training_lexicon import lexicon_boost
@@ -818,9 +1143,18 @@ def _score_pair(
     src_sem = _semantic_form(source)
     tgt_sem_raw = _semantic_form(target)
 
-    type_penalty = _type_compat_penalty(source_type, target_type)
-    type_boost = _type_aware_boost(source_type, target_type)
+    type_penalty = _type_compat_penalty(
+        source_type, target_type, source_name=source, dest_db=dest_db
+    )
+    type_boost = _type_aware_boost(source_type, target_type, dest_db=dest_db)
     sample_boost = _sample_consistency_boost(source_samples, source_type, target_type)
+    if (
+        sample_boost > -0.5
+        and _identity_onto_numeric_landmine(source, source_type, target_type)
+    ):
+        # No samples: still refuse ObjectId/text identity → NUMBER (Validate would
+        # only catch it later after Map already offered the landmine).
+        sample_boost = -0.90
 
     def _finish(score: float, reason: str) -> tuple[float, str]:
         adjusted = max(0.0, min(0.995, float(score) - type_penalty + type_boost + sample_boost))
@@ -1117,7 +1451,7 @@ def map_columns(
     destination_table_exists: bool | None = None,
 ) -> list[dict]:
     from services.semantic_analyzer import analyze_column
-    from services.type_system import ddl_type
+    from services.type_system import create_new_mapping_target_type, ddl_type
 
     floor = max(0.55, threshold - 0.3)
     src_roles: dict[str, str] = {}
@@ -1154,6 +1488,7 @@ def map_columns(
         for src in source_columns:
             src_type = src_types.get(src, "VARCHAR")
             dest_native = ddl_type(dest_db, src_type) if dest_db else src_type
+            map_target_type = create_new_mapping_target_type(src_type, dest_db)
             if confirmed_missing:
                 out.append(
                     {
@@ -1166,7 +1501,7 @@ def map_columns(
                         ),
                         "user_override": False,
                         "source_type": src_type,
-                        "target_type": dest_native,
+                        "target_type": map_target_type,
                         "assignment_strategy": "identity_passthrough",
                         "create_new": True,
                     }
@@ -1195,7 +1530,7 @@ def map_columns(
                         "requires_review": True,
                     }
                 )
-        return out
+        return _apply_create_new_risk_stamps(out, dest_db)
 
     idf = _build_idf(source_columns + target_columns)
     all_doc_lens = [len(_tokenize(c)) for c in source_columns + target_columns]
@@ -1216,6 +1551,7 @@ def map_columns(
                 src_types.get(source, "VARCHAR"),
                 tgt_types.get(target, "VARCHAR"),
                 src_samples.get(source),
+                dest_db=dest_db,
             )
             pair_scores[(source, target)] = (score, reason)
 
@@ -1232,7 +1568,23 @@ def map_columns(
         winner = alternatives[0]["confidence"] if alternatives else score
         runner_up = alternatives[1]["confidence"] if len(alternatives) > 1 else 0.0
         score_gap = round(max(winner - runner_up, 0.0), 3)
-        requires_review = score_gap < 0.08 and not reason.startswith("Exact")
+        requires_review = score_gap < 0.08
+        src_type = src_types.get(source, "VARCHAR")
+        tgt_type = tgt_types.get(target, "VARCHAR")
+        try:
+            from services.type_system import is_lossy_coercion
+            lossy_pair = is_lossy_coercion(src_type, tgt_type, dest_db=dest_db)
+        except Exception:
+            # Fail closed — unknown type authority must not green-path remaps.
+            lossy_pair = True
+        if lossy_pair:
+            # Exact-name must not exempt DECIMAL→INTEGER / DATETIME→DATE remaps.
+            requires_review = True
+            score = min(float(score), 0.84)
+            reason = f"{reason} · lossy type pair"
+        elif reason.startswith("Exact") and score_gap >= 0.08:
+            # Decisive Exact with compatible types — review not required.
+            requires_review = False
         assigned_sources.add(source)
         used_targets.add(target)
         mappings.append(
@@ -1248,6 +1600,8 @@ def map_columns(
                 "alternatives": alternatives,
                 "score_gap": score_gap,
                 "requires_review": requires_review,
+                "source_type": src_type,
+                "target_type": tgt_type,
             }
         )
 
@@ -1270,6 +1624,7 @@ def map_columns(
                 src_types.get(source, "VARCHAR"),
                 tgt_types.get(target, "VARCHAR"),
                 src_samples.get(source),
+                dest_db=dest_db,
             )
             if score > best_score:
                 best_score, best_target, best_reason = score, target, reason
@@ -1281,7 +1636,9 @@ def map_columns(
         near_tgt, near_ratio = _near_target_by_form(source, target_columns, used_targets=used_targets)
         if near_tgt:
             near_tgt_type = tgt_types.get(near_tgt, "VARCHAR")
-            near_penalty = _type_compat_penalty(src_type, near_tgt_type)
+            near_penalty = _type_compat_penalty(
+                src_type, near_tgt_type, source_name=source, dest_db=dest_db
+            )
             near_sample = _sample_consistency_boost(
                 src_samples.get(source), src_type, near_tgt_type,
             )
@@ -1297,6 +1654,15 @@ def map_columns(
                 runner_up = alternatives[1]["confidence"] if len(alternatives) > 1 else 0.0
                 score_gap = round(max(winner - runner_up, 0.0), 3)
                 requires_review = near_ratio < 0.85
+                near_tgt_type = tgt_types.get(near_tgt, "VARCHAR")
+                try:
+                    from services.type_system import is_lossy_coercion
+                    near_lossy = is_lossy_coercion(src_type, near_tgt_type, dest_db=dest_db)
+                except Exception:
+                    near_lossy = True
+                if near_lossy:
+                    requires_review = True
+                    near_score = min(float(near_score), 0.84)
                 mappings.append(
                     {
                         "source": source,
@@ -1310,12 +1676,15 @@ def map_columns(
                         "reasoning": (
                             f"Near-form match to existing destination "
                             f"(similarity={near_ratio:.2f}); prefer over inventing a column"
+                            + (" · lossy type pair" if near_lossy else "")
                         ),
                         "user_override": False,
                         "assignment_strategy": "near_form_existing",
                         "alternatives": alternatives,
                         "score_gap": score_gap,
                         "requires_review": requires_review,
+                        "source_type": src_type,
+                        "target_type": near_tgt_type,
                     }
                 )
                 continue
@@ -1325,24 +1694,37 @@ def map_columns(
             # with review instead of inventing (avoids ph_number when phone exists).
             if near_tgt and near_ratio >= 0.50:
                 used_targets.add(near_tgt)
+                near_tgt_type = tgt_types.get(near_tgt, "VARCHAR")
+                try:
+                    from services.type_system import is_lossy_coercion
+                    near_lossy = is_lossy_coercion(src_type, near_tgt_type, dest_db=dest_db)
+                except Exception:
+                    near_lossy = True
                 mappings.append(
                     {
                         "source": source,
                         "target": near_tgt,
-                        "confidence": round(min(0.55 + near_ratio * 0.35, 0.88), 3),
+                        "confidence": round(
+                            min(0.55 + near_ratio * 0.35, 0.84 if near_lossy else 0.88),
+                            3,
+                        ),
                         "reasoning": (
                             f"Sub-threshold score but near existing column "
                             f"(similarity={near_ratio:.2f}) — review before create-new"
+                            + (" · lossy type pair" if near_lossy else "")
                         ),
                         "user_override": False,
                         "assignment_strategy": "near_form_review",
                         "alternatives": alternatives,
                         "score_gap": 0.0,
                         "requires_review": True,
+                        "source_type": src_type,
+                        "target_type": near_tgt_type,
                     }
                 )
                 continue
             dest_native = ddl_type(dest_db, src_type) if dest_db else src_type
+            map_target_type = create_new_mapping_target_type(src_type, dest_db)
             # Prefer the original source name for ADD COLUMN (_id stays _id).
             # Semantic form alone collapses _id → id, then id_text — a name that
             # operators did not approve and that often never gets DDL.
@@ -1361,12 +1743,12 @@ def map_columns(
                     "target": candidate,
                     "confidence": IDENTITY_PASSTHROUGH_CONFIDENCE,
                     "reasoning": (
-                        "No type-compatible destination column — map to a new text field "
+                        "No type-compatible destination column — map to a new field "
                         f"(create/ADD as {dest_native}); do not coerce into incompatible DDL"
                     ),
                     "user_override": False,
                     "source_type": src_type,
-                    "target_type": dest_native,
+                    "target_type": map_target_type,
                     "assignment_strategy": "create_compatible_new",
                     "create_new": True,
                     "alternatives": alternatives,
@@ -1385,7 +1767,20 @@ def map_columns(
         winner = alternatives[0]["confidence"] if alternatives else best_score
         runner_up = alternatives[1]["confidence"] if len(alternatives) > 1 else 0.0
         score_gap = round(max(winner - runner_up, 0.0), 3)
-        requires_review = score_gap < 0.08 and not best_reason.startswith("Exact")
+        requires_review = score_gap < 0.08
+        src_type = src_types.get(source, "VARCHAR")
+        tgt_type = tgt_types.get(best_target, "VARCHAR") if best_target else "VARCHAR"
+        try:
+            from services.type_system import is_lossy_coercion
+            lossy_pair = bool(
+                best_target and is_lossy_coercion(src_type, tgt_type, dest_db=dest_db)
+            )
+        except Exception:
+            lossy_pair = bool(best_target)
+        if lossy_pair:
+            requires_review = True
+            best_score = min(float(best_score), 0.84)
+            best_reason = f"{best_reason} · lossy type pair"
         mappings.append(
             {
                 "source": source,
@@ -1401,8 +1796,103 @@ def map_columns(
                 "alternatives": alternatives,
                 "score_gap": score_gap,
                 "requires_review": requires_review,
+                "source_type": src_type,
+                "target_type": tgt_type,
             }
         )
 
     mappings.sort(key=lambda m: source_columns.index(m["source"]))
-    return mappings
+    return _apply_create_new_risk_stamps(mappings, dest_db)
+
+
+def _apply_create_new_risk_stamps(
+    mappings: list[dict],
+    destination_db_type: str = "",
+) -> list[dict]:
+    """Stamp create-new type risks without importing mapping_pipeline (cycle-safe)."""
+    from services.type_system import (
+        assess_create_new_type_risk,
+        create_new_mapping_target_type,
+        is_lossy_coercion,
+        is_precision_collapse_coercion,
+        normalize_logical_type as _nlt,
+    )
+
+    out: list[dict] = []
+    for m in mappings:
+        row = dict(m)
+        # Only confirmed create-new strategies — never stamp pending schema as
+        # create-new (UI keeps createNew=false; inventing risks/DDL contradicts that).
+        strategy = str(row.get("assignment_strategy") or "")
+        is_create = bool(
+            row.get("create_new")
+            or strategy in {
+                "create_compatible_new",
+                "identity_passthrough",
+            }
+        )
+        if not is_create or strategy == "pending_dest_schema":
+            out.append(row)
+            continue
+        src = str(row.get("source_type") or "VARCHAR")
+        db = destination_db_type or str(row.get("dest_db_type") or "")
+        stamped = str(row.get("target_type") or "").strip()
+        physical_from_src = create_new_mapping_target_type(src, db) if db else ""
+        if db and stamped:
+            physical_from_stamp = create_new_mapping_target_type(stamped, db)
+            stamp_l = _nlt(stamped)
+            src_phys_l = _nlt(physical_from_src or src)
+            # Transform/pipeline may widen VARCHAR→DATETIME(6)/JSONB/UUID wire.
+            # Never erase that with source-derived TEXT create-new.
+            if stamp_l not in {"string", "text"} or src_phys_l not in {"string", "text"}:
+                tgt = physical_from_stamp or stamped
+            else:
+                tgt = physical_from_src or physical_from_stamp or stamped
+        elif db:
+            tgt = physical_from_src or src
+        else:
+            tgt = stamped or src
+        if tgt and tgt != stamped:
+            row["target_type"] = tgt
+        risks = assess_create_new_type_risk(src, tgt, destination_db_type=db)
+        if risks:
+            row["create_new_risks"] = risks
+            row["requires_review"] = True
+            kinds = ", ".join(sorted({r.get("kind", "") for r in risks if r.get("kind")}))
+            reason = str(row.get("reasoning") or "")
+            note = f"create-new type risk: {kinds}"
+            if note not in reason.lower():
+                row["reasoning"] = f"{reason} · {note}".strip(" ·")
+            if (
+                (not row.get("fidelity") or row.get("fidelity") == "lossless")
+                and (
+                    is_lossy_coercion(src, tgt, dest_db=db)
+                    or is_precision_collapse_coercion(src, tgt, dest_db=db)
+                )
+            ):
+                row["fidelity"] = "lossy_cast"
+            # Vary confidence: lossy create-new must not look like identity slam-dunk.
+            try:
+                base = float(row.get("confidence") or IDENTITY_PASSTHROUGH_CONFIDENCE)
+            except (TypeError, ValueError):
+                base = IDENTITY_PASSTHROUGH_CONFIDENCE
+            row["confidence"] = _calibrated_confidence(
+                base,
+                score_gap=float(row.get("score_gap") or 0.0),
+                requires_review=True,
+                hard_cap=0.88,
+                fidelity=str(row.get("fidelity") or ""),
+            )
+        elif strategy == "identity_passthrough":
+            # Same semantic form, no risk stamps → keep high but not flat 0.99.
+            src_l = src.strip().upper()
+            tgt_l = str(tgt or "").strip().upper()
+            if src_l and tgt_l and src_l == tgt_l:
+                row["confidence"] = round(min(float(row.get("confidence") or 0.95), 0.96), 3)
+            else:
+                row["confidence"] = round(
+                    min(float(row.get("confidence") or IDENTITY_PASSTHROUGH_CONFIDENCE), 0.93),
+                    3,
+                )
+        out.append(row)
+    return out

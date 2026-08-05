@@ -6,7 +6,7 @@ Informatica maps **native → transformation (logical) → native** so Oracle→
 does not inherit Oracle naming. Airbyte/Fivetran keep destination-specific writers
 but a shared catalog/type layer.
 
-DataFlow mirrors that:
+Datawrap mirrors that:
 
 1. ``type_system.py`` — logical types (STRING/INTEGER/…) + per-dialect DDL.
 2. ``dialect_profiles.py`` — default schema, case fold, quote style (this module).

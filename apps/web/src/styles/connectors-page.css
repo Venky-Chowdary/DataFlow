@@ -85,8 +85,8 @@
   border-radius: 999px;
 }
 
-.df2-connector-row .df2-health-dot.ok { background: #059669; }
-.df2-connector-row .df2-health-dot.err { background: #dc2626; }
+.df2-connector-row .df2-health-dot.ok { background: var(--df-success); }
+.df2-connector-row .df2-health-dot.err { background: var(--df-danger); }
 
 .df2-connector-row-icon {
   display: inline-flex;
@@ -105,7 +105,7 @@
 .df2-connector-row-name {
   font-size: 13.5px;
   font-weight: 600;
-  color: #0f172a;
+  color: var(--df-text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -113,7 +113,7 @@
 
 .df2-connector-row-meta {
   font-size: 11.5px;
-  color: #64748b;
+  color: var(--df-text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -196,7 +196,7 @@
 }
 
 /* Tablet: drop the "last used" and role columns into the identity block */
-@media (max-width: 1024px) {
+@media (max-width: 1023px) {
   .df2-connector-rows-head { display: none; }
   .df2-connector-row {
     grid-template-columns: auto auto minmax(0, 1fr) auto;

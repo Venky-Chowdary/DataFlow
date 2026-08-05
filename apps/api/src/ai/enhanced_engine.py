@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Enhanced Semantic Engine
+Datawrap — Enhanced Semantic Engine
 
 RAG + LLM powered semantic analysis with chain-of-thought reasoning.
 Upgrades the base pattern engine with embedding similarity and retrieval.

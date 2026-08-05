@@ -33,18 +33,26 @@ CoercionColumn shape::
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from services.transform_engine import apply_transform
 from services.transform_resolver import resolve_transform
 from services.type_system import (
     ddl_type,
+    is_lossy_coercion,
     is_nested_document_collapse,
     is_nested_shape_collapse,
     is_precision_collapse_coercion,
+    is_unlimited_string_carrier,
     normalize_logical_type,
 )
-from services.value_serializer import cell_to_string
+from services.value_serializer import (
+    DF_MISSING_SENTINEL,
+    SQL_NULL_SENTINEL,
+    cell_to_string,
+    is_missing_sentinel,
+)
 
 _TEXTUAL_LOGICALS = {"string", "text"}
 _STRUCTURAL_LOGICALS = {"json", "array", "struct", "map"}
@@ -86,13 +94,20 @@ def samples_coerce_mapping(
     return checked > 0
 
 
-def _target_type_for(mapping: dict, dest_types: dict[str, str], source_types: dict[str, str]) -> str:
-    tgt = mapping.get("target", "")
-    return (
-        dest_types.get(tgt)
-        or mapping.get("target_type")
-        or source_types.get(mapping.get("source", ""))
-        or "VARCHAR"
+def _target_type_for(
+    mapping: dict,
+    dest_types: dict[str, str],
+    source_types: dict[str, str],
+    dest_db_type: str = "",
+) -> str:
+    from services.type_system import resolve_mapping_target_type
+
+    src = str(mapping.get("source") or "")
+    return resolve_mapping_target_type(
+        mapping,
+        target_types=dest_types,
+        source_type=str(source_types.get(src) or ""),
+        dest_db_type=dest_db_type,
     )
 
 
@@ -119,6 +134,27 @@ def _looks_structural(values: list[str]) -> bool:
         if s[:1] in ("{", "[") and s[-1:] in ("}", "]"):
             return True
     return False
+
+
+def _is_json_scalar_wrap(cell: str, converted: Any) -> bool:
+    """True when a non-JSON bare scalar was wrapped as a JSON string literal.
+
+    Value digits are preserved, but the domain changes (TEXT ``hi`` → JSON
+    ``\"hi\"``). Validate must warn so operators Accept risk intentionally —
+    never green-light as a clean structural pass.
+    """
+    text = (cell or "").strip()
+    if not text or converted is None:
+        return False
+    try:
+        json.loads(text)
+        return False
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+    try:
+        return str(converted) == json.dumps(text, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return False
 
 
 def _build_suggestion(
@@ -213,12 +249,17 @@ def analyze_coercion(
         if not src:
             continue
         src_type = source_types.get(src, "VARCHAR")
-        tgt_type = _target_type_for(m, dest_types, source_types)
+        tgt_type = _target_type_for(m, dest_types, source_types, dest_db_type=dest_db_type)
         src_logical = normalize_logical_type(src_type)
         tgt_logical = normalize_logical_type(tgt_type)
 
-        # Text/varchar targets accept any serialized value — no coercion risk.
-        if tgt_logical in _TEXTUAL_LOGICALS:
+        # Only skip truly unbounded TEXT sinks with no declared fidelity loss.
+        # Bounded VARCHAR(n) / LOB-tier narrow / national charset must be probed.
+        if (
+            tgt_logical in _TEXTUAL_LOGICALS
+            and is_unlimited_string_carrier(tgt_type)
+            and not is_lossy_coercion(src_type, tgt_type, dest_db=dest_db_type)
+        ):
             continue
 
         transform = resolve_transform(m, column_types=source_types, dest_types=dest_types)
@@ -226,9 +267,11 @@ def analyze_coercion(
         ok = nulls = sentinel_nulls = failed = 0
         wire_normalize = 0
         wire_failures = 0
+        json_scalar_wraps = 0
         sample_failures: list[dict[str, Any]] = []
         sentinel_examples: list[dict[str, Any]] = []
         wire_examples: list[dict[str, Any]] = []
+        wrap_examples: list[dict[str, Any]] = []
         raw_failure_values: list[str] = []
         observed_values: list[str] = []
         sample_wire_form: str | None = None
@@ -311,7 +354,22 @@ def analyze_coercion(
         use_binary_wire = tgt_logical == "binary" and dest_l in _uuid_binary_dests
 
         for idx, row in enumerate(rows):
-            cell = cell_to_string(row.get(src))
+            raw_cell = row.get(src, DF_MISSING_SENTINEL)
+            # Sparse schemaless docs (Mongo/Dynamo): absent / SQL-null sentinels
+            # are real NULLs at write — never cast failures or silent-loss blocks.
+            if is_missing_sentinel(raw_cell) or raw_cell in {
+                DF_MISSING_SENTINEL,
+                SQL_NULL_SENTINEL,
+                "__df_ddb_null__",
+            }:
+                nulls += 1
+                observed_values.append("")
+                continue
+            cell = cell_to_string(raw_cell)
+            if cell.strip() in {"", DF_MISSING_SENTINEL, SQL_NULL_SENTINEL, "__df_ddb_null__"}:
+                nulls += 1
+                observed_values.append(cell)
+                continue
             observed_values.append(cell)
             converted, err = apply_transform(cell, transform)
             if err:
@@ -326,7 +384,27 @@ def analyze_coercion(
                     sentinel_nulls += 1
                     if len(sentinel_examples) < SAMPLE_FAILURE_LIMIT:
                         sentinel_examples.append({"row": idx, "value": cell[:120]})
+            elif is_missing_sentinel(converted) or str(converted) in {
+                DF_MISSING_SENTINEL,
+                SQL_NULL_SENTINEL,
+            }:
+                nulls += 1
             else:
+                # Domain change: bare scalar → JSON string literal (VARIANT/JSON).
+                if tgt_logical in _STRUCTURAL_LOGICALS and _is_json_scalar_wrap(
+                    cell, converted
+                ):
+                    json_scalar_wraps += 1
+                    if len(wrap_examples) < SAMPLE_FAILURE_LIMIT:
+                        wrap_examples.append({
+                            "row": idx,
+                            "value": cell[:120],
+                            "wire_form": str(converted)[:120],
+                            "reason": (
+                                "Bare scalar wrapped as JSON string literal "
+                                "(domain change — Accept risk if intentional)"
+                            ),
+                        })
                 # Destination-wire probe: transform-engine ISO-Z ≠ SQL/warehouse bind.
                 if use_wire and wire_check_fn is not None:
                     probe_val = converted if converted is not None else cell
@@ -396,6 +474,12 @@ def analyze_coercion(
         # with the destination logical type (genuine coercion happening).
         # Structural JSON/array pairs are always surfaced so Validate can label
         # them as serialization (not a scary cast) when they round-trip cleanly.
+        # Same-logical YEAR/MONEY/width/IEEE collapses must not early-continue.
+        fidelity_collapse = bool(
+            is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest_db_type)
+            or is_lossy_coercion(src_type, tgt_type, dest_db=dest_db_type)
+            or is_nested_shape_collapse(src_type, tgt_type, dest_db=dest_db_type)
+        )
         coercion_required = src_logical != tgt_logical
         structural_pair = (
             src_logical in _STRUCTURAL_LOGICALS and tgt_logical in _STRUCTURAL_LOGICALS
@@ -404,8 +488,10 @@ def analyze_coercion(
             failed == 0
             and sentinel_nulls == 0
             and wire_normalize == 0
+            and json_scalar_wraps == 0
             and not coercion_required
             and not structural_pair
+            and not fidelity_collapse
         ):
             continue
 
@@ -414,7 +500,7 @@ def analyze_coercion(
         elif sentinel_nulls and strict_null_loss:
             # Non-null → NULL is potential data loss; never green-light under strict.
             severity = "block"
-        elif sentinel_nulls or wire_normalize:
+        elif sentinel_nulls or wire_normalize or json_scalar_wraps:
             severity = "warn"
         else:
             severity = "ok"
@@ -432,28 +518,41 @@ def analyze_coercion(
             dest_db_type=dest_db_type,
             structural=structural,
         )
-        # Head-sample coerce-ok must not hide IEEE/time/TZ fidelity collapse
-        # or nested STRUCT/MAP/ARRAY element contracts (G3 already blocks these).
-        fidelity_collapse = bool(
-            is_precision_collapse_coercion(src_type, tgt_type)
-            or is_nested_shape_collapse(src_type, tgt_type)
-        )
         if severity != "block" and fidelity_collapse:
-            severity = "block"
+            # Keep fidelity_collapse=true for honesty. Soften severity only with a
+            # verified continue-policy Risk Contract (boolean ack never enough).
+            from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+            risk_cleared = mapping_has_clearing_risk_contract(m)
+            severity = "warn" if risk_cleared else "block"
             if not fix:
                 fix = (
                     f"Column '{src}' → {tgt_type}: declared mapping collapses fidelity "
                     f"({src_type} → {tgt_type}) even when preview samples coerce. "
-                    f"Widen the destination type, add an explicit transform, or accept "
-                    f"lossy remapping under a non-strict policy after review."
+                    f"Widen the destination type, add an explicit transform, or sign a "
+                    f"Migration Risk Contract with CAST_AND_CONTINUE."
+                    if not risk_cleared
+                    else (
+                        f"Column '{src}' → {tgt_type}: declared fidelity collapse "
+                        f"({src_type} → {tgt_type}) — continue-policy Risk Contract signed."
+                    )
                 )
         if wire_normalize and not fix:
             example = wire_examples[0] if wire_examples else {}
             fix = (
                 f"Column '{src}' → {tgt_type}: {wire_normalize} of {len(rows)} sampled "
                 f"value(s) use ISO timestamps (e.g. {example.get('value', '…')!r}). "
-                f"DataFlow will normalize to {example.get('wire_form') or 'YYYY-MM-DD HH:MM:SS'} "
+                f"Datawrap will normalize to {example.get('wire_form') or 'YYYY-MM-DD HH:MM:SS'} "
                 f"at write time for destination SQL/warehouse temporal bind."
+            )
+        if json_scalar_wraps and not fix:
+            example = wrap_examples[0] if wrap_examples else {}
+            fix = (
+                f"Column '{src}' → {tgt_type}: {json_scalar_wraps} of {len(rows)} sampled "
+                f"value(s) are bare scalars wrapped as JSON string literals "
+                f"(e.g. {example.get('value', '…')!r} → {example.get('wire_form', '…')!r}). "
+                f"Values load, but the domain changes — Accept risk on Map if intentional, "
+                f"or emit real JSON objects/arrays upstream."
             )
 
         tgt_name = str(m.get("target", src) or src)
@@ -473,7 +572,9 @@ def analyze_coercion(
         framing = None
         if structural_preserve:
             nested_to_doc = is_nested_document_collapse(src_type, tgt_type)
-            nested_shape_loss = is_nested_shape_collapse(src_type, tgt_type)
+            nested_shape_loss = is_nested_shape_collapse(
+                src_type, tgt_type, dest_db=dest_db_type
+            )
             shape_ok = (
                 not nested_to_doc
                 and not nested_shape_loss
@@ -553,9 +654,11 @@ def analyze_coercion(
             "failed": failed,
             "wire_normalize": wire_normalize,
             "wire_failures": wire_failures,
+            "json_scalar_wraps": json_scalar_wraps,
             "sample_failures": sample_failures,
             "sentinel_examples": sentinel_examples,
             "wire_examples": wire_examples,
+            "wrap_examples": wrap_examples,
             "sample_wire_form": sample_wire_form,
             "severity": severity,
             "fidelity_collapse": fidelity_collapse,

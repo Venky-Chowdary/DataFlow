@@ -1,4 +1,4 @@
-"""Schema-grounded WHERE predicates for Data Pilot analytics.
+"""Schema-grounded WHERE predicates for Datawrap Pilot analytics.
 
 "How many **open** orders", "revenue **in 2024**", "customers **where email is
 null**" — an aggregate without filters answers a different question than the one

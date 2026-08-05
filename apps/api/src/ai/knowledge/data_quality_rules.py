@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Data Quality Rules
+Datawrap — Data Quality Rules
 
 Validation patterns and quality checks for data columns.
 """

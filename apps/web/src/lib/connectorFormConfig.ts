@@ -268,7 +268,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     userPassFields.push(
       text("host", "SMTP host", { placeholder: "smtp.gmail.com" }),
       number("port", "Port", { placeholder: "587" }),
-      text("authSource", "From address", { placeholder: "noreply@dataflow.com" }),
+      text("authSource", "From address", { placeholder: "noreply@datawrap.app" }),
       text("database", "Recipients", { placeholder: "alice@example.com, bob@example.com" }),
       text("username", "SMTP username"),
       password("password", "SMTP password"),
@@ -337,7 +337,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       textarea("connection_string", "SQLAlchemy connection URL", {
         rows: 2,
         placeholder: genericSqlPlaceholder(type),
-        hint: "Paste the full SQLAlchemy URL for your engine. DataFlow will validate connectivity and introspect schema.",
+        hint: "Paste the full SQLAlchemy URL for your engine. Datawrap will validate connectivity and introspect schema.",
       })
     );
   } else if (isMongo) {
@@ -345,7 +345,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       textarea("connection_string", "MongoDB connection string", {
         rows: 2,
         placeholder: "mongodb+srv://user:pass@cluster.mongodb.net/mydb?retryWrites=true&w=majority",
-        hint: "mongodb:// or mongodb+srv:// URL. DataFlow will auto-detect authSource and TLS settings.",
+        hint: "mongodb:// or mongodb+srv:// URL. Datawrap will auto-detect authSource and TLS settings.",
       }),
       text("authSource", "Auth source override", { optional: true, placeholder: "admin" }),
       checkbox("ssl", "Force TLS / SSL", { optional: true, hint: "Toggle on if the URI does not include tls=true." })
@@ -378,7 +378,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     connStrFields.push(
       textarea("connection_string", "SMTP URL", {
         rows: 2,
-        placeholder: "smtp://user:pass@smtp.gmail.com:587/?from=noreply@dataflow.com&to=alice@example.com",
+        placeholder: "smtp://user:pass@smtp.gmail.com:587/?from=noreply@datawrap.app&to=alice@example.com",
         hint: "smtp:// or smtps:// URL. Use query params from= and to= for sender/recipients.",
       })
     );
@@ -527,15 +527,26 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       stripe: "customers",
       rest_api: getRestApiDefaultObject(type),
     };
-    const placeholder = host || resolved;
+    const isSalesforce = resolved === "salesforce";
+    const placeholder = isSalesforce
+      ? "https://yourorg.my.salesforce.com"
+      : host || resolved;
     const objectHint = `Default object/table used when none is specified: ${defaultObject[resolved] || ""}.`;
     apiFields.push(
-      text("host", "Host / instance URL", { optional: true, placeholder }),
+      text("host", isSalesforce ? "Instance URL" : "Host / instance URL", {
+        optional: !isSalesforce,
+        placeholder,
+        hint: isSalesforce
+          ? "Use your org instance URL (*.my.salesforce.com). Do not use login.salesforce.com."
+          : undefined,
+      }),
       text("database", "Object / table (optional)", { optional: true, placeholder: defaultObject[resolved] }),
-      textarea("apiKey", resolved === "stripe" ? "Secret key" : "API token", {
+      textarea("apiKey", resolved === "stripe" ? "Secret key" : isSalesforce ? "Access token (Bearer)" : "API token", {
         rows: 2,
-        placeholder: resolved === "stripe" ? "sk_..." : "Paste access token",
-        hint: `Paste the ${resolved === "stripe" ? "Stripe secret key" : resolved + " access token"}. ${objectHint}`,
+        placeholder: resolved === "stripe" ? "sk_..." : isSalesforce ? "00D…!AQEA… (session access token)" : "Paste access token",
+        hint: isSalesforce
+          ? `Paste a Bearer access token (not username/password). ${objectHint}`
+          : `Paste the ${resolved === "stripe" ? "Stripe secret key" : resolved + " access token"}. ${objectHint}`,
       })
     );
     if (resolved === "rest_api") {
@@ -626,7 +637,17 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
   if (apiFields.length) {
     authModes.push(
       auth("api_key", "API key", apiFields, (values) => {
-        if (!isSaaS && !fmt(values, "host")) return "Host is required.";
+        if ((!isSaaS || resolved === "salesforce") && !fmt(values, "host")) {
+          return resolved === "salesforce"
+            ? "Salesforce instance URL is required (*.my.salesforce.com)."
+            : "Host is required.";
+        }
+        if (resolved === "salesforce") {
+          const h = String(fmt(values, "host") || "").toLowerCase();
+          if (h.includes("login.salesforce.com") || h.includes("test.salesforce.com")) {
+            return "Use your org instance URL (*.my.salesforce.com), not login.salesforce.com.";
+          }
+        }
         if (resolved === "weaviate" || resolved === "milvus") {
           return null;
         }

@@ -213,7 +213,7 @@ function FlowCanvas({
         <span className="df2-flow-hub-ring df2-flow-hub-ring-2" />
         <div className="df2-flow-hub-core">
           <DtLogo size={32} />
-          <span>DataFlow</span>
+          <span>Datawrap</span>
         </div>
       </div>
 

@@ -127,21 +127,40 @@ def dispatch_postgresql_migration(
             source_checksum = row_checksum([tuple(r) for r in all_checksum_rows])
             set_phase(job_id, WorkflowPhase.RECONCILE, "Verifying migration fidelity")
             from services.dialect_profiles import schema_from_cfg
+            from services.reconciliation import ReconciliationReport
 
+            # Never invent target checksum equality from the source digest.
             target_rows, target_checksum = verify_target(
                 dest_db_type,
                 dest,
                 schema=schema_from_cfg(dest_db_type, dest),
                 table_name=table_name,
                 fallback_rows=written,
-                fallback_checksum=source_checksum,
+                fallback_checksum="",
             )
-            recon = reconcile(
-                source_rows=total_rows,
-                target_rows=target_rows,
-                source_checksum=source_checksum,
-                target_checksum=target_checksum or source_checksum,
-            )
+            tgt_chk = (target_checksum or "").strip()
+            if not tgt_chk:
+                recon = ReconciliationReport(
+                    passed=False,
+                    source_rows=total_rows,
+                    target_rows=target_rows,
+                    source_checksum=source_checksum,
+                    target_checksum="",
+                    message=(
+                        "Gate-8: destination checksum unavailable — "
+                        "refuse fidelity claim (never spoof source digest)"
+                    ),
+                    checksum_match=False,
+                    population_proof=False,
+                    assurance_level="none",
+                )
+            else:
+                recon = reconcile(
+                    source_rows=total_rows,
+                    target_rows=target_rows,
+                    source_checksum=source_checksum,
+                    target_checksum=tgt_chk,
+                )
             job_store.complete(
                 job_id,
                 written,

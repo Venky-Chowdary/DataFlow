@@ -104,3 +104,49 @@ def test_schema_policy_finding_does_not_suggest_strip_controls():
     assert rows
     assert rows[0]["suggested_transform"] is None
     assert "Backfill" in rows[0]["reason"]
+
+
+def test_objectid_lossy_string_fills_column_and_dedupes_integrity():
+    pf = {
+        "passed": False,
+        "gates": [
+            {
+                "id": "g3_schema_contract",
+                "status": "block",
+                "details": {
+                    "issues": [
+                        "Lossy coercion: userId (OBJECTID) → user_id (TEXT) — OBJECTID specialty polarity collapse"
+                    ],
+                    "issues_detail": [
+                        {
+                            "source": "userId",
+                            "target": "user_id",
+                            "source_type": "OBJECTID",
+                            "target_type": "TEXT",
+                            "reason": "Lossy coercion: userId (OBJECTID) → user_id (TEXT) — OBJECTID specialty polarity collapse",
+                            "suggested_fix": "Remap target type to VARCHAR(24)",
+                        }
+                    ],
+                },
+            },
+            {
+                "id": "g9_data_integrity",
+                "status": "block",
+                "details": {
+                    "issues": ["userId (OBJECTID) → user_id (TEXT)"],
+                },
+            },
+        ],
+        "blockers": [
+            {
+                "id": "g3_schema_contract",
+                "message": "1 type coercion issue(s); Data integrity failed: userId (OBJECTID) → user_id (TEXT)",
+            }
+        ],
+    }
+    rows = quarantine_rows_from_preflight(pf)
+    assert len(rows) == 1
+    assert rows[0]["column"] == "userId"
+    assert rows[0]["target"] == "user_id"
+    assert "specialty polarity" in rows[0]["reason"].lower()
+    assert rows[0]["suggested_transform"] is None

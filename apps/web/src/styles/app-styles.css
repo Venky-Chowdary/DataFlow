@@ -1,8 +1,21 @@
-/** Consolidated app styles — single entry for Vite. */
+/**
+ * Consolidated app styles — single Vite entry.
+ *
+ * Cascade contract (do not insert parallel theme sheets):
+ *   1. tokens.css          — sole --df-* SSOT
+ *   2. dataflow-ui.css     — primitives / base components
+ *   3. feature modules     — landing, pages, studio (no :root brand overrides)
+ *   4. polish / consistency — component rules only
+ *   5. enterprise-ui.css   — canonical final component layer
+ *   6. rules in THIS file  — shell scroll/header contract (last word)
+ *
+ * Theme tokens must not be redefined in steps 2–5.
+ */
 @import "./tokens.css";
 @import "./dataflow-ui.css";
 @import "./jarvis-ui.css";
 @import "./landing.css";
+@import "./marketing-layout.css";
 @import "./enterprise-platform.css";
 @import "./premium-theme.css";
 @import "./brand-system.css";
@@ -12,22 +25,20 @@
 @import "./settings-workspace.css";
 @import "./settings-enterprise.css";
 @import "./mcp-enterprise.css";
-@import "./responsive-fixes.css";
 @import "./pipeline-topology.css";
-@import "./responsive-shell-fixes.css";
 @import "./column-workbench.css";
 @import "./connectors-page.css";
 @import "./pilot-chat.css";
 @import "./docs-page.css";
+@import "./marketing-editorial.css";
 @import "./query-playground.css";
 @import "./benchmarks.css";
-/* transfer-studio.css is a self-contained, exclusively-namespaced merge of what
-   used to be 5 separate files; no other stylesheet touches its selectors, so it
-   is safe to load ahead of the canonical layer below. */
+/* Responsive patches (component rules only; tokens stay in tokens.css) */
+@import "./responsive-fixes.css";
+@import "./responsive-shell-fixes.css";
+/* transfer-studio.css is exclusively namespaced; load before final layer. */
 @import "./transfer-studio.css";
-/* Canonical final layer (genuinely last now) — do not add enterprise-ui-vN /
-   enterprise-primitives / workspace-enterprise-vN siblings. Extend this file
-   or tokens.css only. Includes former workspace-enterprise.css content. */
+/* Canonical final component layer — extend this or tokens.css only. */
 @import "./enterprise-ui.css";
 
 .df2-map-step-body {
@@ -117,7 +128,7 @@
   transform: none;
 }
 
-/* ═══ Data Pilot — ChatGPT-style viewport: NO page scroll ═══ */
+/* ═══ Datawrap Pilot — ChatGPT-style viewport: NO page scroll ═══ */
 .df2-main .df2-content:has(.df2-content-flush) {
   overflow: hidden !important;
 }
@@ -145,9 +156,7 @@
    area scrolls deterministically, and every page reads as one system.
    ═══════════════════════════════════════════════════════════════════════ */
 
-.df2-app {
-  --df-header-height: 60px;
-}
+/* Header height owned by tokens.css (--df-header-height: 60px) */
 
 /* ── 1. Header alignment: topbar = sidebar brand = pilot rail head ───────── */
 .df2-app .df2-topbar,
@@ -199,21 +208,57 @@
   gap: 8px;
 }
 
-.df2-app .df2-topbar-actions > .df2-btn,
-.df2-app .df2-topbar-actions > button {
-  height: 36px;
-  min-height: 36px;
-  box-sizing: border-box;
-  border-radius: 9px;
-  display: inline-flex;
+.df2-app .df2-api-offline-banner.df2-alert {
+  display: flex;
   align-items: center;
-  gap: 6px;
-  white-space: nowrap;
+  gap: 10px;
+  padding: 8px 14px;
+  margin: 0 0 8px;
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
 }
 
-.df2-app .df2-topbar-actions > .df2-btn {
-  padding: 0 14px;
+.df2-app .df2-api-offline-banner.df2-alert p {
+  margin: 0;
+  display: inline;
+  font-size: 12.5px;
+}
+
+.df2-app .df2-api-offline-banner.df2-alert strong {
+  margin-right: 0.35rem;
+}
+
+.df2-app .df2-topbar-actions > .df2-btn,
+.df2-app .df2-topbar-actions > button,
+.df2-app .df2-topbar-actions > .df2-system-pill,
+.df2-app .df2-topbar-actions .df2-btn {
+  height: 34px !important;
+  min-height: 34px !important;
+  max-height: 34px !important;
+  box-sizing: border-box !important;
+  border-radius: 9px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px;
+  white-space: nowrap;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  line-height: 1 !important;
+  font-size: 13px !important;
+}
+
+.df2-app .df2-topbar-actions > .df2-btn,
+.df2-app .df2-topbar-actions .df2-btn {
+  padding-left: 12px !important;
+  padding-right: 12px !important;
   font-weight: 600;
+}
+
+.df2-app .df2-topbar-actions .df2-btn-primary {
+  /* Match ghost/status height — brand fill only, not taller padding */
+  height: 34px !important;
+  min-height: 34px !important;
 }
 
 .df2-app .df2-topbar-actions .df2-btn-ghost.active {
@@ -441,12 +486,12 @@
 }
 
 .df2-app .df2-overview-v3-analytics > .df2-overview-v3-card {
-  min-height: 280px;
+  min-height: 200px;
 }
 
 .df2-app .df2-overview-v3-card--chart .df2-overview-v3-chart-body {
   flex: 1 1 auto;
-  min-height: 196px;
+  min-height: 120px;
 }
 
 /* Workspace row: main column + sticky rail, aligned tops */
@@ -489,5 +534,290 @@
 @media (max-width: 560px) {
   .df2-app .df2-overview-v3-kpis {
     grid-template-columns: 1fr;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   ENTERPRISE RESPONSIVE CONTRACT (final layer)
+   Breakpoints: 640 / 768 / 1024 / 1280 / 1440
+   Pane-level horizontal scroll only — never .df2-app sideways bleed.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.df2-app,
+.df2-app .df2-main,
+.df2-app .df2-content,
+.df2-app .df2-content-inner,
+.df2-app .df2-page {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.df2-app .df2-content-inner {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* Dense tables / workbenches: scroll inside the pane */
+.df2-app .df2-stream-table-wrap,
+.df2-app .df2-table-scroll,
+.df2-app .df2-settings-table-wrap,
+.df2-app .df2-mcp-table-wrap,
+.df2-app .df2-jobs-table-wrap,
+.df2-app .df2-query-results-wrap,
+.df2-app .df2-contracts-table-wrap,
+.df2-app .df2-connectors-list-full,
+.df2-app .df2-column-workbench,
+.df2-app .df2-transfer-studio {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.df2-app .df2-stream-table-wrap,
+.df2-app .df2-table-scroll,
+.df2-app .df2-settings-table-wrap,
+.df2-app .df2-mcp-table-wrap,
+.df2-app .df2-jobs-table-wrap,
+.df2-app .df2-query-results-wrap,
+.df2-app .df2-contracts-table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.df2-app .df2-stream-table,
+.df2-app .df2-settings-table,
+.df2-app table.df2-table {
+  min-width: 0;
+}
+
+/* Touch-friendly controls on small screens */
+@media (max-width: 1023px) {
+  .df2-app .df2-btn,
+  .df2-app .df2-input,
+  .df2-app .df2-select,
+  .df2-app select.df2-input {
+    min-height: var(--df-btn-height, 36px);
+  }
+
+  .df2-app .df2-topbar {
+    padding-left: 12px !important;
+    padding-right: 12px !important;
+  }
+
+  .df2-app .df2-page-untitled.df2-page-fluid:not(.df2-page-fit) {
+    padding-left: 12px;
+    padding-right: 12px;
+    padding-top: 12px;
+  }
+
+  .df2-app .df2-context-bar {
+    border-radius: var(--df-radius-md, 8px);
+  }
+}
+
+@media (max-width: 767px) {
+  .df2-app .df2-topbar-actions .df2-btn-label,
+  .df2-app .df2-topbar-actions .df2-btn .df2-btn-text {
+    display: none;
+  }
+
+  .df2-app .df2-context-stat {
+    border-right: none;
+    border-bottom: 1px solid var(--df-border);
+    width: 100%;
+    padding: 8px 4px;
+  }
+
+  .df2-app .df2-context-stat:last-child {
+    border-bottom: none;
+  }
+
+  .df2-app .df2-context-bar-stats {
+    flex-direction: column;
+    width: 100%;
+  }
+}
+
+/* Overview — shared breakpoint scale */
+@media (max-width: 1279px) {
+  .df2-app .df2-overview-v3-workspace {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 1023px) {
+  .df2-app .df2-overview-v3-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 639px) {
+  .df2-app .df2-overview-v3-kpis {
+    grid-template-columns: 1fr;
+  }
+
+  .df2-app .df2-overview-v3-card-head,
+  .df2-app .df2-overview-v3-card-body {
+    padding: 12px 14px;
+  }
+}
+
+/* Connectors list — reflow columns */
+@media (max-width: 1023px) {
+  .df2-app .df2-connector-rows-head,
+  .df2-app .df2-connector-row {
+    grid-template-columns: auto auto minmax(0, 1fr) auto !important;
+  }
+
+  .df2-app .df2-connector-row-used,
+  .df2-app .df2-connector-rows-head > :nth-child(4),
+  .df2-app .df2-connector-rows-head > :nth-child(5) {
+    display: none;
+  }
+}
+
+@media (max-width: 639px) {
+  .df2-app .df2-connector-rows-head {
+    display: none;
+  }
+
+  .df2-app .df2-connector-row {
+    grid-template-columns: auto minmax(0, 1fr) auto !important;
+    gap: 8px;
+  }
+
+  .df2-app .df2-connector-row-quick .df2-btn-label {
+    display: none;
+  }
+}
+
+/* Transfer Studio — contain overflow; stack chrome on narrow viewports */
+@media (max-width: 1279px) {
+  .df2-app .df2-transfer-studio,
+  .df2-app .df2-studio-layout,
+  .df2-app .df2-ts-layout {
+    min-width: 0;
+  }
+}
+
+@media (max-width: 767px) {
+  .df2-app .df2-transfer-studio .df2-wizard-steps,
+  .df2-app .df2-ts-stepper {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* Pipelines / Jobs / Settings / Query grids */
+@media (max-width: 1023px) {
+  .df2-app .df2-schedules-layout,
+  .df2-app .df2-jobs-layout,
+  .df2-app .df2-settings-layout,
+  .df2-app .df2-query-layout,
+  .df2-app .df2-contracts-layout,
+  .df2-app .df2-mcp-layout {
+    grid-template-columns: 1fr !important;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .df2-app .df2-settings-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    max-width: 100%;
+  }
+}
+
+@media (max-width: 639px) {
+  .df2-app .df2-page-actionbar,
+  .df2-app .df2-page-actions {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .df2-app .df2-page-actions .df2-btn {
+    flex: 1 1 auto;
+  }
+
+  .df2-app .df2-filter-bar,
+  .df2-app .df2-toolbar {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+}
+
+/* Drawers / modals full-bleed on phone */
+@media (max-width: 639px) {
+  .df2-app .df2-drawer,
+  .df2-app .df2-drawer-panel,
+  .df2-app [class*="df2-drawer"] {
+    width: 100% !important;
+    max-width: 100vw !important;
+  }
+
+  .df2-app .df2-modal,
+  .df2-app .df2-dialog {
+    width: calc(100vw - 24px) !important;
+    max-width: calc(100vw - 24px) !important;
+    margin: 12px;
+  }
+}
+
+/* Pilot / Query / Docs — prevent nested scroll fights */
+@media (max-width: 1023px) {
+  .df2-app .df2-page-pilot,
+  .df2-app .df2-query-playground,
+  .df2-app .df2-docs-layout {
+    min-width: 0;
+  }
+
+  .df2-app .df2-copilot-rail {
+    width: min(100%, var(--df-rail-width, 360px));
+  }
+}
+
+/* Marketing — share token brand; flatten subpages; standard breakpoints */
+.lp {
+  --lp-accent: var(--df-brand);
+  --lp-accent-soft: var(--df-brand-muted);
+  --lp-accent-ink: var(--df-brand-hover);
+  --lp-brand: var(--df-brand);
+  --lp-brand-ink: var(--df-brand-hover);
+  --lp-line: var(--df-border);
+  --lp-ink: var(--df-text-primary);
+  --lp-muted: var(--df-text-secondary);
+}
+
+.lp.lp-subpage .lp-mkt-page {
+  background: var(--df-bg-canvas);
+}
+
+@media (max-width: 1023px) {
+  .lp .lp-hero,
+  .lp .lp-mkt-hero,
+  .lp .lp-section {
+    padding-left: max(16px, env(safe-area-inset-left));
+    padding-right: max(16px, env(safe-area-inset-right));
+  }
+}
+
+@media (max-width: 767px) {
+  .lp .lp-nav-links {
+    gap: 8px;
+  }
+
+  .lp .lp-compare-table,
+  .lp [class*="lp-compare"] {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+@media (max-width: 639px) {
+  .lp .lp-mkt-feature-grid,
+  .lp .lp-mkt-price-grid,
+  .lp .lp-trust-grid {
+    grid-template-columns: 1fr !important;
   }
 }

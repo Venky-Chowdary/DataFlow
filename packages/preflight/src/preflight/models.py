@@ -65,10 +65,21 @@ class ColumnMapping:
     reasoning: str = ""
     requires_review: bool = False
     score_gap: float = 1.0
+    # Create-new / remap stamp — must survive Validate→probe→integrity.
+    target_type: str | None = None
+    create_new: bool = False
     # STRUCT/JSON Map policy — optional; gates may surface but write owns materialize.
     struct_policy: str | None = None
     struct_derived: bool = False
     struct_parent: str | None = None
+    # Fidelity stamps from Map / mapping_fidelity — G4 fail-closed on lossy.
+    fidelity: str | None = None
+    type_narrowing: bool = False
+    # Explicit operator acknowledgment of lossy / narrowing risk (not bare Approve).
+    risk_acknowledged: bool = False
+    intentional_omit: bool = False
+    # Migration Risk Contract (signed dict) — boolean ack alone is incomplete.
+    risk_contract: dict[str, Any] | None = None
 
 
 @dataclass
@@ -121,6 +132,13 @@ class TransferPlan:
     destination_pk_columns: list[str] = field(default_factory=list)
     # Introspected UNIQUE indexes/constraints (columns + optional expression CI flags).
     destination_unique_keys: list[dict[str, Any]] = field(default_factory=list)
+    # Optional FK metadata for constraint findings (not a GateId).
+    # Shape: {columns, referenced_table, referenced_columns}.
+    # Unmapped FK columns block in strict/maximum unless fk_risk_acknowledged —
+    # schema coverage only; never invents population orphan proof.
+    destination_foreign_keys: list[dict[str, Any]] = field(default_factory=list)
+    # Operator acknowledged destination FK mapping risk for this Validate run.
+    fk_risk_acknowledged: bool = False
 
 
 @dataclass

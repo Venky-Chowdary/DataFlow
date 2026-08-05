@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Sample Data Generator
+Datawrap — Sample Data Generator
 
 Create diverse test datasets for logistics, finance, healthcare, retail, etc.
 """

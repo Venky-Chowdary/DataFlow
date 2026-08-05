@@ -14,7 +14,9 @@ from typing import Any
 from connectors.sql_temporal import (
     coerce_sql_temporal,
     format_wire_value,
+    input_has_timezone,
     is_temporal_ddl,
+    parse_sql_datetime,
     sql_base_type,
     wire_check_temporal,
 )
@@ -58,13 +60,24 @@ def format_snowflake_bind(value: Any, sf_type: str) -> Any:
     ddl = snowflake_temporal_ddl(sf_type)
     if not ddl:
         return value
-    coerced = coerce_sql_temporal(value, ddl if ddl != "TIMESTAMP_NTZ" else "TIMESTAMP")
-    if isinstance(coerced, datetime):
-        if ddl == "DATE":
+    if ddl == "DATE":
+        coerced = coerce_sql_temporal(value, "DATE")
+        if isinstance(coerced, date) and not isinstance(coerced, datetime):
+            return coerced.isoformat()
+        if isinstance(coerced, datetime):
             return coerced.date().isoformat()
-        # TIMESTAMP_NTZ / TIMESTAMP: naive UTC wall clock, space separator (no T/Z).
+        return value
+    if ddl in {"TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMESTAMPTZ"}:
+        coerced = parse_sql_datetime(value, aware_utc=True)
+    else:
+        # TIMESTAMP_NTZ / bare TIMESTAMP / DATETIME / TIME: keep civil digits.
+        # Do NOT astimezone(UTC) then strip — that invents a different local time
+        # for offset wires (e.g. 12:00-05:00 → 17:00). TZ→NTZ polarity is a
+        # Validate/Accept-risk concern; bind must not silently rewrite the clock.
+        coerced = parse_sql_datetime(value, wall_clock=True)
+    if isinstance(coerced, datetime):
         if coerced.tzinfo is not None:
-            coerced = coerced.astimezone(timezone.utc).replace(tzinfo=None)
+            coerced = coerced.replace(tzinfo=None)
         if coerced.microsecond:
             return coerced.strftime("%Y-%m-%d %H:%M:%S.%f").rstrip("0").rstrip(".")
         return coerced.strftime("%Y-%m-%d %H:%M:%S")
@@ -84,21 +97,38 @@ def format_bigquery_bind(value: Any, bq_type: str) -> Any:
         from services.value_serializer import format_bigquery_interval
 
         return format_bigquery_interval(value)
-    coerced = coerce_sql_temporal(value, ddl)
-    if isinstance(coerced, datetime):
-        if ddl == "DATE":
+    if ddl == "DATE":
+        coerced = coerce_sql_temporal(value, "DATE")
+        if isinstance(coerced, date) and not isinstance(coerced, datetime):
+            return coerced.isoformat()
+        if isinstance(coerced, datetime):
             return coerced.date().isoformat()
-        if ddl == "TIMESTAMP":
-            # RFC3339 UTC
-            if coerced.tzinfo is None:
-                coerced = coerced.replace(tzinfo=timezone.utc)
-            else:
-                coerced = coerced.astimezone(timezone.utc)
-            text = coerced.isoformat().replace("+00:00", "Z")
-            return text
-        # DATETIME: no timezone
+        return value
+    if ddl == "TIMESTAMP":
+        # BQ TIMESTAMP is a UTC instant. Never invent Z on a naive wall-clock —
+        # that silently relocates civil times. Require offset/Z, or use DATETIME.
+        if not input_has_timezone(value):
+            raise ValueError(
+                "BigQuery TIMESTAMP refuses naive wall-clock (would invent UTC). "
+                "Provide an offset/Z, or map to DATETIME for timezone-less values."
+            )
+        coerced = parse_sql_datetime(value, aware_utc=True)
+        if not isinstance(coerced, datetime):
+            return value
+        coerced = coerced.astimezone(timezone.utc)
+        return coerced.isoformat().replace("+00:00", "Z")
+    if ddl == "TIME":
+        coerced = coerce_sql_temporal(value, "TIME")
+        if isinstance(coerced, time):
+            return coerced.isoformat()
+        if isinstance(coerced, datetime):
+            return coerced.time().isoformat()
+        return value
+    # DATETIME: wall-clock only — keep civil digits.
+    coerced = parse_sql_datetime(value, wall_clock=True)
+    if isinstance(coerced, datetime):
         if coerced.tzinfo is not None:
-            coerced = coerced.astimezone(timezone.utc).replace(tzinfo=None)
+            coerced = coerced.replace(tzinfo=None)
         if coerced.microsecond:
             return coerced.strftime("%Y-%m-%dT%H:%M:%S.%f").rstrip("0").rstrip(".")
         return coerced.strftime("%Y-%m-%dT%H:%M:%S")
@@ -133,17 +163,25 @@ def wire_check_warehouse(value: Any, ddl_type: str, *, engine: str) -> dict[str,
     if not check["ok"]:
         return check
 
-    if eng == "snowflake":
-        wire = format_snowflake_bind(value, ddl_type)
-    elif eng == "bigquery":
-        wire = format_bigquery_bind(value, ddl_type)
-    else:
-        wire = format_wire_value(value, ddl_type)
+    try:
+        if eng == "snowflake":
+            wire = format_snowflake_bind(value, ddl_type)
+        elif eng == "bigquery":
+            wire = format_bigquery_bind(value, ddl_type)
+        else:
+            wire = format_wire_value(value, ddl_type)
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "wire_value": None,
+            "reason": str(exc),
+            "needs_normalize": False,
+        }
 
     needs = False
     if isinstance(value, str) and isinstance(wire, str):
         raw = value.strip()
-        if raw != wire and ("T" in raw or raw.endswith(("Z", "z"))):
+        if raw != wire and ("T" in raw or raw.endswith(("Z", "z")) or "+" in raw[10:] or raw.count("-") >= 3):
             needs = True
     return {
         "ok": True,

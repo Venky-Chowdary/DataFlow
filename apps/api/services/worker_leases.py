@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+from services.brand_env import getenv_brand
 import socket
 import threading
 import uuid
@@ -34,10 +35,10 @@ def worker_id() -> str:
 
 def requires_distributed_backend() -> bool:
     """True when memory lease fallback is forbidden (multi-replica / shared Mongo)."""
-    store = os.getenv("DATAFLOW_JOB_STORE", "").lower().strip()
+    store = getenv_brand("JOB_STORE", "").lower().strip()
     if store == "memory":
         return False
-    if os.getenv("DATAFLOW_MULTI_REPLICA", "").lower() in ("1", "true", "yes"):
+    if getenv_brand("MULTI_REPLICA", "").lower() in ("1", "true", "yes"):
         return True
     if store in ("mongodb", "mongo"):
         return True

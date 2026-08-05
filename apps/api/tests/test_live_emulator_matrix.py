@@ -1,7 +1,7 @@
 """Live end-to-end smoke tests against local Docker emulators.
 
 Tests skip automatically when a container port is unreachable, so CI without
-the emulator stack can still pass. Running these locally (the DataFlow dev box
+the emulator stack can still pass. Running these locally (the Datawrap dev box
 has the containers) exercises the live connector surface.
 """
 

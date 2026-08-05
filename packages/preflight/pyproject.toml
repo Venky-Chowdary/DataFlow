@@ -1,7 +1,7 @@
 [project]
 name = "dataflow-preflight"
 version = "0.1.0"
-description = "8-gate fail-fast preflight engine for data transfers"
+description = "G1–G9 fail-fast preflight engine for data transfers"
 requires-python = ">=3.12"
 dependencies = []
 

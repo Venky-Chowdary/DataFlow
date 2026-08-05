@@ -287,7 +287,10 @@ def test_write_typed_fidelity_live_proof_summary():
         {"route": "postgresql→sqlite", "proof": "sqlite3 readback"},
         {"route": "float→existing DECIMAL", "proof": "lossy risk surfaced"},
         {"route": "postgresql→redis", "proof": "JSON wire NULL≠'' + decimal"},
-        {"route": "postgresql→redshift(pg stand-in)", "proof": "TIMESTAMP DDL + typed values"},
+        {
+            "route": "postgresql→redshift(pg stand-in)",
+            "proof": "SKIP until PRODUCTION_SKU — Redshift is Planned (DDL unit tests remain)",
+        },
         {"route": "postgresql→duckdb", "proof": "DECIMAL(12,4) + DOUBLE native"},
         {"route": "postgresql→sqlserver", "proof": "skip if :1433 / drivers down"},
         {"route": "postgresql→bigquery", "proof": "skip if emulator :9050 down"},
@@ -327,7 +330,19 @@ def test_postgresql_to_redis_typed_preflight_on():
 
 
 def test_postgresql_to_redshift_standin_typed_preflight_on():
-    """Writer engine=redshift against local PG — proves TIMESTAMP DDL branch."""
+    """Writer engine=redshift against local PG — proves TIMESTAMP DDL branch.
+
+    Redshift stays Planned until a real PRODUCTION_SKU route is proven.
+    Catalog honesty blocks Planned destinations from Execute — skip here and
+    keep DDL/upsert unit coverage in test_redshift_schema_registry_honesty.py.
+    """
+    from src.transfer.connector_capabilities import get_capabilities, transfer_ready
+
+    if not transfer_ready(get_capabilities("redshift", "redshift")):
+        pytest.skip(
+            "Redshift is Planned until PRODUCTION_SKU — not demo-certified. "
+            "DDL unit proofs remain in test_redshift_schema_registry_honesty.py."
+        )
     require_ports(5432)
     src = uniq("tf_pg_rs_src")
     dst = uniq("tf_pg_rs_dst")

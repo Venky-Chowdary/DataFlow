@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Synonym Dictionary
+Datawrap — Synonym Dictionary
 
 Comprehensive synonym mappings for column name normalization.
 Handles abbreviations like AMT=amount, cust=customer, qty=quantity.

@@ -26,6 +26,9 @@ INCREMENTAL_MODES = frozenset({
     "incremental_append",
     "incremental_deduped",
     "cdc",
+    # SCD2 tracks history from a watermark; reading the whole source every run
+    # would re-open already-closed validity windows.
+    "scd2",
 })
 
 OVERWRITE_SYNC_MODES = frozenset({
@@ -44,6 +47,23 @@ APPEND_SYNC_MODES = frozenset({
     "full_append",
 })
 
+#: The one set of sync modes the engine acts on. Every other layer's spelling
+#: is an alias onto this set — see :data:`_SYNC_MODE_ALIASES`.
+CANONICAL_SYNC_MODES = frozenset({
+    "full_refresh_overwrite",
+    "full_refresh_append",
+    "incremental_append",
+    "incremental_deduped",
+    "cdc",
+    "scd2",
+    # Full scan, key-idempotent write, destination-only rows left alone.
+    "upsert",
+    # `mirror` is upsert *plus* deleting destination rows the source no longer
+    # has. It is destructive, so nothing aliases onto it implicitly.
+    "mirror",
+    "reverse_etl",
+})
+
 _SYNC_MODE_ALIASES = {
     "full_append": "full_refresh_append",
     "fullappend": "full_refresh_append",
@@ -55,6 +75,29 @@ _SYNC_MODE_ALIASES = {
     "replace": "full_refresh_overwrite",
     "truncate": "full_refresh_overwrite",
     "trunc": "full_refresh_overwrite",
+    # schedule_store spelling. Airbyte's bare "Incremental" is append-mode, and
+    # append is also this module's non-destructive default, so a schedule that
+    # says "incremental" gets incremental *append* rather than a dedup it did
+    # not ask for. Before this alias existed the token fell through unmapped and
+    # requires_incremental() returned False — every "incremental" schedule
+    # quietly re-read the whole source on each run.
+    "incremental": "incremental_append",
+    # copilot/transfer_tools spelling. These two fell through as well, so a
+    # Pilot-planned "incremental_upsert" wrote plain INSERTs and duplicated
+    # rows on every re-run.
+    "incremental_upsert": "incremental_deduped",
+    "cdc_incremental": "cdc",
+    # A bare "upsert"/"merge" says how to write, not what to read, and it must
+    # not become `mirror` — mirror also deletes destination rows the source no
+    # longer has. Nor `incremental_deduped`, which would demand a cursor field
+    # the caller never declared. It stays its own canonical mode.
+    "merge": "upsert",
+    "dedupe": "incremental_deduped",
+    "deduped": "incremental_deduped",
+    "incremental_dedup": "incremental_deduped",
+    "full_refresh_mirror": "mirror",
+    "scd_2": "scd2",
+    "slowly_changing_dimension": "scd2",
 }
 
 
@@ -63,13 +106,27 @@ def normalize_sync_mode(mode: str | None, *, default: str = "full_refresh_append
 
     Default is **append** (non-destructive) so omitting sync_mode never silently
     wipes a destination. Overwrite must be explicit.
+
+    Four layers spell these modes differently — ``schedule_store`` says
+    ``incremental``, ``transfer_tools`` says ``incremental_upsert`` and
+    ``cdc_incremental``, this module says ``incremental_deduped``. Unmapped
+    tokens used to be returned verbatim, which meant they matched none of the
+    behaviour sets below and silently degraded to full-read + insert. Everything
+    now resolves onto :data:`CANONICAL_SYNC_MODES`, and anything still unknown
+    is logged rather than passed through unnoticed.
     """
     raw = (mode or "").strip().lower().replace("-", "_").replace(" ", "_")
     if not raw:
         return default
-    if raw in _SYNC_MODE_ALIASES:
-        return _SYNC_MODE_ALIASES[raw]
-    return raw
+    resolved = _SYNC_MODE_ALIASES.get(raw, raw)
+    if resolved not in CANONICAL_SYNC_MODES:
+        _logger.warning(
+            "Unknown sync_mode %r does not resolve to a canonical mode %s; "
+            "it will not trigger incremental reads or upsert writes.",
+            mode,
+            sorted(CANONICAL_SYNC_MODES),
+        )
+    return resolved
 
 
 def is_overwrite_sync(mode: str | None) -> bool:
@@ -386,15 +443,20 @@ def requires_incremental(sync_mode: str) -> bool:
     return (sync_mode or "").lower() in INCREMENTAL_MODES
 
 
+#: Modes whose write must be key-idempotent. ``full_refresh_mirror`` is no
+#: longer listed because it normalizes to ``mirror`` before reaching this check.
+UPSERT_MODES = frozenset({
+    "upsert",
+    "incremental_deduped",
+    "cdc",
+    "mirror",
+    "reverse_etl",
+    "scd2",
+})
+
+
 def requires_upsert(sync_mode: str) -> bool:
-    return normalize_sync_mode(sync_mode, default="") in {
-        "upsert",
-        "incremental_deduped",
-        "cdc",
-        "full_refresh_mirror",
-        "mirror",
-        "reverse_etl",
-    }
+    return normalize_sync_mode(sync_mode, default="") in UPSERT_MODES
 
 
 def map_source_to_target(column: str, mappings: list[dict[str, Any]]) -> str:

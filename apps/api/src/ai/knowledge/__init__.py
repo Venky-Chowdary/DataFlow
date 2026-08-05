@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Knowledge Base
+Datawrap — Knowledge Base
 
 Comprehensive semantic knowledge for data understanding:
 - 200+ semantic patterns

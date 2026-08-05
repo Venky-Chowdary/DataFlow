@@ -1,4 +1,5 @@
 import type { ColumnAnalysis } from "./types";
+import { declaredCarrierFidelityRisk } from "./typeCarrierFidelity";
 
 /**
  * Studio MappingTransform vocabulary — must stay aligned with
@@ -54,6 +55,12 @@ export const MAPPING_TRANSFORMS: { id: MappingTransform; label: string; detail: 
   },
 ];
 
+export interface CreateNewTypeRisk {
+  kind: string;
+  severity?: "info" | "warn" | "block" | string;
+  message: string;
+}
+
 export interface EditableMapping {
   source: string;
   target: string;
@@ -96,7 +103,96 @@ export interface EditableMapping {
   fidelityReason?: string;
   /** True when the type path itself narrows (independent of transform). */
   typeNarrowing?: boolean;
+  /**
+   * Create-new precision / width / TZ risks stamped by the mapping pipeline
+   * (`assess_create_new_type_risk`). Visible before Validate/write — never invent
+   * green when the engine stamped a risk.
+   */
+  createNewRisks?: CreateNewTypeRisk[];
+  /**
+   * Operator explicitly accepted precision/type loss for this row.
+   * Required by G4 for lossy_cast / typeNarrowing — bare Approve is not enough.
+   * Alone this is NOT an execution contract — see riskContract.
+   */
+  riskAcknowledged?: boolean;
+  /**
+   * Signed Migration Risk Contract (or draft fields signed on Validate).
+   * Execute-approve requires a continue-policy contract — boolean ack is incomplete.
+   */
+  riskContract?: MigrationRiskContractDraft;
+  /** Underscore-path collisions from STRUCT flatten — fail-closed, operator-visible. */
+  flattenCollisions?: { flat: string; paths: string[][] }[];
 }
+
+/** Draft / signed Migration Risk Contract — mirrors apps/api migration_risk_contract. */
+export type ExecutionPolicy =
+  | "FAIL_JOB"
+  | "STOP_TABLE"
+  | "STOP_COLUMN"
+  | "QUARANTINE_ROW"
+  | "SKIP_ROW"
+  | "RETRY"
+  | "CAST_AND_CONTINUE"
+  | "TRANSFORM_AND_CONTINUE"
+  | "ABORT_TRANSACTION";
+
+/** Policies that unlock Validate→Execute (must match BE CONTINUE_POLICIES). */
+export const CONTINUE_EXECUTION_POLICIES = new Set<ExecutionPolicy>([
+  "QUARANTINE_ROW",
+  "SKIP_ROW",
+  "CAST_AND_CONTINUE",
+  "TRANSFORM_AND_CONTINUE",
+  "STOP_COLUMN",
+]);
+
+/** Operator-selectable policies — labels match runtime semantics (no placeholders). */
+export const EXECUTION_POLICY_OPTIONS: Array<{
+  id: ExecutionPolicy;
+  label: string;
+  continueUnlock: boolean;
+}> = [
+  { id: "FAIL_JOB", label: "FAIL_JOB — abort the job write", continueUnlock: false },
+  { id: "STOP_TABLE", label: "STOP_TABLE — abort this table/stream write", continueUnlock: false },
+  { id: "ABORT_TRANSACTION", label: "ABORT_TRANSACTION — abort txn (or fail if none)", continueUnlock: false },
+  { id: "RETRY", label: "RETRY — one re-attempt then abort", continueUnlock: false },
+  { id: "STOP_COLUMN", label: "STOP_COLUMN — omit bad column; write other columns", continueUnlock: true },
+  { id: "QUARANTINE_ROW", label: "QUARANTINE_ROW — holdout row to DLQ for replay", continueUnlock: true },
+  { id: "SKIP_ROW", label: "SKIP_ROW — drop row (audit skip, not DLQ replay)", continueUnlock: true },
+  { id: "CAST_AND_CONTINUE", label: "CAST_AND_CONTINUE — cast fail → quarantine", continueUnlock: true },
+  { id: "TRANSFORM_AND_CONTINUE", label: "TRANSFORM_AND_CONTINUE — transform fail → quarantine", continueUnlock: true },
+];
+
+export type MigrationRiskContractDraft = {
+  risk_id?: string;
+  severity?: string;
+  root_cause?: string;
+  column: string;
+  source_type: string;
+  destination_type: string;
+  transform?: string | null;
+  rows_sampled?: number;
+  estimated_rows?: number | null;
+  expected_failure_pct?: number | null;
+  expected_precision_loss?: boolean;
+  expected_truncation?: boolean;
+  expected_nulls?: boolean;
+  execution_policy: ExecutionPolicy;
+  quarantine_policy?: string;
+  retry_policy?: string;
+  rollback_strategy?: string;
+  approved_by: string;
+  approved_at?: string;
+  reason: string;
+  signature?: string;
+  proof_pack_ref?: string | null;
+  mapping_hash?: string;
+  plan_id?: string | null;
+  migration_id?: string;
+  table?: string;
+  loss_classification?: string;
+  target?: string;
+  version?: number;
+};
 
 const STATUS_ENUM_TOKENS = new Set([
   "active", "inactive", "enabled", "disabled", "pending", "invalidated",
@@ -149,7 +245,9 @@ const FLATTEN_POLICIES = new Set<StructPolicy>(["flatten_top_level_keys", "flatt
 
 const STRUCT_TYPE_RE = /\b(json|jsonb|struct|map|object|variant|document|record)\b/i;
 const ARRAY_TYPE_RE = /\b(array|list|repeated)\b/i;
-const SPECIALTY_TYPE_RE = /\b(vector|interval|geography|geometry|geopoint|geojson)\b/i;
+/** Aligned with engine specialty_carrier_base / INTERVAL / VECTOR / GEOGRAPHY. */
+const SPECIALTY_TYPE_RE =
+  /\b(vector|halfvec|sparsevec|interval|geography|geometry|geopoint|geojson|sdo_geometry|st_geometry|inet|cidr|macaddr8?|hstore|citext|objectid|xml|xmltype|tsvector|tsquery|pg_lsn|ltree|hierarchyid|rowversion|sql_variant|uniqueidentifier|ipv[46]|oid|jsonpath|regclass|name|user-defined|user_defined|anydata|hllsketch|money|smallmoney|long\s+raw|decfloat|smalldatetime|enum8|enum16|nothing|dynamic|aggregatefunction|simpleaggregatefunction)\b/i;
 /** Engine transforms with no first-class UI cast — surface as a pipeline chip. */
 const PIPELINE_ONLY_ENGINE = new Set(["url", "iban", "postal", "uuid", "trim_id"]);
 
@@ -272,18 +370,334 @@ export function inferLogicalFromSample(sample?: string): string {
   return "VARCHAR";
 }
 
-/** True when Approve-all must leave this row for operator review. */
-export function mappingRequiresManualApproval(m: EditableMapping): boolean {
-  if (isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m)) return true;
+export function isLossyMapping(m: EditableMapping): boolean {
+  return (m.fidelity || "").toLowerCase() === "lossy_cast" || Boolean(m.typeNarrowing);
+}
+
+/** True when the pipeline stamped create-new precision/width/TZ risk. */
+export function hasCreateNewTypeRisk(m: EditableMapping): boolean {
+  return Boolean(m.createNewRisks && m.createNewRisks.length > 0);
+}
+
+/** Short chip label for the highest-severity create-new risk. */
+export function createNewRiskChipLabel(m: EditableMapping): string | null {
+  if (!hasCreateNewTypeRisk(m)) return null;
+  const kinds = new Set((m.createNewRisks || []).map((r) => (r.kind || "").toLowerCase()));
+  if (kinds.has("timezone_polarity")) return "TZ risk";
+  if (kinds.has("varchar_width_cap") || kinds.has("varchar_narrow")) return "width risk";
+  if (kinds.has("precision_collapse")) return "precision";
+  if (kinds.has("uuid_domain")) return "UUID domain";
+  if (kinds.has("objectid_domain")) return "ObjectId domain";
+  if (kinds.has("lossy_coercion")) return "create-new risk";
+  return "create-new risk";
+}
+
+export function createNewRiskDetail(m: EditableMapping): string {
+  return (m.createNewRisks || []).map((r) => r.message).filter(Boolean).join(" · ");
+}
+
+/**
+ * Prefer engine-stamped fidelity / create-new risks over client heuristics.
+ * Map, intelligence panel, and PairList must show the same chip.
+ */
+export function engineStampedRiskChip(m: EditableMapping): {
+  label: string;
+  detail: string;
+  severity: "block" | "warn";
+} | null {
+  // Safe normalize (email/trim/case) is Approve-tier — do not scare with mutate/cast chips.
+  if (isSafeNormalizeMapping(m)) return null;
+  const fidelity = (m.fidelity || "").toLowerCase();
+  if (fidelity === "lossy_cast" || fidelity === "mutate" || fidelity === "cast") {
+    return {
+      label: fidelity === "lossy_cast" ? "lossy" : fidelity === "mutate" ? "mutate" : "cast",
+      detail: m.fidelityReason || `${m.inferredType || "?"} → ${m.destType || "?"}`,
+      severity: fidelity === "lossy_cast" ? "block" : "warn",
+    };
+  }
+  if (hasCreateNewTypeRisk(m)) {
+    const hasBlock = (m.createNewRisks || []).some(
+      (r) => (r.severity || "").toLowerCase() === "block",
+    );
+    return {
+      label: createNewRiskChipLabel(m) || "create-new risk",
+      detail: createNewRiskDetail(m) || m.fidelityReason || "Create-new type risk",
+      severity: hasBlock ? "block" : "warn",
+    };
+  }
+  return null;
+}
+
+/** Safe normalizations — trim/case/email/phone — not precision or semantic risk.
+ * Include engine ``trim_id`` (pipeline id preserved on Validate) alongside UI ``trim``. */
+const SAFE_NORMALIZE_TRANSFORMS = new Set<string>([
+  "trim",
+  "trim_id",
+  "lower",
+  "upper",
+  "email",
+  "phone",
+  "strip_controls",
+]);
+
+/**
+ * Operator-facing ack tier for Map status actions.
+ * - approve: harmless / preserve (or safe normalize) — no "risk" language
+ * - review: reversible cast / ISO / widen-to-text — needs eyes, not scare wording
+ * - accept_risk: lossy / irreversible / STRUCT expand / specialty transport
+ */
+export type MappingAckTier = "approve" | "review" | "accept_risk";
+
+export function isSafeNormalizeMapping(m: EditableMapping): boolean {
+  if (isIntentionalOmit(m)) return false;
+  if (m.typeNarrowing || (m.fidelity || "").toLowerCase() === "lossy_cast") return false;
+  if (hasCreateNewTypeRisk(m)) return false;
+  if (isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType)) return false;
+  if (m.transform === "identity_specialty") return false;
+  if (
+    m.structPolicy === "flatten_top_level_keys"
+    || m.structPolicy === "flatten_deep"
+    || m.structPolicy === "explode_rows"
+    || m.structDerived
+  ) {
+    return false;
+  }
+  const t = (m.transform || "").toLowerCase();
+  return SAFE_NORMALIZE_TRANSFORMS.has(t);
+}
+
+export function mappingAckTier(m: EditableMapping): MappingAckTier {
+  if (isIntentionalOmit(m) || !mappingRequiresRiskAck(m)) return "approve";
+  if (isSafeNormalizeMapping(m)) return "approve";
+  const fidelity = (m.fidelity || "").toLowerCase();
+  if (fidelity === "lossy_cast" || m.typeNarrowing) return "accept_risk";
+  if (hasCreateNewTypeRisk(m)) {
+    const hasBlock = (m.createNewRisks || []).some(
+      (r) => (r.severity || "").toLowerCase() === "block",
+    );
+    return hasBlock ? "accept_risk" : "review";
+  }
+  if (
+    isSpecialtyLogicalType(m.inferredType)
+    || isSpecialtyLogicalType(m.destType)
+    || m.transform === "identity_specialty"
+    || m.structDerived
+    || m.structPolicy === "flatten_top_level_keys"
+    || m.structPolicy === "flatten_deep"
+    || m.structPolicy === "explode_rows"
+  ) {
+    return "accept_risk";
+  }
+  // cast / mutate (non-safe) / carrier widen → Review
+  return "review";
+}
+
+export function mappingAckLabel(m: EditableMapping): string {
+  const tier = mappingAckTier(m);
+  if (tier === "accept_risk") return "Sign Risk Contract";
+  if (tier === "review") return "Review";
+  return "Approve";
+}
+
+/** True when a signed/draft contract uses a continue policy that clears Validate. */
+export function mappingHasClearingRiskContract(m: EditableMapping): boolean {
+  const pol = String(m.riskContract?.execution_policy || "").toUpperCase() as ExecutionPolicy;
+  return Boolean(
+    m.riskAcknowledged
+    && m.riskContract
+    && CONTINUE_EXECUTION_POLICIES.has(pol),
+  );
+}
+
+export function mappingAckDoneLabel(m: EditableMapping): string {
+  if (m.riskAcknowledged && mappingRequiresRiskAck(m)) {
+    const policy = m.riskContract?.execution_policy;
+    if (policy === "CAST_AND_CONTINUE") return "Contracted · cast";
+    if (policy) return `Contracted · ${policy}`;
+    return mappingAckTier(m) === "accept_risk" ? "Risk Contract signed" : "Reviewed";
+  }
+  return "Ready";
+}
+
+/** Lossy, mutate, cast (quarantine path), specialty, create-new risk, or STRUCT expand — G4 needs risk_acknowledged. */
+export function mappingRequiresRiskAck(m: EditableMapping): boolean {
+  if (isIntentionalOmit(m)) return false;
+  // Safe normalize (email/trim/case) is not fidelity risk — Approve is enough.
+  if (isSafeNormalizeMapping(m)) return false;
+  const fidelity = (m.fidelity || "").toLowerCase();
+  // cast = type path holds but unparseable values quarantine — never silent Ready.
+  if (fidelity === "lossy_cast" || fidelity === "mutate" || fidelity === "cast" || m.typeNarrowing) {
+    return true;
+  }
+  if (hasCreateNewTypeRisk(m)) return true;
+  // Dest-type edits clear engine fidelity — recompute from carriers so Approve
+  // cannot look green until Accept risk (Map→Validate SSOT).
+  if (declaredCarrierFidelityRisk(m.inferredType, m.destType)) return true;
   if (isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType)) return true;
   if (m.transform === "identity_specialty") return true;
-  if (m.structPolicy === "flatten_top_level_keys" || m.structPolicy === "flatten_deep" || m.structPolicy === "explode_rows" || m.structDerived) return true;
+  if (
+    m.structPolicy === "flatten_top_level_keys"
+    || m.structPolicy === "flatten_deep"
+    || m.structPolicy === "explode_rows"
+    || m.structDerived
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** True when Approve-all must leave this row for operator review. */
+export function mappingRequiresManualApproval(m: EditableMapping): boolean {
+  if (isIntentionalOmit(m)) return false;
+  if (isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m)) return true;
+  if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) return true;
   return false;
 }
 
 /**
+ * Explicit operator acceptance of fidelity / structural risk.
+ * Emits a Migration Risk Contract draft. ``executionPolicy`` is required —
+ * no hidden CAST_AND_CONTINUE default (Enterprise GA).
+ * Server signs on Validate; boolean riskAcknowledged alone does not unlock Execute.
+ */
+export function acknowledgeMappingRisk(
+  m: EditableMapping,
+  opts?: {
+    executionPolicy?: ExecutionPolicy;
+    approvedBy?: string;
+    reason?: string;
+    rowsSampled?: number;
+    estimatedRows?: number | null;
+    migrationId?: string;
+    table?: string;
+    planId?: string;
+  },
+): EditableMapping {
+  if (!mappingRequiresRiskAck(m)) {
+    return approveMappingHonestly(m);
+  }
+  const policy = opts?.executionPolicy;
+  if (!policy || !EXECUTION_POLICY_OPTIONS.some((p) => p.id === policy)) {
+    return {
+      ...m,
+      approved: false,
+      requiresReview: true,
+      reason: [m.reason, "Choose an execution policy before signing Risk Contract"]
+        .filter(Boolean)
+        .join(" · "),
+    };
+  }
+  const fidelity = (m.fidelity || "").toLowerCase();
+  const ackNote =
+    fidelity === "mutate"
+      ? "Operator acknowledged value-mutating transform"
+      : fidelity === "cast"
+        ? "Operator acknowledged cast/quarantine path"
+        : hasCreateNewTypeRisk(m)
+          ? "Operator acknowledged create-new type risk"
+          : m.structDerived || m.structPolicy === "flatten_top_level_keys" || m.structPolicy === "flatten_deep" || m.structPolicy === "explode_rows"
+            ? "Operator acknowledged STRUCT/ARRAY expand policy"
+            : isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType) || m.transform === "identity_specialty"
+              ? "Operator acknowledged specialty identity transport"
+              : "Operator acknowledged type/precision loss risk";
+  const actor = (opts?.approvedBy || "map-operator").trim() || "map-operator";
+  const why = (opts?.reason || ackNote).trim() || ackNote;
+  const srcType = m.inferredType || "UNKNOWN";
+  const dstType = m.destType || m.inferredType || "UNKNOWN";
+  const lossClassification =
+    fidelity === "mutate" || fidelity === "lossy_cast" || fidelity === "cast"
+      ? fidelity
+      : m.typeNarrowing
+        ? "truncation"
+        : "precision_loss";
+  const clears = CONTINUE_EXECUTION_POLICIES.has(policy);
+  const riskContract: MigrationRiskContractDraft = {
+    column: m.source,
+    target: m.target || m.source,
+    source_type: srcType,
+    destination_type: dstType,
+    transform: m.transform || null,
+    rows_sampled: opts?.rowsSampled ?? 0,
+    estimated_rows: opts?.estimatedRows ?? null,
+    expected_precision_loss: true,
+    expected_truncation: Boolean(m.typeNarrowing),
+    expected_nulls: fidelity === "cast" || policy === "QUARANTINE_ROW",
+    execution_policy: policy,
+    quarantine_policy:
+      policy === "QUARANTINE_ROW"
+        ? "QUARANTINE_ROW_on_failure"
+        : "holdout_rejected_rows",
+    retry_policy: "none",
+    rollback_strategy: "DOCUMENT_ONLY",
+    approved_by: actor,
+    reason: why,
+    root_cause: `${srcType} → ${dstType} fidelity risk`,
+    severity: "high",
+    migration_id: opts?.migrationId || opts?.planId || "",
+    plan_id: opts?.planId || opts?.migrationId || null,
+    table: opts?.table || "",
+    loss_classification: lossClassification,
+    version: 1,
+  };
+  return {
+    ...m,
+    riskAcknowledged: true,
+    riskContract,
+    // Fail-closed policies stamp the contract but do not Approve/unlock Execute.
+    approved: clears,
+    requiresReview: !clears,
+    transform:
+      (isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType))
+      && (!m.transform || m.transform === "none")
+        ? "identity_specialty"
+        : m.transform,
+    reason: [m.reason, createNewRiskDetail(m) || m.fidelityReason, ackNote, `policy=${policy}`].filter(Boolean).join(" · "),
+  };
+}
+
+/** Merge Validate-echoed signed risk contracts onto Map rows (risk_id + signature). */
+export function mergeSignedRiskContracts(
+  mappings: EditableMapping[],
+  signed: Array<{
+    source?: string;
+    target?: string;
+    risk_contract?: MigrationRiskContractDraft | Record<string, unknown>;
+    risk_acknowledged?: boolean;
+  }> | null | undefined,
+): EditableMapping[] {
+  if (!signed?.length) return mappings;
+  const bySourceTarget = new Map<string, (typeof signed)[number]>();
+  const bySource = new Map<string, (typeof signed)[number]>();
+  for (const row of signed) {
+    const src = String(row.source || "").trim();
+    const tgt = String(row.target || "").trim();
+    if (!src || !row.risk_contract) continue;
+    bySourceTarget.set(`${src}\0${tgt}`, row);
+    if (!bySource.has(src)) bySource.set(src, row);
+  }
+  return mappings.map((m) => {
+    const hit =
+      bySourceTarget.get(`${m.source}\0${m.target || m.source}`)
+      || bySource.get(m.source);
+    if (!hit?.risk_contract) return m;
+    const contract = hit.risk_contract as MigrationRiskContractDraft;
+    const pol = String(contract.execution_policy || "").toUpperCase() as ExecutionPolicy;
+    const clears = CONTINUE_EXECUTION_POLICIES.has(pol);
+    return {
+      ...m,
+      riskContract: { ...m.riskContract, ...contract },
+      riskAcknowledged: hit.risk_acknowledged !== false,
+      approved: clears ? true : m.approved,
+      requiresReview: clears ? false : m.requiresReview,
+    };
+  });
+}
+
+/**
  * Single honesty path for Approve / Approve-all (Map panel + Validate CTA).
- * Never auto-approves specialty identity, STRUCT flatten children, or existing DDL conflicts.
+ * Never auto-approves specialty identity, STRUCT flatten children, lossy casts,
+ * mutate transforms, type narrowing, or existing DDL conflicts.
+ * Risk rows require {@link acknowledgeMappingRisk}, not bare Approve.
  */
 export function approveMappingHonestly(m: EditableMapping): EditableMapping {
   if (isExistingEnumBooleanConflict(m)) {
@@ -295,16 +709,21 @@ export function approveMappingHonestly(m: EditableMapping): EditableMapping {
   if (isEnumToBooleanConflict(m) && canWidenMapping(m)) {
     return { ...widenMappingToVarchar(m), approved: true, requiresReview: false };
   }
-  if (isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType) || m.transform === "identity_specialty") {
+  if (mappingRequiresRiskAck(m)) {
+    // GA: only continue-policy Risk Contracts approve — FAIL_JOB/STOP_* do not unlock.
+    if (mappingHasClearingRiskContract(m)) {
+      return { ...m, approved: true, requiresReview: false };
+    }
     return {
       ...m,
       approved: false,
       requiresReview: true,
-      transform: m.transform === "none" || !m.transform ? "identity_specialty" : m.transform,
+      transform:
+        (isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType))
+        && (!m.transform || m.transform === "none")
+          ? "identity_specialty"
+          : m.transform,
     };
-  }
-  if (m.structPolicy === "flatten_top_level_keys" || m.structPolicy === "flatten_deep" || m.structPolicy === "explode_rows" || m.structDerived) {
-    return { ...m, approved: false, requiresReview: true };
   }
   return { ...m, approved: true, requiresReview: false };
 }
@@ -340,32 +759,59 @@ export function topLevelKeysFromSample(sample?: string, maxKeys = 32): string[] 
   }
 }
 
-/** Deep-promotable leaf paths (depth≤2) for flatten_deep — mirrors backend caps. */
+/**
+ * Deep-promotable leaf paths (depth≤2) for flatten_deep — mirrors backend caps.
+ * Returns flattened column suffixes using `_` (backend SSOT). Collisions between
+ * a literal key `geo_lat` and nested `geo.lat` are detected separately.
+ */
 export function deepKeysFromSample(sample?: string, maxKeys = 64): string[] {
+  return deepKeyPathsFromSample(sample, maxKeys).map((p) => p.flat);
+}
+
+/** JSON path segments + flattened suffix for collision-safe Map synthesis. */
+export function deepKeyPathsFromSample(
+  sample?: string,
+  maxKeys = 64,
+): Array<{ flat: string; path: string[] }> {
   if (!sample) return [];
   const trimmed = sample.trim();
   if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return [];
   try {
     const parsed = JSON.parse(trimmed) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
-    const keys: string[] = [];
-    const walk = (obj: Record<string, unknown>, prefix: string, depth: number) => {
+    const keys: Array<{ flat: string; path: string[] }> = [];
+    const walk = (obj: Record<string, unknown>, path: string[], depth: number) => {
       for (const [key, value] of Object.entries(obj)) {
         const name = String(key).trim();
         if (!name) continue;
-        const path = prefix ? `${prefix}_${name}` : name;
+        const nextPath = [...path, name];
         if (value !== null && typeof value === "object" && !Array.isArray(value) && depth < 2) {
-          walk(value as Record<string, unknown>, path, depth + 1);
+          walk(value as Record<string, unknown>, nextPath, depth + 1);
         } else {
-          keys.push(path);
+          keys.push({ flat: nextPath.join("_"), path: nextPath });
         }
         if (keys.length >= maxKeys) return;
       }
     };
-    walk(parsed as Record<string, unknown>, "", 1);
+    walk(parsed as Record<string, unknown>, [], 1);
     return keys;
   } catch {
     return [];
+  }
+}
+
+function childSampleFromPath(sample: string | undefined, path: string[]): string | undefined {
+  if (!sample || !path.length) return undefined;
+  try {
+    let cur: unknown = JSON.parse(sample.trim());
+    for (const part of path) {
+      if (!cur || typeof cur !== "object" || Array.isArray(cur)) return undefined;
+      cur = (cur as Record<string, unknown>)[part];
+    }
+    if (cur == null) return undefined;
+    return typeof cur === "string" ? cur : JSON.stringify(cur);
+  } catch {
+    return undefined;
   }
 }
 
@@ -374,20 +820,16 @@ function childSampleFromParent(sample: string | undefined, key: string): string 
   try {
     const parsed = JSON.parse(sample.trim()) as Record<string, unknown>;
     if (!parsed || typeof parsed !== "object") return undefined;
-    // Support deep path keys like geo_lat from flatten_deep.
-    if (key.includes("_") && !(key in parsed)) {
-      const parts = key.split("_");
-      let cur: unknown = parsed;
-      for (const part of parts) {
-        if (!cur || typeof cur !== "object" || Array.isArray(cur)) return undefined;
-        cur = (cur as Record<string, unknown>)[part];
-      }
-      if (cur == null) return undefined;
-      return typeof cur === "string" ? cur : JSON.stringify(cur);
+    if (key in parsed) {
+      const v = parsed[key];
+      if (v == null) return undefined;
+      return typeof v === "string" ? v : JSON.stringify(v);
     }
-    const v = parsed[key];
-    if (v == null) return undefined;
-    return typeof v === "string" ? v : JSON.stringify(v);
+    // Deep path keys like geo_lat — prefer exact segment walk when unambiguous.
+    if (key.includes("_")) {
+      return childSampleFromPath(sample, key.split("_"));
+    }
+    return undefined;
   } catch {
     return undefined;
   }
@@ -417,7 +859,13 @@ export function applyStructPolicyChange(
     ...withoutDerived[parentIdx],
     structPolicy: policy,
     approved: false,
-    requiresReview: flattenish || exploding ? true : withoutDerived[parentIdx].requiresReview,
+    // Leaving flatten clears collision metadata so the Map table does not stick.
+    flattenCollisions: flattenish ? withoutDerived[parentIdx].flattenCollisions : undefined,
+    requiresReview: flattenish || exploding
+      ? true
+      : withoutDerived[parentIdx].flattenCollisions?.length
+        ? false
+        : withoutDerived[parentIdx].requiresReview,
     reason: exploding
       ? "ARRAY explode — one output row per element (capped); parent array kept"
       : policy === "flatten_deep"
@@ -463,11 +911,11 @@ export function applyStructPolicyChange(
     return next;
   }
 
-  const keys =
+  const keyPaths =
     policy === "flatten_deep"
-      ? deepKeysFromSample(parent.sample)
-      : topLevelKeysFromSample(parent.sample);
-  if (!keys.length) {
+      ? deepKeyPathsFromSample(parent.sample)
+      : topLevelKeysFromSample(parent.sample).map((k) => ({ flat: k, path: [k] }));
+  if (!keyPaths.length) {
     next[parentIdx] = {
       ...nextParent,
       reason:
@@ -478,15 +926,59 @@ export function applyStructPolicyChange(
     return next;
   }
 
+  // Detect underscore-path collisions (literal geo_lat vs nested geo.lat → geo_lat).
+  const flatOwners = new Map<string, string[][]>();
+  for (const kp of keyPaths) {
+    const owners = flatOwners.get(kp.flat) || [];
+    owners.push(kp.path);
+    flatOwners.set(kp.flat, owners);
+  }
+  const collisionFlats = new Set(
+    [...flatOwners.entries()].filter(([, owners]) => owners.length > 1).map(([flat]) => flat),
+  );
+  if (collisionFlats.size) {
+    const collisions = [...collisionFlats].map((flat) => ({
+      flat,
+      paths: flatOwners.get(flat) || [],
+    }));
+    next[parentIdx] = {
+      ...nextParent,
+      approved: false,
+      requiresReview: true,
+      flattenCollisions: collisions,
+      reason: [
+        nextParent.reason,
+        `Flatten path collision on ${[...collisionFlats].join(", ")} — keep as JSON or rename source keys`,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    };
+  }
+
   const existingSources = new Set(next.map((m) => m.source));
   const children: EditableMapping[] = [];
-  for (const key of keys) {
-    const source = `${parent.source}_${key}`;
-    if (existingSources.has(source)) continue;
-    const sample = childSampleFromParent(parent.sample, key);
+  for (const kp of keyPaths) {
+    if (collisionFlats.has(kp.flat)) continue; // fail-closed: do not invent ambiguous columns
+    const source = `${parent.source}_${kp.flat}`;
+    if (existingSources.has(source)) {
+      next[parentIdx] = {
+        ...next[parentIdx],
+        approved: false,
+        requiresReview: true,
+        reason: [
+          next[parentIdx].reason,
+          `Flatten target ${source} already exists — choose store-as-JSON or remap`,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      };
+      continue;
+    }
+    const sample = childSampleFromPath(parent.sample, kp.path);
     const childType = inferLogicalFromSample(sample);
     const specialty = isSpecialtyLogicalType(childType);
     const structish = isStructLogicalType(childType) || isArrayLogicalType(childType);
+    const dotted = kp.path.join(".");
     children.push({
       source,
       target: normalizeMappingTarget(source),
@@ -496,7 +988,7 @@ export function applyStructPolicyChange(
       sample,
       approved: false,
       requiresReview: true,
-      reason: `Flattened from ${parent.source}.${key} (${childType})`,
+      reason: `Flattened from ${parent.source}.${dotted} (${childType})`,
       transform: specialty ? "identity_specialty" : structish ? "parse_json" : "none",
       engineTransform: structish ? "json" : undefined,
       structDerived: true,
@@ -527,7 +1019,9 @@ export function isEnumToBooleanConflict(m: EditableMapping): boolean {
  * from the Map step (Airbyte/Fivetran posture) — use Remap or ALTER.
  */
 export function canWidenMapping(m: EditableMapping): boolean {
-  return !m.existsInDestination;
+  // Pending/incomplete dest schema is not proven create-new — never invent Widen.
+  if (m.assignmentStrategy === "pending_dest_schema") return false;
+  return m.existsInDestination === false;
 }
 
 /** Widen destination type to VARCHAR and clear numeric/boolean casts — new tables only. */
@@ -605,7 +1099,20 @@ export function applyDestTypeChange(m: EditableMapping, nextDestType: string): E
       requiresReview: true,
     };
   }
-  return { ...m, destType: nextDestType, approved: false };
+  const narrowing = declaredCarrierFidelityRisk(m.inferredType, nextDestType);
+  return {
+    ...m,
+    destType: nextDestType,
+    approved: false,
+    riskAcknowledged: false,
+    // Stale engine fidelity must not greenwash the new dest type until re-stamp.
+    fidelity: narrowing ? "lossy_cast" : undefined,
+    fidelityReason: narrowing
+      ? `Destination type ${nextDestType} may collapse fidelity from ${m.inferredType || "source"}`
+      : undefined,
+    typeNarrowing: narrowing || undefined,
+    requiresReview: narrowing || m.requiresReview,
+  };
 }
 
 export function isIntentionalOmit(m: EditableMapping): boolean {
@@ -621,6 +1128,7 @@ export function applyTransformChange(m: EditableMapping, next: MappingTransform)
       target: "",
       approved: true,
       requiresReview: false,
+      riskAcknowledged: false,
       reason: "Intentionally omitted from transfer",
     };
   }
@@ -633,6 +1141,7 @@ export function applyTransformChange(m: EditableMapping, next: MappingTransform)
     target: restoring && !String(m.target || "").trim() ? m.source : m.target,
     reason: restoring && m.reason === "Intentionally omitted from transfer" ? undefined : m.reason,
     approved: false,
+    riskAcknowledged: false,
   };
 }
 
@@ -651,15 +1160,40 @@ function boostIdentityConfidence(
   confidence: number,
   createNew = false,
   pendingDestSchema = false,
+  fidelity?: string,
+  transform?: string,
 ): number {
   // Pending / unknown destination — never inflate toward create-new certainty.
   if (pendingDestSchema) return Math.min(confidence, 0.55);
   const norm = normalizeMappingTarget(source);
-  if (norm === target || source.toLowerCase() === target.toLowerCase()) {
-    if (createNew) return Math.min(Math.max(confidence, 0.9), 0.93);
-    return Math.max(confidence, 0.95);
+  const exact = norm === target || source.toLowerCase() === target.toLowerCase();
+  const fid = (fidelity || "").toLowerCase();
+  const tf = (transform || "").toLowerCase();
+  let next = confidence;
+  if (exact) {
+    if (createNew) {
+      // Vary create-new identity by fidelity — avoid a flat 93% wall.
+      if (fid === "lossy_cast") next = Math.min(Math.max(confidence, 0.62), 0.74);
+      else if (fid === "mutate" && !SAFE_NORMALIZE_TRANSFORMS.has(tf)) {
+        next = Math.min(Math.max(confidence, 0.78), 0.88);
+      } else if (fid === "mutate") {
+        next = Math.min(Math.max(confidence, 0.88), 0.94);
+      } else if (fid === "cast") {
+        next = Math.min(Math.max(confidence, 0.8), 0.9);
+      } else if (fid === "preserve" || !fid) {
+        next = Math.min(Math.max(confidence, 0.9), 0.96);
+      } else {
+        next = Math.min(Math.max(confidence, 0.86), 0.93);
+      }
+    } else {
+      next = Math.max(confidence, fid === "lossy_cast" ? 0.7 : 0.95);
+    }
+  } else if (fid === "lossy_cast") {
+    next = Math.min(confidence, 0.72);
+  } else if (fid === "cast") {
+    next = Math.min(Math.max(confidence, 0.7), 0.88);
   }
-  return confidence;
+  return next;
 }
 
 export function mappingsFromAnalysis(
@@ -697,7 +1231,8 @@ export function mappingsFromAnalysis(
       confidence: conf,
       inferredType: inferred,
       sample: sampleVal != null ? String(sampleVal) : undefined,
-      approved: conf >= 0.9 && !col.is_pii && !specialty && !structish && !arrayish && !pendingDest,
+      // Never invent Approve from confidence — pipeline fidelity must stamp first.
+      approved: false,
       isPii: col.is_pii,
       reason: specialty
         ? `${inferred} — identity payload (no invented cast/dim)`
@@ -718,7 +1253,7 @@ export function mappingsFromAnalysis(
             ? "parse_json"
             : "none",
       engineTransform: structish || arrayish ? "json" : undefined,
-      requiresReview: specialty || structish || arrayish || pendingDest || undefined,
+      requiresReview: specialty || structish || arrayish || pendingDest || conf < 0.9 || undefined,
       structPolicy: structish || arrayish ? "store_as_json" : undefined,
       existsInDestination,
       createNew: createNew || undefined,
@@ -751,9 +1286,9 @@ export function buildPreflightMappings(
     return editable.map((m) => {
       const enumBool = isEnumToBooleanConflict(m);
       const safe =
-        enumBool && !m.existsInDestination
+        enumBool && m.existsInDestination === false
           ? widenMappingToVarchar(m)
-          : enumBool && m.existsInDestination
+          : enumBool && m.existsInDestination === true
             ? flagExistingEnumBooleanConflict(m)
             : m;
       const pendingDest = safe.assignmentStrategy === "pending_dest_schema";
@@ -777,7 +1312,8 @@ export function buildPreflightMappings(
               : safe.confidence
         ),
         reason: safe.reason || "User reviewed",
-        user_override: safe.approved && !enumBool,
+        // user_override only after explicit Approve / Accept risk — never confidence bootstrap.
+        user_override: Boolean(safe.riskAcknowledged) || (safe.approved && !enumBool && !mappingRequiresRiskAck(safe)),
         transform: omitted ? "omit" : uiTransformToEngine(safe.transform, safe.engineTransform),
         intentional_omit: omitted || undefined,
         target_type: omitted
@@ -798,6 +1334,10 @@ export function buildPreflightMappings(
         struct_policy: omitted ? undefined : safe.structPolicy,
         struct_derived: safe.structDerived || undefined,
         struct_parent: safe.structParent,
+        fidelity: omitted ? undefined : safe.fidelity,
+        type_narrowing: omitted ? undefined : Boolean(safe.typeNarrowing) || undefined,
+        risk_acknowledged: omitted ? undefined : Boolean(safe.riskAcknowledged) || undefined,
+        risk_contract: omitted ? undefined : (safe.riskContract || undefined),
       };
     });
   }
@@ -810,7 +1350,8 @@ export function buildPreflightMappings(
       target,
       confidence: boostIdentityConfidence(col.column_name, target, col.confidence, true),
       reason: col.semantic_type || col.inferred_type || "Semantic match",
-      user_override: col.confidence >= 0.9,
+      user_override: false,
+      requires_review: true,
       create_new: true,
       assignment_strategy: "create_compatible_new",
       source_type: col.inferred_type || col.semantic_type,
@@ -845,6 +1386,7 @@ export function editableFromPipelineMappings(
     fidelity?: string;
     fidelity_reason?: string;
     type_narrowing?: boolean;
+    create_new_risks?: Array<{ kind?: string; severity?: string; message?: string }>;
   }>,
   sampleRows?: Record<string, unknown>[],
   destColumns?: string[],
@@ -873,9 +1415,10 @@ export function editableFromPipelineMappings(
       m.confidence,
       rowCreateNew,
       pendingDest,
+      (m.fidelity || "").trim().toLowerCase() || undefined,
+      (m.transform || "").trim().toLowerCase() || undefined,
     );
     const requiresReview = Boolean(m.requires_review) || pendingDest;
-    const identityMatch = normalizeMappingTarget(m.source) === m.target.toLowerCase();
     const sourceType = m.source_type;
     const destType = liveDestType || m.target_type || m.source_type;
     const specialty = isSpecialtyLogicalType(sourceType) || isSpecialtyLogicalType(destType);
@@ -899,6 +1442,25 @@ export function editableFromPipelineMappings(
             ? "store_as_json"
             : undefined;
     const engineFidelity = (m.fidelity || "").trim().toLowerCase();
+    const createNewRisks: CreateNewTypeRisk[] | undefined = Array.isArray(m.create_new_risks)
+      && m.create_new_risks.length > 0
+      ? m.create_new_risks
+          .filter((r) => r && (r.kind || r.message))
+          .map((r) => ({
+            kind: String(r.kind || "create_new_risk"),
+            severity: r.severity || "warn",
+            message: String(r.message || ""),
+          }))
+      : undefined;
+    const lossyFidelity =
+      engineFidelity === "lossy_cast"
+      || engineFidelity === "mutate"
+      || engineFidelity === "cast"
+      || Boolean(m.type_narrowing)
+      || Boolean(createNewRisks?.length);
+    // Fail-closed: never invent Approve from confidence. Operator must Approve
+    // (or Approve-all for eligible rows). Ready ≡ approved only.
+    const autoApproved = false;
     const base: EditableMapping = {
       source: m.source,
       target: m.target,
@@ -906,13 +1468,7 @@ export function editableFromPipelineMappings(
       inferredType: sourceType,
       destType,
       sample: sampleVal != null ? String(sampleVal) : undefined,
-      approved:
-        !requiresReview
-        && !specialty
-        && !structish
-        && !arrayish
-        && !pendingDest
-        && (conf >= threshold || (identityMatch && !rowCreateNew)),
+      approved: autoApproved,
       isPii: m.is_pii,
       reason: specialty && !(m.reasoning || "").toLowerCase().includes("identity")
         ? [m.reasoning, `${sourceType || destType} — identity payload (dim/SRID not rewritten)`].filter(Boolean).join(" · ")
@@ -922,7 +1478,7 @@ export function editableFromPipelineMappings(
             ? "ARRAY — serialize as JSON/list or explode rows (Map policy)"
             : m.reasoning,
       existsInDestination: existsInDest,
-      requiresReview: requiresReview || specialty || structish || arrayish,
+      requiresReview: requiresReview || specialty || structish || arrayish || lossyFidelity || conf < threshold,
       scoreGap: m.score_gap,
       transform: uiTf === "none" && (structish || arrayish) ? "parse_json" : uiTf,
       engineTransform: engineTf || (structish || arrayish ? "json" : undefined),
@@ -933,6 +1489,7 @@ export function editableFromPipelineMappings(
       fidelity: engineFidelity || undefined,
       fidelityReason: m.fidelity_reason || undefined,
       typeNarrowing: Boolean(m.type_narrowing),
+      createNewRisks,
       structDerived: Boolean(m.struct_derived),
       structParent: m.struct_parent,
     };
@@ -951,8 +1508,10 @@ export function editableFromPipelineMappings(
 }
 
 export function confidenceThresholdForMode(mode: string): number {
-  if (mode === "balanced") return 0.75;
+  if (mode === "balanced" || mode === "migration") return 0.75;
   if (mode === "maximum") return 0.95;
+  if (mode === "discovery") return 0;
+  // strict | audit | unknown → fail closed to strict floor
   return 0.85;
 }
 
@@ -978,26 +1537,33 @@ export function mappingHealthSummary(
   const total = mappings.length;
   const intentionalOmit = mappings.filter((m) => isIntentionalOmit(m)).length;
   const active = mappings.filter((m) => !isIntentionalOmit(m));
-  const needsReview = active.filter((m) => m.requiresReview && !m.approved).length;
+  const needsReview = active.filter(
+    (m) => !m.approved || (mappingRequiresRiskAck(m) && !m.riskAcknowledged),
+  ).length;
   const lowConfidence = active.filter((m) => m.confidence < threshold && !m.approved).length;
   const unmappedTarget = active.filter((m) => !String(m.target || "").trim()).length;
   const specialtyIdentity = active.filter(
-    (m) => m.transform === "identity_specialty" || isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType),
+    (m) =>
+      (m.transform === "identity_specialty" || isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType))
+      && mappingRequiresRiskAck(m)
+      && !m.riskAcknowledged,
   ).length;
   const existingTypeConflict = active.filter(
     (m) => isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m),
   ).length;
-  const ready = mappings.filter(
-    (m) =>
-      (isIntentionalOmit(m) && m.approved)
-      || (m.approved && String(m.target || "").trim() && !m.requiresReview),
-  ).length;
+  // Ready ≡ operator-approved (and Accept risk when required) — never confidence alone.
+  const ready = mappings.filter((m) => {
+    if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) return false;
+    if (isIntentionalOmit(m)) return Boolean(m.approved);
+    return Boolean(m.approved && String(m.target || "").trim());
+  }).length;
   const weak =
     total === 0
     || unmappedTarget > 0
     || needsReview > 0
     || lowConfidence > 0
-    || existingTypeConflict > 0;
+    || existingTypeConflict > 0
+    || specialtyIdentity > 0;
 
   let headline = "Map looks ready";
   let detail = `${ready}/${total} mappings approved for Validate.`;
@@ -1014,11 +1580,15 @@ export function mappingHealthSummary(
     headline = `${existingTypeConflict} existing-column type conflict(s)`;
     detail = "Remap to a compatible column or ALTER the destination — Map Widen cannot change DDL.";
   } else if (needsReview > 0 || lowConfidence > 0) {
-    headline = `${needsReview + lowConfidence} mapping(s) need review`;
-    detail = `Approve or fix low-confidence / specialty rows (threshold ${(threshold * 100).toFixed(0)}%).`;
+    // One row can be both requiresReview and low-confidence — count unique mappings.
+    const reviewCount = active.filter(
+      (m) => !m.approved && (m.requiresReview || m.confidence < threshold),
+    ).length;
+    headline = `${reviewCount} mapping(s) need review`;
+    detail = `Accept risk on lossy/specialty rows, or Approve eligible rows only (threshold ${(threshold * 100).toFixed(0)}%).`;
   } else if (specialtyIdentity > 0) {
-    headline = `${specialtyIdentity} specialty type(s) use identity`;
-    detail = "VECTOR / INTERVAL / GEOGRAPHY travel as identity payloads — dimensions/SRID are not rewritten.";
+    headline = `${specialtyIdentity} specialty type(s) need Accept risk`;
+    detail = "VECTOR / INTERVAL / GEOGRAPHY travel as identity payloads — Accept risk required before Validate clears G4.";
   } else if (intentionalOmit > 0) {
     headline = `${intentionalOmit} column(s) intentionally omitted`;
     detail = `${ready - intentionalOmit} columns transfer · ${intentionalOmit} excluded by Map policy.`;
@@ -1033,7 +1603,7 @@ export function mappingHealthSummary(
     intentionalOmit,
     specialtyIdentity,
     existingTypeConflict,
-    weak: weak || specialtyIdentity > 0,
+    weak,
     headline,
     detail,
   };

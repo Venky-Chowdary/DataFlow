@@ -1,10 +1,21 @@
 """
-DataTransfer.space — Type Conversion Matrix
+Datawrap — Type Conversion Matrix (NON-AUTHORITATIVE)
 
-Universal type mapping rules for data transformation.
+Module 12: This coarse logical matrix is for LLM/RAG assist only.
+It MUST NOT drive Map, Validate, DDL, Execute, or proof decisions.
+
+Authoritative SSOT:
+  apps/api/services/conversion_contract.py
+  apps/api/services/type_system.py (is_lossy_coercion / materialize_dest_ddl)
 """
 
 from __future__ import annotations
+
+AUTHORITATIVE = False
+AUTHORITY_NOTE = (
+    "Non-authoritative AI assist matrix. Use services.conversion_contract "
+    "and services.type_system for migration decisions."
+)
 
 TYPE_CONVERSION_MATRIX: dict[str, dict[str, dict]] = {
     "string": {
@@ -55,15 +66,34 @@ TYPE_CONVERSION_MATRIX: dict[str, dict[str, dict]] = {
 
 
 def suggest_type_conversion(source_type: str, target_type: str) -> dict | None:
-    """Get conversion rule between source and target types."""
+    """Get a non-authoritative conversion hint (LLM assist only)."""
     source = source_type.lower()
     target = target_type.lower()
     if source == target:
-        return {"method": "identity", "lossy": False}
+        return {"method": "identity", "lossy": False, "authoritative": False}
     conversions = TYPE_CONVERSION_MATRIX.get(source, {})
-    return conversions.get(target)
+    hit = conversions.get(target)
+    if hit is None:
+        return None
+    return {**hit, "authoritative": False}
+
+
+def suggest_type_conversion_non_authoritative(
+    source_type: str, target_type: str
+) -> dict:
+    """Explicit non-authoritative wrapper for assistants."""
+    base = suggest_type_conversion(source_type, target_type) or {
+        "method": "unknown",
+        "lossy": True,
+    }
+    return {
+        **base,
+        "authoritative": False,
+        "authority_note": AUTHORITY_NOTE,
+        "use_instead": "services.conversion_contract.classify_conversion",
+    }
 
 
 def get_compatible_types(source_type: str) -> list[str]:
-    """List all types that can be converted from source type."""
+    """List assist types — not a migration allow-list."""
     return list(TYPE_CONVERSION_MATRIX.get(source_type.lower(), {}).keys())

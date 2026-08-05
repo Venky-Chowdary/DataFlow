@@ -3,12 +3,17 @@ import { createPortal } from "react-dom";
 import { DtIcon } from "../DtIcon";
 import { lockBodyScroll } from "../../lib/bodyScrollLock";
 
-export type DrawerSize = "md" | "lg" | "xl" | "full";
+/**
+ * Canonical right-rail width for every app slide-over (Transfer Studio, Jobs,
+ * Connectors, Contracts, Schedules). One size — never invent per-page widths.
+ */
+export const DRAWER_PANEL_WIDTH_PX = 720;
+
+export type DrawerSize = "lg" | "full";
 
 const DRAWER_WIDTH: Record<DrawerSize, number> = {
-  md: 560,
-  lg: 720,
-  xl: 960,
+  lg: DRAWER_PANEL_WIDTH_PX,
+  /** Rare wide evidence panels — prefer `lg` unless content truly needs it. */
   full: 1400,
 };
 
@@ -23,20 +28,29 @@ interface DrawerProps {
   headerExtra?: ReactNode;
   /** Sticky footer content (e.g. primary/secondary actions). */
   footer?: ReactNode;
-  /** Panel width in px on desktop. Prefer `size` for viewport-aware panels. */
+  /**
+   * @deprecated Ignored. All right drawers use `DRAWER_PANEL_WIDTH_PX` via `size="lg"`.
+   */
   width?: number;
-  /** Viewport-aware width: md 560 · lg 720 · xl 960 · full ~1200 (uses available height). */
-  size?: DrawerSize;
+  /**
+   * `lg` (720px) is the app-wide default. Use `full` only for rare wide evidence.
+   * Legacy aliases `md` / `xl` coerce to `lg`.
+   */
+  size?: DrawerSize | "md" | "xl";
   side?: "right" | "left";
   ariaLabel?: string;
   className?: string;
   children: ReactNode;
 }
 
+function resolveSize(size: DrawerProps["size"]): DrawerSize {
+  if (size === "full") return "full";
+  return "lg";
+}
+
 /**
- * Reusable slide-over Drawer primitive: portal-rendered overlay + side panel
- * with Escape-to-close, body scroll lock, and focus handoff. Shares the modal
- * design tokens (df2-drawer-*) so it stays consistent with df2-modal.
+ * Single reusable slide-over for the whole app. Portal + Escape + scroll lock.
+ * Prefer this over page-local drawers so width/theme stay identical everywhere.
  */
 export function Drawer({
   open,
@@ -46,15 +60,15 @@ export function Drawer({
   icon,
   headerExtra,
   footer,
-  width,
-  size = "md",
+  size = "lg",
   side = "right",
   ariaLabel,
   className = "",
   children,
 }: DrawerProps) {
   const panelRef = useRef<HTMLDivElement>(null);
-  const resolvedWidth = width ?? DRAWER_WIDTH[size];
+  const resolvedSize = resolveSize(size);
+  const resolvedWidth = DRAWER_WIDTH[resolvedSize];
 
   useEffect(() => {
     if (!open) return;
@@ -77,12 +91,12 @@ export function Drawer({
     <div className="df2-drawer-overlay" role="presentation" onClick={onClose}>
       <div
         ref={panelRef}
-        className={`df2-drawer df2-drawer-${side} df2-drawer-size-${size} ${className}`}
+        className={`df2-drawer df2-drawer-${side} df2-drawer-size-${resolvedSize} ${className}`}
         style={{
-          width: size === "full"
+          width: resolvedSize === "full"
             ? `min(${resolvedWidth}px, 92vw)`
             : `min(${resolvedWidth}px, 96vw)`,
-          maxWidth: size === "full" ? "92vw" : undefined,
+          maxWidth: resolvedSize === "full" ? "92vw" : undefined,
         }}
         role="dialog"
         aria-modal="true"

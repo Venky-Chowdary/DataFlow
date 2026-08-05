@@ -117,6 +117,26 @@ describe("streamContractsNeedReview", () => {
     });
     assert.equal(needs, false);
   });
+
+  it("flags PK missing from a divergent stream schema", () => {
+    const needs = streamContractsNeedReview({
+      streamNames: ["orders", "events"],
+      sourceColumns: ["order_id", "updated_at"],
+      sourceColumnsByStream: {
+        orders: ["order_id", "updated_at"],
+        events: ["event_id", "ts"],
+      },
+      requiresCursor: true,
+      requiresPrimaryKey: true,
+      defaultCursor: "updated_at",
+      defaultPrimaryKey: "order_id",
+      streamFields: {
+        orders: { cursorField: "updated_at", primaryKeyField: "order_id" },
+        events: { cursorField: "updated_at", primaryKeyField: "order_id" },
+      },
+    });
+    assert.equal(needs, true);
+  });
 });
 
 describe("seedStreamFieldsFromCandidates", () => {

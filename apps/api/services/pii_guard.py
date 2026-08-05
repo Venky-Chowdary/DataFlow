@@ -2,7 +2,7 @@
 
 Detects sensitive values in samples and masks/de-identifies them in logs,
 telemetry, and prompt payloads.  This is a defensive guard, not a data loss
-prevention replacement; it makes sure DataFlow never leaks sensitive data in
+prevention replacement; it makes sure Datawrap never leaks sensitive data in
 observability or prompts.
 """
 
@@ -60,7 +60,15 @@ def mask(value: Any) -> str:
         raw = email_match.group(0)
         local, _, domain = raw.partition("@")
         if local and domain:
-            return f"{local[0]}{'*' * max(1, len(local) - 1)}@{domain}"
+            # Keep local first character + TLD so operators still see "this is an
+            # email", but never leave the full domain (org identity) readable.
+            local_mask = f"{local[0]}{'*' * max(1, len(local) - 1)}"
+            if "." in domain:
+                name, _, tld = domain.rpartition(".")
+                domain_mask = f"{'*' * max(3, len(name))}.{tld}"
+            else:
+                domain_mask = "*" * max(3, len(domain))
+            return f"{local_mask}@{domain_mask}"
     if len(text) <= 4:
         return "*" * len(text)
     if len(text) <= 12:
@@ -165,6 +173,13 @@ def redact_destination_summary(
             values = nd.get("values")
             if isinstance(values, dict):
                 nd["values"] = mask_record(values, sensitive)
+            # Dual-stamped Wave 32/34 payloads — must mask both shapes for Theater/export.
+            source_values = nd.get("source_values")
+            if isinstance(source_values, dict):
+                nd["source_values"] = mask_record(source_values, sensitive)
+            target_values = nd.get("target_values")
+            if isinstance(target_values, dict):
+                nd["target_values"] = mask_record(target_values, sensitive)
             redacted_details.append(nd)
         out["rejected_details"] = redacted_details
 

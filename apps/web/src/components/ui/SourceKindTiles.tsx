@@ -5,6 +5,8 @@ export type SourceKind = "file" | "database" | "cloud";
 interface SourceKindTilesProps {
   value: SourceKind;
   onChange: (kind: SourceKind) => void;
+  /** Hide the mindset strip once a source is already loaded — saves vertical chrome. */
+  hideHint?: boolean;
 }
 
 const OPTIONS: {
@@ -37,7 +39,7 @@ const OPTIONS: {
   },
 ];
 
-export function SourceKindTiles({ value, onChange }: SourceKindTilesProps) {
+export function SourceKindTiles({ value, onChange, hideHint = false }: SourceKindTilesProps) {
   const active = OPTIONS.find((o) => o.id === value) ?? OPTIONS[0];
 
   return (
@@ -50,20 +52,24 @@ export function SourceKindTiles({ value, onChange }: SourceKindTilesProps) {
             role="radio"
             aria-checked={value === opt.id}
             className={`df2-source-kind-tile ${value === opt.id ? "active" : ""}`}
+            title={`${opt.label} — ${opt.desc}`}
             onClick={() => onChange(opt.id)}
           >
-            <span className="df2-source-kind-icon">
-              <DtIcon name={opt.icon} size={22} />
+            <span className="df2-source-kind-icon" aria-hidden>
+              <DtIcon name={opt.icon} size={18} />
             </span>
-            <strong>{opt.label}</strong>
-            <span>{opt.desc}</span>
+            <span className="df2-source-kind-copy">
+              <strong>{opt.label}</strong>
+            </span>
           </button>
         ))}
       </div>
-      <p className="df2-source-kind-hint">
-        <DtIcon name="sparkle" size={14} />
-        {active.mindset}
-      </p>
+      {!hideHint && (
+        <p className="df2-source-kind-hint" title={active.mindset}>
+          <DtIcon name="sparkle" size={13} />
+          <span>{active.mindset}</span>
+        </p>
+      )}
     </div>
   );
 }

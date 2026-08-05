@@ -77,7 +77,8 @@ def test_sf_typed_array_preserves_element():
     assert ddl_type("snowflake", "ARRAY(VARCHAR)") == "ARRAY(VARCHAR)"
     assert ddl_type("snowflake", "ARRAY<TEXT>") == "ARRAY(VARCHAR)"
     assert ddl_type("databricks", "ARRAY<TEXT>") == "ARRAY<STRING>"
-    assert ddl_type("postgresql", "ARRAY<TEXT>") == "JSONB"
+    # PG-family emits native T[] for typed arrays (wave 7); bare ARRAY still JSONB.
+    assert ddl_type("postgresql", "ARRAY<TEXT>") == "TEXT[]"
 
 
 def test_sf_nested_map_with_parametric_value():

@@ -1,6 +1,6 @@
 """Universal SQLAlchemy connector for any SQL database with a Python DBAPI.
 
-This connector lets DataFlow treat SQLAlchemy-supported engines as first-class
+This connector lets Datawrap treat SQLAlchemy-supported engines as first-class
 sources and destinations. The user provides the catalog type (e.g. mssql,
 oracle, db2, trino, h2) or a full connection_string; we build the SQLAlchemy
 URL and driver name from the catalog. This is the fastest path to 100+
@@ -34,8 +34,17 @@ from connectors.sql_temporal import (
     is_sql_data_error,
     logical_to_temporal_ddl,
 )
+from connectors.write_resilience import (
+    build_write_batch_key,
+    ensure_sqlalchemy_write_ledger,
+    mark_sqlalchemy_chunk_committed,
+    sqlalchemy_chunk_rows_written,
+)
+from services import reflection_cache
+from services.engine_pool import release_engine
 from services.type_system import (
     ddl_type,
+    materialize_dest_ddl,
     normalize_logical_type,
     parse_numeric_precision_scale,
 )
@@ -106,6 +115,7 @@ from connectors.writer_common import (
     quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
+    materialize_missing_as_null_for_dense_write,
     split_dense_sparse_rows,
     transform_error_policy,
 )
@@ -348,15 +358,25 @@ def _default_port(db_type: str) -> int:
 
 
 def _normalize_sqlite_url(url: str) -> str:
-    """Ensure absolute SQLite file paths use four leading slashes.
+    """Ensure absolute SQLite file paths use the SQLAlchemy-correct slash count.
 
-    SQLAlchemy interprets ``sqlite:///path`` as relative and
-    ``sqlite:////absolute/path`` as absolute. Users often supply the former for
-    absolute paths, so this normalizes only when the path component is absolute.
+    SQLAlchemy rules:
+    * ``sqlite:///relative.db`` — relative path
+    * ``sqlite:////absolute/path.db`` — Unix absolute (four slashes)
+    * ``sqlite:///C:/windows/path.db`` — Windows drive absolute (three slashes)
+
+    Users often paste ``sqlite:///C:/…`` or ``sqlite:////var/…``; only Unix
+    absolute paths missing the fourth slash are rewritten. Windows drive
+    letters must keep three slashes — adding a fourth makes sqlite3 fail with
+    ``unable to open database file``.
     """
     if url.startswith("sqlite:///") and not url.startswith("sqlite:////"):
         path = url[len("sqlite:///") :]
-        if path and (path.startswith("/") or (len(path) > 1 and path[1] == ":")):
+        # Windows drive letter — already absolute with three slashes.
+        if len(path) >= 2 and path[1] == ":":
+            return url
+        # Unix absolute path written with three slashes → four.
+        if path.startswith("/"):
             return f"sqlite:////{path}"
     return url
 
@@ -459,11 +479,12 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
     if not port:
         port = _default_port(db_type)
 
-    query = None
+    query: dict[str, str] | None = None
     if drivername.startswith("mssql"):
         drivername = _mssql_drivername()
+        query = {}
         if drivername == "mssql+pyodbc":
-            query = {"driver": "ODBC Driver 17 for SQL Server"}
+            query["driver"] = "ODBC Driver 17 for SQL Server"
         # Always On listener: MultiSubnetFailover speeds AG failover reconnect.
         multi = cfg.get("multi_subnet_failover")
         if multi is None:
@@ -476,6 +497,8 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
         if intent:
             # ReadOnly routes to a readable secondary when the AG allows it.
             query["ApplicationIntent"] = intent
+        if not query:
+            query = None
 
     return sa.URL.create(
         drivername,
@@ -489,6 +512,26 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
 
 
 def _engine(cfg: dict[str, Any]) -> Any:
+    """Engine for ``cfg``, reused across calls.
+
+    An Engine owns a connection pool and is designed to be long-lived and
+    thread-safe. This used to build a new one on every read chunk, write chunk
+    and checksum re-read — roughly ``3N`` pools per N-chunk transfer, each used
+    for exactly one connection. :mod:`services.engine_pool` keeps one per
+    distinct connection target so the pool can actually pool, and so
+    SQLAlchemy's reflection cache stays warm between chunks.
+
+    Callers must pair this with ``release_engine`` rather than ``dispose()``:
+    disposing a shared engine would tear the pool out from under every other
+    chunk in flight.
+    """
+    from services.engine_pool import get_pooled_engine
+
+    return get_pooled_engine(cfg, _build_engine)
+
+
+def _build_engine(cfg: dict[str, Any]) -> Any:
+    """Construct a brand-new Engine. Called once per distinct target."""
     url = _build_url(cfg)
     # Fast, safe defaults for local and network databases.
     db_type = (cfg.get("type") or "").lower()
@@ -510,7 +553,9 @@ def _engine(cfg: dict[str, Any]) -> Any:
             if db_type == "duckdb" or "duckdb" in connection_string:
                 engine.dialect.supports_native_decimal = True
             return engine
-        engine = create_engine(url, pool_pre_ping=True, pool_recycle=600)
+        from services.engine_pool import pool_settings
+
+        engine = create_engine(url, pool_pre_ping=True, **pool_settings())
         # SQL Server: refuse silent VARCHAR truncation at the session level.
         if (
             db_type in {
@@ -669,7 +714,7 @@ def _type_repr(type_obj: Any) -> str:
 
 
 def _logical_type_from_sa(col_type: Any) -> str:
-    """Map a SQLAlchemy type instance to a DataFlow logical type."""
+    """Map a SQLAlchemy type instance to a Datawrap logical type."""
     from services.type_system import normalize_logical_type
 
     if col_type is None:
@@ -855,7 +900,7 @@ class _DuckDBJSON(sa.JSON):
 
 
 def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> Any:
-    """Map a DataFlow logical type to a SQLAlchemy type that compiles for the engine.
+    """Map a Datawrap logical type to a SQLAlchemy type that compiles for the engine.
 
     Accepts carriers like ``DECIMAL(12,4)`` / ``NUMERIC(38,10)`` — bare
     ``t == "decimal"`` matching used to fall through to TEXT and strip scale
@@ -895,9 +940,12 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
     if (
         "timestamptz" in raw_lower
         or "timestamp_tz" in raw_lower
+        or "timestamp_ltz" in raw_lower
         or "timestamp with time zone" in raw_lower
+        or "timestamp with local time zone" in raw_lower
         or "datetimeoffset" in raw_lower
         or raw_lower.endswith(" with time zone")
+        or raw_lower.endswith(" local time zone")
     ):
         # SQL Server DATETIMEOFFSET is TZ-aware — never bind as naive DATETIME2.
         if db_type == "questdb":
@@ -914,7 +962,33 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
         return _maybe_nullable(sa.DateTime())
 
     if t == LOGICAL_INTEGER:
-        return _maybe_nullable(sa.BigInteger())
+        # Honor Map integer width — never invent BIGINT from INTEGER/INT.
+        int_u = raw.upper().split("(", 1)[0].strip().replace(" ", "")
+        if int_u in {
+            "BIGINT",
+            "INT64",
+            "LONG",
+            "UBIGINT",
+            "UINT64",
+            "BIGSERIAL",
+        }:
+            return _maybe_nullable(sa.BigInteger())
+        # Oracle NUMBER(p,0) normalized as integer — width from precision.
+        if int_u == "NUMBER":
+            from services.type_system import parse_numeric_precision_scale as _pnps
+
+            np, _ns = _pnps(raw)
+            if np is not None and int(np) > 9:
+                return _maybe_nullable(sa.BigInteger())
+            if np is not None and int(np) <= 4:
+                return _maybe_nullable(sa.SmallInteger())
+            return _maybe_nullable(sa.Integer())
+        if int_u in {"SMALLINT", "INT2", "SMALLSERIAL", "SHORT", "INT16"}:
+            return _maybe_nullable(sa.SmallInteger())
+        if int_u in {"TINYINT", "INT1", "UINT8", "BYTE"}:
+            return _maybe_nullable(sa.SmallInteger())
+        # INTEGER / INT / MEDIUMINT / INT32 / SERIAL / NUMBER(p,0) mid-range
+        return _maybe_nullable(sa.Integer())
     if t == LOGICAL_DECIMAL:
         precision, scale = parse_numeric_precision_scale(raw)
         if db_type == "risingwave":
@@ -928,14 +1002,58 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
             if db_type == "presto":
                 return sa.DECIMAL(int(precision), out_scale)
             return _maybe_nullable(sa.Numeric(int(precision), out_scale))
-        if db_type == "presto":
-            return sa.DECIMAL(38, 15)
-        # PostgreSQL-wire engines store arbitrary-scale NUMERIC without padding.
-        if dialect_name == "postgresql":
+        # Bare DECIMAL/NUMBER — Map≡CREATE must match type_system ddl_type SSOT.
+        # Never invent Numeric(38,15) when the destination default is (38,10)
+        # (SQL Server / Oracle / Databricks / Synapse).
+        dest = (db_type or dialect_name or "").strip() or "generic_sql"
+        wire = ddl_type(dest, raw)
+        wp, ws = parse_numeric_precision_scale(wire)
+        if wp is not None:
+            out_scale = 0 if ws is None else int(ws)
+            if (db_type or "").lower() == "presto" or dialect_name == "presto":
+                return sa.DECIMAL(int(wp), out_scale)
+            return _maybe_nullable(sa.Numeric(int(wp), out_scale))
+        # PostgreSQL-wire: bare NUMERIC (arbitrary scale, no invent).
+        if dialect_name == "postgresql" or (db_type or "").lower() in {
+            "postgresql",
+            "postgres",
+            "cockroachdb",
+            "yugabytedb",
+            "timescale",
+            "supabase",
+            "neon",
+            "risingwave",
+        }:
             return sa.Numeric()
-        return _maybe_nullable(sa.Numeric(38, 15))
+        # Destination has no fixed-point wire (e.g. SQLite TEXT) — do not invent
+        # Numeric(38,15); follow ddl_type collapse.
+        wire_logical = normalize_logical_type(wire)
+        if wire_logical in {LOGICAL_TEXT, LOGICAL_STRING}:
+            if "TEXT" in (wire or "").upper():
+                return _maybe_nullable(sa.Text())
+            return _maybe_nullable(sa.String())
+        return _maybe_nullable(sa.Numeric())
     if t == LOGICAL_FLOAT:
         # Approximate IEEE float — never rewrite to fixed-point Numeric.
+        # Honor Map REAL/FLOAT4/FLOAT stamps (sa.Double invents mantissa widen).
+        float_u = raw.upper().split("(", 1)[0].strip()
+        if float_u in {"REAL", "FLOAT4", "HALF", "FLOAT16", "BINARY_FLOAT", "FLOAT32"}:
+            if dialect_name == "postgresql" and hasattr(postgresql, "REAL"):
+                return _maybe_nullable(postgresql.REAL())
+            return _maybe_nullable(sa.Float())
+        if float_u == "FLOAT" and (db_type or "").lower() in {
+            "mysql",
+            "mariadb",
+            "tidb",
+            "sqlserver",
+            "mssql",
+            "databricks",
+            "spark",
+            "delta",
+            "delta_lake",
+            "databricks_sql",
+        }:
+            return _maybe_nullable(sa.Float())
         return _maybe_nullable(sa.Double())
     if t == LOGICAL_BOOLEAN:
         return _maybe_nullable(sa.Boolean())
@@ -950,14 +1068,27 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
                 ChDateTime64(3) if ChDateTime64 is not None else sa.DateTime()
             )
         if db_type == "trino" and TrinoTimestamp is not None:
-            return TrinoTimestamp(precision=3, timezone=True)
+            # Trino bare timestamp path — TZ-aware stamps already returned above.
+            return TrinoTimestamp(precision=3, timezone=False)
         if db_type == "presto":
             return sa.TIMESTAMP()
-        # SQL Server DATETIME2 is timezone-naive; Oracle TIMESTAMP WITH TIME ZONE
-        # keeps aware UTC (matches historical generic_sql bind contract).
-        if dialect_name == "mssql" or db_type in {"sqlserver", "mssql"}:
-            return _maybe_nullable(sa.DateTime())
-        return sa.DateTime(timezone=True)
+        # Map≡CREATE: LOGICAL_DATETIME without TZ markers is NTZ wall-clock on
+        # Oracle/DuckDB/PG/SQL Server. Databricks TIMESTAMP is session-TZ aware
+        # (TIMESTAMP_NTZ already returned naive above) — never invent the wrong
+        # polarity. TZ-aware carriers (TIMESTAMPTZ, DATETIMEOFFSET, Oracle
+        # WITH [LOCAL] TIME ZONE) already returned timezone=True above.
+        db_l = (db_type or "").strip().lower()
+        if db_l in {
+            "databricks",
+            "spark",
+            "delta",
+            "delta_lake",
+            "databricks_sql",
+        }:
+            base = raw_lower.split("(", 1)[0].strip()
+            if base in {"timestamp", "timestamptz"}:
+                return sa.DateTime(timezone=True)
+        return _maybe_nullable(sa.DateTime())
     if t == LOGICAL_TIME:
         # ClickHouse, QuestDB and Presto (PyHive) do not bind Python time objects
         # reliably; store as string in these engines.
@@ -1325,17 +1456,29 @@ def _reflect_table(
     columns: list[str] | None = None,
     include_pk: bool = False,
 ) -> sa.Table:
-    """Reflect or build a Table object for reading/writing."""
-    metadata = sa.MetaData()
-    # Quote identifiers for safety with reserved words and case-sensitive engines.
-    table_obj = sa.Table(
-        table,
-        metadata,
-        schema=schema,
-        quote=True,
-        quote_schema=True,
-        autoload_with=engine,
-    )
+    """Reflect or build a Table object for reading/writing.
+
+    The ``autoload_with`` reflection is the expensive half and is cached per
+    table, because a chunked read calls this once per chunk for a shape that
+    only changes when we ourselves run DDL. The column-subset projection below
+    is pure Python and is rebuilt per call, so callers still get their own
+    object to hold and the shared reflected table is never mutated.
+    """
+    from services.reflection_cache import get_or_load
+
+    def _reflect() -> sa.Table:
+        metadata = sa.MetaData()
+        # Quote identifiers for safety with reserved words and case-sensitive engines.
+        return sa.Table(
+            table,
+            metadata,
+            schema=schema,
+            quote=True,
+            quote_schema=True,
+            autoload_with=engine,
+        )
+
+    table_obj = get_or_load(engine, schema, table, "reflect", _reflect)
     if columns is None:
         return table_obj
 
@@ -1493,6 +1636,9 @@ def _widen_existing_columns_sa(
     target_cols: list[str],
     target_column_types: dict[str, str],
     conflict_columns: list[str] | None = None,
+    *,
+    stamp_ceiling_by_col: dict[str, str] | None = None,
+    refusals_out: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     """Issue ALTER COLUMN / MODIFY COLUMN to widen any columns that drifted wider.
 
@@ -1500,6 +1646,9 @@ def _widen_existing_columns_sa(
     every SQLAlchemy-backed dialect (DuckDB, SQL Server, Oracle, SQLite skipped).
     Primary-key / conflict columns are skipped because most engines cannot
     ALTER the type of a key column in place.
+
+    Map≡ALTER: when ``stamp_ceiling_by_col`` is set, never ALTER past the
+    approved Map stamp — refuse-closed with audit evidence in ``refusals_out``.
     """
     if not target_cols or not target_column_types:
         return []
@@ -1509,6 +1658,11 @@ def _widen_existing_columns_sa(
         return []
 
     skip_cols = set(conflict_columns or [])
+    ceilings = {
+        str(k): str(v)
+        for k, v in (stamp_ceiling_by_col or {}).items()
+        if k and v
+    }
 
     try:
         inspector = sa.inspect(conn)
@@ -1525,7 +1679,25 @@ def _widen_existing_columns_sa(
         if not existing:
             continue
         existing_type = str(existing["type"].compile(dialect=engine.dialect))
-        desired_type = target_column_types.get(col, existing_type)
+        proposed = target_column_types.get(col, existing_type)
+        stamp = ceilings.get(col)
+        desired_type = proposed
+        if stamp:
+            # Hard ceiling: align live up to stamp only; never past it.
+            if proposed and is_wider_type(stamp, proposed):
+                refusal = {
+                    "column": col,
+                    "mapped_type": stamp,
+                    "refused_wider": proposed,
+                    "reason": "explicit_map_stamp_ceiling",
+                }
+                if refusals_out is not None:
+                    refusals_out.append(refusal)
+                else:
+                    logger.info(
+                        "generic_sql Map≡ALTER refusal (stamp ceiling): %s", refusal
+                    )
+            desired_type = stamp
         if not is_wider_type(existing_type, desired_type):
             continue
         try:
@@ -1559,7 +1731,7 @@ def _widen_existing_columns_sa(
 
 
 def _infer_logical_from_samples(values: list[Any], field_name: str = "") -> str | None:
-    """Use DataFlow value inference to narrow generic SQL String columns.
+    """Use Datawrap value inference to narrow generic SQL String columns.
 
     We intentionally do NOT narrow string columns to INTEGER or DECIMAL: a
     string column may contain codes, identifiers, bit strings, or formatted
@@ -1805,11 +1977,17 @@ def introspect_table_schema(
             "tables": [],
         }
     finally:
-        engine.dispose()
+        release_engine(engine)
 
 
 def drop_table(cfg: dict[str, Any], table: str, schema: str | None = None) -> bool:
-    """Drop a table using SQLAlchemy dialect-aware DDL with a raw fallback."""
+    """Drop a table using SQLAlchemy dialect-aware DDL with a raw fallback.
+
+    Raises on a failed drop rather than returning ``False``. A caller deciding
+    whether a ``full_refresh`` actually cleared the destination cannot tell a
+    swallowed permission error from "nothing to drop", and guessing wrong means
+    appending onto rows that were supposed to be gone.
+    """
     if not SQLALCHEMY_AVAILABLE:
         return False
     engine = _engine(cfg)
@@ -1820,15 +1998,26 @@ def drop_table(cfg: dict[str, Any], table: str, schema: str | None = None) -> bo
             conn.execute(sa.text(f"DROP TABLE IF EXISTS {qualified}"))
             conn.commit()
         return True
-    except Exception:
+    except Exception as primary_exc:
+        # Some dialects reject the raw IF EXISTS form; retry via dialect DDL
+        # before giving up, but surface the original error if that also fails.
         try:
             table_obj = sa.Table(table, sa.MetaData(), schema=schema)
             table_obj.drop(engine, checkfirst=True)
             return True
-        except Exception:
-            return False
+        except Exception as fallback_exc:
+            logger.error(
+                "Failed to drop table %s (primary: %s; dialect DDL fallback: %s)",
+                table,
+                primary_exc,
+                fallback_exc,
+            )
+            raise primary_exc
     finally:
-        engine.dispose()
+        # Whether the drop succeeded or not, any reflected shape for this table
+        # is no longer trustworthy.
+        reflection_cache.invalidate_table(engine, schema, table)
+        release_engine(engine)
 
 
 def delete_by_primary_keys(
@@ -1838,7 +2027,13 @@ def delete_by_primary_keys(
     keys: list[str],
     schema: str | None = None,
 ) -> int:
-    """Delete rows by primary key using a dialect-aware parameterized statement."""
+    """Delete rows by primary key using a dialect-aware parameterized statement.
+
+    Raises on driver failure. Returning ``0`` here made a failed DELETE
+    indistinguishable from "those keys were already absent", so CDC read the
+    failure as an idempotent success and advanced its cursor past tombstones
+    that were never applied.
+    """
     if not SQLALCHEMY_AVAILABLE or not keys:
         return 0
     engine = _engine(cfg)
@@ -1859,10 +2054,13 @@ def delete_by_primary_keys(
             result = conn.execute(sa.text(stmt), params)
             conn.commit()
             return result.rowcount or 0
-    except Exception:
-        return 0
+    except Exception as exc:
+        from connectors.table_manager import DestinationDeleteError
+
+        logger.error("Delete by primary key failed on %s: %s", table, exc, exc_info=exc)
+        raise DestinationDeleteError(table, exc) from exc
     finally:
-        engine.dispose()
+        release_engine(engine)
 
 
 def fetch_pk_lsn_map(
@@ -1903,7 +2101,7 @@ def fetch_pk_lsn_map(
                 existing[str(row[0])] = row[1]
         return existing
     finally:
-        engine.dispose()
+        release_engine(engine)
 
 
 def _read_table_raw(
@@ -2078,7 +2276,7 @@ def read_table_batch(
 
         return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     finally:
-        engine.dispose()
+        release_engine(engine)
 
 
 def read_table_cursor_batch(
@@ -2182,7 +2380,7 @@ def read_table_cursor_batch(
 
         return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=None)
     finally:
-        engine.dispose()
+        release_engine(engine)
 
 
 def _delete_by_keys(
@@ -3733,7 +3931,7 @@ def _upsert_batch(
 
     # ClickHouse must never DELETE+INSERT even if native path failed — mutations
     # race ReplacingMergeTree merges (Airbyte destination AGENTS.md). Dedup is
-    # therefore deferred to the table engine: DataFlow creates ReplacingMergeTree,
+    # therefore deferred to the table engine: Datawrap creates ReplacingMergeTree,
     # but an operator-owned plain MergeTree keeps every duplicate. Say so rather
     # than let the run look like a clean upsert.
     if dialect_name == "clickhouse" or str(dialect_name).startswith("clickhouse"):
@@ -3827,6 +4025,20 @@ def write_mapped_rows(
     engine = _engine(cfg)
     schema_name = _schema_name(cfg)
 
+    # Durable chunk ledger: without it, a transient failure after chunk k
+    # committed makes the outer retry re-run this write from chunk 0 and
+    # duplicate every already-landed row. Only meaningful when the caller
+    # supplies a job_id to scope the ledger to this attempt chain.
+    ledger_job_id = str(_kwargs.get("job_id") or "").strip()
+    ledger_batch_key = str(
+        _kwargs.get("write_batch_key") or ""
+    ).strip() or build_write_batch_key(
+        table_name=table_name,
+        file_batch_idx=_kwargs.get("file_batch_idx"),
+    )
+    ledger_chunks_skipped = 0
+    ledger_unavailable = False
+
     target_cols, logical_types = resolve_target_columns(
         mappings, column_types, preserve_case=True
     )
@@ -3842,18 +4054,21 @@ def write_mapped_rows(
         mappings = [mappings[i] for i in keep_idx if i < len(mappings)]
     dest_db = (cfg.get("type") or "").lower()
     target_column_types = {}
+    explicit_stamps: set[str] = set()
     for i, col in enumerate(target_cols):
         explicit = mappings[i].get("target_type") if i < len(mappings) else None
         source_type = (
             column_types.get(mappings[i]["source"]) if i < len(mappings) else None
         ) or (logical_types[i] if i < len(logical_types) else "string")
-        # Map source logical types to destination-native DDL so default
-        # identity mappings create the right physical column. DuckDB DECIMAL
-        # sources keep their (p,s) DDL when present — never silently collapse
-        # to DOUBLE, which loses scale and breaks financial fidelity.
-        derived = explicit or (
-            ddl_type(dest_db, source_type) if dest_db else source_type
-        )
+        # Map stamps / logicals through materialize_dest_ddl so CREATE cannot
+        # invent REAL→DOUBLE or BQ TIMESTAMP→DATETIME after Map stamped.
+        if explicit:
+            derived = materialize_dest_ddl(dest_db, explicit) if dest_db else str(explicit)
+            explicit_stamps.add(col)
+        elif dest_db:
+            derived = materialize_dest_ddl(dest_db, source_type)
+        else:
+            derived = source_type
         # DuckDB only: if preflight is skipped and the source DECIMAL has no
         # declared precision/scale (typical for CSV / file inference), fall
         # back to DOUBLE. This avoids inventing a scale that pads values like
@@ -3863,6 +4078,7 @@ def write_mapped_rows(
             and _kwargs.get("skip_preflight")
             and not mappings[i].get("user_override")
             and normalize_logical_type(derived) == "decimal"
+            and not explicit
         ):
             p, s = parse_numeric_precision_scale(source_type)
             if p is None and s is None:
@@ -3870,17 +4086,44 @@ def write_mapped_rows(
                 mappings[i] = {**mappings[i], "target_type": "DOUBLE"}
         target_column_types[col] = derived
 
-    # Widen target types to at least the source DDL so schema drift to a wider
-    # source column does not truncate or overflow in the destination.
+    # Map≡ALTER: source DDL may propose a wider type; explicit Map stamps are a
+    # hard ceiling (same helper as PostgreSQL / MySQL writers). Overflow cells
+    # quarantine on write — never silent ALTER past the approved mapping.
+    from connectors.writer_common import desired_types_honoring_map_stamps
+
+    ceiling_types = [target_column_types[col] for col in target_cols]
+    candidate_by_col: dict[str, str] = {}
     for i, col in enumerate(target_cols):
-        target_ddl = target_column_types[col]
-        mapping_source = mappings[i].get("source_type")
-        catalog_source = column_types.get(mappings[i].get("source"))
+        if col in explicit_stamps:
+            continue
+        mapping_source = mappings[i].get("source_type") if i < len(mappings) else None
+        catalog_source = (
+            column_types.get(mappings[i].get("source")) if i < len(mappings) else None
+        )
         source_type = _source_ddl_for_widen(mapping_source, catalog_source) or "string"
-        source_ddl = ddl_type(dest_db, source_type) if dest_db else source_type
-        if is_wider_type(target_ddl, source_ddl):
-            target_column_types[col] = source_ddl
-            mappings[i] = {**mappings[i], "target_type": source_ddl}
+        source_ddl = (
+            materialize_dest_ddl(dest_db, source_type) if dest_db else source_type
+        )
+        candidate_by_col[col] = source_ddl
+
+    desired_list, alter_refusals = desired_types_honoring_map_stamps(
+        target_cols=target_cols,
+        current_target_types=ceiling_types,
+        mappings=mappings,
+        candidate_by_col=candidate_by_col,
+        preserve_case=True,
+        explicit_columns=explicit_stamps,
+    )
+    if alter_refusals:
+        logger.info(
+            "generic_sql Map≡ALTER refusals (stamp ceiling): %s", alter_refusals
+        )
+    for i, col in enumerate(target_cols):
+        new_typ = desired_list[i]
+        old_typ = target_column_types[col]
+        target_column_types[col] = new_typ
+        if col not in explicit_stamps and new_typ != old_typ and i < len(mappings):
+            mappings[i] = {**mappings[i], "target_type": new_typ}
 
     policy = transform_error_policy(error_policy)
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
@@ -3921,6 +4164,8 @@ def write_mapped_rows(
     rows_for_checksum: list[tuple] = list(mapped_rows)
     if write_mode == "upsert" and conflict_columns:
         mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
+    # Dense INSERT/MERGE: absent schemaless fields → SQL NULL (sparse keeps sentinel).
+    mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
 
     if transform_errors and policy == "fail":
         return WriteResult(
@@ -3995,13 +4240,22 @@ def write_mapped_rows(
                 # QuestDB's pg_catalog reflection is incomplete; use idempotent DDL.
                 table_exists = False
             else:
-                inspector = inspect(engine)
-                table_exists = inspector.has_table(table_name, schema=schema_name)
+                # Cached per table: a chunked load asks this once per chunk, and
+                # the answer only changes on DDL we run ourselves below — every
+                # such branch invalidates.
+                table_exists = reflection_cache.get_or_load(
+                    engine,
+                    schema_name,
+                    table_name,
+                    "has_table",
+                    lambda: inspect(engine).has_table(table_name, schema=schema_name),
+                )
 
             if write_mode == "replace" and table_exists:
                 conn.execute(sa.schema.DropTable(table_obj, if_exists=True))
                 conn.commit()
                 table_exists = False
+                reflection_cache.invalidate_table(engine, schema_name, table_name)
 
             if not table_exists and not create_table:
                 return WriteResult(
@@ -4062,6 +4316,10 @@ def write_mapped_rows(
                         conn.rollback()
                     else:
                         raise
+                finally:
+                    # The table now exists (or a concurrent writer created it).
+                    # Either way the cached "missing" answer is stale.
+                    reflection_cache.invalidate_table(engine, schema_name, table_name)
 
             if table_exists and backfill_new_fields:
                 add_missing_columns(
@@ -4073,6 +4331,12 @@ def write_mapped_rows(
                     backfill=True,
                     connection=conn,
                 )
+                stamp_ceiling_by_col = {
+                    col: target_column_types[col]
+                    for col in target_cols
+                    if col in explicit_stamps and col in target_column_types
+                }
+                alter_widen_refusals: list[dict[str, Any]] = []
                 _widen_existing_columns_sa(
                     conn,
                     engine,
@@ -4082,7 +4346,17 @@ def write_mapped_rows(
                     target_cols,
                     target_column_types,
                     conflict_columns=conflict_columns,
+                    stamp_ceiling_by_col=stamp_ceiling_by_col or None,
+                    refusals_out=alter_widen_refusals,
                 )
+                if alter_widen_refusals:
+                    logger.info(
+                        "generic_sql Map≡ALTER live refusals: %s",
+                        alter_widen_refusals,
+                    )
+                # Drift backfill may have added or widened columns; anything
+                # reflected before this point describes the old shape.
+                reflection_cache.invalidate_table(engine, schema_name, table_name)
 
             if sparse_converted and write_mode == "upsert" and conflict_columns:
                 from connectors.writer_common import row_has_missing_sentinel
@@ -4105,6 +4379,16 @@ def write_mapped_rows(
 
             total = len(converted_rows)
             chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE) if total else 0
+            # The ledger is only needed when a replay could duplicate rows. An
+            # upsert keyed on conflict columns is already idempotent, so paying
+            # for a ledger round-trip per chunk there would be pure overhead.
+            ledger_table = None
+            if ledger_job_id and total and not (write_mode == "upsert" and conflict_columns):
+                ledger_table = ensure_sqlalchemy_write_ledger(conn, schema=schema_name)
+                if ledger_table is not None:
+                    conn.commit()
+                else:
+                    ledger_unavailable = True
             for chunk_idx in range(chunks):
                 start = chunk_idx * CHUNK_SIZE
                 batch = converted_rows[start : start + CHUNK_SIZE]
@@ -4112,6 +4396,26 @@ def write_mapped_rows(
                     break
 
                 try:
+                    already = (
+                        sqlalchemy_chunk_rows_written(
+                            conn,
+                            ledger_table,
+                            job_id=ledger_job_id,
+                            batch_key=ledger_batch_key,
+                            chunk_idx=chunk_idx,
+                        )
+                        if ledger_table is not None
+                        else None
+                    )
+                    if already is not None:
+                        # A previous attempt already committed this chunk. Replay
+                        # its recorded row count instead of re-inserting the rows.
+                        written += already
+                        ledger_chunks_skipped += 1
+                        chunks_completed = chunk_idx + 1
+                        if on_checkpoint:
+                            on_checkpoint(chunks_completed, chunks, written)
+                        continue
                     chunk_written = 0
                     if write_mode == "upsert" and conflict_columns:
                         chunk_written = _upsert_batch(
@@ -4131,6 +4435,15 @@ def write_mapped_rows(
                         chunk_written = max(
                             0, getattr(result, "rowcount", None) or 0
                         ) or len(batch)
+                    if ledger_table is not None:
+                        mark_sqlalchemy_chunk_committed(
+                            conn,
+                            ledger_table,
+                            job_id=ledger_job_id,
+                            batch_key=ledger_batch_key,
+                            chunk_idx=chunk_idx,
+                            rows_written=chunk_written,
+                        )
                     conn.commit()
                     written += chunk_written
                 except Exception as chunk_exc:
@@ -4195,6 +4508,31 @@ def write_mapped_rows(
                                     }
                                 )
                                 transform_errors.append(str(row_exc)[:200])
+                        if ledger_table is not None:
+                            # Row-by-row salvage already committed the good rows.
+                            # Record the surviving count so a retry skips them
+                            # instead of duplicating them, and so it does not
+                            # re-attempt the rows we know are unfit.
+                            try:
+                                mark_sqlalchemy_chunk_committed(
+                                    conn,
+                                    ledger_table,
+                                    job_id=ledger_job_id,
+                                    batch_key=ledger_batch_key,
+                                    chunk_idx=chunk_idx,
+                                    rows_written=chunk_written,
+                                )
+                                conn.commit()
+                            except Exception as ledger_exc:
+                                try:
+                                    conn.rollback()
+                                except Exception:
+                                    pass
+                                logger.warning(
+                                    "write ledger update failed for chunk %s: %s",
+                                    chunk_idx,
+                                    ledger_exc,
+                                )
                         written += chunk_written
                     elif policy == "fail" or not is_sql_data_error(chunk_exc):
                         raise
@@ -4204,6 +4542,17 @@ def write_mapped_rows(
                 chunks_completed = chunk_idx + 1
                 if on_checkpoint:
                     on_checkpoint(chunks_completed, chunks, written)
+
+        if ledger_chunks_skipped:
+            transform_errors.append(
+                f"Skipped {ledger_chunks_skipped} chunk(s) already committed by a "
+                "previous attempt (write ledger prevented duplicate rows)"
+            )
+        elif ledger_unavailable:
+            transform_errors.append(
+                "Could not create the write ledger on this destination; a retry "
+                "after an interrupted write may duplicate rows"
+            )
 
         return WriteResult(
             ok=True,
@@ -4252,4 +4601,4 @@ def write_mapped_rows(
             warnings=transform_errors,
         )
     finally:
-        engine.dispose()
+        release_engine(engine)

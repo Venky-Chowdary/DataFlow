@@ -202,7 +202,7 @@ export function ConnectorCatalogPanel({
           <p className="df2-catalog-meta">
             {filtered.toLocaleString()} shown
             {total > 0 && ` · ${total.toLocaleString()} in catalog`}
-            {transferLive > 0 && ` · ${transferLive.toLocaleString()} certified`}
+            {transferLive > 0 && ` · ${transferLive.toLocaleString()} transfer-live drivers`}
             {sourceOnlyCount > 0 && ` · ${sourceOnlyCount.toLocaleString()} source-only`}
             {plannedCount > 0 && ` · ${plannedCount.toLocaleString()} planned`}
             {role !== "all" && (

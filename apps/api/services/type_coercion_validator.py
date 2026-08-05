@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from services.type_system import is_lossy_coercion, normalize_logical_type
+from services.type_system import (
+    is_lossy_coercion,
+    is_precision_collapse_coercion,
+    normalize_logical_type,
+    resolve_mapping_target_type,
+    specialty_carrier_base,
+    specialty_wire_preserves_value,
+    uuid_capacity_string_carrier,
+)
 
 
 def validate_mapping_coercions(
@@ -15,6 +23,7 @@ def validate_mapping_coercions(
     schema_policy: str = "manual_review",
     confidence_floor: float = 0.85,
     validation_mode: str = "strict",
+    dest_db_type: str = "",
 ) -> list[dict[str, Any]]:
     """Return structured coercion issues for each mapping pair.
 
@@ -23,10 +32,13 @@ def validate_mapping_coercions(
     confidence or whether the coercion is usually lossy. This prevents silent
     data loss from schema drift.
 
-    Under ``strict`` / ``maximum``, lossy coercions always block. Under
-    ``balanced`` / ``review``, declared lossy pairs warn (mirrors G3) so Map and
-    Validate agree — value-level sentinel NULL loss is still enforced by
-    ``coercion_probe`` during preflight.
+    Declared lossy coercions always block under strict unless a verified
+    continue-policy Migration Risk Contract clears the mapping (aligned with
+    G3/G4/G6). Boolean ``risk_acknowledged`` alone never softens. Balanced/
+    review may still warn for Map-time advisory without a contract.
+
+    Same-logical pairs still run precision-collapse checks (DECIMAL/VARCHAR/TZ
+    narrowing) — an early ``continue`` used to green G9 while G3/G6 blocked.
     """
     type_locked = (schema_policy or "").lower() == "type_locked"
     mode = (validation_mode or "strict").strip().lower()
@@ -37,18 +49,70 @@ def validate_mapping_coercions(
         src = m.get("source", "")
         tgt = m.get("target", "")
         src_type = source_types.get(src, "VARCHAR")
-        tgt_type = target_types.get(tgt, src_type)
+        # Create-new stamps (e.g. BQ UUID→STRING) must win over missing live DDL.
+        tgt_type = resolve_mapping_target_type(
+            m,
+            target_types=target_types,
+            source_type=src_type,
+            dest_db_type=dest_db_type,
+        )
         src_logical = normalize_logical_type(src_type)
         tgt_logical = normalize_logical_type(tgt_type)
-        if src_logical == tgt_logical:
+        # Width-safe UUID / ObjectId wires are value-preserving create-new sinks
+        # (unless type_locked — contract forbids logical drift even to safe wires).
+        specialty = specialty_carrier_base(src_type)
+        wire_ok = (
+            (src_logical == "uuid" and uuid_capacity_string_carrier(tgt_type))
+            or (specialty and specialty_wire_preserves_value(specialty, tgt_type))
+            or (specialty and specialty_carrier_base(tgt_type) == specialty)
+        )
+        if wire_ok and not type_locked:
             continue
-        lossy = is_lossy_coercion(src_type, tgt_type)
-        if type_locked:
+        precision_collapse = is_precision_collapse_coercion(
+            src_type, tgt_type, dest_db=dest_db_type
+        )
+        lossy = (
+            is_lossy_coercion(src_type, tgt_type, dest_db=dest_db_type)
+            or precision_collapse
+        )
+        # Same logical family can still be lossy (YEAR→SMALLINT, MONEY→DECIMAL,
+        # BIT→BYTEA). Never early-continue past is_lossy — Map/G3 SSOT.
+        if src_logical == tgt_logical and not lossy and not wire_ok:
+            continue
+        create_new = bool(m.get("create_new"))
+        # Create-new UUID→bare STRING/TEXT (BQ/Databricks/SQLite): polarity warn.
+        uuid_string_create_new = bool(
+            create_new
+            and src_logical == "uuid"
+            and tgt_logical in {"string", "text"}
+            and not uuid_capacity_string_carrier(tgt_type)
+        )
+        if type_locked and (src_logical != tgt_logical or wire_ok):
             severity = "block"
+        elif type_locked and precision_collapse:
+            severity = "block"
+        elif uuid_string_create_new:
+            from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+            risk_cleared = mapping_has_clearing_risk_contract(m)
+            # ObjectId→TEXT parity: create-new UUID→STRING needs Risk Contract.
+            severity = "warn" if risk_cleared or balanced else "block"
         elif lossy:
-            severity = "warn" if balanced else "block"
+            from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+            risk_cleared = mapping_has_clearing_risk_contract(m)
+            # Balanced Map-time advisory may warn; strict needs clearing contract.
+            if risk_cleared or balanced:
+                severity = "warn"
+            else:
+                severity = "block"
+        elif src_logical == tgt_logical:
+            # Unreachable when precision_collapse is False (continued above).
+            continue
         else:
-            severity = "block" if float(m.get("confidence", 0)) < floor else "warn"
+            # Cross-logical but not lossy = allow-listed widen (boolean→integer).
+            # Do not warn — Map preserve and G3 must agree.
+            continue
         issues.append({
             "source": src,
             "target": tgt,

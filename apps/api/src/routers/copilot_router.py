@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Copilot API Router
+Datawrap — Copilot API Router
 
 Customer-facing chat + separate training agent endpoints.
 """
@@ -59,6 +59,7 @@ class ModelCapabilitiesResponse(BaseModel):
     active_provider: str
     active_model: str
     agent_mode: str
+    pilot_engine: str = "local"
     fallback_order: list[str]
     providers: list[dict]
     guarantees: list[str]
@@ -156,7 +157,10 @@ async def _start_confirmed_transfer(payload: dict) -> dict:
 
 @router.post("/confirm")
 async def copilot_confirm(request: ConfirmActionRequest):
-    """Consume a Pilot mutation ack (e.g. create_connector) — secrets never leave the ledger."""
+    """Consume a Pilot mutation ack (create_connector / start_transfer / run_schedule).
+
+    Secrets and schedule ids stay on the server ledger — the browser only sends ack_id.
+    """
     from services.connector_store import create_connector
 
     from ..ai.copilot.ack_ledger import get_ack_ledger
@@ -225,6 +229,45 @@ async def copilot_confirm(request: ConfirmActionRequest):
         )
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
+    if kind == "run_schedule":
+        schedule_id = str(payload.get("schedule_id") or "").strip()
+        if not schedule_id:
+            ledger.release_claim(ack_id)
+            raise HTTPException(status_code=400, detail="Approval is missing schedule_id")
+        try:
+            from services.schedule_store import get_schedule
+            from ..services.schedule_runner import _run_schedule
+
+            sched = get_schedule(schedule_id)
+            if not sched:
+                ledger.release_claim(ack_id)
+                raise HTTPException(status_code=404, detail="Schedule not found")
+            job_id = _run_schedule(schedule_id)
+            if not job_id:
+                ledger.release_claim(ack_id)
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not start pipeline — check connectors",
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            ledger.release_claim(ack_id)
+            raise HTTPException(status_code=400, detail=f"Failed to run pipeline: {exc}") from exc
+        result = {
+            "job_id": job_id,
+            "schedule_id": schedule_id,
+            "name": str(payload.get("name") or getattr(sched, "name", "") or ""),
+            "status": "queued",
+        }
+        ledger.finalize(
+            ack_id,
+            actor=request.actor or "pilot-ui",
+            reason=request.reason or "confirmed",
+            result=result,
+        )
+        return {"ok": True, "idempotent": False, "kind": kind, **result}
+
     ledger.release_claim(ack_id)
     raise HTTPException(status_code=400, detail=f"Unsupported approval kind: {kind}")
 
@@ -245,7 +288,7 @@ async def copilot_prompts():
 
 @router.get("/tools", response_model=ToolRegistryResponse)
 async def copilot_tools():
-    """Expose Data Pilot tool registry and generated connector actions."""
+    """Expose Datawrap Pilot tool registry and generated connector actions."""
     from ..ai.copilot.tools import get_tool_registry
     return get_tool_registry()
 

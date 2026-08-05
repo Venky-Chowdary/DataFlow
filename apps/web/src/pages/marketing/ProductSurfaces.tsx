@@ -2,6 +2,12 @@ import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { MarketingHeroBand } from "../../components/marketing/MarketingHeroBand";
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
 import { MarketingSectionFooter } from "../../components/marketing/MarketingSectionFooter";
+import {
+  AlgorithmCinemaBand,
+  CdcCinema,
+  MappingCinema,
+  ProofCinema,
+} from "../../components/landing/AlgorithmCinema";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import {
   AlgoBlock,
@@ -140,12 +146,12 @@ function SurfaceShell({
       ) : null}
       {children}
       <MarketingReveal>
-        <section className="lp-mkt-body">
-          <MarketingSectionFooter>
-            <button type="button" className="lp-btn lp-btn--ghost" onClick={() => onNavigate(next)}>
+        <section className="lp-mkt-next-band">
+          <MarketingSectionFooter align="center">
+            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate(next)}>
               Next: {nextLabel} →
             </button>
-            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("help")}>
+            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("help")}>
               Read the docs
             </button>
           </MarketingSectionFooter>
@@ -188,7 +194,7 @@ function TransferStudioMock() {
   }, []);
 
   return (
-    <Shot label="Transfer Studio · Orders migration" caption="Live preflight advancing through eight fail-fast gates before write.">
+    <Shot label="Transfer Studio · Orders migration" caption="Live preflight advancing through nine fail-fast gates (G1–G9) before write.">
       <div className="lp-mkt-ui-grid lp-mkt-ui-grid--studio">
         <div className="lp-mkt-ui-pane">
           <h4>Semantic map</h4>
@@ -325,7 +331,7 @@ LIMIT 200;`}</pre>
 
 function PilotMock() {
   return (
-    <Shot label="Data Pilot · triage chat" caption="Natural language over the same engine — failed gates, mapping fixes, and Job Theater handoff.">
+    <Shot label="Datawrap Pilot · triage chat" caption="Natural language over the same engine — failed gates, mapping fixes, and Job Theater handoff.">
       <div className="lp-mkt-ui-chat">
         <div className="lp-mkt-ui-bubble is-user">
           Why did the Orders → BigQuery job fail preflight?
@@ -349,7 +355,7 @@ function McpMock() {
     <Shot label="MCP · Cursor agent tools" caption="Agents call the same governed tools — never raw destination passwords.">
       <div className="lp-mkt-ui-mcp">
         <div className="lp-mkt-ui-mcp-tool">
-          <code>dataflow.transfer.run</code>
+          <code>datawrap.transfer.run</code>
           <span className="lp-mkt-ui-pill is-healthy">allowed</span>
         </div>
         <pre className="lp-mkt-ui-sql">{`{
@@ -381,7 +387,7 @@ export function TransferStudioPage({
     <SurfaceShell
       kicker="Product · Transfer Studio"
       title="The wizard that refuses silent data loss"
-      lead="Connect any source to any destination, review semantic maps with confidence scores, pass eight preflight gates (G1–G8), then write with quarantine and checksum proof — all in one governed path."
+      lead="Connect any source to any destination, review semantic maps with confidence scores, pass nine preflight gates (G1–G9), then write with quarantine and checksum proof — all in one governed path."
       ctaPrimary="Open Transfer Studio"
       ctaSecondary="See Job Theater"
       onPrimary={onGetStarted}
@@ -404,7 +410,7 @@ export function TransferStudioPage({
           <p>
             Transfer Studio is where humans plan transfers. You pick a source and destination (or upload CSV, JSONL, Parquet),
             inspect the proposed semantic map, run preflight, and only then authorize write. The same path is shared with
-            Data Pilot and MCP — so UI, chat, and agents never diverge into unsafe shortcuts.
+            Datawrap Pilot and MCP — so UI, chat, and agents never diverge into unsafe shortcuts.
           </p>
           <p>
             Unlike script-first ETL, Studio keeps evidence with the job: mapping decisions, gate results, quarantined rows,
@@ -464,10 +470,10 @@ export function TransferStudioPage({
         </ProofCallout>
       </Chapter>
 
-      <Chapter id="ts-gates" kicker="Preflight · G1–G8" title="Eight gates from the real engine — fail-fast before write">
+      <Chapter id="ts-gates" kicker="Preflight · G1–G8" title="nine core gates from the real engine — fail-fast before write">
         <div className="lp-mkt-prose">
           <p>
-            These are not marketing labels. They map to <code>GateId</code> in DataFlow&apos;s preflight package.
+            These are not marketing labels. They map to <code>GateId</code> in Datawrap&apos;s preflight package.
             A single <em>block</em> stops write — there is no “best effort” mode that drops rows quietly.
           </p>
         </div>
@@ -498,20 +504,18 @@ export function TransferStudioPage({
             },
           ]}
         />
-        <div className="lp-mkt-capability-grid">
-          {[
-            { t: "Role detection", d: "Amounts, emails, IDs, and timestamps classified so synonyms align across schemas." },
-            { t: "Confidence scores", d: "Every edge shows a score. You pin, reject, or override before production write." },
-            { t: "Type-aware coerce", d: "Only fail-fast-safe coercions are offered. Unsafe casts never silently apply." },
-            { t: "Synonym dictionary", d: "Workspace synonyms improve over time — Pilot can propose additions from failed jobs." },
-          ].map((c) => (
-            <article key={c.t} className="lp-mkt-capability-card">
-              <h3>{c.t}</h3>
-              <p>{c.d}</p>
-            </article>
-          ))}
-        </div>
       </Chapter>
+
+      <MarketingReveal>
+        <AlgorithmCinemaBand
+          kicker="Mapping · Preflight"
+          title="Watch the semantic mapper score every edge"
+          lead="Format classify, role enrichment, and continuous confidence — not a string-match guess. Ambiguous edges pause for human review before they can pin into workspace synonyms."
+          compact
+        >
+          <MappingCinema />
+        </AlgorithmCinemaBand>
+      </MarketingReveal>
 
       <Chapter id="ts-scenario" kicker="Worked example" title="Retail orders CSV → PostgreSQL">
         <div className="lp-mkt-scenario">
@@ -616,23 +620,16 @@ export function JobTheaterPage({
         </ProofCallout>
       </Chapter>
 
-      <Chapter id="jt-caps" kicker="Capabilities" title="What operators get on every run">
-        <div className="lp-mkt-capability-grid">
-          {[
-            { t: "Phase timeline", d: "Ordered phases with timestamps — no opaque spinner that hides where time went." },
-            { t: "Batch counters", d: "Source, written, quarantined, and skipped counts update as batches commit." },
-            { t: "Quarantine samples", d: "Inspect failing values without dumping the whole table into logs." },
-            { t: "Proof report", d: "Row counts and content checksums after write — matched or failed, never assumed." },
-            { t: "Retry with context", d: "Re-run from the failed plan with the same mapping and gate evidence attached." },
-            { t: "Agent parity", d: "MCP-triggered jobs appear identically — same phases, same proof artifacts." },
-          ].map((c) => (
-            <article key={c.t} className="lp-mkt-capability-card">
-              <h3>{c.t}</h3>
-              <p>{c.d}</p>
-            </article>
-          ))}
-        </div>
-      </Chapter>
+      <MarketingReveal>
+        <AlgorithmCinemaBand
+          kicker="Proof"
+          title="Checksum + row-count reconcile lands on every job"
+          lead="Job Theater does not claim success on status alone. The engine hashes mapped source rows, reads the destination sample, compares — then flashes MATCH only when counts and content agree."
+          compact
+        >
+          <ProofCinema />
+        </AlgorithmCinemaBand>
+      </MarketingReveal>
 
       <Chapter id="jt-scenario" kicker="Worked example" title="Watching a warehouse load fail safely">
         <div className="lp-mkt-scenario">
@@ -730,21 +727,16 @@ export function PipelinesPage({
         />
       </Chapter>
 
-      <Chapter id="pl-modes" kicker="Write modes" title="Pick the mode that matches the destination">
-        <div className="lp-mkt-capability-grid">
-          {[
-            { t: "Watermark incremental", d: "Advance a high-water mark column; only new/changed rows move each tick." },
-            { t: "Upsert", d: "Merge on primary/business keys where the destination driver supports it." },
-            { t: "Append", d: "Insert-only streams for events and immutable fact tables." },
-            { t: "Overwrite", d: "Full refresh when the table must match source exactly after the run." },
-          ].map((c) => (
-            <article key={c.t} className="lp-mkt-capability-card">
-              <h3>{c.t}</h3>
-              <p>{c.d}</p>
-            </article>
-          ))}
-        </div>
-      </Chapter>
+      <MarketingReveal>
+        <AlgorithmCinemaBand
+          kicker="CDC"
+          title="Snapshot handoff, then idempotent streaming upserts"
+          lead="Pipelines default to at-least-once upserts on the primary key. The snapshot window backfills, LSN 0/16A2B40 hands off, and streaming ticks apply — until exactly-once is proven for a route, we say so."
+          compact
+        >
+          <CdcCinema />
+        </AlgorithmCinemaBand>
+      </MarketingReveal>
 
       <Chapter id="pl-scenario" kicker="Worked example" title="Hourly orders into BigQuery">
         <div className="lp-mkt-scenario">
@@ -786,7 +778,7 @@ export function QueryPlaygroundPage({
         { value: "Handoff", label: "Into Transfer Studio" },
       ]}
       next="product-pilot"
-      nextLabel="Data Pilot"
+      nextLabel="Datawrap Pilot"
       onNavigate={onNavigate}
     >
       <Chapter id="qy-what" kicker="What it is" title="Exploration that respects connector boundaries">
@@ -843,20 +835,14 @@ export function QueryPlaygroundPage({
       </Chapter>
 
       <Chapter id="qy-caps" kicker="Capabilities" title="What you can do in the playground">
-        <div className="lp-mkt-capability-grid">
-          {[
-            { t: "Multi-driver SQL", d: "PostgreSQL, MySQL, Snowflake, BigQuery, and other SQLAlchemy-backed engines." },
-            { t: "Document queries", d: "Mongo-style filters for collections when the connector is document-native." },
-            { t: "Result preview", d: "Column types and sample rows before you commit to a transfer plan." },
-            { t: "Export samples", d: "CSV/JSONL samples for offline review — still scoped by preview limits." },
-            { t: "Studio handoff", d: "Promote a validated query/table selection into a Transfer Studio plan." },
-            { t: "Audit context", d: "Who queried what is attributable in enterprise workspaces." },
-          ].map((c) => (
-            <article key={c.t} className="lp-mkt-capability-card">
-              <h3>{c.t}</h3>
-              <p>{c.d}</p>
-            </article>
-          ))}
+        <div className="lp-mkt-prose">
+          <p>
+            Author multi-driver SQL against PostgreSQL, MySQL, Snowflake, BigQuery, and other SQLAlchemy-backed
+            engines — plus Mongo-style filters when the connector is document-native. Every result is a preview,
+            capped by workspace policy, with column types surfaced so you know what Studio will map. When a slice
+            is ready, promote it into a Transfer Studio plan; the mapping, gates, and proof still apply. Every
+            query is attributable in enterprise workspaces — nothing runs anonymously.
+          </p>
         </div>
       </Chapter>
     </SurfaceShell>
@@ -872,16 +858,16 @@ export function DataPilotPage({
 }) {
   return (
     <SurfaceShell
-      kicker="Product · Data Pilot"
+      kicker="Product · Datawrap Pilot"
       title="Natural-language triage on the governed engine"
       lead="Ask why a gate failed, how to fix a map, or what a Job Theater run did — Pilot answers with the same evidence Studio and MCP use, and can hand you back into the wizard when you need controls."
-      ctaPrimary="Try Data Pilot"
+      ctaPrimary="Try Datawrap Pilot"
       ctaSecondary="MCP Server"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-mcp")}
       heroVisual={<PilotMock />}
       liveFrames={PRODUCT_FRAMES.pilot}
-      liveTitle="Data Pilot in the live workspace"
+      liveTitle="Datawrap Pilot in the live workspace"
       stats={[
         { value: "NL", label: "Triage chat" },
         { value: "Gates", label: "Explain failures" },
@@ -895,8 +881,8 @@ export function DataPilotPage({
       <Chapter id="dp-what" kicker="What it is" title="Chat that cannot bypass preflight">
         <div className="lp-mkt-prose">
           <p>
-            Data Pilot is an operator copilot, not a shadow ETL path. When it proposes a mapping fix or quarantine
-            policy, the change still flows through Transfer Studio’s review and the eight gates. That is how Pilot
+            Datawrap Pilot is an operator copilot, not a shadow ETL path. When it proposes a mapping fix or quarantine
+            policy, the change still flows through Transfer Studio’s review and the nine core gates. That is how Pilot
             stays trustworthy for production teams.
           </p>
         </div>
@@ -926,19 +912,6 @@ export function DataPilotPage({
             },
           ]}
         />
-        <div className="lp-mkt-capability-grid">
-          {[
-            { t: "Gate explainers", d: "Plain-language reasons for G1–G8 failures with the underlying evidence." },
-            { t: "Mapping proposals", d: "Suggest synonym pins and coerce rules from failed samples." },
-            { t: "Job inspection", d: "Summarize Theater phases, quarantine counts, and proof status." },
-            { t: "Safe handoff", d: "Deep-link into Studio or Theater with the job and map context preserved." },
-          ].map((c) => (
-            <article key={c.t} className="lp-mkt-capability-card">
-              <h3>{c.t}</h3>
-              <p>{c.d}</p>
-            </article>
-          ))}
-        </div>
       </Chapter>
     </SurfaceShell>
   );
@@ -955,7 +928,7 @@ export function McpServerPage({
     <SurfaceShell
       kicker="Product · MCP Server"
       title="Agents get tools — never raw passwords"
-      lead="Cursor, Claude, and VS Code call DataFlow MCP tools under workspace RBAC. Transfers still map, preflight, quarantine, and reconcile — with audit entries for every agent-initiated run."
+      lead="Cursor, Claude, and VS Code call Datawrap MCP tools under workspace RBAC. Transfers still map, preflight, quarantine, and reconcile — with audit entries for every agent-initiated run."
       ctaPrimary="Connect an agent"
       ctaSecondary="Security overview"
       onPrimary={onGetStarted}
@@ -1030,18 +1003,14 @@ export function McpServerPage({
       </Chapter>
 
       <Chapter id="mcp-tools" kicker="Tooling" title="Representative tool groups">
-        <div className="lp-mkt-capability-grid">
-          {[
-            { t: "Catalog & connectors", d: "List transfer-ready drivers and connection health." },
-            { t: "Transfer plans", d: "Create/update maps; never skip review flags on ambiguous edges." },
-            { t: "Run & status", d: "Enqueue governed runs; poll phases and proof." },
-            { t: "Quarantine read", d: "Sample bad rows for agent-assisted fixes — still policy-scoped." },
-          ].map((c) => (
-            <article key={c.t} className="lp-mkt-capability-card">
-              <h3>{c.t}</h3>
-              <p>{c.d}</p>
-            </article>
-          ))}
+        <div className="lp-mkt-prose">
+          <p>
+            Tools group cleanly around <strong>catalog &amp; connectors</strong> (transfer-ready drivers and
+            connection health), <strong>transfer plans</strong> (create/update maps without skipping review flags
+            on ambiguous edges), <strong>run &amp; status</strong> (enqueue governed runs and poll phases + proof),
+            and <strong>quarantine read</strong> (sample bad rows for agent-assisted fixes, still policy-scoped).
+            The API surface is thin on purpose — the engine, not the wrapper, decides what is safe.
+          </p>
         </div>
       </Chapter>
     </SurfaceShell>
@@ -1056,60 +1025,83 @@ export function MigrationsSolutionPage({
   onNavigate: Nav;
 }) {
   return (
-    <SurfaceShell
+    <SolutionShell
       kicker="Solution · Migrations"
-      title="Cross-schema moves when names never matched"
-      lead="Migrate databases and files across schemas that were never 1:1 — with semantic maps you can review, type-safe coercion, and checksum proof before cutover."
+      title="Cross-schema cutover you can prove"
+      lead="Move data across schemas that were never 1:1. Semantic maps you can review, nine fail-fast gates (G1–G9), quarantine with reasons, and checksum proof before cutover."
       ctaPrimary="Start a migration"
-      ctaSecondary="Transfer Studio"
+      ctaSecondary="Open Transfer Studio"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-transfer")}
       heroVisual={<TransferStudioMock />}
-      stats={[
-        { value: "Semantic", label: "Column matching" },
-        { value: "Review", label: "Ambiguous edges" },
-        { value: "Fail-fast", label: "Unsafe casts" },
-        { value: "Cutover", label: "Checksum proof" },
+      outcomes={[
+        {
+          title: "Semantic column matching",
+          body: "Roles and type fit outrank string names — order_amt lines up with payment_amount when the meaning matches.",
+        },
+        {
+          title: "Human review on ambiguous edges",
+          body: "Low-confidence maps pause for confirmation. Nothing pins into workspace synonyms until someone accepts it.",
+        },
+        {
+          title: "Fail-fast on unsafe casts",
+          body: "Dry-run isolates coerce failures into quarantine with column, value, and reason — never a silent null.",
+        },
+        {
+          title: "Checksum-signed cutover",
+          body: "Pilot a subset first, then full write. Finance archives the reconcile report — counts and hashes that MATCH.",
+        },
       ]}
+      steps={[
+        {
+          n: "01",
+          title: "Discover both sides",
+          body: "Profile source and destination. Datawrap proposes role-aware maps instead of assuming name equality.",
+        },
+        {
+          n: "02",
+          title: "Review the map",
+          body: "Operators confirm ambiguous edges. High-confidence matches pin; the rest wait for a human decision.",
+        },
+        {
+          n: "03",
+          title: "Clear nine core gates",
+          body: "Contracts, types, capacity, and dry-run must pass before write. One block stops the load.",
+        },
+        {
+          n: "04",
+          title: "Cutover with proof",
+          body: "Pilot earns checksum confidence, then production write ships with quarantine visible and a reconcile pack.",
+        },
+      ]}
+      caps={[
+        {
+          title: "Messy real-world schemas",
+          body: "Amounts, emails, and identifiers align even when column names diverge across ERP, CRM, and warehouse copies.",
+        },
+        {
+          title: "Quarantine you can act on",
+          body: "Bad rows surface with column + value + reason at write time — replayable, never vanished into “job complete.”",
+        },
+        {
+          title: "Compliance-ready artifacts",
+          body: "Mapping decisions, gate results, quarantine samples, and matched checksums export without a screenshot pass.",
+        },
+      ]}
+      cinema={
+        <AlgorithmCinemaBand
+          kicker="Mapping"
+          title="Watch every edge earn a confidence score"
+          lead="Format classify, role enrichment, and continuous confidence — not string matching. Ambiguous edges pause for human review before they pin."
+          compact
+        >
+          <MappingCinema />
+        </AlgorithmCinemaBand>
+      }
       next="solution-warehouse"
       nextLabel="Warehouse loading"
       onNavigate={onNavigate}
-    >
-      <Chapter id="mig-flow" kicker="How it works" title="Migration flow from discovery to cutover">
-        <div className="lp-mkt-prose">
-          <p>
-            Migrations fail when teams assume name equality. DataFlow profiles both sides, proposes role-aware maps,
-            and forces a review on anything ambiguous. Preflight blocks cutover until contracts, types, and capacity
-            clear — then Job Theater proves the load.
-          </p>
-        </div>
-        <PacketFlow
-          nodes={[
-            { label: "Discover", sub: "Schemas" },
-            { label: "Map", sub: "Semantics", accent: true },
-            { label: "Pilot load", sub: "Sample proof" },
-            { label: "Cutover", sub: "Full write", accent: true },
-            { label: "Reconcile", sub: "Checksums" },
-            { label: "Sign-off", sub: "Evidence" },
-          ]}
-        />
-      </Chapter>
-      <Chapter id="mig-caps" kicker="Capabilities" title="Built for messy real-world schemas">
-        <div className="lp-mkt-capability-grid">
-          {[
-            { t: "Role-aware matching", d: "Amounts, emails, and identifiers align even when column names differ." },
-            { t: "Dual-run proof", d: "Pilot subset first; full cutover only after checksum confidence." },
-            { t: "Quarantine cutover", d: "Bad rows never block the clean set — and never disappear." },
-            { t: "Audit pack", d: "Maps, gates, and proof export for migration sign-off." },
-          ].map((c) => (
-            <article key={c.t} className="lp-mkt-capability-card">
-              <h3>{c.t}</h3>
-              <p>{c.d}</p>
-            </article>
-          ))}
-        </div>
-      </Chapter>
-    </SurfaceShell>
+    />
   );
 }
 
@@ -1121,48 +1113,155 @@ export function WarehouseSolutionPage({
   onNavigate: Nav;
 }) {
   return (
-    <SurfaceShell
-      kicker="Solution · Warehouse loading"
-      title="Bulk paths finance can trust"
-      lead="Load Snowflake, BigQuery, and Redshift with destination probes, capacity checks, upsert/overwrite modes, and reconciliation reports built for analytics stakeholders."
-      ctaPrimary="Load a warehouse"
-      ctaSecondary="Pipelines"
-      onPrimary={onGetStarted}
-      onSecondary={() => onNavigate("product-pipelines")}
-      heroVisual={<JobTheaterMock />}
-      stats={[
-        { value: "Native", label: "Warehouse drivers" },
-        { value: "Probe", label: "Perms · capacity" },
-        { value: "Bulk", label: "Write paths" },
-        { value: "Report", label: "Reconcile export" },
-      ]}
-      next="solution-sync"
-      nextLabel="Recurring sync"
-      onNavigate={onNavigate}
-    >
-      <Chapter id="wh-flow" kicker="How it works" title="Warehouse-specific probes before bulk write">
-        <div className="lp-mkt-prose">
-          <p>
-            Warehouse loads are expensive to get wrong. DataFlow probes permissions and capacity, validates the write
-            mode against the driver, then executes bulk paths. Post-load row counts and content checksums become the
-            report analytics and finance teams can archive.
-          </p>
+    <div className="lp-mkt-page lp-wh-v3">
+      <section className="lp-wh-hero" aria-label="Warehouse loading">
+        <div className="lp-shell lp-wh-hero-inner">
+          <div className="lp-wh-hero-copy">
+            <p className="lp-mkt-kicker">Solution · Warehouse loading</p>
+            <h1>Bulk loads finance can archive</h1>
+            <p className="lp-wh-lead">
+              Snowflake, BigQuery, and Redshift — with destination probes, capacity checks, and
+              reconciliation reports. Same nine core gates as every other Datawrap path.
+            </p>
+            <div className="lp-hero-cta">
+              <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
+                Load a warehouse
+              </button>
+              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("product-pipelines")}>
+                Explore Pipelines
+              </button>
+            </div>
+          </div>
+          <div className="lp-wh-hero-visual">{<JobTheaterMock />}</div>
         </div>
-        <div className="lp-mkt-capability-grid">
-          {[
-            { t: "Snowflake", d: "Upsert and overwrite with warehouse slot awareness." },
-            { t: "BigQuery", d: "Load jobs with destination table probes and proof counts." },
-            { t: "Redshift", d: "Bulk paths with capacity and permission checks." },
-            { t: "Scheduled refresh", d: "Promote any warehouse plan into Pipelines for cadence." },
-          ].map((c) => (
-            <article key={c.t} className="lp-mkt-capability-card">
-              <h3>{c.t}</h3>
-              <p>{c.d}</p>
-            </article>
-          ))}
+      </section>
+
+      <section className="lp-wh-rail" aria-label="Destinations">
+        <div className="lp-shell lp-wh-rail-inner">
+          <span>Snowflake</span>
+          <span>BigQuery</span>
+          <span>Redshift</span>
+          <span>Native drivers</span>
+          <span>Checksum MATCH</span>
         </div>
-      </Chapter>
-    </SurfaceShell>
+      </section>
+
+      <MarketingReveal>
+        <section className="lp-wh-split">
+          <div className="lp-shell lp-wh-split-grid">
+            <div>
+              <p className="lp-mkt-kicker">Before the bulk window</p>
+              <h2>Probe the destination first</h2>
+              <p>
+                Reachability, privileges, and warehouse capacity clear in preflight — so you do not
+                burn a load window on a doomed plan.
+              </p>
+              <ul className="lp-wh-list">
+                <li>Write rights and role checks before any bulk path starts</li>
+                <li>Slot / capacity estimates surfaced for operators</li>
+                <li>Same G1–G8 contract as Studio migrations — no warehouse shortcut</li>
+              </ul>
+            </div>
+            <aside className="lp-wh-panel" aria-label="Preflight snapshot">
+              <header>
+                <strong>Destination probe</strong>
+                <em>Ready</em>
+              </header>
+              <div><span>Reachability</span><em>ok</em></div>
+              <div><span>Privileges</span><em>write granted</em></div>
+              <div><span>Capacity</span><em>slots available</em></div>
+              <div><span>Preflight</span><em>8 / 8</em></div>
+            </aside>
+          </div>
+        </section>
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-wh-split lp-wh-split--alt">
+          <div className="lp-shell lp-wh-split-grid is-flip">
+            <div>
+              <p className="lp-mkt-kicker">Write modes</p>
+              <h2>Upsert, append, or overwrite — validated</h2>
+              <p>
+                Bulk modes are advertised only where the driver truly supports them. Coerce failures
+                quarantine in the open; nothing silently truncates.
+              </p>
+              <ul className="lp-wh-list">
+                <li>Driver-aware load jobs with quarantine samples</li>
+                <li>Honest labels — Planned stays Planned until evidence lands</li>
+                <li>Promote the same plan into Pipelines for recurring cadence</li>
+              </ul>
+            </div>
+            <aside className="lp-wh-modes" aria-label="Write modes">
+              <div><strong>Upsert</strong><span>Primary-key merge where proven</span></div>
+              <div><strong>Append</strong><span>Insert path with coerce quarantine</span></div>
+              <div><strong>Overwrite</strong><span>Replace window with reconcile after</span></div>
+            </aside>
+          </div>
+        </section>
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-wh-flow">
+          <div className="lp-shell">
+            <div className="lp-wh-section-head">
+              <p className="lp-mkt-kicker">How it works</p>
+              <h2>Four steps from probe to MATCH</h2>
+            </div>
+            <ol className="lp-wh-flow-list">
+              <li>
+                <span>01</span>
+                <strong>Probe</strong>
+                <p>Destination rights and capacity before the window opens.</p>
+              </li>
+              <li>
+                <span>02</span>
+                <strong>Map &amp; gate</strong>
+                <p>Semantic maps and nine fail-fast gates (G1–G9) — identical to Studio.</p>
+              </li>
+              <li>
+                <span>03</span>
+                <strong>Bulk write</strong>
+                <p>Driver path with quarantine for coerce failures.</p>
+              </li>
+              <li>
+                <span>04</span>
+                <strong>Prove</strong>
+                <p>Row counts and content checksums flash MATCH.</p>
+              </li>
+            </ol>
+          </div>
+        </section>
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <AlgorithmCinemaBand
+          kicker="Proof"
+          title="Checksum + row-count reconcile flashes MATCH"
+          lead="Success is never status alone. The engine hashes mapped source rows, reads the destination, and flashes MATCH only when counts and content agree."
+          compact
+        >
+          <ProofCinema />
+        </AlgorithmCinemaBand>
+      </MarketingReveal>
+
+      <section className="lp-wh-cta">
+        <div className="lp-shell lp-wh-cta-inner">
+          <div>
+            <h2>Ready to load with proof?</h2>
+            <p>Start free on the same engine — or talk to us about enterprise warehouse controls.</p>
+          </div>
+          <div className="lp-hero-cta">
+            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
+              Load a warehouse
+            </button>
+            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("solution-sync")}>
+              Next: Recurring sync →
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -1174,44 +1273,221 @@ export function SyncSolutionPage({
   onNavigate: Nav;
 }) {
   return (
-    <SurfaceShell
+    <SolutionShell
       kicker="Solution · Recurring sync"
-      title="Incremental pipelines with quarantine, not hope"
-      lead="Keep systems aligned on a cadence — watermark incremental, upsert, schema-drift blocking, and Job Theater visibility from every tick."
+      title="Incremental schedules with quarantine, not hope"
+      lead="Keep systems aligned on a cadence — watermark incremental, upsert, schema-drift blocking, and Job Theater visibility on every tick."
       ctaPrimary="Create a sync"
       ctaSecondary="Pipelines product"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-pipelines")}
       heroVisual={<PipelinesMock />}
-      stats={[
-        { value: "Cadence", label: "Hourly → weekly" },
-        { value: "Watermark", label: "Incremental" },
-        { value: "Drift", label: "Blocks bad ticks" },
-        { value: "Theater", label: "Every run" },
+      outcomes={[
+        {
+          title: "Cadence you choose",
+          body: "Hourly to weekly schedules — every tick is a real governed job, not a scheduler-only shortcut.",
+        },
+        {
+          title: "Watermark incremental",
+          body: "Deltas resolve cleanly from the last successful watermark so restarts do not double-write chaos.",
+        },
+        {
+          title: "Drift that blocks",
+          body: "Schema changes stop the line until you review the diff — no silent write into a wrong shape.",
+        },
+        {
+          title: "Theater on every run",
+          body: "Phases, quarantine samples, and checksum proof attach to each tick operators can open later.",
+        },
       ]}
+      steps={[
+        {
+          n: "01",
+          title: "Promote a proven plan",
+          body: "Start from a Studio map that already cleared gates — sync inherits the same engine.",
+        },
+        {
+          n: "02",
+          title: "Set cadence and mode",
+          body: "Pick schedule, watermark or upsert mode, and destination write strategy operators trust.",
+        },
+        {
+          n: "03",
+          title: "Run ticks under gates",
+          body: "Each tick maps, preflights, writes with quarantine, and reconciles — identical to interactive loads.",
+        },
+        {
+          n: "04",
+          title: "Watch and correct",
+          body: "Job Theater surfaces drift blocks and quarantine. Fix once; the next tick reuses the decision.",
+        },
+      ]}
+      caps={[
+        {
+          title: "Honest CDC handoff",
+          body: "Snapshot + LSN handoff, then streaming upserts on primary keys. At-least-once until exactly-once is proven.",
+        },
+        {
+          title: "Idempotent upserts",
+          body: "Primary keys stay authoritative across retries so partial ticks do not corrupt the destination.",
+        },
+        {
+          title: "Same policy for agents",
+          body: "MCP and Pilot can trigger syncs — they still inherit workspace RBAC and the nine core gates.",
+        },
+      ]}
+      cinema={
+        <AlgorithmCinemaBand
+          kicker="CDC"
+          title="Snapshot + LSN handoff, then streaming upserts"
+          lead="Honest CDC: start with a snapshot window, hand off at a logical LSN, and stream idempotent upserts. At-least-once is the default until exactly-once is proven."
+          compact
+        >
+          <CdcCinema />
+        </AlgorithmCinemaBand>
+      }
       next="pricing"
       nextLabel="Pricing"
       onNavigate={onNavigate}
-    >
-      <Chapter id="sy-flow" kicker="How it works" title="From proven plan to reliable ticks">
-        <div className="lp-mkt-prose">
-          <p>
-            Recurring sync is the Pipelines product applied to operational keep-warm loads. Promote a Studio plan,
-            pick cadence and mode, and every tick inherits gates and proof. Drift stops the line instead of writing
-            into a silently wrong schema.
-          </p>
+    />
+  );
+}
+
+function SolutionShell({
+  kicker,
+  title,
+  lead,
+  ctaPrimary,
+  ctaSecondary,
+  onPrimary,
+  onSecondary,
+  heroVisual,
+  outcomes,
+  steps,
+  caps,
+  cinema,
+  next,
+  nextLabel,
+  onNavigate,
+}: {
+  kicker: string;
+  title: string;
+  lead: string;
+  ctaPrimary: string;
+  ctaSecondary: string;
+  onPrimary: () => void;
+  onSecondary: () => void;
+  heroVisual: ReactNode;
+  outcomes: { title: string; body: string }[];
+  steps: { n: string; title: string; body: string }[];
+  caps: { title: string; body: string }[];
+  cinema: ReactNode;
+  next: PublicRoute;
+  nextLabel: string;
+  onNavigate: Nav;
+}) {
+  return (
+    <div className="lp-mkt-page lp-sol-v2">
+      <section className="lp-sol-hero" aria-label={kicker}>
+        <div className="lp-sol-hero-waves" aria-hidden>
+          <span className="lp-wave-grid" />
+          <span className="lp-wave-glow lp-wave-glow--1" />
+          <span className="lp-wave-glow lp-wave-glow--2" />
         </div>
-        <PacketFlow
-          nodes={[
-            { label: "Promote", sub: "Studio plan" },
-            { label: "Cadence", sub: "Schedule", accent: true },
-            { label: "Delta", sub: "Watermark" },
-            { label: "Gates", sub: "Each tick", accent: true },
-            { label: "Sync", sub: "Upsert/append" },
-            { label: "Prove", sub: "Theater" },
-          ]}
-        />
-      </Chapter>
-    </SurfaceShell>
+        <div className="lp-sol-hero-inner">
+          <div className="lp-sol-hero-copy">
+            <p className="lp-pricing-hero-kicker">
+              <span className="lp-pricing-hero-dot" aria-hidden />
+              {kicker}
+            </p>
+            <h1>{title}</h1>
+            <p className="lp-sol-hero-lead">{lead}</p>
+            <div className="lp-hero-cta">
+              <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onPrimary}>
+                {ctaPrimary}
+              </button>
+              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={onSecondary}>
+                {ctaSecondary}
+              </button>
+            </div>
+          </div>
+          <div className="lp-sol-hero-visual">{heroVisual}</div>
+        </div>
+      </section>
+
+      <MarketingReveal>
+        <section className="lp-sol-outcomes" aria-label="What you get">
+          {outcomes.map((item, i) => (
+            <article key={item.title} className="lp-sol-outcome" style={{ "--reveal-i": i } as CSSProperties}>
+              <span>{String(i + 1).padStart(2, "0")}</span>
+              <h3>{item.title}</h3>
+              <p>{item.body}</p>
+            </article>
+          ))}
+        </section>
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-sol-section">
+          <div className="lp-sol-section-head">
+            <p className="lp-mkt-kicker">How it works</p>
+            <h2>A clear path from discovery to proof</h2>
+            <p>Same governed engine at every step — no parallel “fast path” that skips gates.</p>
+          </div>
+          <ol className="lp-sol-steps">
+            {steps.map((step) => (
+              <li key={step.n} className="lp-sol-step">
+                <span>{step.n}</span>
+                <div>
+                  <h3>{step.title}</h3>
+                  <p>{step.body}</p>
+                </div>
+              </li>
+            ))}
+          </ol>
+        </section>
+      </MarketingReveal>
+
+      <MarketingReveal>{cinema}</MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-sol-section lp-sol-section--caps">
+          <div className="lp-sol-section-head">
+            <p className="lp-mkt-kicker">Built for operators</p>
+            <h2>Details that survive real schemas</h2>
+          </div>
+          <div className="lp-sol-caps">
+            {caps.map((cap) => (
+              <article key={cap.title} className="lp-sol-cap">
+                <h3>{cap.title}</h3>
+                <p>{cap.body}</p>
+              </article>
+            ))}
+          </div>
+        </section>
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-sol-footer">
+          <div className="lp-sol-footer-inner">
+            <div>
+              <h2>Ready to run this path?</h2>
+              <p>Start free on the same engine — or talk to us about enterprise controls.</p>
+            </div>
+            <div className="lp-sol-footer-actions">
+              <button type="button" className="lp-btn lp-btn--brand" onClick={onPrimary}>
+                {ctaPrimary}
+              </button>
+              <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate(next)}>
+                Next: {nextLabel} →
+              </button>
+              <button type="button" className="lp-btn lp-btn--ghost" onClick={() => onNavigate("help")}>
+                Read the docs
+              </button>
+            </div>
+          </div>
+        </section>
+      </MarketingReveal>
+    </div>
   );
 }

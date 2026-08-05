@@ -198,6 +198,35 @@ def estimate_item_count(cfg: dict[str, Any], table: str) -> int:
     return int(resp.get("Table", {}).get("ItemCount", 0) or 0)
 
 
+def describe_key_schema(cfg: dict[str, Any], table: str) -> list[dict[str, str]]:
+    """Return Dynamo HASH/RANGE keys as ``[{name, key_type, attr_type}, ...]``.
+
+    Map/Validate need the identity contract — without it operators invent a PK
+    and Dynamo create-table / upsert demos fail mid-walkthrough.
+    """
+    client = boto3_client("dynamodb", cfg)
+    resp = client.describe_table(TableName=table)
+    table_info = resp.get("Table") or {}
+    attr_defs = {
+        a.get("AttributeName"): a.get("AttributeType", "S")
+        for a in (table_info.get("AttributeDefinitions") or [])
+        if a.get("AttributeName")
+    }
+    keys: list[dict[str, str]] = []
+    for key in table_info.get("KeySchema") or []:
+        name = str(key.get("AttributeName") or "")
+        if not name:
+            continue
+        keys.append(
+            {
+                "name": name,
+                "key_type": str(key.get("KeyType") or "HASH"),
+                "attr_type": _ddb_attr_type(attr_defs.get(name, "S")),
+            }
+        )
+    return keys
+
+
 def describe_table_schema(cfg: dict[str, Any], table: str) -> tuple[list[str], dict[str, str]]:
     """Return column names and types from KeySchema + AttrDefs + **sample union**."""
     client = boto3_client("dynamodb", cfg)

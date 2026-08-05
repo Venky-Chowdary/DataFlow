@@ -88,7 +88,7 @@ def extract_url_credentials(message: str) -> dict[str, Any] | None:
 
 
 def extract_field_credentials(message: str) -> dict[str, Any]:
-    """Parse host/user/password/port/database lines from a chat message."""
+    """Parse host/user/password/port/database from labeled lines or inline prose."""
     lower = message.lower()
     out: dict[str, Any] = {}
 
@@ -101,8 +101,17 @@ def extract_field_credentials(message: str) -> dict[str, Any]:
 
     def _field(*names: str) -> str:
         for name in names:
+            # Labeled: "host: db.example.com" / "host = …" after start/newline/comma
             m = re.search(
                 rf"(?:^|\n|,|;)\s*{name}\s*[:=]\s*([^\n,;]+)",
+                message,
+                re.I,
+            )
+            if m:
+                return m.group(1).strip().strip("\"'")
+            # Inline prose: "host localhost user demo password secret"
+            m = re.search(
+                rf"\b{name}\s+([A-Za-z0-9_.:\-\[\]%]+)",
                 message,
                 re.I,
             )
@@ -119,6 +128,14 @@ def extract_field_credentials(message: str) -> dict[str, Any]:
     db = _field("database", "db", "dbname")
     if db:
         out["database"] = db
+    warehouse = _field("warehouse")
+    if warehouse:
+        out["warehouse"] = warehouse
+    account = _field("account", "snowflake account")
+    if account:
+        out["account"] = account
+        if not out.get("host"):
+            out["host"] = account
     user = _field("username", "user", "uid")
     if user:
         out["username"] = user
@@ -126,6 +143,14 @@ def extract_field_credentials(message: str) -> dict[str, Any]:
     if password:
         out["password"] = password
     name = _field("name", "connector name", "label")
+    if not name:
+        named = re.search(
+            r"\bnamed\s+[\"']?(.+?)[\"']?(?=\s+(?:host|hostname|server|user|username|password|port|database|db)\b|$)",
+            message,
+            re.I,
+        )
+        if named:
+            name = named.group(1).strip().strip("\"'")
     if name:
         out["name"] = name
     return out
@@ -146,8 +171,46 @@ def wants_create_connector(message: str) -> bool:
         "save this connection",
         "make a connector",
         "register connector",
+        "create a postgres",
+        "create a postgresql",
+        "create a mysql",
+        "create a mongodb",
+        "create a snowflake",
+        "create an postgres",
+        "add a postgres",
+        "add a mysql",
+        "add postgres",
+        "add mysql",
+        "add mongodb",
+        "add mongo",
+        "add snowflake",
+        "save this postgres",
+        "save this postgresql",
+        "save this mysql",
+        "save this mongo",
+        "save this mongodb",
+        "save postgres",
+        "save mysql",
     )
     if any(v in lower for v in verbs):
+        return True
+    # "create a <engine> connector at host…" / "add mysql named warehouse host…"
+    if re.search(
+        r"\b(?:create|add|save|register|setup|set\s+up)\s+(?:a\s+|an\s+|this\s+)?"
+        r"(?:postgres(?:ql)?|mysql|mariadb|mongo(?:db)?|snowflake|sql\s*server|sqlite)"
+        r"(?:\s+connector)?\b",
+        lower,
+    ) and any(
+        w in lower
+        for w in ("host", "hostname", "user", "username", "password", "database", "named", "port", "://")
+    ):
+        return True
+    if re.search(
+        r"\b(?:create|add|save|register|setup|set\s+up)\s+(?:a\s+|an\s+)?"
+        r"(?:postgres(?:ql)?|mysql|mariadb|mongo(?:db)?|snowflake|sql\s*server|sqlite)"
+        r"\s+connector\b",
+        lower,
+    ):
         return True
     # Credentials pasted with an explicit ask to save/use
     if extract_url_credentials(message) and any(
@@ -203,6 +266,31 @@ def build_connector_draft(message: str, args: dict[str, Any] | None = None) -> d
 def draft_is_complete(draft: dict[str, Any]) -> tuple[bool, str]:
     ctype = draft.get("type") or ""
     if draft.get("connection_string"):
+        # Snowflake URLs are not fully supported yet — require structured fields.
+        if ctype == "snowflake" and "snowflake" in str(draft.get("connection_string") or "").lower():
+            return (
+                False,
+                "Snowflake connectors need account, warehouse, database, username, and password "
+                "(or open Connectors to finish SSO / key-pair auth). Chat URL paste isn't enough yet.",
+            )
+        return True, ""
+    if ctype == "snowflake":
+        missing = []
+        if not (draft.get("host") or draft.get("account")):
+            missing.append("account (or host)")
+        if not draft.get("warehouse"):
+            missing.append("warehouse")
+        if not draft.get("database"):
+            missing.append("database")
+        if not draft.get("username") or not draft.get("password"):
+            missing.append("username and password")
+        if missing:
+            return (
+                False,
+                "Snowflake needs "
+                + ", ".join(missing)
+                + ". Or open **Connectors** to configure SSO / key-pair.",
+            )
         return True, ""
     if not draft.get("host"):
         return False, "I need a host (or a full connection URL) to create this connector."

@@ -27,7 +27,7 @@ interface FreshnessSloPanelProps {
 
 /**
  * Closed-loop freshness SLO surface for Overview — lag/heartbeat alerts with
- * Open pipeline / Open job CTAs (same pattern as quarantine / lease next steps).
+ * Open schedule / Open job CTAs (same pattern as quarantine / lease next steps).
  */
 export function FreshnessSloPanel({
   sloStatus,
@@ -76,7 +76,7 @@ export function FreshnessSloPanel({
           Warn {warnSeconds}s
           {criticalSeconds != null ? ` · critical ${criticalSeconds.toFixed(0)}s` : ""}
           {worstLagSeconds != null ? ` · worst ${worstLagSeconds.toFixed(1)}s` : ""}.
-          Open the pipeline or job, then check lease / quarantine if the consumer stalled.
+          Open the schedule or job, then check lease / quarantine if the consumer stalled.
         </p>
         {top.length > 0 && (
           <ul className="df2-freshness-slo-list">

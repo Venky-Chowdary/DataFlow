@@ -1,37 +1,18 @@
 /** Gate-8 reconciliation proof — source vs destination rows + checksums. */
 
-export interface Gate8SampleMismatch {
-  row?: string | number;
-  source?: string;
-  target?: string;
-  source_value?: string;
-  target_value?: string;
-  column?: string;
-}
+import { useEffect, useRef, useState } from "react";
+import type { Gate8ReconciliationPayload } from "../../lib/types";
 
-export interface Gate8Reconciliation {
-  passed?: boolean;
-  message?: string;
-  preview?: boolean;
-  phase?: string;
-  post_write_pending?: boolean;
-  source_rows?: number;
-  target_rows?: number;
-  source_checksum?: string;
-  target_checksum?: string;
-  rejected_rows?: number;
-  coerced_null_rows?: number;
-  missing_key_count?: number;
-  extra_key_count?: number;
-  matched_key_count?: number;
-  row_fidelity_score?: number;
-  sample_compare?: {
-    passed?: boolean;
-    compared?: number;
-    skipped?: boolean;
-    mismatches?: Gate8SampleMismatch[];
-  };
-}
+/**
+ * The card renders the engine payload verbatim — one shape, defined in
+ * `lib/types.ts`. A second local copy is how honesty fields (identity,
+ * alignment, read-back error) silently fell off the card before.
+ */
+export type Gate8Reconciliation = Gate8ReconciliationPayload;
+export type Gate8Identity = NonNullable<Gate8ReconciliationPayload["identity"]>;
+export type Gate8SampleMismatch = NonNullable<
+  NonNullable<Gate8ReconciliationPayload["sample_compare"]>["mismatches"]
+>[number];
 
 interface Gate8ProofCardProps {
   report: Gate8Reconciliation;
@@ -39,12 +20,18 @@ interface Gate8ProofCardProps {
   explanation?: string;
   className?: string;
   compact?: boolean;
+  /** When set, Export downloads a signed HMAC proof pack from the API. */
+  jobId?: string;
   /** Closed-loop: open Map / Validate when reconcile fails. */
   onOpenValidate?: () => void;
-  /** Closed-loop: jump to quarantine findings. */
+  /** Override default “Open Validate / Map” label when already on Validate. */
+  onOpenValidateLabel?: string;
+  /** Closed-loop: jump to quarantine findings (inspect only — never mutate). */
   onOpenQuarantine?: () => void;
-  /** Closed-loop: re-run the transfer. */
+  /** Closed-loop: re-run Validate (or transfer when wired from Jobs). */
   onRerun?: () => void;
+  /** Override default “Re-run transfer” label (Validate uses Re-run Validate). */
+  onRerunLabel?: string;
 }
 
 function shortChecksum(value?: string): string {
@@ -59,17 +46,46 @@ function mismatchLabel(m: Gate8SampleMismatch): string {
   return `${row} · ${col}: ${String(m.source_value ?? "—")} → ${String(m.target_value ?? "—")}`;
 }
 
-function exportGate8Proof(report: Gate8Reconciliation) {
-  const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+function downloadJson(filename: string, payload: unknown) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `dataflow-gate8-proof-${Date.now()}.json`;
+  a.download = filename;
   a.rel = "noopener";
   document.body.appendChild(a);
   a.click();
   a.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+async function exportGate8Proof(report: Gate8Reconciliation, jobId?: string) {
+  if (jobId) {
+    try {
+      const { fetchSignedProofPack } = await import("../../lib/api");
+      const pack = await fetchSignedProofPack(jobId);
+      downloadJson(`datawrap-signed-proof-${jobId}.json`, pack);
+      return;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Signed proof pack export failed";
+      // Do not silently substitute an unsigned snapshot when the CTA promised HMAC.
+      window.alert(`Could not export signed proof pack.\n${message}`);
+      return;
+    }
+  }
+  downloadJson(`dataflow-gate8-proof-${Date.now()}.json`, {
+    honesty: "Unsigned local Gate-8 snapshot — open Jobs with a job id to export HMAC-signed pack.",
+    gate8: report,
+  });
+}
+
+async function verifyProofFile(
+  file: File,
+): Promise<{ ok: boolean; errors: string[]; content_sha256?: string }> {
+  const text = await file.text();
+  const pack = JSON.parse(text) as Record<string, unknown>;
+  const { verifySignedProofPack } = await import("../../lib/api");
+  return verifySignedProofPack(pack);
 }
 
 /** True when evidence is writer-ack only — not independent source/target Verified. */
@@ -93,15 +109,23 @@ export function isGate8WriterAckOnly(report: Gate8Reconciliation): boolean {
 export function isGate8SampleVerified(report: Gate8Reconciliation): boolean {
   const phase = String(report.phase || "").toLowerCase();
   if (phase.includes("sample_verified")) return true;
+  if (String(report.coverage || "").toLowerCase() === "sample") return true;
   const msg = String(report.message || "").toLowerCase();
   if (/sample-verified|sample verified/i.test(msg)) return true;
   const compared = Number(report.sample_compare?.compared ?? 0);
-  return Boolean(
+  const sampleOk = Boolean(
     report.passed
     && compared > 0
-    && report.sample_compare?.passed !== false
-    && !String(report.target_checksum || "").trim()
+    && report.sample_compare?.passed !== false,
   );
+  if (!sampleOk) return false;
+  // No independent dest digest — sample is the only proof.
+  if (!String(report.target_checksum || "").trim()) return true;
+  // Whole-table digests diverge — sample authority, not population proof.
+  const src = String(report.source_checksum || "").trim();
+  const tgt = String(report.target_checksum || "").trim();
+  if (src && tgt && src !== tgt) return true;
+  return false;
 }
 
 /** True when evidence is pre-write only — never show Verified / match claims. */
@@ -135,11 +159,29 @@ export function isGate8PreWriteSimulation(report: Gate8Reconciliation): boolean 
 export type Gate8StatusView = {
   label: string;
   tone: "ok" | "warn" | "danger" | "muted";
-  /** Independent post-write source↔dest proof — not writer-ack or pre-write. */
+  /**
+   * Independent full-checksum post-write proof (source↔dest digests match).
+   * Sample-verified / writer-ack / pre-write must keep this false — never invent
+   * population proof from a keyed sample.
+   */
   fullPass: boolean;
 };
 
 /** Shared operator label for Gate-8 — never call writer-ack / pre-write “Passed”. */
+/**
+ * True when the engine compared values but could not prove row identity
+ * (no primary key, or null/duplicate keys). Positional matches are not
+ * keyed fidelity proof and must never render as a clean pass.
+ */
+export function isGate8IdentityUnproven(report: Gate8Reconciliation): boolean {
+  const mode = String(report.verification_mode || "").toLowerCase();
+  if (mode === "unproven_identity" || mode === "positional_only") return true;
+  if (report.identity && report.identity.proven === false) return true;
+  const alignment = String(report.sample_compare?.alignment || "").toLowerCase();
+  if (alignment === "unproven_identity" || alignment === "positional_only") return true;
+  return Boolean(report.sample_compare?.identity_warning);
+}
+
 export function classifyGate8Status(
   report: Gate8Reconciliation | null | undefined,
 ): Gate8StatusView {
@@ -152,8 +194,14 @@ export function classifyGate8Status(
   if (isGate8WriterAckOnly(report)) {
     return { label: "Writer ack", tone: "warn", fullPass: false };
   }
+  // A positional / unproven-identity compare is not keyed fidelity proof —
+  // labelling it "Passed" is the false-proof the engine explicitly refuses.
+  if (isGate8IdentityUnproven(report)) {
+    return { label: "Unproven identity", tone: "warn", fullPass: false };
+  }
   if (isGate8SampleVerified(report)) {
-    return { label: "Sample verified", tone: "ok", fullPass: true };
+    // Sample ≠ population — never green "ok" (Enterprise GA honesty).
+    return { label: "Sample verified", tone: "warn", fullPass: false };
   }
   if (isGate8PreWriteSimulation(report)) {
     return { label: "Pre-write only", tone: "warn", fullPass: false };
@@ -173,10 +221,69 @@ export function Gate8ProofCard({
   explanation,
   className = "",
   compact = false,
+  jobId,
   onOpenValidate,
+  onOpenValidateLabel = "Open Validate / Map",
   onOpenQuarantine,
   onRerun,
+  onRerunLabel = "Re-run transfer",
 }: Gate8ProofCardProps) {
+  const verifyInputRef = useRef<HTMLInputElement>(null);
+  const [verifyState, setVerifyState] = useState<
+    | { status: "idle" }
+    | { status: "working" }
+    | { status: "ok"; sha?: string }
+    | { status: "fail"; errors: string[] }
+  >({ status: "idle" });
+  const [packSummary, setPackSummary] = useState<{
+    migration_proven?: boolean;
+    claim_level?: string;
+    accepted_risks?: number;
+    incomplete?: string[];
+    versions_honesty?: string;
+    ddl_hash?: string | null;
+    mapping_hash?: string | null;
+    rollback?: string;
+  } | null>(null);
+  useEffect(() => {
+    setVerifyState({ status: "idle" });
+  }, [jobId, report.source_checksum, report.target_checksum, report.phase, report.passed]);
+  useEffect(() => {
+    setPackSummary(null);
+    if (!jobId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { fetchSignedProofPack } = await import("../../lib/api");
+        const pack = await fetchSignedProofPack(jobId);
+        if (cancelled) return;
+        const assurance = (pack.assurance || {}) as Record<string, unknown>;
+        const hashes = (pack.hashes || {}) as Record<string, unknown>;
+        const rb = (pack.rollback_plan || {}) as Record<string, unknown>;
+        const risks = Array.isArray(pack.accepted_risks) ? pack.accepted_risks : [];
+        const incomplete = Array.isArray(pack.proof_incomplete_reasons)
+          ? (pack.proof_incomplete_reasons as string[])
+          : [];
+        setPackSummary({
+          migration_proven: Boolean(assurance.migration_proven),
+          claim_level: String(assurance.claim_level || ""),
+          accepted_risks: risks.length,
+          incomplete: incomplete.slice(0, 4),
+          versions_honesty: String(pack.connector_versions_honesty || ""),
+          ddl_hash: hashes.ddl_hash != null ? String(hashes.ddl_hash) : null,
+          mapping_hash: hashes.mapping_hash != null ? String(hashes.mapping_hash) : null,
+          rollback: rb.strategy
+            ? `${rb.strategy}${rb.executable ? " (executable staging discard)" : " (not executable)"}`
+            : undefined,
+        });
+      } catch {
+        if (!cancelled) setPackSummary(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [jobId, report.source_checksum, report.target_checksum, report.phase, report.passed]);
   const preWrite = isGate8PreWriteSimulation(report);
   const sampleVerified = !preWrite && isGate8SampleVerified(report);
   const writerAck = !preWrite && !sampleVerified && isGate8WriterAckOnly(report);
@@ -187,25 +294,42 @@ export function Gate8ProofCard({
   const targetRows = Number(report.target_rows ?? 0);
   const rejectedRows = Number(report.rejected_rows ?? 0);
   const coercedNullRows = Number(report.coerced_null_rows ?? 0);
-  // Quarantine hold-outs are counted in source_rows but not written — delta vs
-  // expected (source − held_out), not raw source−dest (that falsely warns on pass).
+  const rowsSkipped = Number(report.rows_skipped ?? 0);
+  // Quarantine hold-outs + intentional LSN-guard skips are counted in
+  // source_rows but not written — delta vs expected, not raw source−dest.
   const heldOut = Math.max(rejectedRows - coercedNullRows, 0);
-  const expectedRows = Math.max(sourceRows - heldOut, 0);
+  const expectedRows = Math.max(sourceRows - heldOut - rowsSkipped, 0);
   const delta = targetRows - expectedRows;
   const mismatches = report.sample_compare?.mismatches ?? [];
+  const sampleSkipped = Boolean(report.sample_compare?.skipped);
+  const sampleError = String(report.sample_compare?.error || "").trim();
+  const alignment = String(report.sample_compare?.alignment || "").toLowerCase();
+  const identityWarning = String(
+    report.sample_compare?.identity_warning
+    || (report.identity?.proven === false ? report.identity?.reason : "")
+    || "",
+  ).trim();
+  const identityUnproven = isGate8IdentityUnproven(report);
+  const fidelity = report.row_fidelity_score;
   const missingKeys = Number(report.missing_key_count ?? 0);
   const extraKeys = Number(report.extra_key_count ?? 0);
   const hasFindings = !passed && !simulationOk && !writerAckOk
     || mismatches.length > 0
     || missingKeys > 0
     || extraKeys > 0
-    || heldOut > 0;
+    || heldOut > 0
+    || identityUnproven
+    || Boolean(sampleError)
+    || sampleSkipped;
 
+  const fullChecksumPass = passed && !sampleVerified && !writerAck && !preWrite && !identityUnproven;
   const toneClass = preWrite
     ? (simulationOk ? "is-pending" : "is-fail")
     : writerAck
       ? (writerAckOk ? "is-pending" : "is-fail")
-      : (passed ? "is-pass" : "is-fail");
+      : sampleVerified || identityUnproven
+        ? "is-pending"
+        : (fullChecksumPass ? "is-pass" : (passed ? "is-pending" : "is-fail"));
   const title = preWrite
     ? (simulationOk
       ? "Pre-write simulation passed — post-write proof pending"
@@ -214,21 +338,27 @@ export function Gate8ProofCard({
       ? (writerAckOk
         ? "Writer acknowledged — independent read-back not available"
         : "Writer acknowledgment did not verify")
-      : sampleVerified
-        ? "Keyed sample read-back matched (reverse-ETL class proof)"
-        : (passed ? "Source and destination match" : "Reconciliation did not verify");
+      : identityUnproven && (passed || sampleVerified)
+        ? "Sample compared — identity not proven"
+        : sampleVerified
+          ? "Keyed sample matched — not population / migration_proven"
+          : (fullChecksumPass ? "Source and destination match" : "Reconciliation did not verify");
   const badge = preWrite
     ? (simulationOk ? "Pending" : "Failed")
     : writerAck
       ? (writerAckOk ? "Writer ack" : "Failed")
-      : sampleVerified
-        ? "Sample verified"
-        : (passed ? "Verified" : "Failed");
+      : identityUnproven && (passed || sampleVerified)
+        ? "Unproven identity"
+        : sampleVerified
+          ? "Sample only"
+          : (fullChecksumPass ? "Verified" : "Failed");
   const badgeClass = preWrite
     ? (simulationOk ? "is-pending" : "is-bad")
     : writerAck
       ? (writerAckOk ? "is-pending" : "is-bad")
-      : (passed ? "is-ok" : "is-bad");
+      : identityUnproven || sampleVerified
+        ? "is-pending"
+        : (fullChecksumPass ? "is-ok" : "is-bad");
 
   return (
     <section
@@ -255,7 +385,7 @@ export function Gate8ProofCard({
           </>
         ) : (
           <>
-            After the write finishes, DataFlow compares <strong>row counts</strong> and
+            After the write finishes, Datawrap compares <strong>row counts</strong> and
             {" "}
             <strong>content checksums</strong> so silent truncation or corruption cannot
             look like success. Quarantined rows are <strong>held out</strong> of the primary
@@ -266,6 +396,28 @@ export function Gate8ProofCard({
 
       {report.message && (
         <p className="df2-gate8-proof-message">{report.message}</p>
+      )}
+
+      {identityWarning && (
+        <p className="df2-gate8-proof-message is-warn" role="status">
+          Identity caveat: {identityWarning}
+          {alignment === "positional_only"
+            ? " Comparison is positional only — do not treat this as keyed fidelity proof."
+            : ""}
+        </p>
+      )}
+
+      {sampleError && (
+        <p className="df2-gate8-proof-message is-warn" role="alert">
+          Read-back failed: {sampleError}
+        </p>
+      )}
+
+      {sampleSkipped && !sampleError && (
+        <p className="df2-gate8-proof-message is-warn" role="status">
+          Value read-back was not performed — row counts/checksums alone do not prove
+          per-cell fidelity.
+        </p>
       )}
 
       {preWrite && (
@@ -316,6 +468,22 @@ export function Gate8ProofCard({
             </dd>
           </div>
         )}
+        {rowsSkipped > 0 && (
+          <div>
+            <dt>Skipped (LSN guard)</dt>
+            <dd className="is-ok" title="Intentional CDC redelivery skips — not a shortfall">
+              {rowsSkipped.toLocaleString()}
+            </dd>
+          </div>
+        )}
+        {fidelity != null && Number.isFinite(Number(fidelity)) && (
+          <div>
+            <dt>Row fidelity</dt>
+            <dd className={Number(fidelity) >= 0.95 ? "is-ok" : "is-warn"}>
+              {(Number(fidelity) * 100).toFixed(1)}%
+            </dd>
+          </div>
+        )}
         <div>
           <dt>Source checksum</dt>
           <dd title={report.source_checksum || undefined}>
@@ -342,6 +510,27 @@ export function Gate8ProofCard({
               : "—"}
           </dd>
         </div>
+        {report.sample_compare?.sample_seed?.method === "stratified" && (
+          <p className="df2-muted" style={{ fontSize: 12, marginTop: 6 }}>
+            Sample plan: <strong>stratified</strong>
+            {report.sample_compare.sample_seed.stratify_by
+              ? ` by ${String(report.sample_compare.sample_seed.stratify_by)}`
+              : ""}
+            {report.sample_compare.sample_seed.auto_selected ? " (auto)" : ""}
+            {" — "}rare categories preferred within this sample. Still{" "}
+            <strong>sample coverage</strong>, not population proof.
+          </p>
+        )}
+        {report.sample_compare?.sample_seed?.content_sha256 && (
+          <div>
+            <dt>Sample seed</dt>
+            <dd
+              title={`method=${report.sample_compare.sample_seed.method || "?"} size=${report.sample_compare.sample_seed.size ?? "?"}`}
+            >
+              {shortChecksum(report.sample_compare.sample_seed.content_sha256)}
+            </dd>
+          </div>
+        )}
         {(missingKeys > 0 || extraKeys > 0 || report.matched_key_count != null) && (
           <div>
             <dt>Keys</dt>
@@ -369,44 +558,133 @@ export function Gate8ProofCard({
         </div>
       )}
 
-      {(hasFindings || preWrite) && (
-        <div className="df2-gate8-proof-next" role="region" aria-label="Next reconciliation step">
-          <div className="df2-gate8-proof-next-copy">
-            <strong>Next step</strong>
-            <p>
-              {preWrite
-                ? "Run Execute to produce post-write row-count and checksum proof in Job Theater."
-                : !passed
-                  ? "Fix mapping or transforms, inspect quarantine if rows were isolated, then re-run. Export the proof for audit."
-                  : "Proof passed with findings to review — export if you need an artifact."}
-            </p>
+      {packSummary && (
+        <dl className="df2-gate8-proof-honesty" aria-label="Signed proof pack honesty">
+          <div>
+            <dt>migration_proven</dt>
+            <dd className={packSummary.migration_proven ? "is-ok" : "is-warn"}>
+              {packSummary.migration_proven ? "true" : "false"}
+              {packSummary.claim_level ? ` · ${packSummary.claim_level}` : ""}
+            </dd>
           </div>
-          <div className="df2-gate8-proof-next-actions">
-            {!passed && !preWrite && onOpenValidate && (
-              <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={onOpenValidate}>
-                Open Validate / Map
-              </button>
-            )}
-            {!passed && !preWrite && onOpenQuarantine && (
-              <button type="button" className="df2-btn df2-btn-sm" onClick={onOpenQuarantine}>
-                Inspect quarantine
-              </button>
-            )}
-            {!passed && !preWrite && onRerun && (
-              <button type="button" className="df2-btn df2-btn-sm" onClick={onRerun}>
-                Re-run transfer
-              </button>
-            )}
-            <button
-              type="button"
-              className="df2-btn df2-btn-sm df2-btn-secondary"
-              onClick={() => exportGate8Proof(report)}
-            >
-              Export proof JSON
-            </button>
+          <div>
+            <dt>Accepted risks</dt>
+            <dd>{packSummary.accepted_risks ?? 0}</dd>
           </div>
-        </div>
+          <div>
+            <dt>Hashes</dt>
+            <dd>
+              ddl {shortChecksum(packSummary.ddl_hash || undefined)}
+              {" · "}
+              map {shortChecksum(packSummary.mapping_hash || undefined)}
+            </dd>
+          </div>
+          <div>
+            <dt>Connector versions</dt>
+            <dd>{packSummary.versions_honesty || "absent"}</dd>
+          </div>
+          {packSummary.rollback && (
+            <div>
+              <dt>Rollback</dt>
+              <dd>{packSummary.rollback}</dd>
+            </div>
+          )}
+          {(packSummary.incomplete?.length ?? 0) > 0 && (
+            <div>
+              <dt>Incomplete</dt>
+              <dd className="is-warn">{packSummary.incomplete!.join("; ")}</dd>
+            </div>
+          )}
+        </dl>
       )}
+
+      <div className="df2-gate8-proof-next" role="region" aria-label="Proof export and next steps">
+        <div className="df2-gate8-proof-next-copy">
+          <strong>{hasFindings || preWrite ? "Next step" : "Audit export"}</strong>
+          <p>
+            {preWrite
+              ? "Run Execute to produce post-write row-count and checksum proof in Job Theater."
+              : !passed
+                ? "Fix mapping or transforms, inspect quarantine if rows were isolated, then re-run. Export the proof for audit."
+                : sampleVerified
+                  ? "Sample matched — export the signed pack; migration_proven stays false until full_checksum."
+                  : "Export the signed proof pack for diligence (accepted risks, policies, hashes)."}
+          </p>
+        </div>
+        <div className="df2-gate8-proof-next-actions">
+          {!passed && !preWrite && onOpenValidate && (
+            <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={onOpenValidate}>
+              {onOpenValidateLabel}
+            </button>
+          )}
+          {!passed && !preWrite && onOpenQuarantine && (
+            <button type="button" className="df2-btn df2-btn-sm" onClick={onOpenQuarantine}>
+              Inspect sample cells
+            </button>
+          )}
+          {!passed && !preWrite && onRerun && (
+            <button type="button" className="df2-btn df2-btn-sm" onClick={onRerun}>
+              {onRerunLabel}
+            </button>
+          )}
+          <button
+            type="button"
+            className="df2-btn df2-btn-sm df2-btn-secondary"
+            onClick={() => void exportGate8Proof(report, jobId)}
+          >
+            {jobId ? "Export signed proof pack" : "Export proof JSON"}
+          </button>
+          <input
+            ref={verifyInputRef}
+            type="file"
+            accept="application/json,.json"
+            hidden
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              e.target.value = "";
+              if (!file) return;
+              setVerifyState({ status: "working" });
+              void verifyProofFile(file)
+                .then((res) => {
+                  if (res.ok) {
+                    setVerifyState({ status: "ok", sha: res.content_sha256 });
+                  } else {
+                    setVerifyState({
+                      status: "fail",
+                      errors: res.errors?.length ? res.errors : ["Signature verification failed"],
+                    });
+                  }
+                })
+                .catch((err) => {
+                  setVerifyState({
+                    status: "fail",
+                    errors: [err instanceof Error ? err.message : "Verify failed"],
+                  });
+                });
+            }}
+          />
+          <button
+            type="button"
+            className="df2-btn df2-btn-sm"
+            disabled={verifyState.status === "working"}
+            onClick={() => verifyInputRef.current?.click()}
+            title="Re-check an exported HMAC proof pack (buyer diligence)"
+          >
+            {verifyState.status === "working" ? "Verifying…" : "Verify proof pack"}
+          </button>
+        </div>
+        {verifyState.status === "ok" && (
+          <p className="df2-gate8-proof-verify is-ok" role="status">
+            HMAC proof pack verified
+            {verifyState.sha ? ` · content ${verifyState.sha.slice(0, 12)}…` : ""}.
+          </p>
+        )}
+        {verifyState.status === "fail" && (
+          <p className="df2-gate8-proof-verify is-fail" role="alert">
+            Proof verify failed: {verifyState.errors.join("; ")}
+          </p>
+        )}
+      </div>
 
       {explanation && (
         <details className="df2-gate8-proof-explain">

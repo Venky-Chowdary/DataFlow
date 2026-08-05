@@ -216,14 +216,61 @@ def get_contract(
 
 @router.post("/{contract_id}/sign", response_model=_ContractResponse)
 def sign_contract(contract_id: str, body: _SignRequest):
+    from datetime import datetime, timezone
+
     store = get_contract_store()
     contract = store.get_contract(contract_id)
     if not contract:
         raise HTTPException(status_code=404, detail="Contract not found")
+    prior = getattr(contract.status, "value", str(contract.status))
+    meta = dict(getattr(contract, "metadata", None) or {})
+    revisions = list(meta.get("revisions") or [])
+    # Re-sign / recover from broken|deprecated bumps the agreement version.
+    if prior in {"signed", "broken", "deprecated"}:
+        contract.version = int(contract.version or 1) + 1
+    elif not contract.version:
+        contract.version = 1
+    now = datetime.now(timezone.utc).isoformat()
+    revisions.append(
+        {
+            "version": int(contract.version or 1),
+            "from_status": prior,
+            "to_status": "signed",
+            "column_count": len(contract.columns or []),
+            "mapping_count": len(contract.mappings or []),
+            "at": now,
+            "note": "schema agreement lifecycle — not a cryptographic signature",
+        }
+    )
     contract.status = ContractStatus.SIGNED
     contract.strict = body.strict
+    meta["revisions"] = revisions[-50:]
+    contract.metadata = meta
     store.save_contract(contract)
     return _contract_to_response(contract)
+
+
+@router.get("/{contract_id}/history")
+def contract_history(contract_id: str, request: Request, workspace_id: str = Header(default="", alias="X-Workspace-Id")):
+    """Return schema-agreement revision snapshots (not cryptographic signatures)."""
+    resolve_read_workspace(request, workspace_id)
+    store = get_contract_store()
+    contract = store.get_contract(contract_id)
+    if not contract:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    meta = getattr(contract, "metadata", None) or {}
+    assert_resource_workspace(request, str(meta.get("workspace_id") or ""))
+    revisions = list(meta.get("revisions") or [])
+    return {
+        "contract_id": contract_id,
+        "current_version": int(contract.version or 1),
+        "current_status": getattr(contract.status, "value", str(contract.status)),
+        "revisions": list(reversed(revisions)),
+        "honesty": (
+            "Revisions are schema agreement snapshots for operator diligence. "
+            "Sign/deprecate are lifecycle status flips — not cryptographic signatures or MDM."
+        ),
+    }
 
 
 @router.post("/{contract_id}/deprecate", response_model=_ContractResponse)
@@ -310,7 +357,7 @@ def import_contract(payload: dict[str, Any]):
     from services.gitops_manifest import apply_manifest
 
     # Accept bare contract dicts and kind-wrapped artifacts.
-    if payload.get("kind") == "DataContract" or payload.get("kind") == "DataFlowManifest":
+    if payload.get("kind") == "DataContract" or payload.get("kind") == "DatawrapManifest":
         result = apply_manifest(payload, dry_run=False)
         rows = [r for r in (result.get("results") or []) if r.get("kind") == "DataContract" and r.get("ok")]
         if not rows:

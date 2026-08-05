@@ -6,7 +6,7 @@ Opt-in only. Requires:
   - Python: ``pypdfium2``, ``Pillow``, ``pytesseract``
   - System: ``tesseract`` binary on PATH
 
-When OCR is requested but unavailable, DataFlow fail-closes with an actionable
+When OCR is requested but unavailable, Datawrap fail-closes with an actionable
 error — never invents text. Delivery of OCR chunks is at-least-once when paired
 with vector destinations (same as text-layer document chunking).
 """

@@ -29,7 +29,8 @@ const STEP_GUIDES: Record<number, { title: string; body: string }> = {
   },
   4: {
     title: "Validate",
-    body: "Preflight runs eleven gates — transforms, destination probe, and capacity checks.",
+    body: "Preflight runs core G1–G9 only (not “eleven gates”). Studio may add host policy checks and soft constraint hints — those are extras, not marketed GateIds.",
+
   },
   5: {
     title: "Run",

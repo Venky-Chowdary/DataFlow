@@ -109,7 +109,7 @@ def test_db_to_db_route_live(src: str, dest: str):
     [
         ("VARCHAR", "INTEGER", "42", "integer", 42),
         ("VARCHAR", "DECIMAL", "$1,234.50", "decimal", "1234.50"),
-        ("VARCHAR", "BOOLEAN", "yes", "boolean", True),
+        ("VARCHAR", "BOOLEAN", "true", "boolean", True),
         ("VARCHAR", "DATE", "2024-06-01", "date", "2024-06-01"),
         ("TIMESTAMP", "DATETIME", "2024-06-01T12:00:00Z", "datetime", "2024-06-01T12:00:00Z"),
         ("VARCHAR", "JSON", '{"a":1}', "json", '{"a":1}'),
@@ -126,7 +126,15 @@ def test_apply_transform_cross_types(source_type, target_type, raw, transform, e
 def test_infer_transform_uses_target_type():
     assert infer_transform_for_mapping("amount", "total_cents", "VARCHAR", "INTEGER") == "integer"
     assert infer_transform_for_mapping("payload", "doc", "VARCHAR", "JSON") == "json"
-    assert infer_transform_for_mapping("created", "created_at", "VARCHAR", "TIMESTAMP") == "datetime"
+    # Non-temporal VARCHAR must not invent a datetime cast (wave 1 honesty).
+    assert infer_transform_for_mapping("created", "created_at", "VARCHAR", "TIMESTAMP") == "none"
+    assert infer_transform_for_mapping(
+        "created",
+        "created_at",
+        "VARCHAR",
+        "TIMESTAMP",
+        source_samples=["2024-06-01T12:00:00Z", "2024-06-02T08:00:00Z"],
+    ) == "datetime"
 
 
 def test_mapping_pipeline_passes_source_types():
@@ -173,9 +181,10 @@ def test_lossy_coercion_detection():
         ("INTEGER", "VARCHAR", False),
         ("DATE", "DATETIME", False),
         ("BOOLEAN", "INTEGER", False),
-        ("JSON", "TEXT", False),
-        ("BINARY", "TEXT", False),
-        ("TEXT", "BINARY", False),
+        ("JSON", "TEXT", True),
+        # binary ↔ text needs encoding policy (hex/base64) — Accept risk, not preserve
+        ("BINARY", "TEXT", True),
+        ("TEXT", "BINARY", True),
         # narrowing or semantically incompatible conversions are lossy
         # UUID→VARCHAR keeps the value but drops the UUID domain constraint;
         # wave 77 surfaces that collapse rather than reporting silent green.
@@ -242,10 +251,11 @@ CSV_SNOWFLAKE_DDL_EXPECTED = {
     "order_id": "VARCHAR",
     "customer_email": "VARCHAR",
     "order_total": "NUMBER(38,10)",
-    "quantity": "NUMBER(38,0)",
+    "quantity": "INTEGER",
     "is_gift": "BOOLEAN",
     "order_date": "DATE",
-    "shipped_at": "TIMESTAMP_TZ",
+    # Bare TIMESTAMP = wall-clock NTZ (offset samples need explicit TIMESTAMPTZ).
+    "shipped_at": "TIMESTAMP_NTZ",
     "metadata": "VARIANT",
     "notes": "VARCHAR",
 }
@@ -289,7 +299,7 @@ def test_csv_rows_map_to_snowflake_typed_values():
         "user@test.com",
         "$2,499.00",
         "5",
-        "yes",
+        "true",
         "2024-11-20",
         "2024-11-21T14:00:00Z",
         '{"promo":true}',
@@ -337,12 +347,12 @@ def test_csv_to_snowflake_lossy_coercions_flagged():
 @pytest.mark.parametrize(
     "raw,transform,expected,expect_error",
     [
-        # booleans with common spellings
+        # Canonical boolean wire only (yes/on/n invent refused).
         ("true", "boolean", True, False),
         ("FALSE", "boolean", False, False),
-        ("yes", "boolean", True, False),
+        ("yes", "boolean", None, True),
         ("0", "boolean", False, False),
-        ("n", "boolean", False, False),
+        ("n", "boolean", None, True),
         ("maybe", "boolean", None, True),
         # decimals preserve precision
         ("12345678901234567890.12345", "decimal", "12345678901234567890.12345", False),

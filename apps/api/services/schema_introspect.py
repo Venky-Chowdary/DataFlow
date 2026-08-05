@@ -8,6 +8,7 @@ import logging
 import re
 from typing import Any
 
+from services.engine_pool import release_engine
 from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ _BSON_DECIMAL = _bson_decimal_type()
 
 
 def _infer_logical_from_strings(samples: list[str], field_name: str = "") -> str | None:
-    """Use DataFlow value inference to narrow TEXT/CHAR columns."""
+    """Use Datawrap value inference to narrow TEXT/CHAR columns."""
     try:
         from services.schema_inference import infer_column
 
@@ -460,6 +461,7 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                 "primary_key_columns": [],
                 "unique_keys": [],
             }
+            foreign_keys: list[dict[str, Any]] = []
             if target:
                 columns = _pg_fetch_columns(cur, schema, target)
                 # Table may live outside the requested schema (common when UI
@@ -495,6 +497,7 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                     unique_meta = _pg_fetch_unique_keys(cur, resolved_schema, target)
                     if advisory_keys:
                         unique_meta = _mark_unique_keys_advisory(unique_meta)
+                    foreign_keys = _pg_fetch_foreign_keys(cur, resolved_schema, target)
         conn.close()
         out: dict[str, Any] = {
             "ok": True,
@@ -503,6 +506,7 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
             "schema": resolved_schema if table else schema,
             "primary_key_columns": unique_meta.get("primary_key_columns") or [],
             "unique_keys": unique_meta.get("unique_keys") or [],
+            "foreign_keys": foreign_keys,
         }
         if advisory_keys and (out["primary_key_columns"] or out["unique_keys"]):
             out["warnings"] = [
@@ -992,8 +996,10 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                 "primary_key_columns": [],
                 "unique_keys": [],
             }
+            foreign_keys: list[dict[str, Any]] = []
             if columns and target:
                 unique_meta = _mysql_fetch_unique_keys(cur, db_name, target)
+                foreign_keys = _mysql_fetch_foreign_keys(cur, db_name, target)
         conn.close()
         return {
             "ok": True,
@@ -1002,6 +1008,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
             "schema": db_name,
             "primary_key_columns": unique_meta.get("primary_key_columns") or [],
             "unique_keys": unique_meta.get("unique_keys") or [],
+            "foreign_keys": foreign_keys,
         }
     except ImportError:
         return {"ok": False, "error": "Install pymysql for MySQL schema introspection", "columns": [], "tables": []}
@@ -1521,6 +1528,129 @@ def _pg_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
     return {"primary_key_columns": pk, "unique_keys": unique_keys}
 
 
+def _pg_fetch_foreign_keys(cur: Any, schema: str, table: str) -> list[dict[str, Any]]:
+    """Return FOREIGN KEY metadata for ``schema.table`` (information_schema).
+
+    Shape matches constraint_hints / sample_orphan_probe:
+    ``{name, columns, referenced_schema, referenced_table, referenced_columns}``.
+    Never invents FKs — empty list on query failure.
+    """
+    by_name: dict[str, dict[str, Any]] = {}
+    try:
+        cur.execute(
+            """
+            SELECT tc.constraint_name,
+                   kcu.column_name,
+                   kcu.ordinal_position,
+                   ccu.table_schema AS foreign_table_schema,
+                   ccu.table_name AS foreign_table_name,
+                   ccu.column_name AS foreign_column_name
+            FROM information_schema.table_constraints AS tc
+            JOIN information_schema.key_column_usage AS kcu
+              ON tc.constraint_catalog = kcu.constraint_catalog
+             AND tc.constraint_schema = kcu.constraint_schema
+             AND tc.constraint_name = kcu.constraint_name
+            JOIN information_schema.constraint_column_usage AS ccu
+              ON ccu.constraint_catalog = tc.constraint_catalog
+             AND ccu.constraint_schema = tc.constraint_schema
+             AND ccu.constraint_name = tc.constraint_name
+            WHERE tc.constraint_type = 'FOREIGN KEY'
+              AND tc.table_schema = %s
+              AND tc.table_name = %s
+            ORDER BY tc.constraint_name, kcu.ordinal_position
+            """,
+            (schema, table),
+        )
+        for (
+            cname,
+            col,
+            _ord,
+            ref_schema,
+            ref_table,
+            ref_col,
+        ) in cur.fetchall() or []:
+            key = str(cname)
+            bucket = by_name.setdefault(
+                key,
+                {
+                    "name": key,
+                    "columns": [],
+                    "referenced_schema": str(ref_schema or "").strip(),
+                    "referenced_table": str(ref_table or "").strip(),
+                    "referenced_columns": [],
+                },
+            )
+            col_s = str(col).strip()
+            ref_s = str(ref_col).strip()
+            if col_s and col_s not in bucket["columns"]:
+                bucket["columns"].append(col_s)
+            if ref_s and ref_s not in bucket["referenced_columns"]:
+                bucket["referenced_columns"].append(ref_s)
+            if ref_schema and not bucket.get("referenced_schema"):
+                bucket["referenced_schema"] = str(ref_schema).strip()
+            if ref_table and not bucket.get("referenced_table"):
+                bucket["referenced_table"] = str(ref_table).strip()
+    except Exception as exc:
+        logger.debug("pg foreign key introspect failed: %s", exc, exc_info=exc)
+        return []
+    return list(by_name.values())
+
+
+def _mysql_fetch_foreign_keys(cur: Any, schema: str, table: str) -> list[dict[str, Any]]:
+    """Return FOREIGN KEY metadata from ``KEY_COLUMN_USAGE`` (MySQL / MariaDB)."""
+    by_name: dict[str, dict[str, Any]] = {}
+    try:
+        cur.execute(
+            """
+            SELECT CONSTRAINT_NAME,
+                   COLUMN_NAME,
+                   ORDINAL_POSITION,
+                   REFERENCED_TABLE_SCHEMA,
+                   REFERENCED_TABLE_NAME,
+                   REFERENCED_COLUMN_NAME
+            FROM information_schema.KEY_COLUMN_USAGE
+            WHERE TABLE_SCHEMA = %s
+              AND TABLE_NAME = %s
+              AND REFERENCED_TABLE_NAME IS NOT NULL
+            ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION
+            """,
+            (schema, table),
+        )
+        for (
+            cname,
+            col,
+            _ord,
+            ref_schema,
+            ref_table,
+            ref_col,
+        ) in cur.fetchall() or []:
+            key = str(cname)
+            bucket = by_name.setdefault(
+                key,
+                {
+                    "name": key,
+                    "columns": [],
+                    "referenced_schema": str(ref_schema or "").strip(),
+                    "referenced_table": str(ref_table or "").strip(),
+                    "referenced_columns": [],
+                },
+            )
+            col_s = str(col).strip()
+            ref_s = str(ref_col).strip()
+            if col_s and col_s not in bucket["columns"]:
+                bucket["columns"].append(col_s)
+            if ref_s and ref_s not in bucket["referenced_columns"]:
+                bucket["referenced_columns"].append(ref_s)
+            if ref_schema and not bucket.get("referenced_schema"):
+                bucket["referenced_schema"] = str(ref_schema).strip()
+            if ref_table and not bucket.get("referenced_table"):
+                bucket["referenced_table"] = str(ref_table).strip()
+    except Exception as exc:
+        logger.debug("mysql foreign key introspect failed: %s", exc, exc_info=exc)
+        return []
+    return list(by_name.values())
+
+
 def _sqlserver_fetch_unique_keys(conn: Any, schema: str, table: str) -> dict[str, Any]:
     """Return PRIMARY KEY + UNIQUE indexes from ``sys.indexes``.
 
@@ -2031,7 +2161,7 @@ def _pg_elem_to_logical(elem: str) -> str:
 
 
 def _pg_to_logical(dtype: str) -> str:
-    """Map PostgreSQL ``format_type`` / data_type strings to DataFlow logical carriers.
+    """Map PostgreSQL ``format_type`` / data_type strings to Datawrap logical carriers.
 
     Parametric types keep their dimensions in the type string (DECIMAL(p,s),
     VECTOR(n)) so ``ddl_type`` can propagate them — same contract as DECIMAL.
@@ -2705,7 +2835,7 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
     finally:
         try:
-            engine.dispose()
+            release_engine(engine)
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
@@ -2910,13 +3040,13 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
     finally:
         try:
-            engine.dispose()
+            release_engine(engine)
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
 def _arrow_to_logical(dtype: str) -> str:
-    """Map Apache Arrow / PyArrow dtype strings to DataFlow carriers."""
+    """Map Apache Arrow / PyArrow dtype strings to Datawrap carriers."""
     from services.type_system import arrow_dtype_to_carrier
 
     carrier = arrow_dtype_to_carrier(dtype)
@@ -3292,22 +3422,30 @@ def _widen_mongodb_type(current: str, observed: str) -> str:
 
 def _finalize_mongodb_type(type_counts: dict[str, int]) -> str:
     """Majority-vote Mongo field type — one TEXT sentinel must not demote 49 ints."""
+    chosen, _note = _finalize_mongodb_type_with_note(type_counts)
+    return chosen
+
+
+def _finalize_mongodb_type_with_note(
+    type_counts: dict[str, int],
+) -> tuple[str, str | None]:
+    """Return (majority type, optional mix warning for Validate honesty)."""
     counts = {str(k).upper(): int(v) for k, v in (type_counts or {}).items() if v and k}
     total = sum(counts.values())
     if total <= 0:
-        return "TEXT"
+        return "TEXT", None
 
     structural = {k: counts[k] for k in _STRUCTURAL_TYPES if counts.get(k, 0) > 0}
     if structural:
         # Sticky: any nested observation keeps a semi-structured type.
         if "OBJECT" in structural and "ARRAY" in structural:
-            return "JSON"
-        return max(structural, key=lambda k: (structural[k], _MONGO_TYPE_ORDER.get(k, 0)))
+            return "JSON", None
+        return max(structural, key=lambda k: (structural[k], _MONGO_TYPE_ORDER.get(k, 0))), None
 
     text_n = counts.get("TEXT", 0) + counts.get("VARCHAR", 0)
     typed = {k: v for k, v in counts.items() if k not in _TEXTUAL_TYPES}
     if not typed:
-        return "TEXT"
+        return "TEXT", None
 
     # Promote INTEGER+DECIMAL → DECIMAL, DATE+TIMESTAMP → TIMESTAMP.
     if "DECIMAL" in typed and "INTEGER" in typed:
@@ -3317,11 +3455,22 @@ def _finalize_mongodb_type(type_counts: dict[str, int]) -> str:
 
     best = max(typed, key=lambda k: (typed[k], _MONGO_TYPE_ORDER.get(k, 0)))
     typed_share = sum(typed.values()) / total
+    mix_note: str | None = None
     if typed_share >= _MONGO_TYPED_MAJORITY:
-        return best
+        if text_n > 0:
+            mix_note = (
+                f"{text_n} TEXT sentinel(s) among {total} samples — majority {best}; "
+                "outlier rows may quarantine at write"
+            )
+        return best, mix_note
     if text_n / total >= (1.0 - _MONGO_TYPED_MAJORITY):
-        return "TEXT"
-    return best
+        return "TEXT", None
+    if text_n > 0:
+        mix_note = (
+            f"Mixed Mongo types ({text_n} TEXT / majority {best}) — "
+            "outlier rows may quarantine at write"
+        )
+    return best, mix_note
 
 
 def _introspect_mongodb(**kwargs) -> dict[str, Any]:
@@ -3348,9 +3497,9 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
         columns: dict[str, dict[str, Any]] = {}
         if target:
             for doc in db[target].find().limit(100):
-                if "_id" in doc:
-                    doc["_id"] = str(doc["_id"])
-                for key, val in doc.items():
+                # Sample BSON types BEFORE stringifying _id — otherwise ObjectId
+                # is erased to TEXT and create-new never stamps VARCHAR(24).
+                for key, val in list(doc.items()):
                     inferred = _sample_logical_type(val, key)
                     sample_text = "" if val is None else str(val)
                     if key not in columns:
@@ -3376,7 +3525,10 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
         for col in columns.values():
             counts = col.pop("type_counts", {}) or {}
             if counts:
-                col["inferred_type"] = _finalize_mongodb_type(counts)
+                inferred, mix_note = _finalize_mongodb_type_with_note(counts)
+                col["inferred_type"] = inferred
+                if mix_note:
+                    col["type_mix_warning"] = mix_note
             elif not col.get("inferred_type"):
                 col["inferred_type"] = "TEXT"
             # Re-infer from samples only when majority vote stayed textual / weak —
@@ -3410,6 +3562,7 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
     try:
         from connectors.dynamodb_reader import (
             DDB_NULL_SENTINEL,
+            describe_key_schema,
             describe_table_schema,
             estimate_item_count,
             list_tables,
@@ -3422,8 +3575,15 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
             "username": kwargs.get("username") or "",
             "password": kwargs.get("password") or "",
             "connection_string": kwargs.get("connection_string") or "",
+            "endpoint_url": kwargs.get("endpoint_url") or "",
+            "region": kwargs.get("region") or "",
         }
         names, types = describe_table_schema(cfg, table)
+        key_schema = []
+        try:
+            key_schema = describe_key_schema(cfg, table)
+        except Exception:
+            logger.debug("DynamoDB key schema describe failed for %s", table, exc_info=True)
         # Sample real items — union every attribute (sparse keys) + native types.
         try:
             from connectors.dynamodb_reader import read_table_batch
@@ -3456,8 +3616,16 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
         except Exception:
             logger.warning("DynamoDB sample inference failed for %s", table, exc_info=True)
 
+        pk_names = [k["name"] for k in key_schema if k.get("name")]
+        key_roles = {k["name"]: k.get("key_type", "HASH") for k in key_schema}
         columns = [
-            {"name": name, "inferred_type": types.get(name, "TEXT"), "nullable": True}
+            {
+                "name": name,
+                "inferred_type": types.get(name, "TEXT"),
+                "nullable": name not in pk_names,
+                "is_primary_key": name in pk_names,
+                "dynamo_key_type": key_roles.get(name),
+            }
             for name in names
         ]
         tables = [table]
@@ -3476,6 +3644,8 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
             "columns": columns,
             "schema": table,
             "row_estimate": row_estimate,
+            "primary_key_columns": pk_names,
+            "dynamo_key_schema": key_schema,
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}
@@ -3856,7 +4026,7 @@ def salesforce_field_to_logical(
     scale: int | None = None,
     length: int | None = None,
 ) -> str:
-    """Map Salesforce describe field type → DataFlow logical carrier.
+    """Map Salesforce describe field type → Datawrap logical carrier.
 
     Currency/percent without Describe precision still get honest DECIMAL defaults
     (never bare DECIMAL that invents warehouse NUMBER). Datetime is UTC → TIMESTAMPTZ.
@@ -3911,7 +4081,7 @@ def hubspot_property_to_logical(
     number_display_hint: str = "",
     name: str = "",
 ) -> str:
-    """Map HubSpot property type → DataFlow logical carrier.
+    """Map HubSpot property type → Datawrap logical carrier.
 
     Uses ``fieldType`` / ``numberDisplayHint`` when present so currency and
     whole-number properties do not all collapse to bare DECIMAL.
@@ -4007,9 +4177,35 @@ def _introspect_salesforce(**kwargs: Any) -> dict[str, Any]:
                 "nullable": bool(f.get("nillable", True)),
                 "data_type": f.get("type") or "string",
                 "label": f.get("label") or "",
+                "is_primary_key": f.get("name") == "Id" or bool(f.get("externalId")),
+                "updateable": bool(f.get("updateable", True)),
+                "createable": bool(f.get("createable", True)),
+                "calculated": bool(f.get("calculated", False)),
+                "externalId": bool(f.get("externalId", False)),
+                "idLookup": bool(f.get("idLookup", False)),
             }
         )
-    return {"ok": True, "columns": columns, "tables": tables, "schema": table}
+    pk_cols = ["Id"] if any(c.get("name") == "Id" for c in columns) else []
+    unique_keys: list[dict[str, Any]] = []
+    for c in columns:
+        if c.get("externalId") or (c.get("idLookup") and c.get("name") != "Id"):
+            unique_keys.append(
+                {
+                    "name": f"sf_ext_{c['name']}",
+                    "columns": [str(c["name"])],
+                    "primary": False,
+                    "enforced": True,
+                    "external_id": bool(c.get("externalId")),
+                }
+            )
+    return {
+        "ok": True,
+        "columns": columns,
+        "tables": tables,
+        "schema": table,
+        "primary_key_columns": pk_cols,
+        "unique_keys": unique_keys,
+    }
 
 
 def _thin_saas_logical_to_carrier(logical: str) -> str:

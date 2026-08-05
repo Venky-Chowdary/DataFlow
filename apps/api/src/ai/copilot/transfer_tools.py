@@ -1,4 +1,4 @@
-"""Real transfer planning and confirm-gated execution for Data Pilot.
+"""Real transfer planning and confirm-gated execution for Datawrap Pilot.
 
 The pilot could describe transfers but never run one, and what it *did* describe
 was invented: the old ``plan_transfer_route`` matched substrings like "csv" in a
@@ -47,7 +47,8 @@ from .schema_tools import (
 _LOG = logging.getLogger(__name__)
 
 # Engine tokens, not prose. The old stub returned labels like "Incremental CDC"
-# that no engine call accepts.
+# that no engine call accepts. Every token here resolves to a canonical mode in
+# ``services.sync_cursor``, which :func:`normalize_sync_mode` enforces.
 SYNC_MODES = (
     "full_refresh_append",
     "full_refresh_overwrite",
@@ -56,30 +57,77 @@ SYNC_MODES = (
     "cdc_incremental",
 )
 
-# Only these words authorise destroying rows that are already there.
-_OVERWRITE_WORDS = ("overwrite", "replace", "truncate", "full refresh", "wipe")
-_UPSERT_WORDS = ("upsert", "merge", "dedupe", "deduplicate")
-_APPEND_WORDS = ("append", "add to", "insert into")
+# Only these words authorise destroying rows that are already there. Matching is
+# whole-word (see :func:`sync_mode_from_phrase`), not substring: plain
+# ``in`` matching let a table named ``replacements`` select overwrite and wipe a
+# destination the operator never asked to clear.
+_OVERWRITE_PHRASES = (
+    "overwrite",
+    "replace",
+    "truncate",
+    "wipe",
+    # "full refresh" alone is NOT destructive — operators say that for a
+    # reload-append. Only the explicit overwrite form authorises a wipe.
+    "full refresh overwrite",
+    "full_refresh_overwrite",
+)
+_UPSERT_PHRASES = ("upsert", "merge", "dedupe", "deduplicate", "incremental upsert", "incremental_upsert")
+_APPEND_PHRASES = ("append", "add to", "insert into", "full refresh append", "full_refresh_append")
 
 _MAX_PREVIEW_MAPPINGS = 40
 
 
-def normalize_sync_mode(spoken: str, *, default: str = "full_refresh_append") -> str:
-    """Map an operator phrase to an engine sync-mode token."""
+def sync_mode_from_phrase(spoken: str, *, default: str = "full_refresh_append") -> str:
+    """Map a natural-language operator phrase to a sync-mode token.
+
+    Returns a raw candidate that is then canonicalised by
+    ``services.sync_cursor.normalize_sync_mode``. Phrase matching uses
+    whole-phrase / word-boundary checks so a table named ``replacements``
+    cannot authorise a destructive overwrite.
+    """
     text = (spoken or "").strip().lower()
     if not text:
         return default
     if text in SYNC_MODES:
         return text
-    if any(w in text for w in _OVERWRITE_WORDS):
-        return "full_refresh_overwrite"
-    if any(w in text for w in _UPSERT_WORDS):
-        return "incremental_upsert"
-    if "cdc" in text or "change data capture" in text:
+    # Exact phrase first, then token-boundary contains for multi-word phrases.
+    for phrase in _OVERWRITE_PHRASES:
+        if text == phrase or f" {phrase} " in f" {text} ":
+            return "full_refresh_overwrite"
+    for phrase in _UPSERT_PHRASES:
+        if text == phrase or f" {phrase} " in f" {text} ":
+            return "incremental_upsert"
+    if text == "cdc" or "change data capture" in text or text.startswith("cdc "):
         return "cdc_incremental"
-    if any(w in text for w in _APPEND_WORDS):
-        return "full_refresh_append"
+    for phrase in _APPEND_PHRASES:
+        if text == phrase or f" {phrase} " in f" {text} ":
+            return "full_refresh_append"
     return default
+
+
+def normalize_sync_mode(spoken: str, *, default: str = "full_refresh_append") -> str:
+    """Pilot-facing wrapper: phrase → sync-mode token, engine-validated.
+
+    The Pilot keeps emitting its historical spellings because every engine path
+    already aliases them onto canonical modes. What changed is that the result
+    is now *checked* against the one canonical table in ``services.sync_cursor``
+    before it is returned, so a phrase can no longer resolve to a token the
+    engine would quietly ignore and degrade to full-read + insert.
+    """
+    from services.sync_cursor import CANONICAL_SYNC_MODES
+    from services.sync_cursor import normalize_sync_mode as _canonical
+
+    candidate = sync_mode_from_phrase(spoken, default=default)
+    if _canonical(candidate, default=default) not in CANONICAL_SYNC_MODES:
+        _LOG.warning(
+            "Pilot phrase %r produced sync_mode %r, which no engine mode "
+            "accepts; falling back to the non-destructive default %r.",
+            spoken,
+            candidate,
+            default,
+        )
+        return default
+    return candidate
 
 
 def _column_samples(rows: list[dict[str, Any]], columns: list[str]) -> dict[str, list[str]]:
@@ -126,6 +174,64 @@ def _schema_rows(
     return rows
 
 
+def _transfer_decision(preflight: dict[str, Any]) -> str:
+    """Execute decision from proof bundle — never invent approve from passed alone."""
+    return str(
+        (
+            (preflight.get("proof_bundle") or {}).get("transfer_decision") or {}
+        ).get("decision")
+        or ""
+    ).strip().lower()
+
+
+def _is_execute_cleared(preflight: dict[str, Any]) -> bool:
+    """Same bar as Studio Execute — passed + approve; never local / review-grade."""
+    run_id = str(preflight.get("run_id") or "")
+    if run_id.startswith("pf_local_"):
+        return False
+    return bool(preflight.get("passed") and _transfer_decision(preflight) == "approve")
+
+
+_RISKY_FIDELITY = frozenset({"lossy_cast", "cast", "mutate"})
+
+
+def _risky_conversions(conversions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Cast / mutate / lossy_cast — never call these round-trip-safe."""
+    return [
+        c for c in conversions
+        if str(c.get("fidelity") or "").strip().lower() in _RISKY_FIDELITY
+    ]
+
+
+def _dest_table_exists_tri_state(dst_info: dict[str, Any]) -> bool | None:
+    """True / False / None — never invent create-new from failed introspect.
+
+    None = schema pending / incomplete (Studio schema_pending / schema_incomplete).
+    False = proven missing (error names the table as absent).
+    True = columns loaded from an existing table.
+    """
+    if dst_info.get("columns"):
+        return True
+    if dst_info.get("ok"):
+        # Connected but zero columns — incomplete metadata, not create-new.
+        return None
+    err = str(dst_info.get("error") or "").lower()
+    if any(
+        tok in err
+        for tok in (
+            "not found",
+            "does not exist",
+            "doesn't exist",
+            "unknown relation",
+            "unknown table",
+            "no such table",
+            "invalid object name",
+        )
+    ):
+        return False
+    return None
+
+
 def _type_conversions(mappings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Every column whose carrier changes, with the fidelity verdict attached."""
     out: list[dict[str, Any]] = []
@@ -133,9 +239,18 @@ def _type_conversions(mappings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         src_type = str(m.get("source_type") or m.get("inferred_type") or "").upper()
         dst_type = str(m.get("target_type") or m.get("destination_type") or "").upper()
         transform = str(m.get("transform") or "")
+        fidelity = str(m.get("fidelity") or m.get("risk") or "")
+        # Create-new domain risks are fidelity risks even when fidelity stamp is empty.
+        if not fidelity and m.get("create_new_risks"):
+            fidelity = "cast"
         if not src_type and not dst_type:
             continue
-        if src_type == dst_type and not transform:
+        if (
+            src_type == dst_type
+            and not transform
+            and not m.get("create_new_risks")
+            and str(fidelity).strip().lower() not in _RISKY_FIDELITY
+        ):
             continue
         out.append({
             "source_column": m.get("source_column") or m.get("source"),
@@ -143,7 +258,7 @@ def _type_conversions(mappings: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "from_type": src_type,
             "to_type": dst_type,
             "transform": transform,
-            "fidelity": m.get("fidelity") or m.get("risk") or "",
+            "fidelity": fidelity,
             "confidence": m.get("confidence"),
         })
     return out
@@ -164,12 +279,16 @@ def plan_transfer(
     tool = "plan_transfer"
     src_table = (source_table or "").strip()
     if not src_table:
+        from .example_phrases import example_connector_name, example_dest_connector_name
+
+        src_ex = example_connector_name()
+        dst_ex = example_dest_connector_name(source_hint=src_ex)
         return _tool_result(
             tool,
             success=False,
             error=(
                 "Which table should I move? Example: "
-                '"plan a transfer of orders from Local Postgres to Warehouse".'
+                f'"plan a transfer of orders from {src_ex} to {dst_ex}".'
             ),
         )
     dst_table = (dest_table or src_table).strip()
@@ -213,7 +332,7 @@ def plan_transfer(
         _LOG.warning("plan_transfer dest introspect failed: %s", exc, exc_info=True)
         dst_info = {"ok": False, "error": str(exc), "columns": [], "db_type": "", "cfg": {}}
 
-    dest_exists = bool(dst_info.get("ok") and dst_info.get("columns"))
+    dest_exists = _dest_table_exists_tri_state(dst_info)
     mode = normalize_sync_mode(sync_mode)
 
     # Sample once: the same real rows drive mapping confidence and the gates.
@@ -300,7 +419,7 @@ def plan_transfer(
             "mapped_count": len(mappings),
             "unmapped_source_columns": unmapped[:20],
             "type_conversions": conversions[:_MAX_PREVIEW_MAPPINGS],
-            "lossy_conversions": [c for c in conversions if c.get("fidelity") == "lossy_cast"],
+            "lossy_conversions": _risky_conversions(conversions),
             "mappings": [
                 {
                     "source": m.get("source_column") or m.get("source"),
@@ -318,7 +437,8 @@ def plan_transfer(
             "quality_issues": (mapping.get("quality_issues") or [])[:10],
             "coercion_issues": (mapping.get("coercion_issues") or [])[:10],
             "preflight": preflight,
-            "safe_to_start": bool(preflight.get("passed")),
+            # Align with Execute unlock — passed alone must not invent safe_to_start.
+            "safe_to_start": _is_execute_cleared(preflight),
         },
     )
 
@@ -338,7 +458,7 @@ def _run_preflight(
     src_db_type: str,
     source_config: dict[str, Any],
     dest_db_type: str,
-    dest_exists: bool,
+    dest_exists: bool | None,
 ) -> dict[str, Any]:
     """Run the real 9 gates and persist the run so the operator can cite it."""
     from services.preflight_run_store import save_preflight_run
@@ -532,20 +652,34 @@ def start_transfer(
 
     plan = planned.output or {}
     preflight = plan.get("preflight") or {}
-    if not preflight.get("passed"):
+    if not _is_execute_cleared(preflight):
+        decision = _transfer_decision(preflight) or ("blocked" if not preflight.get("passed") else "review")
         blockers = preflight.get("blockers") or []
         listed = "; ".join(
             f"{b.get('id')}: {b.get('message')}" for b in blockers[:4] if b.get("message")
         )
+        if not preflight.get("passed"):
+            err = (
+                "Preflight blocked this transfer, so I won't start it"
+                + (f" — {listed}" if listed else "")
+                + (f" (run {preflight.get('run_id')})." if preflight.get("run_id") else ".")
+            )
+        elif str(preflight.get("run_id") or "").startswith("pf_local_"):
+            err = (
+                "Local / browser-only preflight cannot unlock Confirm — "
+                "re-run Validate against the API until decision is approve."
+            )
+        else:
+            err = (
+                f"Preflight is {decision}-grade, not approve — Confirm is blocked "
+                "until Studio Execute would unlock "
+                + (f"(run {preflight.get('run_id')})." if preflight.get("run_id") else ".")
+            )
         return _tool_result(
             tool,
             success=False,
             output={**plan, "action": "plan_transfer"},
-            error=(
-                "Preflight blocked this transfer, so I won't start it"
-                + (f" — {listed}" if listed else "")
-                + (f" (run {preflight.get('run_id')})." if preflight.get("run_id") else ".")
-            ),
+            error=err,
         )
 
     source = plan["source"]
@@ -584,6 +718,8 @@ def start_transfer(
         "skip_preflight": False,
         "preflight_run_id": preflight.get("run_id"),
     }
+    # Belt-and-suspenders: ignore any injected/mutated skip even if schema drifts.
+    payload["skip_preflight"] = False  # hard deny - Pilot never bypasses Validate
     preview = {
         "source": f"{source['connector_name']}.{source['table']}",
         "destination": f"{destination['connector_name']}.{destination['table']}",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from services.brand_env import getenv_brand
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -24,7 +25,7 @@ def _now() -> str:
 
 
 def _store_path() -> Path:
-    env = os.getenv("DATAFLOW_NOTIFICATION_STORE", "").strip()
+    env = getenv_brand("NOTIFICATION_STORE", "").strip()
     return Path(env) if env else STORE_PATH
 
 

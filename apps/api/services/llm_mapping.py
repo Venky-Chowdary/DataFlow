@@ -15,6 +15,45 @@ def _sanitize_samples(samples: dict[str, list[str]] | None) -> dict[str, list[st
         return {}
     return mask_pii_samples(samples)
 
+
+_IDENTITY_TRANSFORMS = frozenset({"", "none", "identity", "null"})
+
+
+def _norm_transform(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def _hold_invented_transform(
+    pick: dict[str, Any],
+    base: dict[str, Any] | None,
+    llm: dict[str, Any],
+) -> dict[str, Any]:
+    """Never auto-apply an LLM-invented transform — require human accept on Map.
+
+    Deterministic baseline transform (if any) stays applied; the LLM proposal is
+    surfaced as ``suggested_transform`` with ``requires_review`` forced.
+    """
+    llm_xf = _norm_transform(llm.get("transform"))
+    base_xf = _norm_transform(
+        (base or {}).get("transform") or (base or {}).get("transformation")
+    )
+    if not llm_xf or llm_xf in _IDENTITY_TRANSFORMS or llm_xf == base_xf:
+        return pick
+    suggested = llm.get("transform") or llm.get("transformation")
+    pick["llm_invented_transform"] = True
+    pick["suggested_transform"] = suggested
+    if base is not None and ("transform" in base or "transformation" in base):
+        pick["transform"] = base.get("transform", base.get("transformation"))
+    else:
+        pick["transform"] = None
+    pick["requires_review"] = True
+    note = (
+        f"LLM suggested transform '{suggested}' — human accept required before Execute"
+    )
+    reason = str(pick.get("reasoning") or "").strip()
+    pick["reasoning"] = f"{reason} · {note}" if reason else note
+    return pick
+
 _LLM_SYSTEM = (
     "You are a data engineering expert. Map source columns to destination columns. "
     "Respond with valid JSON only. Never invent destination columns not in the target list."
@@ -108,8 +147,8 @@ def _compute_llm_review(
     """Compute score gap and review flag from LLM confidence and baseline alternatives.
 
     The LLM confidence is the winner; the strongest baseline alternative that targets a
-    different column is the runner-up.  If the gap is small and the mapping is not an exact
-    identity match, flag it for review.
+    different column is the runner-up. Exact-name identity no longer exempts a narrow
+    gap — operators must approve ambiguous remaps before Execute.
     """
     winner_conf = llm["confidence"]
     target = llm["target"].lower()
@@ -124,10 +163,7 @@ def _compute_llm_review(
             default=0.0,
         )
     score_gap = max(round(winner_conf - runner_up, 3), 0.0)
-
-    reason = str(llm.get("reasoning") or base.get("reasoning") or "")
-    is_exact = source.lower().strip() == target or reason.startswith("Exact")
-    requires_review = score_gap < 0.08 and not is_exact
+    requires_review = score_gap < 0.08
     return score_gap, requires_review
 
 
@@ -210,9 +246,31 @@ def refine_mappings_with_llm(
         used_targets: set[str] = set()
         baseline_by_source = {m["source"]: m for m in baseline_mappings}
 
+        # Module 13 — never silently overwrite operator-locked baseline rows.
+        from services.mapping_engine_contract import is_operator_locked
+
         for src in source_columns:
             base = baseline_by_source.get(src)
             llm = llm_by_source.get(src)
+            if base and is_operator_locked(base):
+                kept = dict(base)
+                if llm and (
+                    str(llm.get("target") or "") != str(base.get("target") or "")
+                    or str(llm.get("transform") or "") != str(base.get("transform") or "none")
+                ):
+                    kept["engine_suggestion"] = {
+                        "target": llm.get("target"),
+                        "transform": llm.get("transform"),
+                        "confidence": llm.get("confidence"),
+                        "reasoning": llm.get("reasoning"),
+                        "suppressed": True,
+                        "reason": "operator_locked_mapping_not_silently_overwritten",
+                    }
+                merged.append(kept)
+                tgt = str(kept.get("target") or "").lower()
+                if tgt:
+                    used_targets.add(tgt)
+                continue
             if llm and llm["target"].lower() not in used_targets:
                 pick = {**(base or {}), **llm}
                 if base and llm["confidence"] < base.get("confidence", 0):
@@ -220,6 +278,7 @@ def refine_mappings_with_llm(
                 score_gap, requires_review = _compute_llm_review(src, llm, base)
                 pick["score_gap"] = score_gap
                 pick["requires_review"] = requires_review
+                pick = _hold_invented_transform(pick, base, llm)
                 pick["method"] = "hybrid_llm"
                 pick["agent"] = "LLMMappingAgent"
                 merged.append(pick)
@@ -229,8 +288,9 @@ def refine_mappings_with_llm(
 
         for src, llm in llm_by_source.items():
             if src not in {m["source"] for m in merged} and llm["target"].lower() not in used_targets:
-                merged.append(llm)
-                used_targets.add(llm["target"].lower())
+                held = _hold_invented_transform(dict(llm), None, llm)
+                merged.append(held)
+                used_targets.add(held["target"].lower())
 
         meta.update({
             "llm_used": True,

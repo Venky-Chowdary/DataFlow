@@ -1,5 +1,5 @@
 """
-DataTransfer.space — RAG Retriever
+Datawrap — RAG Retriever
 
 Semantic search over known patterns, synonyms, and type mappings.
 """

@@ -23,7 +23,16 @@ _PK_HINT_FIELDS = ("id", "_id", "pk", "ID", "Id", "uuid", "UUID", "key")
 
 
 def infer_row_pk(row: dict[str, Any] | None, *, explicit: str | None = None) -> str:
-    """Best-effort PK string for coalesce when callers do not pass one."""
+    """Resolve the PK string used to coalesce in-transaction DML.
+
+    Callers that know the primary key **must** pass ``explicit``. Guessing from
+    the first non-empty column value collapsed two distinct rows that shared
+    that value into one, and made a DELETE keyed on the real PK miss the
+    INSERT that followed it in the same transaction — so the recreated row
+    was deleted. The only remaining fallback is well-known id column names;
+    anything else returns empty and the coalescer keeps the row under a
+    synthetic key rather than inventing a collision.
+    """
     if explicit:
         return str(explicit)
     if not row:
@@ -31,10 +40,6 @@ def infer_row_pk(row: dict[str, Any] | None, *, explicit: str | None = None) -> 
     for field in _PK_HINT_FIELDS:
         if field in row and row[field] is not None and str(row[field]).strip() != "":
             return str(row[field])
-    # Fall back to first non-empty scalar (stable for single-PK tables).
-    for value in row.values():
-        if value is not None and str(value).strip() != "":
-            return str(value)
     return ""
 
 

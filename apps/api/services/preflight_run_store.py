@@ -1,4 +1,4 @@
-"""Persist preflight/validation runs so Data Pilot and Jobs can look them up by ID."""
+"""Persist preflight/validation runs so Datawrap Pilot and Jobs can look them up by ID."""
 
 from __future__ import annotations
 
@@ -84,14 +84,18 @@ def _suggest_remediations(blockers: list[Any]) -> list[dict[str, str]]:
         str(b.get("message") or "") for b in blockers if isinstance(b, dict)
     ).lower()
     out: list[dict[str, str]] = []
-    if "format-control" in text or "replacement character" in text or "encoding" in text:
-        out.append({
-            "kind": "normalize_control_chars",
-            "label": "Strip control characters and re-run validation",
-        })
+    # Do not match bare "encoding" — column names like encoding_id steal CTAs.
+    if (
+        "format-control" in text
+        or "replacement character" in text
+        or "encoding anomaly" in text
+        or "character encoding" in text
+        or "u+200b" in text
+        or "zero-width" in text
+    ):
         out.append({
             "kind": "open_bad_data_fix",
-            "label": "Open Fix bad data dialog",
+            "label": "Fix bad data…",
         })
     if "mapping" in text or "confidence" in text:
         out.append({"kind": "review_mappings", "label": "Review column mappings"})

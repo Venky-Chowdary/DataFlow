@@ -132,7 +132,7 @@ def build_milvus_entities(
     *,
     dimension: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Map DataFlow vector rows to Milvus upsert entities (testable, no I/O).
+    """Map Datawrap vector rows to Milvus upsert entities (testable, no I/O).
 
     Returns ``(entities, rejected)``. Missing/mismatched embeddings and missing
     stable ids are rejected — never fabricate zero vectors or ``"missing"`` ids.

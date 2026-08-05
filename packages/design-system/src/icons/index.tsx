@@ -1,26 +1,38 @@
 /**
- * DataFlow mark — source · gate · destination
+ * Datawrap mark — source · wrap gate · destination
  */
 
 export function IconFlowMark({ size = 32 }: { size?: number }) {
+  const gradId = `dw-bg-${size}`;
   return (
-    <svg width={size} height={size} viewBox="0 0 40 40" fill="none" aria-hidden role="img">
-      <title>DataFlow</title>
+    <svg width={size} height={size} viewBox="0 0 512 512" fill="none" aria-hidden role="img">
+      <title>Datawrap</title>
       <defs>
-        <linearGradient id="df-flow-orange" x1="4" y1="20" x2="20" y2="20" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#FF4D00" />
-          <stop offset="1" stopColor="#FF4D00" stopOpacity="0.6" />
-        </linearGradient>
-        <linearGradient id="df-flow-mint" x1="20" y1="20" x2="36" y2="20" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#00B87A" stopOpacity="0.6" />
-          <stop offset="1" stopColor="#00B87A" />
+        <linearGradient id={gradId} x1="72" y1="48" x2="440" y2="464" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#0F766E" />
+          <stop offset="0.55" stopColor="#134E4A" />
+          <stop offset="1" stopColor="#0B1220" />
         </linearGradient>
       </defs>
-      <circle cx="8" cy="20" r="4" fill="#FF4D00" />
-      <path d="M12 20 H17" stroke="url(#df-flow-orange)" strokeWidth="2.5" strokeLinecap="round" />
-      <rect x="17.5" y="17.5" width="5" height="5" rx="1" transform="rotate(45 20 20)" fill="#FF4D00" />
-      <path d="M23 20 H32" stroke="url(#df-flow-mint)" strokeWidth="2.5" strokeLinecap="round" />
-      <circle cx="32" cy="20" r="4" fill="#00B87A" />
+      <rect width="512" height="512" rx="112" fill={`url(#${gradId})`} />
+      <path
+        d="M128 256 L176 176 H336 L384 256 L336 336 H176 Z"
+        stroke="#FFFFFF"
+        strokeWidth="28"
+        strokeLinejoin="round"
+        fill="none"
+      />
+      <path
+        d="M256 198 L314 256 L256 314 L198 256 Z"
+        stroke="#FFFFFF"
+        strokeWidth="26"
+        strokeLinejoin="round"
+        fill="none"
+      />
+      <path d="M72 256 H128" stroke="#FFFFFF" strokeWidth="28" strokeLinecap="round" />
+      <path d="M384 256 H440" stroke="#FFFFFF" strokeWidth="28" strokeLinecap="round" />
+      <circle cx="72" cy="256" r="34" fill="#F59E0B" />
+      <circle cx="440" cy="256" r="34" fill="#2DD4BF" />
     </svg>
   );
 }
@@ -39,18 +51,18 @@ export function IconOverview({ size = 18 }: { size?: number }) {
 export function IconHome({ size = 18 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 18 18" fill="none" aria-hidden>
-      <path 
-        d="M3 7.5L9 3L15 7.5V14.5C15 15.05 14.55 15.5 14 15.5H4C3.45 15.5 3 15.05 3 14.5V7.5Z" 
-        stroke="currentColor" 
-        strokeWidth="1.5" 
-        strokeLinecap="round" 
+      <path
+        d="M3 7.5L9 3L15 7.5V14.5C15 15.05 14.55 15.5 14 15.5H4C3.45 15.5 3 15.05 3 14.5V7.5Z"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
         strokeLinejoin="round"
       />
-      <path 
-        d="M7 15.5V9.5H11V15.5" 
-        stroke="currentColor" 
-        strokeWidth="1.5" 
-        strokeLinecap="round" 
+      <path
+        d="M7 15.5V9.5H11V15.5"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
         strokeLinejoin="round"
       />
     </svg>
@@ -79,8 +91,7 @@ export function IconConnector({ size = 18 }: { size?: number }) {
 export function IconJobs({ size = 18 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 18 18" fill="none" aria-hidden>
-      <path d="M4 4H14V14H4V4Z" stroke="currentColor" strokeWidth="1.5" />
-      <path d="M6 7H12M6 10H10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <path d="M3 4.5H15M3 9H15M3 13.5H10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
     </svg>
   );
 }

@@ -211,6 +211,14 @@ PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     ("file", "parquet", "database", "snowflake"),
     # Duplex stores already RW+introspect — commit SKU proof routes
     ("database", "postgresql", "database", "dynamodb"),
+    # Demo-critical: DynamoDB → cloud object stores (client wedge)
+    ("database", "dynamodb", "database", "s3"),
+    ("database", "dynamodb", "database", "gcs"),
+    ("database", "dynamodb", "database", "adls"),
+    ("database", "dynamodb", "database", "postgresql"),
+    # Demo-critical: Salesforce source + dest
+    ("database", "salesforce", "database", "postgresql"),
+    ("database", "salesforce", "database", "s3"),
     ("database", "postgresql", "database", "elasticsearch"),
     ("database", "postgresql", "database", "redis"),
     ("database", "postgresql", "database", "gcs"),

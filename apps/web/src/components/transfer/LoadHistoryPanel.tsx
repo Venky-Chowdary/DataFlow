@@ -25,19 +25,8 @@ export function LoadHistoryPanel({
   const hasSignal = anomalies.length > 0 || novel.length > 0 || Boolean(warning);
 
   if (prior === 0 && !hasSignal) {
-    return (
-      <section className={`df2-load-history ${className}`.trim()} aria-label={title}>
-        <header className="df2-load-history-head">
-          <DtIcon name="activity" size={15} />
-          <strong>{title}</strong>
-          <span className="df2-load-history-badge">No prior loads</span>
-        </header>
-        <p className="df2-load-history-empty">
-          This is the first profiled load for this source→destination route.
-          Later runs compare against this baseline (null rates, volume, quarantine patterns).
-        </p>
-      </section>
-    );
+    // First-load baseline note is noise on Run — hide until there is history.
+    return null;
   }
 
   return (

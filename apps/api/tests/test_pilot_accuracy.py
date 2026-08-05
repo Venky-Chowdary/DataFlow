@@ -1,4 +1,4 @@
-"""Accuracy / robustness guarantees for Data Pilot routing and scoring."""
+"""Accuracy / robustness guarantees for Datawrap Pilot routing and scoring."""
 
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ def test_score_prefers_grounded_local_over_ungrounded_llm():
         answer="Live schema Local Postgres.`airports` — **5 columns**:",
         intent="schema",
         confidence=0.96,
-        method="pilot_local_agent",
+        method="pilot_local_engine",
         tools_used=[{"name": "introspect_connector_schema", "success": True, "summary": "5 cols"}],
     )
     llm = CopilotResponse(
@@ -107,7 +107,7 @@ def test_score_clarification_does_not_beat_grounded():
         answer="You have **3 pipeline schedule(s)**.",
         intent="operate",
         confidence=0.96,
-        method="pilot_local_agent",
+        method="pilot_local_engine",
         tools_used=[{"name": "list_schedules", "success": True, "summary": "3"}],
     )
     vague = CopilotResponse(

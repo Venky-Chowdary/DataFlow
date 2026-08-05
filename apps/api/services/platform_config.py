@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from services.brand_env import getenv_brand
 import sys
 from pathlib import Path
 from typing import Any
@@ -15,19 +16,35 @@ def is_railway() -> bool:
 
 
 def is_production() -> bool:
-    env = os.getenv("DATAFLOW_ENV", os.getenv("ENVIRONMENT", "")).lower()
-    if is_railway():
-        if env in ("development", "dev", "local"):
-            return False
-        return True
-    if not env:
+    """Return True when the process must enforce production security policy.
+
+    Fail-closed rules:
+    - Explicit ``ENV=production|prod`` → production
+    - Explicit ``ENV=development|dev|local|test`` → not production
+    - Railway (unless explicitly marked development) → production
+    - ``ASSUME_PRODUCTION=1`` → production (bare-metal / k8s without ENV)
+    - ``REQUIRE_AUTH=1`` with unset ENV → production (misconfigured host)
+    - Otherwise unset ENV stays non-production for local developer UX
+    """
+    env = (getenv_brand("ENV", os.getenv("ENVIRONMENT", "")) or "").lower()
+    if env in ("development", "dev", "local", "test"):
         return False
-    return env in ("production", "prod")
+    if env in ("production", "prod"):
+        return True
+    if is_railway():
+        return True
+    if getenv_brand("ASSUME_PRODUCTION", "0").lower() in ("1", "true", "yes"):
+        return True
+    # Operator set auth-required without declaring ENV — treat as production so
+    # vault / DEV_USER / docs gates cannot silently fail open on a public host.
+    if not env and getenv_brand("REQUIRE_AUTH", "").lower() in ("1", "true", "yes"):
+        return True
+    return False
 
 
 def _railway_volume_root() -> Path | None:
     """Railway persistent volume mount (set in dashboard)."""
-    for key in ("RAILWAY_VOLUME_MOUNT_PATH", "DATAFLOW_VOLUME_PATH"):
+    for key in ("RAILWAY_VOLUME_MOUNT_PATH", "DATAWRAP_VOLUME_PATH", "DATAFLOW_VOLUME_PATH"):
         raw = os.getenv(key, "").strip()
         if raw:
             return Path(raw)
@@ -38,7 +55,7 @@ def _railway_volume_root() -> Path | None:
 
 def data_dir() -> Path:
     vol = _railway_volume_root()
-    raw = os.getenv("DATAFLOW_DATA_DIR", "").strip()
+    raw = getenv_brand("DATA_DIR", "").strip()
     if raw:
         path = Path(raw)
     elif vol:
@@ -51,7 +68,7 @@ def data_dir() -> Path:
 
 def upload_dir() -> Path:
     vol = _railway_volume_root()
-    raw = os.getenv("DATAFLOW_UPLOAD_DIR", "").strip()
+    raw = getenv_brand("UPLOAD_DIR", "").strip()
     if raw:
         path = Path(raw)
     elif vol:
@@ -64,7 +81,7 @@ def upload_dir() -> Path:
 
 def vector_store_dir() -> Path:
     vol = _railway_volume_root()
-    raw = os.getenv("DATAFLOW_VECTOR_STORE_DIR", "").strip()
+    raw = getenv_brand("VECTOR_STORE_DIR", "").strip()
     if raw:
         path = Path(raw)
     elif vol:
@@ -99,12 +116,34 @@ def cors_origins() -> list[str]:
     if domain:
         origins.append(f"https://{domain}")
 
-    web_domain = os.getenv("DATAFLOW_WEB_DOMAIN", "").strip()
+    web_domain = getenv_brand("WEB_DOMAIN", "").strip()
     if web_domain:
         if not web_domain.startswith("http"):
             origins.append(f"https://{web_domain}")
         else:
             origins.append(web_domain)
+
+    # Operator-managed customer vanity URLs (pre-DNS or multi-tenant hosts).
+    extra = os.getenv("CORS_EXTRA_ORIGINS", "").strip()
+    if extra:
+        origins.extend(o.strip() for o in extra.split(",") if o.strip())
+
+    # Tenant custom domains configured via workspace APIs — customers set these
+    # so the SPA at https://data.customer.com can call the API with credentials.
+    if getenv_brand("CORS_INCLUDE_TENANT_DOMAINS", "1").lower() not in ("0", "false", "no"):
+        try:
+            from services.tenant_store import list_tenants
+
+            for tenant in list_tenants():
+                host = (getattr(tenant, "custom_domain", None) or "").strip().lower()
+                if not host:
+                    continue
+                if host.startswith("http://") or host.startswith("https://"):
+                    origins.append(host.rstrip("/"))
+                else:
+                    origins.append(f"https://{host}")
+        except Exception:
+            pass
 
     seen: set[str] = set()
     unique: list[str] = []
@@ -117,8 +156,13 @@ def cors_origins() -> list[str]:
 
 def docs_enabled() -> bool:
     if is_production():
-        return os.getenv("DATAFLOW_ENABLE_DOCS", "0").lower() in ("1", "true", "yes")
-    return os.getenv("DATAFLOW_ENABLE_DOCS", "1").lower() not in ("0", "false", "off", "no")
+        return getenv_brand("ENABLE_DOCS", "0").lower() in ("1", "true", "yes")
+    return getenv_brand("ENABLE_DOCS", "1").lower() not in ("0", "false", "off", "no")
+
+
+def tracing_enabled() -> bool:
+    """Opt-in OpenTelemetry. Off by default so a lean install is unchanged."""
+    return getenv_brand("ENABLE_TRACING", "0").lower() in ("1", "true", "yes")
 
 
 def _mongo_is_localhost(uri: str) -> bool:
@@ -136,32 +180,37 @@ def validate_production_config() -> list[str]:
         return []
 
     errors: list[str] = []
-    secret = os.getenv("DATAFLOW_AUTH_SECRET", "")
+    secret = getenv_brand("AUTH_SECRET", "")
     if not secret or len(secret) < 32:  # nosec B105
-        errors.append("DATAFLOW_AUTH_SECRET must be set to a strong random value (>=32 bytes) in production")
+        errors.append(
+            "DATAWRAP_AUTH_SECRET (or legacy DATAFLOW_AUTH_SECRET) must be set "
+            "to a strong random value (>=32 bytes) in production"
+        )
 
-    if os.getenv("DATAFLOW_REQUIRE_AUTH", "0").lower() not in ("1", "true", "yes"):
-        errors.append("DATAFLOW_REQUIRE_AUTH must be 1 in production")
+    if getenv_brand("REQUIRE_AUTH", "0").lower() not in ("1", "true", "yes"):
+        errors.append("DATAWRAP_REQUIRE_AUTH (or DATAFLOW_REQUIRE_AUTH) must be 1 in production")
 
     # At least one real login path: admin pair and/or AUTH_USERS JSON.
-    # DATAFLOW_ALLOW_DEV_USER is staging-only and must not be required in prod.
-    admin_email = (os.getenv("DATAFLOW_ADMIN_EMAIL") or "").strip()
-    admin_password = (os.getenv("DATAFLOW_ADMIN_PASSWORD") or "").strip()
-    users_raw = (os.getenv("DATAFLOW_AUTH_USERS") or "").strip()
-    allow_dev = os.getenv("DATAFLOW_ALLOW_DEV_USER", "0").lower() in ("1", "true", "yes")
-    if not ((admin_email and admin_password) or users_raw or allow_dev):
-        errors.append(
-            "Set DATAFLOW_ADMIN_EMAIL + DATAFLOW_ADMIN_PASSWORD "
-            "(recommended), or a valid DATAFLOW_AUTH_USERS JSON array"
-        )
+    # DATAWRAP_ALLOW_DEV_USER is forbidden in production — never a login path.
+    admin_email = (getenv_brand("ADMIN_EMAIL") or "").strip()
+    admin_password = (getenv_brand("ADMIN_PASSWORD") or "").strip()
+    users_raw = (getenv_brand("AUTH_USERS") or "").strip()
+    allow_dev = getenv_brand("ALLOW_DEV_USER", "0").lower() in ("1", "true", "yes")
     if allow_dev:
-        print(
-            "[!] DATAFLOW_ALLOW_DEV_USER=1 is set — staging/dev login only; "
-            "disable for real production tenants",
-            file=sys.stderr,
+        errors.append(
+            "DATAWRAP_ALLOW_DEV_USER must not be enabled in production "
+            "(hard-coded test@gmail.com login is forbidden for customer tenants)"
         )
-    if not os.getenv("DATAFLOW_SECRETS_KEY", "").strip():
-        errors.append("DATAFLOW_SECRETS_KEY must be set for Fernet encryption of connector credentials in production")
+    if not ((admin_email and admin_password) or users_raw):
+        errors.append(
+            "Set DATAWRAP_ADMIN_EMAIL + DATAWRAP_ADMIN_PASSWORD "
+            "(or legacy DATAFLOW_ADMIN_*), or a valid DATAWRAP_AUTH_USERS JSON array"
+        )
+    if not getenv_brand("SECRETS_KEY", "").strip():
+        errors.append(
+            "DATAWRAP_SECRETS_KEY (or DATAFLOW_SECRETS_KEY) must be set for "
+            "Fernet encryption of connector credentials in production"
+        )
     try:
         import cryptography.fernet  # noqa: F401
     except Exception:
@@ -192,7 +241,7 @@ def enforce_production_config() -> None:
 
 def public_url() -> str:
     """Public API base URL used for retry/resume links in notifications."""
-    explicit = os.getenv("DATAFLOW_PUBLIC_URL", "").strip()
+    explicit = getenv_brand("PUBLIC_URL", "").strip()
     if explicit:
         return explicit.rstrip("/")
     if is_railway():
@@ -209,30 +258,30 @@ def email_provider_config() -> dict[str, Any]:
     If provider is configured and its API key is present, the platform sends
     email without requiring per-tenant SMTP credentials.
     """
-    provider = os.getenv("DATAFLOW_EMAIL_PROVIDER", "smtp").lower().strip()
+    provider = getenv_brand("EMAIL_PROVIDER", "smtp").lower().strip()
     cfg: dict[str, Any] = {"provider": provider}
     if provider == "sendgrid":
         cfg["api_key"] = os.getenv("SENDGRID_API_KEY", "")
-        cfg["from"] = os.getenv("DATAFLOW_EMAIL_FROM", "dataflow@example.com")
+        cfg["from"] = getenv_brand("EMAIL_FROM", "dataflow@example.com")
     elif provider == "resend":
         cfg["api_key"] = os.getenv("RESEND_API_KEY", "")
-        cfg["from"] = os.getenv("DATAFLOW_EMAIL_FROM", "dataflow@example.com")
+        cfg["from"] = getenv_brand("EMAIL_FROM", "dataflow@example.com")
     elif provider == "mailgun":
         cfg["api_key"] = os.getenv("MAILGUN_API_KEY", "")
         cfg["domain"] = os.getenv("MAILGUN_DOMAIN", "")
         cfg["region"] = os.getenv("MAILGUN_REGION", "us")
-        cfg["from"] = os.getenv("DATAFLOW_EMAIL_FROM", "dataflow@example.com")
+        cfg["from"] = getenv_brand("EMAIL_FROM", "dataflow@example.com")
     else:
-        cfg["from"] = os.getenv("DATAFLOW_EMAIL_FROM", os.getenv("DATAFLOW_SMTP_FROM", "dataflow@localhost"))
+        cfg["from"] = getenv_brand("EMAIL_FROM", getenv_brand("SMTP_FROM", "dataflow@localhost"))
     return cfg
 
 
 def web_url() -> str:
     """Public web UI base URL used for clickable job links."""
-    explicit = os.getenv("DATAFLOW_WEB_URL", "").strip()
+    explicit = getenv_brand("WEB_URL", "").strip()
     if explicit:
         return explicit.rstrip("/")
-    web_domain = os.getenv("DATAFLOW_WEB_DOMAIN", "").strip()
+    web_domain = getenv_brand("WEB_DOMAIN", "").strip()
     if web_domain:
         if web_domain.startswith("http"):
             return web_domain.rstrip("/")

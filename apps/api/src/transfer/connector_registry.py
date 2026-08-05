@@ -472,7 +472,7 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
         if re.search(r"authentication|auth|login|credential|account_key|signature|invalid|unauthorized|access denied|permission", text):
             return "Azure authentication failed. Check the storage account name, account key, or service principal JSON and permissions."
         if re.search(r"container|filesystem|not found|does not exist|resource not found", text):
-            return "Container not found. Check the container or filesystem name, or DataFlow will create it during the transfer."
+            return "Container not found. Check the container or filesystem name, or Datawrap will create it during the transfer."
 
     # GCS
     if driver == "gcs":

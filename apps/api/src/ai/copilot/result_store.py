@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from services.brand_env import getenv_brand
 import threading
 import time
 import uuid
@@ -24,7 +25,7 @@ _MAX_ENTRIES = 200
 
 
 def _default_path() -> Path:
-    override = os.environ.get("DATAFLOW_PILOT_RESULTS_PATH", "").strip()
+    override = getenv_brand("PILOT_RESULTS_PATH", "").strip()
     if override:
         return Path(override)
     return Path(__file__).resolve().parents[3] / "data" / "pilot_results.json"

@@ -147,7 +147,7 @@ export function inferTransferFailureHint(
       confidence: "high",
       fix:
         errorFix
-        || 'DataFlow needs object rows: [{...}], a wrapper like {"data":[{...}]} / {"countries":[{...}]}, GeoJSON features, or one object as a single row. Re-export, re-upload, then re-run from Source — Resume will not help if extract never started.',
+        || 'Datawrap needs object rows: [{...}], a wrapper like {"data":[{...}]} / {"countries":[{...}]}, GeoJSON features, or one object as a single row. Re-export, re-upload, then re-run from Source — Resume will not help if extract never started.',
     };
   }
   if (
@@ -178,6 +178,47 @@ export function inferTransferFailureHint(
       fix:
         errorFix
         || "Open the Quarantine tab on this job, read the per-row reason, fix the Map transform or destination type, then Replay. This is not an empty source — the engine held the rows so nothing was silently dropped.",
+    };
+  }
+  if (
+    text.includes("full_refresh could not clear")
+    || text.includes("refusing to append onto rows that should have been replaced")
+    || text.includes("full_refresh_drop_failed")
+  ) {
+    return {
+      code: errorCode || "full_refresh_drop_failed",
+      title: errorTitle || "Could not clear the destination for full refresh",
+      confidence: "high",
+      fix:
+        errorFix
+        || "Grant DROP (or DELETE) on the destination table, confirm no lock is holding it, then re-run. Datawrap refused to continue as an append — that would have silently doubled the destination row count.",
+    };
+  }
+  if (
+    text.includes("ambiguous_write_outcome")
+    || text.includes("cannot be safely retried")
+    || text.includes("unknown outcome")
+  ) {
+    return {
+      code: errorCode || "ambiguous_write_outcome",
+      title: errorTitle || "Write interrupted with an unknown outcome",
+      confidence: "high",
+      fix:
+        errorFix
+        || "Resume this job from the last committed chunk. Datawrap stopped instead of re-sending the batch because this destination cannot deduplicate a replay. To make retries automatic, switch the sync mode to upsert with a primary key.",
+    };
+  }
+  if (
+    text.includes("duplicate_transfer")
+    || text.includes("equivalent transfer is already")
+  ) {
+    return {
+      code: errorCode || "duplicate_transfer",
+      title: errorTitle || "An equivalent transfer is already running",
+      confidence: "high",
+      fix:
+        errorFix
+        || "Open the in-flight job instead of starting another writer against the same table. Cancel it first if you need a fresh run.",
     };
   }
   if (errorTitle && errorFix) {

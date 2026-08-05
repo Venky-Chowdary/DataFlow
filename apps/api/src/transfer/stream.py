@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import logging
 import os
+from services.brand_env import getenv_brand
 import re
 import sys
+import threading
+import time
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable
@@ -26,6 +29,8 @@ from connectors.writer_common import (  # noqa: E402
 )
 
 # Keep resilient batch/quarantine path importable for streaming callers.
+from services.bounded_collections import BoundedStrings
+from services.engine_pool import release_engine
 from services.resilience import (  # noqa: E402, F401
     ResilientBatcher,
     adaptive_chunk_size,
@@ -33,10 +38,27 @@ from services.resilience import (  # noqa: E402, F401
 
 from .adapters import (
     _introspect_table_schema,
+    _introspect_table_schema_rich,
     resolve_connector_config,
     resolve_dest_table,
 )
 from .connector_capabilities import resolve_driver_type
+
+from services.phase_profile import (  # noqa: E402
+    PHASE_CHECKSUM,
+    PHASE_READ,
+    PHASE_TRANSFORM_WRITE,
+    PhaseProfile,
+)
+
+logger = logging.getLogger(__name__)
+
+#: Distinct warning messages retained per transfer. Only the first 10 are shown,
+#: but keeping a few more lets the summary report an honest suppressed count.
+MAX_WARNING_SAMPLES = 200
+#: Distinct load methods observed across batches (copy_into, merge_batch, ...).
+#: There are only a handful in the whole product, so this is generous.
+MAX_LOAD_METHODS = 16
 
 try:
     from services.checkpoint_service import Checkpoint, CheckpointService
@@ -44,6 +66,7 @@ try:
     from services.error_handling import RetryBudget, with_retry
     from services.parallel_chunks import ChunkDispatcher
     from services.reconciliation import FingerprintAccumulator
+    from services.replay_safety import classify_replay_safety
     from services.resilience import adaptive_chunk_size
     from services.row_filter import apply_row_filter_to_matrix
 except ImportError:  # pragma: no cover - tests with api root on path
@@ -52,6 +75,7 @@ except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.error_handling import RetryBudget, with_retry
     from src.services.parallel_chunks import ChunkDispatcher
     from src.services.reconciliation import FingerprintAccumulator
+    from src.services.replay_safety import classify_replay_safety
     from src.services.resilience import adaptive_chunk_size
     from src.services.row_filter import apply_row_filter_to_matrix
 
@@ -60,11 +84,14 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     rejected = int(getattr(result, "rejected_rows", 0) or 0)
     coerced = int(getattr(result, "coerced_null_rows", 0) or 0)
     skipped = int(getattr(result, "rows_skipped", 0) or 0)
+    # GA: never truncate rejected_details before merge/DLQ — rows cannot disappear.
+    details = list(getattr(result, "rejected_details", []) or [])
     return {
         "rejected_rows": rejected,
         "coerced_null_rows": coerced,
         "rows_skipped": skipped,
-        "rejected_details": list(getattr(result, "rejected_details", []) or [])[:500],
+        "rejected_details": details,
+        "rejected_details_sample": details[:200],
         "warnings": list(getattr(result, "warnings", []) or [])[:10],
         "error_policy": "quarantine" if (rejected or coerced) else "none",
         "load_method": getattr(result, "load_method", None),
@@ -496,6 +523,7 @@ def _write_batch(
     error_policy: str | None = None,
     connection: Any | None = None,
     close_connection: bool | None = None,
+    connection_holder: dict[str, Any] | None = None,
     skip_session_setup: bool = False,
     job_id: str | None = None,
     skip_preflight: bool = False,
@@ -532,6 +560,9 @@ def _write_batch(
             ),
             file_batch_idx=chunk_idx,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
+            connection=connection,
+            close_connection=close_connection,
+            connection_holder=connection_holder,
         )
         if not result.ok:
             _raise_write_failure(result, f"{dest_type} batch write failed")
@@ -779,6 +810,22 @@ def _write_batch(
             kwargs["conflict_columns"] = conflict_columns
             kwargs["sync_mode"] = sync_mode
             kwargs["file_batch_idx"] = chunk_idx
+        if dest_type == "dynamodb":
+            # Create-table needs HASH[/RANGE] from conflict_columns; without
+            # them Dynamo invents nothing and refuses, or (worse) operators
+            # get a half-configured table mid-demo.
+            kwargs["write_mode"] = write_mode
+            kwargs["conflict_columns"] = conflict_columns
+            kwargs["sync_mode"] = sync_mode
+            kwargs["job_id"] = job_id or ""
+        if dest_type in ("s3", "gcs", "adls"):
+            # Multi-chunk object-store writes must receive chunk index + total so
+            # writers emit part-* keys instead of overwriting a fixed object.
+            # job_id lets append runs isolate their part set from earlier runs.
+            kwargs["sync_mode"] = sync_mode
+            kwargs["file_batch_idx"] = chunk_idx
+            kwargs["total_chunks"] = total_chunks
+            kwargs["job_id"] = job_id or ""
         if dest_type in ("pgvector", "qdrant", "weaviate", "pinecone", "milvus"):
             extra = getattr(dest, "extra", {}) or {}
             kwargs["content_column"] = extra.get("content_column")
@@ -799,6 +846,8 @@ def _write_batch(
         from connectors.generic_sql import write_mapped_rows
 
         type_name = cfg.get("type", "") or dest_type
+        from connectors.write_resilience import build_write_batch_key
+
         result = write_mapped_rows(
             host=cfg["host"],
             port=cfg["port"],
@@ -822,6 +871,13 @@ def _write_batch(
             error_policy=error_policy,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
             skip_preflight=skip_preflight,
+            # Arm the SQLAlchemy chunk ledger so insert-mode retries after a
+            # mid-transfer failure cannot re-insert already-committed chunks.
+            job_id=job_id,
+            write_batch_key=build_write_batch_key(
+                table_name=table_name, file_batch_idx=chunk_idx
+            ),
+            file_batch_idx=chunk_idx,
         )
         if not result.ok:
             raise RuntimeError(result.error or f"{dest_type} batch write failed")
@@ -948,6 +1004,7 @@ def stream_database_transfer(
     incremental = requires_incremental(effective_sync)
     cursor_source_col = contract.cursor_field if contract else ""
     pk_target_cols: list[str] = []
+    pk_source_cols: list[str] = []
     cursor_pk_source = ""
     if contract and contract.primary_key:
         pk_source_cols = contract.primary_key_columns()
@@ -976,6 +1033,16 @@ def stream_database_transfer(
                 "Cannot resume a streaming insert without a primary key; "
                 "set primary_key on the stream contract or use an upsert sync mode"
             )
+    # Decide up front whether an interrupted batch may be re-sent. Append-only
+    # destinations get retries only for failures that prove nothing landed;
+    # everything else keeps the full retry budget.
+    replay_safety = classify_replay_safety(
+        dest_type=dest_type,
+        write_mode=write_mode,
+        conflict_columns=pk_target_cols or None,
+        job_id=job_id,
+        has_primary_key=bool(pk_target_cols),
+    )
     watermark = None
     cursor_key = ""
     if incremental and cursor_source_col:
@@ -1047,6 +1114,22 @@ def stream_database_transfer(
     # Memory-safe chunk sizing: sample a few rows, then size batches to keep
     # per-batch memory within a destination-safe limit while respecting CHUNK_SIZE.
     sample_limit = 100 if limit == 0 else min(100, limit)
+    # Created before the first read so the sizing probe and the first data page
+    # are attributed too. Both are real source reads; leaving them out reported
+    # "Reading source 0.0s" on any transfer that fit in a single batch.
+    phase_profile = PhaseProfile()
+    # Baselines for the engine/schema caches so the run summary reports what
+    # *this* transfer reused, not the process lifetime totals.
+    try:
+        from services.engine_pool import stats as _engine_stats
+        from services.reflection_cache import stats as _schema_stats
+
+        _pool_baseline = _engine_stats().to_dict()
+        _schema_baseline = _schema_stats().to_dict()
+    except Exception:
+        _pool_baseline = None
+        _schema_baseline = None
+    _sample_started = time.perf_counter()
     sample_probe, _ = _unwrap_read(
         _read_batch(
             src_type, src_cfg, table, None, 0, sample_limit, database=src_db,
@@ -1055,38 +1138,87 @@ def stream_database_transfer(
             cursor_type=normalize_inferred(schema.get(cursor_source_col, "string")).upper() if schema and incremental else None,
         )
     )
+    phase_profile.add(
+        PHASE_READ,
+        time.perf_counter() - _sample_started,
+        rows=len(sample_probe.rows or []),
+    )
     sample_rows = sample_probe.rows or []
     avg_row_size = 100
     if sample_rows:
-        avg_row_size = max(1, int(sum(len(str(row)) for row in sample_rows) / len(sample_rows)))
+        # Prefer mapped cell byte lengths — len(str(row)) under-counts nested/wide payloads.
+        sizes: list[int] = []
+        for row in sample_rows:
+            if isinstance(row, dict):
+                sizes.append(sum(len(str(v).encode("utf-8", errors="replace")) for v in row.values()) + 64)
+            else:
+                sizes.append(max(1, len(str(row).encode("utf-8", errors="replace"))))
+        avg_row_size = max(1, int(sum(sizes) / len(sizes)))
     # Warehouses benefit from larger stream chunks so batches clear COPY/MERGE
     # thresholds; Mongo already used 64MB — extend the same class to SF/BQ/RS.
+    # PostgreSQL/MySQL stay tight: wide JSON/TEXT rows OOM mid-COPY otherwise.
     _warehouse_dests = {"mongodb", "snowflake", "bigquery", "redshift"}
-    target_memory_bytes = 64 * 1024 * 1024 if dest_type in _warehouse_dests else 8 * 1024 * 1024
+    _sql_tight = {"postgresql", "postgres", "mysql", "mariadb", "sqlserver", "mssql"}
+    if dest_type in _warehouse_dests:
+        target_memory_bytes = 64 * 1024 * 1024
+    elif dest_type in _sql_tight and avg_row_size >= 4096:
+        target_memory_bytes = 4 * 1024 * 1024  # wide-row PG/MySQL ceiling
+    elif dest_type in _sql_tight:
+        target_memory_bytes = 8 * 1024 * 1024
+    else:
+        target_memory_bytes = 8 * 1024 * 1024
+    requested_chunk = int(CHUNK_SIZE)
     chunk_size = adaptive_chunk_size(CHUNK_SIZE, avg_row_size, max_size=CHUNK_SIZE, target_memory_bytes=target_memory_bytes)
+    adaptive_chunk = int(chunk_size)
+    proxy_capped = False
+    object_store_single_shot = False
     # Cap stream batches on public TCP proxies so one socket never holds a 20k-row window.
     try:
         from connectors.write_resilience import proxy_stream_batch_size
     except ImportError:
         proxy_stream_batch_size = None  # type: ignore
     if proxy_stream_batch_size is not None:
+        before_proxy = int(chunk_size)
         chunk_size = proxy_stream_batch_size(
             dest_cfg.get("host"),
             connection_string=dest_cfg.get("connection_string") or dest_cfg.get("uri") or "",
             default=chunk_size,
         )
+        proxy_capped = int(chunk_size) < before_proxy
     # Object-store writers (S3/GCS/ADLS) emit a single destination object per call.
     # Chunked writes would overwrite the same key and silently lose data.
     # Always force a single shot — gating on truthy total_rows failed open after
     # honesty waves set total_rows=None for unknown cardinality.
     if dest_type in ("s3", "gcs", "adls"):
         chunk_size = max(1, int(sample_probe.total_rows or 10_000_000))
+        object_store_single_shot = True
+    chunk_policy = {
+        "requested": requested_chunk,
+        "adaptive": adaptive_chunk,
+        "final": int(chunk_size),
+        "avg_row_bytes": int(avg_row_size),
+        "target_memory_bytes": int(target_memory_bytes),
+        "proxy_capped": bool(proxy_capped),
+        "object_store_single_shot": bool(object_store_single_shot),
+        "wide_row": bool(avg_row_size >= 4096),
+
+        "reason": (
+            "object-store single-shot"
+            if object_store_single_shot
+            else "proxy batch cap"
+            if proxy_capped
+            else "adaptive memory target"
+            if adaptive_chunk != requested_chunk
+            else "default chunk"
+        ),
+    }
 
     def _batch_limit(offset: int = 0, *, default: int = chunk_size) -> int:
         if limit > 0:
             return max(0, min(default, limit - offset))
         return default
 
+    _probe_started = time.perf_counter()
     probe, ddb_cursor = _unwrap_read(
         _read_batch(
             src_type, src_cfg, table, None, 0, _batch_limit(0), database=src_db,
@@ -1095,12 +1227,39 @@ def stream_database_transfer(
             cursor_type=normalize_inferred(schema.get(cursor_source_col, "string")).upper() if schema and incremental else None,
         )
     )
+    # This page is not thrown away — it becomes the first written batch.
+    phase_profile.add(
+        PHASE_READ, time.perf_counter() - _probe_started, rows=len(probe.rows or [])
+    )
     columns = probe.headers
+    if not columns and src_type == "dynamodb":
+        # Empty or key-only Dynamo tables still have a KeySchema — seed from
+        # describe so Map/Validate can proceed instead of aborting the demo.
+        try:
+            from connectors.dynamodb_reader import describe_table_schema
+
+            key_names, key_types = describe_table_schema(src_cfg, table)
+            if key_names:
+                columns = list(key_names)
+                for name, lt in (key_types or {}).items():
+                    schema.setdefault(name, lt)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "DynamoDB empty-probe KeySchema seed failed for %s: %s", table, exc
+            )
     if not columns:
         raise ValueError(f"Source table `{table}` has no columns or is empty")
 
     # Schemaless sources — absorb sparse attrs discovered mid-transfer so they
     # are never silently dropped from destination writes (Dynamo/Mongo/ES/Redis).
+    #
+    # This runs on chunk-writer threads, and it rebinds state the reader thread
+    # and sibling chunks read (columns, mappings, column_types, schema,
+    # target_cols). Two pages that each discover a new attribute used to
+    # interleave their read-modify-write and lose one of the attributes — a
+    # silent column drop, which is exactly what this function exists to prevent.
+    _schema_absorb_lock = threading.Lock()
+
     def _absorb_schemaless_discovered_attrs(batch) -> None:
         nonlocal columns, mappings, column_types, schema, backfill_new_fields, target_cols
         from connectors.header_union import (
@@ -1111,37 +1270,38 @@ def stream_database_transfer(
         if src_type not in SCHEMALESS_SOURCE_TYPES or not batch or not getattr(batch, "headers", None):
             return
 
-        known = set(columns)
-        new_headers = [h for h in batch.headers if h and h not in known]
-        if not new_headers and set(batch.headers).issubset(known):
-            return
-        columns = union_attribute_keys(columns, batch.headers)
-        mapped_sources = {str(m.get("source") or "") for m in mappings}
-        meta = getattr(batch, "meta", None) or {}
-        native_types = meta.get("native_types") if isinstance(meta, dict) else {}
-        if not isinstance(native_types, dict):
-            native_types = {}
-        for h in new_headers:
-            lt = str(native_types.get(h) or schema.get(h) or "VARCHAR")
-            schema[h] = lt
-            column_types[h] = ddl_carrier_type(lt)
-            if h not in mapped_sources:
-                mappings.append({
-                    "source": h,
-                    "target": h,
-                    "confidence": 0.9,
-                    # Force ADD COLUMN on SQL dests when attrs appear after CREATE.
-                    "create_new": True,
-                    "assignment_strategy": "create_compatible_new",
-                })
-                mapped_sources.add(h)
-                ddl_log.append(
-                    f"{dest_type.upper()} COLUMN {h} {ddl_type(dest_type, schema.get(h, 'string'))} "
-                    f"(discovered mid-transfer from {src_type} — no silent drop)"
-                )
-        if new_headers:
-            backfill_new_fields = True
-            target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
+        with _schema_absorb_lock:
+            known = set(columns)
+            new_headers = [h for h in batch.headers if h and h not in known]
+            if not new_headers and set(batch.headers).issubset(known):
+                return
+            columns = union_attribute_keys(columns, batch.headers)
+            mapped_sources = {str(m.get("source") or "") for m in mappings}
+            meta = getattr(batch, "meta", None) or {}
+            native_types = meta.get("native_types") if isinstance(meta, dict) else {}
+            if not isinstance(native_types, dict):
+                native_types = {}
+            for h in new_headers:
+                lt = str(native_types.get(h) or schema.get(h) or "VARCHAR")
+                schema[h] = lt
+                column_types[h] = ddl_carrier_type(lt)
+                if h not in mapped_sources:
+                    mappings.append({
+                        "source": h,
+                        "target": h,
+                        "confidence": 0.9,
+                        # Force ADD COLUMN on SQL dests when attrs appear after CREATE.
+                        "create_new": True,
+                        "assignment_strategy": "create_compatible_new",
+                    })
+                    mapped_sources.add(h)
+                    ddl_log.append(
+                        f"{dest_type.upper()} COLUMN {h} {ddl_type(dest_type, schema.get(h, 'string'))} "
+                        f"(discovered mid-transfer from {src_type} — no silent drop)"
+                    )
+            if new_headers:
+                backfill_new_fields = True
+                target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
 
     if not schema:
         if src_type in ("s3", "gcs", "adls"):
@@ -1236,16 +1396,68 @@ def stream_database_transfer(
     # Strict/maximum FAIL-FAST on coercion errors; balanced quarantines them.
     # Threaded to every writer so the streaming path matches the buffered path.
     stream_error_policy = transform_error_policy_for_validation_mode(validation_mode)
-    warning_samples: list[str] = []
+    # Bounded: warnings arrive per batch, so an uncapped list grows with the
+    # batch count on large transfers. Truncating at emit time bounded the output
+    # but never the memory.
+    warning_samples: BoundedStrings = BoundedStrings(cap=MAX_WARNING_SAMPLES)
     ddb_total = probe.total_rows if src_type == "dynamodb" else None
     running_cursor = checkpoint.cursor_value if checkpoint.cursor_value is not None else watermark
     es_search_after = checkpoint.es_search_after or (ddb_cursor if src_type == "elasticsearch" else None)
     redis_scan_state = checkpoint.redis_scan_state or (ddb_cursor if src_type == "redis" else None)
     # Preserve probe continuation tokens when checkpoint has none (fresh job).
     probe_continuation = ddb_cursor
-    keyset_col = checkpoint.cursor_column or (columns[0] if columns and not incremental else "")
+    # Keyset (seek) pagination seeks with a strict ``>`` on the bookmark column.
+    # That is only lossless when the bookmark orders rows uniquely: if a page
+    # boundary lands inside a run of equal values, every remaining tied row is
+    # skipped and nothing reports it. The old default bookmarked ``columns[0]``,
+    # so any table whose first column was a status/name/date silently dropped
+    # rows on the most common routes.
+    #
+    # Bookmark a primary key when we have one; otherwise carry a PK tie-break so
+    # the reader can seek on the ``(value, pk)`` tuple it already supports. With
+    # neither, fall back to OFFSET — quadratic and slow, but it cannot skip rows.
+    keyset_pk_cols = [c for c in pk_source_cols if c and c in columns]
+    if not keyset_pk_cols and src_type in ("postgresql", "redshift", "mysql", "snowflake"):
+        # Most transfers never declare a stream contract, so requiring a
+        # contract PK would drop every one of them onto OFFSET. The source
+        # catalog already knows the real key — ask it, so the common case keeps
+        # seek reads and gets uniqueness from the database rather than a guess.
+        try:
+            _, _, _src_keys = _introspect_table_schema_rich(
+                src_type, src_cfg, table, columns
+            )
+            keyset_pk_cols = [
+                c for c in (_src_keys.get("primary_key_columns") or []) if c in columns
+            ]
+        except Exception as exc:
+            logger.debug("source primary-key introspection failed: %s", exc, exc_info=exc)
+    keyset_col = checkpoint.cursor_column or (
+        keyset_pk_cols[0]
+        if keyset_pk_cols
+        else (columns[0] if columns and not incremental else "")
+    )
+    keyset_tiebreak = next((c for c in keyset_pk_cols if c != keyset_col), "")
+    keyset_unique = len(keyset_pk_cols) == 1 and keyset_col == keyset_pk_cols[0]
     keyset_after = checkpoint.cursor_value
-    use_keyset = bool(keyset_col) and src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb")
+    use_keyset = (
+        bool(keyset_col)
+        and (keyset_unique or bool(keyset_tiebreak))
+        and src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb")
+    )
+    if keyset_col and not use_keyset and src_type in (
+        "postgresql",
+        "redshift",
+        "mysql",
+        "snowflake",
+        "mongodb",
+    ):
+        logger.info(
+            "Keyset pagination disabled for %s.%s — no unique bookmark (declare a "
+            "primary_key on the stream contract to re-enable seek reads). Falling "
+            "back to OFFSET pagination.",
+            src_type,
+            table,
+        )
     ddb_cursor = checkpoint.dynamodb_cursor or (probe_continuation if src_type == "dynamodb" else None)
     kafka_cursor = checkpoint.kafka_cursor or (probe_continuation if src_type == "kafka" else None)
 
@@ -1259,6 +1471,21 @@ def stream_database_transfer(
     committed_offset = offset
 
     def _fetch_next_batch(last_batch):
+        """Timed wrapper — source read time is the first thing to rule out."""
+        started = time.perf_counter()
+        try:
+            result = _fetch_source_batch(last_batch)
+        except BaseException:
+            phase_profile.add(PHASE_READ, time.perf_counter() - started)
+            raise
+        phase_profile.add(
+            PHASE_READ,
+            time.perf_counter() - started,
+            rows=len(getattr(result, "rows", None) or []),
+        )
+        return result
+
+    def _fetch_source_batch(last_batch):
         nonlocal ddb_cursor, es_search_after, redis_scan_state, keyset_after, kafka_cursor
         if limit > 0 and fetch_offset >= limit:
             return None
@@ -1328,7 +1555,19 @@ def stream_database_transfer(
             return batch
         elif use_keyset:
             if keyset_col in columns and last_batch is not None and last_batch.rows:
-                keyset_after = last_batch.rows[-1][last_batch.headers.index(keyset_col)]
+                # Advance on the max of the page, not the last row, and carry the
+                # PK so the bookmark is the same composite the reader seeks on.
+                # Taking row[-1] assumed the page was already sorted by the
+                # bookmark; max_cursor_value does not need that assumption.
+                keyset_after = (
+                    max_cursor_value(
+                        last_batch.rows,
+                        last_batch.headers,
+                        keyset_col,
+                        keyset_tiebreak or None,
+                    )
+                    or keyset_after
+                )
             batch, extra = _unwrap_read(
                 _read_batch(
                     src_type,
@@ -1342,6 +1581,7 @@ def stream_database_transfer(
                     cursor_after=keyset_after,
                     cursor_type=column_types.get(keyset_col, "VARCHAR"),
                     known_total_rows=total_rows,
+                    cursor_primary_key=keyset_tiebreak or None,
                 )
             )
             if src_type == "elasticsearch":
@@ -1439,7 +1679,7 @@ def stream_database_transfer(
         lower = {h.lower(): h for h in batch.headers}
         pk_source_col = lower.get(pk_source_col.lower(), pk_source_col)
 
-    max_workers = int(os.getenv("DATAFLOW_PARALLEL_WORKERS", str(min(2, os.cpu_count() or 1))))
+    max_workers = int(getenv_brand("PARALLEL_WORKERS", str(min(2, os.cpu_count() or 1))))
     # SQLite handles concurrency poorly with a single shared file, so keep it sequential.
     # Snowflake reuses one connection for the job — must stay serial.
     # Iceberg catalog commits are snapshot-isolated; concurrent writers conflict.
@@ -1461,10 +1701,13 @@ def stream_database_transfer(
         if is_public_proxy_host(proxy_host) or is_public_proxy_host(proxy_cs):
             max_workers = 1
 
-    # Shared Snowflake connection for the life of this stream job (open once).
+    # Shared destination connections for the life of this stream job (open once).
     sf_conn_state: dict[str, Any] = {"conn": None, "session_ready": False}
+    pg_conn_state: dict[str, Any] = {"conn": None}
     batches_completed = 0
-    load_methods_seen: list[str] = []
+    # Only the distinct set matters (the summary asks "did any batch COPY?"),
+    # so dedupe instead of appending one entry per batch.
+    load_methods_seen: BoundedStrings = BoundedStrings(cap=MAX_LOAD_METHODS)
     # Bounded source sample for Gate-8 after streaming (records=[] at reconcile).
     reconcile_sample: list[dict[str, Any]] = []
     _RECONCILE_SAMPLE_CAP = 50
@@ -1486,7 +1729,53 @@ def stream_database_transfer(
         )
         return sf_conn_state["conn"]
 
+    def _ensure_pg_conn() -> Any:
+        existing = pg_conn_state.get("conn")
+        if existing is not None:
+            try:
+                if getattr(existing, "closed", 0) == 0:
+                    return existing
+            except Exception:
+                pass
+            pg_conn_state["conn"] = None
+        from connectors.postgresql_conn import get_connection as pg_get_connection
+
+        pg_port = int(
+            dest_cfg.get("port")
+            or (5439 if dest_type == "redshift" else 5432)
+        )
+        conn = pg_get_connection(
+            host=dest_cfg.get("host", ""),
+            port=pg_port,
+            database=dest_cfg.get("database", ""),
+            username=dest_cfg.get("username", ""),
+            password=dest_cfg.get("password", ""),
+            connection_string=dest_cfg.get("connection_string", ""),
+            ssl=dest_cfg.get("ssl", False),
+        )
+        try:
+            conn.autocommit = False
+        except Exception:
+            pass
+        pg_conn_state["conn"] = conn
+        return conn
+
     def _process_db_chunk(idx: int, batch: Any) -> dict[str, Any]:
+        """Timed wrapper around the transform + destination write for one chunk.
+
+        Runs on the worker pool, so these totals overlap the reader's — that is
+        what ``overlap_factor`` in the profile snapshot reports.
+        """
+        rows = len(getattr(batch, "rows", None) or [])
+        started = time.perf_counter()
+        try:
+            return _process_db_chunk_inner(idx, batch)
+        finally:
+            phase_profile.add(
+                PHASE_TRANSFORM_WRITE, time.perf_counter() - started, rows=rows
+            )
+
+    def _process_db_chunk_inner(idx: int, batch: Any) -> dict[str, Any]:
         if not batch or not getattr(batch, "rows", None):
             return {
                 "batch_written": 0,
@@ -1535,6 +1824,11 @@ def stream_database_transfer(
             write_kwargs["connection"] = _ensure_snowflake_conn()
             write_kwargs["close_connection"] = False
             write_kwargs["skip_session_setup"] = bool(sf_conn_state["session_ready"])
+        elif dest_type in ("postgresql", "redshift") and max_workers == 1:
+            # psycopg2 connections are not safely shared across worker threads.
+            write_kwargs["connection"] = _ensure_pg_conn()
+            write_kwargs["close_connection"] = False
+            write_kwargs["connection_holder"] = pg_conn_state
 
         write_op = partial(
             _write_batch,
@@ -1569,6 +1863,7 @@ def stream_database_transfer(
                 exponential_base=retry.exponential_base,
                 jitter=retry.jitter,
             ),
+            replay_safety=replay_safety,
         )
         if dest_type == "snowflake":
             sf_conn_state["session_ready"] = True
@@ -1590,7 +1885,7 @@ def stream_database_transfer(
         rejected_total += result["rejected"]
         coerced_null_total += result.get("coerced_null", 0)
         last_checksum = result["last_checksum"] or last_checksum
-        warning_samples.extend(result["warnings"])
+        warning_samples.extend(result["warnings"])  # bounded + deduped
         if len(reconcile_sample) < _RECONCILE_SAMPLE_CAP:
             for row in result.get("reconcile_sample_rows") or []:
                 if not isinstance(row, dict):
@@ -1623,7 +1918,9 @@ def stream_database_transfer(
                     detail["batch_offset"] = batch_start
                     detail["row"] = batch_start + local_row  # 1-based absolute across the transfer
                 new_details.append(detail)
-            merged_details = (prev_details + new_details)[:2000]
+            # GA: keep full rejected_details across batches — never drop for a
+            # UI sample cap (sample is stamped separately at finalize).
+            merged_details = prev_details + new_details
             dest_summary = {
                 **prev,
                 **incoming,
@@ -1632,6 +1929,32 @@ def stream_database_transfer(
                 "coerced_null_rows": coerced_null_total,
             }
             batches_completed += 1
+            # Persist rejected rows before continuing — crash must not lose quarantine.
+            if new_details and job_id:
+                try:
+                    from services.quarantine_dlq import persist_rejected_rows
+
+                    persist_rejected_rows(
+                        job_id=str(job_id),
+                        rejected_details=new_details,
+                        source="stream_batch",
+                        connector=str(
+                            getattr(destination, "format", None)
+                            or getattr(destination, "kind", None)
+                            or ""
+                        ),
+                    )
+                    dest_summary["quarantine_stream_durable"] = True
+                    dest_summary["quarantine_durable"] = True
+                    # Prefix already on control-plane DLQ — finalize must not re-append.
+                    dest_summary["quarantine_dlq_persisted_count"] = len(merged_details)
+                except Exception as qexc:
+                    dest_summary["quarantine_durable"] = False
+                    dest_summary["quarantine_dlq_error"] = str(qexc)[:300]
+                    raise RuntimeError(
+                        "Quarantine DLQ persist failed after batch — refuse to "
+                        f"continue (rows cannot disappear): {qexc}"
+                    ) from qexc
 
         # Persist durable checkpoint after the batch is committed.  We use the
         # ordered result stream so checkpoint offsets/cursors can never skip
@@ -1649,7 +1972,8 @@ def stream_database_transfer(
         checkpoint.phase = "writing"
         checkpoint.chunk_total = chunks
         checkpoint.status = "running"
-        checkpoint_service.save(checkpoint)
+        # Fail-closed: no durable resume point ⇒ abort (do not keep writing).
+        checkpoint_service.require_save(checkpoint)
         if src_type == "kafka" and kafka_cursor and src_cfg:
             try:
                 from connectors.kafka_reader import commit_kafka_offsets
@@ -1659,9 +1983,22 @@ def stream_database_transfer(
                 if isinstance(kafka_cursor, dict):
                     kafka_cursor = {**kafka_cursor, "pending_offsets": [], "committed": True}
                     checkpoint.kafka_cursor = kafka_cursor
-                    checkpoint_service.save(checkpoint)
+                    checkpoint_service.require_save(checkpoint)
             except Exception as exc:
-                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+                # Checkpoint persistence must abort the job — never swallow it.
+                try:
+                    from services.checkpoint_service import CheckpointPersistenceError
+                except ImportError:  # pragma: no cover
+                    from src.services.checkpoint_service import CheckpointPersistenceError
+                if isinstance(exc, CheckpointPersistenceError):
+                    raise
+                # Module 14: Kafka offset commit after durable checkpoint must
+                # fail closed — never swallow (delivery state becomes unexplained).
+                from services.execution_engine_contract import (
+                    kafka_offset_commit_must_fail_closed,
+                )
+
+                raise kafka_offset_commit_must_fail_closed(exc) from exc
         if on_checkpoint:
             on_checkpoint(idx, chunks, written, checkpoint.to_dict())
 
@@ -1695,30 +2032,42 @@ def stream_database_transfer(
 
         idx = first_idx + 1
         with ChunkDispatcher(max_workers=max_workers) as dispatcher:
-            # Fetch the next batch (the first one has already been committed).
-            batch = _fetch_next_batch(batch)
-            while batch:
-                _prepare_and_submit(dispatcher, idx, batch)
-
-                # Process any completed batches in ascending index order.
-                for ready_idx, result in dispatcher.ready():
-                    _apply_result(ready_idx, result)
-
-                # Fetch the next batch while earlier batches are still being written.
-                batch = _fetch_next_batch(batch)
-                idx += 1
-
-            # Drain the remaining in-flight writes.
-            for ready_idx, result in dispatcher.results():
-                _apply_result(ready_idx, result)
-    finally:
-        conn = sf_conn_state.get("conn")
-        if conn is not None:
             try:
-                conn.close()
-            except Exception as exc:
-                logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
-            sf_conn_state["conn"] = None
+                # Fetch the next batch (the first one has already been committed).
+                batch = _fetch_next_batch(batch)
+                while batch:
+                    _prepare_and_submit(dispatcher, idx, batch)
+
+                    # Process any completed batches in ascending index order.
+                    for ready_idx, result in dispatcher.ready():
+                        _apply_result(ready_idx, result)
+
+                    # Fetch the next batch while earlier batches are still being written.
+                    batch = _fetch_next_batch(batch)
+                    idx += 1
+
+                # Drain the remaining in-flight writes.
+                for ready_idx, result in dispatcher.results():
+                    _apply_result(ready_idx, result)
+            except BaseException:
+                # Stop queued chunks from writing. Without this the dispatcher's
+                # shutdown waited for every in-flight chunk to finish, so a
+                # cancelled transfer still committed up to `max_inflight` chunks
+                # past the persisted checkpoint — and a later resume rewrote
+                # that region as duplicates.
+                dispatcher.abort()
+                raise
+    finally:
+        for state in (sf_conn_state, pg_conn_state):
+            conn = state.get("conn")
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception as exc:
+                    logging.getLogger(__name__).debug(
+                        "Exception suppressed: %s", exc, exc_info=exc
+                    )
+                state["conn"] = None
 
     if written == 0 and incremental:
         ddl_log.append("INCREMENTAL — no new rows since last watermark")
@@ -1760,6 +2109,7 @@ def stream_database_transfer(
         # reconciliation memory-bounded by a single batch, even for billion-row
         # tables, and avoids the previous `source_rows_for_checksum` list that
         # materialized the full source a second time.
+        checksum_started = time.perf_counter()
         fp_accumulator = FingerprintAccumulator()
         cursor_type_for_read: str | None = None
         if incremental and cursor_source_col:
@@ -1822,18 +2172,100 @@ def stream_database_transfer(
             else:
                 read_offset += len(batch.rows)
         final_checksum = fp_accumulator.digest() if fp_accumulator.total else last_checksum
+        phase_profile.add(
+            PHASE_CHECKSUM, time.perf_counter() - checksum_started, rows=fp_accumulator.total
+        )
     else:
         final_checksum = last_checksum
 
     dest_summary["checksum"] = final_checksum or last_checksum
+    # Where the time actually went. Without this the only signal was a single
+    # end-of-run rows/second figure, which cannot distinguish a slow source scan
+    # from a slow destination write from a doubled cost in strict verification.
+    phase_snapshot = phase_profile.snapshot()
+    dest_summary["phase_profile"] = phase_snapshot
+    if phase_snapshot.get("phases"):
+        logger.info("Transfer phase breakdown — %s", phase_profile.summary())
+    # Connection and metadata reuse for this run. Without these numbers the
+    # operator cannot tell a transfer that reused one pool across N chunks from
+    # one that rebuilt a pool per chunk — and that distinction is the whole
+    # point of the engine/schema caches.
+    if _pool_baseline is not None or _schema_baseline is not None:
+        try:
+            from services.engine_pool import stats as _engine_stats
+            from services.reflection_cache import stats as _schema_stats
+
+            def _delta(now: dict, base: dict | None) -> dict:
+                if not base:
+                    return now
+                # Counters are differenced so the run summary shows what *this*
+                # transfer reused. Gauges (``live``) and ratios stay absolute —
+                # subtracting a gauge produces a signed nonsense number.
+                gauges = {"live", "reuse_ratio"}
+                out = {}
+                for key, value in now.items():
+                    if (
+                        key not in gauges
+                        and isinstance(value, (int, float))
+                        and key in base
+                    ):
+                        out[key] = type(value)(value - base[key])  # type: ignore[operator]
+                    else:
+                        out[key] = value
+                return out
+
+            pool_delta = _delta(_engine_stats().to_dict(), _pool_baseline)
+            schema_delta = _delta(_schema_stats().to_dict(), _schema_baseline)
+            # Recompute ratios from the deltas so a process with prior hits
+            # does not inflate this run's reuse figure.
+            pool_total = int(pool_delta.get("hits", 0)) + int(pool_delta.get("misses", 0))
+            schema_total = int(schema_delta.get("hits", 0)) + int(schema_delta.get("misses", 0))
+            pool_delta["reuse_ratio"] = (
+                round(pool_delta["hits"] / pool_total, 4) if pool_total else 0.0
+            )
+            schema_delta["reuse_ratio"] = (
+                round(schema_delta["hits"] / schema_total, 4) if schema_total else 0.0
+            )
+            dest_summary["connection_reuse"] = {
+                "engine_pool": pool_delta,
+                "schema_cache": schema_delta,
+            }
+            if pool_delta.get("hits") or schema_delta.get("hits"):
+                logger.info(
+                    "Connection reuse — engines saved=%s (ratio=%s), "
+                    "metadata queries saved=%s (ratio=%s)",
+                    pool_delta.get("connections_saved", 0),
+                    pool_delta.get("reuse_ratio"),
+                    schema_delta.get("metadata_queries_saved", 0),
+                    schema_delta.get("reuse_ratio"),
+                )
+        except Exception as exc:
+            logger.debug("connection_reuse summary skipped: %s", exc)
+    # Tell the operator whether an interrupted write could have been retried in
+    # place. This is the difference between "resume is automatic" and "resume
+    # needs a decision", so it belongs in the summary, not only in the logs.
+    dest_summary["replay_safety"] = replay_safety.to_dict()
     dest_summary["rejected_rows"] = rejected_total
     dest_summary["coerced_null_rows"] = coerced_null_total
-    dest_summary["rejected_details"] = list(dest_summary.get("rejected_details") or [])[:2000]
+    all_details = list(dest_summary.get("rejected_details") or [])
+    # GA: keep full rejected_details for DLQ durability — never truncate bodies
+    # before quarantine persist. UI may use rejected_details_sample.
+    dest_summary["rejected_details"] = all_details
+    dest_summary["rejected_details_sample"] = all_details[:2000]
+    dest_summary["rejected_details_total"] = len(all_details)
+    if len(all_details) > 2000:
+        dest_summary["rejected_details_sample_capped"] = True
     dest_summary["warnings"] = warning_samples[:10]
+    suppressed_warnings = max(len(warning_samples) - 10, 0) + getattr(
+        warning_samples, "dropped", 0
+    )
+    if suppressed_warnings:
+        dest_summary["warnings_suppressed"] = suppressed_warnings
     dest_summary["error_policy"] = "quarantine" if (rejected_total or coerced_null_total) else "none"
     dest_summary["sync_mode"] = effective_sync
     dest_summary["watermark"] = running_cursor
     dest_summary["chunk_size"] = chunk_size
+    dest_summary["chunk_policy"] = chunk_policy
     dest_summary["batches"] = batches_completed
     if not isinstance(dest_summary.get("source_row_count"), int) or dest_summary.get("source_row_count", 0) <= 0:
         held_out = max(int(rejected_total or 0) - int(coerced_null_total or 0), 0)
@@ -1852,19 +2284,37 @@ def stream_database_transfer(
 
 
 def _drop_destination_endpoint(destination: EndpointConfig) -> bool:
-    """Drop the remapped destination object (overwrite sync, multi-stream)."""
+    """Drop the remapped destination object (overwrite sync, multi-stream).
+
+    Raises :class:`FullRefreshDropFailed` on a failed drop for the same reason
+    as the buffered path: a swallowed failure turns an overwrite into an append
+    against a table that still holds the previous generation of rows. Returns
+    ``False`` only when the driver cannot drop at all.
+    """
     if destination.kind != "database":
         return False
-    try:
-        from connectors.table_manager import drop_table
 
+    from connectors.table_manager import TableDropError, drop_table
+    from services.error_handling import FullRefreshDropFailed
+
+    try:
         db_type = resolve_driver_type(destination.format)
         cfg = resolve_connector_config(destination)
         table_name = resolve_dest_table(db_type, destination)
         schema = cfg.get("schema")
+    except Exception as exc:
+        raise FullRefreshDropFailed(
+            "unknown", f"could not resolve destination for drop: {exc}"
+        ) from exc
+
+    try:
         return drop_table(db_type, cfg, table_name, schema)
-    except Exception:
-        return False
+    except TableDropError as exc:
+        logger.error("Overwrite drop failed for %s: %s", table_name, exc)
+        raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
+    except Exception as exc:
+        logger.error("Overwrite drop failed for %s: %s", table_name, exc, exc_info=exc)
+        raise FullRefreshDropFailed(table_name, str(exc)) from exc
 
 
 def run_non_cdc_multi_stream_sequential(
@@ -2056,13 +2506,31 @@ class _NoOpCheckpointService:
 
     Used for temporary staging transfers so the parent job's checkpoint is not
     overwritten by an internal phase.
+
+    Module 14 honesty: this phase is not crash-recoverable on its own.
     """
+
+    failed_saves = 0
+    durable = False
+    resume_supported = False
+
+    @property
+    def has_failed_saves(self) -> bool:
+        return False
 
     def save(self, checkpoint: Any) -> bool:  # noqa: ARG002
         return True
 
+    def require_save(self, checkpoint: Any) -> None:  # noqa: ARG002
+        return None
+
     def load(self, job_id: str) -> Any | None:  # noqa: ARG002
         return None
+
+    def honesty(self) -> dict:
+        from services.execution_engine_contract import noop_checkpoint_posture
+
+        return noop_checkpoint_posture()
 
 
 def _qualified(table: str, schema: str | None) -> str:
@@ -2306,7 +2774,7 @@ def stream_scd2_mirror_transfer(
                     conn, target_qualified, target_cols, "_deleted", batch_size=1_000
                 )
                 conn.commit()
-            engine.dispose()
+            release_engine(engine)
             dest_summary["active_rows"] = active_count
             dest_summary["active_checksum"] = active_checksum
 
@@ -2356,7 +2824,7 @@ def _read_staging_batches(
                     break
                 offset += batch_size
     finally:
-        engine.dispose()
+        release_engine(engine)
 
 
 def peek_stream_source(source: EndpointConfig) -> tuple[list[str], dict[str, str], int, list[dict]]:

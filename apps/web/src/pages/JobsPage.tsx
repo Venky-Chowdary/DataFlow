@@ -9,7 +9,6 @@ import { Button } from "../components/ui/Button";
 import { CopyIdChip } from "../components/ui/CopyIdChip";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
-import { PageContextBar } from "../components/ui/PageContextBar";
 import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageToolbar } from "../components/ui/PageToolbar";
@@ -26,6 +25,16 @@ import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "../components/transfer/CdcIncrementalSnapshotPanel";
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
 import { LoadHistoryPanel } from "../components/transfer/LoadHistoryPanel";
+import { ConnectionReuseCard } from "../components/transfer/ConnectionReuseCard";
+import { PhaseProfileCard } from "../components/transfer/PhaseProfileCard";
+import { ReplaySafetyCard } from "../components/transfer/ReplaySafetyCard";
+import { TransformationsCard } from "../components/transfer/TransformationsCard";
+import type {
+  ConnectionReuseReport,
+  PhaseProfileReport,
+  ReplaySafetyReport,
+  TransformationsReport,
+} from "../lib/types";
 import { inferTransferFailureHint } from "../lib/transferFailure";
 import { buildJobTimeline, JobTimeline } from "../components/ui/JobTimeline";
 import { readJobEventLog } from "../lib/jobEventLog";
@@ -227,17 +236,6 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     failed: jobs.filter((j) => j.status === "failed").length,
   }), [jobs]);
 
-  const rowsMoved = useMemo(
-    () =>
-      jobs
-        .filter((j) => isJobSuccess(j.status))
-        .reduce((sum, j) => sum + (j.records_processed || 0), 0),
-    [jobs],
-  );
-  const successRate = counts.all
-    ? Math.round((counts.completed / counts.all) * 100)
-    : null;
-
   const filtered = useMemo(() => {
     let list = jobs;
     if (filter === "running") list = jobs.filter((j) => j.status === "running" || j.status === "pending");
@@ -316,7 +314,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     }
   }, [filter, filtered, jobs, counts.failed, selectedId]);
 
-  // Feed the selected job into Data Pilot so NL triage uses the real job ID.
+  // Feed the selected job into Datawrap Pilot so NL triage uses the real job ID.
   useEffect(() => {
     const job = jobs.find((j) => j._id === selectedId);
     if (!job) return;
@@ -658,32 +656,6 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           />
         ) : (
           <>
-            <PageContextBar
-              ariaLabel="Jobs summary"
-              stats={[
-                { label: "Total jobs", value: counts.all, icon: "jobs" },
-                { label: "Rows moved", value: rowsMoved.toLocaleString(), icon: "layers", tone: "muted", title: "Records from completed jobs only (failed/cancelled runs are excluded so the total does not jump when a retry fails)" },
-                {
-                  label: "Success rate",
-                  value: successRate != null ? `${successRate}%` : "—",
-                  icon: "check",
-                  tone: successRate != null && successRate >= 90 ? "ok" : successRate != null ? "warn" : "muted",
-                  title: `${counts.completed} of ${counts.all} jobs completed`,
-                },
-                {
-                  label: "Running",
-                  value: counts.running,
-                  icon: "activity",
-                  tone: counts.running > 0 ? "warn" : "muted",
-                },
-                {
-                  label: "Failed",
-                  value: counts.failed,
-                  icon: "alert",
-                  tone: counts.failed > 0 ? "danger" : "muted",
-                },
-              ]}
-            />
             <PageToolbar
               searchValue={jobSearch}
               onSearchChange={setJobSearch}
@@ -876,8 +848,24 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                         <strong>{mappingCount || "—"}</strong>
                         <span>Columns</span>
                       </article>
-                      <article className="is-metric-mode">
-                        <strong>{liveJob.operation || liveJob.transfer_request?.sync_mode || "transfer"}</strong>
+                      <article
+                        className="is-metric-mode"
+                        title={liveJob.operation || liveJob.transfer_request?.sync_mode || "transfer"}
+                      >
+                        <strong>
+                          {(() => {
+                            const mode = String(liveJob.operation || liveJob.transfer_request?.sync_mode || "transfer");
+                            const short: Record<string, string> = {
+                              full_refresh_overwrite: "overwrite",
+                              full_refresh_append: "append",
+                              incremental_append: "incr append",
+                              incremental_upsert: "upsert",
+                              cdc: "CDC",
+                              migration: "migration",
+                            };
+                            return short[mode.toLowerCase()] || (mode.length > 12 ? `${mode.slice(0, 10)}…` : mode);
+                          })()}
+                        </strong>
                         <span>Mode</span>
                       </article>
                       <article className={`is-metric-quarantine${rejectedCount > 0 ? " is-warn" : ""}`}>
@@ -1036,13 +1024,24 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                 {
                                   id: "writer",
                                   title: "Writer & throughput",
-                                  description: "RPS, chunk progress, destination summary, load history",
+                                  description: "RPS, phase timing, destination summary, load history",
                                   icon: "speed",
-                                  meta: writerRps != null
-                                    ? `${Math.round(writerRps).toLocaleString()} r/s`
-                                    : loadHistory
-                                      ? "Load history"
-                                      : undefined,
+                                  meta: (() => {
+                                    const phase =
+                                      destSummary.phase_profile &&
+                                      typeof destSummary.phase_profile === "object"
+                                        ? (destSummary.phase_profile as PhaseProfileReport)
+                                            .dominant_phase
+                                        : "";
+                                    if (writerRps != null && phase) {
+                                      return `${Math.round(writerRps).toLocaleString()} r/s · ${phase}`;
+                                    }
+                                    if (writerRps != null) {
+                                      return `${Math.round(writerRps).toLocaleString()} r/s`;
+                                    }
+                                    if (phase) return `bottleneck: ${phase}`;
+                                    return loadHistory ? "Load history" : undefined;
+                                  })(),
                                   disabled: !hasWriterEvidence,
                                   onOpen: () => setEvidenceDrawer("writer"),
                                 },
@@ -1245,49 +1244,9 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                             )}
 
                             {selected.status === "failed" && (
-                              <div className="df2-jobs-v3-actions">
-                                {duplicateKeyFailure && onStartTransfer && (
-                                  <button
-                                    type="button"
-                                    className="df2-btn df2-btn-primary"
-                                    onClick={() => openMapInStudio()}
-                                  >
-                                    <DtIcon name="layers" size={16} /> Open Map · set primary key
-                                  </button>
-                                )}
-                                {liveJob?.checkpoint && (liveJob.checkpoint.rows_processed ?? 0) > 0 && !duplicateKeyFailure && (
-                                  <button
-                                    type="button"
-                                    className="df2-btn df2-btn-primary"
-                                    onClick={() => void handleResume()}
-                                    disabled={resuming}
-                                  >
-                                    {resuming ? <ButtonLoader label="Resuming…" /> : <><DtIcon name="activity" size={16} /> Resume from batch {liveJob.checkpoint.chunk_index ?? 0}</>}
-                                  </button>
-                                )}
-                                <button
-                                  type="button"
-                                  className={
-                                    duplicateKeyFailure
-                                      || (liveJob?.checkpoint && (liveJob.checkpoint.rows_processed ?? 0) > 0)
-                                      ? "df2-btn"
-                                      : "df2-btn df2-btn-primary"
-                                  }
-                                  onClick={() => void handleRetry()}
-                                  disabled={retrying}
-                                >
-                                  {retrying ? <ButtonLoader label="Retrying…" /> : <><DtIcon name="transfer" size={16} /> Retry from start</>}
-                                </button>
-                                {onStartTransfer && (
-                                  <button
-                                    type="button"
-                                    className="df2-btn"
-                                    onClick={() => openValidateInStudio()}
-                                  >
-                                    Open Validate in Studio
-                                  </button>
-                                )}
-                              </div>
+                              <p className="df2-jobs-detail-actions-hint">
+                                Recovery actions are pinned in the bar below this card.
+                              </p>
                             )}
                           </div>
                         )}
@@ -1383,22 +1342,6 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                   <strong>{Number(liveJob.coerced_null_rows ?? 0).toLocaleString()}</strong>
                                 </article>
                               </div>
-                              <div className="df2-jobs-quarantine-actions">
-                                <Button
-                                  variant="primary"
-                                  onClick={() => setEvidenceDrawer("quarantine")}
-                                  leadingIcon={<DtIcon name="alert" size={14} />}
-                                >
-                                  Inspect quarantine details
-                                </Button>
-                                <Button
-                                  variant="secondary"
-                                  onClick={() => openValidateInStudio()}
-                                  leadingIcon={<DtIcon name="gate" size={14} />}
-                                >
-                                  Open Validate in Studio
-                                </Button>
-                              </div>
                             </section>
                           </div>
                         )}
@@ -1462,6 +1405,106 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                           </div>
                         )}
                       </div>
+
+                      <div className="df2-jobs-detail-footer" role="navigation" aria-label="Job actions">
+                        {detailTab === "detail" && selected.status === "failed" && (
+                          <div className="df2-jobs-v3-actions">
+                            {duplicateKeyFailure && onStartTransfer && (
+                              <button
+                                type="button"
+                                className="df2-btn df2-btn-primary"
+                                onClick={() => openMapInStudio()}
+                              >
+                                <DtIcon name="layers" size={16} /> Open Map · set primary key
+                              </button>
+                            )}
+                            {liveJob?.checkpoint && (liveJob.checkpoint.rows_processed ?? 0) > 0 && !duplicateKeyFailure && (
+                              <button
+                                type="button"
+                                className="df2-btn df2-btn-primary"
+                                onClick={() => void handleResume()}
+                                disabled={resuming}
+                              >
+                                {resuming ? <ButtonLoader label="Resuming…" /> : <><DtIcon name="activity" size={16} /> Resume from batch {liveJob.checkpoint.chunk_index ?? 0}</>}
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className={
+                                duplicateKeyFailure
+                                  || (liveJob?.checkpoint && (liveJob.checkpoint.rows_processed ?? 0) > 0)
+                                  ? "df2-btn"
+                                  : "df2-btn df2-btn-primary"
+                              }
+                              onClick={() => void handleRetry()}
+                              disabled={retrying}
+                              title="Starts a new job and re-reads the source from the beginning. Use Resume to continue from the last committed batch."
+                            >
+                              {retrying
+                                ? <ButtonLoader label="Retrying…" />
+                                : (
+                                  <><DtIcon name="transfer" size={16} /> Retry from start</>
+                                )}
+                            </button>
+                            {onStartTransfer && (
+                              <button
+                                type="button"
+                                className="df2-btn"
+                                onClick={() => openValidateInStudio()}
+                              >
+                                Open Validate in Studio
+                              </button>
+                            )}
+                          </div>
+                        )}
+                        {detailTab === "quarantine" && (
+                          <div className="df2-jobs-quarantine-actions">
+                            <Button
+                              variant="primary"
+                              onClick={() => setEvidenceDrawer("quarantine")}
+                              leadingIcon={<DtIcon name="alert" size={14} />}
+                            >
+                              Inspect quarantine details
+                            </Button>
+                            <Button
+                              variant="secondary"
+                              onClick={() => openValidateInStudio()}
+                              leadingIcon={<DtIcon name="gate" size={14} />}
+                            >
+                              Open Validate in Studio
+                            </Button>
+                          </div>
+                        )}
+                        {detailTab === "mapping" && onStartTransfer && (
+                          <div className="df2-jobs-v3-actions">
+                            <button
+                              type="button"
+                              className="df2-btn df2-btn-primary"
+                              onClick={() => openMapInStudio()}
+                            >
+                              <DtIcon name="layers" size={16} /> Open Map in Studio
+                            </button>
+                            <button
+                              type="button"
+                              className="df2-btn"
+                              onClick={() => openValidateInStudio()}
+                            >
+                              Open Validate in Studio
+                            </button>
+                          </div>
+                        )}
+                        {detailTab === "log" && onStartTransfer && (
+                          <div className="df2-jobs-v3-actions">
+                            <button
+                              type="button"
+                              className="df2-btn"
+                              onClick={() => openValidateInStudio()}
+                            >
+                              Open Validate in Studio
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 ) : (
@@ -1485,11 +1528,12 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Gate-8 reconcile"
           subtitle="Source vs destination row counts and content fingerprints"
           icon={<DtIcon name="shield" size={18} />}
-          size="xl"
+          size="lg"
         >
           <Gate8ProofCard
             report={recon}
             explanation={liveJob.explanation}
+            jobId={selectedId || liveJob._id}
             onOpenValidate={() => {
               setEvidenceDrawer(null);
               openValidateInStudio();
@@ -1517,7 +1561,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               : `${jobPreflight.passed_count}/${jobPreflight.total_gates} gates · ${jobPreflight.readiness_score}% readiness`
           }
           icon={<DtIcon name="gate" size={18} />}
-          size="xl"
+          size="lg"
         >
           <div className="df2-drawer-facts" style={{ marginBottom: 14 }}>
             <div className="df2-drawer-fact">
@@ -1577,7 +1621,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Writer & throughput"
           subtitle="Destination write path, batching, and prior-load comparison"
           icon={<DtIcon name="speed" size={18} />}
-          size="xl"
+          size="lg"
         >
           <dl className="df2-jobs-v3-summary-dl">
             {writerRps != null && (
@@ -1604,12 +1648,31 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                   {liveJob.checkpoint.rows_processed != null
                     ? ` · ${(liveJob.checkpoint.rows_processed ?? 0).toLocaleString()} rows committed`
                     : ""}
+                  {liveJob.checkpoint.updated_at
+                    ? ` · updated ${String(liveJob.checkpoint.updated_at)}`
+                    : ""}
+                  {" · at-least-once resume"}
                 </dd>
               </div>
             )}
             {typeof destSummary.load_method === "string" && destSummary.load_method && (
               <div><dt>Load method</dt><dd>{String(destSummary.load_method)}</dd></div>
             )}
+            {typeof destSummary.chunk_policy === "object" && destSummary.chunk_policy !== null ? (
+              <div>
+                <dt>Chunk policy</dt>
+                <dd>
+                  {String((destSummary.chunk_policy as { reason?: string }).reason || "adaptive")}
+                  {" · final "}
+                  {String((destSummary.chunk_policy as { final?: number }).final
+                    ?? destSummary.chunk_size
+                    ?? "—")}
+                  {(destSummary.chunk_policy as { proxy_capped?: boolean }).proxy_capped
+                    ? " · proxy-capped"
+                    : ""}
+                </dd>
+              </div>
+            ) : null}
             {typeof destSummary.database === "string" && destSummary.database && (
               <div><dt>Database</dt><dd>{String(destSummary.database)}</dd></div>
             )}
@@ -1623,6 +1686,38 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               <div><dt>Writer checksum</dt><dd className="df2-mono">{String(destSummary.checksum)}</dd></div>
             )}
           </dl>
+          <PhaseProfileCard
+            profile={
+              destSummary.phase_profile && typeof destSummary.phase_profile === "object"
+                ? (destSummary.phase_profile as PhaseProfileReport)
+                : null
+            }
+          />
+          <ReplaySafetyCard
+            report={
+              destSummary.replay_safety && typeof destSummary.replay_safety === "object"
+                ? (destSummary.replay_safety as ReplaySafetyReport)
+                : null
+            }
+          />
+          <ConnectionReuseCard
+            report={
+              destSummary.connection_reuse && typeof destSummary.connection_reuse === "object"
+                ? (destSummary.connection_reuse as ConnectionReuseReport)
+                : null
+            }
+            traceId={typeof destSummary.trace_id === "string" ? destSummary.trace_id : null}
+            correlationId={
+              typeof destSummary.correlation_id === "string" ? destSummary.correlation_id : null
+            }
+          />
+          <TransformationsCard
+            report={
+              destSummary.transformations && typeof destSummary.transformations === "object"
+                ? (destSummary.transformations as TransformationsReport)
+                : null
+            }
+          />
           {Object.keys(destSummary).length > 0 && (
             <details className="df2-jobs-writer-raw">
               <summary>Raw destination summary</summary>
@@ -1644,7 +1739,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Run metadata"
           subtitle={jobRouteLabel(liveJob)}
           icon={<DtIcon name="activity" size={18} />}
-          size="xl"
+          size="lg"
         >
           <dl className="df2-jobs-v3-summary-dl df2-jobs-operator-meta">
             {triggeredBy && (
@@ -1742,7 +1837,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Phase timeline"
           subtitle="Job phase history for this run"
           icon={<DtIcon name="clock" size={18} />}
-          size="xl"
+          size="lg"
         >
           <JobTimeline entries={timelineEntries} />
         </Drawer>
@@ -1755,7 +1850,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Column map"
           subtitle={`${mappingCount.toLocaleString()} columns`}
           icon={<DtIcon name="connectors" size={18} />}
-          size="xl"
+          size="lg"
         >
           {mappingCount > 0 ? (
             <div className="df2-jobs-v3-mappings is-drawer">
@@ -1834,7 +1929,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Event log"
           subtitle={`${eventLog.length.toLocaleString()} durable operator events`}
           icon={<DtIcon name="activity" size={18} />}
-          size="xl"
+          size="lg"
         >
           <JobLogTable lines={eventLog} empty="No events yet" />
         </Drawer>
@@ -1847,7 +1942,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="DDL & stream log"
           subtitle={`${ddlLog.length.toLocaleString()} schema / stream lines`}
           icon={<DtIcon name="code" size={18} />}
-          size="xl"
+          size="lg"
         >
           <JobLogTable lines={ddlLog.map(String)} empty="No DDL lines" />
         </Drawer>
@@ -1860,7 +1955,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Pipeline explanation"
           subtitle="Plain-language summary from the transfer engine"
           icon={<DtIcon name="book" size={18} />}
-          size="xl"
+          size="lg"
         >
           <JobExplanationView text={liveJob.explanation} />
         </Drawer>
@@ -1873,7 +1968,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="CDC stream health"
           subtitle={`${liveJob.streams.length} stream(s)`}
           icon={<DtIcon name="zap" size={18} />}
-          size="xl"
+          size="lg"
         >
           <table className="df2-table df2-jobs-cdc-table">
             <thead>
@@ -1919,13 +2014,18 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               : "Inspect findings, propose repair, or promote / replay"
           }
           icon={<DtIcon name="alert" size={18} />}
-          size="full"
+          size="lg"
         >
           <QuarantinePanel
             jobId={selectedId}
             rejectedRows={liveJob.rejected_rows}
             coercedNullRows={liveJob.coerced_null_rows}
             initialDetails={Array.isArray(liveJob.rejected_details) ? liveJob.rejected_details : undefined}
+            truncatedDetails={
+              liveJob.rejected_details_truncated
+              ?? (liveJob.destination_summary as { rejected_details_truncated?: number } | undefined)
+                ?.rejected_details_truncated
+            }
             autoLoad
             initiallyOpen
             repairMappings={jobRepairMappings}
@@ -1944,9 +2044,11 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               const reopen =
                 proposal.status === "proposed"
                 || (proposal.status === "approved" && maps.length > 0);
+              // Closed-loop: always land on Validate so operator re-runs G1–G9 after repair.
               openValidateInStudio({
                 repairProposalId: reopen ? proposal.id : undefined,
                 mappings: maps,
+                step: "validate",
               });
             }}
             onReplayComplete={(childJobId) => {

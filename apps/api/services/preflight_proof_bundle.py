@@ -1,7 +1,7 @@
 """Unified preflight proof bundle.
 
 This module assembles the deterministic safety signals already implemented in
-DataFlow into one auditable decision object:
+Datawrap into one auditable decision object:
 - semantic mapping quality
 - sample quality
 - compliance / PII risk
@@ -159,18 +159,37 @@ def build_preflight_proof_bundle(
     if not reconciliation.get("preview") and not reconciliation.get("passed"):
         blockers.append("Row-level reconciliation proof failed")
 
-    # Use the validation-mode aware confidence floor. The gate-level confidence
-    # check (G4) already accepts mappings above the floor (threshold - 0.3) so
-    # the data-integrity audit can be the stricter authority. The proof bundle
-    # should not be stricter than G4; it should report low confidence (via the
-    # confidence_band) without blocking transfers that have already passed the
-    # mapping gate. The average semantic score is reported for UX, not as a hard
-    # gate on its own.
-    effective_threshold = max(0.55, confidence_threshold - 0.3)
-    confidences = [float(m.get("confidence", 0)) for m in mappings if m.get("confidence") is not None]
-    min_confidence = round(min(confidences) if confidences else 0.0, 3)
-    if min_confidence < effective_threshold:
-        blockers.append("Semantic mapping confidence too low")
+    # Module 3: G4 owns hard mapping-confidence blocks. Proof bundle reports
+    # min_confidence for evidence only — never invent a sibling "confidence too
+    # low" blocker that duplicates g4_mapping_confidence.
+    effective_threshold = max(0.55, float(confidence_threshold or 0.85))
+    from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+    confidences = [
+        float(m.get("confidence", 0))
+        for m in mappings
+        if m.get("confidence") is not None
+        and not m.get("user_override")
+        and not mapping_has_clearing_risk_contract(m)
+        and not m.get("risk_acknowledged")
+        and not m.get("riskAcknowledged")
+    ]
+    min_confidence = round(min(confidences) if confidences else 1.0, 3)
+    confidence_below_floor = bool(confidences and min_confidence < effective_threshold)
+    # Intentionally do NOT append "Semantic mapping confidence too low" here.
+
+    # Migration Risk Contract: boolean risk_acknowledged alone must never
+    # unlock Execute-approve. Continue-policy signed contracts are required.
+    from services.migration_risk_contract import lossy_mappings_missing_risk_contracts
+
+    missing_contracts = lossy_mappings_missing_risk_contracts(mappings)
+    if missing_contracts:
+        cols = ", ".join(missing_contracts[:5])
+        more = f" (+{len(missing_contracts) - 5} more)" if len(missing_contracts) > 5 else ""
+        blockers.append(
+            "Migration Risk Contract required (execution policy) for: "
+            f"{cols}{more}"
+        )
 
     decision = "approve"
     if blockers:
@@ -204,14 +223,36 @@ def build_preflight_proof_bundle(
         f"sample quality {quality_display}; "
         f"compliance risk {compliance.get('risk_score', 0.0):.2f}; reconciliation {recon_label}"
     )
+    if confidence_below_floor:
+        evidence_summary += (
+            f"; below G4 floor {effective_threshold:.2f} "
+            "(hard block is g4_mapping_confidence — not re-stated here)"
+        )
 
     passed = decision == "approve"
+    post_write_proof = bool(
+        not reconciliation.get("preview")
+        and not reconciliation.get("post_write_pending")
+        and reconciliation.get("passed")
+        and str(reconciliation.get("phase") or "").startswith("post_write")
+    )
+    # Module 8: Execute-ready (decision=approve) is never migration_proven.
+    # migration_proven requires post-write full_checksum — see signed_proof_pack.
+    from services.signed_proof_pack import classify_post_write_assurance
+
+    assurance = classify_post_write_assurance(reconciliation)
+    migration_proven = bool(assurance.get("migration_proven"))
 
     return {
         "passed": passed,
+        "migration_proven": migration_proven,
+        "post_write_proof": post_write_proof,
+        "proof_assurance": assurance,
         "semantic_mapping_score": semantic_score,
         "min_confidence": min_confidence,
         "confidence_threshold": effective_threshold,
+        "confidence_below_floor": confidence_below_floor,
+        "confidence_authority": "g4_mapping_confidence",
         "semantic_notes": semantic_notes,
         "quality_score": quality_score,
         "confidence_band": confidence_band,
@@ -219,10 +260,27 @@ def build_preflight_proof_bundle(
         "evidence_summary": evidence_summary,
         "compliance": compliance,
         "reconciliation": reconciliation,
+        "risk_contracts": {
+            "missing_columns": missing_contracts,
+            "incomplete": bool(missing_contracts),
+            "note": (
+                "Boolean Accept Risk is not an execution contract. "
+                "Execute-approve requires a signed Migration Risk Contract with a "
+                "continue policy (CAST_AND_CONTINUE, QUARANTINE_ROW, …). "
+                "Default policy is FAIL_JOB."
+            ),
+        },
         "transfer_decision": {
             "decision": decision,
             "blockers": blockers,
             "compliance_only": bool(blockers) and blockers == compliance_blockers,
             "reason": "No blocking issues detected" if not blockers else "; ".join(blockers),
+            "note": (
+                "decision=approve means Execute-ready under current gates — "
+                "not migration_proven. Post-write Gate-8 proof is required for "
+                "migration correctness claims."
+                if decision == "approve"
+                else None
+            ),
         },
     }

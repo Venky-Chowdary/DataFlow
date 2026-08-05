@@ -1,41 +1,84 @@
-/** DataFlow brand mark — clean node-flow icon */
-
-import { useId } from "react";
+/**
+ * Datawrap mark — wrap lattice (original geometry).
+ *
+ * Uniqueness notes (research pass):
+ * - NOT headphones (no twin uprights + headband)
+ * - NOT Fivetran blue blob, Airbyte octopus, Confluent hex, Jira chevron
+ * - NOT Datawrapper (wordmark-only charting brand — different product)
+ * Concept: three cargo-style wrap straps sealing a center void, diagonal
+ * strap ends as directional arrow (secured anywhere→anywhere).
+ */
 
 interface DtLogoProps {
   size?: number;
+  title?: string;
+  variant?: "app" | "plain";
+  fidelity?: "svg" | "raster";
 }
 
-export function DtLogo({ size = 36 }: DtLogoProps) {
-  const gradId = useId().replace(/:/g, "");
+export function DtLogo({
+  size = 36,
+  title = "Datawrap",
+  variant = "app",
+  fidelity = "svg",
+}: DtLogoProps) {
+  const decorative = !title;
+
+  if (fidelity === "raster" && variant === "app") {
+    return (
+      <img
+        className="dt-brand-mark dt-brand-mark--raster"
+        src="/brand/datawrap-mark.png"
+        width={size}
+        height={size}
+        alt={decorative ? "" : title}
+        aria-hidden={decorative ? true : undefined}
+        draggable={false}
+      />
+    );
+  }
+
+  const isApp = variant === "app";
+
   return (
     <svg
       className="dt-brand-mark"
       width={size}
       height={size}
-      viewBox="0 0 36 36"
+      viewBox="0 0 64 64"
       fill="none"
-      aria-hidden
+      role={decorative ? undefined : "img"}
+      aria-hidden={decorative ? true : undefined}
+      aria-label={decorative ? undefined : title}
       shapeRendering="geometricPrecision"
     >
-      <rect width="36" height="36" rx="9" fill={`url(#${gradId})`} />
+      {!decorative && <title>{title}</title>}
+      {isApp && <rect width="64" height="64" rx="14" fill="#0A3D3A" />}
+
+      {/* Horizontal wrap strap */}
+      <rect x="10" y="28" width="44" height="8" rx="2.5" fill="#F59E0B" />
+      {/* Vertical wrap strap */}
+      <rect x="28" y="10" width="8" height="44" rx="2.5" fill={isApp ? "#F8FAFC" : "#0F766E"} />
+      {/* Diagonal wrap strap → arrow (unique third axis) */}
       <path
-        d="M10 24V14M10 14h6l2 4 4-8h4"
-        stroke="white"
-        strokeWidth="2.25"
+        d="M16 48 L40 24"
+        stroke="#2DD4BF"
+        strokeWidth="8"
         strokeLinecap="round"
-        strokeLinejoin="round"
-        opacity="0.98"
       />
-      <circle cx="10" cy="24" r="2.75" fill="#F59E0B" />
-      <circle cx="10" cy="14" r="2.75" fill="#2DD4BF" />
-      <circle cx="26" cy="10" r="2.75" fill="#A7F3D0" />
-      <defs>
-        <linearGradient id={gradId} x1="4" y1="4" x2="32" y2="32" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#134E4A" />
-          <stop offset="1" stopColor="#111827" />
-        </linearGradient>
-      </defs>
+      <path d="M36 18 L52 14 L44 30 Z" fill="#2DD4BF" />
+
+      {/* Center seal void — reads as secured packet, not ear cup */}
+      <rect
+        x="27"
+        y="27"
+        width="10"
+        height="10"
+        rx="2"
+        fill={isApp ? "#0A3D3A" : "#FFFFFF"}
+        stroke={isApp ? "#0A3D3A" : "#FFFFFF"}
+        strokeWidth="1"
+      />
     </svg>
   );
 }

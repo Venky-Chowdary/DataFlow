@@ -1,4 +1,4 @@
-/* Data Pilot — ChatGPT-style chat UI */
+/* Datawrap Pilot — ChatGPT-style chat UI */
 
 .df2-pilot-workspace.df2-pilot-v2 {
   display: flex;
@@ -284,7 +284,7 @@
   border-radius: 6px;
 }
 
-@media (max-width: 900px) {
+@media (max-width: 1023px) {
   .df2-pilot-v2 .df2-pilot-body {
     grid-template-columns: 1fr;
   }
@@ -294,7 +294,7 @@
   }
 }
 
-@media (max-width: 600px) {
+@media (max-width: 639px) {
   .df2-pilot-v2 .df2-pilot-main-inner {
     padding: 16px 16px 0;
   }

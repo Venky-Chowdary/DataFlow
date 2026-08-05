@@ -2,12 +2,43 @@
    UI consistency — unified tiles, cards, spacing
    ═══════════════════════════════════════════════════════════ */
 
-:root {
-  --df-tile-min-h: 88px;
-  --df-card-head-pad: 16px 20px;
-  --df-card-pad: 20px;
-  --df-page-section-gap: 16px;
-  --df-grid-gap: 14px;
+/* Density tokens owned by tokens.css — component density rules only. */
+
+@media (min-width: 1024px) and (max-width: 1366px) {
+  .df2-app .df2-settings-nav-desc {
+    display: none;
+  }
+
+  .df2-app .df2-settings-nav-item {
+    padding: 8px 10px;
+    gap: 8px;
+  }
+
+  .df2-app .df2-overview-v3-kpis {
+    gap: 8px;
+  }
+
+  .df2-app .df2-metric-glass {
+    min-height: var(--df-tile-min-h, 64px);
+    padding: 8px 10px;
+  }
+
+  .df2-app .df2-xform-card {
+    padding: 10px 12px;
+    border-radius: var(--df-radius-card);
+  }
+
+  .df2-app .df2-xform-card-head h3 {
+    font-size: 14px;
+  }
+
+  .df2-app .df2-mcp-endpoint-card {
+    padding: 10px 12px;
+  }
+
+  .df2-app .df2-jobs-v3-summary {
+    padding: 8px 10px;
+  }
 }
 
 /* Form controls — consistent sizing, no border clip */
@@ -171,6 +202,79 @@
 .df2-btn-block {
   width: 100%;
   justify-content: center;
+}
+
+/*
+ * Card / panel borders — keep a paint gutter so 1px edges stay visible when
+ * parents use overflow:hidden (laptop density tokens, not CSS zoom).
+ */
+.df2-app .df2-content-inner:not(.df2-content-studio):not(.df2-content-flush) {
+  padding: 4px max(12px, var(--df-page-gutter, 16px)) 16px;
+  box-sizing: border-box;
+}
+.df2-app .df2-page:not(.df2-page-transfer-studio) {
+  padding-left: max(16px, var(--df-page-gutter, 16px));
+  padding-right: max(16px, var(--df-page-gutter, 16px));
+  box-sizing: border-box;
+}
+.df2-app .df2-content-studio .df2-transfer-studio-shell {
+  padding: 4px 6px 6px;
+  box-sizing: border-box;
+}
+.df2-app .df2-card,
+.df2-app .df2-pipe-card,
+.df2-app .df2-job-row,
+.df2-app .df2-metric-glass,
+.df2-app .df2-xform-card,
+.df2-app .df2-mcp-endpoint-card,
+.df2-app .df2-jobs-v3-list,
+.df2-app .df2-pipeline-rows,
+.df2-app .df2-transfer-studio-chrome,
+.df2-app .df2-transfer-step-panel {
+  box-sizing: border-box;
+  border-style: solid;
+  background-clip: padding-box;
+}
+.df2-app .df2-jobs-v3-layout,
+.df2-app .df2-pipeline-page,
+.df2-app .df2-page-jobs {
+  min-width: 0;
+}
+.df2-sidebar-foot {
+  gap: 8px;
+  padding-top: 8px;
+}
+.df2-sidebar-foot .df2-sidebar-user {
+  margin-top: 0;
+}
+
+/*
+ * Enterprise action chrome — footers / rails never stretch a single primary
+ * button full-bleed unless `.df2-btn-block` is explicit. Prevents the Validate
+ * "Fix …" control from becoming a page-width slab.
+ */
+.df2-validate-rail-actions .df2-btn,
+.df2-validate-footer-actions .df2-btn,
+.df2-run-ready-actions .df2-btn,
+.df2-run-footer-actions .df2-btn,
+.df2-wizard-footer .df2-btn,
+.df2-map-footer-actions .df2-btn,
+.df2-card-footer .df2-btn,
+.df2-toolbar .df2-btn,
+.df2-page-head-actions .df2-btn,
+.df2-vd-fix-actions .df2-btn,
+.df2-vd-remediate-bar .df2-btn {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 0;
+  max-width: min(220px, 100%);
+  white-space: nowrap;
+}
+.df2-validate-rail-actions .df2-btn.df2-btn-block,
+.df2-wizard-footer .df2-btn.df2-btn-block,
+.df2-card-footer .df2-btn.df2-btn-block {
+  flex: 1 1 auto;
+  width: 100%;
 }
 
 /* Pilot inside app shell — fill content area */

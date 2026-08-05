@@ -32,6 +32,13 @@ export interface QuarantinePanelProps {
    * when the API returns empty.
    */
   initialDetails?: QuarantineRow[];
+  /**
+   * How many quarantine detail records the engine dropped past its sample cap.
+   * The exact row count still lives in ``rejectedRows``; this only bounds the
+   * per-finding evidence so a heavily-quarantining job cannot blow the
+   * checkpoint document past MongoDB's 16 MB limit.
+   */
+  truncatedDetails?: number;
   /** Closed-loop: preflight findings → Validate (Strip / remapping). */
   onOpenValidate?: () => void;
   /** Closed-loop: after successful write-time replay. */
@@ -40,6 +47,8 @@ export interface QuarantinePanelProps {
   repairMappings?: RepairMapping[];
   /** After approve / apply / reject — parent can deep-link to Validate. */
   onRepairDecided?: (proposal: RepairProposal) => void;
+  /** Sync applied mapping transforms into Studio state before re-validate. */
+  onRepairMappingsApplied?: (mappings: RepairMapping[]) => void;
 }
 
 function summarizeReasons(rows: QuarantineRow[]) {
@@ -113,10 +122,12 @@ export function QuarantinePanel({
   initiallyOpen = false,
   autoLoad = false,
   initialDetails,
+  truncatedDetails = 0,
   onOpenValidate,
   onReplayComplete,
   repairMappings = [],
   onRepairDecided,
+  onRepairMappingsApplied,
 }: QuarantinePanelProps) {
   const { toast } = useToast();
   const [open, setOpen] = useState(initiallyOpen || autoLoad || Boolean(initialDetails?.length));
@@ -128,6 +139,7 @@ export function QuarantinePanel({
   const [repairOpen, setRepairOpen] = useState(false);
   const [repairProposal, setRepairProposal] = useState<RepairProposal | null>(null);
   const [repairBusy, setRepairBusy] = useState(false);
+  const [remediatedPendingValidate, setRemediatedPendingValidate] = useState(false);
   const [issueCount, setIssueCount] = useState(initialDetails?.length ?? 0);
   const [rowCount, setRowCount] = useState(rejectedRows ?? initialDetails?.length ?? 0);
   const [source, setSource] = useState<string>(initialDetails?.length ? "job" : "none");
@@ -147,6 +159,8 @@ export function QuarantinePanel({
     };
   } | null>(null);
   const [destDlq, setDestDlq] = useState<import("../../lib/api").QuarantineInfo["dest_dlq"]>(undefined);
+  const [quarantineDurable, setQuarantineDurable] = useState<boolean | null | undefined>(undefined);
+  const [quarantineDlqError, setQuarantineDlqError] = useState<string | null | undefined>(undefined);
 
   const transformOverrides = useMemo(() => buildTransformOverrides(rows), [rows]);
   const hasStripSuggestion = Object.values(transformOverrides).some(
@@ -164,6 +178,8 @@ export function QuarantinePanel({
       setRowCount(data.rejected_rows ?? rejectedRows ?? next.length);
       setSource(apiRows.length ? (data.source || "write") : (initialDetails?.length ? "job" : data.source || "none"));
       setDestDlq(data.dest_dlq);
+      setQuarantineDurable(data.quarantine_durable);
+      setQuarantineDlqError(data.quarantine_dlq_error ?? null);
       setOpen(true);
       setLoaded(true);
     } catch (e) {
@@ -318,7 +334,11 @@ export function QuarantinePanel({
   const displayFindings = loaded ? issueCount : (rejectedRows ?? 0) || issueCount;
   const isWriteSource = source === "write" || source === "job";
   const isPreflight = source === "preflight";
-  const canReplay = isWriteSource && rows.length > 0;
+  // Replay needs a durable control-plane record of the rejected rows. When
+  // persist_rejected_rows failed the engine still lists them in memory, but
+  // a Replay click would rewrite nothing — block the button and say why.
+  const durableLost = quarantineDurable === false;
+  const canReplay = isWriteSource && rows.length > 0 && !durableLost;
 
   return (
     <div className="df2-quarantine-panel">
@@ -340,6 +360,15 @@ export function QuarantinePanel({
             {coercedNullRows != null && coercedNullRows > 0 && (
               <span className="df2-quarantine-explainer-count">
                 <strong>{coercedNullRows.toLocaleString()}</strong> coerced to NULL
+              </span>
+            )}
+            {truncatedDetails > 0 && (
+              <span
+                className="df2-quarantine-explainer-count"
+                title="Evidence is capped so a heavily-quarantining job cannot break checkpoint resume. The row count above is still exact."
+              >
+                <strong>{truncatedDetails.toLocaleString()}</strong> more finding
+                {truncatedDetails === 1 ? "" : "s"} not shown (sample capped)
               </span>
             )}
             {source !== "none" && loaded && (
@@ -374,8 +403,16 @@ export function QuarantinePanel({
           <strong>Next step</strong>
           {isPreflight ? (
             <p>
-              Caught in Validate before write. Open Validate → apply <em>Strip controls</em> or fix
+              Caught in Validate before write. Open Validate → <em>Fix bad data…</em> or fix
               mappings, then re-run. Replay is for write-time rejects only.
+            </p>
+          ) : durableLost ? (
+            <p className="df2-quarantine-durable-warn" role="alert">
+              Quarantine findings are listed here but were <strong>not durably written</strong> to
+              the control-plane DLQ
+              {quarantineDlqError ? <> ({quarantineDlqError})</> : null}. Replay is disabled because
+              it would rewrite nothing — export the CSV now, fix the DLQ store, and re-run the
+              transfer so rejects are persisted.
             </p>
           ) : canReplay ? (
             <p>
@@ -387,15 +424,18 @@ export function QuarantinePanel({
               ) : null}
               . Edit bad cells if needed
               {hasStripSuggestion ? ", apply suggested strip transforms," : ","} then{" "}
-              <strong>Promote / Replay</strong> — good rows already on the destination stay put.
-              Promoted DLQ rows are stamped <code>_df_promoted_at</code>.
+              <strong>Promote / Replay</strong> upserts the <em>stored</em> quarantine payload
+              (optionally edited) — it does <strong>not</strong> re-extract from the live source.
+              Good rows already on the destination stay put. Promoted DLQ rows are stamped{" "}
+              <code>_df_promoted_at</code>.
             </p>
           ) : (
             <p>
               Each table row is one <strong>bad cell finding</strong> (source row # + column + value + reason).
               If the job says 30 quarantined, you should see up to 30 findings here (or Export CSV for the full set).
               Good rows already on the destination stay put — fix mappings / types, then{" "}
-              <strong>Promote / Replay</strong> only the quarantined rows (or re-run after Map fixes).
+              <strong>Promote / Replay</strong> only the stored quarantine scraps (not a fresh source extract),
+              or re-run after Map fixes.
               {destDlq?.table ? <> Destination DLQ table: <code>{destDlq.table}</code>.</> : null}
             </p>
           )}
@@ -538,7 +578,7 @@ export function QuarantinePanel({
                     : "No row-level findings were stored for this job yet."}
                 </p>
                 <p>
-                  What to do next: open <strong>Validate</strong> for Strip controls / Quarantine / Fix bad data,
+                  What to do next: open <strong>Validate</strong> → <strong>Fix bad data…</strong>,
                   confirm the API build includes write-time quarantine persistence, then re-run the transfer.
                 </p>
               </div>
@@ -627,12 +667,20 @@ export function QuarantinePanel({
         mappings={repairMappings}
         onClose={() => setRepairOpen(false)}
         onApplied={(updated, p) => {
+          setRemediatedPendingValidate(true);
           toast({
-            title: "Repair applied",
-            message: `${updated.length} mapping(s) updated from proposal ${p.id}. Opening Validate so you can re-run gates.`,
+            title: "Repair applied — re-validate required",
+            message: `${updated.length} mapping(s) updated from proposal ${p.id}. Opening Validate to re-run G1–G9.`,
             tone: "success",
           });
-          onRepairDecided?.(p);
+          // Prefer parent closed-loop (Jobs seeds proposal id + mappings).
+          // Do not also call onOpenValidate — a second intent clears repairProposalId.
+          onRepairMappingsApplied?.(updated);
+          if (onRepairDecided) {
+            onRepairDecided(p);
+          } else {
+            onOpenValidate?.();
+          }
         }}
         onDecided={(p) => {
           if (p.status === "proposed") {

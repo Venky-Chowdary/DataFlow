@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from services.brand_env import getenv_brand
 import sqlite3
 import threading
 import time
@@ -32,7 +33,7 @@ _SESSION_WRITES = 0
 
 
 def _resolve_db_path() -> Path:
-    override = os.getenv("DATAFLOW_EMBEDDING_CACHE_PATH", "").strip()
+    override = getenv_brand("EMBEDDING_CACHE_PATH", "").strip()
     if override:
         path = Path(override)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -41,7 +42,7 @@ def _resolve_db_path() -> Path:
 
 
 def durable_cache_enabled_by_default() -> bool:
-    raw = os.getenv("DATAFLOW_EMBEDDING_DURABLE_CACHE", "true").strip().lower()
+    raw = getenv_brand("EMBEDDING_DURABLE_CACHE", "true").strip().lower()
     return raw not in {"0", "false", "no", "off"}
 
 

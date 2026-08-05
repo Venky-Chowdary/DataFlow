@@ -1,6 +1,6 @@
 """Cross-schema edge-type transfers.
 
-Proves that DataFlow preserves precision and semantics for booleans, high-
+Proves that Datawrap preserves precision and semantics for booleans, high-
 precision decimals, timezones, JSON/arrays, and locale-ambiguous dates when
 mapping between different column names and types.
 """
@@ -58,7 +58,7 @@ EDGE_RECORDS = [
     {
         "rec_id": "3",
         "compensation": "-9999.99",
-        "active": "yes",
+        "active": "true",
         "recorded_at": "2024-07-14",
         "payload": "{}",
         "comment": "date only",

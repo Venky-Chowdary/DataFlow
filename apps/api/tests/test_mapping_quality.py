@@ -121,7 +121,14 @@ def test_create_new_identity_why_contains_new_table_language():
     assert all(m["assignment_strategy"] == "identity_passthrough" for m in mappings)
     assert all("New destination table" in m["reasoning"] for m in mappings)
     assert all("CREATE on first write" in m["reasoning"] for m in mappings)
-    assert mappings[0]["target_type"] == "NUMBER(38,0)"
+    # Snowflake create-new may stamp INTEGER (logical) — materialize_dest_ddl owns
+    # NUMBER(38,0) wire. Never require inventing (38,0) on the Map stamp itself.
+    from services.type_system import materialize_dest_ddl
+
+    stamp = str(mappings[0]["target_type"] or "")
+    assert stamp.upper() in {"INTEGER", "NUMBER(38,0)", "NUMBER(38, 0)"}
+    wire = materialize_dest_ddl("snowflake", stamp).upper().replace(" ", "")
+    assert "NUMBER" in wire or wire == "INTEGER"
     assert mappings[0]["confidence"] <= 0.95
 
 

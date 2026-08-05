@@ -76,8 +76,8 @@
       "id": "excel",
       "name": "Excel",
       "category": "file",
-      "status": "beta",
-      "description": "Multi-sheet workbooks with type detection"
+      "status": "live",
+      "description": "Upload .xlsx workbooks — streamed via openpyxl and written as typed rows to Postgres/Snowflake (automatic conversion; prefer .xlsx over legacy .xls)"
     },
     {
       "id": "mysql",
@@ -307,8 +307,8 @@
       "id": "dynamodb",
       "name": "DynamoDB",
       "category": "database",
-      "status": "beta",
-      "description": "AWS DynamoDB source and destination \u2014 table sync with credential test"
+      "status": "live",
+      "description": "AWS DynamoDB source and destination \u2014 KeySchema-aware map, typed writes, cloud object-store routes"
     },
     {
       "id": "documentdb",
@@ -623,7 +623,7 @@
       "name": "Salesforce",
       "category": "saas",
       "status": "live",
-      "description": "Salesforce SaaS application sync"
+      "description": "Salesforce source/destination via Composite Collections (≤200/req). Host must be org instance URL; paste Bearer access token."
     },
     {
       "id": "hubspot",
@@ -1497,8 +1497,15 @@
       "id": "sftp",
       "name": "SFTP",
       "category": "file",
+      "status": "live",
+      "description": "SFTP file source and destination — pick CSV/Excel/Parquet from remote hosts (NAS via SFTP gateway) into Postgres/Snowflake"
+    },
+    {
+      "id": "smb",
+      "name": "SMB / NAS share",
+      "category": "file",
       "status": "planned",
-      "description": "SFTP file source and destination"
+      "description": "Direct SMB/CIFS NAS mounts — use SFTP gateway or S3/ADLS today for production file pickup into warehouses"
     },
     {
       "id": "email",

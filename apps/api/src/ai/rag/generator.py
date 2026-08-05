@@ -1,5 +1,5 @@
 """
-DataTransfer.space — RAG Generator
+Datawrap — RAG Generator
 
 LLM prompt templates for schema analysis, mapping, and transformation.
 """
@@ -128,7 +128,7 @@ class DataTransferRAGGenerator:
                     query=query,
                     context=context,
                 )
-                llm_response = self._llm.generate(prompt, system="You are the DataTransfer.space AI assistant.")
+                llm_response = self._llm.generate(prompt, system="You are the Datawrap AI assistant.")
                 if llm_response.success:
                     return RAGResponse(
                         answer=llm_response.content,

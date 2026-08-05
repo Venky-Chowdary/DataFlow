@@ -4,18 +4,27 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  acknowledgeMappingRisk,
   applyDestTypeChange,
   applyStructPolicyChange,
   applyTransformChange,
+  approveMappingHonestly,
   approveMappingsHonestly,
   buildPreflightMappings,
   canWidenMapping,
   countApproveEligible,
+  createNewRiskChipLabel,
   editableFromPipelineMappings,
+  engineStampedRiskChip,
   engineTransformToUi,
   inferLogicalFromSample,
+  isSafeNormalizeMapping,
+  mappingAckLabel,
+  mappingAckTier,
   mappingHealthSummary,
+  mappingRequiresRiskAck,
   mappingsFromAnalysis,
+  mergeSignedRiskContracts,
   uiTransformToEngine,
   widenMappingToVarchar,
   type EditableMapping,
@@ -72,6 +81,244 @@ describe("transform SSOT round-trip", () => {
     assert.equal(next.transform, "cast_number");
     assert.equal(next.engineTransform, "decimal");
     assert.equal(next.approved, false);
+  });
+});
+
+describe("fail-closed Map approve", () => {
+  it("does not auto-approve exact-name lossy_cast pairs", () => {
+    const editable = editableFromPipelineMappings(
+      [
+        {
+          source: "amount",
+          target: "amount",
+          confidence: 0.99,
+          source_type: "DECIMAL",
+          target_type: "INTEGER",
+          fidelity: "lossy_cast",
+          fidelity_reason: "precision collapse",
+          type_narrowing: true,
+          requires_review: false,
+        },
+      ],
+      [],
+      ["amount"],
+      0.85,
+      { amount: "INTEGER" },
+    );
+    assert.equal(editable[0].approved, false);
+    assert.equal(editable[0].requiresReview, true);
+  });
+
+  it("approveMappingHonestly refuses lossy_cast even when operator Approve-all runs", () => {
+    const next = approveMappingsHonestly([
+      {
+        source: "amount",
+        target: "amount",
+        confidence: 0.99,
+        approved: false,
+        fidelity: "lossy_cast",
+        typeNarrowing: true,
+        inferredType: "DECIMAL",
+        destType: "INTEGER",
+      },
+    ]);
+    assert.equal(next[0].approved, false);
+    assert.equal(next[0].requiresReview, true);
+  });
+
+  it("acknowledgeMappingRisk stamps risk_acknowledged for G4", () => {
+    const next = acknowledgeMappingRisk(
+      {
+        source: "amount",
+        target: "amount",
+        confidence: 0.99,
+        approved: false,
+        fidelity: "lossy_cast",
+        typeNarrowing: true,
+        inferredType: "DECIMAL",
+        destType: "INTEGER",
+        fidelityReason: "precision collapse",
+      },
+      {
+        executionPolicy: "CAST_AND_CONTINUE",
+        migrationId: "mig-42",
+        table: "orders",
+        planId: "mig-42",
+      },
+    );
+    assert.equal(next.approved, true);
+    assert.equal(next.riskAcknowledged, true);
+    assert.equal(next.requiresReview, false);
+    assert.ok(next.riskContract);
+    assert.equal(next.riskContract?.execution_policy, "CAST_AND_CONTINUE");
+    assert.equal(next.riskContract?.column, "amount");
+    assert.equal(next.riskContract?.migration_id, "mig-42");
+    assert.equal(next.riskContract?.table, "orders");
+    assert.equal(next.riskContract?.loss_classification, "lossy_cast");
+    const pf = buildPreflightMappings([], [next]);
+    assert.equal(pf[0].risk_acknowledged, true);
+    assert.equal(pf[0].fidelity, "lossy_cast");
+    assert.ok(pf[0].risk_contract);
+    assert.equal(pf[0].risk_contract?.execution_policy, "CAST_AND_CONTINUE");
+  });
+
+  it("approveMappingHonestly refuses boolean riskAcknowledged without Risk Contract", () => {
+    const next = approveMappingHonestly({
+      source: "amount",
+      target: "amount",
+      confidence: 0.99,
+      approved: false,
+      fidelity: "lossy_cast",
+      typeNarrowing: true,
+      inferredType: "DECIMAL",
+      destType: "INTEGER",
+      riskAcknowledged: true,
+      // no riskContract — GA fail-closed
+    });
+    assert.equal(next.approved, false);
+    assert.equal(next.requiresReview, true);
+  });
+
+  it("approve-all refuses mutate fidelity without risk ack", () => {
+    const next = approveMappingsHonestly([
+      {
+        source: "amount",
+        target: "amount",
+        confidence: 0.99,
+        approved: false,
+        fidelity: "mutate",
+        transform: "currency",
+        inferredType: "VARCHAR",
+        destType: "DECIMAL",
+      },
+    ]);
+    assert.equal(next[0].approved, false);
+    assert.equal(next[0].requiresReview, true);
+    const acked = acknowledgeMappingRisk(next[0], {
+      executionPolicy: "CAST_AND_CONTINUE",
+    });
+    assert.equal(acked.riskAcknowledged, true);
+    assert.equal(acked.approved, true);
+  });
+
+  it("acknowledgeMappingRisk refuses hidden CAST_AND_CONTINUE default", () => {
+    const next = acknowledgeMappingRisk({
+      source: "amount",
+      target: "amount",
+      confidence: 0.99,
+      approved: false,
+      fidelity: "lossy_cast",
+      inferredType: "DECIMAL",
+      destType: "INTEGER",
+    });
+    assert.equal(next.approved, false);
+    assert.equal(next.requiresReview, true);
+    assert.equal(next.riskAcknowledged, undefined);
+    assert.ok(String(next.reason || "").includes("execution policy"));
+  });
+
+  it("FAIL_JOB contract does not unlock Approve", () => {
+    const next = acknowledgeMappingRisk(
+      {
+        source: "amount",
+        target: "amount",
+        confidence: 0.99,
+        approved: false,
+        fidelity: "lossy_cast",
+        inferredType: "DECIMAL",
+        destType: "INTEGER",
+      },
+      { executionPolicy: "FAIL_JOB" },
+    );
+    assert.equal(next.riskAcknowledged, true);
+    assert.equal(next.approved, false);
+    assert.equal(next.requiresReview, true);
+  });
+
+  it("mergeSignedRiskContracts echoes risk_id and signature", () => {
+    const merged = mergeSignedRiskContracts(
+      [{
+        source: "amount",
+        target: "amount",
+        confidence: 0.99,
+        approved: true,
+        fidelity: "lossy_cast",
+        riskAcknowledged: true,
+        riskContract: {
+          column: "amount",
+          source_type: "DECIMAL",
+          destination_type: "INTEGER",
+          execution_policy: "CAST_AND_CONTINUE",
+          approved_by: "map-operator",
+          reason: "draft",
+        },
+      }],
+      [{
+        source: "amount",
+        target: "amount",
+        risk_acknowledged: true,
+        risk_contract: {
+          column: "amount",
+          source_type: "DECIMAL",
+          destination_type: "INTEGER",
+          execution_policy: "CAST_AND_CONTINUE",
+          approved_by: "ops",
+          reason: "signed",
+          risk_id: "mrc-abc",
+          signature: "mrc-sha256:deadbeef",
+        },
+      }],
+    );
+    assert.equal(merged[0].riskContract?.risk_id, "mrc-abc");
+    assert.equal(merged[0].riskContract?.signature, "mrc-sha256:deadbeef");
+  });
+
+  it("safe normalize (email/trim) Approves without Accept risk wording", () => {
+    const email = {
+      source: "customer_email",
+      target: "customer_email",
+      confidence: 0.93,
+      approved: false,
+      fidelity: "mutate" as const,
+      transform: "email" as const,
+      inferredType: "VARCHAR",
+      destType: "TEXT",
+    };
+    assert.equal(isSafeNormalizeMapping(email), true);
+    assert.equal(mappingRequiresRiskAck(email), false);
+    assert.equal(mappingAckLabel(email), "Approve");
+    assert.equal(engineStampedRiskChip(email), null);
+    const next = approveMappingHonestly(email);
+    assert.equal(next.approved, true);
+    assert.equal(next.riskAcknowledged, undefined);
+  });
+
+  it("cast fidelity uses Review label; lossy uses Accept risk", () => {
+    const castRow = {
+      source: "order_date",
+      target: "order_date",
+      confidence: 0.9,
+      approved: false,
+      fidelity: "cast" as const,
+      transform: "date_iso" as const,
+      inferredType: "DATE",
+      destType: "TEXT",
+    };
+    const lossy = {
+      source: "order_amt",
+      target: "order_amt",
+      confidence: 0.7,
+      approved: false,
+      fidelity: "lossy_cast" as const,
+      transform: "cast_integer" as const,
+      inferredType: "DECIMAL",
+      destType: "INTEGER",
+      typeNarrowing: true,
+    };
+    assert.equal(mappingAckTier(castRow), "review");
+    assert.equal(mappingAckLabel(castRow), "Review");
+    assert.equal(mappingAckTier(lossy), "accept_risk");
+    assert.equal(mappingAckLabel(lossy), "Sign Risk Contract");
   });
 });
 
@@ -212,6 +459,25 @@ describe("STRUCT Map policy", () => {
     assert.ok(sources.includes("addr_geo_lon"));
   });
 
+  it("fails closed when flatten underscore paths collide", () => {
+    const base: EditableMapping[] = [{
+      source: "addr",
+      target: "addr",
+      confidence: 0.9,
+      approved: false,
+      inferredType: "JSON",
+      destType: "JSONB",
+      // literal geo_lat and nested geo.lat both flatten to geo_lat
+      sample: '{"geo_lat":1,"geo":{"lat":2}}',
+      structPolicy: "store_as_json",
+      transform: "parse_json",
+    }];
+    const next = applyStructPolicyChange(base, 0, "flatten_deep");
+    assert.equal(next[0].requiresReview, true);
+    assert.match(next[0].reason || "", /collision/i);
+    assert.ok(!next.some((m) => m.source === "addr_geo_lat" && m.structDerived));
+  });
+
   it("array explode synthesizes _elem child", () => {
     const base: EditableMapping[] = [{
       source: "tags",
@@ -334,7 +600,7 @@ describe("destination schema honesty", () => {
       },
     ]);
     assert.equal(fromEditable[0].create_new, true);
-    assert.ok((fromEditable[0].confidence as number) <= 0.93);
+    assert.ok((fromEditable[0].confidence as number) <= 0.96);
 
     const fromColumns = buildPreflightMappings([
       {
@@ -347,7 +613,7 @@ describe("destination schema honesty", () => {
       },
     ]);
     assert.equal(fromColumns[0].create_new, true);
-    assert.ok((fromColumns[0].confidence as number) <= 0.93);
+    assert.ok((fromColumns[0].confidence as number) <= 0.96);
   });
 
   it("caps Map bootstrap identity when dest column is missing (even without createNew flag)", () => {
@@ -365,7 +631,7 @@ describe("destination schema honesty", () => {
       },
     ]);
     assert.equal(fromBootstrap[0].create_new, true);
-    assert.ok((fromBootstrap[0].confidence as number) <= 0.93);
+    assert.ok((fromBootstrap[0].confidence as number) <= 0.96);
   });
 
   it("mappingsFromAnalysis caps create-new and pending dest honestly", () => {
@@ -377,7 +643,7 @@ describe("destination schema honesty", () => {
       compliance: [],
     }];
     const unknownDest = mappingsFromAnalysis(cols);
-    assert.ok(unknownDest[0].confidence <= 0.93);
+    assert.ok(unknownDest[0].confidence <= 0.96);
 
     const pending = mappingsFromAnalysis(cols, undefined, []);
     assert.equal(pending[0].assignmentStrategy, "pending_dest_schema");
@@ -387,12 +653,14 @@ describe("destination schema honesty", () => {
     const create = mappingsFromAnalysis(cols, undefined, ["other_col"]);
     assert.equal(create[0].existsInDestination, false);
     assert.equal(create[0].createNew, true);
-    assert.ok(create[0].confidence <= 0.93);
+    assert.ok(create[0].confidence <= 0.96);
 
     const existing = mappingsFromAnalysis(cols, undefined, ["id"]);
     assert.equal(existing[0].existsInDestination, true);
     assert.equal(existing[0].createNew, undefined);
     assert.ok(existing[0].confidence >= 0.95);
+    // Bootstrap must not invent Approve — fidelity pipeline stamps first.
+    assert.equal(existing[0].approved, false);
   });
 
   it("intentional omit is first-class Map policy", () => {
@@ -422,5 +690,113 @@ describe("destination schema honesty", () => {
     assert.equal(payload[1].transform, "omit");
     assert.equal(payload[1].intentional_omit, true);
     assert.equal(payload[1].target, "");
+  });
+
+  it("consumes pipeline create_new_risks stamp before Validate", () => {
+    const editable = editableFromPipelineMappings(
+      [{
+        source: "created_at",
+        target: "created_at",
+        confidence: 0.92,
+        source_type: "TIMESTAMPTZ",
+        target_type: "TIMESTAMP",
+        create_new: true,
+        assignment_strategy: "identity_passthrough",
+        create_new_risks: [{
+          kind: "timezone_polarity",
+          severity: "warn",
+          message: "Create-new drops timezone polarity: TIMESTAMPTZ → TIMESTAMP.",
+        }],
+      }],
+      [],
+      [],
+      0.75,
+    );
+    assert.equal(editable[0].createNew, true);
+    assert.equal(editable[0].createNewRisks?.length, 1);
+    assert.equal(editable[0].approved, false);
+    assert.equal(mappingRequiresRiskAck(editable[0]), true);
+    assert.equal(createNewRiskChipLabel(editable[0]), "TZ risk");
+    assert.ok(engineStampedRiskChip(editable[0])?.label === "TZ risk");
+  });
+
+  it("cast fidelity never auto-approves as Ready without Accept risk", () => {
+    const editable = editableFromPipelineMappings(
+      [{
+        source: "created_at",
+        target: "created_at",
+        confidence: 0.99,
+        source_type: "TIMESTAMP",
+        target_type: "TIMESTAMP",
+        fidelity: "cast",
+        fidelity_reason: "Parsed via datetime; unparseable values quarantine.",
+      }],
+      [],
+      ["created_at"],
+      0.75,
+      { created_at: "TIMESTAMP" },
+    );
+    assert.equal(editable[0].approved, false);
+    assert.equal(mappingRequiresRiskAck(editable[0]), true);
+    assert.equal(engineStampedRiskChip(editable[0])?.label, "cast");
+  });
+
+  it("never invents Approve from high confidence alone", () => {
+    const editable = editableFromPipelineMappings(
+      [{
+        source: "id",
+        target: "id",
+        confidence: 0.99,
+        source_type: "INTEGER",
+        target_type: "INTEGER",
+        requires_review: false,
+      }],
+      [],
+      ["id"],
+      0.75,
+      { id: "INTEGER" },
+    );
+    assert.equal(editable[0].approved, false);
+    assert.equal(editable[0].requiresReview, false);
+  });
+
+  it("does not treat pending dest schema as create-new Widen", () => {
+    const m: EditableMapping = {
+      source: "id",
+      target: "id",
+      confidence: 0.9,
+      approved: false,
+      existsInDestination: false,
+      assignmentStrategy: "pending_dest_schema",
+    };
+    assert.equal(canWidenMapping(m), false);
+  });
+
+  it("specialty health clears after Accept risk + Approve", () => {
+    const open: EditableMapping = {
+      source: "emb",
+      target: "emb",
+      confidence: 0.99,
+      approved: false,
+      transform: "identity_specialty",
+      inferredType: "VECTOR(3)",
+      destType: "VECTOR(3)",
+      fidelity: "mutate",
+      existsInDestination: true,
+    };
+    const openHealth = mappingHealthSummary([open], 0.75);
+    assert.ok(openHealth.specialtyIdentity >= 1);
+    assert.equal(openHealth.weak, true);
+
+    const cleared: EditableMapping = {
+      ...open,
+      approved: true,
+      riskAcknowledged: true,
+    };
+    const clearedHealth = mappingHealthSummary([cleared], 0.75);
+    assert.equal(clearedHealth.specialtyIdentity, 0);
+    assert.equal(clearedHealth.weak, false);
+    assert.equal(clearedHealth.ready, 1);
+    assert.match(clearedHealth.headline, /ready/i);
   });
 });

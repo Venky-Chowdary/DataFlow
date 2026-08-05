@@ -7,7 +7,7 @@ machine-readable ``suggested_actions`` the UI can turn into one-click buttons.
 The explanation is built deterministically from the existing rulebook
 (:mod:`services.preflight_rules`) and the value-level ``coercion_report`` so it
 always works offline and is fully testable. When an LLM provider is configured
-(Data Pilot infra) it is reused only to add a friendlier natural-language
+(Datawrap Pilot infra) it is reused only to add a friendlier natural-language
 narrative — never to invent the facts. If no provider is available the
 deterministic narrative is used.
 """
@@ -49,15 +49,34 @@ def _coercion_column_fixes(report: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _parse_type_mismatch_columns(text: str) -> list[tuple[str, str]]:
     """Extract (source, target) from messages like ``population (VARCHAR) → population (NUMBER)``."""
+    return [(src, tgt) for src, _st, tgt, _tt in _parse_type_mismatch_pairs(text)]
+
+
+def _parse_type_mismatch_pairs(text: str) -> list[tuple[str, str, str, str]]:
+    """Extract (source, source_type, target, target_type) from mismatch messages."""
     import re
 
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, str, str]] = []
     for m in re.finditer(
-        r"([A-Za-z_][\w]*)\s*\([^)]+\)\s*→\s*([A-Za-z_][\w]*)\s*\([^)]+\)",
+        r"([A-Za-z_][\w]*)\s*\(([^)]+)\)\s*→\s*([A-Za-z_][\w]*)\s*\(([^)]+)\)",
         text or "",
     ):
-        out.append((m.group(1), m.group(2)))
+        out.append(
+            (m.group(1), m.group(2).strip(), m.group(3), m.group(4).strip())
+        )
     return out
+
+
+def _remap_to_type_for_mismatch(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> str:
+    """Choose a one-click target type that can actually clear the gate."""
+    from services.type_system import suggest_remap_target
+
+    return suggest_remap_target(source_type, target_type, dest_db=dest_db)
 
 
 def _is_encoding_blocker(text: str) -> bool:
@@ -121,6 +140,7 @@ def _is_type_mismatch_blocker(text: str) -> bool:
             "cannot be cast",
             "does not safely become",
             "lossy type",
+            "lossy coercion",
             "unparseable",
         )
     )
@@ -209,19 +229,31 @@ def _suggested_actions(
 
     # Declared-type / dry-run type mismatches → Widen/remap, never Strip-first.
     if _is_type_mismatch_blocker(blocker_text):
-        for src, tgt in _parse_type_mismatch_columns(blocker_text):
-            key = ("change_target_type", src, "VARCHAR")
+        pairs = _parse_type_mismatch_pairs(blocker_text)
+        if not pairs:
+            for src, tgt in _parse_type_mismatch_columns(blocker_text):
+                pairs.append((src, "", tgt, ""))
+        for src, src_type, tgt, tgt_type in pairs:
+            to_type = _remap_to_type_for_mismatch(src_type, tgt_type)
+            key = ("change_target_type", src, to_type)
             if key not in seen:
                 seen.add(key)
+                if to_type.upper() == "UUID":
+                    label = (
+                        f"Keep '{src}' as UUID — create-new writes CHAR(36)/UUID "
+                        f"(bare VARCHAR/TEXT is not a fix; Strip/Quarantine cannot help)"
+                    )
+                else:
+                    label = (
+                        f"Remap '{src}' off typed {tgt or tgt_type or 'column'} → {to_type} "
+                        "(Strip/Quarantine cannot fix type mismatches)"
+                    )
                 actions.append({
                     "kind": "change_target_type",
                     "column": src,
                     "target": tgt,
-                    "to_type": "VARCHAR",
-                    "label": (
-                        f"Remap '{src}' off typed {tgt} → VARCHAR "
-                        "(Strip/Quarantine cannot fix type mismatches)"
-                    ),
+                    "to_type": to_type,
+                    "label": label,
                     "requires_ddl": True,
                 })
         if not any(a.get("kind") == "change_target_type" for a in actions):
@@ -236,21 +268,15 @@ def _suggested_actions(
             })
 
     if _is_encoding_blocker(blocker_lower):
-        if not any(a.get("kind") == "normalize_control_chars" for a in actions):
-            actions.append({
-                "kind": "normalize_control_chars",
-                "transform": "strip_controls",
-                "label": "Strip control characters & re-run",
-            })
-        if not any(a.get("kind") == "quarantine_and_rerun" for a in actions):
-            actions.append({
-                "kind": "quarantine_and_rerun",
-                "label": "Quarantine bad cells & re-run",
-            })
+        # One CTA only — Strip / Quarantine live inside Fix bad data drawer.
+        actions = [
+            a for a in actions
+            if a.get("kind") not in {"normalize_control_chars", "quarantine_and_rerun"}
+        ]
         if not any(a.get("kind") == "open_bad_data_fix" for a in actions):
             actions.append({
                 "kind": "open_bad_data_fix",
-                "label": "Open Fix bad data dialog",
+                "label": "Fix bad data…",
             })
     elif "g8_reconciliation" in gate_ids or "identity transform" in blocker_lower or "identity mapping" in blocker_lower:
         if not any(a.get("kind") == "review_mappings" for a in actions):
@@ -270,13 +296,8 @@ def _suggested_actions(
                     "kind": "review_mappings",
                     "label": "Review mappings",
                 })
-            if "integrity" in blocker_lower and not any(a.get("kind") == "open_bad_data_fix" for a in actions):
-                # Only offer Fix bad data when the text still looks integrity-related
-                # but not encoding (e.g. required nulls) — drawer may still help.
-                actions.append({
-                    "kind": "open_bad_data_fix",
-                    "label": "Inspect integrity findings",
-                })
+            # Never open the encoding-centric Fix-bad-data drawer for nulls /
+            # required-field integrity — Strip/Quarantine cannot invent values.
     if "g4_mapping_confidence" in gate_ids:
         if not any(a.get("kind") == "review_mappings" for a in actions):
             actions.append({"kind": "review_mappings", "label": "Review and approve low-confidence mappings"})
@@ -302,9 +323,16 @@ def _deterministic_narrative(
     passed: bool,
     issues: list[dict[str, Any]],
     column_fixes: list[dict[str, Any]],
+    *,
+    decision: str = "",
 ) -> str:
-    if passed:
+    if passed and decision == "approve":
         return "All preflight gates passed. This transfer is safe to run."
+    if passed:
+        return (
+            "Checks cleared with a review-grade decision — not production-approved. "
+            "Re-run Validate or acknowledge remaining polarity risks before Execute unlocks."
+        )
     lines: list[str] = []
     hard_issues = [i for i in issues if i.get("severity") != "warning"]
     warn_issues = [i for i in issues if i.get("severity") == "warning"]
@@ -379,7 +407,7 @@ def _llm_narrative(deterministic: str, issues: list[dict[str, Any]]) -> tuple[st
         return deterministic, "deterministic"
 
     system = (
-        "You are DataFlow's validation assistant. Explain data-transfer preflight "
+        "You are Datawrap's validation assistant. Explain data-transfer preflight "
         "failures to a data engineer in clear, concise language. Only use the facts "
         "provided — never invent columns, values, or fixes. Prefer short, prioritized, "
         "actionable steps."
@@ -425,6 +453,9 @@ def explain_validation(
         and optionally ``coercion_report``).
     """
     passed = bool(preflight.get("passed"))
+    proof = preflight.get("proof_bundle") or {}
+    transfer_decision = proof.get("transfer_decision") or {}
+    decision = str(transfer_decision.get("decision") or "").strip().lower()
     blockers = preflight.get("blockers") or []
     coercion_report = preflight.get("coercion_report") or {}
 
@@ -481,17 +512,24 @@ def explain_validation(
             })
 
     actions = _suggested_actions(blockers, column_fixes)
-    deterministic = _deterministic_narrative(passed, issues, column_fixes)
+    deterministic = _deterministic_narrative(
+        passed, issues, column_fixes, decision=decision,
+    )
 
     narrative, provider = deterministic, "deterministic"
     if not passed and use_llm:
         narrative, provider = _llm_narrative(deterministic, issues)
 
     hard_count = sum(1 for i in issues if i["severity"] != "warning")
+    approved = passed and decision == "approve"
     summary = (
         "Validation passed — safe to run."
-        if passed
-        else f"Validation blocked: {hard_count} issue(s), {len(column_fixes)} column(s) need attention."
+        if approved
+        else (
+            "Validation review-grade — not safe to run until decision is approve."
+            if passed
+            else f"Validation blocked: {hard_count} issue(s), {len(column_fixes)} column(s) need attention."
+        )
     )
 
     return {

@@ -1,6 +1,6 @@
 """Tenant store — workspace-bound enterprise SaaS settings.
 
-A tenant represents the enterprise customer that accesses DataFlow through a
+A tenant represents the enterprise customer that accesses Datawrap through a
 custom domain (e.g. ``dataflow.wellsfargo.com``).  Each tenant is linked to one
 workspace; that workspace's connectors, jobs, and members are isolated under
 the tenant's security and residency policies.
@@ -12,6 +12,7 @@ import ipaddress
 import json
 import logging
 import os
+from services.brand_env import getenv_brand
 import re
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -266,7 +267,7 @@ def is_request_ip_allowed(request_client_ip: str | None, tenant: Tenant | None) 
 
 
 def default_region() -> str:
-    return os.getenv("DATAFLOW_DEFAULT_REGION", "us-east-1").strip() or "us-east-1"
+    return getenv_brand("DEFAULT_REGION", "us-east-1").strip() or "us-east-1"
 
 
 def tenant_region(tenant: Tenant | None = None) -> str:

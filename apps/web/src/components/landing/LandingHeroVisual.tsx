@@ -70,7 +70,7 @@ export function LandingHeroVisual() {
             <span className="lp-flow-ring lp-flow-ring--2" />
             <div className="lp-flow-hub">
               <DtLogo size={30} />
-              <span>DataFlow</span>
+              <span>Datawrap</span>
             </div>
           </div>
 

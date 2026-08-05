@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Copilot Data Analyst
+Datawrap — Copilot Data Analyst
 
 Analyzes real universal data and composes natural-language responses
 about columns, values, PII, quality — not just transfer steps.
@@ -38,6 +38,13 @@ class CopilotDataAnalyst:
         schemas = self.feeder.feed_all()
         if not include_catalog:
             schemas = [s for s in schemas if s.source != "catalog"]
+        # Training synonym dumps are not operator datasets — keep them out of
+        # "Tell me about …" chips and inventory answers.
+        schemas = [
+            s for s in schemas
+            if "synonym" not in (s.name or "").lower()
+            and "industry schema" not in (s.name or "").lower()
+        ]
         return [
             {
                 "name": s.name,
@@ -307,13 +314,13 @@ class CopilotDataAnalyst:
         return value
 
     def extract_dataset_hint(self, message: str) -> str | None:
+        """Match upload/industry names without re-parsing every CSV on each turn."""
         lower = message.lower()
-        schemas = self.feeder.feed_all()
-        for schema in schemas:
-            if schema.name.lower().replace("_", " ") in lower:
-                return schema.name
-            if schema.industry and schema.industry in lower:
-                return schema.name
+        for name, industry in self.feeder.list_dataset_names():
+            if name.lower().replace("_", " ") in lower:
+                return name
+            if industry and industry in lower:
+                return name
 
         for word in ("hr", "logistics", "payment", "retail", "finance", "healthcare", "employee", "shipping"):
             if word in lower:

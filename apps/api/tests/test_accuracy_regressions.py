@@ -99,6 +99,62 @@ def test_g8_identity_allows_native_array_and_object_fields():
     assert not any("identity transform altered" in str(i) for i in issues)
 
 
+def test_identity_preserves_trailing_whitespace():
+    """none/string aliases must not silent-strip — that false-failed Gate-8 on Mongo text."""
+    for transform in ("none", "identity", "passthrough", "string", "text", "varchar"):
+        val, err = apply_transform("hello \n", transform)
+        assert err is None, transform
+        assert val == "hello \n", transform
+
+
+def test_g8_identity_allows_trailing_whitespace_on_long_text():
+    """Mongo job descriptions often carry trailing newlines; identity must not alter."""
+    desc = (
+        "Amazon Web Services (AWS) offers the world’s most comprehensive "
+        "and broadly adopted cloud platform.\n"
+    )
+    result = run_file_preflight(
+        columns=["companyDescription", "shortDescription"],
+        column_types={
+            "companyDescription": "TEXT",
+            "shortDescription": "TEXT",
+        },
+        row_count=1,
+        mappings=[
+            {
+                "source": "companyDescription",
+                "target": "company_description",
+                "confidence": 0.99,
+                "transform": "string",
+                "target_type": "TEXT",
+            },
+            {
+                "source": "shortDescription",
+                "target": "short_description",
+                "confidence": 0.99,
+                "transform": "none",
+                "target_type": "TEXT",
+            },
+        ],
+        destination_connected=True,
+        source_connected=True,
+        sample_rows=[{
+            "companyDescription": desc,
+            "shortDescription": "Short blurb.  ",
+        }],
+        destination_column_types={
+            "company_description": "TEXT",
+            "short_description": "TEXT",
+        },
+        destination_table_exists=True,
+        destination_can_create=True,
+        destination_db_type="mysql",
+        validation_mode="strict",
+    )
+    gate = next(g for g in result["gates"] if g["id"] == "g8_reconciliation")
+    assert gate["status"] == "pass", gate
+
+
 def test_g8_still_blocks_when_identity_truly_mutates():
     """Upper transform is not identity — but a declared none that changes must block.
     Simulate via strip_controls on a ZWSP-only difference is intentional mutate;

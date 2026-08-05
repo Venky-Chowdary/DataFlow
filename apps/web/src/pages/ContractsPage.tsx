@@ -5,7 +5,6 @@ import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
-import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { SectionLoader } from "../components/LoadingState";
 import { DtIcon } from "../components/DtIcon";
@@ -209,9 +208,19 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
       className="df2-page-contracts"
       title="Contracts"
       kicker="Platform"
-      description="Signed schema agreements that gate transfers and detect drift."
+      description="Signed schema agreements that gate transfers and detect drift. Sign / deprecate are workspace lifecycle status flips — not cryptographic signatures or an MDM catalog."
     >
       <PageFrame className="df2-contracts-workspace">
+        <div className="df2-alert df2-alert-info" role="note">
+          <DtIcon name="info" size={18} />
+          <div>
+            <strong>Lifecycle honesty</strong>
+            <p>
+              Draft → Signed → Deprecated (or Broken via breaker) controls whether transfers may use the contract.
+              This is governance workflow UX, not a policy graph / MDM product.
+            </p>
+          </div>
+        </div>
         {loadError && contracts.length === 0 ? (
           <div className="df2-alert df2-alert-error" role="alert">
             <DtIcon name="alert" size={18} />
@@ -236,15 +245,6 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
           />
         ) : (
           <>
-            <PageContextBar
-              ariaLabel="Contracts summary"
-              stats={[
-                { label: "Contracts", value: contracts.length, icon: "shield" },
-                { label: "Signed", value: signed, icon: "check", tone: signed > 0 ? "ok" : "muted" },
-                { label: "Draft", value: drafts, icon: "file", tone: "muted" },
-                { label: "Broken", value: broken, icon: "alert", tone: broken > 0 ? "danger" : "muted" },
-              ]}
-            />
             <PageToolbar
               searchValue={query}
               onSearchChange={setQuery}

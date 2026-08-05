@@ -1,5 +1,5 @@
 /**
- * Persist Data Pilot conversations locally so refresh / nav does not wipe chats.
+ * Persist Datawrap Pilot conversations locally so refresh / nav does not wipe chats.
  * Scoped per browser profile (localStorage) — not a server transcript store.
  * Secrets (passwords, connection URLs with credentials) are redacted before write.
  */
@@ -37,7 +37,36 @@ export interface PilotSession {
 export interface PilotRailState {
   messages: PilotMessage[];
   history: CopilotChatMessage[];
+  /** Stable id so follow-ups share working memory with the API. */
+  sessionId: string;
+  /** Last durable sample/query result ref (pr_…). */
+  lastResultId?: string;
   updatedAt: number;
+}
+
+/** Pull the newest pr_… result id from tool summaries (PilotPage + rail). */
+export function extractPilotResultId(
+  tools?: { name: string; success: boolean; summary: string }[],
+): string | undefined {
+  if (!tools?.length) return undefined;
+  for (let i = tools.length - 1; i >= 0; i -= 1) {
+    const t = tools[i];
+    if (!t.success) continue;
+    if (
+      ![
+        "sample_connector_object",
+        "run_query",
+        "filter_result",
+        "analyze_result",
+        "aggregate_data",
+      ].includes(t.name)
+    ) {
+      continue;
+    }
+    const m = /\b(pr_[a-f0-9]+)\b/i.exec(t.summary || "");
+    if (m) return m[1];
+  }
+  return undefined;
 }
 
 const SESSIONS_KEY = "df2.pilot.sessions.v1";
@@ -185,16 +214,79 @@ export function loadRailChat(): PilotRailState | null {
   return {
     messages: stored.messages.slice(-MAX_MESSAGES),
     history: (stored.history || []).slice(-MAX_HISTORY),
+    sessionId: stored.sessionId || crypto.randomUUID(),
+    lastResultId: stored.lastResultId,
     updatedAt: stored.updatedAt || Date.now(),
   };
 }
 
-export function saveRailChat(state: Pick<PilotRailState, "messages" | "history">) {
+export function saveRailChat(
+  state: Pick<PilotRailState, "messages" | "history" | "sessionId" | "lastResultId">,
+) {
   writeJson(RAIL_KEY, {
     messages: state.messages.map(redactMessage).slice(-MAX_MESSAGES),
     history: redactHistory(state.history).slice(-MAX_HISTORY),
+    sessionId: state.sessionId,
+    lastResultId: state.lastResultId,
     updatedAt: Date.now(),
   });
+}
+
+/**
+ * Promote the FAB/rail conversation into the Pilot workspace so opening
+ * Datawrap Pilot keeps the same session id, result ref, and message history.
+ * Returns null when the rail has nothing worth promoting.
+ */
+export function promoteRailChatToPilotSession(): {
+  sessions: PilotSession[];
+  activeId: string;
+} | null {
+  const rail = loadRailChat();
+  if (!rail) return null;
+  const meaningful = (rail.messages || []).filter(
+    (m) => m.role === "user" || (m.role === "assistant" && (m.text || "").length > 80),
+  );
+  if (meaningful.length === 0 && (rail.history || []).length === 0) return null;
+
+  const { sessions, activeId } = loadPilotWorkspace();
+  const existing = sessions.find((s) => s.id === rail.sessionId);
+  const titleFromUser =
+    (rail.messages || []).find((m) => m.role === "user")?.text?.slice(0, 48) || "Rail conversation";
+
+  if (existing) {
+    const merged: PilotSession = trimSession({
+      ...existing,
+      messages: rail.messages.length >= existing.messages.length ? rail.messages : existing.messages,
+      history: rail.history.length >= existing.history.length ? rail.history : existing.history,
+      lastResultId: rail.lastResultId || existing.lastResultId,
+      updatedAt: Date.now(),
+      title: existing.title === "New conversation" ? titleFromUser : existing.title,
+    });
+    const next = [merged, ...sessions.filter((s) => s.id !== merged.id)];
+    savePilotWorkspace(next, merged.id);
+    return { sessions: next, activeId: merged.id };
+  }
+
+  const promoted: PilotSession = trimSession({
+    id: rail.sessionId || crypto.randomUUID(),
+    title: titleFromUser,
+    messages: rail.messages || [],
+    history: rail.history || [],
+    toolLog: [],
+    lastResultId: rail.lastResultId,
+    updatedAt: Date.now(),
+  });
+  const next = [promoted, ...sessions.filter((s) => s.messages.length > 0 || s.id === activeId)];
+  savePilotWorkspace(next, promoted.id);
+  return { sessions: next, activeId: promoted.id };
+}
+
+export function clearRailChat() {
+  try {
+    localStorage.removeItem(RAIL_KEY);
+  } catch {
+    /* ignore */
+  }
 }
 
 export function loadSidebarNavCompact(): boolean {

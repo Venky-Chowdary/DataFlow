@@ -172,7 +172,8 @@ const BASE_DEFAULTS: Record<string, { host: string; port: number }> = {
   pinecone: { host: "", port: 443 },
   milvus: { host: "localhost", port: 19530 },
   iceberg: { host: "", port: 0 },
-  salesforce: { host: "login.salesforce.com", port: 443 },
+  // Instance URL only — login.salesforce.com cannot serve REST data APIs.
+  salesforce: { host: "https://yourorg.my.salesforce.com", port: 443 },
   hubspot: { host: "api.hubapi.com", port: 443 },
   stripe: { host: "api.stripe.com", port: 443 },
   csv: { host: "", port: 0 },

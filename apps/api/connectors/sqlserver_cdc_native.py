@@ -9,7 +9,8 @@ Robustness
 ----------
 - Capture instance is **discovered** from ``cdc.change_tables`` (not assumed
   ``schema_table``).
-- Poll batches never split a transaction LSN group (``__$start_lsn`` boundary).
+- Poll batches paginate on ``(__$start_lsn, __$seqval)`` so a single LSN
+  larger than ``batch_size`` cannot livelock the stream.
 - Snapshot tokens carry resumable ``offset``.
 - Without SQL Agent, callers may invoke ``force_cdc_scan()`` (tests/CI do).
 - Delivery remains **at-least-once**; leases prevent concurrent consumers.
@@ -182,7 +183,7 @@ def normalize_mssql_row_filter(value: str | None) -> str:
 def classify_mssql_cdc_rows(
     rows: list[dict[str, Any]],
     *,
-    primary_key: str,
+    primary_key: str | list[str],
     row_filter: str = ROW_FILTER_ALL,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     """Map ``__$operation`` rows into inserts / updates / deletes.
@@ -190,7 +191,14 @@ def classify_mssql_cdc_rows(
     - 1 delete, 2 insert, 3 update-before, 4 update-after
     Before images (op 3) pair with the next after image (op 4) for the same PK
     and attach as ``_df_before`` when ``row_filter`` is ``all update old``.
+
+    ``primary_key`` may be a single column or a comma-joined / list composite.
+    Composite keys are joined with the same unit separator the snapshot window
+    uses, so a delete and a later upsert of the same logical row collide.
     """
+    from services.cdc_snapshot_window import _pk_columns, _pk_value
+
+    pk_cols = _pk_columns(primary_key)
     inserts: list[dict[str, Any]] = []
     updates: list[dict[str, Any]] = []
     deletes: list[str] = []
@@ -208,7 +216,7 @@ def classify_mssql_cdc_rows(
             for k, v in rec.items()
             if not str(k).startswith("__$")
         }
-        key = str(clean.get(primary_key, "") or "")
+        key = _pk_value(clean, pk_cols) or ""
         if op_i == 1:
             if key:
                 deletes.append(key)
@@ -282,6 +290,13 @@ class SqlServerNativeCdc:
         )
         self.start_lsn = state.get("lsn") or ""
         self.start_seqval = state.get("seqval") or ""
+        # Whether start_lsn itself is still unread. An empty seqval is
+        # ambiguous on its own — it means both "nothing consumed at this LSN"
+        # (snapshot handoff) and "this LSN is fully consumed" (clean poll
+        # boundary). Treating the two the same silently dropped every change
+        # committed at the handoff LSN, so the state is tracked explicitly and
+        # legacy tokens without a seqval resolve to the at-least-once side.
+        self._resume_inclusive = not (state.get("seqval") or "")
         self.phase = state.get("phase") or "initial"
         self.snapshot_offset = int(state.get("offset") or 0)
         self._last_event_at: datetime | None = None
@@ -395,7 +410,7 @@ class SqlServerNativeCdc:
                 return
             from services.cdc_schema_history import record_ddl
 
-            record_ddl(
+            entry = record_ddl(
                 self.source_key,
                 f"{self.schema}.{self.table}",
                 ddl=f"cdc.capture_instance={self.capture_instance}",
@@ -407,6 +422,19 @@ class SqlServerNativeCdc:
                 },
             )
             self._last_schema_fingerprint = fingerprint
+            try:
+                from services.cdc_mapping_review import flag_mapping_review
+
+                flag_mapping_review(
+                    source_key=self.source_key,
+                    table=f"{self.schema}.{self.table}",
+                    reason="cdc_schema_drift",
+                    schema_version=int(entry.get("version") or 0) or None,
+                    ddl=str(entry.get("ddl") or ""),
+                    column_names=[str(c.get("name") or "") for c in cols if c.get("name")],
+                )
+            except Exception:
+                logger.debug("SQL Server CDC mapping review flag skipped", exc_info=True)
         except Exception as exc:
             logger.debug("SQL Server CDC schema history skipped: %s", exc)
 
@@ -586,6 +614,8 @@ class SqlServerNativeCdc:
                         break
         self.start_lsn = handoff
         self.start_seqval = ""
+        # Nothing at the handoff LSN has been streamed yet.
+        self._resume_inclusive = True
         self.phase = "streaming"
         self.snapshot_offset = 0
         yield ChangeBatch(
@@ -650,6 +680,8 @@ class SqlServerNativeCdc:
                             break
         self.start_lsn = handoff
         self.start_seqval = ""
+        # Nothing at the handoff LSN has been streamed yet.
+        self._resume_inclusive = True
         self.phase = "streaming"
         self.snapshot_offset = 0
         yield ChangeBatch(
@@ -745,14 +777,81 @@ class SqlServerNativeCdc:
         return events
 
     @staticmethod
+    def _after_cursor(
+        rows: list[tuple],
+        cols: list[str],
+        *,
+        from_lsn_hex: str,
+        from_seqval_hex: str,
+        inclusive: bool = False,
+    ) -> list[tuple]:
+        """Drop rows at or before the inclusive ``(lsn, seqval)`` cursor.
+
+        ``fn_cdc_get_all_changes`` takes an **inclusive** ``@from_lsn``. Without
+        this filter a resume that stopped mid-LSN re-fetches the same prefix
+        forever — the exact livelock a bulk UPDATE larger than ``batch_size``
+        used to trigger. Seqval is the capture instance's intra-LSN total order.
+
+        ``inclusive`` keeps rows at ``from_lsn`` when that LSN has not been read
+        yet (snapshot handoff). Without it the handoff LSN looks fully consumed
+        and every change committed during the snapshot is dropped.
+        """
+        if not rows or not from_lsn_hex:
+            return rows
+        try:
+            lsn_idx = cols.index("__$start_lsn")
+        except ValueError:
+            return rows
+        try:
+            seq_idx = cols.index("__$seqval")
+        except ValueError:
+            seq_idx = -1
+        from_lsn = _hex_to_lsn(from_lsn_hex)
+        from_seq = _hex_to_lsn(from_seqval_hex) if from_seqval_hex else b""
+        out: list[tuple] = []
+        for row in rows:
+            row_lsn = row[lsn_idx]
+            if isinstance(row_lsn, (bytes, bytearray)):
+                row_lsn_b = bytes(row_lsn)
+            else:
+                row_lsn_b = _hex_to_lsn(_lsn_to_hex(row_lsn))
+            if row_lsn_b < from_lsn:
+                continue
+            if row_lsn_b > from_lsn:
+                out.append(row)
+                continue
+            # Same LSN — require seqval strictly greater than the cursor.
+            if seq_idx < 0 or not from_seq:
+                if inclusive:
+                    # start_lsn is unread (snapshot handoff): keep its rows.
+                    out.append(row)
+                continue
+            row_seq = row[seq_idx]
+            if isinstance(row_seq, (bytes, bytearray)):
+                row_seq_b = bytes(row_seq)
+            else:
+                row_seq_b = _hex_to_lsn(_lsn_to_hex(row_seq))
+            if row_seq_b > from_seq:
+                out.append(row)
+        return out
+
+    @staticmethod
     def _truncate_at_lsn_boundary(
         rows: list[tuple],
         cols: list[str],
         batch_size: int,
     ) -> tuple[list[tuple], str, str]:
-        """Keep only complete ``__$start_lsn`` groups within ``batch_size``.
+        """Take up to ``batch_size`` rows; resume via ``(lsn, seqval)``.
 
         Returns (rows_to_apply, next_lsn_hex, next_seqval_hex).
+
+        Transactions stay atomic by default: when the batch boundary lands
+        inside an LSN group, the partial group is dropped and re-read whole on
+        the next poll. The one exception is a transaction larger than
+        ``batch_size`` — dropping that group would leave nothing to apply and
+        livelock the stream, so it is split on ``(lsn, seqval)``. The split is
+        safe because the next poll filters with ``_after_cursor`` and writers
+        guard redelivery via ``_df_lsn`` in ``cdc_effectively_once``.
         """
         if not rows:
             return [], "", ""
@@ -766,39 +865,16 @@ class SqlServerNativeCdc:
         except ValueError:
             seq_idx = -1
 
-        if len(rows) <= batch_size:
-            last = rows[-1]
-            return (
-                rows,
-                _lsn_to_hex(last[lsn_idx]),
-                _lsn_to_hex(last[seq_idx]) if seq_idx >= 0 else "",
-            )
-
-        # Look-ahead row may share LSN with the batch edge — drop incomplete group.
-        edge = rows[batch_size - 1][lsn_idx]
-        if rows[batch_size][lsn_idx] == edge:
-            keep: list[tuple] = []
-            for row in rows[:batch_size]:
-                if row[lsn_idx] == edge:
-                    break
-                keep.append(row)
-            if not keep:
-                # Entire window is one LSN — process the full window (must not lose
-                # mid-txn rows). Caller should use a larger batch if this is common.
-                keep = list(rows[: batch_size + 1])
-                # Include all fetched rows for this LSN in the look-ahead window.
-                for row in rows[batch_size + 1 :]:
-                    if row[lsn_idx] != edge:
-                        break
-                    keep.append(row)
-            last = keep[-1]
-            return (
-                keep,
-                _lsn_to_hex(last[lsn_idx]),
-                _lsn_to_hex(last[seq_idx]) if seq_idx >= 0 else "",
-            )
-
         keep = list(rows[:batch_size])
+        if len(rows) > batch_size:
+            boundary = _lsn_to_hex(keep[-1][lsn_idx])
+            if _lsn_to_hex(rows[batch_size][lsn_idx]) == boundary:
+                # Boundary LSN group is incomplete — prefer re-reading it whole.
+                trimmed = [r for r in keep if _lsn_to_hex(r[lsn_idx]) != boundary]
+                if trimmed:
+                    keep = trimmed
+                # Empty trim means this single transaction exceeds batch_size;
+                # keep the partial group rather than stalling forever.
         last = keep[-1]
         return (
             keep,
@@ -844,7 +920,13 @@ class SqlServerNativeCdc:
                         cursor_key=self.cursor_key,
                     )
                     max_lsn = self._max_lsn(cur)
-                    if not max_lsn or max_lsn == self.start_lsn:
+                    # A mid-LSN seqval cursor — or an unread handoff LSN — still
+                    # has rows at start_lsn even when max_lsn has not advanced.
+                    if not max_lsn or (
+                        max_lsn == self.start_lsn
+                        and not self.start_seqval
+                        and not self._resume_inclusive
+                    ):
                         yield ChangeBatch(
                             resume_token=self._token(
                                 lsn=self.start_lsn,
@@ -854,7 +936,9 @@ class SqlServerNativeCdc:
                             table=self.table,
                         )
                         return
-                    # from_lsn is exclusive of the last fully applied LSN.
+                    # from_lsn is INCLUSIVE per Microsoft docs. We over-fetch
+                    # and drop rows at/before (start_lsn, start_seqval) so a
+                    # mid-LSN resume does not re-emit the already-acked prefix.
                     sql = (
                         f"""
                         SELECT TOP ({self.batch_size + 1}) *
@@ -871,7 +955,13 @@ class SqlServerNativeCdc:
                         ),
                     )
                     cols = [d[0] for d in (cur.description or [])]
-                    raw_rows = list(cur.fetchall() or [])
+                    raw_rows = self._after_cursor(
+                        list(cur.fetchall() or []),
+                        cols,
+                        from_lsn_hex=self.start_lsn,
+                        from_seqval_hex=self.start_seqval,
+                        inclusive=self._resume_inclusive,
+                    )
                     rows, next_lsn, next_seq = self._truncate_at_lsn_boundary(
                         raw_rows, cols, self.batch_size
                     )
@@ -888,8 +978,11 @@ class SqlServerNativeCdc:
                     if next_lsn:
                         self.start_lsn = next_lsn
                         self.start_seqval = next_seq
+                        # Everything up to (next_lsn, next_seq) is now consumed.
+                        self._resume_inclusive = False
                     elif max_lsn:
                         self.start_lsn = max_lsn
+                        self._resume_inclusive = False
         except CdcLsnGapError:
             raise
         except Exception as exc:
@@ -936,7 +1029,11 @@ class SqlServerNativeCdc:
                                 cursor_key=self.cursor_key,
                             )
                     max_lsn = self._max_lsn(cur)
-                    if not max_lsn or max_lsn == self.start_lsn:
+                    if not max_lsn or (
+                        max_lsn == self.start_lsn
+                        and not self.start_seqval
+                        and not self._resume_inclusive
+                    ):
                         yield ChangeBatch(
                             resume_token=self._token(
                                 lsn=self.start_lsn,
@@ -971,6 +1068,15 @@ class SqlServerNativeCdc:
                             seq_h = _lsn_to_hex(rec.get("__$seqval"))
                             if not lsn_h:
                                 continue
+                            # Inclusive from_lsn: skip already-acked (lsn, seqval).
+                            if lsn_h < self.start_lsn:
+                                continue
+                            if lsn_h == self.start_lsn:
+                                if self.start_seqval and seq_h <= self.start_seqval:
+                                    continue
+                                if not self.start_seqval and not self._resume_inclusive:
+                                    # LSN already fully consumed by a prior poll.
+                                    continue
                             tagged.append((lsn_h, seq_h, table_name, rec))
         except CdcLsnGapError:
             raise
@@ -1005,14 +1111,30 @@ class SqlServerNativeCdc:
                 by_table.setdefault(table_name, []).append(rec)
                 last_seq = seq_h or last_seq
             for table_name, records in by_table.items():
+                from services.cdc_snapshot_window import _pk_columns, _pk_value
+
                 pk = self.primary_keys.get(table_name, self.primary_key)
+                pk_cols = _pk_columns(pk)
                 inserts, updates, deletes = classify_mssql_cdc_rows(
                     records, primary_key=pk, row_filter=self.row_filter
                 )
+                # Explicit PK stops the net-effect coalescer guessing from the
+                # first non-empty column — that collapse silently drops rows
+                # and makes DELETE+INSERT of the same key apply out of order.
                 for row in inserts:
-                    buf.insert(table_name, row, lsn=lsn_h)
+                    buf.insert(
+                        table_name,
+                        row,
+                        pk=_pk_value(row, pk_cols) or None,
+                        lsn=lsn_h,
+                    )
                 for row in updates:
-                    buf.update(table_name, row, lsn=lsn_h)
+                    buf.update(
+                        table_name,
+                        row,
+                        pk=_pk_value(row, pk_cols) or None,
+                        lsn=lsn_h,
+                    )
                 for pk_val in deletes:
                     buf.delete(table_name, pk_val, lsn=lsn_h)
             last_lsn = lsn_h
@@ -1026,6 +1148,8 @@ class SqlServerNativeCdc:
 
         self.start_lsn = last_lsn
         self.start_seqval = last_seq
+        if emitted:
+            self._resume_inclusive = False
         if not emitted:
             yield ChangeBatch(
                 resume_token=self._token(
@@ -1039,26 +1163,20 @@ class SqlServerNativeCdc:
         tagged: list[tuple[str, str, str, dict[str, Any]]],
         batch_size: int,
     ) -> list[tuple[str, str, str, dict[str, Any]]]:
-        """Keep complete ``__$start_lsn`` groups within ``batch_size`` events."""
+        """Take up to ``batch_size`` events; resume via ``(lsn, seqval)``.
+
+        Mirrors :meth:`_truncate_at_lsn_boundary`: transactions stay atomic
+        unless a single LSN group is larger than ``batch_size``, in which case
+        it is split on ``(lsn, seqval)`` so the stream cannot livelock.
+        """
         if not tagged or len(tagged) <= batch_size:
             return tagged
-        edge = tagged[batch_size - 1][0]
-        if tagged[batch_size][0] != edge:
-            return tagged[:batch_size]
-        # Look-ahead shares LSN with batch edge — drop incomplete group.
-        keep: list[tuple[str, str, str, dict[str, Any]]] = []
-        for item in tagged[:batch_size]:
-            if item[0] == edge:
-                break
-            keep.append(item)
-        if keep:
-            return keep
-        # Entire window is one LSN — take the full group (must not split).
-        keep = list(tagged[: batch_size + 1])
-        for item in tagged[batch_size + 1 :]:
-            if item[0] != edge:
-                break
-            keep.append(item)
+        keep = list(tagged[:batch_size])
+        boundary = keep[-1][0]
+        if tagged[batch_size][0] == boundary:
+            trimmed = [t for t in keep if t[0] != boundary]
+            if trimmed:
+                return trimmed
         return keep
 
     def ack(self, resume_token: Any = None) -> None:
@@ -1068,6 +1186,8 @@ class SqlServerNativeCdc:
                 self.start_lsn = state["lsn"]
             if state.get("seqval") is not None:
                 self.start_seqval = str(state.get("seqval") or "")
+                if self.start_seqval:
+                    self._resume_inclusive = False
             if state.get("capture_instance"):
                 self.capture_instance = str(state["capture_instance"])
                 self._capture_resolved = True

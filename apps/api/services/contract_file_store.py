@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from services.brand_env import getenv_brand
 import threading
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,7 @@ from services.data_contract import CircuitBreaker, DataContract
 
 
 def _default_path() -> Path:
-    override = os.environ.get("DATAFLOW_CONTRACTS_PATH", "").strip()
+    override = getenv_brand("CONTRACTS_PATH", "").strip()
     if override:
         return Path(override)
     return Path(__file__).resolve().parents[1] / "data" / "contracts.json"

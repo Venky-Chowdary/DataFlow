@@ -55,7 +55,7 @@ def request(
     if token and auth_header:
         h.setdefault(auth_header, f"{auth_scheme} {token}".strip())
     h.setdefault("Accept", "application/json")
-    h.setdefault("User-Agent", "DataFlow/1.0")
+    h.setdefault("User-Agent", "Datawrap/1.0")
 
     def _call() -> requests.Response:
         resp = requests.request(

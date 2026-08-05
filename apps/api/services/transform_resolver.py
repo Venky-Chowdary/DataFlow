@@ -120,6 +120,12 @@ def resolve_transform(
     if mapping.get("intentional_omit") or mapping.get("intentionalOmit"):
         return "omit"
 
+    # Hold LLM invents until operator accepts on Map (user_override / explicit transform).
+    if mapping.get("llm_invented_transform") and not mapping.get("user_override"):
+        held = str(mapping.get("transform") or "").strip().lower()
+        if held in {"", "none", "null", "identity"}:
+            return "none"
+
     source_type = normalize_logical_type(column_types.get(mapping["source"], "VARCHAR"))
     target_type = normalize_logical_type(
         mapping.get("target_type") or dest_types.get(mapping["target"]) or column_types.get(mapping["target"]) or "VARCHAR",

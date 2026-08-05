@@ -1,4 +1,5 @@
 import type { EditableMapping } from "./mapping";
+import { mappingRequiresRiskAck } from "./mapping";
 import { GATE_CATALOG } from "./preflightGates";
 import type { PreflightGate, PreflightResult } from "./types";
 
@@ -31,8 +32,13 @@ function applyTransform(value: unknown, transform?: string): unknown {
       return Number.isFinite(n) ? n : value;
     }
     case "boolean":
-    case "cast_boolean":
-      return ["true", "1", "yes", "y"].includes(s.toLowerCase());
+    case "cast_boolean": {
+      // Strict wire only — match transform_engine._STRICT_BOOL_* (no yes/y invent).
+      const t = s.toLowerCase();
+      if (["true", "t", "1"].includes(t)) return true;
+      if (["false", "f", "0"].includes(t)) return false;
+      return value;
+    }
     default:
       return value;
   }
@@ -116,10 +122,37 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
   const intentionalOmits = input.mappings.filter(
     (m) => m.transform === "omit" || (m as { intentionalOmit?: boolean }).intentionalOmit,
   );
+  const activeMaps = input.mappings.filter((m) => m.transform !== "omit");
+  // GA: boolean riskAcknowledged alone never clears — need Risk Contract policy.
+  const CONTINUE_POLICIES = new Set([
+    "QUARANTINE_ROW",
+    "SKIP_ROW",
+    "CAST_AND_CONTINUE",
+    "TRANSFORM_AND_CONTINUE",
+    "STOP_COLUMN",
+  ]);
+  const hasClearingContract = (m: (typeof activeMaps)[number]) => {
+    const pol = String(m.riskContract?.execution_policy || "").toUpperCase();
+    return Boolean(m.riskAcknowledged && m.riskContract && CONTINUE_POLICIES.has(pol));
+  };
+  const riskUnacked = activeMaps.filter(
+    (m) => mappingRequiresRiskAck(m) && !hasClearingContract(m),
+  );
+  // Ready ≡ operator Approve — never invent G4 PASS from confidence alone.
+  const unapproved = activeMaps.filter((m) => !m.approved);
+  const lowConfidence = activeMaps.filter(
+    (m) => !m.approved && m.confidence < threshold && !hasClearingContract(m),
+  );
   if (unmapped.length > 0) {
     block("g3_schema_contract", `${unmapped.length} source column(s) have no mapping.`, {
       kind: "schema_contract", coverage: "full_schema", note: "Unmapped source columns",
     });
+  } else if (riskUnacked.length > 0) {
+    block(
+      "g3_schema_contract",
+      `${riskUnacked.length} mapping(s) have unacked fidelity risk — Accept risk on Map before Validate can pass.`,
+      { kind: "schema_contract", coverage: "full_schema", columns: input.mappings.length },
+    );
   } else {
     const omitNote = intentionalOmits.length
       ? ` · ${intentionalOmits.length} intentionally omitted`
@@ -130,17 +163,26 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     });
   }
 
-  const lowConfidence = input.mappings.filter(
-    (m) => m.transform !== "omit" && m.confidence < threshold,
-  );
-  if (lowConfidence.length > 0) {
+  if (riskUnacked.length > 0) {
+    block(
+      "g4_mapping_confidence",
+      `${riskUnacked.length} mapping(s) need Accept risk on Map (lossy/mutate/STRUCT/specialty).`,
+      { kind: "mapping_confidence", coverage: "full_schema", columns: input.mappings.length },
+    );
+  } else if (unapproved.length > 0) {
+    block(
+      "g4_mapping_confidence",
+      `${unapproved.length} mapping(s) need Approve on Map before Validate can pass.`,
+      { kind: "mapping_confidence", coverage: "full_schema", columns: input.mappings.length },
+    );
+  } else if (lowConfidence.length > 0) {
     block(
       "g4_mapping_confidence",
       `${lowConfidence.length} mapping(s) below ${(threshold * 100).toFixed(0)}% confidence — review in Map step.`,
       { kind: "mapping_confidence", coverage: "full_schema", columns: input.mappings.length },
     );
   } else {
-    pass("g4_mapping_confidence", `${input.mappings.length} mappings meet confidence threshold.`, {
+    pass("g4_mapping_confidence", `${input.mappings.length} mapping(s) operator-approved for Validate.`, {
       kind: "mapping_confidence", coverage: "full_schema", columns: input.mappings.length,
     });
   }
@@ -191,9 +233,9 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     });
   }
 
-  pass("g9_data_integrity", "Sampled types and nulls within expected bounds.", {
-    kind: "data_integrity", coverage: "sample", sample_rows: Math.min(rows.length, 20),
-    note: "Browser sample only — not a full-table uniqueness probe",
+  skip("g9_data_integrity", "Browser-local export — uniqueness/null integrity requires API sample probe.", {
+    kind: "data_integrity", coverage: "n/a",
+    note: "Not a full-table integrity probe — do not treat as gate-pass evidence",
   });
 
   skip("g9_sync_contract", "Full refresh file export — sync contract not applicable.", {

@@ -31,6 +31,17 @@ _CHUNK = 200
 _SF_ID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
 
 
+def _require_instance_url(host: str) -> str:
+    """Refuse login/test hosts — Composite APIs need the org instance URL."""
+    host_l = (host or "").strip().lower()
+    if not host_l or "login.salesforce.com" in host_l or "test.salesforce.com" in host_l:
+        raise ValueError(
+            "Salesforce Host must be the org instance URL "
+            "(https://yourorg.my.salesforce.com), not login.salesforce.com"
+        )
+    return base_url(host, DEFAULT_HOST)
+
+
 def coerce_salesforce_id_wire(value: Any) -> str | None:
     """Normalize Salesforce Id / reference to 18-char case-safe form.
 
@@ -350,11 +361,25 @@ def write_mapped_rows(
             error="Salesforce access token is required for reverse-ETL writes",
             driver="salesforce",
         )
+    try:
+        url_base = _require_instance_url(host)
+    except ValueError as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=sobject,
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error=str(exc),
+            driver="salesforce",
+        )
 
     target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
     policy = transform_error_policy(error_policy)
     # Live Describe when credentials allow — VARCHAR(n)/DECIMAL(p,s) for Bulk fit.
     describe_fields: list[dict[str, Any]] | None = None
+    describe_warning = ""
     try:
         from connectors.salesforce import describe_sobject
 
@@ -368,8 +393,81 @@ def write_mapped_rows(
             "table": sobject,
         }
         describe_fields = describe_sobject(cfg, sobject)
-    except Exception:
+    except Exception as exc:
         describe_fields = None
+        describe_warning = (
+            f"Salesforce Describe unavailable ({exc}); length/picklist quarantine "
+            "and formula-field filtering are degraded for this write"
+        )
+    # Skip formula / non-writable fields so a live demo does not explode on
+    # Calculated fields the Map step may have suggested from Describe.
+    skip_targets: set[str] = set()
+    mode = (write_mode or "upsert").lower()
+    ext_field = ""
+    if conflict_columns:
+        ext_field = str(conflict_columns[0]).strip()
+    elif "Id" in target_cols:
+        ext_field = "Id"
+    elif "ExternalId" in target_cols:
+        ext_field = "ExternalId"
+    # Upsert/update by Id needs Id present even though it is not createable.
+    identity_keep = {ext_field} if ext_field and mode in {"upsert", "update"} else set()
+    if describe_fields:
+        by_name = {str(f.get("name") or ""): f for f in describe_fields if f.get("name")}
+        if ext_field and ext_field != "Id" and ext_field in by_name:
+            meta = by_name[ext_field]
+            if not (meta.get("externalId") or meta.get("idLookup")):
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=sobject,
+                    target_schema="",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Conflict column `{ext_field}` is not an External Id / idLookup "
+                        "on this Salesforce object — set Destination → Advanced primary key "
+                        "to a real External Id field (or Id for PATCH update)"
+                    ),
+                    driver="salesforce",
+                )
+        for f in describe_fields:
+            name = str(f.get("name") or "")
+            if not name or name in identity_keep:
+                continue
+            if f.get("calculated"):
+                skip_targets.add(name)
+                continue
+            if mode in {"update", "upsert"} and ext_field == "Id":
+                # PATCH-by-Id: keep updateable fields + Id; drop non-updateable.
+                if name != "Id" and not f.get("updateable", True):
+                    skip_targets.add(name)
+            elif mode == "update":
+                if not f.get("updateable", True):
+                    skip_targets.add(name)
+            elif not f.get("createable", True):
+                skip_targets.add(name)
+    if skip_targets:
+        target_cols = [c for c in target_cols if c not in skip_targets]
+        mappings = [
+            m
+            for m in mappings
+            if (m.get("target") or m.get("source") or "") not in skip_targets
+        ]
+    if mode in {"upsert", "update"} and ext_field and ext_field not in target_cols:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=sobject,
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error=(
+                f"Conflict column `{ext_field}` is not mapped — include it in Map "
+                "or change Destination → Advanced primary key"
+            ),
+            driver="salesforce",
+        )
     dest_types = resolve_salesforce_dest_types(
         target_cols,
         mappings,
@@ -416,19 +514,74 @@ def write_mapped_rows(
             driver="salesforce",
         )
 
-    ext_field = ""
-    if conflict_columns:
-        ext_field = str(conflict_columns[0]).strip()
-    elif "Id" in target_cols:
-        ext_field = "Id"
-    elif "ExternalId" in target_cols:
-        ext_field = "ExternalId"
+    if mode in {"upsert", "update"} and not ext_field:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=sobject,
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error=(
+                "Salesforce upsert/update requires conflict_columns — set Destination → "
+                "Advanced primary key to Id or an External Id field"
+            ),
+            driver="salesforce",
+        )
 
-    url_base = base_url(host, DEFAULT_HOST)
     written = 0
     chunks = 0
     digest = hashlib.sha256()
     written_ids: list[str] = []
+
+    def _submit(records: list[dict[str, Any]], *, method: str, endpoint: str, row_base: int) -> None:
+        nonlocal written, chunks
+        if not records:
+            return
+        body = {"allOrNone": False, "records": [
+            {"attributes": {"type": sobject}, **r} for r in records
+        ]}
+        resp = request(method=method, url=endpoint, token=access, data=body, timeout=120)
+        results = resp.json() if resp.content else []
+        if not isinstance(results, list):
+            raise RuntimeError(
+                "Salesforce returned no per-record result list — refusing to claim rows written"
+            )
+        if len(results) != len(records):
+            raise RuntimeError(
+                f"Salesforce acknowledged {len(results)} of {len(records)} submitted records"
+            )
+        for idx, item in enumerate(results):
+            if not isinstance(item, dict):
+                raise RuntimeError(
+                    f"Salesforce returned invalid result for row {row_base + idx}"
+                )
+            if item.get("success"):
+                written += 1
+                rid = str(item.get("id", "") or "")
+                digest.update((rid or str(idx)).encode())
+                if rid:
+                    written_ids.append(rid)
+            else:
+                errs = item.get("errors") or [{"message": "unknown Salesforce error"}]
+                msg = errs[0].get("message", str(errs[0])) if isinstance(errs[0], dict) else str(errs[0])
+                rejected_details.append({
+                    "row_index": row_base + idx,
+                    "reason": msg,
+                    "values": records[idx] if idx < len(records) else {},
+                })
+        batch_failures = sum(
+            1 for item in results
+            if isinstance(item, dict) and not item.get("success")
+        )
+        if batch_failures and policy == "fail":
+            raise RuntimeError(
+                f"Salesforce rejected {batch_failures} record(s); "
+                "strict error policy blocks partial activation"
+            )
+        chunks += 1
+        if on_checkpoint:
+            on_checkpoint(written, len(mapped_rows), chunks)
 
     try:
         for i in range(0, len(mapped_rows), chunk):
@@ -450,66 +603,31 @@ def write_mapped_rows(
                     f"{url_base}/services/data/{API_VERSION}/composite/sobjects/"
                     f"{sobject}/{ext_field}"
                 )
-                body = {"allOrNone": False, "records": [
-                    {"attributes": {"type": sobject}, **r} for r in records
-                ]}
-                method = "PATCH"
-            elif write_mode == "update" and ext_field == "Id":
-                endpoint = f"{url_base}/services/data/{API_VERSION}/composite/sobjects"
-                body = {"allOrNone": False, "records": [
-                    {"attributes": {"type": sobject}, **r} for r in records
-                ]}
-                method = "PATCH"
+                _submit(records, method="PATCH", endpoint=endpoint, row_base=i)
+            elif write_mode in {"upsert", "update"} and ext_field == "Id":
+                # Id present → PATCH update; Id missing → POST insert on upsert
+                # (update-only quarantines missing Id — never invent duplicates).
+                collections = f"{url_base}/services/data/{API_VERSION}/composite/sobjects"
+                with_id = [r for r in records if r.get("Id")]
+                without_id = [r for r in records if not r.get("Id")]
+                if with_id:
+                    _submit(with_id, method="PATCH", endpoint=collections, row_base=i)
+                if without_id and write_mode == "upsert":
+                    _submit(without_id, method="POST", endpoint=collections, row_base=i)
+                elif without_id:
+                    for idx, rec in enumerate(without_id):
+                        rejected_details.append({
+                            "row_index": i + idx,
+                            "reason": "Salesforce update requires Id — quarantined (no invent)",
+                            "values": rec,
+                        })
+                    if policy == "fail":
+                        raise RuntimeError(
+                            f"Salesforce update missing Id on {len(without_id)} record(s)"
+                        )
             else:
                 endpoint = f"{url_base}/services/data/{API_VERSION}/composite/sobjects"
-                body = {"allOrNone": False, "records": [
-                    {"attributes": {"type": sobject}, **r} for r in records
-                ]}
-                method = "POST"
-
-            resp = request(method=method, url=endpoint, token=access, data=body, timeout=120)
-            results = resp.json() if resp.content else []
-            if not isinstance(results, list):
-                raise RuntimeError(
-                    "Salesforce returned no per-record result list — refusing to claim rows written"
-                )
-            if len(results) != len(records):
-                raise RuntimeError(
-                    f"Salesforce acknowledged {len(results)} of {len(records)} submitted records"
-                )
-            for idx, item in enumerate(results):
-                if not isinstance(item, dict):
-                    raise RuntimeError(
-                        f"Salesforce returned invalid result for row {i + idx}"
-                    )
-                if item.get("success"):
-                    written += 1
-                    rid = str(item.get("id", "") or "")
-                    digest.update((rid or str(idx)).encode())
-                    if rid:
-                        written_ids.append(rid)
-                else:
-                    errs = item.get("errors") or [{"message": "unknown Salesforce error"}]
-                    msg = errs[0].get("message", str(errs[0])) if isinstance(errs[0], dict) else str(errs[0])
-                    rejected_details.append({
-                        "row_index": i + idx,
-                        "reason": msg,
-                        "values": records[idx] if idx < len(records) else {},
-                    })
-
-            batch_failures = sum(
-                1 for item in results
-                if isinstance(item, dict) and not item.get("success")
-            )
-            if batch_failures and policy == "fail":
-                raise RuntimeError(
-                    f"Salesforce rejected {batch_failures} record(s); "
-                    "strict error policy blocks partial activation"
-                )
-
-            chunks += 1
-            if on_checkpoint:
-                on_checkpoint(written, len(mapped_rows), chunks)
+                _submit(records, method="POST", endpoint=endpoint, row_base=i)
     except Exception as exc:
         return WriteResult(
             ok=False,
@@ -540,6 +658,14 @@ def write_mapped_rows(
             driver="salesforce",
         )
 
+    warnings: list[str] = []
+    if describe_warning:
+        warnings.append(describe_warning)
+    if skip_targets:
+        warnings.append(
+            "Skipped non-writable Salesforce fields: "
+            + ", ".join(sorted(skip_targets)[:12])
+        )
     return WriteResult(
         ok=True,
         rows_written=written,
@@ -549,6 +675,7 @@ def write_mapped_rows(
         chunks_completed=chunks,
         rejected_details=rejected_details,
         rejected_rows=len(rejected_details),
+        warnings=warnings or None,
         driver="salesforce",
         meta=gate8_writer_meta(mapped_rows, target_cols, written_ids),
     )

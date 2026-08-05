@@ -133,10 +133,29 @@ def _preserve_masked_secrets(data: dict[str, Any], existing: Any) -> dict[str, A
 
 
 def _can_access_connector(request: Request, conn: Any) -> bool:
-    """True if the actor may see or mutate this connector."""
-    if not conn.workspace_id:
-        return True
-    return can_read_workspace(conn.workspace_id, _actor_email(request))
+    """True if the actor may see or mutate this connector (workspace + optional ACL)."""
+    actor = _actor_email(request)
+    if conn.workspace_id and not can_read_workspace(conn.workspace_id, actor):
+        return False
+    try:
+        from services.resource_acl import assert_resource_acl
+
+        user = getattr(request.state, "user", None) or {}
+        is_admin = str(user.get("role") or "").lower() == "admin"
+        assert_resource_acl(
+            tenant_id=conn.workspace_id or "",
+            resource_type="connector",
+            resource_id=str(getattr(conn, "id", "") or ""),
+            principal=actor,
+            min_role="viewer",
+            is_admin=is_admin,
+        )
+    except PermissionError:
+        return False
+    except Exception:
+        # Fail closed: ACL infrastructure errors must not open restricted resources.
+        return False
+    return True
 
 
 @router.get("")
@@ -146,7 +165,13 @@ def get_saved_connectors(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     workspace_id = _resolve_workspace(request, workspace_id)
-    return {"connectors": [_to_ui(c) for c in list_connectors(role, workspace_id=workspace_id)]}
+    return {
+        "connectors": [
+            _to_ui(c)
+            for c in list_connectors(role, workspace_id=workspace_id)
+            if _can_access_connector(request, c)
+        ]
+    }
 
 
 @router.get("/{connector_id}")
@@ -231,6 +256,95 @@ def remove_saved_connector(
     if not delete_connector(connector_id, workspace_id=workspace_id):
         raise HTTPException(status_code=404, detail="Connector not found")
     return {"ok": True}
+
+
+class RotateSecretsBody(BaseModel):
+    """Replace one or more connector secrets and invalidate pooled engines."""
+
+    password: str | None = None
+    api_key: str | None = None
+    connection_string: str | None = None
+    private_key: str | None = None
+    service_account: str | None = None
+
+
+@router.post("/{connector_id}/rotate-secrets")
+def rotate_saved_connector_secrets(
+    connector_id: str,
+    body: RotateSecretsBody,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Rotate connector credentials with audit + pool invalidation.
+
+    Masked placeholders are rejected — callers must send the new secret value.
+    Does not claim short-lived DB token issuance (separate enterprise feature).
+    """
+    from datetime import datetime, timezone
+
+    from services.audit_log import actor_from_request, append_audit_event
+
+    workspace_id = _require_write_workspace(request, workspace_id)
+    existing = get_connector(connector_id, workspace_id=workspace_id)
+    if not existing or not _can_access_connector(request, existing):
+        raise HTTPException(status_code=404, detail="Connector not found")
+
+    payload = body.model_dump(exclude_none=True)
+    if not payload:
+        raise HTTPException(status_code=400, detail="Provide at least one new secret field")
+    for key, value in payload.items():
+        if _is_masked_value(value):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{key} looks masked; send the new secret value, not ****",
+            )
+
+    rotated_at = datetime.now(timezone.utc).isoformat()
+    payload["credentials_rotated_at"] = rotated_at
+    # Invalidate pooled engines keyed by the *pre-rotation* credentials first —
+    # cache keys include password/connection_string, so post-update invalidate misses.
+    pool_invalidated = False
+    try:
+        from services.engine_pool import invalidate
+
+        pool_invalidated = bool(invalidate(existing.to_dict()))
+    except Exception:
+        pool_invalidated = False
+
+    updated = update_connector(connector_id, payload, workspace_id=workspace_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Connector not found")
+
+    try:
+        from services.engine_pool import invalidate
+
+        pool_invalidated = bool(invalidate(updated.to_dict())) or pool_invalidated
+    except Exception:
+        pass
+
+    try:
+        append_audit_event(
+            action="connector.rotate_secrets",
+            resource=f"connector:{connector_id}",
+            actor=actor_from_request(request),
+            level="info",
+            details={
+                "fields": sorted(k for k in payload if k != "credentials_rotated_at"),
+                "pool_invalidated": pool_invalidated,
+                "credentials_rotated_at": rotated_at,
+            },
+        )
+    except Exception:
+        pass
+
+    ui = _to_ui(updated)
+    ui["credentials_rotated_at"] = rotated_at
+    ui["pool_invalidated"] = pool_invalidated
+    ui["honesty"] = (
+        "Secrets rotated and re-encrypted at rest. Pooled SQL engines for this "
+        "config were invalidated when present. Not a short-lived token workflow."
+    )
+    return ui
 
 
 @router.post("/{connector_id}/test")

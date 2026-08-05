@@ -62,3 +62,36 @@
 - Enable `enable_istio=true` in Terraform for mTLS between pods (requires Istio installed separately).
 - DocumentDB `MONGODB_URL` uses `ssl=false` in the default template; for production, either use a custom parameter group with TLS disabled or mount the AWS CA bundle and set `tls=true`.
 - Enable AWS WAF on the ALB and restrict `ingress` source IPs.
+
+## Custom domain + CORS (tenant vanity host)
+
+- API env: `DATAFLOW_CORS_ORIGINS` (comma-separated) must include the Studio origin
+  (`https://app.example.com`) and any tenant custom domain (`https://data.acme.com`).
+- Custom domain DNS CNAME → platform ingress; TLS via cert-manager / ACM.
+- After DNS cutover, verify:
+  1. `OPTIONS` preflight on `/api/health` returns `Access-Control-Allow-Origin` for the vanity host.
+  2. Browser Studio login cookie / bearer flow against the vanity host (SameSite=None + Secure when cross-site).
+- Honesty: vanity host is routing + CORS allowlist — not a separate multi-tenant isolation boundary.
+  Workspace RBAC / resource ACLs still gate data.
+
+## Audit tip anchors (WORM honesty)
+
+- `GET /audit/tip` returns the current HMAC chain tip + optional external anchor metadata.
+- `POST /audit/tip` (requires `WORKSPACE_MANAGE`) records an **external anchor stub**
+  (hash reference + timestamp). This is **not** Amazon S3 Object Lock, Glacier Vault Lock,
+  or a TSA timestamp authority.
+- Production WORM: ship tip hashes to an immutable store (S3 Object Lock / Azure WORM /
+  vendor TSA) out-of-band, then POST the receipt id back into the stub fields for auditors.
+- Do not claim SOC2 control evidence from the stub alone — auditor letters remain org-owned.
+
+
+## Parallel workers and ordered checkpoints
+
+- Default `DATAFLOW_PARALLEL_WORKERS` / `PARALLEL_WORKERS` is **1**.
+- When raised above 1, the stream dispatcher still yields completed chunks in
+  **ascending index order** before advancing the durable checkpoint. Abort drops
+  unstarted queued chunks (`ChunkAborted`) so resume stays at the last committed index.
+- Writers that cannot safely overlap (SQLite, some Snowflake/Iceberg/proxy paths)
+  force workers=1 in code — do not override those paths in production.
+- Honesty: ordered parallel improves throughput; it does **not** upgrade CDC or
+  upsert delivery beyond **at-least-once**.

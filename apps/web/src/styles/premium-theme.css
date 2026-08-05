@@ -1,17 +1,9 @@
 /**
- * DataFlow Premium Theme — production UI layer
+ * Datawrap Premium Theme — production UI layer
  * Refined teal enterprise aesthetic with motion, depth, and clarity
  */
 
-:root {
-  --df-premium-gradient: linear-gradient(135deg, #0f766e 0%, #0d9488 50%, #14b8a6 100%);
-  --df-premium-gradient-soft: linear-gradient(180deg, rgba(15, 118, 110, 0.08) 0%, transparent 100%);
-  --df-premium-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 3px rgba(15, 23, 42, 0.06);
-  --df-premium-shadow-md: 0 4px 6px rgba(15, 23, 42, 0.04), 0 12px 24px rgba(15, 23, 42, 0.08);
-  --df-premium-shadow-lg: 0 8px 16px rgba(15, 23, 42, 0.06), 0 24px 48px rgba(15, 118, 110, 0.1);
-  --df-premium-radius: 12px;
-  --df-premium-ease: cubic-bezier(0.22, 1, 0.36, 1);
-}
+/* Premium tokens owned by tokens.css — component rules only below. */
 
 @keyframes df-premium-rise {
   from { opacity: 0; transform: translateY(12px); }
@@ -28,90 +20,37 @@
   50% { opacity: 0.6; transform: scale(0.92); }
 }
 
-/* ─── App shell ─── */
-
-.df2-app {
-  background:
-    radial-gradient(ellipse 80% 50% at 0% 0%, rgba(15, 118, 110, 0.04), transparent 50%),
-    var(--df-surface-canvas);
-}
-
-.df2-sidebar {
-  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
-  border-right: 1px solid var(--df-line);
-  box-shadow: 1px 0 0 rgba(255, 255, 255, 0.8) inset;
-}
-
-.df2-sidebar-brand {
-  padding: 18px 16px 14px;
-  border-bottom: 1px solid var(--df-line);
-  margin-bottom: 4px;
-}
-
-.df2-brand-name {
-  font-size: 15px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  background: var(--df-premium-gradient);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-}
-
-.df2-brand-tag {
-  font-size: 11px;
-  color: var(--df-ink-muted);
-  margin-top: 1px;
-}
+/* ─── App shell — no parallel theme; tokens + brand-system own chrome ─── */
 
 .df2-nav-item {
   position: relative;
   margin: 1px 8px;
-  border-radius: 8px;
-  transition: background 0.15s var(--df-premium-ease), color 0.15s, transform 0.15s;
+  border-radius: var(--df-radius-md);
+  transition: background var(--df-dur-fast) var(--df-ease), color var(--df-dur-fast);
 }
 
 .df2-nav-item:hover {
-  background: rgba(15, 118, 110, 0.06);
-  transform: translateX(2px);
-}
-
-.df2-nav-item.active {
-  background: linear-gradient(90deg, rgba(15, 118, 110, 0.12), rgba(15, 118, 110, 0.04));
-  color: #0f766e;
-  font-weight: 600;
-}
-
-.df2-nav-item.active::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 6px;
-  bottom: 6px;
-  width: 3px;
-  border-radius: 0 3px 3px 0;
-  background: var(--df-premium-gradient);
+  background: var(--df-brand-muted);
 }
 
 .df2-nav-badge {
-  background: #ecfdf5;
-  color: #0f766e;
-  border: 1px solid #99f6e4;
+  background: var(--df-success-bg);
+  color: var(--df-brand-deep);
+  border: 1px solid var(--df-brand-soft);
   font-size: 10px;
   font-weight: 700;
 }
 
 .df2-sidebar-cta {
-  background: var(--df-premium-gradient);
+  background: var(--df-brand);
   color: #fff;
   border: none;
-  box-shadow: 0 2px 8px rgba(15, 118, 110, 0.35);
-  transition: transform 0.15s, box-shadow 0.15s;
+  box-shadow: none;
+  transition: background var(--df-dur-fast) var(--df-ease);
 }
 
 .df2-sidebar-cta:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 4px 14px rgba(15, 118, 110, 0.4);
+  background: var(--df-brand-hover);
 }
 
 .df2-sidebar-env {
@@ -793,7 +732,7 @@
   background: linear-gradient(90deg, #059669, #0f766e);
 }
 
-/* ─── Data Pilot ─── */
+/* ─── Datawrap Pilot ─── */
 
 .df2-pilot {
   display: grid;
@@ -1133,6 +1072,87 @@
 .df2-column-type {
   color: #64748b;
   font-size: 12px;
+}
+
+.df2-column-risk-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
+  min-width: 9.5rem;
+}
+
+.df2-column-risk-actions .df2-select-xs {
+  font-size: 11px;
+  padding: 2px 6px;
+  min-height: 28px;
+}
+
+.df2-column-contract-done {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+
+.df2-column-risk-id {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  color: #64748b;
+  max-width: 9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.df2-gate8-proof-honesty {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px 12px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  font-size: 12px;
+}
+
+.df2-gate8-proof-honesty dt {
+  color: #64748b;
+  font-weight: 500;
+  margin: 0 0 2px;
+}
+
+.df2-gate8-proof-honesty dd {
+  margin: 0;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.df2-gate8-proof-honesty dd.is-warn {
+  color: #b45309;
+}
+
+.df2-gate8-proof-honesty dd.is-ok {
+  color: #047857;
+}
+
+.df2-theater-rollback {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  background: #fef2f2;
+}
+
+.df2-theater-rollback p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #7f1d1d;
 }
 
 .df2-column-reason {

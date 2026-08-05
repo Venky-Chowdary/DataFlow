@@ -1,15 +1,15 @@
-# DataFlow Deep Audit — Gap & Fix Report
+# Datawrap Deep Audit — Gap & Fix Report
 
 **Branch:** `devin/deep-audit-1784855991`  
 **Date:** 2026-07-19  
 **Auditor:** Devin  
-**Repo:** `Venky-Chowdary/DataFlow`
+**Repo:** `Venky-Chowdary/Datawrap`
 
 ---
 
 ## 1. Executive Summary
 
-This audit was a line-by-line review of the DataFlow universal transfer engine, with the goal of moving the product toward Airbyte/Fivetran-class robustness and zero silent data loss. The engine has a strong architecture (`UniversalTransferEngine`, preflight gates, reconciliation, quarantine, and schema mapping). After this fix cycle the local full test suite is green: 9,065 passed, 1,085 skipped, 0 failed. The remaining 1,085 skipped are mostly cloud-warehouse/Oracle/Redis routes that require live credentials or services not running in the local CI container.
+This audit was a line-by-line review of the Datawrap universal transfer engine, with the goal of moving the product toward Airbyte/Fivetran-class robustness and zero silent data loss. The engine has a strong architecture (`UniversalTransferEngine`, preflight gates, reconciliation, quarantine, and schema mapping). After this fix cycle the local full test suite is green: 9,065 passed, 1,085 skipped, 0 failed. The remaining 1,085 skipped are mostly cloud-warehouse/Oracle/Redis routes that require live credentials or services not running in the local CI container.
 
 ### What was fixed in this cycle
 
@@ -221,7 +221,7 @@ pytest apps/api/tests/test_validate_failfast_critical_hazards.py apps/api/tests/
 
 **File:** `apps/api/src/transfer/engine.py`
 
-Relative `output_path` values such as `exports/test_output_path.csv` were resolved against the current working directory (`/home/ubuntu/repos/DataFlow`) instead of the application workspace (`apps/api`). The engine now computes the workspace root relative to `engine.py` and joins relative paths there before checking `startswith(workspace_root)`. This fixes `test_execute_tracked_csv_to_file_export.py::test_csv_to_csv_export_with_output_path` and prevents accidental writes outside the workspace.
+Relative `output_path` values such as `exports/test_output_path.csv` were resolved against the current working directory (`/home/ubuntu/repos/Datawrap`) instead of the application workspace (`apps/api`). The engine now computes the workspace root relative to `engine.py` and joins relative paths there before checking `startswith(workspace_root)`. This fixes `test_execute_tracked_csv_to_file_export.py::test_csv_to_csv_export_with_output_path` and prevents accidental writes outside the workspace.
 
 ### 3.13 Gate-8 reconciliation preserved `None` through write-path transforms
 
@@ -259,7 +259,7 @@ The buffered database path nests SCD2/mirror summaries under `dest_summary["scd2
 
 ### 4.1 Feature parity matrix
 
-| Capability | DataFlow today | Airbyte | Fivetran | Debezium/Estuary | Gap severity |
+| Capability | Datawrap today | Airbyte | Fivetran | Debezium/Estuary | Gap severity |
 |------------|----------------|---------|----------|------------------|--------------|
 | Full / incremental / append / overwrite | Yes | Yes | Yes | Yes | Low |
 | Upsert with explicit primary key | Yes | Yes | Yes | Yes | Low |
@@ -349,7 +349,7 @@ The blind-exception patterns are the biggest risk: they swallow conversion error
 ```bash
 # Setup
 source /home/ubuntu/.venv_dataflow/bin/activate
-cd /home/ubuntu/repos/DataFlow
+cd /home/ubuntu/repos/Datawrap
 export DATAFLOW_JOB_STORE=memory
 export DATAFLOW_DISABLE_OBJECT_STORE=1
 export DATAFLOW_PII_HASH_KEY=test-pii-key
@@ -397,7 +397,7 @@ The goal is to keep iterating on the prioritized backlog until every route in `P
 
 | Fix | Root cause | Evidence |
 |-----|------------|----------|
-| Railway `DataFlow-Api` deployment build failure | `Dockerfile.api` set `ENV DATAFLOW_REQUIRE_AUTH=1`; Railway's build lint treats `AUTH` as a secret and fails the image build. The runtime flag is already set by `services/platform_config.py` `apply_railway_defaults()` | `Dockerfile.api` |
+| Railway `Datawrap-Api` deployment build failure | `Dockerfile.api` set `ENV DATAFLOW_REQUIRE_AUTH=1`; Railway's build lint treats `AUTH` as a secret and fails the image build. The runtime flag is already set by `services/platform_config.py` `apply_railway_defaults()` | `Dockerfile.api` |
 | Preflight gate ordering | `G9_DATA_INTEGRITY` ran before `G6_TARGET_DDL`, `G7_CAPACITY`, and `G8_RECONCILIATION`, so integrity checks could execute before the target table/DDL/capacity/reconciliation were validated | `packages/preflight/src/preflight/gates.py` |
 | `date_locale` contract for ambiguous dates | Mixed-locale sources (`DD/MM/YYYY` vs `MM/DD/YYYY`) were either silently mis-parsed or failed closed. A per-transfer `date_locale` (`DMY`/`MDY`) now propagates from `TransferRequest` through preflight, dry-run, and all write paths | `apps/api/src/transfer/models.py`, `apps/api/src/transfer/engine.py`, `apps/api/services/transform_engine.py`, `apps/api/services/preflight_service.py`, `apps/api/src/routers/preflight_router.py`, `apps/api/src/routers/transfer_router.py` |
 
@@ -1010,7 +1010,7 @@ The full `apps/api/tests` suite revealed two more hang/loop hazards:
 | `_attach_db_sample` `fmt` unbound | `fmt` assigned inside the `try` block | `apps/api/src/transfer/endpoint_intelligence.py` now assigns `fmt` before the `try` block |
 | Saved-connector masked secrets corrupting destination auth | `update_connector` and `saved_connectors_router.py` only preserved `password`/`private_key`; a masked `connection_string` (e.g. `postgresql://postgres:****@...`) overwrote the real saved DSN, so destination introspection failed with password auth errors even though the connector test was green | `services/connector_store.update_connector` and `src/routers/saved_connectors_router` now preserve any secret / connection-string / API key / service account that carries `****` or `<redacted>` placeholders; live reproduction showed a masked update no longer corrupts the saved password or connection string |
 | Runtime/local data artifacts in the branch | `apps/api/data` and `apps/api/localhost` contained test-run artifacts, quarantine logs, CDC history, training outputs, SQLite caches, and encrypted `connectors.json` that were bloating the PR diff and leaking local state | Untracked 66 runtime files (≈100 MB) from the index and expanded `.gitignore`; static catalog/config (`connector_catalog.json`, `integrations.json`) remain tracked; runtime stores are created on demand |
-| Preflight missed duplicate identity keys in large tables | G9 duplicate-key checks only saw the 100-row preview sample, so a 75k-row MySQL table with 17 duplicate `id` values passed Validate and failed at Run with "Duplicate identity-key values in a write batch" | Added `services/source_duplicate_probe.py` and wired it into `run_file_preflight`: when a database source has a resolved identity key, DataFlow runs a dialect-agnostic source-side `GROUP BY ... HAVING COUNT(*) > 1` (SQLAlchemy Core) or MongoDB aggregation and feeds the findings into `data_integrity._check_duplicate_keys` so G9 blocks before Run |
+| Preflight missed duplicate identity keys in large tables | G9 duplicate-key checks only saw the 100-row preview sample, so a 75k-row MySQL table with 17 duplicate `id` values passed Validate and failed at Run with "Duplicate identity-key values in a write batch" | Added `services/source_duplicate_probe.py` and wired it into `run_file_preflight`: when a database source has a resolved identity key, Datawrap runs a dialect-agnostic source-side `GROUP BY ... HAVING COUNT(*) > 1` (SQLAlchemy Core) or MongoDB aggregation and feeds the findings into `data_integrity._check_duplicate_keys` so G9 blocks before Run |
 | Misleading "Destination or resource not found" hiding real connection errors | `humanize_connection_error` matched the word `table` or `does not exist` in any driver text, so fakesnow lock errors and other backend failures were surfaced as generic resource-not-found messages | Tightened the regex in `src/transfer/connector_registry.py` to require an actual object-kind + missing phrase (`table 'x' does not exist`, `no such table`, `unknown database`, etc.) before returning the resource-not-found message; auth/DNS/connection/SSL/lock errors now keep their specific guidance |
 
 ### Verification this session
@@ -1118,7 +1118,7 @@ pytest apps/api/tests/test_data_integrity.py tests/test_data_quality.py \
 ### What is still NOT proven
 
 - The live Railway `sakura.proxy.rlwy.net:54480` password failure is a real
-  credential mismatch; DataFlow now surfaces the actual PostgreSQL error and never
+  credential mismatch; Datawrap now surfaces the actual PostgreSQL error and never
   overwrites a saved password with a masked `****`/`redacted` placeholder.
 
 ---

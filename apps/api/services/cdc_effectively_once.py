@@ -22,8 +22,16 @@ EFFECTIVELY_ONCE_PK_SINKS = True  # only when _df_lsn guard is applied
 APPEND_ONLY_SINKS_EFFECTIVELY_ONCE = False
 EXACTLY_ONCE_CLAIMED = False
 
+# Explicit delivery-class taxonomy (charter: EO / ALO / AMO — never invent).
+DELIVERY_CLASS_EXACTLY_ONCE = "exactly_once"
+DELIVERY_CLASS_AT_LEAST_ONCE = "at_least_once"
+DELIVERY_CLASS_AT_MOST_ONCE = "at_most_once"
+
 SINK_EFFECTIVELY_ONCE_ELIGIBLE = "effectively_once_eligible"
 SINK_APPEND_ONLY = "append_only_at_least_once"
+
+DUPLICATE_SCENARIO_APPEND_REDELIVERY = "append_only_redelivery_duplicates_rows"
+DUPLICATE_SCENARIO_ALO_WITHOUT_LSN = "at_least_once_without_pk_lsn_guard_may_duplicate"
 
 
 class CdcAppendOnlySinkError(ValueError):
@@ -284,28 +292,38 @@ def classify_sink_delivery(
     if eligible:
         return {
             "class": SINK_EFFECTIVELY_ONCE_ELIGIBLE,
+            "delivery_class": DELIVERY_CLASS_AT_LEAST_ONCE,
             "exactly_once": False,
+            "at_least_once": True,
+            "at_most_once": False,
             "effectively_once_pk_sink": True,
             "duplicates_on_redelivery": False,
+            "duplicate_scenario": None,
             "dest_type": dest,
             "supports_upsert": upsert_capable,
             "has_lsn_guard": True,
             "notes": [
                 "PK upsert + _df_lsn can reject stale redelivery (row state).",
                 "Log capture remains at-least-once; not exactly-once delivery.",
+                "At-most-once is not offered (would allow silent loss).",
             ],
         }
     return {
         "class": SINK_APPEND_ONLY,
+        "delivery_class": DELIVERY_CLASS_AT_LEAST_ONCE,
         "exactly_once": False,
+        "at_least_once": True,
+        "at_most_once": False,
         "effectively_once_pk_sink": False,
         "duplicates_on_redelivery": True,
+        "duplicate_scenario": DUPLICATE_SCENARIO_APPEND_REDELIVERY,
         "dest_type": dest,
         "supports_upsert": upsert_capable,
         "has_lsn_guard": bool(caps_lsn and lsn_ok),
         "notes": [
             "Append-only / non-upsert / missing _df_lsn sinks duplicate rows under at-least-once CDC.",
             "Refuse exactly-once / LSN-guarded idempotency claims for this route.",
+            "Requires allow_append_only acknowledgement before CDC write.",
         ],
     }
 
@@ -345,16 +363,54 @@ def gate_cdc_destination(
 
 
 def honesty_dict() -> dict[str, Any]:
+    """Canonical CDC delivery honesty for Theater / workspace / proof packs.
+
+    Explicitly classifies Exactly Once / At Least Once / At Most Once.
+    Never invents a claim the platform does not implement.
+    """
     return {
         "delivery_default": DELIVERY_DEFAULT,
         "exactly_once_claimed": EXACTLY_ONCE_CLAIMED,
         "effectively_once_pk_sinks": EFFECTIVELY_ONCE_PK_SINKS,
         "append_only_sinks_effectively_once": APPEND_ONLY_SINKS_EFFECTIVELY_ONCE,
+        "append_sink_acknowledgement_required": True,
+        "delivery_classes": {
+            DELIVERY_CLASS_EXACTLY_ONCE: {
+                "claimed": False,
+                "available": False,
+                "note": (
+                    "Platform never claims exactly-once end-to-end CDC. "
+                    "PK+_df_lsn upsert is LSN-guarded row-state idempotency under at-least-once capture."
+                ),
+            },
+            DELIVERY_CLASS_AT_LEAST_ONCE: {
+                "claimed": True,
+                "default": True,
+                "available": True,
+                "note": (
+                    "Default CDC delivery: peek→apply→ack may redeliver. "
+                    "PK upsert sinks with _df_lsn reject stale tokens; append sinks can duplicate."
+                ),
+            },
+            DELIVERY_CLASS_AT_MOST_ONCE: {
+                "claimed": False,
+                "available": False,
+                "note": (
+                    "At-most-once is not offered — silent loss is incompatible with "
+                    "migration assurance (fail closed, never drop without quarantine)."
+                ),
+            },
+        },
+        "duplicate_scenarios": [
+            DUPLICATE_SCENARIO_APPEND_REDELIVERY,
+            DUPLICATE_SCENARIO_ALO_WITHOUT_LSN,
+        ],
         "requires": ["primary_key", DF_LSN_COL, "upsert_destination"],
         "notes": [
             "Log capture remains at-least-once (peek→apply→ack).",
             "PK sinks with _df_lsn reject older tokens so row state does not regress.",
             "Append-only sinks are gated unless allow_append_only is set.",
             "Do not claim exactly-once pipeline delivery.",
+            "Do not claim at-most-once (would allow silent loss).",
         ],
     }

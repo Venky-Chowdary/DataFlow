@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import { ColumnReviewPanel } from "../../components/ColumnReviewPanel";
-import { MappingIntelligencePanel } from "../../components/MappingIntelligencePanel";
 import {
   MappingProofDrawer,
   mergeMappingProof,
@@ -10,7 +9,7 @@ import { Dialog } from "../../components/ui/Dialog";
 import { Button } from "../../components/ui/Button";
 import { DtIcon } from "../../components/DtIcon";
 import type { ColumnFilter } from "../../lib/columnWorkbench";
-import { countByFilter, filterMappings } from "../../lib/columnWorkbench";
+import { countByFilter, needsMappingReview } from "../../lib/columnWorkbench";
 import type { EditableMapping } from "../../lib/mapping";
 import { mappingHealthSummary } from "../../lib/mapping";
 import type { UniqueKeySuggestion } from "../../lib/uniqueKeySuggestions";
@@ -70,10 +69,10 @@ interface TransferMapStepProps {
   requiresCursor?: boolean;
   onOpenIdentitySettings?: () => void;
   uniqueKeySuggestions?: UniqueKeySuggestion[];
+  compositeKeySuggestions?: Array<{ columns: string[]; uniqueCount: number; sampleRows: number }>;
   onApplyPrimaryKey?: (column: string) => void;
 }
 
-const INTELLIGENCE_PAIR_LIMIT = 500;
 
 const MAP_STEP_SCROLL_CLASS = "is-map-step-view";
 
@@ -90,10 +89,10 @@ export function TransferMapStep({
   destKindMode,
   destType,
   sourceLabel,
-  sourceSubtitle,
-  sourceType,
+  sourceSubtitle: _sourceSubtitle,
+  sourceType: _sourceType,
   destRouteLabel,
-  destRouteSubtitle,
+  destRouteSubtitle: _destRouteSubtitle,
   mappingReviewCount,
   confidenceThreshold,
   rowCount,
@@ -121,15 +120,30 @@ export function TransferMapStep({
   requiresCursor = false,
   onOpenIdentitySettings,
   uniqueKeySuggestions = [],
+  compositeKeySuggestions = [],
   onApplyPrimaryKey,
 }: TransferMapStepProps) {
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<ColumnFilter>("all");
+  const [filter, setFilter] = useState<ColumnFilter>("review");
+  const [userPickedFilter, setUserPickedFilter] = useState(false);
   const [focusSource, setFocusSource] = useState<string | null>(null);
   const [mapDialogOpen, setMapDialogOpen] = useState(false);
   const [proofOpenLocal, setProofOpenLocal] = useState(false);
   const proofOpen = proofOpenProp ?? proofOpenLocal;
   const setProofOpen = onProofOpenChange ?? setProofOpenLocal;
+
+
+  const handleFilterChange = (next: ColumnFilter) => {
+    setUserPickedFilter(true);
+    setFilter(next);
+  };
+
+  useEffect(() => {
+    // Skip while an identity/focus dialog is open so we don't fight setFilter("all").
+    if (userPickedFilter || focusSource) return;
+    const needs = columnMappings.filter((m) => needsMappingReview(m, confidenceThreshold)).length;
+    setFilter(needs > 0 ? "review" : "all");
+  }, [columnMappings, confidenceThreshold, userPickedFilter, focusSource]);
 
   useEffect(() => {
     const content = document.querySelector(".df2-content");
@@ -146,23 +160,13 @@ export function TransferMapStep({
     if (!initialFocusSource) return;
     setFocusSource(initialFocusSource);
     setSearch(initialFocusSource);
+    // Do not set userPickedFilter — issues-first resumes when focusSource clears.
     setFilter("all");
     setMapDialogOpen(true);
     onIdentityFixConsumed?.();
   }, [initialFocusSource]);
 
   const destDisplayType = destKindMode === "database" ? destType : "file";
-  const destPaneSubtitle = destKindMode === "database"
-    ? destSchemaLoading
-      ? "Loading existing schema from connector…"
-      : destColumns.length > 0
-        ? `${destColumns.length} existing fields in ${targetDatabase}.${targetCollection}`
-        : destTableExists === true
-          ? `Existing table ${targetDatabase}.${targetCollection} — column metadata pending`
-          : destTableExists === false
-            ? `New fields in ${targetDatabase}.${targetCollection}`
-            : `Confirming ${targetDatabase}.${targetCollection} on destination…`
-    : destRouteSubtitle;
 
   const filterCounts = useMemo(
     () => countByFilter(columnMappings, confidenceThreshold),
@@ -176,18 +180,6 @@ export function TransferMapStep({
     [columnMappings, confidenceThreshold],
   );
 
-  const filteredForVisual = useMemo(
-    () => filterMappings(columnMappings, {
-      search,
-      filter,
-      sort: "confidence-asc",
-      threshold: confidenceThreshold,
-    }),
-    [columnMappings, search, filter, confidenceThreshold],
-  );
-
-  const visualItems = filteredForVisual.slice(0, INTELLIGENCE_PAIR_LIMIT);
-
   /** Prefer API proof; refresh pair list from live edits so operators see current transforms. */
   const effectiveProof = useMemo(
     () => mergeMappingProof(mappingProof, columnMappings, {
@@ -198,56 +190,36 @@ export function TransferMapStep({
     [mappingProof, columnMappings, destColumns, destDisplayType, destKindMode, destTableExists],
   );
 
-  const jumpToSource = (source: string) => {
-    setSearch(source);
-    setFilter("all");
-    setFocusSource(source);
-  };
+  const identityFooterLabel = requiresPrimaryKey && !primaryKeyField
+    ? "PK required"
+    : requiresPrimaryKey && primaryKeyField
+      ? `PK ${primaryKeyField}`
+      : `${syncModeLabel || "sync"}`;
 
-  const filterAttention = (kind: "review" | "block" | "pii" | "warn") => {
-    const map: Record<string, ColumnFilter> = {
-      review: "review",
-      block: "block",
-      pii: "pii",
-      warn: "warn",
-    };
-    setFilter(map[kind]);
-    setSearch("");
-    setFocusSource(null);
-  };
+  const mappingFooterLabel = mappingReviewCount > 0
+    ? `${mappingReviewCount} need review`
+    : `${approvedCount} ready`;
 
   return (
-    <div className="df2-transfer-step-panel df2-map-step-panel">
-      <div className="df2-card-head df2-map-step-head">
-        <div>
+    <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-map-step-panel">
+      <div
+        className="df2-card-head df2-map-step-head"
+        title={`${columnMappings.length} mappings · ${approvedCount} ready${mappingReviewCount > 0 ? ` · ${mappingReviewCount} need review` : ""}`}
+      >
+        <div className="df2-map-step-head-copy">
           <h3 className="df2-card-title">Map columns</h3>
           <p className="df2-card-sub">
-            {columnMappings.length} mappings · {approvedCount} ready
-            {mappingReviewCount > 0 ? ` · ${mappingReviewCount} need review` : ""}
+            Align source fields to destination types
+            {destDisplayType ? ` · ${destDisplayType}` : ""}
             {llmUsed ? " · semantic engine" : ""}
-            {destColumns.length === 0 && !destSchemaLoading && destTableExists === false
-              ? " · create-new table"
-              : destColumns.length === 0 && destTableExists === true
-                ? " · existing table (columns pending)"
-                : destColumns.length === 0 && !destSchemaLoading && destTableExists == null
-                  ? " · destination schema unknown"
-                  : destColumns.length > 0 && destTableExists === true
-                    ? ` · match existing · ${destColumns.length} dest columns`
-                    : destColumns.length > 0
-                      ? ` · ${destColumns.length} dest columns`
-                      : ""}
             {streamNames.length > 1 ? ` · ${streamNames.length} streams` : ""}
+            {targetDatabase && targetCollection ? ` · ${targetDatabase}.${targetCollection}` : ""}
           </p>
         </div>
         <div className="df2-map-step-head-actions">
           {(effectiveProof.summary?.cdc_detected || (effectiveProof.sync_mode || "").toLowerCase().includes("cdc")) && (
             <span className="df2-badge df2-badge-info df2-badge-xs" title="Change-stream / CDC route — at-least-once upsert by default">
-              CDC · at-least-once
-            </span>
-          )}
-          {destDisplayType && (
-            <span className="df2-badge df2-badge-muted df2-badge-xs" title="Destination DDL family used for type pickers and native types">
-              {destDisplayType}
+              CDC
             </span>
           )}
           <button
@@ -256,7 +228,8 @@ export function TransferMapStep({
             onClick={() => setProofOpen(true)}
             title="Inspect how this map works — confidence evidence, transforms, fidelity risks"
           >
-            <DtIcon name="sparkle" size={14} /> Mapping proof
+            <DtIcon name="sparkle" size={14} />
+            <span className="df2-map-btn-label">Proof</span>
           </button>
           <button
             type="button"
@@ -264,28 +237,11 @@ export function TransferMapStep({
             onClick={() => setMapDialogOpen(true)}
             title="Open full mapping table in a dialog"
           >
-            <DtIcon name="expand" size={14} /> Expand mapping table
+            <DtIcon name="expand" size={14} />
+            <span className="df2-map-btn-label">Expand</span>
           </button>
         </div>
       </div>
-
-      {health.weak && (
-        <div
-          className={`df2-map-health-banner${health.total === 0 || health.unmappedTarget > 0 || health.existingTypeConflict > 0 ? " is-critical" : " is-warn"}`}
-          role="status"
-        >
-          <DtIcon name="alert" size={16} />
-          <div>
-            <strong>{health.headline}</strong>
-            <p>{health.detail}</p>
-            {health.specialtyIdentity > 0 && health.existingTypeConflict === 0 && health.unmappedTarget === 0 && (
-              <p className="df2-map-health-note">
-                Specialty types use identity transforms — Validate will still fail-closed on VECTOR dim mismatch.
-              </p>
-            )}
-          </div>
-        </div>
-      )}
 
       {streamNames.length > 1 && (
         <div className="df2-map-stream-bar" role="tablist" aria-label="Map per source stream">
@@ -331,157 +287,137 @@ export function TransferMapStep({
       )}
 
       <div className="df2-card-body df2-map-step-body">
-        {(syncModeLabel || onOpenIdentitySettings) && (
-          <div className="df2-map-identity-chip" role="region" aria-label="Identity and sync contract">
-            <div className="df2-map-identity-chip-main">
-              <span className="df2-map-identity-chip-kicker">Identity contract</span>
-              <div className="df2-map-identity-chip-meta">
-                <span>
-                  Sync <strong>{syncModeLabel || "—"}</strong>
-                </span>
-                <span>
-                  Primary key{" "}
-                  <strong>
-                    {requiresPrimaryKey
-                      ? primaryKeyField || "required — unset"
-                      : primaryKeyField || "not required"}
-                  </strong>
-                </span>
-                {requiresCursor && (
-                  <span>
-                    Cursor <strong>{cursorField || "required — unset"}</strong>
-                  </span>
-                )}
-              </div>
-              <p className="df2-map-identity-chip-hint">
-                Column mapping pairs fields. Primary key and sync mode live in Destination → Advanced —
-                Map Approve cannot dedupe source rows or change identity.
-              </p>
-              {uniqueKeySuggestions.length > 0 && requiresPrimaryKey && (
-                <div className="df2-map-identity-suggest" aria-label="Sample-unique key suggestions">
-                  <span className="df2-label-hint">Unique in sample — try as primary key:</span>
-                  {uniqueKeySuggestions.slice(0, 3).map((s) => (
-                    <button
-                      key={s.column}
-                      type="button"
-                      className="df2-adv-suggest-chip"
-                      title={`Unique in ${s.sampleRows}-row sample (${s.uniqueCount} values)`}
-                      onClick={() => {
-                        onApplyPrimaryKey?.(s.column);
-                        onOpenIdentitySettings?.();
-                      }}
-                    >
-                      Use <strong>{s.column}</strong>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-            {onOpenIdentitySettings && (
-              <Button
-                size="sm"
-                variant={requiresPrimaryKey && !primaryKeyField ? "primary" : "secondary"}
-                leadingIcon={<DtIcon name="settings" size={14} />}
-                onClick={onOpenIdentitySettings}
-              >
-                Open identity settings
-              </Button>
-            )}
-          </div>
-        )}
-
         {identityFixBanner && (
-          <div className="df2-map-identity-banner" role="status">
+          <div className="df2-map-identity-banner is-compact" role="status">
             <DtIcon name="alert" size={16} />
             <div className="df2-map-identity-banner-body">
               <strong>Identity fix required</strong>
               <p>{identityFixBanner}</p>
-              <p className="df2-map-identity-banner-hint">
-                Reviewing this column on Map is evidence only. Change the primary key or sync mode in
-                Destination → Advanced, or dedupe the source, then re-validate.
-              </p>
-              <div className="df2-map-identity-banner-actions">
-                {onOpenIdentitySettings && (
-                  <Button
-                    size="sm"
-                    variant="primary"
-                    leadingIcon={<DtIcon name="settings" size={14} />}
-                    onClick={onOpenIdentitySettings}
-                  >
-                    Open identity settings
-                  </Button>
-                )}
-                <Button size="sm" variant="ghost" onClick={() => onIdentityFixConsumed?.()}>
-                  Dismiss
+            </div>
+            <div className="df2-map-identity-banner-actions">
+              {onOpenIdentitySettings && (
+                <Button
+                  size="sm"
+                  variant="primary"
+                  leadingIcon={<DtIcon name="settings" size={14} />}
+                  onClick={onOpenIdentitySettings}
+                >
+                  Settings
                 </Button>
-              </div>
+              )}
+              <Button size="sm" variant="ghost" onClick={() => onIdentityFixConsumed?.()}>
+                Dismiss
+              </Button>
             </div>
           </div>
         )}
-        <div className="df2-map-step-workspace">
-          <ColumnReviewPanel
-            mappings={columnMappings}
-            rowCount={rowCount}
-            sampleRows={sampleRows}
-            confidenceThreshold={confidenceThreshold}
-            onChange={onChangeMappings}
-            destinationFields={destColumns}
-            destinationLabel={destRouteLabel}
-            destType={destDisplayType}
-            destSchemaLoading={destSchemaLoading}
-            destTableExists={destTableExists}
-            destConnected={destConnected}
-            destConnectionError={destConnectionError}
-            compact
-            hideTitle
-            search={search}
-            onSearchChange={setSearch}
-            filter={filter}
-            onFilterChange={setFilter}
-            focusSource={focusSource}
-            onFocusHandled={() => setFocusSource(null)}
-          />
-
-          <MappingIntelligencePanel
-            allMappings={columnMappings}
-            items={visualItems}
-            sourceLabel={sourceLabel}
-            sourceSubtitle={sourceSubtitle}
-            sourceType={sourceType}
-            destLabel={destRouteLabel}
-            destSubtitle={destPaneSubtitle}
-            destType={destDisplayType}
-            confidenceThreshold={confidenceThreshold}
-            totalCount={filteredForVisual.length}
-            mappedCount={columnMappings.length}
-            llmUsed={llmUsed}
-            destSchemaLoading={destSchemaLoading}
-            onSelectSource={jumpToSource}
-            onFilterAttention={filterAttention}
-          />
+        <div className="df2-map-step-workspace is-full-editor">
+          <div className="df2-map-editor-pane">
+            <div className="df2-map-editor-scroll-host">
+              <ColumnReviewPanel
+                mappings={columnMappings}
+                rowCount={rowCount}
+                sampleRows={sampleRows}
+                confidenceThreshold={confidenceThreshold}
+                onChange={onChangeMappings}
+                destinationFields={destColumns}
+                destinationLabel={destRouteLabel}
+                destType={destDisplayType}
+                destSchemaLoading={destSchemaLoading}
+                destTableExists={destTableExists}
+                destConnected={destConnected}
+                destConnectionError={destConnectionError}
+                tableName={targetCollection}
+                compact
+                hideTitle
+                search={search}
+                onSearchChange={setSearch}
+                filter={filter}
+                onFilterChange={handleFilterChange}
+                focusSource={focusSource}
+                onFocusHandled={() => setFocusSource(null)}
+              />
+            </div>
+          </div>
         </div>
       </div>
 
-      <div className="df2-wizard-footer df2-map-footer">
+      <div className="df2-card-footer df2-wizard-footer df2-map-footer">
+        <button type="button" className="df2-btn" onClick={onBack}>← Back</button>
         <div className="df2-map-footer-status" aria-live="polite">
-          <span>
-            <strong>Mapping:</strong>{" "}
-            {mappingReviewCount > 0
-              ? `${mappingReviewCount} column(s) need review`
-              : `${columnMappings.length} columns ready`}
+          <span className={mappingReviewCount > 0 ? "is-warn" : "is-ok"} title={health.weak ? health.detail : undefined}>
+            <strong>Mapping</strong> {mappingFooterLabel}
           </span>
-          <span>
-            <strong>Identity:</strong>{" "}
-            {requiresPrimaryKey && !primaryKeyField
-              ? "primary key required — open settings"
-              : requiresPrimaryKey && primaryKeyField
-                ? `PK ${primaryKeyField} · uniqueness checked on Validate`
-                : `${syncModeLabel || "sync"} · uniqueness not required`}
+          <span
+            className={requiresPrimaryKey && !primaryKeyField ? "is-warn" : undefined}
+            title={
+              requiresCursor
+                ? `Cursor ${cursorField || "required"} · Sync ${syncModeLabel || "—"}`
+                : `Sync ${syncModeLabel || "—"}`
+            }
+          >
+            <strong>Identity</strong> {identityFooterLabel}
+            {uniqueKeySuggestions.length > 0 && requiresPrimaryKey && !primaryKeyField && (
+              <>
+                {" · Try "}
+                {uniqueKeySuggestions.slice(0, 2).map((s, i) => (
+                  <button
+                    key={s.column}
+                    type="button"
+                    className="df2-map-footer-pk-suggest"
+                    title={`Unique in ${s.sampleRows}-row sample`}
+                    onClick={() => {
+                      onApplyPrimaryKey?.(s.column);
+                      onOpenIdentitySettings?.();
+                    }}
+                  >
+                    {s.column}{i === 0 && uniqueKeySuggestions.length > 1 ? "," : ""}
+                  </button>
+                ))}
+              </>
+            )}
+
+            {compositeKeySuggestions.length > 0 && requiresPrimaryKey && !primaryKeyField && (
+              <span className="df2-map-pk-suggest">
+                Composite sample keys:{" "}
+                {compositeKeySuggestions.slice(0, 2).map((s, i) => (
+                  <button
+                    key={s.columns.join(",")}
+                    type="button"
+                    className="df2-linkish"
+                    onClick={() => onApplyPrimaryKey?.(s.columns.join(","))}
+                    title={`Unique in ${s.sampleRows}-row sample`}
+                  >
+                    {s.columns.join(" + ")}{i === 0 && compositeKeySuggestions.length > 1 ? "," : ""}
+                  </button>
+                ))}
+              </span>
+            )}
+
           </span>
         </div>
         <div className="df2-map-footer-actions">
-          <button type="button" className="df2-btn" onClick={onBack}>← Back</button>
-          <button type="button" className="df2-btn df2-btn-primary" onClick={onContinue}>
+          {onOpenIdentitySettings && (
+            <button
+              type="button"
+              className="df2-btn df2-btn-ghost"
+              onClick={onOpenIdentitySettings}
+              title="Open Advanced settings — primary key, sync mode, cursor (same drawer as Destination)"
+            >
+              <DtIcon name="settings" size={14} /> Advanced
+            </button>
+          )}
+          <button
+            type="button"
+            className="df2-btn df2-btn-primary"
+            onClick={onContinue}
+            disabled={mappingReviewCount > 0}
+            title={
+              mappingReviewCount > 0
+                ? `${mappingReviewCount} column(s) need Approve or Accept risk before Validate`
+                : "Continue to Validate"
+            }
+          >
             Continue to Validate →
           </button>
         </div>
@@ -569,11 +505,12 @@ export function TransferMapStep({
           destTableExists={destTableExists}
           destConnected={destConnected}
           destConnectionError={destConnectionError}
+          tableName={targetCollection}
           presentation="dialog"
           search={search}
           onSearchChange={setSearch}
           filter={filter}
-          onFilterChange={setFilter}
+          onFilterChange={handleFilterChange}
           focusSource={focusSource}
           onFocusHandled={() => setFocusSource(null)}
         />

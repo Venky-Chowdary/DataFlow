@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import os
+from services.brand_env import getenv_brand
 import re
 import unicodedata
 import uuid as uuid_lib
@@ -147,6 +148,28 @@ NULL_SENTINELS = frozenset({
     # NOTE: __df_missing__ is NOT a null — writers must omit the field (sparse CDC).
 })
 
+# Transform-classification sets used by the per-cell coercion path. These are
+# module-level because that path runs once per cell: rebuilding three frozensets
+# inside it cost a set construction per cell, which is billions of avoidable
+# allocations on a wide, large table.
+
+#: Identity / text transforms where an empty string is a real value, not a null.
+_KEEP_EMPTY_TRANSFORMS = frozenset({
+    "none", "identity", "passthrough", "string", "varchar", "text",
+    "upper", "lower", "trim", "trim_id",
+    "strip_controls", "normalize_unicode",
+})
+
+#: NaN / ±Infinity are not SQL null for JSON/vector — the typed parsers reject
+#: them rather than inventing JSON null or an empty embedding.
+_NONFINITE_TOKENS = frozenset({"nan", "infinity", "+infinity", "-infinity"})
+
+#: Transforms that parse into a concrete type, so null sentinels mean null.
+_TYPED_TRANSFORMS = frozenset({
+    "decimal", "integer", "boolean", "date", "datetime", "time",
+    "json", "uuid", "binary", "vector",
+})
+
 # Per-request date locale for ambiguous MDY/DMY parsing.  The engine and
 # preflight service set this via :func:`set_active_date_locale` so every
 # coerce / dry-run / preview path resolves dates with the operator-chosen
@@ -156,7 +179,7 @@ _DATE_LOCALE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar("date_loc
 
 def _active_date_locale(explicit: str = "") -> str:
     """Return 'DMY' or 'MDY' from explicit > context > env, or '' if unset."""
-    loc = (explicit or _DATE_LOCALE_VAR.get() or os.getenv("DATAFLOW_DATE_ORDER") or "").strip().upper()
+    loc = (explicit or _DATE_LOCALE_VAR.get() or getenv_brand("DATE_ORDER") or "").strip().upper()
     return loc if loc in {"DMY", "MDY"} else ""
 
 
@@ -364,23 +387,10 @@ def _parse_datetime_worker(value: str, date_locale: str) -> str | None:
     text = value.strip()
     if not _DATE_LIKE_RE.search(text):
         return None
-    # Fail closed on ambiguous MDY/DMY — silent US-default corrupts EU dates.
-    # Exception: ambiguous timestamps that also carry a time-of-day are far more
-    # likely to be day-first event data (EU/IN/AU convention) than a US date with
-    # a time; default to DMY so real-world logistics/banking fixtures parse.
+    # Fail closed on ambiguous MDY/DMY — including timestamps with a time-of-day.
+    # Inventing DMY for "06/05/2024 14:30" while AM/PM paths fell through to MDY
+    # silently corrupted calendars across US/EU/IN feeds. Require date_locale.
     if _is_ambiguous_mdy_dmy(text, date_locale):
-        if re.search(r"[ T]\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?\b", text):
-            dayfirst_patterns = (
-                [p for p in DATETIME_PATTERNS if p.startswith("%d")]
-                + [p for p in DATETIME_PATTERNS if p.startswith("%Y")]
-                + [p for p in DATETIME_PATTERNS if p.startswith("%m")]
-            )
-            for fmt in dayfirst_patterns:
-                try:
-                    parsed = datetime.strptime(text, fmt)
-                    return _to_utc_z(parsed)
-                except ValueError:
-                    continue
         return None
     if _EPOCH_MS_RE.match(text):
         ms = int(text)
@@ -602,12 +612,12 @@ def _parse_integer(value: str) -> int | None:
         return None
 
 
-# Strict boolean tokens only. Words like "active"/"inactive"/"enabled" are
-# status *enums* in real datasets (Mongo sessions, CRM, auth) — treating them
-# as booleans caused new Snowflake tables to CREATE status BOOLEAN, then
-# hard-fail on values like "invalidated".
-_STRICT_BOOL_TRUE = frozenset({"true", "t", "yes", "y", "1", "on"})
-_STRICT_BOOL_FALSE = frozenset({"false", "f", "no", "n", "0", "off"})
+# Canonical boolean wire only (SSOT with type_system.boolean_value_fits).
+# Informal "yes"/"on"/"y" invents truth (Airbyte-class); refuse — operator
+# must remap or transform. Schema inference keeps a wider informal set for
+# flag-name detection only.
+_STRICT_BOOL_TRUE = frozenset({"true", "t", "1"})
+_STRICT_BOOL_FALSE = frozenset({"false", "f", "0"})
 
 
 def _parse_boolean(value: str) -> bool | None:
@@ -697,7 +707,7 @@ def _parse_uuid(value: str) -> str | None:
 
 def _hash_pii(value: str) -> str:
     """HMAC-SHA256 digest for PII masking. Requires DATAFLOW_PII_HASH_KEY in prod."""
-    secret = os.getenv("DATAFLOW_PII_HASH_KEY") or os.getenv("DATAFLOW_SECRET")
+    secret = getenv_brand("PII_HASH_KEY") or getenv_brand("SECRET")
     if not secret:
         # Fail closed — never hash with a shared public default (would be reversible
         # across tenants that ship the same binary).
@@ -731,16 +741,35 @@ def _parse_time(value: str) -> str | None:
     """Parse a time string and return a canonical ISO 8601 time.
 
     Accepts 24-hour and 12-hour forms, with optional microseconds, time-zone
-    offsets, and AM/PM markers.
+    offsets, and AM/PM markers. Offset / ``Z`` polarity is preserved — never
+    strip then re-invent UTC on TIMETZ binds (silent clock corruption).
     """
+    from datetime import time as time_cls
+
     text = value.strip()
     if not text:
         return None
-    text = text.upper().replace("Z", "+0000")
+    # Prefer fromisoformat so ``15:30:00+05:30`` keeps tzinfo.
+    iso_text = text
+    if iso_text.upper().endswith("Z"):
+        iso_text = iso_text[:-1] + "+00:00"
+    elif iso_text.upper().endswith(" UTC"):
+        iso_text = iso_text[:-4].strip() + "+00:00"
+    try:
+        tm = time_cls.fromisoformat(iso_text)
+        return tm.isoformat()
+    except ValueError:
+        pass
+    # strptime fallback — keep tzinfo via timetz() when %z matched.
+    stamped = text.upper().replace("Z", "+0000")
+    # ``+05:30`` → ``+0530`` for %z on older parsers.
+    if len(stamped) >= 6 and stamped[-3] == ":" and stamped[-6] in "+-":
+        stamped = stamped[:-3] + stamped[-2:]
     for fmt in TIME_PATTERNS:
         try:
-            parsed = datetime.strptime(text, fmt)
-            return parsed.time().isoformat()
+            parsed = datetime.strptime(stamped, fmt)
+            tm = parsed.timetz() if parsed.tzinfo is not None else parsed.time()
+            return tm.isoformat()
         except ValueError:
             continue
     return None
@@ -749,8 +778,15 @@ def _parse_time(value: str) -> str | None:
 KNOWN_TRANSFORMS = frozenset({
     "decimal", "integer", "boolean", "date", "datetime", "time", "json", "binary",
     "trim", "trim_id", "uuid", "upper", "lower", "hash_pii", "mask_pii", "none", "identity",
+    # Logical-type aliases Studio / DDL inference sometimes stamp as the transform id.
+    "passthrough", "string", "varchar", "text",
     "phone", "email", "url", "iban", "currency", "percentage", "postal", "base64",
     "strip_controls", "normalize_unicode",
+})
+
+#: Rename-only transforms — must not mutate wire (no strip). Trim is opt-in.
+_IDENTITY_TRANSFORMS = frozenset({
+    "none", "identity", "passthrough", "string", "varchar", "text",
 })
 
 
@@ -829,6 +865,22 @@ def _samples_prefer_boolean_over_integer(samples: list[str] | None) -> bool:
     return (bool_ok / checked) >= 0.9 and (int_ok / checked) < 0.5
 
 
+def _samples_look_temporal(source_samples: list[str] | None) -> bool:
+    """True when most non-empty samples look date/time-like (not status/enum text)."""
+    if not source_samples:
+        return False
+    hits = 0
+    checked = 0
+    for raw in source_samples[:25]:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        checked += 1
+        if _DATE_LIKE_RE.search(text):
+            hits += 1
+    return checked >= 2 and (hits / checked) >= 0.8
+
+
 def infer_transform_for_mapping(
     source_col: str,
     target_col: str,
@@ -852,6 +904,8 @@ def infer_transform_for_mapping(
     tgt_name = target_col.lower()
 
     semantic = detect_semantic_type(source_col, source_samples)
+    samples_temporal = _samples_look_temporal(source_samples)
+    src_temporal = src in {"datetime", "date", "timestamp", "time"}
 
     # Zero-scale DECIMAL/NUMBER targets (e.g. Snowflake NUMBER(38,0)) are integer
     # carriers, so an integer source should be coerced with the integer transform.
@@ -886,16 +940,24 @@ def infer_transform_for_mapping(
         if tgt == "binary":
             return "binary"
         if tgt == "datetime":
-            return "datetime"
+            # Never force a date cast on non-temporal VARCHAR (status → posted_date).
+            # Let G3/G5 declare the type mismatch instead of lucky-parse corruption.
+            if src_temporal or samples_temporal:
+                return "datetime"
+            return "none"
         if tgt == "date":
             # Narrowing a datetime into a date-only column drops the time of day.
             # Only do it when the destination genuinely cannot hold a time;
             # document stores map both logical types onto one instant carrier.
             if src == "datetime" and temporal_carrier_holds_time(destination_db_type):
                 return "datetime"
-            return "date"
+            if src_temporal or samples_temporal:
+                return "date"
+            return "none"
         if tgt == "time":
-            return "time"
+            if src_temporal or samples_temporal:
+                return "time"
+            return "none"
         if tgt == "uuid":
             return "uuid"
         if tgt == "vector":
@@ -916,6 +978,11 @@ def infer_transform_for_mapping(
     if src in {"json", "array"}:
         return "json"
     if src == "binary":
+        # Binary→text sinks must not force base64 rewrite as identity.
+        # Keep bytes as identity payload; Map/G3 treat domain polarity via
+        # Accept risk (hex/base64 mutate is not "preserve").
+        if tgt in {"string", "text", "json", "unknown"} or not destination_type:
+            return "none"
         return "binary"
     if src == "datetime":
         return "datetime"
@@ -1009,27 +1076,24 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         return None, "intentional omit — mapping should not project"
 
     # Identity / text transforms: empty string is a real value.
-    _KEEP_EMPTY = frozenset({
-        "none", "identity", "passthrough", "string", "varchar", "text",
-        "upper", "lower", "trim", "trim_id",
-        "strip_controls", "normalize_unicode",
-    })
-    if text == "" and transform_l in _KEEP_EMPTY:
+    if text == "" and transform_l in _KEEP_EMPTY_TRANSFORMS:
         return "", None
     if text == "":
         return None, None
 
+    # Identity aliases must preserve exact wire (incl. leading/trailing whitespace).
+    # Silent strip previously false-failed Gate-8 ("identity transform altered value")
+    # on Mongo/long-text samples and silently mutated VARCHAR payloads at write.
+    if transform_l in _IDENTITY_TRANSFORMS:
+        return raw_s, None
+
     # Null/missing sentinels for typed transforms are treated as None.
     # Exception: NaN / ±Infinity are NOT SQL null for JSON/vector — reject as
     # non-finite (never invent JSON null / empty embedding).
-    _NONFINITE = frozenset({"nan", "infinity", "+infinity", "-infinity"})
-    if transform_l in {
-        "decimal", "integer", "boolean", "date", "datetime", "time",
-        "json", "uuid", "binary", "vector",
-    }:
+    if transform_l in _TYPED_TRANSFORMS:
         low = text.lower()
         if low in NULL_SENTINELS:
-            if transform_l in {"json", "vector"} and low in _NONFINITE:
+            if transform_l in {"json", "vector"} and low in _NONFINITE_TOKENS:
                 pass  # fall through to typed parsers that reject non-finite
             else:
                 return None, None
@@ -1111,9 +1175,6 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         if parsed is None:
             return None, f"Invalid UUID: {text!r}"
         return parsed, None
-
-    if transform in {"none", "identity"}:
-        return text, None
 
     if transform == "upper":
         return text.upper(), None

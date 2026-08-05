@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+from services.brand_env import getenv_brand
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import InvalidOperation
@@ -35,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 # MongoDB commands handle ~1000-document batches most reliably through proxies
 # and serverless tiers. 20k-document single calls can hit socket/proxy limits.
-MONGO_WRITE_BATCH_SIZE = int(os.getenv("DATAFLOW_MONGO_BATCH_SIZE", "1000"))
+MONGO_WRITE_BATCH_SIZE = int(getenv_brand("MONGO_BATCH_SIZE", "1000"))
 
 
 @dataclass

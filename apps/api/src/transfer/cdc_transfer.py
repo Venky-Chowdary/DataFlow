@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from services.brand_env import getenv_brand
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -47,6 +48,7 @@ from services.cdc_snapshot_mode import (
     should_run_stream,
 )
 from services.error_handling import RetryBudget, with_retry
+from services.replay_safety import classify_replay_safety
 from services.sync_cursor import (
     build_cursor_key,
     get_watermark,
@@ -70,6 +72,34 @@ except ImportError:  # pragma: no cover - tests with api root on PYTHONPATH
 CHUNK_SIZE = 1000
 
 logger = logging.getLogger(__name__)
+
+
+def _cdc_span(name: str, **attrs: Any):
+    """OTEL span for CDC phases. Fail-open — tracing must never block apply."""
+    from contextlib import contextmanager, nullcontext
+
+    @contextmanager
+    def _inner():
+        try:
+            from services.tracing import start_span
+        except ImportError:  # pragma: no cover
+            yield None
+            return
+        cleaned = {
+            "dataflow.cdc.delivery": "at-least-once",
+            **{
+                (f"dataflow.{k}" if not str(k).startswith("dataflow.") else str(k)): v
+                for k, v in attrs.items()
+                if isinstance(v, (str, int, float, bool)) or v is None
+            },
+        }
+        with start_span(name, attributes=cleaned, kind="internal") as span:
+            yield span
+
+    try:
+        return _inner()
+    except Exception:
+        return nullcontext()
 
 
 def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
@@ -160,8 +190,34 @@ def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
         **_source_ha_lag_fields(cdc),
         **_cdc_retention_lag_fields(cdc),
     }
+    # Retained WAL is the number an on-call engineer needs first: an idle slot
+    # that stops advancing fills the primary's disk, and the job looks healthy
+    # right up until the database stops accepting writes.
+    confirmed = getattr(cdc, "consistent_point_lsn", None)
+    if confirmed:
+        out["cdc_confirmed_flush_lsn"] = str(confirmed)
     if row_filter:
         out["cdc_row_filter"] = str(row_filter)
+    try:
+        from services.cdc_mapping_review import open_review_for_source
+
+        source_key = getattr(cdc, "source_key", None) or ""
+        table = ""
+        if hasattr(cdc, "_qualified_table"):
+            try:
+                table = str(cdc._qualified_table() or "")
+            except Exception:
+                table = str(getattr(cdc, "table", "") or "")
+        else:
+            table = str(getattr(cdc, "table", "") or "")
+        review = open_review_for_source(str(source_key), table) if source_key else None
+        if review:
+            out["mapping_review_required"] = True
+            out["mapping_review_id"] = review.get("id")
+            out["mapping_review_reason"] = review.get("reason")
+            out["mapping_review_honesty"] = review.get("honesty")
+    except Exception as exc:
+        logging.getLogger(__name__).debug("CDC mapping review lookup skipped: %s", exc)
     return out
 
 
@@ -247,28 +303,132 @@ def _source_headers(headers: list[str], mappings: list[dict[str, Any]]) -> tuple
     return headers, [m.get("target", m.get("source", "")).strip() for m in mappings if m.get("source")]
 
 
+# Exact column names whose truthy value means "this row is deleted". Matching is
+# exact, never substring: `deleted_by`, `deleted_reason` and `delete_count` are
+# ordinary business columns, and a substring rule turned every row with a
+# non-empty `deleted_by` into a destination DELETE.
+_TOMBSTONE_COLUMNS = frozenset(
+    {
+        "deleted",
+        "deleted_at",
+        "deletedat",
+        "deleted_on",
+        "deleted_ts",
+        "deleted_time",
+        "date_deleted",
+        "is_deleted",
+        "isdeleted",
+        "deleted_flag",
+        "row_deleted",
+        "tombstone",
+        "is_tombstone",
+        "_deleted",
+        "__deleted",
+    }
+)
+
+#: Columns that look deletion-adjacent but are audit metadata, not tombstones.
+#: Listed explicitly so a future rule change cannot quietly re-capture them.
+_TOMBSTONE_LOOKALIKES = frozenset(
+    {
+        "deleted_by",
+        "deleted_by_id",
+        "deleted_by_user",
+        "deleted_reason",
+        "delete_count",
+        "deletes",
+        "deletable",
+        "is_deletable",
+        "can_delete",
+        "soft_delete_enabled",
+    }
+)
+
+#: Tokens that unambiguously mean "not deleted".
+_FALSEY_TOKENS = frozenset({"", "0", "false", "f", "no", "n", "null", "none", "nan"})
+#: Tokens that unambiguously mean "deleted".
+_TRUTHY_TOKENS = frozenset({"1", "true", "t", "yes", "y"})
+
+#: Timestamp-style tombstones follow the well-known `deleted_at IS NULL` pattern,
+#: where *any* value at all means deleted. Boolean-style tombstones do not — an
+#: unrecognised token there is ambiguous and must never be read as "delete".
+_TIMESTAMP_TOMBSTONES = frozenset(
+    {"deleted_at", "deletedat", "deleted_on", "deleted_ts", "deleted_time", "date_deleted"}
+)
+
+
 def _detect_tombstone_column(schema: dict[str, str], columns: list[str]) -> str | None:
-    """Return a soft-delete/tombstone column name if one exists."""
+    """Return a soft-delete column name if one is unambiguously present.
+
+    Deliberately conservative, because a false positive here converts live
+    source rows into destination ``DELETE`` statements. Two rules that used to
+    exist have been removed:
+
+    * **Liveness columns are not tombstones.** ``is_active`` was previously
+      treated as a deletion marker with no polarity handling, so every row with
+      ``is_active = 1`` was deleted at the destination and every inactive row
+      was kept — a complete inversion that silently wiped live data. An
+      inactive row is also still a row that *exists* in the source, so even the
+      corrected polarity would be wrong to delete. An operator who genuinely
+      wants that behaviour must configure it explicitly.
+    * **Substring matching is gone.** ``"delete" in name`` captured
+      ``deleted_by`` and ``delete_count``.
+    """
+    del schema  # Detection is by name; type is validated at interpretation time.
     for c in columns:
-        lowered = c.lower()
-        if lowered in {"deleted_at", "deleted", "is_deleted", "tombstone", "is_active"}:
-            return c
-        if "delete" in lowered or "tombstone" in lowered:
+        lowered = (c or "").strip().lower()
+        if not lowered or lowered in _TOMBSTONE_LOOKALIKES:
+            continue
+        if lowered in _TOMBSTONE_COLUMNS:
             return c
     return None
 
 
 def _is_tombstone_set(record: dict[str, Any], tombstone_column: str) -> bool:
+    """Whether ``record`` is marked deleted by its soft-delete column.
+
+    Fails safe: an unrecognised value on a boolean-style column returns
+    ``False``. Refusing to delete on ambiguity is recoverable (a stale row that
+    a later sync corrects); deleting on ambiguity is not.
+    """
+    if not tombstone_column:
+        return False
     value = record.get(tombstone_column)
     if value is None:
         return False
+    if isinstance(value, bool):
+        return value
     text = str(value).strip().lower()
-    if text in {"", "0", "false", "f", "no", "n", "null", "none"}:
+    if text in _FALSEY_TOKENS:
         return False
-    if text in {"1", "true", "t", "yes", "y"}:
+    if text in _TRUTHY_TOKENS:
         return True
-    # Non-empty timestamp/text means deleted (soft-delete pattern)
-    return bool(text)
+    # Timestamp-style soft deletes: any concrete value means deleted. This is
+    # the `deleted_at IS NULL` convention and is safe to read literally.
+    if tombstone_column.strip().lower() in _TIMESTAMP_TOMBSTONES:
+        return _looks_like_timestamp(text)
+    # Boolean-style column carrying something we do not recognise. Do not guess.
+    logger.warning(
+        "Soft-delete column %r held unrecognised value %r; treating the row as "
+        "present rather than deleting it at the destination.",
+        tombstone_column,
+        text[:64],
+    )
+    return False
+
+
+def _looks_like_timestamp(text: str) -> bool:
+    """Whether a value is a real instant rather than a zero/sentinel date.
+
+    ``0000-00-00`` and friends are MySQL's "no date" sentinels; reading them as
+    a deletion timestamp would delete every row that was never soft-deleted.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if set(stripped) <= {"0", "-", ":", " ", "/", "."}:
+        return False
+    return True
 
 
 class CdcEngine:
@@ -447,13 +607,20 @@ def _apply_change_batch(
     mappings: list[dict[str, Any]],
     column_types: dict[str, str],
     headers: list[str],
-    pk_target_col: str,
+    pk_target_col: str | list[str],
     chunk_idx: int,
     total_chunks: int,
     *,
     backfill_new_fields: bool = False,
+    job_id: str = "",
 ) -> tuple[int, str, dict[str, Any], int]:
     """Apply a single ChangeBatch to the destination. Returns rows_written, checksum, summary, deleted_count."""
+    from services.cdc_snapshot_window import _pk_columns
+
+    # Normalize once so every writer and the delete path see a real column list.
+    # A comma-joined string here used to survive into conflict_columns, where
+    # every writer then filtered it out as "column not in target".
+    pk_target_cols = _pk_columns(pk_target_col) if pk_target_col else []
     headers, mappings, column_types = _stamp_cdc_lsn(
         change, headers, mappings, column_types
     )
@@ -462,6 +629,17 @@ def _apply_change_batch(
     deleted = 0
     last_checksum = ""
     dest_summary: dict[str, Any] = {}
+
+    # CDC asks for upsert, but without a destination primary key most writers
+    # degrade to plain inserts. Replaying such a batch after an ambiguous
+    # failure would duplicate change events, so classify before retrying.
+    cdc_replay_safety = classify_replay_safety(
+        dest_type=dest_type,
+        write_mode="upsert",
+        conflict_columns=pk_target_cols or None,
+        job_id=job_id,
+        has_primary_key=bool(pk_target_cols),
+    )
 
     if change.inserts:
         data_rows = _records_to_matrix(change.inserts, headers)
@@ -480,12 +658,15 @@ def _apply_change_batch(
             total_chunks=total_chunks,
             rows_so_far=0,
             write_mode="upsert",
-            conflict_columns=[pk_target_col] if pk_target_col else None,
+            conflict_columns=pk_target_cols or None,
             backfill_new_fields=backfill_new_fields,
+            job_id=job_id,
+            sync_mode="cdc",
         )
         rows, last_checksum, dest_summary = with_retry(
             write_op,
             budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
+            replay_safety=cdc_replay_safety,
         )
         rows_written += rows
 
@@ -506,23 +687,26 @@ def _apply_change_batch(
             total_chunks=total_chunks,
             rows_so_far=0,
             write_mode="upsert",
-            conflict_columns=[pk_target_col] if pk_target_col else None,
+            conflict_columns=pk_target_cols or None,
             backfill_new_fields=backfill_new_fields,
+            job_id=job_id,
+            sync_mode="cdc",
         )
         rows, last_checksum, dest_summary = with_retry(
             write_op,
             budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
+            replay_safety=cdc_replay_safety,
         )
         rows_written += rows
 
     if change.deletes:
-        if not pk_target_col:
+        if not pk_target_cols:
             raise ValueError("CDC deletes require a primary key on the destination")
         deleted = delete_by_primary_keys(
             db_type=dest_type,
             cfg=dest_cfg,
             table_name=dest_table,
-            primary_key_column=pk_target_col,
+            primary_key_column=pk_target_cols,
             keys=change.deletes,
             schema=dest_cfg.get("schema"),
             incoming_lsn=extract_cdc_lsn(change.resume_token),
@@ -909,6 +1093,15 @@ def _run_cdc_shared_multi_table(
     original_dest_collection = getattr(destination, "collection", None)
 
     def _resolve_stream(change: ChangeBatch) -> str:
+        """Map a demuxed batch back to the stream that produced it.
+
+        Raises rather than guessing. The previous ``return tables[0]`` fallback
+        meant any batch whose ``table`` tag was missing or unrecognised was
+        written into the *first* configured table's destination — rows silently
+        landing in the wrong table, with no error and nothing quarantined.
+        A shared reader that cannot attribute a batch is a bug in the reader,
+        and failing the job is the only safe response.
+        """
         name = (change.table or "").strip()
         if name and name in stream_cfg:
             return name
@@ -917,15 +1110,63 @@ def _run_cdc_shared_multi_table(
         for t in tables:
             if t.lower() == lower:
                 return t
-        return tables[0]
+        # Bare table name against a schema-qualified config (or vice versa).
+        if lower:
+            bare = lower.rsplit(".", 1)[-1]
+            for t in tables:
+                if t.lower().rsplit(".", 1)[-1] == bare:
+                    return t
+        if len(tables) == 1:
+            # Single-table run: attribution is unambiguous regardless of tagging.
+            return tables[0]
+        if change.total_changes == 0:
+            # Position-only batch (phase transition / ack barrier). It carries no
+            # rows, so there is nothing to attribute and nothing to mis-route.
+            return tables[0]
+        raise ValueError(
+            f"Shared CDC reader produced a batch of {change.total_changes} change(s) "
+            f"for table {name!r}, which is not one of the captured tables "
+            f"{sorted(tables)}. Refusing to write it to an arbitrary destination — "
+            "rows would land in the wrong table."
+        )
+
+    # Per-table cursors staged for the transaction currently being applied. One
+    # source transaction is demuxed into one batch per touched table, and only
+    # the last carries ``ack_barrier``. Publishing a table's cursor as soon as
+    # its own batch lands would mark that table caught up to the commit while
+    # sibling tables from the same transaction are still unapplied — and if the
+    # run then dies, resuming those tables individually starts *after* changes
+    # that never landed, so the tables diverge permanently with nothing
+    # recording that anything is missing. Staging here and flushing on the
+    # barrier makes the whole transaction advance together or not at all.
+    pending_table_watermarks: dict[str, str] = {}
+
+    def _flush_table_watermarks() -> None:
+        """Publish staged per-table cursors now that the transaction is fully applied."""
+        if not pending_table_watermarks:
+            return
+        for name, token in pending_table_watermarks.items():
+            set_watermark(
+                stream_cfg[name]["cursor_key"],
+                token,
+                metadata={
+                    "job_id": job_id,
+                    "sync_mode": sync_mode,
+                    "shared_reader": True,
+                    "txn_consistent": True,
+                },
+            )
+        pending_table_watermarks.clear()
 
     def _apply_tagged(change: ChangeBatch) -> bool:
         nonlocal total_rows, chunk_idx, headers, last_summary
         stream = _resolve_stream(change)
         cfg = stream_cfg[stream]
         use_maps = cfg["mappings"]
-        pk = cfg["primary_key"]
-        pk_target = map_source_to_target(pk, use_maps) or pk
+        from services.cdc_snapshot_window import _pk_columns
+
+        pk_source = _pk_columns(cfg["primary_key"])
+        pk_target = [map_source_to_target(c, use_maps) or c for c in pk_source]
         if original_dest_table is not None or original_dest_collection is not None:
             if getattr(destination, "format", "") == "mongodb" or original_dest_collection:
                 destination.collection = stream
@@ -937,20 +1178,28 @@ def _run_cdc_shared_multi_table(
             sample = (change.inserts or change.updates)[0]
             headers = list(sample.keys())
         _assert_cdc_lease_before_apply(cdc)
-        rows_written, checksum, dest_summary, deleted = _apply_change_batch(
-            dest_type,
-            destination,
-            dest_cfg,
-            dest_table,
-            change,
-            use_maps,
-            col_types,
-            headers,
-            pk_target,
-            chunk_idx,
-            max(1, chunk_idx + 1),
-            backfill_new_fields=backfill_new_fields,
-        )
+        with _cdc_span(
+            "cdc.apply_batch",
+            job_id=str(job_id or ""),
+            dest_table=str(dest_table or ""),
+            stream=str(stream or ""),
+            chunk_idx=int(chunk_idx),
+        ):
+            rows_written, checksum, dest_summary, deleted = _apply_change_batch(
+                dest_type,
+                destination,
+                dest_cfg,
+                dest_table,
+                change,
+                use_maps,
+                col_types,
+                headers,
+                pk_target,
+                chunk_idx,
+                max(1, chunk_idx + 1),
+                backfill_new_fields=backfill_new_fields,
+                job_id=str(job_id or ""),
+            )
         chunk_idx += 1
         total_rows += rows_written + deleted
         stream_health[stream]["records_processed"] = (
@@ -969,12 +1218,17 @@ def _run_cdc_shared_multi_table(
                     token_s = json.dumps(change.resume_token, default=json_util.default)
                 except TypeError:
                     token_s = str(change.resume_token)
-                set_watermark(
-                    cfg["cursor_key"],
-                    token_s,
-                    metadata={"job_id": job_id, "sync_mode": sync_mode, "shared_reader": True},
-                )
+                # Stage, do not publish. Only a table that actually received a
+                # batch in this transaction advances, so a table untouched by the
+                # commit keeps its previous position.
+                if change.total_changes:
+                    pending_table_watermarks[stream] = token_s
                 if should_ack_shared_batch(change) and not skip_ack:
+                    # Barrier reached: the whole transaction is applied, so the
+                    # per-table cursors and the shared log position may both move.
+                    # A position-only barrier (heartbeat, or a commit that touched
+                    # no captured table) advances the log but no table cursor.
+                    _flush_table_watermarks()
                     set_watermark(
                         shared_key,
                         token_s,
@@ -1015,29 +1269,31 @@ def _run_cdc_shared_multi_table(
 
     try:
         if run_snapshot:
-            for change in cdc.snapshot():
-                _apply_tagged(change)
-                if limit and total_rows >= limit:
-                    break
-        if run_stream and not (limit and total_rows >= limit):
-            max_idle = max(1, int(os.getenv("DATAFLOW_CDC_MAX_IDLE_POLLS", "3")))
-            max_rounds = max(1, int(os.getenv("DATAFLOW_CDC_MAX_POLL_ROUNDS", "50")))
-            idle = 0
-            for _ in range(max_rounds):
-                had = False
-                for change in cdc.poll():
-                    if _apply_tagged(change):
-                        had = True
+            with _cdc_span("cdc.snapshot", job_id=str(job_id or ""), shared_reader=True):
+                for change in cdc.snapshot():
+                    _apply_tagged(change)
                     if limit and total_rows >= limit:
                         break
-                if limit and total_rows >= limit:
-                    break
-                if had:
-                    idle = 0
-                else:
-                    idle += 1
-                    if idle >= max_idle:
+        if run_stream and not (limit and total_rows >= limit):
+            max_idle = max(1, int(getenv_brand("CDC_MAX_IDLE_POLLS", "3")))
+            max_rounds = max(1, int(getenv_brand("CDC_MAX_POLL_ROUNDS", "50")))
+            idle = 0
+            with _cdc_span("cdc.poll", job_id=str(job_id or ""), shared_reader=True):
+                for _ in range(max_rounds):
+                    had = False
+                    for change in cdc.poll():
+                        if _apply_tagged(change):
+                            had = True
+                        if limit and total_rows >= limit:
+                            break
+                    if limit and total_rows >= limit:
                         break
+                    if had:
+                        idle = 0
+                    else:
+                        idle += 1
+                        if idle >= max_idle:
+                            break
     finally:
         if original_dest_table is not None:
             destination.table = original_dest_table
@@ -1243,17 +1499,38 @@ def _run_cdc_single_stream(
     cursor_field = contract.cursor_field if contract else ""
     if not primary_key:
         raise ValueError("CDC sync requires primary_key in the stream contract")
+    # Always expand to a column list. A comma-joined composite left as one
+    # string made every writer filter the conflict list to empty (no column
+    # named "order_id,line_id"), so CDC silently degraded to append-only
+    # inserts and every delete vanished.
+    pk_source_cols = (
+        list(contract.primary_key_columns())
+        if contract is not None
+        else [c.strip() for c in primary_key.replace(";", ",").split(",") if c.strip()]
+    )
+    if not pk_source_cols:
+        raise ValueError("CDC sync requires primary_key in the stream contract")
     _gate_cdc_sink(
         dest_type=dest_type,
         dest_cfg=dest_cfg,
         has_primary_key=True,
     )
     if src_type in {"mongodb", "mysql", "postgresql", "sqlserver", "oracle"}:
-        cursor_field = cursor_field or primary_key or ("_id" if src_type == "mongodb" else "id")
+        cursor_field = cursor_field or pk_source_cols[0] or (
+            "_id" if src_type == "mongodb" else "id"
+        )
     elif not cursor_field:
         raise ValueError("CDC sync requires cursor_field in the stream contract")
 
-    pk_target_col = map_source_to_target(primary_key, mappings)
+    pk_target_cols = [map_source_to_target(c, mappings) for c in pk_source_cols]
+    if any(not c for c in pk_target_cols):
+        raise ValueError(
+            "CDC sync requires every primary-key column to map to a destination "
+            f"column; unmapped sources={pk_source_cols!r}"
+        )
+    # Single-column shorthand kept for call sites that still take a string
+    # (readers, cursor defaults). Composite deletes/upserts use the list.
+    pk_target_col = pk_target_cols[0] if len(pk_target_cols) == 1 else ",".join(pk_target_cols)
     cursor_key = build_cursor_key(
         source_type=src_type,
         source_database=src_cfg.get("database", ""),
@@ -1580,9 +1857,9 @@ def _run_cdc_single_stream(
     import os
 
     # Continuous CDC: drain snapshot, then poll until idle or budget exhausted.
-    max_idle_polls = max(1, int(os.getenv("DATAFLOW_CDC_MAX_IDLE_POLLS", "3")))
-    max_poll_rounds = max(1, int(os.getenv("DATAFLOW_CDC_MAX_POLL_ROUNDS", "50")))
-    txn_hold_sleep = float(os.getenv("DATAFLOW_CDC_TXN_HOLD_SLEEP_SEC", "0.25"))
+    max_idle_polls = max(1, int(getenv_brand("CDC_MAX_IDLE_POLLS", "3")))
+    max_poll_rounds = max(1, int(getenv_brand("CDC_MAX_POLL_ROUNDS", "50")))
+    txn_hold_sleep = float(getenv_brand("CDC_TXN_HOLD_SLEEP_SEC", "0.25"))
 
     def _apply_and_checkpoint(change: ChangeBatch) -> bool:
         """Apply one batch, persist watermark, ack source. Returns True if data moved."""
@@ -1607,20 +1884,27 @@ def _run_cdc_single_stream(
         # must not upsert. Still at-least-once — new holder may redeliver.
         _assert_cdc_lease_before_apply(cdc)
 
-        rows_written, last_checksum, dest_summary, deleted = _apply_change_batch(
-            dest_type,
-            destination,
-            dest_cfg,
-            dest_table,
-            change,
-            mappings,
-            column_types,
-            headers,
-            pk_target_col,
-            chunk_idx,
-            total_chunks,
-            backfill_new_fields=backfill_new_fields,
-        )
+        with _cdc_span(
+            "cdc.apply_batch",
+            job_id=str(job_id or ""),
+            dest_table=str(dest_table or ""),
+            chunk_idx=int(chunk_idx),
+        ):
+            rows_written, last_checksum, dest_summary, deleted = _apply_change_batch(
+                dest_type,
+                destination,
+                dest_cfg,
+                dest_table,
+                change,
+                mappings,
+                column_types,
+                headers,
+                pk_target_col,
+                chunk_idx,
+                total_chunks,
+                backfill_new_fields=backfill_new_fields,
+                job_id=str(job_id or ""),
+            )
         state.rows_written += rows_written
         state.inserts += len(change.inserts)
         state.updates += len(change.updates)
@@ -1749,29 +2033,31 @@ def _run_cdc_single_stream(
     ddl_log.append(f"CDC snapshot_mode={snapshot_mode.value}")
 
     if run_snapshot:
-        for change in cdc.snapshot():
-            _apply_and_checkpoint(change)
+        with _cdc_span("cdc.snapshot", job_id=str(job_id or "")):
+            for change in cdc.snapshot():
+                _apply_and_checkpoint(change)
 
     # Query CDC (CdcEngine): one incremental pass when resuming. Log CDC adapters
     # continuously poll until idle so a single job drains the slot/binlog/CT stream.
     if run_stream:
-        if isinstance(cdc, CdcEngine):
-            if watermark is not None or not run_snapshot:
-                for change in cdc.poll():
-                    _apply_and_checkpoint(change)
-        else:
-            idle_polls = 0
-            for _round in range(max_poll_rounds):
-                had_data = False
-                for change in cdc.poll():
-                    if _apply_and_checkpoint(change):
-                        had_data = True
-                if had_data:
-                    idle_polls = 0
-                else:
-                    idle_polls += 1
-                    if idle_polls >= max_idle_polls:
-                        break
+        with _cdc_span("cdc.poll", job_id=str(job_id or "")):
+            if isinstance(cdc, CdcEngine):
+                if watermark is not None or not run_snapshot:
+                    for change in cdc.poll():
+                        _apply_and_checkpoint(change)
+            else:
+                idle_polls = 0
+                for _round in range(max_poll_rounds):
+                    had_data = False
+                    for change in cdc.poll():
+                        if _apply_and_checkpoint(change):
+                            had_data = True
+                    if had_data:
+                        idle_polls = 0
+                    else:
+                        idle_polls += 1
+                        if idle_polls >= max_idle_polls:
+                            break
 
     final_watermark = state.running_cursor if state.running_cursor is not None else watermark
     lag_fields = _cdc_lag_fields(cdc)

@@ -8,27 +8,29 @@ export interface PageMeta {
   keywords: string;
   robots?: string;
   ogType?: "website" | "article";
+  /** Hash or path for canonical / og:url (e.g. "#/pricing"). */
+  canonicalPath?: string;
 }
 
-const BASE_TITLE = "DataFlow";
+const BASE_TITLE = "Datawrap";
 const DEFAULT_DESCRIPTION =
-  "Integrity-first data transfer — migrate databases, sync files, and move data with AI semantic mapping, CDC, quarantine, and 8 preflight gates.";
+  "Integrity-first data transfer — migrate databases, sync files, and move data with AI semantic mapping, CDC, quarantine, and G1–G9 preflight gates.";
 const DEFAULT_KEYWORDS =
-  "data transfer, data migration, ETL, database migration, CSV to PostgreSQL, Snowflake migration, semantic mapping, preflight validation, data pipeline, DataFlow";
+  "data transfer, data migration, ETL, database migration, CSV to PostgreSQL, Snowflake migration, semantic mapping, preflight validation, data pipeline, Datawrap";
 
 export const PAGE_META: Record<Screen | "login", PageMeta> = {
   landing: {
     title: "Universal Data Transfer Platform",
     description:
-      "Move data between any source and destination — databases, files, warehouses, and APIs. AI column mapping, 8 preflight gates, and live reconciliation.",
+      "Move data between any source and destination — databases, files, warehouses, and APIs. AI column mapping, G1–G9 preflight gates, and live reconciliation.",
     keywords:
       "data transfer platform, database migration tool, file to database, PostgreSQL to Snowflake, data sync, ETL platform, semantic mapping",
     ogType: "website",
   },
   login: {
     title: "Sign In",
-    description: "Sign in to DataFlow to manage connectors, run transfers, and monitor pipelines.",
-    keywords: "DataFlow login, data platform sign in, enterprise data transfer",
+    description: "Sign in to Datawrap to manage connectors, run transfers, and monitor pipelines.",
+    keywords: "Datawrap login, data platform sign in, enterprise data transfer",
     robots: "noindex, nofollow",
   },
   dashboard: {
@@ -53,10 +55,10 @@ export const PAGE_META: Record<Screen | "login", PageMeta> = {
     robots: "noindex",
   },
   pilot: {
-    title: "Data Pilot",
+    title: "Datawrap Pilot",
     description:
       "AI agent for natural-language data operations — inspect schemas, run transfers, and troubleshoot pipelines.",
-    keywords: "AI data agent, natural language ETL, Data Pilot, schema inspection",
+    keywords: "AI data agent, natural language ETL, Datawrap Pilot, schema inspection",
     robots: "noindex",
   },
   connectors: {
@@ -73,6 +75,13 @@ export const PAGE_META: Record<Screen | "login", PageMeta> = {
     keywords: "scheduled data sync, recurring ETL, pipeline scheduler, cron data transfer",
     robots: "noindex",
   },
+  transforms: {
+    title: "Transformations",
+    description:
+      "Post-load SQL models that run at the destination after a transfer lands — views, tables, incremental rollups, and data tests.",
+    keywords: "dbt alternative, post-load SQL, data transformation, warehouse models, data tests",
+    robots: "noindex",
+  },
   jobs: {
     title: "Job Theater",
     description:
@@ -83,37 +92,37 @@ export const PAGE_META: Record<Screen | "login", PageMeta> = {
   mcp: {
     title: "MCP Server",
     description:
-      "Model Context Protocol server for Cursor, Claude, and VS Code — same DataFlow tools inside your IDE.",
+      "Model Context Protocol server for Cursor, Claude, and VS Code — same Datawrap tools inside your IDE.",
     keywords: "MCP server, Cursor integration, Claude data tools, VS Code data agent",
     robots: "noindex",
   },
   settings: {
     title: "Settings",
-    description: "Security, team access, and workspace configuration for your DataFlow deployment.",
-    keywords: "DataFlow settings, team security, workspace configuration",
+    description: "Security, team access, and workspace configuration for your Datawrap deployment.",
+    keywords: "Datawrap settings, team security, workspace configuration",
     robots: "noindex",
   },
   docs: {
     title: "Documentation",
     description:
-      "How DataFlow moves, maps, and validates any data — architecture, preflight rules, connector coverage, and security.",
+      "How Datawrap moves, maps, and validates any data — architecture, preflight rules, connector coverage, and security.",
     keywords:
-      "DataFlow documentation, data transfer architecture, ETL documentation, preflight gates, data migration guide",
+      "Datawrap documentation, data transfer architecture, ETL documentation, preflight gates, data migration guide",
     robots: "noindex",
   },
   benchmarks: {
     title: "Benchmarks",
     description:
-      "Reproducible scale proofs — DataFlow throughput, memory, and correctness vs Fivetran, Airbyte, and Stitch baselines.",
+      "Reproducible scale proofs — Datawrap throughput, memory, and correctness vs Fivetran, Airbyte, and Stitch baselines.",
     keywords:
-      "DataFlow benchmark, ETL throughput, data transfer performance, Fivetran vs Airbyte, rows per second",
+      "Datawrap benchmark, ETL throughput, data transfer performance, Fivetran vs Airbyte, rows per second",
     robots: "noindex",
   },
   contracts: {
     title: "Data contracts",
     description:
       "Signed schema agreements that gate transfers, enforce quality rules, and detect breaking drift before cutover.",
-    keywords: "DataFlow data contracts, schema agreement, schema drift, preflight gates",
+    keywords: "Datawrap data contracts, schema agreement, schema drift, preflight gates",
     robots: "noindex",
   },
 };
@@ -124,7 +133,7 @@ export function resolveSiteUrl(): string {
   if (typeof window !== "undefined" && window.location.origin) {
     return window.location.origin;
   }
-  return "https://dataflow.app";
+  return "https://datawrap.app";
 }
 
 export function formatDocumentTitle(pageTitle: string): string {

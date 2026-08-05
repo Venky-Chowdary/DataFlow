@@ -1,5 +1,5 @@
 /**
- * DataFlow design tokens — unified light enterprise theme
+ * Datawrap design tokens — unified light enterprise theme
  * Fonts loaded via @fontsource in main.tsx (no Google CSS import).
  *
  * Single source of truth for spacing, type, and color primitives (the
@@ -17,11 +17,31 @@
   --df-brand: #0d9488;
   --df-brand-hover: #0f766e;
   --df-brand-strong: #115e59;
+  --df-brand-deep: #0f766e;
+  --df-brand-bright: #14b8a6;
   --df-brand-muted: #f0fdfa;
   --df-brand-soft: #ccfbf1;
+  --df-brand-subtle: #f0fdfa;
   --df-brand-ring: rgba(13, 148, 136, 0.28);
+  --df-brand-glow: rgba(13, 148, 136, 0.22);
+  --df-brand-gradient: linear-gradient(135deg, #0f766e 0%, #0d9488 55%, #14b8a6 100%);
+  --df-brand-gradient-vivid: linear-gradient(135deg, #0f766e 0%, #0d9488 100%);
+  --df-brand-gradient-soft: linear-gradient(180deg, rgba(13, 148, 136, 0.05) 0%, transparent 48%);
+  --df-migration-gradient: linear-gradient(90deg, #0f766e, #0d9488, #14b8a6);
   --df-accent: #0d9488;
   --df-accent-muted: #f0fdfa;
+
+  /* AI / Pilot — teal family only (no indigo/purple) */
+  --df-ai: var(--df-brand);
+  --df-ai-muted: var(--df-brand-muted);
+  --df-ai-soft: var(--df-brand-soft);
+
+  /* Breakpoint reference scale (use these widths in @media) */
+  --df-bp-sm: 640px;
+  --df-bp-md: 768px;
+  --df-bp-lg: 1024px;
+  --df-bp-xl: 1280px;
+  --df-bp-2xl: 1440px;
 
   --df-navy-900: #0b1220;
   --df-navy-800: #152033;
@@ -75,15 +95,50 @@
   --df-surface-panel: var(--df-surface);
   --df-ink-primary: var(--df-text-primary);
   --df-ink-secondary: var(--df-text-secondary);
+  --df-ink-muted: var(--df-text-tertiary);
   --df-line: var(--df-border);
+  --df-line-strong: var(--df-border-strong);
   --df-page-gutter: 24px;
   --df-page-gutter-sm: 16px;
+  --df-tile-min-h: 72px;
+
+  /* Premium / motion aliases — defined once here, not in later sheets */
+  --df-premium-gradient: var(--df-brand-gradient);
+  --df-premium-gradient-soft: var(--df-brand-gradient-soft);
+  --df-premium-shadow-sm: var(--df-shadow-sm);
+  --df-premium-shadow-md: var(--df-shadow-md);
+  --df-premium-shadow-lg: var(--df-shadow-lg);
+  --df-premium-radius: var(--df-radius-panel);
+  --df-premium-ease: var(--df-ease);
+  --df-focus: var(--df-brand-ring);
+  --df-ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --df-ease-smooth: cubic-bezier(0.4, 0, 0.2, 1);
+  --df-duration-fast: var(--df-dur-fast);
+  --df-duration-base: var(--df-dur);
+  --df-duration-slow: var(--df-dur-slow);
+  --df-duration-page: var(--df-dur-reveal);
+  --df-blur-glass: 12px;
+  --df-motion-fast: var(--df-dur-fast) var(--df-ease);
+  --df-motion-smooth: var(--df-dur) var(--df-ease);
+  --df-motion-migration: 1.8s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+  --df-midnight: var(--df-text-primary);
+  --df-midnight-soft: var(--df-navy-800);
+
+  /* Legacy command-center aliases (map only — no second palette) */
+  --df-graphite: var(--df-navy-900);
+  --df-graphite-2: var(--df-navy-800);
+  --df-ink: var(--df-text-primary);
+  --df-panel: var(--df-surface);
+  --df-panel-solid: var(--df-surface);
+  --df-panel-subtle: var(--df-surface-muted);
+  --df-amber: var(--df-warning);
+  --df-amber-muted: var(--df-warning-bg);
 
   --df-font-sans: "IBM Plex Sans", "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
   --df-font-display: "Plus Jakarta Sans", "IBM Plex Sans", system-ui, sans-serif;
   --df-font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
 
-  --df-header-height: 56px;
+  --df-header-height: 60px;
   --df-sidebar-width: 252px;
   --df-content-max: none;
   --df-rail-width: 360px;
@@ -97,19 +152,13 @@
   --df-radius-panel: 12px;
   --df-radius-tile: 10px;
 
-  --df-btn-height: 34px;
+  /* Buttons + form controls share one height so toolbars never look ragged */
+  --df-btn-height: 36px;
   --df-btn-height-sm: 30px;
   --df-btn-height-lg: 40px;
-
-  /* Single control-height standard — every text input, select, search box,
-     and filter pill resolves to one of these so no control ever renders thin
-     or short. Referenced by inputs (app-styles/dataflow-ui), the toolbar/filter
-     cluster (enterprise-ui), and the connection workbench. Defined globally so
-     controls outside a `.df2-toolbar` (e.g. the connection workbench filter)
-     still get a real height instead of collapsing to text. */
-  --df-control-height: 38px;
-  --df-control-height-sm: 34px;
-  --df-toolbar-h: 38px;
+  --df-control-height: 36px;
+  --df-control-height-sm: 32px;
+  --df-toolbar-h: 36px;
 
   --df-table-row-height: 44px;
   --df-table-row-height-sm: 36px;
@@ -135,9 +184,10 @@
   --df-scrollbar-thumb-hover: color-mix(in srgb, var(--df-navy-700) 46%, transparent);
   --df-scrollbar-track: transparent;
 
-  /* Toast durations — keep CSS timer + JS dismiss in lockstep */
+  /* Toast durations — keep CSS timer + JS dismiss in lockstep (Toast.tsx) */
   --df-toast-duration: 4500ms;
-  --df-toast-duration-error: 8000ms;
+  --df-toast-duration-warning: 10000ms;
+  --df-toast-duration-error: 16000ms;
   --df-toast-width: min(400px, calc(100vw - 32px));
 
   --df-space-1: 4px;
@@ -249,6 +299,96 @@ body,
   color: var(--df-text-primary);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/*
+ * Laptop workspace density — enterprise-safe (no CSS `zoom`).
+ *
+ * Operators keep Chrome at 100%. CSS zoom was used to fake ~80% browser zoom
+ * but left blank strips / right-edge overflow on real laptops. Density is now
+ * real tokens (control heights, gutters, type) so the shell always fills the
+ * viewport at 100% browser zoom — Airbyte/Fivetran-class layout honesty.
+ * Landing / login sit outside `.df2-app` and stay full marketing scale.
+ */
+:root {
+  --df-ui-scale: 1; /* retained for tests / docs; never applied via zoom */
+  --df-layout-viewport-h: 100dvh;
+  --df-layout-viewport-w: 100%;
+  --df-viewport-h: 100dvh;
+}
+
+/* Lock document scroll only when the workspace shell is mounted — landing
+   pages outside `.df2-app` must keep normal document scrolling. */
+body:has(.df2-app) {
+  overflow: hidden;
+  width: 100%;
+  max-width: 100%;
+  height: 100%;
+  max-height: 100%;
+}
+
+body:has(.df2-app) #root {
+  width: 100%;
+  max-width: 100%;
+  height: 100%;
+  max-height: 100%;
+  overflow: hidden;
+}
+
+.df2-app {
+  position: relative;
+  width: 100%;
+  max-width: 100%;
+  height: 100%;
+  min-height: 100dvh;
+  max-height: 100%;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+/* ≤1680 CSS px — typical 14–16" laptop at 100% browser zoom */
+@media (max-width: 1680px) {
+  .df2-app {
+    --df-btn-height: 32px;
+    --df-btn-height-sm: 28px;
+    --df-btn-height-lg: 36px;
+    --df-control-height: 32px;
+    --df-control-height-sm: 28px;
+    --df-header-height: 52px;
+    --df-sidebar-width: 220px;
+    --df-page-gutter: 12px;
+    --df-page-gutter-sm: 10px;
+    --df-card-pad: 12px;
+    --df-card-head-pad: 10px 12px;
+    --df-nav-item-height: 32px;
+    --df-table-row-height: 40px;
+    --df-table-row-height-sm: 34px;
+    --df-tile-min-h: 64px;
+    font-size: 13px;
+  }
+}
+
+/* Tablet / small laptop density (shared breakpoint scale) */
+@media (min-width: 1024px) and (max-width: 1366px) {
+  .df2-app {
+    --df-tile-min-h: 64px;
+    --df-card-pad: 12px;
+    --df-card-head-pad: 10px 12px;
+    --df-card-footer-pad: 10px 12px;
+    --df-page-section-gap: 10px;
+    --df-grid-gap: 8px;
+  }
+}
+
+/* 13–15" CSS widths (MacBook Air / typical laptop) */
+@media (max-width: 1512px) {
+  .df2-app {
+    --df-sidebar-width: 204px;
+    --df-page-gutter: 10px;
+    --df-card-pad: 10px;
+    --df-rail-width: 320px;
+    font-size: 12.5px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

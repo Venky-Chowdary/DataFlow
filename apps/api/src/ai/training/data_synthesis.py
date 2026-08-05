@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Training Data Synthesis
+Datawrap — Training Data Synthesis
 
 Generate training data from known patterns and industry schemas.
 """

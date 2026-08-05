@@ -54,7 +54,7 @@ _HUBSPOT_STREAMS: dict[str, dict[str, Any]] = {
 
 @register_connector
 class HubSpotCDKConnector(BaseConnector):
-    """Certified-path HubSpot source implemented on the DataFlow CDK."""
+    """Certified-path HubSpot source implemented on the Datawrap CDK."""
 
     name = "hubspot_cdk"
     supports_read = True

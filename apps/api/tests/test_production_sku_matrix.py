@@ -66,6 +66,17 @@ def test_production_sku_transfer(route: tuple[str, str, str, str], tmp_path: Pat
     if not _endpoint_reachable(destination):
         pytest.skip(f"destination {dst_kind}/{dst_fmt} not reachable")
 
+    # Object-store SKU routes need a working pyexpat (botocore XML). Skip with
+    # an environment reason — never claim product failure for a broken host XML.
+    if src_fmt in {"s3", "gcs", "adls"} or dst_fmt in {"s3", "gcs", "adls"}:
+        from services.runtime_checks import (
+            python_xml_runtime_ok,
+            python_xml_runtime_skip_reason,
+        )
+
+        if not python_xml_runtime_ok():
+            pytest.skip(python_xml_runtime_skip_reason())
+
     validation_mode = "balanced" if dst_fmt in _NO_INDEPENDENT_VERIFIER else "strict"
     request = TransferRequest(
         source=source,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import logging
 import os
+from services.brand_env import getenv_brand
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -12,7 +13,7 @@ from decimal import Overflow
 from pathlib import Path
 from typing import Any, Callable
 
-from services.type_system import ddl_type, normalize_logical_type
+from services.type_system import ddl_type, materialize_dest_ddl, normalize_logical_type
 from services.value_serializer import cell_to_string
 
 from connectors.driver_guard import stub_writes_allowed
@@ -53,8 +54,8 @@ logger = logging.getLogger(__name__)
 
 # Prefer COPY INTO for modest stream batches — 2000 was too high when wide Mongo
 # rows shrink stream chunks below the threshold and force slow INSERT loops.
-COPY_THRESHOLD = int(os.getenv("DATAFLOW_SNOWFLAKE_COPY_THRESHOLD", "200"))
-MAX_BIND_INSERT_ROWS = int(os.getenv("DATAFLOW_SF_BIND_INSERT_ROWS", "1000"))
+COPY_THRESHOLD = int(getenv_brand("SNOWFLAKE_COPY_THRESHOLD", "200"))
+MAX_BIND_INSERT_ROWS = int(getenv_brand("SF_BIND_INSERT_ROWS", "1000"))
 
 @dataclass
 class WriteResult(_WriteResult):
@@ -63,7 +64,7 @@ class WriteResult(_WriteResult):
 
 
 def sf_type(inferred: str) -> str:
-    return ddl_type("snowflake", inferred)
+    return materialize_dest_ddl("snowflake", inferred)
 
 
 def _is_fakesnow_connection(conn: Any) -> bool:
@@ -124,6 +125,31 @@ def _snowflake_decimal_type(col_idx: int, mapped_rows: list[tuple]) -> str:
     return f"NUMBER({precision},{scale})"
 
 
+def resolve_snowflake_create_types(
+    logical_types: list[str],
+    mapped_rows: list[tuple],
+) -> list[str]:
+    """CREATE column types — honor Map-stamped DECIMAL(p,s); bare uses ddl SSOT.
+
+    Explicit NUMBER/DECIMAL(p,s) stamps are never overridden by batch inference;
+    unfit cells are quarantined instead. Bare DECIMAL rematerializes to
+    ``NUMBER(38,10)`` via ``ddl_type`` — never batch-inferred invent.
+    """
+    from services.type_system import ddl_type, normalize_logical_type
+
+    out: list[str] = []
+    for i, t in enumerate(logical_types):
+        if normalize_logical_type(t) == "decimal":
+            if _parse_number_type(t) is not None:
+                out.append(sf_type(t))
+            else:
+                # Map≡CREATE: platform SSOT, not per-batch invent.
+                out.append(sf_type(ddl_type("snowflake", t)))
+        else:
+            out.append(sf_type(t))
+    return out
+
+
 def _quarantine_unfit_decimals(
     mapped_rows: list[tuple],
     target_cols: list[str],
@@ -150,12 +176,39 @@ def _widen_existing_number_columns(
     table_name: str,
     target_cols: list[str],
     target_types: list[str],
-) -> None:
-    """Widen existing NUMBER columns when a later batch needs more capacity.
+    *,
+    stamp_ceiling_by_col: dict[str, str] | None = None,
+    candidate_types: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Align live NUMBER columns up to approved Map types — never past them.
 
-    CREATE TABLE IF NOT EXISTS freezes the first batch's sizing; without this,
-    later chunks raise decimal.Overflow after tens of thousands of rows succeed.
+    Returns audit refusals when a candidate would exceed an explicit Map stamp.
     """
+    from connectors.schema_drift import is_wider_type
+
+    refusals: list[dict[str, Any]] = []
+    ceilings = {str(k).upper(): v for k, v in (stamp_ceiling_by_col or {}).items()}
+    cands = list(candidate_types) if candidate_types is not None else list(target_types)
+    if len(cands) != len(target_cols):
+        cands = list(target_types)
+
+    desired: list[str] = []
+    for col, mapped_typ, cand in zip(target_cols, target_types, cands):
+        stamp = ceilings.get(col.upper())
+        if stamp:
+            if cand and is_wider_type(stamp, cand):
+                refusals.append(
+                    {
+                        "column": col,
+                        "mapped_type": stamp,
+                        "refused_wider": cand,
+                        "reason": "explicit_map_stamp_ceiling",
+                    }
+                )
+            desired.append(stamp)
+        else:
+            desired.append(cand or mapped_typ)
+
     try:
         cur.execute(
             """
@@ -173,9 +226,9 @@ def _widen_existing_number_columns(
         logger.warning(
             "snowflake widen column introspection failed: %s", exc, exc_info=exc
         )
-        return
+        return refusals
 
-    for col, typ in zip(target_cols, target_types):
+    for col, typ in zip(target_cols, desired):
         parsed = _parse_number_type(typ)
         if not parsed:
             continue
@@ -185,22 +238,18 @@ def _widen_existing_number_columns(
             continue
         want_int = max(0, want_p - want_s)
         cur_int = max(0, cur_p - cur_s)
-        final_int = max(want_int, cur_int)
-        final_scale = max(want_s, cur_s)
-        if final_int + final_scale > 38:
-            final_scale = max(0, 38 - final_int)
-        final_p = min(38, final_int + final_scale)
-        if final_p <= cur_p and final_scale <= cur_s and final_int <= cur_int:
+        if want_int <= cur_int and want_s <= cur_s and want_p <= cur_p:
             continue
         try:
             cur.execute(
                 f'ALTER TABLE "{table_name}" ALTER COLUMN "{col}" '
-                f"SET DATA TYPE NUMBER({final_p},{final_scale})"
+                f"SET DATA TYPE NUMBER({want_p},{want_s})"
             )
         except Exception as exc:
             logger.warning(
                 "snowflake alter column %s failed: %s", col, exc, exc_info=exc
             )
+    return refusals
 
 
 def _format_write_error(exc: BaseException) -> str:
@@ -225,9 +274,14 @@ def _bind_rows_for_snowflake(
 
     Production volume uses COPY (≥ COPY_THRESHOLD); without this, BOOLEAN/VARIANT
     bind only on the small JSON INSERT path and Mongo ``\"true\"`` wire drifts.
+
+    Dense load only — callers must route sparse CDC rows to omit-from-SET upsert.
+    ``DF_MISSING`` becomes SQL NULL so BOOL/NUMBER never see the sentinel string.
     """
     from connectors.sql_bind import normalize_sql_bind_value
+    from connectors.writer_common import materialize_missing_as_null_for_dense_write
 
+    mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
     bound: list[tuple] = []
     for row in mapped_rows:
         converted: list[Any] = []
@@ -749,14 +803,10 @@ def write_mapped_rows(
         error_policy=policy,
     )
 
-    # Size Snowflake NUMBER columns from the actual batch data.  Prefer
-    # integer capacity over fractional digits so NUMBER(38,s) never under-fits.
-    target_types = [
-        _snowflake_decimal_type(i, mapped_rows)
-        if normalize_logical_type(t) == "decimal"
-        else sf_type(t)
-        for i, t in enumerate(logical_types)
-    ]
+    # Size Snowflake NUMBER columns from the actual batch data only when Map
+    # did not stamp an explicit DECIMAL/NUMBER(p,s). Prefer integer capacity
+    # over fractional digits so NUMBER(38,s) never under-fits bare DECIMAL.
+    target_types = resolve_snowflake_create_types(logical_types, mapped_rows)
     mapped_rows = _quarantine_unfit_decimals(
         mapped_rows, target_cols, target_types, rejected_details, policy
     )
@@ -993,10 +1043,35 @@ def write_mapped_rows(
                     f"CREATE TABLE IF NOT EXISTS {quote_sql_identifier(table_name)} ({col_defs})"
                 )
 
-            # Later stream chunks may need wider NUMBER than the first CREATE.
-            _widen_existing_number_columns(
-                cur, schema, table_name, target_cols, target_types
+            # Later stream chunks may need wider NUMBER than the first CREATE —
+            # but never past an explicit Map stamp (Map≡ALTER).
+            from services.mapping_constraints import write_mappings
+
+            stamp_ceiling_by_col: dict[str, str] = {}
+            by_tgt: dict[str, dict] = {}
+            for mapping in write_mappings(mappings):
+                tgt = sanitize_identifier(
+                    str(mapping.get("target") or ""), preserve_case=True
+                )
+                if tgt and tgt not in by_tgt:
+                    by_tgt[tgt] = mapping
+            for col, typ in zip(target_cols, target_types):
+                if str((by_tgt.get(col) or {}).get("target_type") or "").strip():
+                    stamp_ceiling_by_col[col] = typ
+            alter_refusals = _widen_existing_number_columns(
+                cur,
+                schema,
+                table_name,
+                target_cols,
+                target_types,
+                stamp_ceiling_by_col=stamp_ceiling_by_col or None,
+                candidate_types=target_types,
             )
+            if alter_refusals:
+                logger.info(
+                    "snowflake Map≡ALTER refusals (stamp ceiling): %s",
+                    alter_refusals,
+                )
 
             if backfill_new_fields:
                 cur.execute(

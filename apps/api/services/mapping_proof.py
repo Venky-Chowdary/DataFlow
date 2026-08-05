@@ -49,13 +49,13 @@ IDENTITY_PASSTHROUGH_CONF_CAP = 0.93
 
 QUARANTINE_POSTURE = (
     "Bad or unparseable rows are held out of the primary write and surfaced in "
-    "quarantine for review — DataFlow does not silently drop them or invent NULL "
+    "quarantine for review — Datawrap does not silently drop them or invent NULL "
     "in place (coerce_null policy only)."
 )
 
 DELIVERY_SEMANTICS = (
-    "Default delivery is at-least-once with upsert/idempotent write where supported; "
-    "exactly-once is not claimed unless a route proves it."
+    "Default delivery is at-least-once with upsert/idempotent write where supported. "
+    "Exactly-once and at-most-once are not claimed (at-most-once would allow silent loss)."
 )
 
 
@@ -76,6 +76,7 @@ def mapping_fidelity(
     *,
     declared_source_type: str = "",
     declared_target_type: str = "",
+    destination_db_type: str = "",
 ) -> dict[str, object]:
     """Canonical per-column fidelity verdict for one mapping.
 
@@ -109,21 +110,43 @@ def mapping_fidelity(
     transform = str(mapping.get("transform") or "none")
     t_fidelity = transform_fidelity(transform)
 
-    if is_lossy_coercion(src_type, tgt_type):
+    dest = (destination_db_type or "").strip().lower()
+    if is_lossy_coercion(src_type, tgt_type, dest_db=dest):
+        from services.conversion_contract import classify_conversion
+
+        conv = classify_conversion(
+            src_type,
+            tgt_type,
+            dest_db=dest,
+            transform=transform,
+            risk_acknowledged=bool(
+                mapping.get("risk_acknowledged") or mapping.get("riskAcknowledged")
+            ),
+        )
         return {
             "verdict": "lossy_cast",
             "reason": f"{src_type} → {tgt_type} can lose precision, range, or domain.",
             "type_narrowing": True,
             "transform_fidelity": t_fidelity,
+            "conversion_class": conv["conversion_class"],
+            "invents_capacity": conv["invents_capacity"],
+            "requires_risk_contract": conv["requires_risk_contract"],
         }
     if t_fidelity == "mutate":
+        from services.conversion_contract import ConversionClass
+
         return {
             "verdict": "mutate",
             "reason": f"Transform '{transform}' rewrites values before write.",
             "type_narrowing": False,
             "transform_fidelity": t_fidelity,
+            "conversion_class": ConversionClass.NEEDS_TRANSFORM.value,
+            "invents_capacity": False,
+            "requires_risk_contract": False,
         }
     if t_fidelity == "lossy_cast":
+        from services.conversion_contract import ConversionClass
+
         return {
             "verdict": "cast",
             "reason": (
@@ -132,12 +155,20 @@ def mapping_fidelity(
             ),
             "type_narrowing": False,
             "transform_fidelity": t_fidelity,
+            "conversion_class": ConversionClass.NEEDS_QUARANTINE.value,
+            "invents_capacity": False,
+            "requires_risk_contract": False,
         }
+    from services.conversion_contract import ConversionClass
+
     return {
         "verdict": "preserve",
         "reason": f"{src_type} → {tgt_type} round-trips without loss.",
         "type_narrowing": False,
         "transform_fidelity": t_fidelity,
+        "conversion_class": ConversionClass.LOSSLESS.value,
+        "invents_capacity": False,
+        "requires_risk_contract": False,
     }
 
 
@@ -146,6 +177,7 @@ def stamp_mapping_fidelity(
     *,
     source_types: dict[str, str] | None = None,
     target_types: dict[str, str] | None = None,
+    destination_db_type: str = "",
 ) -> list[dict]:
     """Attach the canonical verdict to every mapping, in place of guessing.
 
@@ -161,12 +193,16 @@ def stamp_mapping_fidelity(
             m,
             declared_source_type=str(src_declared.get(str(m.get("source") or "")) or ""),
             declared_target_type=str(tgt_declared.get(str(m.get("target") or "")) or ""),
+            destination_db_type=destination_db_type,
         )
         out.append({
             **m,
             "fidelity": verdict["verdict"],
             "fidelity_reason": verdict["reason"],
             "type_narrowing": verdict["type_narrowing"],
+            "conversion_class": verdict.get("conversion_class"),
+            "invents_capacity": verdict.get("invents_capacity"),
+            "requires_risk_contract": verdict.get("requires_risk_contract"),
         })
     return out
 
@@ -270,7 +306,21 @@ def _mapping_risks(
             ),
         })
 
-    if is_lossy_coercion(src_type, tgt_type):
+    src_logical = normalize_logical_type(src_type)
+    tgt_logical = normalize_logical_type(tgt_type)
+    # Normalize engine aliases BEFORE fidelity SSOT — otherwise spark/delta miss
+    # Databricks TIMESTAMP instant polarity and false-flag TIMESTAMPTZ→TIMESTAMP.
+    try:
+        from services.type_system import _normalize_dest_db
+
+        dest = _normalize_dest_db(destination_db_type)
+    except ImportError:  # pragma: no cover
+        dest = (destination_db_type or "").lower()
+        if dest in {"spark", "delta", "delta_lake", "databricks_sql", "unity_catalog"}:
+            dest = "databricks"
+        if dest in {"apache_iceberg", "iceberg_rest", "nessie"}:
+            dest = "iceberg"
+    if is_lossy_coercion(src_type, tgt_type, dest_db=dest):
         risks.append({
             "code": "type_narrowing",
             "severity": "warn",
@@ -279,14 +329,6 @@ def _mapping_risks(
                 "review before production."
             ),
         })
-
-    src_logical = normalize_logical_type(src_type)
-    tgt_logical = normalize_logical_type(tgt_type)
-    dest = (destination_db_type or "").lower()
-    if dest in {"spark", "delta", "delta_lake", "databricks_sql", "unity_catalog"}:
-        dest = "databricks"
-    if dest in {"apache_iceberg", "iceberg_rest", "nessie"}:
-        dest = "iceberg"
     src_raw = src_type.lower()
     lakehouse = dest in {"databricks", "iceberg", "snowflake", "bigquery", "redshift"}
 
@@ -304,7 +346,9 @@ def _mapping_risks(
         is_precision_collapse_coercion = None  # type: ignore
         is_timezone_polarity_loss = None  # type: ignore
 
-    if is_timezone_polarity_loss and is_timezone_polarity_loss(src_type, tgt_type):
+    if is_timezone_polarity_loss and is_timezone_polarity_loss(
+        src_type, tgt_type, dest_db=dest
+    ):
         risks.append({
             "code": "timezone_polarity_loss",
             "severity": "warn",
@@ -329,7 +373,7 @@ def _mapping_risks(
                 ),
             })
 
-    if is_precision_collapse_coercion and is_precision_collapse_coercion(src_type, tgt_type):
+    if is_precision_collapse_coercion and is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest):
         if not any(r.get("code") == "timezone_polarity_loss" for r in risks):
             risks.append({
                 "code": "precision_collapse",
@@ -351,7 +395,9 @@ def _mapping_risks(
                 "native STRUCT/OBJECT."
             ),
         })
-    elif is_nested_shape_collapse and is_nested_shape_collapse(src_type, tgt_type):
+    elif is_nested_shape_collapse and is_nested_shape_collapse(
+        src_type, tgt_type, dest_db=dest
+    ):
         risks.append({
             "code": "nested_shape_collapse",
             "severity": "warn",
@@ -487,7 +533,7 @@ def _mapping_risks(
                 "severity": "info",
                 "message": (
                     "CDC/incremental into lakehouse defaults to at-least-once upsert/MERGE; "
-                    "exactly-once is not claimed unless the route proves idempotent keys + watermark handoff."
+                    "exactly-once is never claimed by DataWrap."
                 ),
             })
 
@@ -638,7 +684,7 @@ def _sample_preview(mapping: dict) -> list[str]:
     return masked
 
 
-def _evidence(mapping: dict) -> dict[str, Any]:
+def _evidence(mapping: dict, *, destination_db_type: str = "") -> dict[str, Any]:
     profile = mapping.get("column_profile") or {}
     sample_n = mapping.get("sample_count")
     if sample_n is None:
@@ -652,9 +698,16 @@ def _evidence(mapping: dict) -> dict[str, Any]:
     name_match = src == tgt or src.replace("_", "") == tgt.replace("_", "")
     src_type = normalize_logical_type(mapping.get("source_type"))
     tgt_type = normalize_logical_type(mapping.get("target_type") or mapping.get("source_type"))
+    evidence_dest = str(
+        destination_db_type
+        or mapping.get("dest_db_type")
+        or mapping.get("destination_db_type")
+        or ""
+    ).strip().lower()
     type_aligned = src_type == tgt_type or not is_lossy_coercion(
         str(mapping.get("source_type") or ""),
         str(mapping.get("target_type") or mapping.get("source_type") or ""),
+        dest_db=evidence_dest,
     )
     preview, preview_clear = _sample_preview_pair(mapping)
     classification = None
@@ -816,7 +869,7 @@ def build_mapping_proof(
         confidences.append(conf)
         transform = m.get("transform") or "none"
         fidelity = transform_fidelity(str(transform))
-        verdict = mapping_fidelity(m)
+        verdict = mapping_fidelity(m, destination_db_type=destination_db_type)
         risks = _mapping_risks(
             m,
             dest_mode=dest_mode,
@@ -824,7 +877,7 @@ def build_mapping_proof(
             sync_mode=effective_sync,
         )
         all_risks.extend(risks)
-        evidence = _evidence(m)
+        evidence = _evidence(m, destination_db_type=destination_db_type)
         # Cap display confidence honesty for create-new identity
         display_conf = conf
         if evidence.get("create_new"):

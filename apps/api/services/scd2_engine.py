@@ -13,6 +13,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from services.engine_pool import release_engine
+
 VALID_FROM_COLUMN = "valid_from"
 VALID_TO_COLUMN = "valid_to"
 IS_CURRENT_COLUMN = "is_current"
@@ -387,7 +389,7 @@ def apply_scd2(
                 conn, qualified, target_cols, batch_size, dialect_name
             )
     finally:
-        engine.dispose()
+        release_engine(engine)
 
     return {
         "rows_written": inserted_total,

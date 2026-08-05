@@ -1,4 +1,4 @@
-# DataFlow — Universal One-Click Data Transfer Platform
+# Datawrap — Universal One-Click Data Transfer Platform
 
 **Any data · any source · any destination · one click**
 
@@ -19,7 +19,7 @@ See [docs/PRODUCT_SCOPE.md](docs/PRODUCT_SCOPE.md) for full scope.
 - **apps/web** — React 19 UI (3-screen one-click flow)
 - **apps/api** — FastAPI orchestrator
 - **apps/cli** — GitOps CLI (`plan` / `apply` / `export` / `validate`)
-- **packages/preflight** — 8-gate validation engine
+- **packages/preflight** — G1–G9 fail-closed validation engine
 - **packages/ml** — Synthetic schema factory + training pipeline
 - **design/tokens** — Precision Data design system tokens
 
@@ -50,7 +50,7 @@ npm run dataflow -- apply -f dataflow.yaml --local --yes
 npm run dataflow -- export --local -o dataflow.yaml
 ```
 
-See [apps/cli/README.md](apps/cli/README.md). Contracts import as **DRAFT** (sign before enforce). CDC remains **at-least-once**.
+See [apps/cli/README.md](apps/cli/README.md). Contracts import as **DRAFT** (sign before enforce). CDC remains **at-least-once** — see [CDC delivery semantics](#cdc-delivery-semantics-honest).
 
 ### Production deploy
 
@@ -80,6 +80,18 @@ docker compose up -d   # Postgres on localhost:5432 (dataflow/dataflow)
 In the wizard: upload CSV → destination PostgreSQL (`localhost`, `5432`, `dataflow`, user/pass `dataflow`) → test connection → transfer.  
 Data lands in `public.df_<filename>_<id>` with Gate 8 reconciliation report.
 
+## CDC delivery semantics (honest)
+
+CDC / incremental log capture is **at-least-once**, not exactly-once.
+
+- **Delivery default:** `at-least-once` (peek → apply → ack). Redelivery after crash/retry is expected.
+- **Destination contract:** upsert on primary key with LSN/SCN/`_df_lsn` guards so a stale redelivery cannot regress row state.
+- **Not claimed:** end-to-end exactly-once pipeline delivery; append-only sinks without an explicit `allow_append_only` opt-in (those duplicate under redelivery).
+- **Leases:** multi-worker CDC leases prevent concurrent consumers of the same slot/binlog resource; they do not upgrade delivery to exactly-once. See [docs/ops/CDC_LEASE_REDIS.md](docs/ops/CDC_LEASE_REDIS.md).
+- **Checkpoints:** transfer checkpoints are **fail-closed** — if the job store cannot persist a resume point, the job aborts rather than continuing with silent resume risk.
+
+Canonical API posture constants live in `apps/api/services/cdc_effectively_once.py` (`DELIVERY_DEFAULT`, `EXACTLY_ONCE_CLAIMED`, `honesty_dict()`).
+
 ## Preflight gates
 
-All transfers pass 8 gates before any production data is written. See `packages/preflight/README.md`.
+All transfers pass 9 core gates (G1–G9) before any production data is written. See `packages/preflight/README.md`.

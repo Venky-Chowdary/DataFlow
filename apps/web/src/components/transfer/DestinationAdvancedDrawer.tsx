@@ -22,7 +22,13 @@ export type DestSchemaPolicy =
   | "pause_on_change"
   | "type_locked";
 
-export type DestValidationMode = "balanced" | "strict" | "maximum";
+export type DestValidationMode =
+  | "balanced"
+  | "strict"
+  | "maximum"
+  | "migration"
+  | "discovery"
+  | "audit";
 export type DestDateLocale = "" | "DMY" | "MDY";
 
 export interface SyncModeOption {
@@ -40,6 +46,8 @@ export interface SchemaPolicyOption {
 export interface ValidationModeOption {
   id: DestValidationMode;
   label: string;
+  threshold?: string;
+  detail?: string;
 }
 
 export interface DateLocaleOption {
@@ -69,6 +77,9 @@ interface DestinationAdvancedDrawerProps {
   defaultPrimaryKey: string;
   sourceColumns: string[];
   sourceSchema: Record<string, string>;
+  /** Per-stream columns when multi-stream schemas diverge. */
+  sourceColumnsByStream?: Record<string, string[]>;
+  sourceSchemaByStream?: Record<string, Record<string, string>>;
   syncModeLabel: string;
   schemaPolicyLabel: string;
   requiresCursor: boolean;
@@ -86,6 +97,8 @@ interface DestinationAdvancedDrawerProps {
   suggestedPrimaryKey?: string;
   /** Sample-unique PK candidates (honest: preview sample only). */
   uniqueKeySuggestions?: Array<{ column: string; sampleRows: number; uniqueCount: number }>;
+  /** Sample-unique 2-column composites (comma-joined into primary key field). */
+  compositeKeySuggestions?: Array<{ columns: string[]; sampleRows: number; uniqueCount: number }>;
   /** Debezium-compatible snapshot mode (CDC). */
   snapshotMode?: string;
   onSnapshotModeChange?: (mode: string) => void;
@@ -111,6 +124,8 @@ interface DestinationAdvancedDrawerProps {
   /** Stage into `{table}_df_staging`, promote only clean rows to primary. */
   writeViaStaging?: boolean;
   onWriteViaStagingChange?: (value: boolean) => void;
+  /** False for Mongo/files/SaaS — hide/disable staging toggle so Execute cannot fail after Validate. */
+  writeViaStagingSupported?: boolean;
   /** Show vector destination embedding controls (pgvector / Qdrant / Weaviate / Pinecone / Milvus). */
   showVectorOptions?: boolean;
   vectorContentColumn?: string;
@@ -175,6 +190,8 @@ export function DestinationAdvancedDrawer({
   defaultPrimaryKey,
   sourceColumns,
   sourceSchema,
+  sourceColumnsByStream = {},
+  sourceSchemaByStream = {},
   syncModeLabel,
   schemaPolicyLabel,
   requiresCursor,
@@ -190,6 +207,7 @@ export function DestinationAdvancedDrawer({
   suggestedCursor = "",
   suggestedPrimaryKey = "",
   uniqueKeySuggestions = [],
+  compositeKeySuggestions = [],
   snapshotMode = "initial",
   onSnapshotModeChange,
   priorityColumn = "",
@@ -208,6 +226,7 @@ export function DestinationAdvancedDrawer({
   showCdcRowFilter = false,
   writeViaStaging = false,
   onWriteViaStagingChange,
+  writeViaStagingSupported = true,
   showVectorOptions = false,
   vectorContentColumn = "",
   vectorEmbeddingColumn = "",
@@ -239,7 +258,7 @@ export function DestinationAdvancedDrawer({
     <Drawer
       open={open}
       onClose={onClose}
-      width={640}
+      size="lg"
       side="right"
       ariaLabel="Advanced sync and schema settings"
       icon={<DtIcon name="settings" size={20} />}
@@ -247,7 +266,13 @@ export function DestinationAdvancedDrawer({
       subtitle="Sync mode, schema drift policy, validation, and per-stream contracts"
       headerExtra={
         <span className={`df2-badge ${streamNeedsReview ? "df2-badge-run" : "df2-badge-live"}`}>
-          {sourceColumns.length ? (streamNeedsReview ? "Review required" : "Ready") : "Waiting for schema"}
+          {!sourceColumns.length
+            ? "Waiting for schema"
+            : streamNeedsReview
+              ? "Sync contract incomplete"
+              : requiresPrimaryKey || requiresCursor
+                ? "Identity fields set"
+                : "Sync mode ready"}
         </span>
       }
       footer={
@@ -270,7 +295,7 @@ export function DestinationAdvancedDrawer({
               <p>Keeps existing destination rows and inserts the full snapshot again.</p>
             )}
             {syncMode === "cdc" && (
-              <p>Change delivery is <strong>at-least-once upsert</strong> until exactly-once is proven for your sink.</p>
+              <p>Change delivery is <strong>at-least-once upsert</strong>. Exactly-once and at-most-once are not claimed.</p>
             )}
             {syncMode === "mirror" && (
               <p>Missing source keys are soft-deleted on the destination (not hard-deleted).</p>
@@ -314,7 +339,7 @@ export function DestinationAdvancedDrawer({
           </div>
         </div>
 
-        {((requiresCursor || requiresPrimaryKey) && (suggestedCursor || suggestedPrimaryKey || uniqueKeySuggestions.length > 0)) && (
+        {((requiresCursor || requiresPrimaryKey) && (suggestedCursor || suggestedPrimaryKey || uniqueKeySuggestions.length > 0 || (compositeKeySuggestions?.length ?? 0) > 0)) && (
           <div className="df2-adv-suggest-row">
             {requiresCursor && suggestedCursor && !defaultCursor && (
               <button
@@ -349,6 +374,23 @@ export function DestinationAdvancedDrawer({
                     Unique in sample · <strong>{s.column}</strong>
                   </button>
                 ))}
+            {requiresPrimaryKey &&
+              (compositeKeySuggestions || [])
+                .slice(0, 2)
+                .map((s) => {
+                  const joined = s.columns.join(",");
+                  return (
+                    <button
+                      key={joined}
+                      type="button"
+                      className="df2-adv-suggest-chip"
+                      title={`Composite unique in ${s.sampleRows}-row sample — not full-table proof`}
+                      onClick={() => onStreamPrimaryKeyChange(names[0], joined)}
+                    >
+                      Composite in sample · <strong>{s.columns.join(" + ")}</strong>
+                    </button>
+                  );
+                })}
           </div>
         )}
 
@@ -369,7 +411,9 @@ export function DestinationAdvancedDrawer({
               <option value="when_needed">when_needed — snapshot if resume missing/broken</option>
             </select>
             <small className="df2-label-hint">
-              Delivery remains <strong>at-least-once upsert</strong> unless the destination stamps `_df_lsn` for PK LSN-guarded idempotent upsert.
+              Delivery guarantee is fixed to <strong>at_least_once</strong> (API field{" "}
+              <code>delivery_guarantee</code>). Exactly-once and at-most-once are refused.
+              Prefer PK upsert / <code>_df_lsn</code> guards — append-only opt-in below allows duplicates on redelivery.
             </small>
             {onAllowAppendOnlyChange && (
               <label className="df2-policy-toggle" style={{ marginTop: "0.75rem" }}>
@@ -478,18 +522,19 @@ export function DestinationAdvancedDrawer({
             </span>
           </label>
           {onWriteViaStagingChange && (
-            <label className="df2-policy-toggle">
+            <label className={`df2-policy-toggle${writeViaStagingSupported === false ? " is-disabled" : ""}`}>
               <input
                 type="checkbox"
-                checked={writeViaStaging}
+                checked={Boolean(writeViaStaging) && writeViaStagingSupported !== false}
+                disabled={writeViaStagingSupported === false}
                 onChange={(e) => onWriteViaStagingChange(e.target.checked)}
               />
               <span>
                 <strong>Write via staging</strong>
                 <small>
-                  Load into <code>{"{table}_df_staging"}</code> first, then promote only clean rows to
-                  primary. Bad rows stay off primary (DLQ + staging). Strict validation blocks promote
-                  entirely. SQL destinations only.
+                  {writeViaStagingSupported === false
+                    ? "Unavailable for this destination — SQL engines only (PostgreSQL, MySQL, Snowflake, BigQuery, …)."
+                    : "Load into {table}_df_staging first, then promote only clean rows. Bad rows stay off primary (DLQ + staging). Strict validation blocks promote entirely."}
                 </small>
               </span>
             </label>
@@ -722,10 +767,16 @@ export function DestinationAdvancedDrawer({
                     defaultCursor,
                     defaultPrimaryKey,
                   );
+                  const streamCols = sourceColumnsByStream[streamName]?.length
+                    ? sourceColumnsByStream[streamName]
+                    : sourceColumns;
+                  const streamSchema = sourceSchemaByStream[streamName] && Object.keys(sourceSchemaByStream[streamName]).length
+                    ? sourceSchemaByStream[streamName]
+                    : sourceSchema;
                   const rowNeeds =
-                    sourceColumns.length > 0
-                    && ((requiresCursor && !fields.cursorField)
-                      || (requiresPrimaryKey && !fields.primaryKeyField));
+                    streamCols.length > 0
+                    && ((requiresCursor && (!fields.cursorField || !streamCols.includes(fields.cursorField)))
+                      || (requiresPrimaryKey && (!fields.primaryKeyField || !streamCols.includes(fields.primaryKeyField))));
                   return (
                     <tr key={streamName}>
                       <td>
@@ -734,7 +785,7 @@ export function DestinationAdvancedDrawer({
                           <span>
                             <strong>{streamName}</strong>
                             <small>
-                              {sourceColumns.length ? `${sourceColumns.length} fields` : "No schema loaded"}
+                              {streamCols.length ? `${streamCols.length} fields` : "No schema loaded"}
                             </small>
                           </span>
                         </label>
@@ -743,15 +794,17 @@ export function DestinationAdvancedDrawer({
                       <td>
                         <select
                           className="df2-input df2-select df2-stream-select"
-                          value={requiresCursor ? fields.cursorField : ""}
-                          disabled={!requiresCursor || sourceColumns.length === 0}
+                          value={requiresCursor && fields.cursorField && streamCols.includes(fields.cursorField)
+                            ? fields.cursorField
+                            : ""}
+                          disabled={!requiresCursor || streamCols.length === 0}
                           onChange={(e) => onStreamCursorChange(streamName, e.target.value)}
                           aria-label={`Cursor field for ${streamName}`}
                         >
                           <option value="">{requiresCursor ? "Select cursor" : "Not required"}</option>
-                          {sourceColumns.map((col) => (
+                          {streamCols.map((col) => (
                             <option key={col} value={col}>
-                              {col}{sourceSchema[col] ? ` · ${sourceSchema[col]}` : ""}
+                              {col}{streamSchema[col] ? ` · ${streamSchema[col]}` : ""}
                             </option>
                           ))}
                         </select>
@@ -759,17 +812,19 @@ export function DestinationAdvancedDrawer({
                       <td>
                         <select
                           className="df2-input df2-select df2-stream-select"
-                          value={fields.primaryKeyField}
-                          disabled={sourceColumns.length === 0}
+                          value={fields.primaryKeyField && streamCols.includes(fields.primaryKeyField)
+                            ? fields.primaryKeyField
+                            : ""}
+                          disabled={streamCols.length === 0}
                           onChange={(e) => onStreamPrimaryKeyChange(streamName, e.target.value)}
                           aria-label={`Primary key for ${streamName}`}
                         >
                           <option value="">
                             {requiresPrimaryKey ? "Select key" : "Optional (append)"}
                           </option>
-                          {sourceColumns.map((col) => (
+                          {streamCols.map((col) => (
                             <option key={col} value={col}>
-                              {col}{sourceSchema[col] ? ` · ${sourceSchema[col]}` : ""}
+                              {col}{streamSchema[col] ? ` · ${streamSchema[col]}` : ""}
                             </option>
                           ))}
                         </select>
@@ -777,7 +832,7 @@ export function DestinationAdvancedDrawer({
                       <td>{schemaPolicyLabel}</td>
                       <td>
                         <span className={`df2-badge ${rowNeeds ? "df2-badge-run" : "df2-badge-live"}`}>
-                          {sourceColumns.length ? (rowNeeds ? "Needs contract" : "Valid") : "Pending"}
+                          {streamCols.length ? (rowNeeds ? "Needs contract" : "Valid") : "Pending"}
                         </span>
                       </td>
                     </tr>

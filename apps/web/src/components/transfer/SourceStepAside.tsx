@@ -174,7 +174,7 @@ function FileAwaitingPanel({ uploading }: { uploading?: boolean }) {
           <p>
             {uploading
               ? "Profiling your file — real columns and sample values load here."
-              : "Upload a file on the left. Detected schema and sample rows show here automatically."}
+              : "Upload or load a sample above. Detected schema and sample rows show here automatically."}
           </p>
         </div>
         <span className={`df2-badge df2-badge-xs ${uploading ? "df2-badge-live" : ""}`}>
@@ -245,6 +245,7 @@ export function SourceStepAside({
         title="Detected structure"
         subtitle={`${parsed.columns.length} fields · ${parsed.row_count.toLocaleString()} rows`}
         fill
+        maxRows={10}
         showBadge
         allowJson
       />
@@ -294,6 +295,7 @@ export function SourceStepAside({
             : "Fields discovered from the selected connector"
         }
         fill
+        maxRows={10}
         showBadge
         allowJson
         sampleWarning={
@@ -330,9 +332,9 @@ export function SourceStepAside({
               {sourceManual
                 ? `Manual ${sourceManualType} source. Schema loads when you continue.`
                 : sourceConnector
-                  ? `Enter table/collection name(s) on the left — each is read separately for preview.`
+                  ? `Enter table/collection name(s) in the source panel — each is read separately for preview.`
                   : pool.length
-                    ? `Select one of ${pool.length} saved database connector${pool.length === 1 ? "" : "s"} on the left.`
+                    ? `Select one of ${pool.length} saved database connector${pool.length === 1 ? "" : "s"} in the source panel.`
                     : "Add a database connector to read tables and collections, or use manual connection."}
             </p>
           </div>
@@ -401,7 +403,7 @@ export function SourceStepAside({
               : sourceConnector
                 ? "Enter an object path or prefix to profile the file."
                 : pool.length
-                  ? "Pick a cloud connector and object path on the left."
+                  ? "Pick a cloud connector and object path in the source panel."
                   : "Add S3, GCS, or Azure Blob storage in Connectors."}
           </p>
         </div>

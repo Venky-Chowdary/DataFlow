@@ -5,7 +5,7 @@ Research anchors
 - Debezium Oracle uses SCN watermarks; SQL Server CT uses integer versions —
   bare integers must not share a compare family (silent invent).
 - MongoDB change-stream resume tokens are opaque (``_data``) — prefix isolate.
-- Iceberg V3 MoR / deletion vectors are competitor-class for CDC lakes; DataFlow
+- Iceberg V3 MoR / deletion vectors are competitor-class for CDC lakes; Datawrap
   filesystem path is Copy-on-Write today — advertise honestly (not MoR).
 """
 

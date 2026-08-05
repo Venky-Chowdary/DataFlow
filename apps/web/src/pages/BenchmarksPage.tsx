@@ -151,7 +151,7 @@ export function BenchmarksPage() {
 
           {tab === "integrity" && (
             <>
-              <PageSection title="Why DataFlow beats Airbyte on integrity">
+              <PageSection title="Why Datawrap beats Airbyte on integrity">
                 <p className="df2-page-benchmarks-intro">
                   Connection tests prove a socket opened. These proofs prove rows, types, quarantine, and
                   checksums survive the full write path — the bar for “any schema → anywhere.”
@@ -226,13 +226,13 @@ export function BenchmarksPage() {
                     )}
 
                     <div className="df2-page-benchmarks-section">
-                      <h3>DataFlow vs Airbyte — integrity dimensions</h3>
+                      <h3>Datawrap vs Airbyte — integrity dimensions</h3>
                       <div className="df2-page-benchmarks-table-wrap">
                         <table className="df2-page-benchmarks-table">
                           <thead>
                             <tr>
                               <th>Dimension</th>
-                              <th>DataFlow</th>
+                              <th>Datawrap</th>
                               <th>Airbyte</th>
                               <th>Proof surface</th>
                             </tr>
@@ -405,7 +405,7 @@ export function BenchmarksPage() {
                   <div className="df2-page-benchmarks-section">
                     <h3>Throughput baselines (public figures)</h3>
                     <p className="df2-page-benchmarks-note">
-                      Competitor RPS figures are representative public baselines. DataFlow numbers here are measured
+                      Competitor RPS figures are representative public baselines. Datawrap numbers here are measured
                       live for <strong>CSV → SQLite only</strong> — not warehouse routes (Mongo→Snowflake, etc.).
                       Prefer the Integrity ledger for migration trust, and the job theater for this-job throughput.
                     </p>
@@ -416,15 +416,15 @@ export function BenchmarksPage() {
                             <th>Product</th>
                             <th>Typical rows/sec</th>
                             <th>Resume</th>
-                            <th>vs DataFlow</th>
+                            <th>vs Datawrap</th>
                           </tr>
                         </thead>
                         <tbody>
                           {comparison?.map((c) => (
                             <tr key={c.product}>
                               <td className="df2-page-benchmarks-product">
-                                {c.product === "DataFlow" ? (
-                                  <strong><DtIcon name="speed" size={14} /> DataFlow (this run)</strong>
+                                {c.product === "Datawrap" ? (
+                                  <strong><DtIcon name="speed" size={14} /> Datawrap (this run)</strong>
                                 ) : (
                                   c.product
                                 )}
@@ -436,7 +436,7 @@ export function BenchmarksPage() {
                                 </span>
                               </td>
                               <td>
-                                {c.product === "DataFlow" ? (
+                                {c.product === "Datawrap" ? (
                                   <span className="df2-badge df2-badge-success">baseline</span>
                                 ) : (
                                   <span className={`df2-badge ${c.faster ? "df2-badge-success" : "df2-badge-warning"}`}>

@@ -1,7 +1,7 @@
 """Embedding / vector destination honesty — never fabricate zero vectors.
 
 Airbyte-class trap: missing embeddings replaced with ``[0.0] * dim`` pollute
-indexes and silently pass dimension checks. DataFlow quarantines instead.
+indexes and silently pass dimension checks. Datawrap quarantines instead.
 """
 
 from __future__ import annotations

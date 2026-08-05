@@ -62,7 +62,7 @@ def test_embed_uses_durable_layer(isolated_embedding_cache: Path):
     from services.vectorization import _get_embedder, clear_memory_cache, embed
 
     _get_embedder.cache_clear()
-    texts = ["DataFlow durable embedding cache proof"]
+    texts = ["Datawrap durable embedding cache proof"]
     model = "hash/16"
     first = embed(texts, model=model, durable=True)
     assert len(first) == 1

@@ -1,5 +1,5 @@
 """
-DataTransfer.space — AI Module
+Datawrap — AI Module
 
 Core AI capabilities for intelligent data understanding:
 - Semantic analysis (pattern + RAG + LLM)

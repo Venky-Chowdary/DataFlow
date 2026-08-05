@@ -182,7 +182,7 @@ def private_cloud_host_hint(host: str = "", connection_string: str = "") -> str:
             )
         return (
             " This is a Railway *private* hostname (*.railway.internal). "
-            "It only works when the DataFlow API runs inside the same Railway project. "
+            "It only works when the Datawrap API runs inside the same Railway project. "
             "Use the public proxy instead: host like *.proxy.rlwy.net and the public port "
             "from Railway (TCP Proxy) — e.g. MySQL often uses port 32253, not 3306."
         )
@@ -194,6 +194,6 @@ def private_cloud_host_hint(host: str = "", connection_string: str = "") -> str:
             )
         return (
             " This hostname looks private/internal to a cloud network. "
-            "Use the provider's public proxy host and port unless DataFlow is running on that same private network."
+            "Use the provider's public proxy host and port unless Datawrap is running on that same private network."
         )
     return ""

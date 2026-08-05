@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from services.brand_env import getenv_brand
 import re
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -23,8 +24,8 @@ from connectors.sql_identifiers import (  # noqa: F401 — re-export canonical h
 )
 
 # Configurable batch size — default 20 000 rows per commit (enterprise scale)
-CHUNK_SIZE = int(os.getenv("DATAFLOW_CHUNK_SIZE", "20000"))
-TRANSFORM_ERROR_POLICY = os.getenv("DATAFLOW_TRANSFORM_ERROR_POLICY", "quarantine").lower()
+CHUNK_SIZE = int(getenv_brand("CHUNK_SIZE", "20000"))
+TRANSFORM_ERROR_POLICY = getenv_brand("TRANSFORM_ERROR_POLICY", "quarantine").lower()
 VALID_ERROR_POLICIES = {"fail", "quarantine", "coerce_null"}
 
 # Active Map mappings while write-quarantine matrix runs — enables dual-stamp
@@ -93,6 +94,8 @@ def append_write_quarantine_detail(
     the Map-projected source payload when mappings are known — preferred by
     quarantine replay (Wave 32). Never invent source_values from target keys
     without a Map (that would poison canonicalize).
+
+    Module 9: stamp first-class quarantine contract fields before append.
     """
     d = dict(detail)
     if not (isinstance(d.get("values"), dict) and d["values"]):
@@ -103,6 +106,16 @@ def append_write_quarantine_detail(
             src = project_quarantine_source_values(d["values"], maps)
             if src:
                 d["source_values"] = src
+    try:
+        from services.quarantine_row_contract import normalize_quarantine_row
+
+        d = normalize_quarantine_row(
+            d,
+            job_id=str(d.get("job_id") or ""),
+            connector=str(d.get("connector") or ""),
+        )
+    except Exception:
+        pass
     rejected_details.append(d)
 
 def resolve_writer_backfill(
@@ -125,6 +138,71 @@ def resolve_writer_backfill(
         schema_policy=schema_policy,
         mappings=mappings,
     )
+
+
+def desired_types_honoring_map_stamps(
+    *,
+    target_cols: list[str],
+    current_target_types: list[str],
+    mappings: list[dict[str, Any]] | None,
+    candidate_by_col: dict[str, str] | None = None,
+    preserve_case: bool = False,
+    explicit_columns: set[str] | frozenset[str] | None = None,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Map≡ALTER: never widen past an explicit Map ``target_type`` stamp.
+
+    ``current_target_types`` are the Map-resolved CREATE types (already
+    honor_explicit). ``candidate_by_col`` may propose a wider source/batch DDL.
+    Explicit stamps are a hard ceiling — overflow cells quarantine on write;
+    silent ALTER past the approved mapping is refuse-closed.
+
+    When ``explicit_columns`` is provided, that set is the authoritative
+    Map-stamp membership (needed when writers temporarily stamp
+    ``target_type`` onto non-explicit widen proposals). When omitted, a column
+    is explicit iff its mapping carries ``target_type``.
+
+    Returns ``(desired_types, refusals)`` where each refusal is audit evidence:
+    ``{column, mapped_type, refused_wider, reason}``.
+    """
+    from connectors.schema_drift import is_wider_type
+    from services.mapping_constraints import write_mappings
+
+    candidates = candidate_by_col or {}
+    by_tgt: dict[str, dict[str, Any]] = {}
+    for mapping in write_mappings(list(mappings or [])):
+        tgt = sanitize_identifier(
+            str(mapping.get("target") or ""), preserve_case=preserve_case
+        )
+        if tgt and tgt not in by_tgt:
+            by_tgt[tgt] = mapping
+
+    desired: list[str] = []
+    refusals: list[dict[str, Any]] = []
+    for col, cur_type in zip(target_cols, current_target_types):
+        mapping = by_tgt.get(col) or {}
+        candidate = str(candidates.get(col) or cur_type or "").strip() or str(cur_type)
+        ceiling = str(cur_type or "").strip() or candidate
+        if explicit_columns is not None:
+            is_explicit = col in explicit_columns
+        else:
+            is_explicit = bool(str(mapping.get("target_type") or "").strip())
+        if is_explicit:
+            if candidate and is_wider_type(ceiling, candidate):
+                refusals.append(
+                    {
+                        "column": col,
+                        "mapped_type": ceiling,
+                        "refused_wider": candidate,
+                        "reason": "explicit_map_stamp_ceiling",
+                    }
+                )
+            desired.append(ceiling)
+            continue
+        if candidate and is_wider_type(ceiling, candidate):
+            desired.append(candidate)
+        else:
+            desired.append(ceiling)
+    return desired, refusals
 
 
 def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
@@ -1061,10 +1139,67 @@ def reject_on_strict_policy(
     rejected_details: list[dict[str, Any]] | None,
     label: str,
 ) -> str | None:
-    """Return an error message when strict mode must refuse a partial write."""
-    if transform_error_policy(policy) == "fail" and rejected_details:
+    """Return an error message when the write must refuse a partial primary write.
+
+    Module 1b: Migration Risk Contract FAIL_JOB aborts even when the job-level
+    error_policy is ``quarantine``. Continue-policy contract failures
+    (CAST_AND_CONTINUE / QUARANTINE_ROW) may hold out rows without aborting.
+    """
+    details = list(rejected_details or [])
+    if not details:
+        return None
+
+    try:
+        from services.migration_risk_contract import (
+            rejected_details_are_continue_contract_only,
+            rejected_details_require_job_abort,
+        )
+    except Exception:
+        rejected_details_require_job_abort = None  # type: ignore[assignment]
+        rejected_details_are_continue_contract_only = None  # type: ignore[assignment]
+
+    if rejected_details_require_job_abort and rejected_details_require_job_abort(details):
+        try:
+            from services.migration_risk_contract import JOB_ABORT_POLICIES
+        except Exception:
+            JOB_ABORT_POLICIES = {
+                "FAIL_JOB",
+                "STOP_TABLE",
+                "ABORT_TRANSACTION",
+                "RETRY",
+            }
+        n = sum(
+            1
+            for d in details
+            if str(d.get("execution_policy") or "").upper() in JOB_ABORT_POLICIES
+            or str(d.get("policy") or "").lower()
+            in {"fail", "stop_table", "abort_transaction", "retry_then_fail"}
+        )
+        scopes = sorted(
+            {
+                str(d.get("stop_scope") or d.get("execution_policy") or "FAIL_JOB")
+                for d in details
+                if str(d.get("execution_policy") or "").upper() in JOB_ABORT_POLICIES
+                or str(d.get("policy") or "").lower()
+                in {"fail", "stop_table", "abort_transaction", "retry_then_fail"}
+            }
+        )
+        scope_note = f" ({', '.join(scopes[:4])})" if scopes else ""
         return (
-            f"{label} rejected {len(rejected_details)} row(s); "
+            f"{label} rejected {n or len(details)} row(s); "
+            f"Migration Risk Contract abort policy blocks partial write{scope_note}"
+        )
+
+    if (
+        rejected_details_are_continue_contract_only
+        and rejected_details_are_continue_contract_only(details)
+    ):
+        # Operator contracted continue + quarantine — do not abort the batch.
+        return None
+
+    if transform_error_policy(policy) == "fail":
+        return (
+            f"{label} rejected {len(details)} row(s); "
             "strict error policy blocks partial write"
         )
     return None
@@ -1190,24 +1325,60 @@ def build_mapped_rows_with_details(
             transform,
             src,
             tgt,
+            m,
         ))
+
+    # Resolve once per call, not once per cell. This import sat inside the
+    # innermost loop, so a 20-column table paid an import-system lookup per cell
+    # — billions of them on a large transfer.
+    from services.value_serializer import DF_MISSING_SENTINEL, is_missing_sentinel
+    try:
+        from services.migration_risk_contract import resolve_write_action_for_mapping
+    except Exception:
+        resolve_write_action_for_mapping = None  # type: ignore[assignment]
+
+    try:
+        from services.migration_risk_contract import disposition_for_execution_policy
+    except Exception:
+        disposition_for_execution_policy = None  # type: ignore[assignment]
 
     mapped: list[tuple] = []
     for row_number, raw in enumerate(data_rows, start=1):
         out = [None] * len(sanitized_target_cols)
         row_has_error = False
-        for source_idx, target_idx, transform, src_name, tgt_name in mapping_infos:
+        # ok | fail | stop_table | abort_transaction | retry_then_fail |
+        # quarantine | skip_row | stop_column | coerce_null
+        row_action = "ok"
+        for source_idx, target_idx, transform, src_name, tgt_name, mapping in mapping_infos:
             val = raw[source_idx] if source_idx is not None and source_idx < len(raw) else None
             # Preserve sparse-CDC missing before transforms (omit-from-SET, never NULL wipe).
-            from services.value_serializer import DF_MISSING_SENTINEL, is_missing_sentinel
-
             if is_missing_sentinel(val):
                 if target_idx >= 0:
                     out[target_idx] = DF_MISSING_SENTINEL
                 continue
             converted, err = apply_transform(val, transform)
+            cell_policy = policy
+            exec_pol: str | None = None
+            risk_id: str | None = None
+            retry_attempted = False
+            if err and resolve_write_action_for_mapping is not None:
+                cell_policy, exec_pol, risk_id = resolve_write_action_for_mapping(
+                    mapping, policy
+                )
+                # RETRY: exactly one re-attempt of the same transform, then fail.
+                if cell_policy == "retry_then_fail":
+                    retry_attempted = True
+                    converted, err = apply_transform(val, transform)
+                    if not err:
+                        cell_policy = "ok"
+                    else:
+                        cell_policy = "fail"
             if err:
                 row_has_error = True
+                if resolve_write_action_for_mapping is not None and exec_pol is None:
+                    cell_policy, exec_pol, risk_id = resolve_write_action_for_mapping(
+                        mapping, policy
+                    )
                 values = {
                     h: (str(raw[i]) if i < len(raw) and raw[i] is not None else "")
                     for i, h in enumerate(headers)
@@ -1218,12 +1389,36 @@ def build_mapped_rows_with_details(
                     "target": tgt_name,
                     "value": str(val) if val is not None else "",
                     "reason": err,
-                    "policy": policy,
+                    "policy": cell_policy,
                     # Full source row so quarantine replay can rewrite without re-reading.
                     "values": values,
                     # Dual-stamp: transform quarantine is already source-shaped.
                     "source_values": dict(values),
                 }
+                if exec_pol:
+                    detail["execution_policy"] = exec_pol
+                    if disposition_for_execution_policy is not None:
+                        detail["disposition"] = disposition_for_execution_policy(exec_pol)
+                    if exec_pol == "STOP_TABLE":
+                        detail["stop_scope"] = "table"
+                    elif exec_pol == "STOP_COLUMN":
+                        detail["stop_scope"] = "column"
+                    elif exec_pol == "FAIL_JOB":
+                        detail["stop_scope"] = "job"
+                    elif exec_pol == "ABORT_TRANSACTION":
+                        detail["stop_scope"] = "transaction"
+                        detail["transaction_abort_requested"] = True
+                        # Writers without a real txn still fail closed — honesty stamp.
+                        detail["transaction_available"] = False
+                    elif exec_pol == "SKIP_ROW":
+                        detail["quarantine_required"] = False
+                    elif exec_pol == "QUARANTINE_ROW":
+                        detail["quarantine_required"] = True
+                if retry_attempted:
+                    detail["retry_attempted"] = True
+                    detail["retry_count"] = 1
+                if risk_id:
+                    detail["risk_id"] = risk_id
                 # Stamp durable identity for upsert replay (composite / non-id PKs).
                 pk_cols: list[str] = []
                 try:
@@ -1239,9 +1434,9 @@ def build_mapped_rows_with_details(
                         pk_cols = [src_key]
                     elif tgt_key:
                         # Map target → source via mapping when needed.
-                        for m in mappings:
-                            if str(m.get("target") or "") == tgt_key and m.get("source"):
-                                pk_cols = [str(m["source"])]
+                        for mm in mappings:
+                            if str(mm.get("target") or "") == tgt_key and mm.get("source"):
+                                pk_cols = [str(mm["source"])]
                                 break
                         if not pk_cols and tgt_key in values:
                             pk_cols = [tgt_key]
@@ -1249,11 +1444,11 @@ def build_mapped_rows_with_details(
                     pk_cols = []
                 if not pk_cols:
                     flagged = [
-                        str(m.get("source") or m.get("target") or "")
-                        for m in mappings
-                        if m.get("primary_key")
-                        or m.get("is_primary_key")
-                        or m.get("identity")
+                        str(mm.get("source") or mm.get("target") or "")
+                        for mm in mappings
+                        if mm.get("primary_key")
+                        or mm.get("is_primary_key")
+                        or mm.get("identity")
                     ]
                     pk_cols = [c for c in flagged if c]
                 if not pk_cols:
@@ -1270,20 +1465,50 @@ def build_mapped_rows_with_details(
                 rejected_details.append(detail)
                 if len(errors) < 10:
                     errors.append(f"row {row_number} {src_name}→{tgt_name}: {err}")
-                if policy == "coerce_null":
-                    # Explicit NULL-in-place — operator opted into altered primary rows.
+                # Escalate row_action by severity — abort > skip/quarantine > stop_column.
+                abort_actions = {
+                    "fail",
+                    "stop_table",
+                    "abort_transaction",
+                    "retry_then_fail",
+                }
+                if cell_policy in abort_actions:
+                    row_action = cell_policy if cell_policy != "retry_then_fail" else "fail"
                     converted = None
-                elif policy == "quarantine":
-                    # Hold the whole row out of the primary write — never invent NULL
-                    # in place of a bad cell (that is silent primary alteration).
-                    row_has_error = True
+                elif cell_policy == "skip_row":
+                    if row_action not in abort_actions:
+                        row_action = "skip_row"
+                    converted = None
+                elif cell_policy == "quarantine":
+                    if row_action not in abort_actions and row_action != "skip_row":
+                        row_action = "quarantine"
+                    converted = None
+                elif cell_policy == "stop_column":
+                    # Omit this cell; allow other columns on the same row to write.
+                    if row_action == "ok":
+                        row_action = "stop_column"
+                    converted = None
+                elif cell_policy == "coerce_null":
+                    if row_action == "ok":
+                        row_action = "coerce_null"
                     converted = None
                 else:
                     continue
             if target_idx >= 0:
                 out[target_idx] = converted
-        if row_has_error and policy in {"fail", "quarantine"}:
+        # Rows not written to primary: abort / quarantine / skip.
+        if row_has_error and row_action in {
+            "fail",
+            "stop_table",
+            "abort_transaction",
+            "quarantine",
+            "skip_row",
+        }:
             continue
+        if row_has_error and row_action == "ok" and policy in {"fail", "quarantine"}:
+            # Legacy path when resolve unavailable — keep prior job semantics.
+            continue
+        # stop_column / coerce_null: row is written with omitted/NULL failing cells.
         mapped.append(tuple(out))
 
     return mapped, errors, rejected_details
@@ -1379,9 +1604,12 @@ def resolve_target_columns(
     Prefers an explicit ``target_type`` on each mapping, then ``dest_types``,
     then the source logical type, and finally ``VARCHAR``.
 
-    For **new tables** (``table_exists is False``), proposed typed DDL is
-    widened via ``safe_ddl_logical_type`` when samples cannot all coerce —
-    e.g. status enums never CREATE as BOOLEAN.
+    Explicit Map ``target_type`` is always preserved (Map≡CREATE) — unfit values
+    quarantine on write instead of rewriting approved DDL.
+
+    Enterprise GA: create-new without an explicit Map ``target_type`` must **not**
+    invent BOOLEAN/INTEGER/DECIMAL from head samples. Keep the source/carrier
+    proposal; values that cannot coerce quarantine on write.
     """
     from services.schema_inference import safe_ddl_logical_type
 
@@ -1409,12 +1637,14 @@ def resolve_target_columns(
             src = str(m.get("source") or "")
             src_type = column_types.get(src) or m.get("source_type")
             if table_exists is False:
+                # Explicit Map stamp OR non-explicit source/carrier proposal:
+                # honor_explicit=True prevents sample-driven invent of tighter types.
                 proposed = safe_ddl_logical_type(
                     str(proposed),
-                    samples.get(src),
+                    samples.get(src) if explicit_target else None,
                     field_name=src,
                     source_type=str(src_type) if src_type else None,
-                    honor_explicit=explicit_target,
+                    honor_explicit=True,
                 )
             target_types.append(str(proposed))
     return target_cols, target_types
@@ -3061,6 +3291,29 @@ def row_has_missing_sentinel(row: tuple | list) -> bool:
     from services.value_serializer import is_missing_sentinel
 
     return any(is_missing_sentinel(v) for v in row)
+
+
+def materialize_missing_as_null_for_dense_write(
+    mapped_rows: list[tuple],
+) -> list[tuple]:
+    """Dense INSERT/COPY/MERGE stage: absent fields → SQL NULL (never bind sentinel).
+
+    Sparse CDC upsert must keep ``DF_MISSING`` and omit columns from SET.
+    Full-refresh / create-new / dense bulk loads union a schemaless schema —
+    missing keys are SQL NULL, not the literal ``__DF_MISSING__`` string
+    (Snowflake BOOL / Postgres BOOLEAN reject that string).
+    """
+    from services.value_serializer import is_missing_sentinel
+
+    if not mapped_rows or not any(row_has_missing_sentinel(r) for r in mapped_rows):
+        return mapped_rows
+    out: list[tuple] = []
+    for row in mapped_rows:
+        if not row_has_missing_sentinel(row):
+            out.append(row)
+            continue
+        out.append(tuple(None if is_missing_sentinel(v) else v for v in row))
+    return out
 
 
 def split_dense_sparse_rows(

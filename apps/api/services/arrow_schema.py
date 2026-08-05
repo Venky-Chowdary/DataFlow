@@ -1,4 +1,4 @@
-"""Arrow / Parquet native schema → DataFlow logical carriers.
+"""Arrow / Parquet native schema → Datawrap logical carriers.
 
 Prefer writer schema over sample inference so nested types, decimals, and
 TIMESTAMPTZ polarity survive (Airbyte-class honesty gap when pandas flattens).
@@ -10,7 +10,7 @@ from typing import Any
 
 
 def arrow_type_to_logical(arrow_type: Any) -> str:
-    """Map a ``pyarrow.DataType`` to a DataFlow logical / structural carrier."""
+    """Map a ``pyarrow.DataType`` to a Datawrap logical / structural carrier."""
     try:
         import pyarrow.types as pat
     except ImportError:

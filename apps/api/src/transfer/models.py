@@ -122,6 +122,13 @@ class TransferRequest:
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian),
     # 'MDY' (US), or '' to infer from env DATAFLOW_DATE_ORDER / fail closed.
     date_locale: str = ""
+    # Client-supplied idempotency key. When set it replaces the derived request
+    # fingerprint, letting a caller make its own HTTP retries safe. When empty,
+    # the fingerprint still guards against accidental double submission.
+    idempotency_key: str = ""
+    # CDC / stream delivery honesty — selectable set is enforced by
+    # ``assert_delivery_guarantee_allowed`` (exactly_once / at_most_once refused).
+    delivery_guarantee: str = "at_least_once"
 
     @property
     def operation(self) -> str:
@@ -135,6 +142,77 @@ class TransferRequest:
         if sk == "database" and dk == "file_export":
             return "dump"
         return "transfer"
+
+
+_SECRET_ENDPOINT_KEYS = (
+    "password",
+    "connection_string",
+    "api_key",
+    "service_account",
+    "private_key",
+    "secret_access_key",
+    "access_key_secret",
+    "token",
+    "refresh_token",
+    "client_secret",
+)
+
+
+def _encrypt_endpoint_secrets(ep: dict) -> dict:
+    """Encrypt secret fields before persisting a transfer_request on a job."""
+    from services.secret_vault import encrypt_secret
+
+    out = dict(ep or {})
+    for key in _SECRET_ENDPOINT_KEYS:
+        val = out.get(key)
+        if isinstance(val, str) and val and val != "****" and not val.startswith("["):
+            out[key] = encrypt_secret(val, label=f"job-{key}")
+    extra = out.get("extra")
+    if isinstance(extra, dict):
+        extra_out = dict(extra)
+        for key, val in list(extra_out.items()):
+            lk = str(key).lower()
+            if (
+                isinstance(val, str)
+                and val
+                and val != "****"
+                and any(s in lk for s in ("password", "secret", "token", "private_key", "api_key"))
+            ):
+                extra_out[key] = encrypt_secret(val, label=f"job-extra-{key}")
+        out["extra"] = extra_out
+    return out
+
+
+def _decrypt_endpoint_secrets(ep: dict) -> dict:
+    """Decrypt secret fields when reconstituting a TransferRequest from storage."""
+    from services.secret_vault import decrypt_secret
+
+    out = dict(ep or {})
+    for key in _SECRET_ENDPOINT_KEYS:
+        val = out.get(key)
+        if isinstance(val, str) and val and val != "****":
+            try:
+                out[key] = decrypt_secret(val)
+            except Exception:
+                # Leave as-is — resume will fail loudly if the value is unusable.
+                pass
+    extra = out.get("extra")
+    if isinstance(extra, dict):
+        extra_out = dict(extra)
+        for key, val in list(extra_out.items()):
+            lk = str(key).lower()
+            if (
+                isinstance(val, str)
+                and val
+                and val != "****"
+                and any(s in lk for s in ("password", "secret", "token", "private_key", "api_key"))
+            ):
+                try:
+                    extra_out[key] = decrypt_secret(val)
+                except Exception:
+                    pass
+        out["extra"] = extra_out
+    return out
 
 
 def endpoint_to_dict(ep: EndpointConfig) -> dict:
@@ -169,8 +247,8 @@ def endpoint_to_dict(ep: EndpointConfig) -> dict:
 
 def transfer_request_to_dict(request: TransferRequest) -> dict:
     return {
-        "source": endpoint_to_dict(request.source),
-        "destination": endpoint_to_dict(request.destination),
+        "source": _encrypt_endpoint_secrets(endpoint_to_dict(request.source)),
+        "destination": _encrypt_endpoint_secrets(endpoint_to_dict(request.destination)),
         "mappings": request.mappings,
         "column_types": request.column_types,
         "skip_preflight": request.skip_preflight,
@@ -192,13 +270,52 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "require_signed_contract": request.require_signed_contract,
         "triggered_by": request.triggered_by,
         "date_locale": request.date_locale,
+        "idempotency_key": request.idempotency_key,
+        "delivery_guarantee": request.delivery_guarantee or "at_least_once",
         "requires_file_reupload": request.source.kind == "file" and bool(request.source_content),
     }
 
 
+def _mask_endpoint_secrets(ep: dict | None) -> dict:
+    """Return a copy of an endpoint dict with secret fields masked for API responses."""
+    import copy
+    import re
+
+    out = copy.deepcopy(ep or {})
+    for key in _SECRET_ENDPOINT_KEYS:
+        if out.get(key):
+            if key == "connection_string" and isinstance(out[key], str):
+                out[key] = re.sub(r":([^:@/]+)@", ":****@", out[key])
+            else:
+                out[key] = "****"
+    extra = out.get("extra")
+    if isinstance(extra, dict):
+        for key in list(extra.keys()):
+            lk = str(key).lower()
+            if any(s in lk for s in ("password", "secret", "token", "private_key", "api_key")):
+                if extra.get(key):
+                    extra[key] = "****"
+    return out
+
+
+def sanitize_job_for_api(job: dict) -> dict:
+    """Strip plaintext connector secrets from a job document before returning to clients."""
+    import copy
+
+    out = copy.deepcopy(job or {})
+    tr = out.get("transfer_request")
+    if isinstance(tr, dict):
+        if isinstance(tr.get("source"), dict):
+            tr["source"] = _mask_endpoint_secrets(tr["source"])
+        if isinstance(tr.get("destination"), dict):
+            tr["destination"] = _mask_endpoint_secrets(tr["destination"])
+        out["transfer_request"] = tr
+    return out
+
+
 def transfer_request_from_dict(data: dict) -> TransferRequest:
-    src = data.get("source") or {}
-    dst = data.get("destination") or {}
+    src = _decrypt_endpoint_secrets(data.get("source") or {})
+    dst = _decrypt_endpoint_secrets(data.get("destination") or {})
     return TransferRequest(
         source=EndpointConfig.from_dict(src.get("kind", "database"), src),
         destination=EndpointConfig.from_dict(dst.get("kind", "database"), dst),
@@ -224,6 +341,8 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         require_signed_contract=bool(data.get("require_signed_contract", False)),
         triggered_by=(data.get("triggered_by") or "").strip(),
         date_locale=(data.get("date_locale") or "").strip().upper(),
+        idempotency_key=(data.get("idempotency_key") or "").strip(),
+        delivery_guarantee=(data.get("delivery_guarantee") or "at_least_once").strip().lower(),
     )
 
 

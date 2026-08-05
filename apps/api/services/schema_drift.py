@@ -28,7 +28,7 @@ from services.type_system import is_lossy_coercion, normalize_logical_type
 # Policies that auto-apply additive field evolution (Airbyte propagate_*).
 PROPAGATE_POLICIES = frozenset({"propagate_columns", "propagate_all"})
 
-# Always pause — Airbyte breaking + DataFlow type-fidelity (no silent narrow).
+# Always pause — Airbyte breaking + Datawrap type-fidelity (no silent narrow).
 HARD_BREAKING_KINDS = frozenset({
     "primary_key_change",
     "cursor_removed",
@@ -75,7 +75,7 @@ def _unpack_schema(schema: dict[str, Any] | None) -> tuple[dict[str, str], dict[
     return columns, {}, []
 
 
-def _is_type_widen(old_type: str, new_type: str) -> bool:
+def _is_type_widen(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
     """True when new_type can hold all values of old_type without loss."""
     old_logical = normalize_logical_type(old_type)
     new_logical = normalize_logical_type(new_type)
@@ -88,10 +88,10 @@ def _is_type_widen(old_type: str, new_type: str) -> bool:
             and new_len > old_len
         )
     # Differing logical types: safe (non-lossy) promotions count as widens.
-    return not is_lossy_coercion(old_type, new_type)
+    return not is_lossy_coercion(old_type, new_type, dest_db=dest_db)
 
 
-def _is_type_narrow(old_type: str, new_type: str) -> bool:
+def _is_type_narrow(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
     old_logical = normalize_logical_type(old_type)
     new_logical = normalize_logical_type(new_type)
     if old_logical == new_logical:
@@ -102,7 +102,7 @@ def _is_type_narrow(old_type: str, new_type: str) -> bool:
             and new_len is not None
             and new_len < old_len
         )
-    return is_lossy_coercion(old_type, new_type)
+    return is_lossy_coercion(old_type, new_type, dest_db=dest_db)
 
 
 def classify_schema_change(
@@ -299,7 +299,7 @@ def resolve_schema_evolution(
 
     Airbyte: propagate applies non-breaking; breaking always pauses.
     Fivetran: net-additive drops/renames under propagate (keep dest history).
-    DataFlow: also fail-closed on type narrow (no silent airbyte_meta soft-pass).
+    Datawrap: also fail-closed on type narrow (no silent airbyte_meta soft-pass).
     """
     policy = (schema_policy or "manual_review").strip().lower()
     classification = classification or {
@@ -568,12 +568,23 @@ def detect_schema_drift(
                 )
                 or "VARCHAR"
             )
-            tgt_type = ci_get(target_schema, tgt) or "VARCHAR"
-            if not is_lossy_coercion(src_type, tgt_type):
-                continue
-            from services.type_system import is_precision_collapse_coercion
+            # Prefer mapping stamp over invented VARCHAR when live schema lacks column.
+            from services.type_system import (
+                is_precision_collapse_coercion,
+                resolve_mapping_target_type,
+            )
 
-            if is_precision_collapse_coercion(src_type, tgt_type):
+            tgt_type = resolve_mapping_target_type(
+                m,
+                target_types=target_schema,
+                source_type=str(src_type),
+                dest_db_type=str(destination_db_type or dest_kind or ""),
+            ) or ci_get(target_schema, tgt) or "VARCHAR"
+            dest_db = str(destination_db_type or dest_kind or "")
+            if not is_lossy_coercion(src_type, tgt_type, dest_db=dest_db):
+                continue
+
+            if is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest_db):
                 type_mismatches.append({
                     "source": src,
                     "target": tgt,

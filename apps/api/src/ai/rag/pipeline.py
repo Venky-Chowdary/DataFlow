@@ -1,5 +1,5 @@
 """
-DataTransfer.space — RAG Pipeline
+Datawrap — RAG Pipeline
 
 End-to-end RAG pipeline orchestrating ingestion, retrieval, and generation.
 """
@@ -19,7 +19,7 @@ _pipeline: Optional["DataTransferRAGPipeline"] = None
 
 
 class DataTransferRAGPipeline:
-    """Complete RAG pipeline for DataTransfer.space."""
+    """Complete RAG pipeline for Datawrap."""
 
     def __init__(self):
         self.ingestion = DataTransferDocumentIngestion()

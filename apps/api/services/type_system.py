@@ -39,6 +39,7 @@ LOGICAL_BINARY = "binary"
 LOGICAL_INTERVAL = "interval"
 LOGICAL_GEOGRAPHY = "geography"
 LOGICAL_VECTOR = "vector"
+LOGICAL_OBJECTID = "objectid"  # MongoDB ObjectId — first-class, not STRING+specialty dual path
 
 # ---------------------------------------------------------------------------
 # Decimal / integer wire budgets (shared by serializer + transform engine)
@@ -83,6 +84,9 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "tinyint": LOGICAL_INTEGER,
     "serial": LOGICAL_INTEGER,
     "bigserial": LOGICAL_INTEGER,
+    "smallserial": LOGICAL_INTEGER,
+    # SQL Server IDENTITY(…) — integer identity carrier (not open STRING).
+    "identity": LOGICAL_INTEGER,
     "number": LOGICAL_DECIMAL,
     "numeric": LOGICAL_DECIMAL,
     "decimal": LOGICAL_DECIMAL,
@@ -120,7 +124,8 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "time without time zone": LOGICAL_TIME,
     "uuid": LOGICAL_UUID,
     "guid": LOGICAL_UUID,
-    "objectid": LOGICAL_STRING,  # MongoDB ObjectId — specialty OBJECTID via ddl/bind
+    "objectid": LOGICAL_OBJECTID,  # MongoDB ObjectId — first-class logical
+    "object id": LOGICAL_OBJECTID,
     "object_id": LOGICAL_STRING,
     "json": LOGICAL_JSON,
     "jsonb": LOGICAL_JSON,
@@ -157,6 +162,9 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "bytea": LOGICAL_BINARY,
     "blob": LOGICAL_BINARY,
     "varbinary": LOGICAL_BINARY,
+    "varbyte": LOGICAL_BINARY,
+    "bindata": LOGICAL_BINARY,
+    "bin data": LOGICAL_BINARY,
     "tinyblob": LOGICAL_BINARY,
     "mediumblob": LOGICAL_BINARY,
     "longblob": LOGICAL_BINARY,
@@ -170,6 +178,7 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "dec": LOGICAL_DECIMAL,
     "num": LOGICAL_DECIMAL,
     "decfloat": LOGICAL_DECIMAL,
+    "decimal128": LOGICAL_DECIMAL,
     "float4": LOGICAL_FLOAT,
     "float8": LOGICAL_FLOAT,
     "binary_float": LOGICAL_FLOAT,
@@ -210,6 +219,7 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "multilinestring": LOGICAL_GEOGRAPHY,
     "multipolygon": LOGICAL_GEOGRAPHY,
     "geometrycollection": LOGICAL_GEOGRAPHY,
+    "ring": LOGICAL_GEOGRAPHY,  # ClickHouse Ring → geometry subtype
     # Oracle Spatial / Esri ST_GEOMETRY — must not collapse to string.
     "sdo geometry": LOGICAL_GEOGRAPHY,
     "st geometry": LOGICAL_GEOGRAPHY,
@@ -259,9 +269,13 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "hierarchyid": LOGICAL_STRING,  # carrier HIERARCHYID kept via ddl_type early path
     "nclob": LOGICAL_TEXT,
     "bfile": LOGICAL_BINARY,
-    # Bare "long" is the lakehouse/Java 64-bit integer (Iceberg/Spark). Oracle's
-    # deprecated LONG text LOB is rare; prefer integer fidelity for universal transfers.
+    # Bare "long" is ambiguous: Spark/Iceberg INT64 vs Oracle text LOB.
+    # Logical stays integer for lakehouse; Oracle LONG invent is fail-closed via
+    # oracle_long_numeric_invent + ddl_type text stamp off-Oracle relational.
     "long": LOGICAL_INTEGER,
+    "half": LOGICAL_FLOAT,
+    "halffloat": LOGICAL_FLOAT,
+    "float16": LOGICAL_FLOAT,
     "fixed": LOGICAL_DECIMAL,  # MySQL FIXED synonym for DECIMAL
     "bit varying": LOGICAL_BINARY,
     "varbit": LOGICAL_BINARY,
@@ -297,10 +311,13 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_DECIMAL: "NUMERIC",
         LOGICAL_BOOLEAN: "BOOLEAN",
         LOGICAL_DATE: "DATE",
-        LOGICAL_DATETIME: "TIMESTAMPTZ",
+        # Wall-clock TIMESTAMP — bare datetime must not invent TIMESTAMPTZ/UTC.
+        # Explicit TIMESTAMPTZ / TIMESTAMP WITH TIME ZONE still map via polarity.
+        LOGICAL_DATETIME: "TIMESTAMP",
         LOGICAL_TIME: "TIME",
         LOGICAL_UUID: "UUID",
         LOGICAL_JSON: "JSONB",
+        # Bare ARRAY → JSONB document; typed ARRAY<T> / T[] → native T[] via nested DDL.
         LOGICAL_ARRAY: "JSONB",
         LOGICAL_BINARY: "BYTEA",
     },
@@ -312,7 +329,8 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_BOOLEAN: "BOOLEAN",
         LOGICAL_DATE: "DATE",
         LOGICAL_DATETIME: "DATETIME(6)",
-        LOGICAL_TIME: "TIME",
+        # Match DATETIME(6): bare TIME is MySQL FSP 0 and false-collapses TIME(6).
+        LOGICAL_TIME: "TIME(6)",
         LOGICAL_UUID: "CHAR(36)",
         LOGICAL_JSON: "JSON",
         LOGICAL_ARRAY: "JSON",
@@ -325,8 +343,9 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_DECIMAL: "DECIMAL(38,10)",
         LOGICAL_BOOLEAN: "BIT",
         LOGICAL_DATE: "DATE",
-        LOGICAL_DATETIME: "DATETIME2",
-        LOGICAL_TIME: "TIME",
+        # SQL Server defaults DATETIME2/TIME to precision 7 — bare stamps false-collapse.
+        LOGICAL_DATETIME: "DATETIME2(7)",
+        LOGICAL_TIME: "TIME(7)",
         LOGICAL_UUID: "UNIQUEIDENTIFIER",
         LOGICAL_JSON: "NVARCHAR(MAX)",
         LOGICAL_ARRAY: "NVARCHAR(MAX)",
@@ -339,7 +358,8 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_DECIMAL: "NUMBER(38,10)",
         LOGICAL_BOOLEAN: "NUMBER(1)",
         LOGICAL_DATE: "DATE",
-        LOGICAL_DATETIME: "TIMESTAMP WITH TIME ZONE",
+        # Wall-clock TIMESTAMP — bare datetime must not invent WITH TIME ZONE.
+        LOGICAL_DATETIME: "TIMESTAMP",
         LOGICAL_TIME: "VARCHAR2(32)",
         LOGICAL_UUID: "VARCHAR2(36)",
         LOGICAL_JSON: "CLOB",
@@ -353,9 +373,11 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_DECIMAL: "NUMBER(38,10)",
         LOGICAL_BOOLEAN: "BOOLEAN",
         LOGICAL_DATE: "DATE",
-        LOGICAL_DATETIME: "TIMESTAMP_TZ",
+        # Wall-clock NTZ — bare datetime must not invent TIMESTAMP_TZ.
+        LOGICAL_DATETIME: "TIMESTAMP_NTZ",
         LOGICAL_TIME: "TIME",
-        LOGICAL_UUID: "VARCHAR",
+        # Width-safe carrier — bare VARCHAR collapses UUID polarity in preflight.
+        LOGICAL_UUID: "VARCHAR(36)",
         LOGICAL_JSON: "VARIANT",
         LOGICAL_ARRAY: "VARIANT",
         LOGICAL_BINARY: "BINARY",
@@ -367,12 +389,33 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_DECIMAL: "BIGNUMERIC",
         LOGICAL_BOOLEAN: "BOOL",
         LOGICAL_DATE: "DATE",
-        LOGICAL_DATETIME: "TIMESTAMP",
+        # Wall-clock DATETIME — bare logical datetime must not invent UTC as TIMESTAMP.
+        # Explicit TIMESTAMPTZ / instant carriers still map to TIMESTAMP via ddl_type().
+        LOGICAL_DATETIME: "DATETIME",
         LOGICAL_TIME: "TIME",
+        # BigQuery has no UUID type; STRING holds the value but drops polarity.
+        # create_new_mapping_target_type stamps physical STRING so Validate warns
+        # (never silent-green UUID→UUID while writers emit STRING).
         LOGICAL_UUID: "STRING",
         LOGICAL_JSON: "JSON",
         LOGICAL_ARRAY: "JSON",
         LOGICAL_BINARY: "BYTES",
+    },
+    # Google Cloud Spanner — INT64/NUMERIC/TIMESTAMP only. No DATETIME, TIME,
+    # BIGNUMERIC, or GEOGRAPHY. Wall-clock NTZ lands on STRING (fail-closed).
+    "spanner": {
+        LOGICAL_STRING: "STRING(MAX)",
+        LOGICAL_TEXT: "STRING(MAX)",
+        LOGICAL_INTEGER: "INT64",
+        LOGICAL_DECIMAL: "NUMERIC",
+        LOGICAL_BOOLEAN: "BOOL",
+        LOGICAL_DATE: "DATE",
+        LOGICAL_DATETIME: "STRING(30)",
+        LOGICAL_TIME: "STRING(18)",
+        LOGICAL_UUID: "STRING(36)",
+        LOGICAL_JSON: "JSON",
+        LOGICAL_ARRAY: "JSON",
+        LOGICAL_BINARY: "BYTES(MAX)",
     },
     "mongodb": {
         LOGICAL_STRING: "string",
@@ -395,8 +438,8 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_DECIMAL: "DECIMAL(38,15)",
         LOGICAL_BOOLEAN: "BOOLEAN",
         LOGICAL_DATE: "DATE",
-        # Ambiguous datetime → TIMESTAMPTZ (matches PG; explicit NTZ stays TIMESTAMP).
-        LOGICAL_DATETIME: "TIMESTAMPTZ",
+        # Wall-clock TIMESTAMP — bare datetime must not invent TIMESTAMPTZ.
+        LOGICAL_DATETIME: "TIMESTAMP",
         LOGICAL_TIME: "TIME",
         LOGICAL_UUID: "VARCHAR(36)",
         LOGICAL_JSON: "SUPER",
@@ -457,7 +500,8 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_DECIMAL: "decimal(38,10)",
         LOGICAL_BOOLEAN: "boolean",
         LOGICAL_DATE: "date",
-        LOGICAL_DATETIME: "timestamptz",
+        # Wall-clock timestamp — bare datetime must not invent timestamptz/UTC.
+        LOGICAL_DATETIME: "timestamp",
         LOGICAL_TIME: "time",
         LOGICAL_UUID: "uuid",
         LOGICAL_JSON: "string",
@@ -531,7 +575,7 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_TEXT: "String",
         LOGICAL_INTEGER: "Int64",
         LOGICAL_DECIMAL: "Decimal(38, 15)",
-        LOGICAL_BOOLEAN: "UInt8",
+        LOGICAL_BOOLEAN: "Bool",
         LOGICAL_DATE: "Date",
         LOGICAL_DATETIME: "DateTime64(3)",
         LOGICAL_TIME: "String",
@@ -547,7 +591,8 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_DECIMAL: "decimal(38,15)",
         LOGICAL_BOOLEAN: "boolean",
         LOGICAL_DATE: "date",
-        LOGICAL_DATETIME: "timestamp(3) with time zone",
+        # Wall-clock timestamp — bare datetime must not invent with-time-zone/UTC.
+        LOGICAL_DATETIME: "timestamp(3)",
         LOGICAL_TIME: "time(3)",
         LOGICAL_UUID: "uuid",
         LOGICAL_JSON: "json",
@@ -569,6 +614,28 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_BINARY: "varbinary",
     },
 }
+
+
+# ObjectId is first-class — stamp into every dialect map (avoid STRING+specialty dual path).
+_OBJECTID_DDL_DEFAULTS: Final[dict[str, str]] = {
+    "mongodb": "objectId",
+    "dynamodb": "S",
+    "redis": "string",
+    "elasticsearch": "keyword",
+    # Width-safe hex wires — bare STRING drops ObjectId polarity (false Validate).
+    "bigquery": "STRING(24)",
+    "spanner": "STRING(24)",
+    "databricks": "VARCHAR(24)",
+    "sqlite": "TEXT",
+    "oracle": "VARCHAR2(24)",
+    "sqlserver": "CHAR(24)",
+    "mysql": "CHAR(24)",
+    "presto": "varchar",
+    "trino": "varchar",
+    "iceberg": "string",
+}
+for _db_key, _map in DDL_TYPES.items():
+    _map.setdefault(LOGICAL_OBJECTID, _OBJECTID_DDL_DEFAULTS.get(_db_key, "VARCHAR(24)"))
 
 # Native specialty DDL where the engine supports the type; otherwise lossless text.
 # Applied after base maps so every destination has interval/geography/vector keys.
@@ -594,7 +661,8 @@ _NATIVE_SPECIALTY_DDL: Final[dict[str, dict[str, str]]] = {
         LOGICAL_VECTOR: "NVARCHAR(MAX)",
     },
     "oracle": {
-        LOGICAL_INTERVAL: "INTERVAL DAY TO SECOND",
+        # Bare INTERVAL has no unqualified native — never invent DAY TO SECOND.
+        LOGICAL_INTERVAL: "VARCHAR2(64)",
         LOGICAL_GEOGRAPHY: "SDO_GEOMETRY",
         LOGICAL_VECTOR: "CLOB",
     },
@@ -609,6 +677,12 @@ _NATIVE_SPECIALTY_DDL: Final[dict[str, dict[str, str]]] = {
         LOGICAL_GEOGRAPHY: "GEOGRAPHY",
         LOGICAL_VECTOR: "STRING",
     },
+    "spanner": {
+        # No native INTERVAL / GEOGRAPHY / VECTOR — lossless text, never invent BQ types.
+        LOGICAL_INTERVAL: "STRING(64)",
+        LOGICAL_GEOGRAPHY: "STRING(MAX)",
+        LOGICAL_VECTOR: "STRING(MAX)",
+    },
     "redshift": {
         LOGICAL_INTERVAL: "VARCHAR(65535)",
         LOGICAL_GEOGRAPHY: "GEOMETRY",
@@ -622,7 +696,7 @@ _NATIVE_SPECIALTY_DDL: Final[dict[str, dict[str, str]]] = {
     "iceberg": {
         LOGICAL_INTERVAL: "string",
         LOGICAL_GEOGRAPHY: "string",
-        LOGICAL_VECTOR: "list",
+        LOGICAL_VECTOR: "list<float>",
     },
     "clickhouse": {
         LOGICAL_INTERVAL: "String",
@@ -667,6 +741,7 @@ _FLOAT_DDL: Final[dict[str, str]] = {
     "oracle": "BINARY_DOUBLE",
     "snowflake": "FLOAT",
     "bigquery": "FLOAT64",
+    "spanner": "FLOAT64",
     "mongodb": "double",
     "redshift": "DOUBLE PRECISION",
     "sqlite": "REAL",
@@ -691,6 +766,7 @@ DEFAULT_DDL: Final[dict[str, str]] = {
     "oracle": "VARCHAR2(4000)",
     "snowflake": "VARCHAR",
     "bigquery": "STRING",
+    "spanner": "STRING(MAX)",
     "mongodb": "string",
     "redshift": "VARCHAR(65535)",
     "sqlite": "TEXT",
@@ -727,6 +803,8 @@ _DECIMAL_CAPS: Final[dict[str, tuple[int, int]]] = {
     # BigQuery NUMERIC is (38,9); BIGNUMERIC is (76,38). We emit BIGNUMERIC
     # for DECIMAL logicals; caps used when source params force a check.
     "bigquery": (76, 38),
+    # Spanner NUMERIC is fixed (38,9) — never invent BIGNUMERIC.
+    "spanner": (38, 9),
 }
 
 # DDL templates that accept (precision, scale). Bare NUMERIC / BIGNUMERIC /
@@ -746,6 +824,7 @@ _DECIMAL_PARAM_TEMPLATES: Final[dict[str, str]] = {
     "duckdb": "DECIMAL({p},{s})",
     "postgresql": "NUMERIC({p},{s})",
     "bigquery": "BIGNUMERIC({p},{s})",
+    "spanner": "NUMERIC({p},{s})",
 }
 
 _DECIMAL_DEFAULT_SCALE: Final[dict[str, int]] = {
@@ -763,6 +842,7 @@ _DECIMAL_DEFAULT_SCALE: Final[dict[str, int]] = {
     "presto": 15,
     "postgresql": 0,
     "bigquery": 38,
+    "spanner": 9,
 }
 
 
@@ -771,11 +851,16 @@ def parse_numeric_precision_scale(inferred: str | None) -> tuple[int | None, int
 
     ClickHouse ``Decimal128(S)`` / ``Decimal64(S)`` pass scale only — precision is
     implied by the Decimal* width (9/18/38/76).
+
+    ``DECFLOAT(n)`` is IEEE decimal-*float* digit count — not fixed-point (p,s).
     """
     raw = strip_identity_qualifier(inferred)
     if not raw:
         return None, None
     upper = raw.upper().replace(" ", "")
+    # DECFLOAT(16|34) is not DECIMAL(p) — never invent scale 0 from digit count.
+    if upper == "DECFLOAT" or upper.startswith("DECFLOAT("):
+        return None, None
     if upper in {"MONEY", "CURRENCY"}:
         return 19, 4
     if upper == "SMALLMONEY":
@@ -866,10 +951,12 @@ def _vector_ddl_for_dest(db: str, inferred: str | None) -> str:
     Never invents a default dimension (historically Snowflake used 1536). When the
     dimension is unknown or exceeds the platform cap, fall back to the destination
     lossless text sink — CREATE TABLE must not invent a wrong embedding width.
+    PostgreSQL preserves HALFVEC/SPARSEVEC encoding (never invent dense vector).
     """
     fallback = DDL_TYPES.get(db, {}).get(LOGICAL_VECTOR, DEFAULT_DDL.get(db, "TEXT"))
     template = _VECTOR_PARAM_TEMPLATES.get(db)
-    if not template:
+    # Engines without native vector templates keep DDL_TYPES sink (ARRAY/STRING/…).
+    if not template and db != "postgresql":
         return fallback
 
     dim = parse_vector_dimension(inferred)
@@ -879,6 +966,17 @@ def _vector_ddl_for_dest(db: str, inferred: str | None) -> str:
     cap = _VECTOR_DIM_CAPS.get(db, 65535)
     if dim > cap:
         return DEFAULT_DDL.get(db, "TEXT")
+
+    enc = vector_encoding_polarity(inferred)
+    if db == "postgresql":
+        if enc == "half":
+            return f"halfvec({dim})"
+        if enc == "sparse":
+            return f"sparsevec({dim})"
+        return f"vector({dim})"
+
+    if not template:
+        return fallback
     return template.format(n=dim)
 
 
@@ -925,7 +1023,7 @@ _AVRO_LOGICAL_TOKEN_CARRIER: Final[dict[str, str]] = {
 
 
 def avro_logical_token_to_carrier(token: str | None) -> str | None:
-    """Map a bare Avro ``logicalType`` string to a DataFlow carrier.
+    """Map a bare Avro ``logicalType`` string to a Datawrap carrier.
 
     Full Avro field dicts go through :func:`services.avro_schema.avro_type_to_logical`.
     This handles introspect/dtype strings like ``timestamp-millis`` alone.
@@ -937,7 +1035,7 @@ def avro_logical_token_to_carrier(token: str | None) -> str | None:
 
 
 def arrow_dtype_to_carrier(dtype: str | None) -> str | None:
-    """Map Apache Arrow / PyArrow type strings to DataFlow carriers.
+    """Map Apache Arrow / PyArrow type strings to Datawrap carriers.
 
     Research: Arrow ``timestamp[us, tz=UTC]`` ↔ Iceberg timestamptz; bare
     ``timestamp[us]`` ↔ timestamp NTZ; ``decimal128(p,s)`` ↔ DECIMAL; 
@@ -1010,6 +1108,14 @@ def normalize_logical_type(inferred: str | None) -> str:
     # contracts (Airbyte Destinations V2 stores objects as JSON — we still label
     # the *source* as struct/map and treat nested→document as an explicit collapse).
     upper = raw.upper()
+    # ClickHouse Nullable / LowCardinality wrappers — unwrap before TEXT fallthrough.
+    m_wrap = re.match(
+        r"^(?:NULLABLE|LOWCARDINALITY)\s*\(\s*(.+)\s*\)$",
+        raw,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if m_wrap:
+        return normalize_logical_type(m_wrap.group(1).strip())
     # DynamoDB AttributeValue type codes — exact tokens only (never match bare
     # "n"/"s" inside other dialects). AWS docs: S/N/B/BOOL/NULL/M/L/SS/NS/BS.
     # Codes that are also generic SQL/Avro aliases defer to CANONICAL_TYPES, so
@@ -1030,6 +1136,8 @@ def normalize_logical_type(inferred: str | None) -> str:
         or upper.startswith("LIST<")
         or upper.startswith("ARRAY(")
         or upper.startswith("LIST(")
+        # Postgres / DuckDB postfix: INTEGER[], TEXT[][], etc.
+        or re.match(r"^[A-Z][A-Z0-9_ ]*(\[\s*\])+$", upper)
     ):
         return LOGICAL_ARRAY
     if (
@@ -1115,6 +1223,14 @@ def normalize_logical_type(inferred: str | None) -> str:
         return LOGICAL_DECIMAL
     if key in {"uint64", "uint128", "uint256", "int128", "int256", "hugeint", "uhugeint"}:
         return LOGICAL_DECIMAL
+    # FLOAT/DECIMAL UNSIGNED must not fall through to LOGICAL_STRING.
+    if "unsigned" in key and re.search(r"\b(float|double|real)\b", key):
+        return LOGICAL_FLOAT
+    if "unsigned" in key and re.search(r"\b(decimal|numeric|number)\b", key):
+        return LOGICAL_DECIMAL
+    # Oracle short forms INTERVAL DAY / INTERVAL YEAR — not bare strings.
+    if key.startswith("interval"):
+        return LOGICAL_INTERVAL
     return CANONICAL_TYPES.get(key, CANONICAL_TYPES.get(key.replace(" ", "_"), LOGICAL_STRING))
 
 
@@ -1130,6 +1246,20 @@ _NESTED_DDL_ENGINES: Final[frozenset[str]] = frozenset({
     "snowflake",
 })
 
+# Engines with native T[] arrays but no STRUCT invent on create-new.
+_ARRAY_NATIVE_ENGINES: Final[frozenset[str]] = frozenset({
+    "postgresql",
+    "postgres",
+    "redshift",
+    "timescaledb",
+    "cockroachdb",
+    "alloydb",
+    "yugabytedb",
+    "citus",
+    "supabase",
+    "greenplum",
+})
+
 
 def _leaf_ddl_for_nested(db: str, leaf: str) -> str:
     """Map a nested leaf logical carrier to destination-native leaf DDL."""
@@ -1142,11 +1272,20 @@ def _leaf_ddl_for_nested(db: str, leaf: str) -> str:
         tz_ddl = _datetime_ddl_for_dest(db, leaf)
         if tz_ddl:
             return tz_ddl
+    # Width-preserving invent for nested INT/FLOAT — never BIGINT[] from ARRAY<INT>.
+    if logical == LOGICAL_INTEGER:
+        int_ddl = _integer_ddl_for_dest(db, leaf)
+        if int_ddl:
+            return int_ddl
+    if logical == LOGICAL_FLOAT:
+        float_ddl = _float_ddl_for_dest(db, leaf)
+        if float_ddl:
+            return float_ddl
     return DDL_TYPES.get(db, {}).get(logical, DEFAULT_DDL.get(db, "TEXT"))
 
 
 def _format_array_ddl(db: str, element_ddl: str) -> str:
-    if db == "duckdb":
+    if db == "duckdb" or db in _ARRAY_NATIVE_ENGINES:
         return f"{element_ddl}[]"
     if db == "clickhouse":
         return f"Array({element_ddl})"
@@ -1165,7 +1304,9 @@ def _format_struct_ddl(db: str, fields: list[tuple[str, str]]) -> str:
         inner = ", ".join(f"{n} {t}" for n, t in fields)
         return f"STRUCT({inner})"
     if db == "clickhouse":
-        inner = ", ".join(t for _, t in fields)
+        # Named Tuple(name Type, …) preserves the STRUCT field contract.
+        # Positional Tuple(T1,T2) drops names and false-collapses create-new Map.
+        inner = ", ".join(f"{n} {t}" for n, t in fields)
         return f"Tuple({inner})"
     if db == "iceberg":
         inner = ", ".join(f"{n}: {t}" for n, t in fields)
@@ -1230,9 +1371,22 @@ def parse_struct_fields(inferred: str | None) -> list[tuple[str, str]]:
     ) and raw.endswith(")"):
         body = raw[raw.index("(") + 1 : -1].strip()
     elif upper.startswith("TUPLE(") and raw.endswith(")"):
-        # Positional tuple — synthesize _0, _1, … for STRUCT-shaped contracts.
+        # ClickHouse Tuple — named ``Tuple(a Int32)`` or positional ``Tuple(Int32)``.
         els = _split_nested_type_parts(raw[raw.index("(") + 1 : -1].strip())
-        return [(f"_{i}", el) for i, el in enumerate(els) if el]
+        out: list[tuple[str, str]] = []
+        for i, el in enumerate(els):
+            el = (el or "").strip()
+            if not el:
+                continue
+            if " " in el:
+                name, typ = el.split(None, 1)
+                name_clean = name.strip().strip('"').strip("`").strip("'")
+                typ = typ.strip()
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name_clean) and typ:
+                    out.append((name_clean, typ))
+                    continue
+            out.append((f"_{i}", el))
+        return out
     else:
         return []
     fields: list[tuple[str, str]] = []
@@ -1267,7 +1421,7 @@ def parse_map_key_value(inferred: str | None) -> tuple[str, str] | None:
 
 
 def parse_array_element(inferred: str | None) -> str | None:
-    """Parse ``ARRAY<T>`` / ``LIST<T>`` / Snowflake ``ARRAY(T)`` element type."""
+    """Parse ``ARRAY<T>`` / ``LIST<T>`` / Snowflake ``ARRAY(T)`` / ``T[]`` element type."""
     raw = (inferred or "").strip()
     upper = raw.upper()
     if (upper.startswith("ARRAY<") or upper.startswith("LIST<")) and raw.endswith(">"):
@@ -1275,6 +1429,11 @@ def parse_array_element(inferred: str | None) -> str | None:
         return inner or None
     if (upper.startswith("ARRAY(") or upper.startswith("LIST(")) and raw.endswith(")"):
         inner = raw[raw.index("(") + 1 : -1].strip()
+        return inner or None
+    # Postfix T[] / T[][] — peel one dimension (PG / DuckDB wire).
+    m = re.match(r"^(.+?)\s*\[\s*\]\s*$", raw, flags=re.IGNORECASE)
+    if m:
+        inner = m.group(1).strip()
         return inner or None
     return None
 
@@ -1293,10 +1452,14 @@ def decimal_params_would_narrow(source_type: str, target_type: str) -> bool:
     sp, ss = parse_numeric_precision_scale(source_type)
     tp, ts = parse_numeric_precision_scale(target_type)
     if sp is None and ss is None:
+        # Bare DECIMAL → DECIMAL(p,s) invents a capacity the source never proved.
+        if tp is not None or ts is not None:
+            return True
         return False
     if tp is None and ts is None:
-        # Bare DECIMAL/NUMERIC target — platform default; not a proven narrow.
-        return False
+        # Proven (p,s) → bare DECIMAL invents platform default (often MySQL
+        # DECIMAL(10,0) / engine-specific) — Accept risk, never silent green.
+        return True
     if ss is not None and ts is not None and ts < ss:
         return True
     if sp is not None and tp is not None:
@@ -1309,59 +1472,247 @@ def decimal_params_would_narrow(source_type: str, target_type: str) -> bool:
     return False
 
 
+def is_decfloat_carrier(inferred: str | None) -> bool:
+    """True for IBM ``DECFLOAT`` / ``DECFLOAT(16|34)`` IEEE decimal-float."""
+    upper = strip_identity_qualifier(inferred).upper().replace(" ", "")
+    return upper == "DECFLOAT" or upper.startswith("DECFLOAT(")
+
+
+def decfloat_domain_would_collapse(source_type: str, target_type: str) -> bool:
+    """True when DECFLOAT polarity would be lost into fixed DECIMAL/FLOAT/text."""
+    if not is_decfloat_carrier(source_type):
+        return False
+    if is_decfloat_carrier(target_type):
+        return False
+    return True
+
+
+def bignumeric_capacity_would_invent(source_type: str, target_type: str) -> bool:
+    """True when bare NUMBER/DECIMAL invents BigQuery BIGNUMERIC (76,38) class."""
+    if normalize_logical_type(source_type) != LOGICAL_DECIMAL:
+        return False
+    if normalize_logical_type(target_type) != LOGICAL_DECIMAL:
+        return False
+    src_u = strip_identity_qualifier(source_type).upper().replace(" ", "")
+    tgt_u = strip_identity_qualifier(target_type).upper().replace(" ", "")
+    src_big = src_u.startswith("BIGNUMERIC") or src_u.startswith("BIGDECIMAL")
+    tgt_big = tgt_u.startswith("BIGNUMERIC") or tgt_u.startswith("BIGDECIMAL")
+    if tgt_big and not src_big:
+        # Same (p,s) BIGNUMERIC is BigQuery create-new physical wire — not invent.
+        sp, ss = parse_numeric_precision_scale(source_type)
+        tp, ts = parse_numeric_precision_scale(target_type)
+        if sp is not None and tp is not None and sp == tp and (
+            (ss is None and ts is None) or ss == ts
+        ):
+            return False
+        return True
+    return False
+
+
+def decimal_fixed_point_would_collapse_to_text(
+    source_type: str, target_type: str
+) -> bool:
+    """True when fixed-point DECIMAL collapses to open TEXT/STRING.
+
+    Create-new may stamp TEXT when (p,s) exceeds the destination DECIMAL cap
+    (e.g. ClickHouse Decimal256→MySQL). That preserves digits as strings but
+    drops fixed-point polarity — Accept risk, never silent green.
+    """
+    if normalize_logical_type(source_type) != LOGICAL_DECIMAL:
+        return False
+    if is_decfloat_carrier(source_type):
+        return False
+    tgt = normalize_logical_type(target_type)
+    return tgt in {LOGICAL_STRING, LOGICAL_TEXT}
+
+
+def smalldatetime_domain_would_invent(source_type: str, target_type: str) -> bool:
+    """True when SMALLDATETIME (minute accuracy) invents second-level TIMESTAMP.
+
+    Microsoft SMALLDATETIME is minute-rounded; inventing TIMESTAMP(0)/DATETIME
+    claims second fidelity the source never had — Accept risk required.
+    """
+    src = strip_identity_qualifier(source_type).upper().replace(" ", "")
+    if src != "SMALLDATETIME":
+        return False
+    tgt = strip_identity_qualifier(target_type).upper().replace(" ", "")
+    if tgt == "SMALLDATETIME":
+        return False
+    return normalize_logical_type(target_type) in {
+        LOGICAL_DATETIME,
+        LOGICAL_DATE,
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+    }
+
+
 def is_opaque_document_logical(inferred: str | None) -> bool:
     """True for VARIANT/JSONB/SUPER-style document sinks (not fielded STRUCT/MAP)."""
     return normalize_logical_type(inferred) == LOGICAL_JSON
 
 
+# Document polarity class — JSON / JSONB / VARIANT / SUPER / OBJECT / BSON.
+# Specialty invent is "leave this class"; dialect physical wires may be text LOBs
+# (SQL Server NVARCHAR(MAX), Oracle CLOB) without losing create-new document intent.
+_DOCUMENT_POLARITY_BASES: Final[frozenset[str]] = frozenset(
+    {
+        "JSON",
+        "JSONB",
+        "VARIANT",
+        "SUPER",
+        "OBJECT",
+        "BSON",
+        "M",  # Mongo document envelope alias
+    }
+)
+
+# Unbounded text LOBs that engines use as *the* create-new document wire when they
+# lack a native JSON type. Bounded VARCHAR(n) is never a document wire.
+_DOCUMENT_TEXT_WIRE_TOKENS: Final[frozenset[str]] = frozenset(
+    {
+        "NVARCHAR(MAX)",
+        "VARCHAR(MAX)",
+        "CLOB",
+        "NCLOB",
+        "LONGTEXT",
+        "LONG VARCHAR",
+        "LONG",
+    }
+)
+
+
+def is_document_polarity_carrier(inferred: str | None) -> bool:
+    """True when the carrier is in the opaque document polarity class."""
+    if not inferred:
+        return False
+    if normalize_logical_type(inferred) != LOGICAL_JSON:
+        return False
+    base = strip_identity_qualifier(inferred).upper().strip()
+    bare = re.sub(r"\s*\(\s*\d+\s*\)", "", base).strip()
+    if bare in _DOCUMENT_POLARITY_BASES or bare.startswith("JSON"):
+        return True
+    # Logical JSON aliases (object / variant / super / bson) with no JSON token.
+    return True
+
+
+def is_dialect_native_document_wire(
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when target is the destination's create-new document sink.
+
+    Covers native JSON/JSONB/VARIANT/SUPER and dialect text LOB wires
+    (NVARCHAR(MAX) / CLOB) that are the intentional document projection —
+    not a fidelity collapse.
+    """
+    raw = strip_identity_qualifier(target_type).strip()
+    if not raw:
+        return False
+    upper = raw.upper()
+    bare = re.sub(r"\s*\(\s*\d+\s*\)", "", upper).strip()
+    if bare in _DOCUMENT_POLARITY_BASES or bare.startswith("JSON"):
+        return True
+    if upper in _DOCUMENT_TEXT_WIRE_TOKENS or bare in _DOCUMENT_TEXT_WIRE_TOKENS:
+        return True
+    db = (dest_db or "").strip().lower()
+    if not db:
+        return False
+    try:
+        native = ddl_type(db, "JSON")
+    except Exception:
+        return False
+    native_u = strip_identity_qualifier(native).upper().strip()
+    return upper == native_u or bare == re.sub(r"\s*\(\s*\d+\s*\)", "", native_u).strip()
+
+
+def document_domain_would_collapse(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when JSON/VARIANT/SUPER/JSONB loses document validation into open text.
+
+    Serializing a document to bounded VARCHAR/STRING/TEXT drops JSON parse
+    polarity. Dialect-native document wires (JSONB, VARIANT, NVARCHAR(MAX),
+    CLOB, …) are create-new projections — not collapse.
+    """
+    if normalize_logical_type(source_type) != LOGICAL_JSON:
+        return False
+    if is_dialect_native_document_wire(target_type, dest_db=dest_db):
+        return False
+    tgt = normalize_logical_type(target_type)
+    return tgt in {LOGICAL_STRING, LOGICAL_TEXT}
+
+
+def document_domain_would_invent(source_type: str, target_type: str) -> bool:
+    """True when open string/text invents a JSON/VARIANT document domain.
+
+    Writers may wrap scalars as JSON, but Map must Accept risk — never imply the
+    source already carried document validation polarity.
+    """
+    if normalize_logical_type(target_type) != LOGICAL_JSON:
+        return False
+    src = normalize_logical_type(source_type)
+    return src in {LOGICAL_STRING, LOGICAL_TEXT}
+
+
 def is_nested_document_collapse(source_type: str, target_type: str) -> bool:
-    """True when fielded STRUCT/MAP collapses into an opaque JSON/VARIANT document.
+    """True when STRUCT/MAP/ARRAY collapses into opaque JSON/VARIANT or text.
 
     Airbyte Destinations V2 often stores objects as JSON — that is valid but is
-    **not** field-level DDL fidelity. Operators must see it (G3 warn/block).
+    **not** field/element DDL fidelity. Operators must see it (G3 warn/block).
+    Nested→VARCHAR/TEXT is the same field-DDL collapse (serialized document).
     """
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
-    if src not in {LOGICAL_STRUCT, LOGICAL_MAP}:
+    if src not in {LOGICAL_STRUCT, LOGICAL_MAP, LOGICAL_ARRAY}:
         return False
-    return tgt == LOGICAL_JSON
+    return tgt in {LOGICAL_JSON, LOGICAL_STRING, LOGICAL_TEXT}
 
 
-def nested_struct_fields_incompatible(source_type: str, target_type: str) -> bool:
-    """True when both sides declare STRUCT fields and a required field/type is lost."""
+def nested_struct_fields_incompatible(source_type: str, target_type: str, *, dest_db: str = "") -> bool:
+    """True when STRUCT field contracts are lost or inventively declared.
+
+    Opaque ``RECORD``/bare STRUCT → fielded ``STRUCT<a:INT>`` invents a schema
+    the source never proved — fail closed (Accept risk).
+    """
     src_fields = parse_struct_fields(source_type)
     tgt_fields = parse_struct_fields(target_type)
+    src_l = normalize_logical_type(source_type)
+    tgt_l = normalize_logical_type(target_type)
+    if src_l == LOGICAL_STRUCT and tgt_l == LOGICAL_STRUCT:
+        # Unfielded ↔ fielded invents or drops a field DDL contract.
+        if bool(src_fields) != bool(tgt_fields):
+            return True
     if not src_fields or not tgt_fields:
         return False
     tgt_by = {n.lower(): t for n, t in tgt_fields}
-    # Safe leaf widenings inside a nested shape (mirrors is_lossy allow-list subset).
+    # Positional ClickHouse Tuple(_0,_1,…) ↔ named STRUCT — match by order when
+    # every target name is a synthetic positional index (legacy positional stamps).
+    positional_tgt = all(
+        n.startswith("_") and n[1:].isdigit() for n, _ in tgt_fields
+    )
+    positional_src = all(
+        n.startswith("_") and n[1:].isdigit() for n, _ in src_fields
+    )
+    if positional_tgt != positional_src and len(src_fields) == len(tgt_fields):
+        if positional_tgt or positional_src:
+            pairs = list(zip(src_fields, tgt_fields))
+            src_fields = [(sn, st) for (sn, st), _ in pairs]
+            tgt_fields = [(sn, tt) for (sn, _), (_, tt) in pairs]
+            tgt_by = {n.lower(): t for n, t in tgt_fields}
+    # Safe leaf widenings inside a nested shape — numeric widen + text↔text only.
+    # INT→STRING under STRUCT rewrites the nested DDL contract (Accept risk).
     safe_leaf: set[tuple[str, str]] = {
         (LOGICAL_INTEGER, LOGICAL_DECIMAL),
-        (LOGICAL_INTEGER, LOGICAL_FLOAT),
-        (LOGICAL_INTEGER, LOGICAL_STRING),
-        (LOGICAL_INTEGER, LOGICAL_TEXT),
-        (LOGICAL_INTEGER, LOGICAL_JSON),
-        (LOGICAL_DECIMAL, LOGICAL_STRING),
-        (LOGICAL_DECIMAL, LOGICAL_TEXT),
-        (LOGICAL_DECIMAL, LOGICAL_JSON),
-        (LOGICAL_FLOAT, LOGICAL_STRING),
-        (LOGICAL_FLOAT, LOGICAL_TEXT),
-        (LOGICAL_FLOAT, LOGICAL_JSON),
-        (LOGICAL_BOOLEAN, LOGICAL_STRING),
-        (LOGICAL_BOOLEAN, LOGICAL_TEXT),
-        (LOGICAL_BOOLEAN, LOGICAL_JSON),
         (LOGICAL_DATE, LOGICAL_DATETIME),
-        (LOGICAL_DATE, LOGICAL_STRING),
-        (LOGICAL_DATE, LOGICAL_TEXT),
-        (LOGICAL_DATE, LOGICAL_JSON),
-        (LOGICAL_DATETIME, LOGICAL_STRING),
-        (LOGICAL_DATETIME, LOGICAL_TEXT),
-        (LOGICAL_DATETIME, LOGICAL_JSON),
         (LOGICAL_STRING, LOGICAL_TEXT),
         (LOGICAL_TEXT, LOGICAL_STRING),
         (LOGICAL_STRUCT, LOGICAL_JSON),  # nested document path — flagged separately
         (LOGICAL_MAP, LOGICAL_JSON),
-        (LOGICAL_ARRAY, LOGICAL_JSON),
+        # ARRAY→JSON is document collapse (is_nested_document_collapse), not a safe leaf.
     }
     for name, src_t in src_fields:
         tgt_t = tgt_by.get(name.lower())
@@ -1370,96 +1721,102 @@ def nested_struct_fields_incompatible(source_type: str, target_type: str) -> boo
         src_l = normalize_logical_type(src_t)
         tgt_l = normalize_logical_type(tgt_t)
         if src_l == LOGICAL_STRUCT and tgt_l == LOGICAL_STRUCT:
-            if nested_struct_fields_incompatible(src_t, tgt_t):
+            if nested_struct_fields_incompatible(src_t, tgt_t, dest_db=dest_db):
                 return True
             continue
         if is_nested_document_collapse(src_t, tgt_t):
             return True
         if src_l == tgt_l:
             # Same family — still catch IEEE/time/TZ collapse when helpers exist.
-            if is_precision_collapse_coercion(src_t, tgt_t):
+            if is_precision_collapse_coercion(src_t, tgt_t, dest_db=dest_db):
                 return True
             continue
         if (src_l, tgt_l) not in safe_leaf:
             return True
-        # Safe leaf pairs that are still precision collapses (float→string is ok;
-        # float→decimal is NOT in safe_leaf).
+        # Safe leaf (STRING↔TEXT) must still catch specialty→text / width / IEEE.
+        if is_precision_collapse_coercion(src_t, tgt_t, dest_db=dest_db):
+            return True
     return False
 
 
-def nested_array_elements_incompatible(source_type: str, target_type: str) -> bool:
+def nested_array_elements_incompatible(source_type: str, target_type: str, *, dest_db: str = "") -> bool:
     """True when ARRAY/LIST element types collapse fidelity (e.g. FLOAT→INTEGER)."""
     src_el = parse_array_element(source_type)
     tgt_el = parse_array_element(target_type)
+    # Bare ARRAY/LIST ↔ typed ARRAY<T> invents or drops the element contract.
+    if bool(src_el) != bool(tgt_el):
+        return True
     if not src_el or not tgt_el:
         return False
-    if is_precision_collapse_coercion(src_el, tgt_el):
+    if is_precision_collapse_coercion(src_el, tgt_el, dest_db=dest_db):
         return True
-    if is_nested_shape_collapse(src_el, tgt_el):
+    if is_nested_shape_collapse(src_el, tgt_el, dest_db=dest_db):
         return True
     if decimal_params_would_narrow(src_el, tgt_el):
         return True
     s_l, t_l = normalize_logical_type(src_el), normalize_logical_type(tgt_el)
     if s_l == t_l:
+        # Same logical family — only narrow collapses (match scalar SSOT).
+        # ARRAY<INTEGER>→ARRAY<INT64> on BigQuery is the engine's single int wire,
+        # not a silent invent; ARRAY<BIGINT>→ARRAY<INT32> still fails closed.
+        if s_l == LOGICAL_INTEGER and integer_width_would_narrow(src_el, tgt_el):
+            return True
+        if s_l == LOGICAL_FLOAT and float_mantissa_would_narrow(
+            src_el, tgt_el, dest_db=dest_db
+        ):
+            return True
         return False
-    # Safe element widenings (same allow-list subset as STRUCT leaves).
+    # Safe element widenings — numeric widen + text↔text only (nested SSOT).
+    # Integer→decimal still allowed; integer→wider integer is width-safe above.
     safe_el = {
         (LOGICAL_INTEGER, LOGICAL_DECIMAL),
-        (LOGICAL_INTEGER, LOGICAL_FLOAT),
-        (LOGICAL_INTEGER, LOGICAL_STRING),
-        (LOGICAL_INTEGER, LOGICAL_TEXT),
-        (LOGICAL_INTEGER, LOGICAL_JSON),
-        (LOGICAL_DECIMAL, LOGICAL_STRING),
-        (LOGICAL_DECIMAL, LOGICAL_TEXT),
-        (LOGICAL_DECIMAL, LOGICAL_JSON),
-        (LOGICAL_FLOAT, LOGICAL_STRING),
-        (LOGICAL_FLOAT, LOGICAL_TEXT),
-        (LOGICAL_FLOAT, LOGICAL_JSON),
-        (LOGICAL_BOOLEAN, LOGICAL_STRING),
-        (LOGICAL_BOOLEAN, LOGICAL_TEXT),
-        (LOGICAL_BOOLEAN, LOGICAL_JSON),
         (LOGICAL_DATE, LOGICAL_DATETIME),
-        (LOGICAL_DATE, LOGICAL_STRING),
-        (LOGICAL_DATE, LOGICAL_TEXT),
         (LOGICAL_STRING, LOGICAL_TEXT),
         (LOGICAL_TEXT, LOGICAL_STRING),
-        (LOGICAL_ARRAY, LOGICAL_JSON),
         (LOGICAL_STRUCT, LOGICAL_JSON),
         (LOGICAL_MAP, LOGICAL_JSON),
+        # ARRAY→JSON element collapse is not a safe widening.
     }
     return (s_l, t_l) not in safe_el
 
 
-def is_nested_shape_collapse(source_type: str, target_type: str) -> bool:
+def is_nested_shape_collapse(source_type: str, target_type: str, *, dest_db: str = "") -> bool:
     """Fielded nested shape lost: document / STRUCT / MAP / ARRAY element collapse."""
+    dest_db = _normalize_dest_db(dest_db) if dest_db else ""
     if is_nested_document_collapse(source_type, target_type):
         return True
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
     if src == LOGICAL_STRUCT and tgt == LOGICAL_STRUCT:
-        return nested_struct_fields_incompatible(source_type, target_type)
+        return nested_struct_fields_incompatible(source_type, target_type, dest_db=dest_db)
     if src == LOGICAL_MAP and tgt == LOGICAL_MAP:
         skv = parse_map_key_value(source_type)
         tkv = parse_map_key_value(target_type)
+        # Bare MAP ↔ typed MAP<K,V> invents or drops the key/value contract.
+        if bool(skv) != bool(tkv):
+            return True
         if skv and tkv:
             if normalize_logical_type(skv[0]) != normalize_logical_type(tkv[0]):
                 return True
-            if is_nested_shape_collapse(skv[1], tkv[1]):
+            if is_nested_shape_collapse(skv[1], tkv[1], dest_db=dest_db):
                 return True
-            if is_precision_collapse_coercion(skv[1], tkv[1]):
+            if is_precision_collapse_coercion(skv[1], tkv[1], dest_db=dest_db):
                 return True
             if decimal_params_would_narrow(skv[1], tkv[1]):
                 return True
             s_l, t_l = normalize_logical_type(skv[1]), normalize_logical_type(tkv[1])
-            if s_l != t_l and t_l not in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON}:
-                if (s_l, t_l) not in {
-                    (LOGICAL_INTEGER, LOGICAL_DECIMAL),
-                    (LOGICAL_INTEGER, LOGICAL_FLOAT),
-                    (LOGICAL_DATE, LOGICAL_DATETIME),
-                }:
-                    return True
+            # Same nested SSOT as STRUCT/ARRAY — INT→STRING rewrites value DDL.
+            if s_l != t_l and (s_l, t_l) not in {
+                (LOGICAL_INTEGER, LOGICAL_DECIMAL),
+                (LOGICAL_DATE, LOGICAL_DATETIME),
+                (LOGICAL_STRING, LOGICAL_TEXT),
+                (LOGICAL_TEXT, LOGICAL_STRING),
+                (LOGICAL_STRUCT, LOGICAL_JSON),
+                (LOGICAL_MAP, LOGICAL_JSON),
+            }:
+                return True
     if src == LOGICAL_ARRAY and tgt == LOGICAL_ARRAY:
-        return nested_array_elements_incompatible(source_type, target_type)
+        return nested_array_elements_incompatible(source_type, target_type, dest_db=dest_db)
     return False
 
 
@@ -1467,20 +1824,28 @@ def _nested_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     """Emit native ARRAY/STRUCT/MAP DDL when source declares nested carriers.
 
     Engines without nested support return None so callers fall back to base maps
-    (JSON/SUPER/TEXT) — never invent a STRUCT on PostgreSQL.
+    (JSON/SUPER/TEXT) — never invent a STRUCT on PostgreSQL. Typed arrays on
+    PG-family still emit native ``T[]`` (never silent JSONB invent).
     """
-    if db not in _NESTED_DDL_ENGINES:
-        return None
     raw = (inferred or "").strip()
     if not raw:
         return None
     upper = raw.upper()
 
     array_el = parse_array_element(raw)
-    if array_el is not None:
-        nested_inner = _nested_ddl_for_dest(db, array_el)
+    if array_el is not None and (
+        db in _NESTED_DDL_ENGINES or db in _ARRAY_NATIVE_ENGINES
+    ):
+        # Recurse only on full nested engines; PG-family keeps scalar leaves.
+        nested_inner = (
+            _nested_ddl_for_dest(db, array_el) if db in _NESTED_DDL_ENGINES else None
+        )
         element = nested_inner if nested_inner else _leaf_ddl_for_nested(db, array_el)
         return _format_array_ddl(db, element)
+
+    if db not in _NESTED_DDL_ENGINES:
+        return None
+
     if upper in {"ARRAY", "LIST"}:
         return DDL_TYPES.get(db, {}).get(LOGICAL_ARRAY, DEFAULT_DDL.get(db, "TEXT"))
 
@@ -1610,6 +1975,25 @@ def _range_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     return None
 
 
+def _is_unsigned_integer_decimal_carrier(inferred: str | None) -> bool:
+    """True when a DECIMAL-logical carrier is really an unsigned integer widen.
+
+    MySQL ``BIGINT UNSIGNED`` / ``UINT64`` map to LOGICAL_DECIMAL so they do not
+    overflow signed BIGINT — but create-new must stay zero-scale, never invent
+    ``NUMBER(38,10)`` fractional digits.
+    """
+    upper = strip_identity_qualifier(inferred).upper()
+    if not upper:
+        return False
+    if re.match(r"^U?INT\d*$", upper.replace(" ", "")):
+        return upper.startswith("UINT") or upper.startswith("INT") and "UNSIGNED" in upper
+    if "UNSIGNED" in upper and re.search(
+        r"\b(?:BIGINT|INTEGER|INT|MEDIUMINT|SMALLINT|TINYINT)\b", upper
+    ):
+        return True
+    return False
+
+
 def _decimal_ddl_for_dest(db: str, inferred: str | None) -> str:
     """Emit destination DECIMAL preserving source scale when possible.
 
@@ -1641,6 +2025,14 @@ def _decimal_ddl_for_dest(db: str, inferred: str | None) -> str:
     # No source params → platform default (PG stays bare NUMERIC; others use
     # a generous floor so values never truncate at write time).
     if precision is None and scale is None:
+        # BIGINT UNSIGNED / UINT64 travel as LOGICAL_DECIMAL for overflow safety
+        # but must not invent fractional scale (NUMBER(38,10) invent).
+        if _is_unsigned_integer_decimal_carrier(inferred):
+            if db == "postgresql":
+                return "NUMERIC(20,0)"
+            if db == "bigquery":
+                return "BIGNUMERIC(20,0)"
+            return template.format(p=min(cap_p, 38), s=0)
         if db == "postgresql":
             return default_ddl
         if db == "bigquery":
@@ -1718,6 +2110,19 @@ def ddl_carrier_type(inferred: str | None) -> str:
         and "<" not in upper
     ):
         return upper
+    # Preserve native specialty carriers (INET, OBJECTID, …) — never collapse to
+    # VARCHAR/TEXT before create-new DDL / risk stamping.
+    specialty = specialty_carrier_base(raw)
+    if specialty is not None:
+        return specialty
+    # Preserve UNSIGNED integer polarity — bare INTEGER invents signed 32-bit CREATE.
+    if "UNSIGNED" in upper or re.search(r"\bUINT\d*\b", upper) or re.match(
+        r"^UINT(8|16|32|64)\b", upper.replace(" ", "")
+    ):
+        return strip_identity_qualifier(raw).strip() or raw
+    # ClickHouse UInt* (case-sensitive leading U).
+    if re.match(r"^UInt(8|16|32|64)\b", strip_identity_qualifier(raw) or ""):
+        return strip_identity_qualifier(raw).strip() or raw
     logical = normalize_logical_type(raw)
     if logical == LOGICAL_DECIMAL:
         # Preserve BIGNUMERIC polarity (76,38) vs bare DECIMAL/NUMERIC (38,9).
@@ -1728,6 +2133,10 @@ def ddl_carrier_type(inferred: str | None) -> str:
             if precision is not None:
                 return f"BIGNUMERIC({precision})"
             return "BIGNUMERIC"
+        # BIGINT UNSIGNED / UINT64 travel as DECIMAL logical for overflow safety
+        # but create-new must keep the unsigned token (never invent NUMBER(38,10)).
+        if _is_unsigned_integer_decimal_carrier(raw):
+            return strip_identity_qualifier(raw).strip() or raw
         precision, scale = parse_numeric_precision_scale(raw)
         if precision is not None and scale is not None:
             return f"DECIMAL({precision},{scale})"
@@ -1735,7 +2144,13 @@ def ddl_carrier_type(inferred: str | None) -> str:
             return f"DECIMAL({precision})"
         return "DECIMAL"
     if logical == LOGICAL_VECTOR:
+        # Preserve HALFVEC/SPARSEVEC encoding polarity — never invent dense VECTOR.
+        enc_raw = strip_identity_qualifier(raw).upper().replace(" ", "")
         dim = parse_vector_dimension(raw)
+        if enc_raw.startswith("HALFVEC"):
+            return f"HALFVEC({dim})" if dim is not None else "HALFVEC"
+        if enc_raw.startswith("SPARSEVEC"):
+            return f"SPARSEVEC({dim})" if dim is not None else "SPARSEVEC"
         if dim is not None:
             return f"VECTOR({dim})"
         return "VECTOR"
@@ -1777,6 +2192,8 @@ def ddl_carrier_type(inferred: str | None) -> str:
         return "TIME"
     if logical == LOGICAL_UUID:
         return "UUID"
+    if logical == LOGICAL_OBJECTID:
+        return "OBJECTID"
     if logical == LOGICAL_JSON:
         return "JSON"
     if logical == LOGICAL_ARRAY:
@@ -1797,7 +2214,104 @@ def ddl_carrier_type(inferred: str | None) -> str:
 def _normalize_dest_db(db_type: str | None) -> str:
     """Canonical destination engine id for DDL / cap lookups."""
     db = (db_type or "").strip().lower()
-    if db in {"spark", "delta", "delta_lake", "databricks_sql", "unity_catalog"}:
+    # PostgreSQL family — DDL_TYPES / caps keyed only on ``postgresql``.
+    # Without this, create-new invents TEXT for NUMBER/DATE/BOOLEAN with soft-pass.
+    if db in {
+        "postgres",
+        "pg",
+        "postgresql",
+        "cockroachdb",
+        "cockroach",
+        "timescaledb",
+        "timescale",
+        "alloydb",
+        "yugabytedb",
+        "yugabyte",
+        "citus",
+        "supabase",
+        "supabase_db",
+        "greenplum",
+        "greenplum_cloud",
+        "neon",
+        "neon_serverless",
+        "azure_postgres",
+        "aws_rds_postgres",
+        "rds_postgres",
+        "aurora",
+        "aurora_postgres",
+        "aurora-postgresql",
+        "pgbouncer",
+        "cloudsql_postgres",
+        "gcp_cloud_sql_postgres",
+        "cloud_sql_postgres",
+        "opengauss",
+        "open_gauss",
+        "kingbase",
+        "vastbase",
+        "hologres",
+        "tdsql",
+        "materialize",
+        "risingwave",
+    }:
+        return "postgresql"
+    if db in {
+        "mariadb",
+        "tidb",
+        "tidb_cloud",
+        "mysql2",
+        "aurora_mysql",
+        "aurora-mysql",
+        "singlestore",
+        "memsql",
+        "cloudsql_mysql",
+        "gcp_cloud_sql_mysql",
+        "rds_mysql",
+        "maria",
+        "percona",
+        "doris",
+        "starrocks",
+        "oceanbase",
+        "selectdb",
+        # Product catalog wires these through mysql+pymysql (not PG wire).
+        "polardb",
+        "gaussdb",
+        "goldendb",
+        "vitess",
+        "planetscale",
+        "mysql_planetscale",
+    }:
+        return "mysql"
+    if db in {
+        "mongo",
+        "mongodb",
+        "documentdb",
+        "document_db",
+        "cosmos",
+        "cosmos-mongodb",
+        "cosmos_mongodb",
+        "cosmosdb",
+        "firestore",
+    }:
+        return "mongodb"
+    if db in {
+        "spark",
+        "delta",
+        "delta_lake",
+        "databricks_sql",
+        "unity_catalog",
+        "databricks_azure",
+        "databricks_aws",
+        "databricks_gcp",
+        "hive",
+        "impala",
+        "emr",
+        "glue",
+        "synapse_spark",
+        "flink",
+        "maxcompute",
+        "odps",
+        "databend",
+    }:
         return "databricks"
     if db in {"apache_iceberg", "iceberg_rest", "nessie"}:
         return "iceberg"
@@ -1807,20 +2321,61 @@ def _normalize_dest_db(db_type: str | None) -> str:
         return "dynamodb"
     if db in {"redis-kv", "redis_kv"}:
         return "redis"
-    if db in {"ch", "clickhouse_cloud"}:
+    if db in {"ch", "clickhouse_cloud", "bytehouse"}:
         return "clickhouse"
+    if db in {"redshift", "redshift_serverless", "amazon_redshift"}:
+        return "redshift"
+    if db in {"snowflake", "snowflake_aws", "snowflake_azure", "snowflake_gcp"}:
+        return "snowflake"
+    if db in {"athena", "amazon_athena", "aws_athena", "dremio"}:
+        return "trino"
+    # Spanner is NOT BigQuery — inventing DATETIME/BIGNUMERIC/TIME is illegal DDL.
+    if db in {"spanner", "google_spanner", "cloud_spanner"}:
+        return "spanner"
+    if db in {"duckdb", "motherduck"}:
+        return "duckdb"
+    if db in {"sqlite", "libsql", "turso"}:
+        return "sqlite"
     # Microsoft T-SQL family — one DDL SSOT (NVARCHAR / BIT / DATETIME2).
     if db in {
         "mssql",
         "azure_sql",
         "azure_sql_db",
         "azure_sql_mi",
+        "azuresql",
+        "azure-sql",
+        "sqlazure",
         "synapse",
         "azure_synapse",
         "sql_server",
+        "fabric",
+        "fabric_sql",
         "fabric_warehouse",
     }:
         return "sqlserver"
+    # No dedicated DDL map yet — generic SQL rather than soft-pass TEXT.
+    if db in {
+        "db2",
+        "ibm_db2",
+        "ibm-db2",
+        "db2luw",
+        "cassandra",
+        "bigtable",
+        "google_bigtable",
+        "teradata",
+        "vertica",
+        "netezza",
+        "exasol",
+        "crate",
+        "cratedb",
+        "questdb",
+        "pinot",
+        "druid",
+        "kylin",
+        "beam",
+        "datafusion",
+    }:
+        return "generic_sql"
     return db
 
 
@@ -1887,11 +2442,150 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
         if db == "databricks":
             return "VOID"
         return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT, DEFAULT_DDL.get(db, "TEXT"))
-    # MongoDB ObjectId — 12-byte identity; VARCHAR(24) hex on relational sinks.
-    if base_early in {"OBJECTID", "OBJECT_ID"}:
-        if db == "mongodb":
-            return "objectId"
-        return "VARCHAR(24)"
+    # Logical UUID → dialect-native UUID DDL (MySQL CHAR(36), PG UUID, …).
+    # Exact CHAR(36)/VARCHAR(36) wires are preserved as-is — never promote a
+    # plain VARCHAR(36) text column to PostgreSQL UUID (invalid for non-UUID
+    # values). Also never collapse CHAR(36) through STRING→TEXT.
+    if normalize_logical_type(inferred) == LOGICAL_UUID:
+        types_early = DDL_TYPES.get(db) or {}
+        native_uuid = types_early.get(LOGICAL_UUID)
+        if native_uuid:
+            return native_uuid
+        return "VARCHAR(36)"
+    if uuid_exact_wire_carrier(inferred):
+        return strip_identity_qualifier(inferred).strip()
+    # MongoDB ObjectId — dialect-native wire (never invent BigQuery VARCHAR).
+    if base_early in {"OBJECTID", "OBJECT_ID"} or normalize_logical_type(inferred) == LOGICAL_OBJECTID:
+        types_oid = DDL_TYPES.get(db) or {}
+        native_oid = types_oid.get(LOGICAL_OBJECTID)
+        if native_oid:
+            return native_oid
+        return _OBJECTID_DDL_DEFAULTS.get(db, "VARCHAR(24)")
+    # Oracle LONG is a deprecated text LOB on Oracle dest (CLOB invent).
+    # Off-Oracle, ``long`` is the Spark/Hive INT64 synonym — never invent TEXT
+    # with soft-pass (INTEGER→TEXT allow-list greenwash). LONG→BIGINT is gated
+    # by oracle_long_numeric_invent (Accept risk).
+    if base_early == "LONG":
+        if db == "oracle":
+            return "CLOB"
+        int_ddl = _integer_ddl_for_dest(db, "BIGINT")
+        if int_ddl:
+            return int_ddl
+        return DDL_TYPES.get(db, {}).get(LOGICAL_INTEGER, "BIGINT")
+    # SQL Server SYSNAME ≡ NVARCHAR(128) — never invent NVARCHAR(MAX)/TEXT.
+    if base_early == "SYSNAME":
+        if db == "sqlserver":
+            return "NVARCHAR(128)"
+        return "VARCHAR(128)"
+    # SQL Server IDENTITY — preserve identity polarity on create-new (never TEXT).
+    if base_early == "IDENTITY" or base_early.startswith("IDENTITY("):
+        if db == "sqlserver":
+            return "INT IDENTITY(1,1)"
+        if db in {
+            "postgresql",
+            "postgres",
+            "cockroachdb",
+            "timescaledb",
+            "alloydb",
+            "yugabytedb",
+            "citus",
+            "supabase",
+            "greenplum",
+            "redshift",
+        }:
+            return "INTEGER GENERATED BY DEFAULT AS IDENTITY"
+        if db in {"mysql", "mariadb", "tidb"}:
+            return "INT AUTO_INCREMENT"
+        int_ddl = _integer_ddl_for_dest(db, "INTEGER")
+        return int_ddl or DDL_TYPES.get(db, {}).get(LOGICAL_INTEGER, "INTEGER")
+    # Oracle LONG RAW — unbounded binary LOB (not fixed RAW).
+    if base_early == "LONG RAW" or base_early.replace(" ", "") == "LONGRAW":
+        if db == "oracle":
+            return "BLOB"
+        if db in {"postgresql", "postgres", "cockroachdb", "timescaledb", "alloydb", "yugabytedb", "citus", "supabase", "greenplum", "redshift"}:
+            return "BYTEA"
+        if db in {"mysql", "mariadb", "tidb"}:
+            return "LONGBLOB"
+        if db in {"sqlserver", "mssql"}:
+            return "VARBINARY(MAX)"
+        if db == "snowflake":
+            return "BINARY"
+        if db == "bigquery":
+            return "BYTES"
+        return DDL_TYPES.get(db, {}).get(LOGICAL_BINARY, "BYTEA")
+    # IEEE half / float16 — stamp REAL/FLOAT32, never invent DOUBLE or TEXT.
+    if base_early in {"HALF", "HALFFLOAT", "FLOAT16"}:
+        types_h = DDL_TYPES.get(db) or {}
+        if db in {"postgresql", "postgres", "cockroachdb", "timescaledb", "alloydb", "yugabytedb", "citus", "supabase", "greenplum", "redshift"}:
+            return "REAL"
+        if db in {"sqlserver", "mssql"}:
+            return "REAL"
+        if db in {"mysql", "mariadb", "tidb"}:
+            return "FLOAT"
+        if db == "oracle":
+            return "BINARY_FLOAT"
+        if db in {"databricks", "spark", "delta", "delta_lake"}:
+            return "FLOAT"
+        if db == "spanner":
+            # No HALF — nearest Spanner wire is FLOAT32 (never invent FLOAT64 widen).
+            return "FLOAT32"
+        if db in {"snowflake", "bigquery"}:
+            return types_h.get(LOGICAL_FLOAT, "FLOAT")
+        if db == "iceberg":
+            return "float"
+        return types_h.get(LOGICAL_FLOAT, "FLOAT")
+    # Opaque PG USER-DEFINED / UDT — stamp open text; specialty collapse forces Accept risk.
+    if base_early in {"USER-DEFINED", "USER_DEFINED"}:
+        return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT, DEFAULT_DDL.get(db, "TEXT"))
+    # ClickHouse Enum8/Enum16 / Nothing / Dynamic — keep native or TEXT + specialty collapse.
+    if base_early.startswith("ENUM8") or base_early.startswith("ENUM16"):
+        if db == "clickhouse":
+            return "Enum8" if base_early.startswith("ENUM8") else "Enum16"
+        return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT, DEFAULT_DDL.get(db, "TEXT"))
+    if base_early in {"NOTHING", "DYNAMIC"}:
+        if db == "clickhouse":
+            return base_early.title() if base_early == "NOTHING" else "Dynamic"
+        return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT, DEFAULT_DDL.get(db, "TEXT"))
+    # ClickHouse AggregateFunction / SimpleAggregateFunction — opaque state; TEXT + collapse.
+    if base_early.startswith("AGGREGATEFUNCTION") or base_early.startswith(
+        "SIMPLEAGGREGATEFUNCTION"
+    ):
+        if db == "clickhouse":
+            return strip_identity_qualifier(inferred).strip() or base_early
+        return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT, DEFAULT_DDL.get(db, "TEXT"))
+    # IBM DECFLOAT — IEEE decimal float; never invent NUMBER(p,0) from digit count.
+    if base_early == "DECFLOAT" or base_early.startswith("DECFLOAT("):
+        if db in {
+            "postgresql",
+            "postgres",
+            "cockroachdb",
+            "timescaledb",
+            "alloydb",
+            "yugabytedb",
+            "citus",
+            "supabase",
+            "greenplum",
+        }:
+            return "NUMERIC"
+        if db == "oracle":
+            return "BINARY_DOUBLE"
+        if db == "sqlserver":
+            return "FLOAT"
+        if db == "bigquery":
+            return "BIGNUMERIC"
+        if db == "snowflake":
+            return "FLOAT"
+        return DDL_TYPES.get(db, {}).get(LOGICAL_FLOAT, "DOUBLE PRECISION")
+    # Redshift HLLSKETCH — keep native or fall to VARCHAR with specialty collapse.
+    if base_early == "HLLSKETCH":
+        if db == "redshift":
+            return "HLLSKETCH"
+        return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT, DEFAULT_DDL.get(db, "TEXT"))
+    # Oracle ANYDATA — polymorphic envelope; JSON/CLOB wire off-engine.
+    if base_early == "ANYDATA":
+        if db == "oracle":
+            return "ANYDATA"
+        return DDL_TYPES.get(db, {}).get(LOGICAL_JSON, DEFAULT_DDL.get(db, "TEXT"))
     # PostgreSQL jsonpath — specialty path expression type (never invent TEXT).
     if base_early == "JSONPATH":
         if db in {
@@ -1989,6 +2683,9 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
             return "MONEY"
         if db == "postgresql":
             return "DECIMAL(19,4)"
+        # SQLite has no fixed-point — TEXT avoids NUMERIC affinity IEEE loss.
+        if db == "sqlite":
+            return "TEXT"
         return (
             _decimal_ddl_for_dest(db, "DECIMAL(19,4)")
             if db in _DECIMAL_PARAM_TEMPLATES
@@ -1997,6 +2694,8 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
     if base_early == "SMALLMONEY":
         if db == "sqlserver":
             return "SMALLMONEY"
+        if db == "sqlite":
+            return "TEXT"
         return (
             _decimal_ddl_for_dest(db, "DECIMAL(10,4)")
             if db in _DECIMAL_PARAM_TEMPLATES
@@ -2152,6 +2851,14 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
         geo_ddl = _geography_ddl_for_dest(db, inferred)
         if geo_ddl:
             return geo_ddl
+    if logical == LOGICAL_FLOAT:
+        float_ddl = _float_ddl_for_dest(db, inferred)
+        if float_ddl:
+            return float_ddl
+    if logical == LOGICAL_INTEGER:
+        int_ddl = _integer_ddl_for_dest(db, inferred)
+        if int_ddl:
+            return int_ddl
     if logical == LOGICAL_BINARY and is_bitstring_carrier(inferred):
         bit_ddl = _bitstring_ddl_for_dest(db, inferred)
         if bit_ddl:
@@ -2214,7 +2921,11 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
             return base_carrier
     # Bounded VARCHAR/CHAR(n) + COLLATE — create-new must not invent TEXT and
     # drop CI/AI semantics (Airbyte/Informatica class schema loss).
+    # Unlimited VARCHAR(MAX)/TEXT on Oracle — CLOB, never invent VARCHAR2(4000).
     if logical in {LOGICAL_STRING, LOGICAL_TEXT}:
+        if is_unlimited_string_carrier(inferred) and db == "oracle":
+            national = is_national_string_carrier(inferred)
+            return "NCLOB" if national else "CLOB"
         string_ddl = _string_ddl_for_dest(db, inferred)
         if string_ddl:
             return _with_collation_clause(db, inferred, string_ddl, logical)
@@ -2251,6 +2962,210 @@ _BINARY_DDL_CAPS: Final[dict[str, int]] = {
 }
 
 
+def _float_ddl_for_dest(db: str, inferred: str | None) -> str | None:
+    """Width-preserving IEEE invent — never stamp DOUBLE from REAL/BINARY_FLOAT.
+
+    Bare ``FLOAT`` stays dialect-default (PG ≡ DOUBLE PRECISION). Explicit
+    single-precision tokens keep a single-precision sink so create-new does not
+    soft-pass invent-widen as identity.
+    """
+    if normalize_logical_type(inferred) != LOGICAL_FLOAT:
+        return None
+    upper = re.sub(
+        r"\bUNSIGNED\b",
+        "",
+        strip_identity_qualifier(inferred).upper(),
+    ).strip().replace(" ", "")
+    bits = float_mantissa_bits(inferred)
+    if bits is None:
+        return None
+    # IEEE half handled in ddl_type early path.
+    if bits <= 11:
+        return None
+    explicit_single = upper in {
+        "REAL",
+        "FLOAT4",
+        "FLOAT32",
+        "BINARY_FLOAT",
+    } or upper.startswith("REAL(")
+    if not explicit_single:
+        m = re.match(r"^FLOAT\((\d+)\)$", upper)
+        if m and int(m.group(1)) <= 24:
+            explicit_single = True
+    if bits <= 24 and explicit_single:
+        if db in {
+            "postgresql",
+            "postgres",
+            "cockroachdb",
+            "timescaledb",
+            "alloydb",
+            "yugabytedb",
+            "citus",
+            "supabase",
+            "greenplum",
+            "redshift",
+            "duckdb",
+        }:
+            return "REAL"
+        if db in {"mysql", "mariadb", "tidb"}:
+            return "FLOAT"
+        if db in {"sqlserver", "mssql"}:
+            return "REAL"
+        if db == "oracle":
+            return "BINARY_FLOAT"
+        if db == "snowflake":
+            # Snowflake FLOAT is IEEE-64 — stamp FLOAT and rely on Map dest token.
+            return "FLOAT"
+        if db == "bigquery":
+            return "FLOAT64"
+        if db == "spanner":
+            # Spanner GoogleSQL: FLOAT32 / FLOAT64 only — never invent REAL.
+            return "FLOAT32"
+        if db in {"databricks", "spark", "delta"}:
+            return "FLOAT"
+        if db == "iceberg":
+            return "float"
+        if db == "clickhouse":
+            return "Float32"
+        if db in {"trino", "presto"}:
+            return "real"
+        return "REAL"
+    # Bare FLOAT with single-precision fail-closed bits: keep IEEE-32 on engines
+    # whose FLOAT/float token is single (never invent list<double> from ARRAY<FLOAT>).
+    # PostgreSQL-family FLOAT ≡ DOUBLE PRECISION — fall through to dialect default.
+    if bits <= 24 and upper == "FLOAT":
+        if db in {"mysql", "mariadb", "tidb"}:
+            return "FLOAT"
+        if db in {"databricks", "spark", "delta", "delta_lake", "databricks_sql"}:
+            return "FLOAT"
+        if db == "iceberg":
+            return "float"
+        if db == "clickhouse":
+            return "Float32"
+        if db in {"trino", "presto"}:
+            return "real"
+    # Double / bare FLOAT — dialect default.
+    return _FLOAT_DDL.get(db)
+
+
+def _integer_ddl_for_dest(db: str, inferred: str | None) -> str | None:
+    """Width-preserving integer invent — never stamp BIGINT from TINYINT/INT.
+
+    Engines with a single integer wire (BigQuery INT64) still invent that wire;
+    operators see INT64 on Map rather than a false TINYINT identity stamp.
+    """
+    if normalize_logical_type(inferred) != LOGICAL_INTEGER:
+        return None
+    upper = strip_identity_qualifier(inferred).upper()
+    # YEAR / SERIAL handled in ddl_type early paths.
+    if upper == "YEAR" or upper.startswith("YEAR("):
+        return None
+    if upper in {"SERIAL", "BIGSERIAL", "SMALLSERIAL", "TINYSERIAL"}:
+        return None
+    width = integer_bit_width(inferred)
+    if width is None:
+        return None
+    unsigned = "UNSIGNED" in upper or bool(re.search(r"\bUINT\d*\b", upper))
+
+    if db in {"mysql", "mariadb", "tidb"}:
+        if width <= 8:
+            return "TINYINT"
+        if width == 9:
+            return "TINYINT UNSIGNED"
+        if width <= 16:
+            return "SMALLINT"
+        if width == 17:
+            return "SMALLINT UNSIGNED"
+        if width <= 24:
+            return "MEDIUMINT"
+        if width == 25:
+            return "MEDIUMINT UNSIGNED"
+        if width <= 32:
+            return "INT"
+        if width == 33:
+            return "INT UNSIGNED"
+        if width <= 64:
+            return "BIGINT"
+        return "BIGINT UNSIGNED"
+
+    if db in {
+        "postgresql",
+        "postgres",
+        "cockroachdb",
+        "timescaledb",
+        "alloydb",
+        "yugabytedb",
+        "citus",
+        "supabase",
+        "greenplum",
+        "redshift",
+        "duckdb",
+    }:
+        if width <= 16:
+            return "SMALLINT"
+        if width <= 32:
+            return "INTEGER"
+        return "BIGINT"
+
+    if db in {"sqlserver", "mssql"}:
+        # T-SQL TINYINT is 0–255 (unsigned 8).
+        if width <= 8 or (unsigned and width == 9):
+            return "TINYINT"
+        if width <= 16:
+            return "SMALLINT"
+        if width <= 32:
+            return "INT"
+        return "BIGINT"
+
+    if db == "oracle":
+        if width <= 16:
+            return "NUMBER(5,0)"
+        if width <= 32:
+            return "NUMBER(10,0)"
+        return "NUMBER(38,0)"
+
+    if db == "snowflake":
+        if width <= 16:
+            return "SMALLINT"
+        if width <= 32:
+            return "INTEGER"
+        return "BIGINT"
+
+    if db == "bigquery":
+        return "INT64"
+
+    if db in {"databricks", "spark", "delta"}:
+        if width <= 32:
+            return "INT"
+        return "BIGINT"
+
+    if db == "iceberg":
+        if width <= 32:
+            return "int"
+        return "long"
+
+    if db == "clickhouse":
+        if width <= 8:
+            return "Int8" if not unsigned else "UInt8"
+        if width <= 16:
+            return "Int16" if not unsigned else "UInt16"
+        if width <= 32:
+            return "Int32" if not unsigned else "UInt32"
+        return "Int64" if not unsigned else "UInt64"
+
+    if db in {"trino", "presto"}:
+        if width <= 16:
+            return "smallint"
+        if width <= 32:
+            return "integer"
+        return "bigint"
+
+    if db == "sqlite":
+        return "INTEGER"
+
+    return None
+
+
 def _string_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     """Emit bounded CHAR/VARCHAR(n) / STRING(n) when source width is known."""
     width = parse_string_carrier_width(inferred)
@@ -2261,7 +3176,11 @@ def _string_ddl_for_dest(db: str, inferred: str | None) -> str | None:
         return None
     fixed = is_fixed_width_char_carrier(inferred)
     upper = strip_identity_qualifier(inferred).upper()
-    national = bool(re.search(r"\bN(?:VAR)?CHAR\b", upper))
+    national = bool(
+        re.search(r"\bN(?:VAR)?CHAR\b", upper)
+        or re.search(r"\bNATIONAL\s+CHARACTER\b", upper)
+        or re.search(r"\bNATIONAL\s+CHAR\b", upper)
+    )
     if db == "bigquery":
         return f"STRING({min(width, cap)})"
     if db == "snowflake":
@@ -2271,13 +3190,20 @@ def _string_ddl_for_dest(db: str, inferred: str | None) -> str | None:
         # and drop declared width (Delta schema-enforcement class).
         return f"VARCHAR({min(width, cap)})"
     if db == "sqlserver":
+        # Preserve source national polarity — never invent NCHAR from CHAR.
         if not fixed and width > 4000:
-            return "NVARCHAR(MAX)"
+            return "NVARCHAR(MAX)" if national else "VARCHAR(MAX)"
         w = min(width, 4000)
-        return f"{'NCHAR' if fixed else 'NVARCHAR'}({w})"
+        if national:
+            return f"{'NCHAR' if fixed else 'NVARCHAR'}({w})"
+        return f"{'CHAR' if fixed else 'VARCHAR'}({w})"
     if db in {"mysql", "mariadb"}:
+        # Preserve NATIONAL CHAR/VARCHAR — never invent non-national from NCHAR.
+        if national:
+            return f"{'NCHAR' if fixed else 'NVARCHAR'}({min(width, cap)})"
         return f"{'CHAR' if fixed else 'VARCHAR'}({min(width, cap)})"
     if db in {"postgresql", "redshift"}:
+        # No national types — CHAR/VARCHAR; remap polarity via national_charset_would_collapse.
         return f"{'CHAR' if fixed else 'VARCHAR'}({min(width, cap)})"
     if db == "oracle":
         w = min(width, cap)
@@ -2290,16 +3216,26 @@ def _string_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     return None
 
 
-def is_fixed_width_binary_carrier(inferred: str | None) -> bool:
-    """True for BINARY(n) / RAW(n) / FIXED(n) (not VARBINARY / VARBYTE / BYTES)."""
+def is_fixed_width_binary_carrier(inferred: str | None, *, dest_db: str = "") -> bool:
+    """True for BINARY(n) / RAW(n) / FIXED(n) (not VARBINARY / VARBYTE / BYTES / LONG RAW).
+
+    Snowflake ``BINARY(n)`` is max-length variable (not MySQL-style pad-fixed) —
+    when ``dest_db`` is snowflake, do not treat it as fixed-pad.
+    """
     upper = strip_identity_qualifier(inferred).upper()
     if not upper:
         return False
+    # Oracle LONG RAW is an unbounded LOB — never treat as fixed RAW(n).
+    if re.search(r"\bLONG\s+RAW\b", upper) or upper.replace(" ", "") == "LONGRAW":
+        return False
     if re.search(r"\b(?:VARBINARY|VARBYTE|BYTES|BYTEA|BLOB|IMAGE)\b", upper):
         return False
-    return bool(
-        re.search(r"\b(?:BINARY|RAW|FIXED|FIXEDSTRING)\b", upper)
-    )
+    if not re.search(r"\b(?:BINARY|RAW|FIXED|FIXEDSTRING)\b", upper):
+        return False
+    db = (dest_db or "").strip().lower()
+    if db in {"snowflake", "sf"} and re.search(r"\bBINARY\b", upper):
+        return False
+    return True
 
 
 def _binary_ddl_for_dest(db: str, inferred: str | None) -> str | None:
@@ -2311,7 +3247,7 @@ def _binary_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     if cap is None:
         return None
     w = min(width, cap)
-    fixed = is_fixed_width_binary_carrier(inferred)
+    fixed = is_fixed_width_binary_carrier(inferred, dest_db=db)
     if db == "bigquery":
         return f"BYTES({w})"
     if db == "snowflake":
@@ -2486,9 +3422,11 @@ def _geography_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     srid = parse_geography_srid(inferred)
     if db == "postgresql":
         if pol == "geography":
-            return f"GEOGRAPHY(Geometry,{srid})" if srid else "GEOGRAPHY"
+            kind = geometry_kind(inferred) or "Geometry"
+            return f"GEOGRAPHY({kind},{srid})" if srid else "GEOGRAPHY"
         if pol == "geometry":
-            return f"GEOMETRY(Geometry,{srid})" if srid else "GEOMETRY"
+            kind = geometry_kind(inferred) or "Geometry"
+            return f"GEOMETRY({kind},{srid})" if srid else "GEOMETRY"
         return None
     if db == "sqlserver":
         if pol == "geometry":
@@ -2518,6 +3456,7 @@ _TZ_AWARE_DDL: Final[dict[str, str]] = {
     "sqlserver": "DATETIMEOFFSET",
     "oracle": "TIMESTAMP WITH TIME ZONE",
     "bigquery": "TIMESTAMP",
+    "spanner": "TIMESTAMP",
     "duckdb": "TIMESTAMPTZ",
     "timescaledb": "timestamptz",
     "databricks": "TIMESTAMP",
@@ -2531,14 +3470,18 @@ _TZ_NAIVE_DDL: Final[dict[str, str]] = {
     "redshift": "TIMESTAMP",
     "snowflake": "TIMESTAMP_NTZ",
     "mysql": "DATETIME(6)",
-    "sqlserver": "DATETIME2",
+    "sqlserver": "DATETIME2(7)",
     "oracle": "TIMESTAMP",
     "bigquery": "DATETIME",
+    # Spanner has no DATETIME — wall-clock NTZ must not invent UTC TIMESTAMP.
+    "spanner": "STRING(30)",
     "duckdb": "TIMESTAMP",
     "timescaledb": "timestamp",
+    # Keep lakehouse NTZ spellings aligned with DDL_TYPES[LOGICAL_DATETIME].
+    # Databricks TIMESTAMP is session-TZ aware; NTZ sources must stamp TIMESTAMP_NTZ.
     "databricks": "TIMESTAMP_NTZ",
-    "clickhouse": "DateTime64(6)",
-    "trino": "timestamp(6)",
+    "clickhouse": "DateTime64(3)",
+    "trino": "timestamp(3)",
     "presto": "timestamp",
     "iceberg": "timestamp",
 }
@@ -2639,11 +3582,17 @@ def time_timezone_polarity(inferred: str | None) -> str | None:
 
 
 def time_timezone_polarity_loss(source_type: str, target_type: str) -> bool:
-    """True when TIMETZ offset polarity would be dropped onto bare TIME."""
-    return (
-        time_timezone_polarity(source_type) == "tz"
-        and time_timezone_polarity(target_type) == "ntz"
-    )
+    """True when TIME offset polarity would be dropped or invented.
+
+    Covers TIMETZ→TIME (offset drop) and TIME→TIMETZ (offset invent on naive).
+    """
+    src = time_timezone_polarity(source_type)
+    tgt = time_timezone_polarity(target_type)
+    if src == "tz" and tgt == "ntz":
+        return True
+    if src == "ntz" and tgt == "tz":
+        return True
+    return False
 
 
 def _time_ddl_for_dest(db: str, inferred: str | None) -> str | None:
@@ -2676,6 +3625,7 @@ _TZ_LTZ_DDL: Final[dict[str, str]] = {
     "sqlserver": "DATETIMEOFFSET",
     "mysql": "DATETIME(6)",
     "bigquery": "TIMESTAMP",
+    "spanner": "TIMESTAMP",
     "databricks": "TIMESTAMP",
     "clickhouse": "DateTime64(6, 'UTC')",
     "trino": "timestamp(6) with time zone",
@@ -2691,6 +3641,7 @@ _TZ_OFFSET_DDL: Final[dict[str, str]] = {
     "sqlserver": "DATETIMEOFFSET",
     "mysql": "DATETIME(6)",
     "bigquery": "TIMESTAMP",
+    "spanner": "TIMESTAMP",
     "databricks": "TIMESTAMP",
     "clickhouse": "DateTime64(6, 'UTC')",
     "trino": "timestamp(6) with time zone",
@@ -2730,6 +3681,12 @@ _TEMPORAL_FSP_CAPS: Final[dict[str, int]] = {
 # TZ-aware variant. Verified against DuckDB 1.3.2, which raises
 # "Type TIMESTAMP WITH TIME ZONE does not support any modifiers!".
 _NO_TZ_TYPMOD_ENGINES: Final[frozenset[str]] = frozenset({"duckdb"})
+
+# Engines that reject TIMESTAMP/TIME typmod entirely (always microsecond
+# or fixed internal precision). Promoting TIMESTAMP(6) here is illegal DDL.
+_NO_TEMPORAL_TYPMOD_ENGINES: Final[frozenset[str]] = frozenset(
+    {"redshift", "bigquery", "databricks", "iceberg", "spark", "delta"}
+)
 
 
 def _is_tz_aware_ddl(base: str) -> bool:
@@ -2820,9 +3777,10 @@ def _datetime_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     Snowflake ``TIMESTAMP_LTZ`` vs ``TIMESTAMP_TZ`` polarity is preserved
     (Openflow maps PG timestamptz→LTZ; Airbyte #80914).
     """
-    # Do NOT treat bare TIMESTAMP / DATETIME as NTZ — those are ambiguous
-    # logical aliases and must fall through to the destination platform
-    # default (e.g. PostgreSQL TIMESTAMPTZ) so greenfield create-new stays honest.
+    # Bare TIMESTAMP / DATETIME are ambiguous — fall through to the destination
+    # platform default, which is wall-clock NTZ (TIMESTAMP / TIMESTAMP_NTZ /
+    # DATETIME). Explicit TIMESTAMPTZ / WITH TIME ZONE keep aware polarity.
+    # Inventing TIMESTAMPTZ from bare datetime silently relocates civil times.
     polarity = datetime_timezone_polarity(inferred)
     fsp = parse_temporal_fractional_precision(inferred)
     base: str | None = None
@@ -2879,13 +3837,87 @@ def decimal_precision_would_truncate(source_type: str | None, dest_db_type: str 
     return precision > _DECIMAL_CAPS[db][0]
 
 
+def vector_encoding_polarity(inferred: str | None) -> str | None:
+    """Return ``dense`` / ``half`` / ``sparse`` for vector carriers, else None."""
+    if normalize_logical_type(inferred) != LOGICAL_VECTOR:
+        return None
+    upper = strip_identity_qualifier(inferred).upper().replace(" ", "")
+    if upper.startswith("SPARSEVEC"):
+        return "sparse"
+    if upper.startswith("HALFVEC"):
+        return "half"
+    if upper.startswith("VECTOR") or "VECTOR(" in upper:
+        return "dense"
+    return "dense"
+
+
+
+def vector_to_array_wire_preserved(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True for VECTOR(n) → ARRAY<FLOAT>/FLOAT[] create-new on lakehouse sinks.
+
+    Databricks/Spark/Iceberg have no native VECTOR — ARRAY<FLOAT>/list<float>
+    is the intentional embedding wire. PostgreSQL/Snowflake native VECTOR must
+    not silent-green an ARRAY sink (embedding domain drop).
+    """
+    if normalize_logical_type(source_type) != LOGICAL_VECTOR:
+        return False
+    if normalize_logical_type(target_type) != LOGICAL_ARRAY:
+        return False
+    el = parse_array_element(target_type)
+    if not el:
+        # Bare ARRAY / LIST drops element contract.
+        return False
+    if normalize_logical_type(el) != LOGICAL_FLOAT:
+        return False
+    db = (dest_db or "").strip().lower()
+    if not db:
+        # Fail closed without destination — ARRAY wire is not universal.
+        return False
+    if db in {
+        "postgresql",
+        "postgres",
+        "pg",
+        "cockroachdb",
+        "timescaledb",
+        "alloydb",
+        "snowflake",
+        "redshift",
+    }:
+        return False
+    return db in {
+        "databricks",
+        "spark",
+        "delta",
+        "delta_lake",
+        "databricks_sql",
+        "unity_catalog",
+        "iceberg",
+        "bigquery",
+        "duckdb",
+        "clickhouse",
+    }
+
+
+def vector_encoding_would_collapse(source_type: str, target_type: str) -> bool:
+    """True when HALFVEC/SPARSEVEC ↔ dense VECTOR invents a different encoding."""
+    src = vector_encoding_polarity(source_type)
+    tgt = vector_encoding_polarity(target_type)
+    if src is None or tgt is None:
+        return False
+    return src != tgt
+
+
 def vector_dim_mismatch(source_type: str | None, target_type: str | None) -> bool:
-    """True when both sides declare a vector dimension and they differ.
+    """True when VECTOR dims differ, or known↔unknown invents/drops a width.
 
     Used by G3 / DDL compatibility to fail closed on embedding-width drift
-    (e.g. ``VECTOR(768)`` → ``VECTOR(FLOAT, 1536)``). Unknown dims on either
-    side return False — that case is handled by ``ddl_type`` falling back to
-    text rather than inventing a width.
+    (e.g. ``VECTOR(768)`` → ``VECTOR(FLOAT, 1536)``) and bare ``VECTOR`` →
+    ``VECTOR(1536)`` invent.
     """
     if normalize_logical_type(source_type) != LOGICAL_VECTOR:
         return False
@@ -2893,8 +3925,10 @@ def vector_dim_mismatch(source_type: str | None, target_type: str | None) -> boo
         return False
     src_dim = parse_vector_dimension(source_type)
     tgt_dim = parse_vector_dimension(target_type)
-    if src_dim is None or tgt_dim is None:
+    if src_dim is None and tgt_dim is None:
         return False
+    if src_dim is None or tgt_dim is None:
+        return True
     return src_dim != tgt_dim
 
 
@@ -2938,15 +3972,20 @@ PRECISION_COLLAPSE_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset({
 })
 
 
-def datetime_timezone_polarity(inferred: str | None) -> str | None:
+def datetime_timezone_polarity(inferred: str | None, *, dest_db: str = "") -> str | None:
     """Return ``ltz`` / ``tz`` / ``ntz`` when DDL tokens make polarity knowable.
 
     - ``ltz``: session-relative instant (Snowflake TIMESTAMP_LTZ, Oracle LOCAL TZ,
       PG TIMESTAMPTZ — Openflow / Airbyte #80914)
     - ``tz``: offset-pinned (Snowflake TIMESTAMP_TZ, DATETIMEOFFSET)
-    - ``ntz``: wall-clock naive
-    - ``None``: ambiguous bare TIMESTAMP/DATETIME → platform default
+    - ``ntz``: wall-clock naive (including bare DATETIME/TIMESTAMP)
+    - ``None``: non-temporal or unrecognized carrier
+
+    When ``dest_db`` is BigQuery/Databricks, bare ``TIMESTAMP`` is an instant
+    carrier (not NTZ) — matches native DDL and clears false TZ-collapse on
+    create-new TIMESTAMPTZ→TIMESTAMP wires.
     """
+    dest_db = _normalize_dest_db(dest_db) if dest_db else ""
     # Arrow timestamp[unit, tz=…] → carrier before polarity token scan.
     arrow = arrow_dtype_to_carrier(inferred)
     if arrow is not None:
@@ -2960,7 +3999,6 @@ def datetime_timezone_polarity(inferred: str | None) -> str | None:
         return None
     # ClickHouse DateTime64(p, 'tz') / DateTime('tz') — column TZ metadata (LTZ).
     # Must run before the generic DATETIME( MySQL ntz token (quote after paren).
-    # Bare DATETIME stays ambiguous (wave 65 → platform TIMESTAMPTZ default).
     if re.search(r"DATETIME64\s*\(\s*\d+\s*,", raw) or re.match(
         r"^DATETIME\s*\(\s*['\"]", raw
     ):
@@ -2969,9 +4007,8 @@ def datetime_timezone_polarity(inferred: str | None) -> str | None:
         return "ntz"
     # A numeric typmod must not break the SQL-standard token match:
     # ``TIMESTAMP(6) WITHOUT TIME ZONE`` is PostgreSQL's information_schema
-    # spelling, and missing it would fall through to the platform default and
-    # flip a naive column to TZ-aware — shifting every value by the session
-    # offset. Keep ``raw`` for the dialect checks that need the parenthesis.
+    # spelling, and missing it would fall through and invent TZ polarity.
+    # Keep ``raw`` for the dialect checks that need the parenthesis.
     collapsed = re.sub(r"\s*\(\s*\d+\s*\)", "", raw).strip()
     ntz_tokens = (
         "TIMESTAMP NTZ",
@@ -2998,6 +4035,26 @@ def datetime_timezone_polarity(inferred: str | None) -> str | None:
         or ("WITH TIME ZONE" in collapsed and "LOCAL" not in collapsed)
     ):
         return "tz"
+    # Bare DATETIME = wall-clock NTZ. Bare TIMESTAMP defaults to NTZ unless the
+    # destination engine's TIMESTAMP token is an instant (BQ / Databricks).
+    if collapsed in {"DATETIME", "TIMESTAMP"} or collapsed.startswith("DATETIME "):
+        if collapsed == "TIMESTAMP":
+            db = (dest_db or "").strip().lower()
+            if db in {
+                "bigquery",
+                "bq",
+                "spanner",
+                "google_spanner",
+                "cloud_spanner",
+                "databricks",
+                "spark",
+                "delta",
+                "delta_lake",
+                "databricks_sql",
+                "unity_catalog",
+            }:
+                return "ltz"
+        return "ntz"
     return None
 
 
@@ -3070,16 +4127,155 @@ def parse_vector_length(value: Any) -> int | None:
     return None
 
 
-def is_timezone_polarity_loss(source_type: str, target_type: str) -> bool:
-    """True when TZ-aware source loses offset/session polarity onto NTZ or LTZ↔TZ."""
+def is_timezone_polarity_loss(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when timezone polarity would be invented or dropped silently.
+
+    Covers aware→NTZ, NTZ→aware (UTC invent on naive wall-clock), and LTZ↔TZ.
+    ``dest_db`` makes **destination** TIMESTAMP polarity dialect-aware (BQ/Databricks
+    instant). Source polarity never borrows dest_db — otherwise create-new
+    ``TIMESTAMP→TIMESTAMP_NTZ`` / ``TIMESTAMP→DATETIME`` false-collapses when the
+    sink engine's bare TIMESTAMP token is an instant.
+    """
+    dest_db = _normalize_dest_db(dest_db) if dest_db else ""
     src = datetime_timezone_polarity(source_type)
-    tgt = datetime_timezone_polarity(target_type)
+    tgt = datetime_timezone_polarity(target_type, dest_db=dest_db)
     if src in {"tz", "ltz"} and tgt == "ntz":
+        return True
+    # Naive / NTZ → TZ-aware invents an instant (UTC stamp) — fail-closed.
+    if src == "ntz" and tgt in {"tz", "ltz"}:
         return True
     # Session-relative ↔ offset-pinned is a silent semantic rewrite.
     if {src, tgt} == {"tz", "ltz"}:
         return True
     return False
+
+
+def timezone_aware_would_collapse_to_string(
+    source_type: str, target_type: str
+) -> bool:
+    """True when offset-aware datetime/time collapses to open TEXT/STRING.
+
+    ``TIMESTAMPTZ→TEXT`` / ``DATETIMEOFFSET→STRING`` / ``TIMETZ→STRING`` look
+    like free serialization but drop the offset contract — Accept risk required.
+    """
+    dt = datetime_timezone_polarity(source_type)
+    tm = time_timezone_polarity(source_type)
+    if dt not in {"tz", "ltz"} and tm != "tz":
+        return False
+    tgt = normalize_logical_type(target_type)
+    return tgt in {LOGICAL_STRING, LOGICAL_TEXT}
+
+
+def is_long_raw_carrier(inferred: str | None) -> bool:
+    """True for Oracle ``LONG RAW`` unbounded binary LOB (not ``RAW(n)``)."""
+    upper = strip_identity_qualifier(inferred).upper()
+    return upper == "LONG RAW" or upper.replace(" ", "") == "LONGRAW"
+
+
+def long_raw_locator_would_collapse(source_type: str, target_type: str) -> bool:
+    """True when LONG RAW locator polarity would be lost into BYTEA/BLOB/BINARY."""
+    if not is_long_raw_carrier(source_type):
+        return False
+    if is_long_raw_carrier(target_type):
+        return False
+    return True
+
+
+def bitstring_opaque_bytes_collapse(source_type: str, target_type: str) -> bool:
+    """True when BIT(n)/VARBIT ↔ BYTEA/BINARY invents a packing the operator never declared."""
+    src_bit = is_bitstring_carrier(source_type)
+    tgt_bit = is_bitstring_carrier(target_type)
+    if src_bit == tgt_bit:
+        return False
+    src_bin = normalize_logical_type(source_type) == LOGICAL_BINARY
+    tgt_bin = normalize_logical_type(target_type) == LOGICAL_BINARY
+    if not (src_bin and tgt_bin):
+        return False
+    # One side bitstring, the other opaque bytes.
+    return True
+
+
+def year_domain_would_collapse(source_type: str, target_type: str) -> bool:
+    """True when MySQL YEAR polarity is dropped or invented.
+
+    YEAR→SMALLINT invents a plain integer; INTEGER/STRING→YEAR invents the
+    1901–2155 YEAR domain (out-of-range only fails at bind — Map must Accept risk).
+    """
+    src_year = is_year_carrier(source_type)
+    tgt_year = is_year_carrier(target_type)
+    if src_year == tgt_year:
+        return False
+    if src_year and not tgt_year:
+        tgt = normalize_logical_type(target_type)
+        return tgt in {
+            LOGICAL_INTEGER,
+            LOGICAL_DECIMAL,
+            LOGICAL_FLOAT,
+            LOGICAL_STRING,
+            LOGICAL_TEXT,
+            LOGICAL_JSON,
+            LOGICAL_DATE,
+            LOGICAL_DATETIME,
+        }
+    # Invent YEAR from open integer/string/float.
+    src = normalize_logical_type(source_type)
+    return src in {
+        LOGICAL_INTEGER,
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+        LOGICAL_JSON,
+        LOGICAL_DATE,
+        LOGICAL_DATETIME,
+    }
+
+
+def money_domain_would_collapse(source_type: str, target_type: str) -> bool:
+    """True when MONEY polarity or SMALLMONEY capacity would be lost/invented.
+
+    ``DECIMAL(19,4)`` is a money-*scale* carrier but not locale MONEY — switching
+    onto ``MONEY``/``SMALLMONEY`` still needs Accept risk. ``MONEY→SMALLMONEY``
+    narrows range (~±214k) — fail closed.
+    """
+    src_base = strip_identity_qualifier(source_type).upper().replace(" ", "")
+    tgt_base = strip_identity_qualifier(target_type).upper().replace(" ", "")
+    named = {"MONEY", "SMALLMONEY", "CURRENCY"}
+    src_named = src_base in named
+    tgt_named = tgt_base in named
+    if src_named and not tgt_named:
+        # Create-new PG/warehouse money-scale wire — not a polarity invent.
+        # MONEY → DECIMAL(19,4); SMALLMONEY → DECIMAL(10,4).
+        p, s = parse_numeric_precision_scale(target_type)
+        if p == 19 and s == 4 and src_base in {"MONEY", "CURRENCY"}:
+            return False
+        if p == 10 and s == 4 and src_base == "SMALLMONEY":
+            return False
+        # MONEY stamped as (10,4) would narrow — keep fail-closed.
+        if p == 19 and s == 4 and src_base == "SMALLMONEY":
+            return False
+        return True
+    if src_named != tgt_named:
+        return True
+    if src_base == "MONEY" and tgt_base == "SMALLMONEY":
+        return True
+    return False
+
+
+def set_to_array_polarity_preserved(source_type: str, target_type: str) -> bool:
+    """True for MySQL SET → TEXT[] / ARRAY (intentional multi-value sink)."""
+    src = parse_enum_or_set_ordered_members(source_type)
+    if src is None or src[0] != "SET":
+        return False
+    tgt_u = (target_type or "").strip().upper().replace(" ", "")
+    if tgt_u in {"TEXT[]", "VARCHAR[]", "STRING[]"} or tgt_u.startswith("ARRAY<"):
+        return True
+    return normalize_logical_type(target_type) == LOGICAL_ARRAY
 
 
 _STRING_WIDTH_RE = re.compile(
@@ -3097,40 +4293,179 @@ _UNBOUNDED_TEXT_RE = re.compile(
     re.I,
 )
 
+# MySQL LOB tier rank — higher is wider. Bare TEXT/BLOB stay "unlimited" for
+# DDL width propagation (logical ``text`` must not become VARCHAR(65535)).
+_MYSQL_TEXT_TIER_RANK: Final[dict[str, int]] = {
+    "TINYTEXT": 1,
+    "TEXT": 2,
+    "MEDIUMTEXT": 3,
+    "LONGTEXT": 4,
+}
+_MYSQL_BLOB_TIER_RANK: Final[dict[str, int]] = {
+    "TINYBLOB": 1,
+    "BLOB": 2,
+    "MEDIUMBLOB": 3,
+    "LONGBLOB": 4,
+}
+
+
+def mysql_text_tier_rank(inferred: str | None) -> int | None:
+    upper = strip_identity_qualifier(inferred).upper().split()[0] if inferred else ""
+    return _MYSQL_TEXT_TIER_RANK.get(upper)
+
+
+def mysql_blob_tier_rank(inferred: str | None) -> int | None:
+    upper = strip_identity_qualifier(inferred).upper().split()[0] if inferred else ""
+    return _MYSQL_BLOB_TIER_RANK.get(upper)
+
 
 def parse_string_carrier_width(inferred: str | None) -> int | None:
     """Return bounded VARCHAR/CHAR width, or None if unlimited/unknown.
 
     Mirrors Airbyte MySQL CHAR truncation class — declared width must be proven,
-    not inferred from short head samples.
+    not inferred from short head samples. MySQL LOB tiers use
+    :func:`mysql_text_tier_rank` (not a fake VARCHAR width).
     """
     text = (inferred or "").strip()
     if not text:
         return None
+    upper = strip_identity_qualifier(text).upper().split()[0] if text else ""
+    # PG ``name`` is a 63-byte identifier type.
+    if upper == "NAME":
+        return 63
+    # TINYTEXT is the only MySQL LOB with a tight practical bound for width math.
+    if upper == "TINYTEXT":
+        return 255
     if _UNBOUNDED_STRING_RE.search(text) or _UNBOUNDED_TEXT_RE.match(text):
         return None
     m = _STRING_WIDTH_RE.search(text)
     if not m:
         return None
     width = int(m.group(1))
+    # Redshift / warehouse LOB ceiling — treat as unbounded for width math.
+    if width >= 65535:
+        return None
     return width if width > 0 else None
 
 
 def is_unlimited_string_carrier(inferred: str | None) -> bool:
-    """True for TEXT / VARCHAR(MAX) / CLOB-class carriers (not bare ambiguous VARCHAR)."""
+    """True for TEXT/CLOB/VARCHAR(MAX)/MEDIUMTEXT/LONGTEXT — not TINYTEXT/NAME.
+
+    Redshift has no TEXT type — ``VARCHAR(65535)`` is the practical LOB ceiling
+    and must not false-narrow unlimited TEXT/CLOB create-new wires.
+    """
     text = (inferred or "").strip()
     if not text:
         return False
+    upper = strip_identity_qualifier(text).upper().split()[0] if text else ""
+    if upper in {"TINYTEXT", "NAME"}:
+        return False
     if _UNBOUNDED_STRING_RE.search(text) or _UNBOUNDED_TEXT_RE.match(text):
+        return True
+    # Redshift max VARCHAR / warehouse LOB ceiling — not a tight sink.
+    m = _STRING_WIDTH_RE.search(text)
+    if m and int(m.group(1)) >= 65535:
         return True
     return normalize_logical_type(text) == LOGICAL_TEXT
 
 
-def string_width_would_narrow(source_type: str, target_type: str) -> bool:
-    """True when source string capacity exceeds destination VARCHAR(n).
+def is_national_string_carrier(inferred: str | None) -> bool:
+    """True for NVARCHAR/NCHAR/NCLOB / NATIONAL CHARACTER (Unicode) carriers."""
+    upper = strip_identity_qualifier(inferred).upper()
+    if not upper:
+        return False
+    compact = upper.replace(" ", "")
+    return (
+        compact.startswith("NVARCHAR")
+        or compact.startswith("NCHAR")
+        or compact.startswith("NCLOB")
+        or compact.startswith("NVARCHAR2")
+        or compact.startswith("NTEXT")
+        or bool(re.search(r"\bNATIONAL\s+CHARACTER\b", upper))
+        or bool(re.search(r"\bNATIONAL\s+CHAR\b", upper))
+    )
 
-    Cases: ``VARCHAR(255)→VARCHAR(50)``, ``TEXT→VARCHAR(10)``. Bare ``VARCHAR``
-    without a width stays unknown (no invented narrow).
+
+def national_charset_would_collapse(source_type: str, target_type: str) -> bool:
+    """True when Unicode national string lands on non-national CHAR/VARCHAR/CLOB."""
+    if not is_national_string_carrier(source_type):
+        return False
+    if is_national_string_carrier(target_type):
+        return False
+    tgt_l = normalize_logical_type(target_type)
+    return tgt_l in {LOGICAL_STRING, LOGICAL_TEXT}
+
+
+def national_charset_would_invent(source_type: str, target_type: str) -> bool:
+    """True when non-national CHAR/VARCHAR invents national NCHAR/NVARCHAR polarity.
+
+    Exception: SQL Server's only LOB text wire is ``NVARCHAR(MAX)`` — create-new
+    TEXT/CLOB/STRING→NVARCHAR(MAX) is platform LOB twin, not Unicode invent.
+    """
+    if is_national_string_carrier(source_type):
+        return False
+    if not is_national_string_carrier(target_type):
+        return False
+    src_l = normalize_logical_type(source_type)
+    if src_l not in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return False
+    # SQL Server / Azure create-new LOB text wire.
+    tgt_u = strip_identity_qualifier(target_type).upper().replace(" ", "")
+    if tgt_u in {"NVARCHAR(MAX)", "NTEXT"} and (
+        is_unlimited_string_carrier(source_type)
+        or strip_identity_qualifier(source_type).upper() in {"STRING", "TEXT", "CLOB", "NCLOB"}
+    ):
+        return False
+    return True
+
+
+def bounded_string_sink_would_truncate(source_type: str, target_type: str) -> bool:
+    """True when a scalar/document lands on tight CHAR/VARCHAR(n)/TINYTEXT.
+
+    Safe-list ``integer→string`` must not greenwash ``INTEGER→VARCHAR(1)``.
+    MySQL ``TEXT``/``MEDIUMTEXT``/``LONGTEXT`` remain practical scalar sinks
+    (≥64KB); only typmod-bounded and TINYTEXT fail closed.
+    """
+    tgt_l = normalize_logical_type(target_type)
+    if tgt_l not in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return False
+    if is_unlimited_string_carrier(target_type):
+        return False
+    upper = strip_identity_qualifier(target_type).upper().split()[0] if target_type else ""
+    tight = upper == "TINYTEXT" or bool(_STRING_WIDTH_RE.search(target_type or ""))
+    if not tight:
+        return False
+    tgt_w = parse_string_carrier_width(target_type)
+    if tgt_w is None:
+        return False
+    src_l = normalize_logical_type(source_type)
+    if src_l in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return string_width_would_narrow(source_type, target_type)
+    # Exact UUID 36-char wire is the industry create-new sink — not truncate.
+    if normalize_logical_type(source_type) == LOGICAL_UUID and uuid_exact_wire_carrier(
+        target_type
+    ):
+        return False
+    # ObjectId CHAR/VARCHAR(24) / BINARY(12) wire — not truncate.
+    if specialty_wire_preserves_value("OBJECTID", target_type) and (
+        normalize_logical_type(source_type) == LOGICAL_OBJECTID
+        or specialty_carrier_base(source_type) == "OBJECTID"
+    ):
+        return False
+    # BIT(n) → VARCHAR(n) create-new is 0/1 digit text of known length — not truncate.
+    if is_bitstring_carrier(source_type):
+        bits = parse_bitstring_width(source_type)
+        if bits is not None and tgt_w >= bits:
+            return False
+    # Non-string → tight sink — fail closed (Accept risk).
+    return True
+
+
+def string_width_would_narrow(source_type: str, target_type: str) -> bool:
+    """True when source string capacity exceeds destination VARCHAR(n)/TEXT tier.
+
+    Cases: ``VARCHAR(255)→VARCHAR(50)``, ``TEXT→VARCHAR(10)``,
+    ``LONGTEXT→TINYTEXT``. Bare ``VARCHAR`` without a width stays unknown.
     """
     src_l = normalize_logical_type(source_type)
     tgt_l = normalize_logical_type(target_type)
@@ -3138,16 +4473,21 @@ def string_width_would_narrow(source_type: str, target_type: str) -> bool:
         return False
     if tgt_l not in {LOGICAL_STRING, LOGICAL_TEXT}:
         return False
+    # MySQL LOB tier narrow (LONGTEXT→MEDIUMTEXT) before unlimited early-out.
+    src_rank = mysql_text_tier_rank(source_type)
+    tgt_rank = mysql_text_tier_rank(target_type)
+    if src_rank is not None and tgt_rank is not None and src_rank > tgt_rank:
+        return True
+    # Unlimited / LOB-ceiling sinks (TEXT, NVARCHAR(MAX), VARCHAR(65535)) never narrow.
     if is_unlimited_string_carrier(target_type):
         return False
     tgt_w = parse_string_carrier_width(target_type)
     if tgt_w is None:
         return False
-    if is_unlimited_string_carrier(source_type):
-        return True
     src_w = parse_string_carrier_width(source_type)
     if src_w is None:
-        return False
+        # Unlimited generic TEXT/CLOB → bounded; bare VARCHAR unknown → no invent.
+        return is_unlimited_string_carrier(source_type)
     return src_w > tgt_w
 
 
@@ -3157,21 +4497,26 @@ _BINARY_WIDTH_RE = re.compile(
 )
 _UNBOUNDED_BINARY_RE = re.compile(
     r"(?:varbinary|binary)\s*\(\s*max\s*\)|"
+    r"\blong\s+raw\b|"
     r"^(?:bytea|blob|longblob|mediumblob|tinyblob|image|bytes|varbyte|binary)\b(?!\s*\()",
     re.I,
 )
 
 
 def parse_binary_carrier_width(inferred: str | None) -> int | None:
-    """Return bounded BINARY/VARBINARY byte width, or None if unlimited/unknown.
+    """Return bounded BINARY/VARBINARY width, or None if unlimited/unknown.
 
     BIT/VARBIT widths are bit-counted — use ``parse_bitstring_width`` instead.
+    MySQL BLOB tiers use :func:`mysql_blob_tier_rank` (not a fake VARBINARY width).
     """
     text = (inferred or "").strip()
     if not text:
         return None
     if is_bitstring_carrier(text):
         return None
+    upper = strip_identity_qualifier(text).upper().split()[0] if text else ""
+    if upper == "TINYBLOB":
+        return 255
     if _UNBOUNDED_BINARY_RE.search(text):
         return None
     m = _BINARY_WIDTH_RE.search(text)
@@ -3182,11 +4527,14 @@ def parse_binary_carrier_width(inferred: str | None) -> int | None:
 
 
 def is_unlimited_binary_carrier(inferred: str | None) -> bool:
-    """True for BYTEA / BLOB / VARBINARY(MAX) class carriers."""
+    """True for BYTEA / BLOB / VARBINARY(MAX) — not TINYBLOB."""
     text = (inferred or "").strip()
     if not text:
         return False
     if is_bitstring_carrier(text):
+        return False
+    upper = strip_identity_qualifier(text).upper().split()[0] if text else ""
+    if upper == "TINYBLOB":
         return False
     return bool(_UNBOUNDED_BINARY_RE.search(text))
 
@@ -3250,6 +4598,123 @@ def bitstring_width_would_narrow(source_type: str, target_type: str) -> bool:
     return False
 
 
+def bitstring_pad_polarity_loss(source_type: str, target_type: str) -> bool:
+    """True when BIT VARYING ↔ fixed BIT(n) changes exact-length polarity."""
+    if not is_bitstring_carrier(source_type) or not is_bitstring_carrier(target_type):
+        return False
+    return is_varying_bitstring_carrier(source_type) != is_varying_bitstring_carrier(
+        target_type
+    )
+
+
+def oracle_char_byte_unit(inferred: str | None) -> str | None:
+    """Return ``CHAR`` / ``BYTE`` length semantics for Oracle VARCHAR2/CHAR."""
+    upper = strip_identity_qualifier(inferred).upper()
+    if not upper:
+        return None
+    if re.search(r"\(\s*\d+\s*CHAR\s*\)", upper):
+        return "CHAR"
+    if re.search(r"\(\s*\d+\s*BYTE\s*\)", upper):
+        return "BYTE"
+    return None
+
+
+def oracle_char_byte_polarity_loss(source_type: str, target_type: str) -> bool:
+    """True when VARCHAR2(n CHAR) ↔ VARCHAR2(n BYTE) changes multibyte budget."""
+    src_u = oracle_char_byte_unit(source_type)
+    tgt_u = oracle_char_byte_unit(target_type)
+    if not src_u or not tgt_u:
+        return False
+    return src_u != tgt_u
+
+
+def is_oracle_long_text_carrier(inferred: str | None) -> bool:
+    """True for Oracle deprecated LONG text LOB (exact token, not LONGTEXT/BIGINT)."""
+    upper = strip_identity_qualifier(inferred).upper().replace(" ", "")
+    return upper == "LONG"
+
+
+def oracle_long_numeric_invent(source_type: str, target_type: str) -> bool:
+    """True when Oracle LONG text would be stamped/mapped as NUMBER/integer.
+
+    Exact ``LONG`` is Oracle's deprecated text LOB. Mapping to BIGINT/NUMBER
+    invents numeric polarity — Accept risk. Lakehouse INT64 should use INT64 /
+    BIGINT tokens, not bare LONG, when the source is not Oracle.
+    """
+    if not is_oracle_long_text_carrier(source_type):
+        return False
+    if is_oracle_long_text_carrier(target_type):
+        return False
+    tgt_u = strip_identity_qualifier(target_type).upper().replace(" ", "")
+    if tgt_u.startswith(
+        ("NUMBER", "DECIMAL", "NUMERIC", "FLOAT", "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE")
+    ):
+        return True
+    tgt = normalize_logical_type(target_type)
+    return tgt in {LOGICAL_INTEGER, LOGICAL_DECIMAL, LOGICAL_FLOAT}
+
+
+def parse_interval_precision(
+    inferred: str | None,
+) -> tuple[int | None, int | None] | None:
+    """Return (leading_precision, fractional_seconds) when declared on INTERVAL."""
+    upper = strip_identity_qualifier(inferred).upper()
+    if not upper or "INTERVAL" not in upper:
+        return None
+    leading: int | None = None
+    frac: int | None = None
+    m_lead = re.search(
+        r"\b(?:YEAR|DAY|HOUR|MONTH|MINUTE|SECOND)\s*\(\s*(\d+)\s*\)",
+        upper,
+    )
+    if m_lead:
+        leading = int(m_lead.group(1))
+    m_frac = re.search(r"SECOND\s*\(\s*(\d+)\s*\)", upper)
+    if m_frac:
+        # DAY(d) TO SECOND(s) — second capture is fractional when TO SECOND(s).
+        if re.search(r"TO\s+SECOND\s*\(", upper):
+            frac = int(m_frac.group(1))
+            # Prefer leading from DAY/YEAR when present.
+            m_day = re.search(r"\bDAY\s*\(\s*(\d+)\s*\)", upper)
+            m_year = re.search(r"\bYEAR\s*\(\s*(\d+)\s*\)", upper)
+            if m_day:
+                leading = int(m_day.group(1))
+            elif m_year:
+                leading = int(m_year.group(1))
+        elif leading is None:
+            leading = int(m_frac.group(1))
+    if leading is None and frac is None:
+        return None
+    return leading, frac
+
+
+def interval_precision_would_narrow(source_type: str, target_type: str) -> bool:
+    """True when INTERVAL leading/fractional precision shrinks or invents typmod."""
+    if normalize_logical_type(source_type) != LOGICAL_INTERVAL:
+        return False
+    if normalize_logical_type(target_type) != LOGICAL_INTERVAL:
+        return False
+    sp = parse_interval_precision(source_type)
+    tp = parse_interval_precision(target_type)
+    if sp is None and tp is None:
+        return False
+    # Bare ↔ proven typmod invents/drops precision contract.
+    if (sp is None) != (tp is None):
+        return True
+    assert sp is not None and tp is not None
+    sl, sf = sp
+    tl, tf = tp
+    if sl is not None and tl is not None and tl < sl:
+        return True
+    if sf is not None and tf is not None and tf < sf:
+        return True
+    if sf is not None and tf is None:
+        return True
+    if sl is not None and tl is None and sf is None:
+        return True
+    return False
+
+
 def binary_width_would_narrow(source_type: str, target_type: str) -> bool:
     """True when source binary capacity exceeds destination BINARY(n)/VARBINARY(n).
 
@@ -3263,6 +4728,10 @@ def binary_width_would_narrow(source_type: str, target_type: str) -> bool:
         return False
     if is_bitstring_carrier(target_type):
         return bitstring_width_would_narrow(source_type, target_type)
+    src_rank = mysql_blob_tier_rank(source_type)
+    tgt_rank = mysql_blob_tier_rank(target_type)
+    if src_rank is not None and tgt_rank is not None and src_rank > tgt_rank:
+        return True
     tgt_w = parse_binary_carrier_width(target_type)
     if tgt_w is None:
         return False
@@ -3290,6 +4759,42 @@ def is_fixed_width_char_carrier(inferred: str | None) -> bool:
         re.search(r"\b(?:N?CHAR|BPCHAR|CHARACTER)\b", upper)
         or re.match(r"^N?CHAR\s*\(", upper)
     )
+
+
+def fixed_width_pad_polarity_loss(
+    source_type: str, target_type: str, *, dest_db: str = ""
+) -> bool:
+    """True when CHAR↔VARCHAR or BINARY↔VARBINARY changes pad/trim equality polarity."""
+    src_l = normalize_logical_type(source_type)
+    tgt_l = normalize_logical_type(target_type)
+    if src_l in {LOGICAL_STRING, LOGICAL_TEXT} and tgt_l in {LOGICAL_STRING, LOGICAL_TEXT}:
+        src_fixed = is_fixed_width_char_carrier(source_type)
+        tgt_fixed = is_fixed_width_char_carrier(target_type)
+        # Only when at least one side is clearly fixed-width (CHAR/BPCHAR).
+        if src_fixed or tgt_fixed:
+            return src_fixed != tgt_fixed
+        return False
+    if src_l == LOGICAL_BINARY and tgt_l == LOGICAL_BINARY:
+        src_fixed = is_fixed_width_binary_carrier(source_type, dest_db=dest_db)
+        tgt_fixed = is_fixed_width_binary_carrier(target_type, dest_db=dest_db)
+        if src_fixed or tgt_fixed:
+            # Unbounded binary LOB sinks (BYTEA/BLOB) store exact bytes — not
+            # CHAR-style pad invent on create-new into engines without FIXED BINARY.
+            if is_unlimited_binary_carrier(target_type) or is_unlimited_binary_carrier(
+                source_type
+            ):
+                return False
+            # BQ BYTES(n) / Snowflake BINARY(n) / Redshift VARBYTE(n) are max-length
+            # varying carriers — equal-or-wider capacity is exact-byte wire, not pad invent.
+            db = (dest_db or "").strip().lower()
+            if db in {"bigquery", "bq", "snowflake", "sf", "redshift"}:
+                sw = parse_binary_carrier_width(source_type)
+                tw = parse_binary_carrier_width(target_type)
+                if sw is not None and tw is not None and tw >= sw:
+                    return False
+            return src_fixed != tgt_fixed
+        return False
+    return False
 
 
 def parse_enum_or_set_members(inferred: str | None) -> tuple[str, frozenset[str]] | None:
@@ -3481,11 +4986,14 @@ def enum_set_domain_would_reject(source_type: str, target_type: str) -> bool:
     if tgt is None:
         return False
     if src is None:
-        # Typed dest domain with open/unknown source — samples handle value check;
-        # declared type alone is not enough to block.
-        return False
-    _src_kind, src_members = src
-    _tgt_kind, tgt_members = tgt
+        # Open/unknown source → closed ENUM/SET: unfit values only appear at
+        # write (quarantine). Fail-closed so Map/G3 require Accept risk.
+        return True
+    src_kind, src_members = src
+    tgt_kind, tgt_members = tgt
+    # SET↔ENUM rewrites multi-value vs single-label polarity — never preserve.
+    if src_kind != tgt_kind:
+        return True
     if not tgt_members:
         return True
     return not src_members.issubset(tgt_members)
@@ -3518,8 +5026,18 @@ def interval_family(inferred: str | None) -> str | None:
     return None
 
 
-def interval_family_would_collapse(source_type: str, target_type: str) -> bool:
-    """True when YEAR-MONTH ↔ DAY-SECOND polarity would be lost."""
+def interval_family_would_collapse(
+    source_type: str, target_type: str, *, dest_db: str = ""
+) -> bool:
+    """True when YEAR-MONTH ↔ DAY-SECOND polarity would be lost or invented.
+
+    Bare ``INTERVAL`` ↔ explicit YM/DS invents a family the operator never
+    declared — fail closed (Snowflake AIM / Oracle INTERVAL class).
+
+    Engines whose single native INTERVAL type holds both families
+    (PostgreSQL, DuckDB, BigQuery) treat YM/DS → bare INTERVAL as create-new
+    wire, not invent/drop — when ``dest_db`` names that engine.
+    """
     if normalize_logical_type(source_type) != LOGICAL_INTERVAL:
         return False
     if normalize_logical_type(target_type) != LOGICAL_INTERVAL:
@@ -3529,21 +5047,30 @@ def interval_family_would_collapse(source_type: str, target_type: str) -> bool:
     tgt_f = interval_family(target_type)
     if src_f and tgt_f and src_f != tgt_f:
         return True
+    # Unqualified ↔ qualified family invent/drop.
+    if (src_f is None) != (tgt_f is None):
+        db = _normalize_dest_db(dest_db) if dest_db else ""
+        # Unified INTERVAL engines — qualified source → bare INTERVAL is native.
+        if (
+            db in {"postgresql", "duckdb", "bigquery"}
+            and src_f is not None
+            and tgt_f is None
+        ):
+            return False
+        return True
     return False
 
-
 def spatial_polarity(inferred: str | None) -> str | None:
-    """Return ``geography`` (geodetic) / ``geometry`` (planar), or None.
+    """Return ``geography`` / ``geometry`` / ``sdo``, or None.
 
-    Oracle ``SDO_GEOMETRY`` is the single native spatial carrier — not a
-    planar-vs-geodetic polarity signal (mapping logical geography → SDO is
-    identity on Oracle, not a collapse).
+    Oracle ``SDO_GEOMETRY`` / Esri ``ST_GEOMETRY`` are opaque spatial carriers —
+    mapping them onto dual GEOGRAPHY/GEOMETRY invents planar vs geodetic polarity.
     """
     upper = (inferred or "").upper().strip()
     if not upper:
         return None
-    if "SDO_GEOMETRY" in upper:
-        return None
+    if "SDO_GEOMETRY" in upper or "ST_GEOMETRY" in upper:
+        return "sdo"
     # Prefer typmod / exact dual-type carriers over the bare logical name
     # ``geography`` (which is polarity-unknown for create-new DDL defaults).
     if upper.startswith("GEOGRAPHY(") or upper == "GEOGRAPHY":
@@ -3571,11 +5098,46 @@ def parse_geography_srid(inferred: str | None) -> int | None:
     return None
 
 
-def geography_contract_would_collapse(source_type: str, target_type: str) -> bool:
-    """True when GEOMETRY↔GEOGRAPHY polarity or SRID would be dropped/mismatched.
+_GEOMETRY_KIND_TOKENS: Final[tuple[str, ...]] = (
+    "GEOMETRYCOLLECTION",
+    "MULTIPOLYGON",
+    "MULTILINESTRING",
+    "MULTIPOINT",
+    "LINESTRING",
+    "POLYGON",
+    "POINT",
+    "RING",  # ClickHouse Ring
+    "CIRCLE",
+    "BOX",
+    "PATH",
+    "LINE",
+    "LSEG",
+)
 
-    Planar→geodetic and SRID rewrite are silent fidelity losses unless the operator
-    chooses an explicit store-as-WKT / reproject policy.
+
+def geometry_kind(inferred: str | None) -> str | None:
+    """Return POINT/LINESTRING/POLYGON/… when declared, else None for bare GEOMETRY."""
+    upper = strip_identity_qualifier(inferred).upper().replace(" ", "")
+    if not upper:
+        return None
+    # GEOMETRY(POINT,4326) / GEOGRAPHY(POLYGON,4326)
+    m = re.match(r"^(?:GEOMETRY|GEOGRAPHY)\((\w+)", upper)
+    if m:
+        return m.group(1)
+    for kind in _GEOMETRY_KIND_TOKENS:
+        if upper == kind or upper.startswith(kind + "("):
+            return kind
+    return None
+
+
+def geography_contract_would_collapse(source_type: str, target_type: str) -> bool:
+    """True when GEOMETRY↔GEOGRAPHY polarity, SRID, or subtype would be lost.
+
+    Planar→geodetic, SRID rewrite, and Polygon→Point are silent fidelity losses
+    unless the operator chooses an explicit store-as-WKT / reproject policy.
+
+    Oracle ``SDO_GEOMETRY`` is the sole spatial carrier — bare GEOMETRY/GEOGRAPHY
+    → SDO is create-new native wire, not planar↔geodetic invent inside Oracle.
     """
     if normalize_logical_type(source_type) != LOGICAL_GEOGRAPHY:
         return False
@@ -3583,13 +5145,49 @@ def geography_contract_would_collapse(source_type: str, target_type: str) -> boo
         return False
     sp = spatial_polarity(source_type)
     tp = spatial_polarity(target_type)
+    # Oracle opaque SDO ↔ bare planar GEOMETRY (no subtype/SRID) — create-new wire.
+    # GEOGRAPHY→SDO still drops geodetic polarity — keep fail-closed.
+    if tp == "sdo" and sp in {"geometry", "sdo"}:
+        ss = parse_geography_srid(source_type)
+        ts = parse_geography_srid(target_type)
+        if ss is not None and ts is not None and ss != ts:
+            return True
+        if ss is not None and ts is None:
+            return True
+        sk = geometry_kind(source_type)
+        tk = geometry_kind(target_type)
+        if sk and tk and sk != tk:
+            return True
+        if bool(sk) != bool(tk):
+            return True
+        return False
     if sp and tp and sp != tp:
         return True
     ss = parse_geography_srid(source_type)
     ts = parse_geography_srid(target_type)
     if ss is not None and ts is not None and ss != ts:
         return True
+    # Declared SRID → bare geometry drops the spatial contract.
+    if ss is not None and ts is None:
+        return True
+    sk = geometry_kind(source_type)
+    tk = geometry_kind(target_type)
+    if sk and tk and sk != tk:
+        return True
+    # Bare ↔ typed subtype invents or drops a geometry kind contract.
+    if bool(sk) != bool(tk):
+        return True
     return False
+
+
+# Elasticsearch IP / PG INET / IPv4 / IPv6 — same host-address polarity.
+# CIDR is network-mask polarity and is NOT in this twin set.
+_IP_HOST_ADDRESS_TWINS: Final[frozenset[str]] = frozenset(
+    {"IP", "INET", "IPV4", "IPV6"}
+)
+
+# Oracle XMLTYPE ↔ ANSI/SQL Server XML — same document-XML polarity.
+_XML_DOCUMENT_TWINS: Final[frozenset[str]] = frozenset({"XML", "XMLTYPE"})
 
 
 _SPECIALTY_NATIVE_CARRIERS: Final[frozenset[str]] = frozenset(
@@ -3598,6 +5196,8 @@ _SPECIALTY_NATIVE_CARRIERS: Final[frozenset[str]] = frozenset(
         "CIDR",
         "MACADDR",
         "MACADDR8",
+        "REGCLASS",
+        "NAME",
         "POINT",
         "LINE",
         "LSEG",
@@ -3605,6 +5205,12 @@ _SPECIALTY_NATIVE_CARRIERS: Final[frozenset[str]] = frozenset(
         "PATH",
         "POLYGON",
         "CIRCLE",
+        "RING",  # ClickHouse / geo ring
+        "LINESTRING",
+        "MULTILINESTRING",
+        "MULTIPOINT",
+        "MULTIPOLYGON",
+        "GEOMETRYCOLLECTION",
         "PG_LSN",
         "OID",
         "TID",
@@ -3633,6 +5239,16 @@ _SPECIALTY_NATIVE_CARRIERS: Final[frozenset[str]] = frozenset(
         "VOID",
         "JSONPATH",
         "OBJECTID",
+        "ANYDATA",  # Oracle polymorphic envelope
+        "HLLSKETCH",  # Redshift HyperLogLog sketch
+        "USER-DEFINED",  # PG opaque UDT — never silent-green → TEXT
+        "USER_DEFINED",
+        "ENUM8",  # ClickHouse closed enum
+        "ENUM16",
+        "NOTHING",  # ClickHouse nothing type
+        "DYNAMIC",  # ClickHouse dynamic type
+        "AGGREGATEFUNCTION",  # ClickHouse aggregate state
+        "SIMPLEAGGREGATEFUNCTION",
     }
 )
 
@@ -3666,7 +5282,7 @@ def is_hierarchyid_carrier(inferred: str | None) -> bool:
 def hierarchyid_to_ltree_path(path: str) -> str:
     """Convert hierarchyid ``/1/2/3/`` polarity to PostgreSQL ``ltree`` ``1.2.3``.
 
-    AWS DMS leaves slash strings in VARCHAR; DataFlow create-new uses LTREE when
+    AWS DMS leaves slash strings in VARCHAR; Datawrap create-new uses LTREE when
     the destination is PostgreSQL-family (Microsoft / AWS migration guidance).
     """
     text = (path or "").strip()
@@ -3722,55 +5338,962 @@ def specialty_carrier_base(inferred: str | None) -> str | None:
     upper = re.sub(r"\s+", " ", (inferred or "").upper().strip())
     if not upper:
         return None
+    # ClickHouse Enum8/Enum16 before generic ENUM( domain parse.
+    if upper.startswith("ENUM8"):
+        return "ENUM8"
+    if upper.startswith("ENUM16"):
+        return "ENUM16"
+    if upper.startswith("SIMPLEAGGREGATEFUNCTION"):
+        return "SIMPLEAGGREGATEFUNCTION"
+    if upper.startswith("AGGREGATEFUNCTION"):
+        return "AGGREGATEFUNCTION"
     # Parametric ENUM/SET are closed domains — not specialty native carriers.
     if upper.startswith(("ENUM(", "SET(")):
         return None
     if upper.startswith("ARRAY<") or upper.endswith("[]"):
         return None
+    # Strip schema/quotes — SYS.XMLTYPE / PG_CATALOG.INET must not greenwash.
+    upper = upper.replace('"', "").replace("`", "").replace("[", "").replace("]", "")
+    if "." in upper and not upper.startswith(
+        ("ARRAY<", "STRUCT<", "MAP<", "RECORD<", "LIST<", "RANGE<")
+    ):
+        upper = upper.rsplit(".", 1)[-1].strip()
+    # PG DATERANGE ↔ BigQuery RANGE<DATE> are dialect twins — one specialty base.
+    range_canon = _normalize_range_carrier(inferred)
+    if range_canon is not None:
+        return range_canon
+    # Re-normalize after schema strip for RANGE carriers.
+    range_canon2 = _normalize_range_carrier(upper)
+    if range_canon2 is not None:
+        return range_canon2
     if "(" in upper and "RANGE" not in upper:
         upper = upper.split("(", 1)[0].strip()
     if upper in _SPECIALTY_NATIVE_CARRIERS:
         return upper
-    # BigQuery bare RANGE / RANGE<T> — specialty so TEXT sinks surface collapse.
-    if upper == "RANGE" or upper.startswith("RANGE<"):
-        return upper
-    if "MULTIRANGE" in upper or (upper.endswith("RANGE") and upper != "RANGE"):
-        return upper
     return None
 
 
-def specialty_carrier_would_collapse(source_type: str, target_type: str) -> bool:
-    """True when a native specialty carrier would collapse to opaque string/text.
+def specialty_wire_preserves_value(source_specialty: str, target_type: str) -> bool:
+    """True when target is the industry-standard wire for a specialty carrier.
 
-    Airbyte maps inet/hstore/pg_lsn/geometric → string. DataFlow preserves natives
-    on PG create-new; mapping to VARCHAR/TEXT/STRING invents document polarity and
-    must surface in preflight (never silent green).
+    Mongo ObjectId → ``CHAR/VARCHAR(24)`` hex or ``BINARY(12)`` (common RDBMS
+    practice). IP families → ``VARCHAR(45)`` (IPv6). Bare TEXT/STRING still
+    collapses polarity and must surface in preflight.
+    """
+    raw = strip_identity_qualifier(target_type).strip()
+    if not raw:
+        return False
+    upper = raw.upper()
+    spec = (source_specialty or "").upper()
+    if spec == "OBJECTID":
+        if upper in {"BINARY(12)", "VARBINARY(12)"}:
+            return True
+        m = re.match(
+            r"^(?:N?VAR)?CHAR(?:ACTER)?(?:\s+VARYING)?\s*\(\s*(\d+)\s*\)$",
+            upper,
+        )
+        if m and int(m.group(1)) >= 24:
+            return True
+        m = re.match(r"^VARCHAR2\s*\(\s*(\d+)\s*(?:BYTE|CHAR)?\s*\)$", upper)
+        if m and int(m.group(1)) >= 24:
+            return True
+        # BigQuery STRING(n) create-new hex wire.
+        m = re.match(r"^STRING\s*\(\s*(\d+)\s*\)$", upper)
+        return bool(m and int(m.group(1)) >= 24)
+    if spec in {"INET", "CIDR", "IPV4", "IPV6", "IP", "MACADDR", "MACADDR8"}:
+        m = re.match(r"^(?:N?VAR)?CHAR(?:ACTER)?(?:\s+VARYING)?\s*\(\s*(\d+)\s*\)$", upper)
+        if m and int(m.group(1)) >= 45:
+            return True
+        m = re.match(r"^VARCHAR2\s*\(\s*(\d+)\s*(?:BYTE|CHAR)?\s*\)$", upper)
+        if m and int(m.group(1)) >= 45:
+            return True
+        m = re.match(r"^STRING\s*\(\s*(\d+)\s*\)$", upper)
+        return bool(m and int(m.group(1)) >= 45)
+    return False
+
+
+def specialty_domain_would_invent(source_type: str, target_type: str) -> bool:
+    """True when open string/json/scalar invents a native specialty domain.
+
+    ``TEXT→INET`` / ``TEXT→TSVECTOR`` / ``JSON→HSTORE`` look like free casts but
+    invent validation algorithms the source never had — Accept risk required.
+    CITEXT invent is handled by :func:`case_fold_polarity_invent`.
+
+    ``JSON→JSONB`` is a create-new dialect twin (same ``LOGICAL_JSON``) — not invent.
+    """
+    tgt = specialty_carrier_base(target_type)
+    if tgt is None or tgt == "CITEXT":
+        return False
+    if specialty_carrier_base(source_type) is not None:
+        return False
+    src_l = normalize_logical_type(source_type)
+    # Document polarity class → document specialty (JSONB) is dialect twin, not invent.
+    # JSON→HSTORE still invents (HSTORE is not in the document class).
+    if tgt in _DOCUMENT_POLARITY_BASES and src_l == LOGICAL_JSON:
+        return False
+    return src_l in {
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+        LOGICAL_JSON,
+        LOGICAL_INTEGER,
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+        LOGICAL_BOOLEAN,
+        LOGICAL_BINARY,
+    }
+
+def specialty_carrier_would_collapse(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when a native specialty carrier would collapse to opaque/scalar sink.
+
+    Airbyte maps inet/hstore/pg_lsn/geometric → string. Datawrap preserves natives
+    on PG create-new; mapping to bare VARCHAR/TEXT/STRING invents document polarity
+    and must surface in preflight (never silent green). Width-safe create-new
+    wires (ObjectId→VARCHAR(24)) are not a collapse. OID→INTEGER invents a
+    numeric polarity the catalog OID domain did not declare.
     """
     src = specialty_carrier_base(source_type)
     if src is None:
         return False
     tgt = specialty_carrier_base(target_type)
     if tgt is not None:
-        # Same specialty family OK; distinct specialty (INET→CIDR) is separate.
+        # Host-address dialect twins (Elasticsearch IP / PG INET / IPv4/IPv6).
+        # CIDR stays a distinct network polarity (INET→CIDR still collapses).
+        if src in _IP_HOST_ADDRESS_TWINS and tgt in _IP_HOST_ADDRESS_TWINS:
+            return False
+        # Oracle XMLTYPE ↔ ANSI/SQL Server XML — same XML document polarity.
+        if src in _XML_DOCUMENT_TWINS and tgt in _XML_DOCUMENT_TWINS:
+            return False
+        # Distinct specialty bases rewrite domain (INET→CIDR, MACADDR→MACADDR8).
+        return src != tgt
+    if specialty_wire_preserves_value(src, target_type):
         return False
     tgt_l = normalize_logical_type(target_type)
-    # Opaque string sinks — specialty validation algorithms would not run on dest.
-    return tgt_l in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON}
+    # JSONB → dialect document LOB wire (NVARCHAR(MAX)/CLOB/STRING) is create-new twin.
+    if src in _DOCUMENT_POLARITY_BASES and is_dialect_native_document_wire(
+        target_type, dest_db=dest_db
+    ):
+        return False
+    # JSONB→JSON / VARIANT / SUPER keep document polarity (dialect twin, not TEXT).
+    if src == "JSONB" and tgt_l == LOGICAL_JSON:
+        tgt_u = strip_identity_qualifier(target_type).upper().strip()
+        bare = re.sub(r"\s*\(\s*\d+\s*\)", "", tgt_u).strip()
+        if bare in {"JSON", "VARIANT", "OBJECT", "SUPER", "BSON", "JSONB"}:
+            return False
+    # Opaque / scalar sinks — specialty validation algorithms would not run.
+    return tgt_l in {
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+        LOGICAL_JSON,
+        LOGICAL_INTEGER,
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+        LOGICAL_BOOLEAN,
+        LOGICAL_UUID,
+        LOGICAL_DATE,
+        LOGICAL_DATETIME,
+        LOGICAL_TIME,
+        LOGICAL_BINARY,
+    }
+
+def resolve_mapping_target_type(
+    mapping: dict,
+    *,
+    target_types: dict[str, str] | None = None,
+    source_type: str = "",
+    dest_db_type: str = "",
+) -> str:
+    """Resolve the DDL type a mapping row should validate/write against.
+
+    Create-new: stamped ``mapping["target_type"]`` is authoritative (writer
+    intent) — never invent UUID→UUID green when the map stamped STRING.
+    Existing columns: live destination type wins, then stamped, then source.
+    """
+    types = target_types or {}
+    tgt = str(mapping.get("target") or "").strip()
+    stamped = str(mapping.get("target_type") or "").strip()
+    live = ""
+    if tgt and tgt in types:
+        live = str(types.get(tgt) or "").strip()
+    elif tgt:
+        lower_map = {str(k).lower(): v for k, v in types.items()}
+        live = str(lower_map.get(tgt.lower(), "") or "").strip()
+    src = (
+        (source_type or "").strip()
+        or str(mapping.get("source_type") or "").strip()
+        or "VARCHAR"
+    )
+    if mapping.get("create_new"):
+        db = (
+            (dest_db_type or "").strip()
+            or str(mapping.get("dest_db_type") or mapping.get("destination_db") or "").strip()
+        )
+        if stamped:
+            # Upgrade legacy bare TIMESTAMP stamps when source declares FSP.
+            return promote_create_new_temporal_stamp(src, stamped, db)
+        if live:
+            return live
+        # Empty stamp must not fall back to source identity (BQ UUID→UUID lie).
+        if db:
+            return create_new_mapping_target_type(src, db)
+        return src
+    return live or stamped or src
+
+
+
+def promote_create_new_temporal_stamp(src_type: str, stamped: str, dest_db_type: str = "") -> str:
+    """Upgrade or strip temporal stamps for destination-legal DDL.
+
+    PG/MySQL/SQL Server: bare TIMESTAMP/TIME/DATETIME2 are FSP-0 (or ambiguous)
+    and must promote when source declares (p). Redshift/BigQuery/Databricks/
+    Iceberg reject typmod — never invent TIMESTAMP(6) (illegal CREATE).
+    """
+    out = (stamped or "").strip()
+    if not out:
+        return out
+    bare = re.sub(r"\s*\(\s*\d+\s*\)", "", out.upper()).strip()
+    db = (dest_db_type or "").strip().lower()
+    # Destinations that cannot take typmod: strip illegal (p) if present.
+    # Keep TIMESTAMP_NTZ / TIMESTAMPTZ polarity tokens — never collapse NTZ→TIMESTAMP
+    # on Databricks (TIMESTAMP is session-TZ aware).
+    if db in _NO_TEMPORAL_TYPMOD_ENGINES and bare in {
+        "TIMESTAMP",
+        "TIME",
+        "DATETIME",
+        "TIMESTAMP_NTZ",
+        "TIMESTAMPTZ",
+        "TIMESTAMP_LTZ",
+        "TIMESTAMP_TZ",
+    }:
+        if "(" in out.upper():
+            # Strip typmod only; preserve polarity token.
+            return bare
+        return out
+    src_p = parse_temporal_fractional_precision(src_type)
+    if src_p is None:
+        # Already-parameterized stamps must not be upgraded (DATETIME2(6)→(7)
+        # via materialize_dest_ddl empty-src promote).
+        if parse_temporal_fractional_precision(out) is not None:
+            return out
+        # SQL Server bare DATETIME2 defaults to precision 7 — stamp it so G3
+        # does not treat create-new as FSP-0 collapse vs TIMESTAMP_NTZ(6+).
+        if bare == "DATETIME2" and db in {"sqlserver", "mssql", ""}:
+            return "DATETIME2(7)"
+        if bare == "TIME" and db in {"sqlserver", "mssql"} and "(" not in out.upper():
+            return "TIME(7)"
+        return out
+    stamp_p = parse_temporal_fractional_precision(out)
+    # Already-parameterized stamps (including Accept-risk narrow) stay as-is.
+    if stamp_p is not None:
+        return out
+    if bare == "TIMESTAMP":
+        if db in _NO_TEMPORAL_TYPMOD_ENGINES:
+            return out
+        if db in {
+            "",
+            "postgresql",
+            "postgres",
+            "pg",
+            "cockroach",
+            "cockroachdb",
+            "alloydb",
+            "timescaledb",
+            "yugabytedb",
+            "citus",
+            "supabase",
+            "greenplum",
+        }:
+            return f"TIMESTAMP({src_p})"
+        return out
+    if bare == "TIME":
+        if db in _NO_TEMPORAL_TYPMOD_ENGINES:
+            return out
+        if db in {
+            "",
+            "mysql",
+            "mariadb",
+            "tidb",
+            "postgresql",
+            "postgres",
+            "pg",
+            "cockroachdb",
+            "alloydb",
+            "sqlserver",
+            "mssql",
+        }:
+            return f"TIME({src_p})"
+        return out
+    if bare == "DATETIME" and db in {"mysql", "mariadb", "tidb", ""}:
+        return f"DATETIME({src_p})"
+    if bare == "DATETIME2" and db in {"sqlserver", "mssql", ""}:
+        return f"DATETIME2({src_p})"
+    return out
+
+
+
+def create_new_mapping_target_type(src_type: str, dest_db_type: str = "") -> str:
+    """Target type stamped on create-new mappings for Validate + writers.
+
+    Stamp **physical** DDL whenever the destination has no native UUID type —
+    even for exact ``CHAR(36)`` / ``VARCHAR(36)`` wires. Map must match CREATE
+    (never silent-green UUID→UUID while writers emit VARCHAR). Native UUID /
+    UNIQUEIDENTIFIER destinations keep the engine token.
+    """
+    if normalize_logical_type(src_type) == LOGICAL_UUID:
+        db_uuid = (dest_db_type or "").strip()
+        if not db_uuid:
+            return "UUID"
+        physical_uuid = ddl_type(db_uuid, src_type)
+        phys_base = strip_identity_qualifier(physical_uuid).upper()
+        src_u = strip_identity_qualifier(src_type).upper()
+        # SQL Server native token — stamp UNIQUEIDENTIFIER (matches CREATE).
+        if phys_base in {"UNIQUEIDENTIFIER", "GUID"}:
+            return physical_uuid
+        # Native UUID engines (PG, …) — keep logical UUID.
+        if normalize_logical_type(physical_uuid) == LOGICAL_UUID and not uuid_exact_wire_carrier(
+            physical_uuid
+        ):
+            return "UUID"
+        if phys_base in {"UUID"}:
+            return "UUID"
+        # Exact-wire / STRING / TEXT sinks — stamp physical so Map ≡ CREATE.
+        # UNIQUEIDENTIFIER/GUID off-SQL-Server land here too (never bare STRING).
+        phys_u = strip_identity_qualifier(physical_uuid).upper().strip()
+        if phys_u in {"STRING", "TEXT", "VARCHAR", "NVARCHAR"} and not uuid_exact_wire_carrier(
+            physical_uuid
+        ):
+            db_l = db_uuid.strip().lower()
+            if db_l in {"bigquery", "bq"}:
+                return "STRING(36)"
+            if db_l in {"databricks", "spark", "delta", "delta_lake"}:
+                return "VARCHAR(36)"
+            if db_l == "iceberg":
+                return "string"
+        # UNIQUEIDENTIFIER off-SQL-Server with non-bare physical (CHAR(36), …).
+        if src_u in {"UNIQUEIDENTIFIER", "GUID"} and phys_base not in {
+            "UUID",
+            "UNIQUEIDENTIFIER",
+            "GUID",
+        }:
+            return physical_uuid
+        return physical_uuid
+    specialty = specialty_carrier_base(src_type)
+    db = (dest_db_type or "").strip()
+    if specialty:
+        if db:
+            physical = ddl_type(db, src_type)
+            # Dest keeps a native specialty token (PG→PG INET) — stamp that.
+            if specialty_carrier_base(physical) is not None:
+                return physical
+            # Off-engine IP/INET host-address wire — VARCHAR(45) hex/text, not bare TEXT.
+            if specialty in {"INET", "CIDR", "IPV4", "IPV6", "IP", "MACADDR", "MACADDR8"}:
+                if specialty_wire_preserves_value(specialty, physical):
+                    return physical
+                db_l = db.lower()
+                if db_l in {"bigquery", "bq"}:
+                    return "STRING(45)"
+                if db_l in {"sqlserver", "mssql"}:
+                    return "VARCHAR(45)"
+                if db_l == "oracle":
+                    return "VARCHAR2(45)"
+                return "VARCHAR(45)"
+            # Off-engine wire (ObjectId→VARCHAR(24), …) — stamp physical sink.
+            return physical
+        return specialty
+    if db:
+        return promote_create_new_temporal_stamp(src_type, ddl_type(db, src_type), dest_db_type)
+    return (src_type or "VARCHAR").strip() or "VARCHAR"
+
+
+
+# Tokens that writers must not re-interpret via ddl_type (Map stamp authority).
+_PHYSICAL_STAMP_PASS_THROUGH: Final[frozenset[str]] = frozenset({
+    "REAL", "FLOAT4", "FLOAT8", "DOUBLE", "DOUBLE PRECISION",
+    "BINARY_FLOAT", "BINARY_DOUBLE",
+    "HALF", "FLOAT16", "FLOAT32", "FLOAT64",
+    "JSONB", "JSON", "VARIANT", "SUPER", "HSTORE", "AVRO",
+    "INET", "CIDR", "UUID", "BYTEA", "CITEXT",
+    "TIMESTAMPTZ", "TIMESTAMP_LTZ", "TIMESTAMP_NTZ", "TIMESTAMP_TZ",
+    "DATETIME2", "DATETIMEOFFSET", "SMALLDATETIME", "TIMETZ",
+    "MONEY", "SMALLMONEY", "YEAR",
+    "NVARCHAR2", "VARCHAR2", "NCHAR", "NVARCHAR", "NCLOB", "CLOB", "BLOB",
+    "NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC",
+    "GEOMETRY", "GEOGRAPHY", "VECTOR", "HLLSKETCH",
+    "TINYINT", "MEDIUMINT", "SMALLINT", "BIGINT", "INTEGER", "INT", "BIGINT UNSIGNED",
+    "BOOLEAN", "BOOL", "DATE", "TIME", "TIMESTAMP", "DATETIME", "DATETIME64",
+    "TEXT", "STRING", "VARCHAR", "CHAR", "BPCHAR", "CHARACTER VARYING",
+    "OBJECTID", "UNIQUEIDENTIFIER", "GUID", "ROWVERSION", "BIT",
+    "ENUM", "SET", "ARRAY", "STRUCT", "MAP", "RECORD",
+})
+
+# Pass-through tokens that are illegal or not the create-new wire on a dest.
+# Explicit — never infer. Bare JSON on PG rematerializes to JSONB (create-new).
+# UUID/JSON on Redshift/Snowflake/BQ must not invent non-existent DDL.
+_PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
+    "redshift": frozenset({
+        "JSON", "JSONB", "UUID", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE",
+        "NVARCHAR2", "VARCHAR2", "NUMBER", "BIGNUMERIC", "UNIQUEIDENTIFIER",
+        # Foreign binary typmod → VARBYTE(n) create-new wire.
+        "BINARY", "VARBINARY", "BYTES", "FIXED",
+        # Bare DECIMAL/NUMERIC → DECIMAL(38,15); quarantine needs (p,s).
+        "DECIMAL", "NUMERIC",
+        # Foreign temporals → TIMESTAMP / TIMESTAMPTZ SSOT.
+        "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET", "SMALLDATETIME",
+        "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMETZ", "YEAR",
+        # Foreign IEEE aliases → REAL / DOUBLE PRECISION. Keep REAL/DOUBLE PRECISION.
+        "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
+        "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+        "BOOLEAN",
+    }),
+    "snowflake": frozenset({
+        "JSON", "JSONB", "UUID", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE",
+        "SUPER", "NVARCHAR2", "BIGNUMERIC", "UNIQUEIDENTIFIER",
+        # Native wire is BINARY(n); rematerialize foreign aliases.
+        "VARBINARY", "BYTES", "VARBYTE", "FIXED",
+        # Bare DECIMAL/NUMBER → NUMBER(38,10) SSOT (never batch invent).
+        "DECIMAL", "NUMERIC", "NUMBER",
+        # TIMESTAMP/DATETIME → TIMESTAMP_NTZ; TIMESTAMPTZ → TIMESTAMP_LTZ.
+        # Keep TIMESTAMP_NTZ / TIMESTAMP_LTZ / TIMESTAMP_TZ native.
+        "TIMESTAMP", "DATETIME", "DATETIME2", "DATETIME64", "TIMESTAMPTZ",
+        "DATETIMEOFFSET", "SMALLDATETIME", "TIMETZ", "YEAR",
+        # Foreign IEEE → FLOAT wire. Keep FLOAT.
+        "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
+        "FLOAT64", "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+    }),
+    "bigquery": frozenset({
+        "UUID", "JSONB", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE", "SUPER",
+        "VARIANT", "NVARCHAR2", "VARCHAR2", "NUMBER", "UNIQUEIDENTIFIER",
+        # Native wire is BYTES(n); rematerialize BINARY/VARBINARY/fixed typmods.
+        "BINARY", "VARBINARY", "VARBYTE", "FIXED",
+        # Bare DECIMAL/NUMERIC → BIGNUMERIC create-new wire.
+        "DECIMAL", "NUMERIC",
+        # Foreign temporals → DATETIME/TIMESTAMP SSOT. Keep DATETIME/TIMESTAMP/DATE/TIME.
+        "DATETIME2", "DATETIME64", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ",
+        "TIMESTAMPTZ", "DATETIMEOFFSET", "SMALLDATETIME", "TIMETZ", "YEAR",
+        # Foreign IEEE → FLOAT64 only. Keep FLOAT64.
+        "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
+        "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+        "BOOLEAN",
+        # Foreign string/integer aliases → STRING / INT64. Keep STRING/INT64/BYTES.
+        "VARCHAR", "CHAR", "NVARCHAR", "TEXT", "CLOB", "NCLOB", "BPCHAR",
+        "CHARACTER VARYING",
+        "INTEGER", "INT", "BIGINT", "SMALLINT",
+    }),
+    "spanner": frozenset({
+        "UUID", "JSONB", "BYTEA", "INET", "CIDR", "CITEXT", "HSTORE", "SUPER",
+        "VARIANT", "NVARCHAR2", "VARCHAR2", "BIGNUMERIC", "UNIQUEIDENTIFIER",
+        "DATETIME", "TIME",  # Spanner has no DATETIME/TIME — use STRING wire
+        "BINARY", "VARBINARY", "VARBYTE", "FIXED",
+        "DECIMAL", "NUMERIC", "NUMBER",
+        "DATETIME2", "DATETIME64", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ",
+        "TIMESTAMPTZ", "DATETIMEOFFSET", "SMALLDATETIME", "TIMETZ", "YEAR",
+        "TIMESTAMP",  # NTZ invent — SSOT STRING(30) / TIMESTAMP for aware via ddl
+        # Foreign IEEE → FLOAT32/FLOAT64. Keep FLOAT32/FLOAT64. Never invent REAL.
+        "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16",
+        "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+        "BOOLEAN",
+    }),
+    "postgresql": frozenset({
+        # Bare JSON is a logical alias; create-new document wire is JSONB.
+        "JSON",
+        "SUPER", "VARIANT", "BIGNUMERIC", "UNIQUEIDENTIFIER", "NVARCHAR2",
+        # Native wire is BYTEA; rematerialize BINARY(n)/BYTES(n)/fixed(n).
+        "BINARY", "VARBINARY", "BYTES", "VARBYTE", "FIXED",
+        # Bare DECIMAL/NUMBER → NUMERIC (unbounded). Keep bare NUMERIC native.
+        "DECIMAL", "NUMBER",
+        # Foreign temporals → TIMESTAMP/TIMESTAMPTZ. Keep TIMESTAMP/TIMESTAMPTZ/DATE/TIME.
+        "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET", "SMALLDATETIME",
+        "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMETZ", "YEAR",
+        # Foreign IEEE aliases → REAL / DOUBLE PRECISION. Keep REAL/DOUBLE PRECISION.
+        "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
+        "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+    }),
+    "mysql": frozenset({
+        "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC",
+        "UNIQUEIDENTIFIER", "NVARCHAR2", "HSTORE",
+        # Native BINARY(n)/VARBINARY(n); rematerialize foreign aliases only.
+        "BYTES", "VARBYTE", "FIXED",
+        # Bare DECIMAL invents MySQL DECIMAL(10,0); SSOT is DECIMAL(38,15).
+        "DECIMAL", "NUMERIC", "NUMBER",
+        # TIMESTAMP invents session-TZ; DATETIME/TIME need FSP(6). Keep DATE/YEAR.
+        "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ",
+        "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET", "SMALLDATETIME",
+        "TIME", "TIMETZ",
+        # Foreign IEEE → FLOAT / DOUBLE. Keep FLOAT/DOUBLE.
+        "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
+        "FLOAT64", "BINARY_FLOAT", "BINARY_DOUBLE",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+            }),
+    "sqlserver": frozenset({
+        "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC", "JSON",
+        "NVARCHAR2", "HSTORE", "INET", "CIDR",
+        "BYTES", "VARBYTE", "FIXED",
+        "DECIMAL", "NUMERIC", "NUMBER",
+        # TIMESTAMP is T-SQL ROWVERSION — never CREATE as datetime. Rematerialize
+        # to DATETIME2(7). Keep DATETIME2 / DATETIMEOFFSET / SMALLDATETIME / DATE.
+        "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ",
+        "DATETIME", "DATETIME64", "TIMETZ", "YEAR",
+        # Foreign IEEE → REAL / FLOAT. Keep REAL/FLOAT (incl. FLOAT(n) typmod).
+        "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
+        "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+                "YEAR", "MEDIUMINT",
+        "BOOLEAN",
+    }),
+    "oracle": frozenset({
+        "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC", "JSON",
+        "UNIQUEIDENTIFIER", "HSTORE", "INET", "CIDR",
+        # Typmod BINARY(n) → RAW(n); bare BINARY already rematerializes to BLOB.
+        "BINARY", "VARBINARY", "BYTES", "VARBYTE", "FIXED",
+        # Bare NUMBER/DECIMAL → NUMBER(38,10) SSOT.
+        "DECIMAL", "NUMERIC", "NUMBER",
+        # Foreign temporals → TIMESTAMP / WITH TIME ZONE. Keep TIMESTAMP/DATE.
+        "DATETIME", "DATETIME2", "DATETIME64", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ",
+        "TIMESTAMP_TZ", "TIMESTAMPTZ", "DATETIMEOFFSET", "SMALLDATETIME",
+        "TIME", "TIMETZ", "YEAR",
+        # Foreign IEEE → BINARY_FLOAT / BINARY_DOUBLE. Keep BINARY_*.
+        "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
+        "FLOAT64", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+        "BOOLEAN",
+    }),
+    "databricks": frozenset({
+        "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC",
+        "UNIQUEIDENTIFIER", "NVARCHAR2", "HSTORE", "INET", "CIDR",
+        "BINARY", "VARBINARY", "BYTES", "VARBYTE", "FIXED",
+        "DECIMAL", "NUMERIC", "NUMBER",
+        # Databricks TIMESTAMP is native session-TZ wire — keep Map stamps.
+        # Foreign DATETIME*/TIMESTAMPTZ → TIMESTAMP_NTZ / TIMESTAMP via ddl.
+        "DATETIME", "DATETIME2", "DATETIME64", "TIMESTAMPTZ",
+        "DATETIMEOFFSET", "SMALLDATETIME", "TIMETZ", "YEAR",
+        "TIMESTAMP_TZ", "TIMESTAMP_LTZ",
+        # Foreign IEEE → FLOAT / DOUBLE. Keep FLOAT/DOUBLE (HALF rematerializes).
+        "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
+        "FLOAT64", "BINARY_FLOAT", "BINARY_DOUBLE",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+    }),
+    "iceberg": frozenset({
+        "JSONB", "UUID", "BYTEA", "SUPER", "VARIANT", "BIGNUMERIC",
+        "UNIQUEIDENTIFIER", "NVARCHAR2", "HSTORE", "INET", "CIDR", "JSON",
+        # Widthed binary → fixed(n); bare BINARY already → binary. Keep FIXED native.
+        "BINARY", "VARBINARY", "BYTES", "VARBYTE",
+        "DECIMAL", "NUMERIC", "NUMBER",
+        "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET", "SMALLDATETIME",
+        "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMETZ", "YEAR",
+        # Foreign IEEE → float / double. Keep lowercase float/double.
+        "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
+        "FLOAT64", "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+        "BOOLEAN",
+    }),
+    "duckdb": frozenset({
+        "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
+        "BINARY", "VARBINARY", "BYTES", "VARBYTE", "BYTEA", "FIXED",
+        "JSONB", "UUID", "SUPER", "VARIANT", "UNIQUEIDENTIFIER", "NVARCHAR2",
+        "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET", "SMALLDATETIME",
+        "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMETZ", "YEAR",
+        # Foreign IEEE → REAL / DOUBLE. Keep REAL/DOUBLE.
+        "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
+        "BINARY_FLOAT", "BINARY_DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+    }),
+    "clickhouse": frozenset({
+        "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
+        "BINARY", "VARBINARY", "BYTES", "VARBYTE", "BYTEA", "FIXED",
+        "JSONB", "UUID", "SUPER", "VARIANT", "UNIQUEIDENTIFIER", "NVARCHAR2",
+        "DATETIME", "DATETIME2", "TIMESTAMP", "TIMESTAMPTZ", "DATETIMEOFFSET",
+        "SMALLDATETIME", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ",
+        "TIMETZ", "YEAR",
+        # Foreign IEEE → Float32 / Float64. Keep Float32/Float64.
+        "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
+        "FLOAT64", "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+        "BOOLEAN",
+    }),
+    "trino": frozenset({
+        "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
+        "BINARY", "VARBINARY", "BYTES", "VARBYTE", "BYTEA", "FIXED",
+        "JSONB", "UUID", "SUPER", "VARIANT", "UNIQUEIDENTIFIER", "NVARCHAR2",
+        "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET", "SMALLDATETIME",
+        "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMETZ", "YEAR",
+        "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
+        "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+        "BOOLEAN",
+    }),
+    "presto": frozenset({
+        "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
+        "BINARY", "VARBINARY", "BYTES", "VARBYTE", "BYTEA", "FIXED",
+        "JSONB", "UUID", "SUPER", "VARIANT", "UNIQUEIDENTIFIER", "NVARCHAR2",
+        "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET", "SMALLDATETIME",
+        "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMETZ", "YEAR",
+        "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
+        "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+        "BOOLEAN",
+    }),
+    "generic_sql": frozenset({
+        "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
+        "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
+        "BINARY_FLOAT", "BINARY_DOUBLE", "REAL", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+        "BOOLEAN",
+    }),
+    # SQLite has no true fixed-point type. DECIMAL/NUMERIC/NUMBER stamps get
+    # NUMERIC affinity and silently store high-precision values as IEEE real.
+    # Rematerialize via ddl_type → TEXT (Map≡CREATE honesty).
+    # Foreign binary typmods → BLOB (SQLite ignores length; no affinity invent).
+    # UUID/JSON/TIMESTAMP/GUID/… also get NUMERIC affinity (not INT/CHAR/CLOB/
+    # BLOB/REAL) — digit-looking payloads become integer/real/inf. Rematerialize
+    # to TEXT/INTEGER SSOT.
+    "sqlite": frozenset({
+        "DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC", "BIGDECIMAL",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "BINARY", "VARBINARY", "BYTES", "VARBYTE", "BYTEA", "FIXED",
+        "UUID", "UNIQUEIDENTIFIER", "GUID", "OBJECTID",
+        "JSON", "JSONB", "VARIANT", "SUPER", "HSTORE", "CITEXT", "AVRO",
+        "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ",
+        "TIMETZ", "DATETIME", "DATETIME2", "DATETIME64", "DATETIMEOFFSET",
+        "SMALLDATETIME", "DATE", "TIME", "YEAR",
+        "BOOLEAN", "BOOL", "BIT",
+        "ENUM", "SET", "INET", "CIDR", "VECTOR", "STRING",
+        "STRUCT", "MAP", "RECORD", "ARRAY",
+        # Foreign IEEE aliases → REAL (SQLite affinity SSOT). Keep REAL.
+        "FLOAT4", "FLOAT8", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32", "FLOAT64",
+        "BINARY_FLOAT", "BINARY_DOUBLE", "DOUBLE", "FLOAT",
+        # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
+        "VECTOR", "HALFVEC", "SPARSEVEC",
+        "BIT", "BOOL", "TINYINT",
+        "ENUM", "SET",
+        "MONEY", "SMALLMONEY", "CURRENCY",
+        "YEAR", "MEDIUMINT",
+        "BOOLEAN",
+    }),
+}
+
+
+def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
+    """True when carrier is already dest DDL (Map stamp) — do not re-ddl invent."""
+    raw = strip_identity_qualifier(carrier).strip()
+    if not raw:
+        return False
+    upper = raw.upper()
+    db = _normalize_dest_db(dest_db) if dest_db else ""
+    reject = _PASS_THROUGH_REJECT_ON_DEST.get(db, frozenset()) if db else frozenset()
+    # Typmod / nested / array brackets are physical unless the bare token is
+    # illegal on this dest (e.g. DECIMAL(38,18) on SQLite → TEXT rematerialize).
+    if "(" in upper or "[" in upper or "<" in upper:
+        if "<" in upper or "[" in upper:
+            return True
+        bare_typmod = upper.split("(", 1)[0].strip()
+        # Valued MySQL ENUM/SET is native CREATE wire — keep Map stamp.
+        if bare_typmod in {"ENUM", "SET"} and db in {"mysql", "mariadb", "tidb"}:
+            return True
+        # TINYINT(1) is the MySQL boolean synonym — rematerialize via ddl_type.
+        if bare_typmod == "TINYINT":
+            m_ti = re.match(r"^TINYINT\((\d+)\)$", upper)
+            if m_ti and int(m_ti.group(1)) == 1:
+                return False
+        # MySQL YEAR(4) → YEAR create-new wire (display-width alias).
+        if bare_typmod == "YEAR":
+            return False
+        # BIT(n): n<=1 → boolean polarity (rematerialize); n>1 → bitstring
+        # native only on PG/MySQL/DuckDB — elsewhere VARCHAR(n) SSOT.
+        if bare_typmod == "BIT":
+            m_bit = re.match(r"^BIT\((\d+)\)$", upper)
+            if m_bit:
+                width = int(m_bit.group(1))
+                if width <= 1:
+                    return False
+                if db in {
+                    "postgresql",
+                    "postgres",
+                    "cockroachdb",
+                    "timescaledb",
+                    "alloydb",
+                    "yugabytedb",
+                    "citus",
+                    "supabase",
+                    "greenplum",
+                    "mysql",
+                    "mariadb",
+                    "tidb",
+                    "duckdb",
+                }:
+                    return True
+                return False
+        # VECTOR / HALFVEC / SPARSEVEC typmods always rematerialize to dest
+        # ddl_type (Snowflake VECTOR(FLOAT,n), PG vector(n), else text/array).
+        if bare_typmod in {"VECTOR", "HALFVEC", "SPARSEVEC"}:
+            return False
+        # BigQuery: parameterized NUMERIC/BIGNUMERIC Map stamps are native CREATE
+        # wire — never rewrite NUMERIC(10,2) → BIGNUMERIC(10,2). Bare NUMERIC
+        # still rejects below → BIGNUMERIC. DECIMAL(p,s) rematerializes to
+        # BIGNUMERIC(p,s) (BQ has no DECIMAL type name).
+        if db == "bigquery" and bare_typmod in {"NUMERIC", "BIGNUMERIC"}:
+            return True
+        if bare_typmod in reject:
+            return False
+        return True
+    bare = upper.split("(", 1)[0].strip()
+    if bare in _PHYSICAL_STAMP_PASS_THROUGH or upper in _PHYSICAL_STAMP_PASS_THROUGH:
+        # Refuse pass-through of tokens illegal / non-create-wire on this dest.
+        if bare in reject or upper in reject:
+            return False
+        # DOUBLE PRECISION is a multi-word pass-through token. Keep only on
+        # engines whose create-new wire is DOUBLE PRECISION (PG-family /
+        # Redshift). Elsewhere rematerialize via ddl_type (MySQL DOUBLE,
+        # Snowflake FLOAT, SQLite REAL, …).
+        if upper == "DOUBLE PRECISION" and db not in {
+            "postgresql",
+            "postgres",
+            "cockroachdb",
+            "timescaledb",
+            "alloydb",
+            "yugabytedb",
+            "citus",
+            "supabase",
+            "greenplum",
+            "redshift",
+        }:
+            return False
+        return True
+    # MySQL/Maria FLOAT is a real physical stamp (HALF create-new). On PG/etc.
+    # bare FLOAT is the logical alias that must still map via ddl_type → DOUBLE.
+    if bare == "FLOAT":
+        return db in {"mysql", "mariadb", "tidb", "sqlserver", "mssql"}
+    if specialty_carrier_base(raw) is not None:
+        return True
+    # Dialect multi-word tokens
+    if upper.startswith("TIMESTAMP ") or upper.startswith("TIME WITH"):
+        # Rematerialize to dest ddl_type SSOT (MySQL → DATETIME(6), SF →
+        # TIMESTAMP_TZ, PG → TIMESTAMPTZ, SQLite → TEXT). Never invent
+        # foreign multi-word temporals as CREATE DDL.
+        return False
+    if upper.startswith("DOUBLE ") or upper.startswith("CHARACTER "):
+        # DOUBLE PRECISION handled above when in pass-through set; remaining
+        # DOUBLE … forms rematerialize. CHARACTER VARYING → ddl on SQLite /
+        # BigQuery (STRING) / other non-native engines.
+        if upper.startswith("DOUBLE "):
+            return False
+        if db in {"sqlite", "bigquery", "spanner", "databricks", "iceberg"}:
+            return False
+        return True
+    return False
+
+
+def materialize_dest_ddl(db_type: str, carrier: str | None) -> str:
+    """Writer CREATE DDL: honor Map physical stamps; map logicals via ddl_type.
+
+    SSOT so Execute CREATE cannot invent REAL→DOUBLE, TIMESTAMP→DATETIME (BQ),
+    NVARCHAR2→VARCHAR2 BYTE, or ARRAY<FLOAT>→ARRAY<DOUBLE> after Map stamped.
+    Illegal typmod on no-typmod engines is still legalized via promote.
+
+    Pass-through is dest-gated via ``_PASS_THROUGH_REJECT_ON_DEST``: tokens that
+    are illegal on the destination (Redshift ``JSON``/``UUID``, BQ ``UUID``, …)
+    or are logical aliases of the create-new wire (PG ``JSON``→``JSONB``) always
+    rematerialize. Native stamps (``SUPER``, ``JSONB``, ``VARIANT``, PG ``UUID``)
+    still pass through unchanged.
+
+    Iceberg nested spelling is an exception: ``ARRAY<T>`` / ``T[]`` / ``VECTOR``
+    must become ``list<…>`` (float leaves stay float) — not pass-through Spark
+    ARRAY tokens the Iceberg writer cannot CREATE.
+
+    Known limitation: typmod-bearing stamps (``VARCHAR(n)``) usually pass
+    through even when ``n`` exceeds a destination cap — width collapse is
+    Validate's job, not silent CREATE rewrite. Exception: tokens listed in
+    ``_PASS_THROUGH_REJECT_ON_DEST`` (e.g. ``DECIMAL(p,s)`` on SQLite) always
+    rematerialize via ``ddl_type`` so CREATE cannot invent NUMERIC affinity.
+    """
+    raw = strip_identity_qualifier(carrier).strip()
+    if not raw:
+        return ddl_type(db_type, "VARCHAR")
+    db = _normalize_dest_db(db_type)
+    upper = raw.upper()
+    if db == "iceberg":
+        if (
+            upper.startswith("ARRAY<")
+            or upper.startswith("ARRAY(")
+            or upper.startswith("LIST<")
+            or upper.startswith("LIST(")
+            or upper.endswith("[]")
+            or normalize_logical_type(raw) == LOGICAL_VECTOR
+        ):
+            return ddl_type(db, raw)
+    if _is_explicit_physical_stamp(raw, db):
+        legalized = promote_create_new_temporal_stamp("", raw, db)
+        return legalized or raw
+    # Rematerialized UUID aliases must use create-new width-safe wire
+    # (BQ STRING(36), not bare STRING) so writers match Map stamps.
+    if normalize_logical_type(raw) == LOGICAL_UUID:
+        return create_new_mapping_target_type(raw, db_type)
+    return ddl_type(db, raw)
+
+
+def uuid_exact_wire_carrier(target_type: str | None) -> bool:
+    """True only for exact 36-char UUID string wires (not VARCHAR(50)+)."""
+    raw = strip_identity_qualifier(target_type).strip()
+    if not raw:
+        return False
+    upper = raw.upper()
+    if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
+        return True
+    m = re.match(
+        r"^(?:N?VAR)?CHAR(?:ACTER)?\s*\(\s*(\d+)\s*\)$",
+        upper,
+    )
+    if m and int(m.group(1)) == 36:
+        return True
+    m = re.match(r"^VARCHAR2\s*\(\s*(\d+)\s*\)$", upper)
+    if m and int(m.group(1)) == 36:
+        return True
+    m = re.match(r"^STRING\s*\(\s*(\d+)\s*\)$", upper)
+    return bool(m and int(m.group(1)) == 36)
+
+
+def uuid_capacity_string_carrier(target_type: str | None) -> bool:
+    """True when the physical type can hold a canonical UUID without truncation.
+
+    MySQL/Oracle/Redshift create-new emit ``CHAR(36)`` / ``VARCHAR(36)`` /
+    ``VARCHAR2(36)`` for UUID. Those are the dialect-native wire — not an
+    opaque domain collapse. Bare ``VARCHAR`` / ``TEXT`` / ``STRING`` still
+    collapse (lost UUID polarity) and must surface in preflight.
+
+    Widths ``> 36`` also preserve the value (no truncation) for collapse
+    checks, but :func:`ddl_type` must not rewrite them to UUID DDL — see
+    :func:`uuid_exact_wire_carrier`.
+    """
+    if uuid_exact_wire_carrier(target_type):
+        return True
+    raw = strip_identity_qualifier(target_type).strip()
+    if not raw:
+        return False
+    upper = raw.upper()
+    m = re.match(
+        r"^(?:N?VAR)?CHAR(?:ACTER)?\s*\(\s*(\d+)\s*\)$",
+        upper,
+    )
+    if m and int(m.group(1)) >= 36:
+        return True
+    m = re.match(r"^VARCHAR2\s*\(\s*(\d+)\s*\)$", upper)
+    if m and int(m.group(1)) >= 36:
+        return True
+    m = re.match(r"^STRING\s*\(\s*(\d+)\s*\)$", upper)
+    return bool(m and int(m.group(1)) >= 36)
+
+
+
+def objectid_would_collapse(source_type: str, target_type: str) -> bool:
+    """True when ObjectId polarity collapses to opaque string/text.
+
+    Width-safe create-new wires (``VARCHAR(24)`` / ``BINARY(12)``) preserve the
+    hex contract and are not a collapse. Bare TEXT/VARCHAR/STRING drop domain
+    polarity and must surface in preflight — never silent green.
+    """
+    if normalize_logical_type(source_type) != LOGICAL_OBJECTID:
+        return False
+    if normalize_logical_type(target_type) == LOGICAL_OBJECTID:
+        return False
+    if specialty_wire_preserves_value("OBJECTID", target_type):
+        return False
+    tgt_l = normalize_logical_type(target_type)
+    return tgt_l in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON, LOGICAL_BINARY}
 
 
 def uuid_would_collapse(source_type: str, target_type: str) -> bool:
     """True when UUID polarity collapses to opaque string/text.
 
-    Top-level UUID→VARCHAR is common on Snowflake/Databricks; nested UUID→string
-    is the Snowflake structured-type compatibility mode (pg_lake / Iceberg).
-    Both are valid sinks but must surface in preflight — never silent green.
+    Top-level UUID→bare VARCHAR/TEXT/STRING is common on Snowflake/Databricks
+    and must surface in preflight — never silent green. Dialect-native
+    ``CHAR(36)`` / ``VARCHAR(36)`` carriers (MySQL create-new) preserve the
+    value *and* the 36-char contract, so they are not a collapse.
     """
     if normalize_logical_type(source_type) != LOGICAL_UUID:
         return False
     if normalize_logical_type(target_type) == LOGICAL_UUID:
         return False
-    tgt_u = strip_identity_qualifier(target_type).upper().strip()
-    if tgt_u in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
+    if uuid_capacity_string_carrier(target_type):
         return False
     tgt_l = normalize_logical_type(target_type)
     return tgt_l in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON}
@@ -4309,7 +6832,12 @@ def parse_temporal_fractional_precision(inferred: str | None) -> int | None:
     return int(m.group(1))
 
 
-def temporal_precision_would_narrow(source_type: str, target_type: str) -> bool:
+def temporal_precision_would_narrow(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
     """True when source fractional seconds exceed destination TIME/TIMESTAMP(p).
 
     ``TIME(6)→TIME(0)`` / ``DATETIME2(7)→DATETIME2(0)`` silently truncates
@@ -4317,6 +6845,11 @@ def temporal_precision_would_narrow(source_type: str, target_type: str) -> bool:
 
     ``SMALLDATETIME`` is one-minute accuracy — any second/fraction datetime
     source into SMALLDATETIME is a silent round (Microsoft / UGO class).
+
+    Bare ``TIMESTAMP`` defaults are dialect-aware when ``dest_db`` is set:
+    MySQL/Maria → FSP 0; PostgreSQL-family / Redshift → 6; SQL Server
+    DATETIME2 bare → 7. Without ``dest_db``, bare TIMESTAMP stays fail-closed
+    at 0 (MySQL) so truncation cannot silent-green.
     """
     src_l = normalize_logical_type(source_type)
     tgt_l = normalize_logical_type(target_type)
@@ -4330,13 +6863,79 @@ def temporal_precision_would_narrow(source_type: str, target_type: str) -> bool:
     if tgt_u == "SMALLDATETIME" and src_u != "SMALLDATETIME" and src_l == LOGICAL_DATETIME:
         return True
     tgt_p = parse_temporal_fractional_precision(target_type)
-    if tgt_p is None:
-        return False
     src_p = parse_temporal_fractional_precision(source_type)
     if src_p is None:
-        return False
+        # SQL Server bare DATETIME2 defaults to precision 7 — never treat as
+        # unknown and soft-pass DATETIME2→DATETIME (≈3.33ms round).
+        bare_src = re.sub(r"\s*\(\s*\d+\s*\)", "", src_u).strip()
+        if bare_src == "DATETIME2":
+            src_p = 7
+        elif bare_src == "DATETIMEOFFSET":
+            src_p = 7
+        else:
+            return False
+    if tgt_p is None:
+        # MySQL bare TIME/DATETIME/TIMESTAMP default FSP 0 — TIME(6)→TIME must
+        # not silent-green. PostgreSQL bare TIMESTAMP / TIMESTAMP WITHOUT TIME
+        # ZONE defaults to precision 6 — TIMESTAMP_NTZ(6)→TIMESTAMP is preserve
+        # on create-new PG, not a fractional collapse.
+        bare = re.sub(r"\s*\(\s*\d+\s*\)", "", tgt_u).strip()
+        if bare in {
+            "TIME WITHOUT TIME ZONE",
+            "TIMESTAMP WITHOUT TIME ZONE",
+            "TIMESTAMP NTZ",
+            "TIMESTAMPTZ",
+            "TIMESTAMP WITH TIME ZONE",
+            "TIMETZ",
+            "TIME WITH TIME ZONE",
+        }:
+            # PostgreSQL / ANSI spellings default to precision 6.
+            tgt_p = 6
+        elif bare == "TIMESTAMP":
+            db = (dest_db or "").strip().lower()
+            if db in {
+                "postgresql", "postgres", "pg", "redshift", "cockroach",
+                "cockroachdb", "alloydb", "timescaledb", "yugabytedb",
+                "citus", "supabase", "greenplum",
+                # Lakehouse bare TIMESTAMP is microsecond (no typmod engines).
+                "databricks", "spark", "delta", "delta_lake", "iceberg",
+                "duckdb", "bigquery", "bq",
+            }:
+                tgt_p = 6
+            elif db in {"sqlserver", "mssql"}:
+                tgt_p = 7
+            else:
+                # MySQL/Maria/unknown: bare TIMESTAMP is FSP 0 — fail closed.
+                tgt_p = 0
+        elif bare == "DATETIME" or (
+            bare.startswith("DATETIME") and bare not in {"DATETIME2", "DATETIMEOFFSET"}
+        ):
+            db = (dest_db or "").strip().lower()
+            # BigQuery DATETIME is microsecond; MySQL/Maria bare DATETIME is FSP 0.
+            if db in {"bigquery", "bq"}:
+                tgt_p = 6
+            else:
+                tgt_p = 0
+        elif bare in {"DATETIME2", "DATETIMEOFFSET"}:
+            # SQL Server bare DATETIME2 / DATETIMEOFFSET default precision 7.
+            tgt_p = 7
+        elif bare == "TIME":
+            db = (dest_db or "").strip().lower()
+            if db in {
+                "bigquery", "bq", "postgresql", "postgres", "pg", "redshift",
+                "duckdb", "databricks", "spark", "delta", "iceberg",
+                "cockroachdb", "alloydb", "timescaledb",
+            }:
+                tgt_p = 6
+            elif db in {"sqlserver", "mssql"}:
+                tgt_p = 7
+            else:
+                tgt_p = 0
+        elif bare.startswith("DATETIME"):
+            tgt_p = 0
+        else:
+            return False
     return src_p > tgt_p
-
 
 def strip_identity_qualifier(inferred: str | None) -> str:
     """Remove GENERATED / AUTO_INCREMENT / COLLATE qualifiers for logical lookup."""
@@ -4548,6 +7147,9 @@ def is_identity_column(inferred: str | None) -> bool:
         return True
     if "GENERATED BY DEFAULT" in upper or "AUTO_INCREMENT" in upper:
         return True
+    # SQL Server IDENTITY(1,1) — must match before strip_identity_qualifier removes it.
+    if re.search(r"\bIDENTITY\b", upper):
+        return True
     base = strip_identity_qualifier(inferred).upper()
     return base in {"SERIAL", "BIGSERIAL", "SMALLSERIAL"} or base.startswith("SERIAL")
 
@@ -4557,22 +7159,109 @@ def generated_always_overwrite_risk(target_type: str) -> bool:
     return is_generated_always_column(target_type)
 
 
+def identity_polarity_would_collapse(source_type: str, target_type: str) -> bool:
+    """True when SERIAL/IDENTITY/AUTO_INCREMENT polarity is dropped on the sink.
+
+    Create-new that stamps plain BIGINT while the source was GENERATED ALWAYS
+    invents a writable numeric column — Accept risk (or stamp identity DDL).
+    """
+    if not is_identity_column(source_type):
+        return False
+    if is_identity_column(target_type):
+        return False
+    tgt = normalize_logical_type(target_type)
+    return tgt in {
+        LOGICAL_INTEGER,
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+        LOGICAL_JSON,
+    }
+
+
+def identity_domain_would_invent(source_type: str, target_type: str) -> bool:
+    """True when plain scalar invents SERIAL/IDENTITY/AUTO_INCREMENT polarity."""
+    if is_identity_column(source_type):
+        return False
+    if not is_identity_column(target_type):
+        return False
+    src = normalize_logical_type(source_type)
+    return src in {
+        LOGICAL_INTEGER,
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+        LOGICAL_JSON,
+    }
+
+
+def is_bfile_locator(inferred: str | None) -> bool:
+    """True for Oracle BFILE external locator (not inlined LOB bytes)."""
+    upper = strip_identity_qualifier(inferred).upper().strip()
+    return upper == "BFILE" or upper.startswith("BFILE(")
+
+
+def bfile_locator_would_collapse(source_type: str, target_type: str) -> bool:
+    """True when BFILE locator polarity would be lost into BLOB/BYTES/text."""
+    if not is_bfile_locator(source_type):
+        return False
+    if is_bfile_locator(target_type):
+        return False
+    return True
+
+
 def integer_bit_width(inferred: str | None) -> int | None:
     """Signed bit width; UNSIGNED adds +1 so INT UNSIGNED is wider than INT."""
-    upper = (inferred or "").upper()
+    raw = strip_identity_qualifier(inferred)
+    if not raw:
+        return None
+    # ClickHouse Int8/UInt8/… — case-sensitive; must not collide with PG INT8≡BIGINT.
+    m_ch = re.match(r"^(U?Int)(8|16|32|64)\b", raw)
+    if m_ch:
+        bits = int(m_ch.group(2))
+        return bits + 1 if m_ch.group(1).startswith("U") else bits
+    upper = raw.upper()
     unsigned = "UNSIGNED" in upper or bool(
         re.search(r"\bUINT\d*\b", upper)
     )
     base: int | None = None
-    if "BIGSERIAL" in upper or "BIGINT" in upper or "INT8" in upper or "UINT64" in upper:
+    # Explicit widths before bare INT — INT64/LONG must not miss \\bINT\\b.
+    if (
+        "BIGSERIAL" in upper
+        or "BIGINT" in upper
+        or re.search(r"\bINT64\b", upper)
+        or re.search(r"\bUINT64\b", upper)
+        or re.search(r"\bLONG\b", upper)
+        or re.search(r"\bINT8\b", upper)  # PostgreSQL INT8 ≡ BIGINT
+    ):
         base = 64
     elif "MEDIUMINT" in upper:
         base = 24
-    elif "SMALLSERIAL" in upper or "SMALLINT" in upper or "INT2" in upper or "UINT16" in upper:
+    elif (
+        "SMALLSERIAL" in upper
+        or "SMALLINT" in upper
+        or re.search(r"\bINT16\b", upper)
+        or re.search(r"\bINT2\b", upper)
+        or re.search(r"\bUINT16\b", upper)
+        or re.search(r"\bSHORT\b", upper)
+    ):
         base = 16
-    elif "TINYSERIAL" in upper or "TINYINT" in upper or "INT1" in upper or "UINT8" in upper:
+    elif (
+        "TINYSERIAL" in upper
+        or "TINYINT" in upper
+        or re.search(r"\bINT1\b", upper)
+        or re.search(r"\bUINT8\b", upper)
+    ):
         base = 8
-    elif "SERIAL" in upper or "INTEGER" in upper or "INT4" in upper or "UINT32" in upper:
+    elif (
+        "SERIAL" in upper
+        or "INTEGER" in upper
+        or re.search(r"\bINT32\b", upper)
+        or re.search(r"\bINT4\b", upper)
+        or re.search(r"\bUINT32\b", upper)
+    ):
         base = 32
     elif re.search(r"\bINT\b", upper):
         base = 32
@@ -4605,6 +7294,221 @@ def integer_storage_bounds(inferred: str | None) -> tuple[int, int] | None:
     return (-(1 << (width - 1)), (1 << (width - 1)) - 1)
 
 
+def integer_width_would_narrow(source_type: str, target_type: str) -> bool:
+    """True when signed/unsigned integer bit width shrinks (BIGINT→INT invent)."""
+    if normalize_logical_type(source_type) != LOGICAL_INTEGER:
+        return False
+    if normalize_logical_type(target_type) != LOGICAL_INTEGER:
+        return False
+    src_w = integer_bit_width(source_type)
+    tgt_w = integer_bit_width(target_type)
+    if src_w is None or tgt_w is None:
+        return False
+    return src_w > tgt_w
+
+
+def float_mantissa_bits(inferred: str | None, *, dest_db: str = "") -> int | None:
+    """IEEE significand bits for float carriers (53=double, 24=single, 11=half).
+
+    Bare ``FLOAT`` is dialect-dependent: SQL Server / Snowflake FLOAT is IEEE-64;
+    MySQL FLOAT is IEEE-32. When ``dest_db`` is known, use the dialect default so
+    DOUBLE→FLOAT create-new on those engines is not a false mantissa collapse.
+    """
+    if normalize_logical_type(inferred) != LOGICAL_FLOAT:
+        return None
+    # Strip UNSIGNED so REAL UNSIGNED / FLOAT UNSIGNED keep single-width tokens.
+    upper = re.sub(
+        r"\bUNSIGNED\b",
+        "",
+        strip_identity_qualifier(inferred).upper(),
+    ).strip().replace(" ", "")
+    # IEEE half / float16 (~10 explicit + 1 implicit significand bits).
+    if upper in {"HALF", "HALFFLOAT", "FLOAT16"} or upper.startswith("HALFFLOAT"):
+        return 11
+    # Single-precision tokens.
+    if upper in {
+        "REAL",
+        "FLOAT4",
+        "FLOAT32",
+        "BINARY_FLOAT",
+    } or upper.startswith("REAL("):
+        return 24
+    # SQL FLOAT(p): p≤24 → single; p>24 → double (SQL Server / ANSI).
+    m = re.match(r"^FLOAT\((\d+)\)$", upper)
+    if m:
+        return 24 if int(m.group(1)) <= 24 else 53
+    if upper in {
+        "DOUBLE",
+        "DOUBLEPRECISION",
+        "FLOAT8",
+        "FLOAT64",
+        "BINARY_DOUBLE",
+    } or upper.startswith("DOUBLE"):
+        return 53
+    # Bare FLOAT is dialect-dependent.
+    if upper == "FLOAT" or upper.startswith("FLOAT"):
+        db = (dest_db or "").strip().lower()
+        if db in {"sqlserver", "mssql", "snowflake"}:
+            return 53
+        # Fail-closed single so DOUBLE→FLOAT never silent-greens without dest.
+        return 24
+    return 53
+
+
+def float_mantissa_would_narrow(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when DOUBLE/FLOAT64 lands on REAL/FLOAT32/HALF (silent IEEE drop)."""
+    src_b = float_mantissa_bits(source_type, dest_db=dest_db)
+    tgt_b = float_mantissa_bits(target_type, dest_db=dest_db)
+    if src_b is None or tgt_b is None:
+        return False
+    return src_b > tgt_b
+
+
+def specialty_polarity_mismatch(source_type: str, target_type: str) -> bool:
+    """True when two distinct specialty carriers would rewrite domain polarity.
+
+    INET→CIDR invents network masking; MACADDR→MACADDR8 changes wire width;
+    HSTORE→LTREE is not identity. IP/INET/IPv4/IPv6 are host-address twins.
+    """
+    src = specialty_carrier_base(source_type)
+    tgt = specialty_carrier_base(target_type)
+    if src is None or tgt is None:
+        return False
+    if src in _IP_HOST_ADDRESS_TWINS and tgt in _IP_HOST_ADDRESS_TWINS:
+        return False
+    if src in _XML_DOCUMENT_TWINS and tgt in _XML_DOCUMENT_TWINS:
+        return False
+    return src != tgt
+
+
+def case_fold_polarity_invent(source_type: str, target_type: str) -> bool:
+    """True when mapping invents or drops case-fold equality polarity.
+
+    Covers TEXT→CITEXT / CS→CI invent and CITEXT→TEXT / explicit CS drop.
+    MySQL/SQL Server CI collation metadata → bare create-new TEXT/VARCHAR is
+    dialect normalization (values round-trip); uniqueness follows the destination
+    platform default and must not block every string column on Validate.
+    """
+    src_l = normalize_logical_type(source_type)
+    tgt_l = normalize_logical_type(target_type)
+    if src_l not in {LOGICAL_STRING, LOGICAL_TEXT} or tgt_l not in {
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+    }:
+        return False
+    tgt_ci = is_case_insensitive_collation(target_type) or (
+        specialty_carrier_base(target_type) == "CITEXT"
+    )
+    src_ci = is_case_insensitive_collation(source_type) or (
+        specialty_carrier_base(source_type) == "CITEXT"
+    )
+    # Only when at least one side declares CI/CS polarity (or CITEXT).
+    src_declares = bool(parse_collation(source_type)) or (
+        specialty_carrier_base(source_type) == "CITEXT"
+    )
+    tgt_declares = bool(parse_collation(target_type)) or (
+        specialty_carrier_base(target_type) == "CITEXT"
+    )
+    if not src_declares and not tgt_declares:
+        return False
+    # Inventing CI / CITEXT on the target from a CS source.
+    if tgt_ci and not src_ci:
+        return True
+    # Dropping CITEXT specialty into bare CS text — real polarity loss.
+    if specialty_carrier_base(source_type) == "CITEXT" and not tgt_ci:
+        return True
+    # Explicit CS (or non-CI) collation on target vs CI source.
+    if src_ci and tgt_declares and not tgt_ci:
+        return True
+    # Source CI collation metadata + bare destination TEXT/VARCHAR: normalize.
+    return False
+
+def accent_polarity_invent(source_type: str, target_type: str) -> bool:
+    """True when mapping invents or explicitly drops accent-insensitive equality.
+
+    Source AI collation → bare create-new TEXT is dialect strip, not invent.
+    """
+    src_l = normalize_logical_type(source_type)
+    tgt_l = normalize_logical_type(target_type)
+    if src_l not in {LOGICAL_STRING, LOGICAL_TEXT} or tgt_l not in {
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+    }:
+        return False
+    if not parse_collation(source_type) and not parse_collation(target_type):
+        return False
+    src_ai = is_accent_insensitive_collation(source_type)
+    tgt_ai = is_accent_insensitive_collation(target_type)
+    # Invent AI on an explicitly collated target.
+    if tgt_ai and not src_ai:
+        return True
+    # Drop AI only when the target declares an accent-sensitive collation.
+    if src_ai and not tgt_ai and parse_collation(target_type):
+        return True
+    return False
+
+def width_fold_polarity_invent(source_type: str, target_type: str) -> bool:
+    """True when mapping invents/drops width-insensitive equality (WS omit).
+
+    SQL Server: ``_WS`` is width-sensitive; omitting ``_WS`` folds fullwidth/
+    halfwidth — unique keys can collide without Accept risk.
+    """
+    src_l = normalize_logical_type(source_type)
+    tgt_l = normalize_logical_type(target_type)
+    if src_l not in {LOGICAL_STRING, LOGICAL_TEXT} or tgt_l not in {
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+    }:
+        return False
+    if not parse_collation(source_type) or not parse_collation(target_type):
+        return False
+    src_name = (parse_collation(source_type) or "").upper()
+    tgt_name = (parse_collation(target_type) or "").upper()
+    if not _is_windows_style_collation(src_name) and not _is_windows_style_collation(
+        tgt_name
+    ):
+        return False
+    return is_width_insensitive_collation(source_type) != is_width_insensitive_collation(
+        target_type
+    )
+
+
+def kana_fold_polarity_invent(source_type: str, target_type: str) -> bool:
+    """True when mapping invents/drops kana-insensitive equality (KS omit)."""
+    src_l = normalize_logical_type(source_type)
+    tgt_l = normalize_logical_type(target_type)
+    if src_l not in {LOGICAL_STRING, LOGICAL_TEXT} or tgt_l not in {
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+    }:
+        return False
+    if not parse_collation(source_type) or not parse_collation(target_type):
+        return False
+    src_name = (parse_collation(source_type) or "").upper()
+    tgt_name = (parse_collation(target_type) or "").upper()
+    if not _is_windows_style_collation(src_name) and not _is_windows_style_collation(
+        tgt_name
+    ):
+        return False
+    return is_kana_insensitive_collation(source_type) != is_kana_insensitive_collation(
+        target_type
+    )
+
+
+def date_to_tz_aware_invent(source_type: str, target_type: str) -> bool:
+    """True when DATE widens into TZ-aware datetime (midnight instant invent)."""
+    if normalize_logical_type(source_type) != LOGICAL_DATE:
+        return False
+    if normalize_logical_type(target_type) != LOGICAL_DATETIME:
+        return False
+    return datetime_timezone_polarity(target_type) in {"tz", "ltz"}
+
+
 def unsigned_integer_would_overflow(source_type: str, target_type: str) -> bool:
     """True when UNSIGNED source max can exceed a signed (or narrower) integer dest.
 
@@ -4613,7 +7517,10 @@ def unsigned_integer_would_overflow(source_type: str, target_type: str) -> bool:
     """
     src_raw = (source_type or "").lower()
     if "unsigned" not in src_raw and not re.search(r"\buint\d*\b", src_raw):
-        return False
+        # ClickHouse UInt8/UInt32 — case-sensitive leading U.
+        raw = strip_identity_qualifier(source_type) or ""
+        if not re.match(r"^UInt(8|16|32|64)\b", raw):
+            return False
     tgt_l = normalize_logical_type(target_type)
     # Lossless sinks for unsigned range.
     if tgt_l in {LOGICAL_DECIMAL, LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON}:
@@ -4628,13 +7535,55 @@ def unsigned_integer_would_overflow(source_type: str, target_type: str) -> bool:
     tgt_w = integer_bit_width(target_type)
     if src_w is None:
         # Unknown unsigned width into signed integer — fail closed.
-        return "unsigned" not in (target_type or "").lower()
+        return "unsigned" not in (target_type or "").lower() and not re.match(
+            r"^UInt", strip_identity_qualifier(target_type) or ""
+        )
     if tgt_w is None:
         tgt_w = 32  # bare INTEGER / INT
     return src_w > tgt_w
 
 
-def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
+def _is_unsigned_integer_carrier(inferred: str | None) -> bool:
+    """True for MySQL UNSIGNED / ClickHouse UInt* / UINT* integer carriers."""
+    raw = strip_identity_qualifier(inferred) or ""
+    if re.match(r"^UInt(8|16|32|64)\b", raw):
+        return True
+    lower = raw.lower()
+    return "unsigned" in lower or bool(re.search(r"\buint\d*\b", lower))
+
+
+def unsigned_signed_polarity_invent(source_type: str, target_type: str) -> bool:
+    """True when UNSIGNED/UInt invents a signed integer sink (or reverse).
+
+    Value-safe *clear* widens (``INT UNSIGNED → BIGINT``) do not invent
+    Accept-risk theater — the signed 64-bit sink holds the full unsigned 32-bit
+    range. Tighter signed sinks (``UInt8 → SMALLINT``) still drop unsigned
+    polarity and require Accept risk even when samples fit. Overflow stays
+    blocked by :func:`unsigned_integer_would_overflow`.
+    """
+    if normalize_logical_type(source_type) != LOGICAL_INTEGER:
+        return False
+    if normalize_logical_type(target_type) != LOGICAL_INTEGER:
+        return False
+    src_u = _is_unsigned_integer_carrier(source_type)
+    tgt_u = _is_unsigned_integer_carrier(target_type)
+    if src_u == tgt_u:
+        return False
+    # INT / INT UNSIGNED → BIGINT class: full range fits in signed 64-bit.
+    if src_u and not tgt_u and not unsigned_integer_would_overflow(source_type, target_type):
+        src_w = integer_bit_width(source_type)
+        tgt_w = integer_bit_width(target_type)
+        if src_w is not None and tgt_w is not None and tgt_w >= 64 and src_w <= 33:
+            return False
+    return True
+
+
+def is_precision_collapse_coercion(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
     """True when source→target collapses precision even if samples appear clean.
 
     Used by DDL compatibility, schema-drift, G3, and integrity sample soft-pass so
@@ -4643,18 +7592,41 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
     BINARY width / UNSIGNED→signed overflow / ENUM·SET domain shrink /
     INTERVAL YM↔DS / GEOGRAPHY SRID·polarity / GENERATED ALWAYS overwrite /
     TIME·TIMESTAMP fractional-second (p) narrow.
+
+    ``dest_db`` threads dialect defaults (document wires, bare TIMESTAMP FSP).
     """
+    dest_db = _normalize_dest_db(dest_db) if dest_db else ""
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
     if (src, tgt) in PRECISION_COLLAPSE_PAIRS:
         return True
-    if is_timezone_polarity_loss(source_type, target_type):
+    if is_timezone_polarity_loss(source_type, target_type, dest_db=dest_db):
         return True
     if time_timezone_polarity_loss(source_type, target_type):
+        return True
+    if timezone_aware_would_collapse_to_string(source_type, target_type):
+        return True
+    if long_raw_locator_would_collapse(source_type, target_type):
+        return True
+    if decfloat_domain_would_collapse(source_type, target_type):
+        return True
+    if bignumeric_capacity_would_invent(source_type, target_type):
+        return True
+    if decimal_fixed_point_would_collapse_to_text(source_type, target_type):
+        return True
+    if smalldatetime_domain_would_invent(source_type, target_type):
         return True
     if decimal_params_would_narrow(source_type, target_type):
         return True
     if string_width_would_narrow(source_type, target_type):
+        return True
+    if bounded_string_sink_would_truncate(source_type, target_type):
+        return True
+    if national_charset_would_collapse(source_type, target_type):
+        return True
+    if national_charset_would_invent(source_type, target_type):
+        return True
+    if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
         return True
     if binary_width_would_narrow(source_type, target_type):
         return True
@@ -4662,30 +7634,360 @@ def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
         return True
     if unsigned_integer_would_overflow(source_type, target_type):
         return True
+    if unsigned_signed_polarity_invent(source_type, target_type):
+        return True
+    if integer_width_would_narrow(source_type, target_type):
+        return True
+    if float_mantissa_would_narrow(source_type, target_type, dest_db=dest_db):
+        return True
+    if year_domain_would_collapse(source_type, target_type):
+        return True
+    if money_domain_would_collapse(source_type, target_type):
+        return True
+    if bitstring_opaque_bytes_collapse(source_type, target_type):
+        return True
     if enum_set_domain_would_reject(source_type, target_type):
         return True
     if enum_domain_would_collapse(source_type, target_type):
         return True
-    if interval_family_would_collapse(source_type, target_type):
+    if interval_family_would_collapse(source_type, target_type, dest_db=dest_db):
+        return True
+    if interval_precision_would_narrow(source_type, target_type):
+        return True
+    if bitstring_pad_polarity_loss(source_type, target_type):
+        return True
+    if oracle_char_byte_polarity_loss(source_type, target_type):
+        return True
+    if oracle_long_numeric_invent(source_type, target_type):
         return True
     if geography_contract_would_collapse(source_type, target_type):
         return True
-    if specialty_carrier_would_collapse(source_type, target_type):
+    if specialty_carrier_would_collapse(source_type, target_type, dest_db=dest_db):
+        return True
+    if specialty_domain_would_invent(source_type, target_type):
+        return True
+    if specialty_polarity_mismatch(source_type, target_type):
+        return True
+    if case_fold_polarity_invent(source_type, target_type):
+        return True
+    if accent_polarity_invent(source_type, target_type):
+        return True
+    if width_fold_polarity_invent(source_type, target_type):
+        return True
+    if kana_fold_polarity_invent(source_type, target_type):
+        return True
+    if date_to_tz_aware_invent(source_type, target_type):
+        return True
+    if vector_dim_mismatch(source_type, target_type):
+        return True
+    if vector_encoding_would_collapse(source_type, target_type):
         return True
     if rowversion_would_collapse_to_temporal(source_type, target_type):
         return True
     if sql_variant_would_collapse(source_type, target_type):
         return True
+    # ObjectId → VARCHAR(24)/BINARY(12) is the industry create-new wire — not lossy.
+    if (
+        normalize_logical_type(source_type) == LOGICAL_OBJECTID
+        and specialty_wire_preserves_value("OBJECTID", target_type)
+    ):
+        return False
     if uuid_would_collapse(source_type, target_type):
+        return True
+    if objectid_would_collapse(source_type, target_type):
         return True
     if generated_always_overwrite_risk(target_type):
         return True
-    if temporal_precision_would_narrow(source_type, target_type):
+    if identity_polarity_would_collapse(source_type, target_type):
+        return True
+    if identity_domain_would_invent(source_type, target_type):
+        return True
+    if bfile_locator_would_collapse(source_type, target_type):
+        return True
+    if document_domain_would_collapse(source_type, target_type, dest_db=dest_db):
+        return True
+    if document_domain_would_invent(source_type, target_type):
+        return True
+    if temporal_precision_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
     return False
 
 
-def is_lossy_coercion(source_type: str, target_type: str) -> bool:
+
+
+def suggest_remap_target(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> str:
+    """One-click Remap target that preserves fidelity — never invent bare VARCHAR.
+
+    SSOT for Validate / agentic repair CTAs. Prefer create-new physical DDL for
+    the destination; specialty / UUID keep native carriers; same-logical twins
+    keep the destination stamp.
+    """
+    db = (dest_db or "").strip() or "postgresql"
+    src_l = normalize_logical_type(source_type)
+    tgt_l = normalize_logical_type(target_type)
+    specialty = specialty_carrier_base(source_type)
+    if src_l == LOGICAL_UUID and tgt_l in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON}:
+        return create_new_mapping_target_type(source_type, db)
+    if specialty and tgt_l in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON}:
+        # Prefer create-new wire (ObjectId→VARCHAR(24)) over raw specialty token
+        # when the destination has no native carrier.
+        stamped = create_new_mapping_target_type(source_type, db)
+        return stamped or specialty
+    if src_l == tgt_l and src_l in {
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+        LOGICAL_JSON,
+        LOGICAL_DATETIME,
+        LOGICAL_DATE,
+        LOGICAL_TIME,
+    }:
+        stamped = (target_type or "").strip()
+        if stamped and "COLLATE" not in stamped.upper():
+            return promote_create_new_temporal_stamp(source_type, stamped, db)
+        return create_new_mapping_target_type(source_type, db) or stamped or "TEXT"
+    if src_l == LOGICAL_FLOAT and tgt_l in {LOGICAL_DECIMAL, LOGICAL_INTEGER}:
+        return create_new_mapping_target_type("DOUBLE", db) or "DOUBLE"
+    if src_l == LOGICAL_DECIMAL and tgt_l in {LOGICAL_INTEGER, LOGICAL_FLOAT}:
+        return source_type.strip() or create_new_mapping_target_type(source_type, db)
+    if src_l in {LOGICAL_DATETIME, LOGICAL_DATE, LOGICAL_TIME} and tgt_l in {
+        LOGICAL_DATETIME,
+        LOGICAL_DATE,
+        LOGICAL_TIME,
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+    }:
+        return create_new_mapping_target_type(source_type, db) or source_type.strip()
+    if src_l in {LOGICAL_STRING, LOGICAL_TEXT} and tgt_l in {
+        LOGICAL_INTEGER,
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+    }:
+        return create_new_mapping_target_type("TEXT", db) or "TEXT"
+    # Last resort: destination text sink — still dialect-aware, never bare VARCHAR invent.
+    return create_new_mapping_target_type("TEXT", db) or "TEXT"
+
+
+def assess_bson_affinity(
+    source_type: str,
+    target_type: str,
+    *,
+    destination_db_type: str = "",
+) -> list[dict]:
+    """Schemaless G3 semantic contract — type affinity when DDL is absent.
+
+    MongoDB / DynamoDB / Redis do not enforce column DDL, but declared (or
+    inferred) carriers still have BSON/AttributeValue affinity. ObjectId↛NUMBER
+    and DECIMAL↛INTEGER must surface before write — never silent SKIP-as-green.
+    """
+    risks: list[dict] = []
+    src = normalize_logical_type(source_type)
+    tgt = normalize_logical_type(target_type) if (target_type or "").strip() else src
+    db = (destination_db_type or "").strip().lower()
+
+    hard = {
+        (LOGICAL_OBJECTID, LOGICAL_INTEGER),
+        (LOGICAL_OBJECTID, LOGICAL_DECIMAL),
+        (LOGICAL_OBJECTID, LOGICAL_FLOAT),
+        (LOGICAL_OBJECTID, LOGICAL_BOOLEAN),
+        (LOGICAL_UUID, LOGICAL_INTEGER),
+        (LOGICAL_UUID, LOGICAL_DECIMAL),
+        (LOGICAL_BINARY, LOGICAL_INTEGER),
+        (LOGICAL_BINARY, LOGICAL_DECIMAL),
+        (LOGICAL_JSON, LOGICAL_INTEGER),
+        (LOGICAL_JSON, LOGICAL_DECIMAL),
+        (LOGICAL_STRUCT, LOGICAL_INTEGER),
+        (LOGICAL_ARRAY, LOGICAL_INTEGER),
+    }
+    if (src, tgt) in hard:
+        risks.append({
+            "kind": "bson_affinity_block",
+            "severity": "block",
+            "message": (
+                f"Schemaless affinity: {source_type or src} → {target_type or tgt}"
+                + (f" on {db}" if db else "")
+                + " invents a numeric/scalar domain the source never had."
+            ),
+        })
+        return risks
+
+    soft = {
+        (LOGICAL_DECIMAL, LOGICAL_INTEGER),
+        (LOGICAL_FLOAT, LOGICAL_INTEGER),
+        (LOGICAL_FLOAT, LOGICAL_DECIMAL),
+        (LOGICAL_DECIMAL, LOGICAL_FLOAT),
+        (LOGICAL_DATETIME, LOGICAL_DATE),
+        (LOGICAL_STRING, LOGICAL_INTEGER),
+        (LOGICAL_STRING, LOGICAL_DECIMAL),
+        (LOGICAL_STRING, LOGICAL_BOOLEAN),
+        (LOGICAL_TEXT, LOGICAL_INTEGER),
+        (LOGICAL_TEXT, LOGICAL_DECIMAL),
+        # Specialty / domain → open string invents no validation at schemaless sinks.
+        (LOGICAL_UUID, LOGICAL_STRING),
+        (LOGICAL_UUID, LOGICAL_TEXT),
+        (LOGICAL_OBJECTID, LOGICAL_STRING),
+        (LOGICAL_OBJECTID, LOGICAL_TEXT),
+        (LOGICAL_BINARY, LOGICAL_STRING),
+        (LOGICAL_BINARY, LOGICAL_TEXT),
+        (LOGICAL_JSON, LOGICAL_STRING),
+        (LOGICAL_JSON, LOGICAL_TEXT),
+        (LOGICAL_VECTOR, LOGICAL_ARRAY),
+        (LOGICAL_VECTOR, LOGICAL_STRING),
+        (LOGICAL_VECTOR, LOGICAL_TEXT),
+    }
+    specialty_to_open = (
+        specialty_carrier_base(source_type) is not None
+        and normalize_logical_type(target_type or "") in {
+            LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON, LOGICAL_ARRAY,
+        }
+        and specialty_carrier_base(target_type) is None
+        and not specialty_wire_preserves_value(
+            specialty_carrier_base(source_type) or "", target_type or ""
+        )
+    )
+    if (
+        (src, tgt) in soft
+        or objectid_would_collapse(source_type, target_type or source_type)
+        or specialty_to_open
+    ):
+        risks.append({
+            "kind": "bson_affinity_warn",
+            "severity": "warn",
+            "message": (
+                f"Schemaless affinity risk: {source_type or src} → {target_type or tgt}"
+                + (f" on {db}" if db else "")
+                + ". No DDL contract — confirm samples before write."
+            ),
+        })
+    return risks
+
+
+def assess_create_new_type_risk(
+    source_type: str,
+    target_type: str,
+    *,
+    destination_db_type: str = "",
+) -> list[dict]:
+    """Risk chips for create-new columns before Validate/write.
+
+    Returns a list of ``{kind, severity, message}`` — empty when lossless.
+    """
+    risks: list[dict] = []
+    src = (source_type or "").strip() or "VARCHAR"
+    tgt = (target_type or "").strip() or src
+    db = (destination_db_type or "").strip().lower()
+
+    if is_precision_collapse_coercion(src, tgt, dest_db=db):
+        risks.append({
+            "kind": "precision_collapse",
+            "severity": "warn",
+            "message": (
+                f"Create-new {src} → {tgt} collapses precision"
+                + (f" on {db}" if db else "")
+                + ". Review before execute."
+            ),
+        })
+    elif is_lossy_coercion(src, tgt, dest_db=db):
+        risks.append({
+            "kind": "lossy_coercion",
+            "severity": "warn",
+            "message": (
+                f"Create-new {src} → {tgt} may lose information"
+                + (f" on {db}" if db else "")
+                + "."
+            ),
+        })
+
+    # Dialect VARCHAR capacity ceilings that create-new often hit.
+    src_w = parse_string_carrier_width(src)
+    tgt_w = parse_string_carrier_width(tgt)
+    dialect_cap = {
+        "oracle": 4000,
+        "sqlserver": 8000,
+        "mssql": 8000,
+        "redshift": 65535,
+        "mysql": 16383,  # utf8mb4 InnoDB row practical ceiling for VARCHAR
+    }.get(db)
+    if dialect_cap and (src_w or 0) > dialect_cap and (not tgt_w or tgt_w >= dialect_cap):
+        risks.append({
+            "kind": "varchar_width_cap",
+            "severity": "warn",
+            "message": (
+                f"Source width {src_w} exceeds {db} VARCHAR capacity (~{dialect_cap}). "
+                "Create-new may truncate unless you use CLOB/TEXT."
+            ),
+        })
+    if src_w and tgt_w and tgt_w < src_w:
+        risks.append({
+            "kind": "varchar_narrow",
+            "severity": "warn",
+            "message": f"Create-new narrows VARCHAR({src_w}) → VARCHAR({tgt_w}).",
+        })
+
+    if is_timezone_polarity_loss(src, tgt, dest_db=db) or time_timezone_polarity_loss(src, tgt):
+        risks.append({
+            "kind": "timezone_polarity",
+            "severity": "warn",
+            "message": f"Create-new drops timezone polarity: {src} → {tgt}.",
+        })
+    if uuid_would_collapse(src, tgt):
+        risks.append({
+            "kind": "uuid_domain",
+            "severity": "warn",
+            "message": (
+                f"Create-new stores UUID as {tgt}"
+                + (f" on {db}" if db else "")
+                + " — UUID domain is not enforced at destination."
+            ),
+        })
+    elif (
+        normalize_logical_type(src) == LOGICAL_UUID
+        and normalize_logical_type(tgt) != LOGICAL_UUID
+        and uuid_exact_wire_carrier(tgt)
+    ):
+        # Exact CHAR/VARCHAR(36) wire preserves values but invents no UUID type —
+        # Accept risk so Map never looks UUID→UUID while CREATE emits string DDL.
+        risks.append({
+            "kind": "uuid_domain",
+            "severity": "warn",
+            "message": (
+                f"Create-new stores UUID as {tgt}"
+                + (f" on {db}" if db else "")
+                + " — exact 36-char wire; UUID domain is not enforced at destination."
+            ),
+        })
+    if objectid_would_collapse(src, tgt):
+        risks.append({
+            "kind": "objectid_domain",
+            "severity": "warn",
+            "message": (
+                f"Create-new stores ObjectId as {tgt}"
+                + (f" on {db}" if db else "")
+                + " — ObjectId domain is not enforced at destination."
+            ),
+        })
+    elif (
+        normalize_logical_type(src) == LOGICAL_OBJECTID
+        and normalize_logical_type(tgt) != LOGICAL_OBJECTID
+        and specialty_wire_preserves_value("OBJECTID", tgt)
+    ):
+        risks.append({
+            "kind": "objectid_domain",
+            "severity": "warn",
+            "message": (
+                f"Create-new stores ObjectId as {tgt}"
+                + (f" on {db}" if db else "")
+                + " — hex/binary wire; ObjectId domain is not enforced at destination."
+            ),
+        })
+    return risks
+
+
+def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") -> bool:
     """True when converting source→target may lose precision, fail silently, or
     change the semantic meaning of a value.
 
@@ -4693,7 +7995,7 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
     transform engine can perform without losing the original value:
 
       * any value → string/text/json/array (structural serialization)
-      * integer → decimal/float/string/text/json
+      * integer → decimal/string/text/json (integer→float is lossy — IEEE mantissa)
       * decimal → string/text/json (decimal→float is lossy)
       * float → string/text/json (float→decimal and float→integer are lossy)
       * boolean → string/text/json/integer/decimal/float
@@ -4709,34 +8011,91 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
     lossy: :func:`uuid_would_collapse` treats the lost UUID *domain constraint*
     as an operator-visible collapse rather than silent green.
     """
+    dest_db = _normalize_dest_db(dest_db) if dest_db else ""
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
     if src == tgt:
         # Same logical family can still drop TZ polarity, DECIMAL params,
         # VARCHAR width, UNSIGNED range, STRUCT/MAP fields, or ARRAY elements.
-        if is_timezone_polarity_loss(source_type, target_type):
+        if is_timezone_polarity_loss(source_type, target_type, dest_db=dest_db):
             return True
         if time_timezone_polarity_loss(source_type, target_type):
+            return True
+        if timezone_aware_would_collapse_to_string(source_type, target_type):
+            return True
+        if long_raw_locator_would_collapse(source_type, target_type):
+            return True
+        if decfloat_domain_would_collapse(source_type, target_type):
+            return True
+        if bignumeric_capacity_would_invent(source_type, target_type):
+            return True
+        if decimal_fixed_point_would_collapse_to_text(source_type, target_type):
+            return True
+        if smalldatetime_domain_would_invent(source_type, target_type):
             return True
         if decimal_params_would_narrow(source_type, target_type):
             return True
         if string_width_would_narrow(source_type, target_type):
             return True
+        if bounded_string_sink_would_truncate(source_type, target_type):
+            return True
+        if national_charset_would_collapse(source_type, target_type):
+            return True
+        if national_charset_would_invent(source_type, target_type):
+            return True
+        if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
+            return True
+        if bitstring_opaque_bytes_collapse(source_type, target_type):
+            return True
         if binary_width_would_narrow(source_type, target_type):
             return True
         if bitstring_width_would_narrow(source_type, target_type):
             return True
+        if year_domain_would_collapse(source_type, target_type):
+            return True
+        if money_domain_would_collapse(source_type, target_type):
+            return True
         if unsigned_integer_would_overflow(source_type, target_type):
+            return True
+        if unsigned_signed_polarity_invent(source_type, target_type):
+            return True
+        if integer_width_would_narrow(source_type, target_type):
+            return True
+        if float_mantissa_would_narrow(source_type, target_type, dest_db=dest_db):
             return True
         if enum_set_domain_would_reject(source_type, target_type):
             return True
         if enum_domain_would_collapse(source_type, target_type):
             return True
-        if interval_family_would_collapse(source_type, target_type):
+        if interval_family_would_collapse(source_type, target_type, dest_db=dest_db):
+            return True
+        if interval_precision_would_narrow(source_type, target_type):
+            return True
+        if bitstring_pad_polarity_loss(source_type, target_type):
+            return True
+        if oracle_char_byte_polarity_loss(source_type, target_type):
+            return True
+        if oracle_long_numeric_invent(source_type, target_type):
             return True
         if geography_contract_would_collapse(source_type, target_type):
             return True
-        if specialty_carrier_would_collapse(source_type, target_type):
+        if specialty_carrier_would_collapse(source_type, target_type, dest_db=dest_db):
+            return True
+        if specialty_domain_would_invent(source_type, target_type):
+            return True
+        if specialty_polarity_mismatch(source_type, target_type):
+            return True
+        if case_fold_polarity_invent(source_type, target_type):
+            return True
+        if accent_polarity_invent(source_type, target_type):
+            return True
+        if width_fold_polarity_invent(source_type, target_type):
+            return True
+        if kana_fold_polarity_invent(source_type, target_type):
+            return True
+        if vector_dim_mismatch(source_type, target_type):
+            return True
+        if vector_encoding_would_collapse(source_type, target_type):
             return True
         if rowversion_would_collapse_to_temporal(source_type, target_type):
             return True
@@ -4744,27 +8103,91 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
             return True
         if uuid_would_collapse(source_type, target_type):
             return True
+        if objectid_would_collapse(source_type, target_type):
+            return True
         if generated_always_overwrite_risk(target_type):
             return True
-        if temporal_precision_would_narrow(source_type, target_type):
+        if identity_polarity_would_collapse(source_type, target_type):
+            return True
+        if identity_domain_would_invent(source_type, target_type):
+            return True
+        if bfile_locator_would_collapse(source_type, target_type):
+            return True
+        if temporal_precision_would_narrow(source_type, target_type, dest_db=dest_db):
             return True
         if src == LOGICAL_STRUCT and nested_struct_fields_incompatible(
-            source_type, target_type
+            source_type, target_type, dest_db=dest_db
         ):
             return True
         if src in {LOGICAL_MAP, LOGICAL_ARRAY} and is_nested_shape_collapse(
-            source_type, target_type
+            source_type, target_type, dest_db=dest_db
         ):
             return True
         return False
 
+    # MySQL SET → TEXT[] is the intentional multi-value sink (not string→array invent).
+    if set_to_array_polarity_preserved(source_type, target_type):
+        return False
+    # BIT(n) → VARCHAR(n) create-new is 0/1 digit text — not opaque BYTEA packing.
+    if is_bitstring_carrier(source_type) and tgt in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return False
+    # ObjectId → VARCHAR(24)/BINARY(12)/STRING(24) is the industry create-new wire.
+    if (
+        normalize_logical_type(source_type) == LOGICAL_OBJECTID
+        and specialty_wire_preserves_value("OBJECTID", target_type)
+    ):
+        return False
+    # VECTOR(n) → ARRAY<FLOAT> lakehouse create-new wire — not embedding invent.
+    if vector_to_array_wire_preserved(source_type, target_type, dest_db=dest_db):
+        return False
+    # JSON → dialect-native document wire (CLOB/NVARCHAR(MAX)/JSONB/…) — not lossy.
+    if src == LOGICAL_JSON and is_dialect_native_document_wire(
+        target_type, dest_db=dest_db
+    ):
+        return False
+    # Dialect-aware collapse SSOT — same rules as G3/probe (never MySQL-default FSP
+    # when dest_db is postgresql/redshift, never false-collapse JSON→JSONB).
+    if is_precision_collapse_coercion(source_type, target_type, dest_db=dest_db):
+        return True
     # Fielded STRUCT/MAP → opaque JSON/VARIANT is intentional on many warehouses
     # (Airbyte V2) but is still a field-DDL collapse — treat as lossy so G3 surfaces it.
     if is_nested_document_collapse(source_type, target_type):
         return True
+    if timezone_aware_would_collapse_to_string(source_type, target_type):
+        return True
+    if long_raw_locator_would_collapse(source_type, target_type):
+        return True
+    if decfloat_domain_would_collapse(source_type, target_type):
+        return True
+    if bignumeric_capacity_would_invent(source_type, target_type):
+        return True
+    if decimal_fixed_point_would_collapse_to_text(source_type, target_type):
+        return True
+    if smalldatetime_domain_would_invent(source_type, target_type):
+        return True
+    if year_domain_would_collapse(source_type, target_type):
+        return True
+    if money_domain_would_collapse(source_type, target_type):
+        return True
+    if bitstring_opaque_bytes_collapse(source_type, target_type):
+        return True
     if unsigned_integer_would_overflow(source_type, target_type):
         return True
+    if unsigned_signed_polarity_invent(source_type, target_type):
+        return True
+    if integer_width_would_narrow(source_type, target_type):
+        return True
+    if float_mantissa_would_narrow(source_type, target_type, dest_db=dest_db):
+        return True
     if string_width_would_narrow(source_type, target_type):
+        return True
+    if bounded_string_sink_would_truncate(source_type, target_type):
+        return True
+    if national_charset_would_collapse(source_type, target_type):
+        return True
+    if national_charset_would_invent(source_type, target_type):
+        return True
+    if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
         return True
     if binary_width_would_narrow(source_type, target_type):
         return True
@@ -4774,11 +8197,37 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         return True
     if enum_domain_would_collapse(source_type, target_type):
         return True
-    if interval_family_would_collapse(source_type, target_type):
+    if interval_family_would_collapse(source_type, target_type, dest_db=dest_db):
+        return True
+    if interval_precision_would_narrow(source_type, target_type):
+        return True
+    if bitstring_pad_polarity_loss(source_type, target_type):
+        return True
+    if oracle_char_byte_polarity_loss(source_type, target_type):
+        return True
+    if oracle_long_numeric_invent(source_type, target_type):
         return True
     if geography_contract_would_collapse(source_type, target_type):
         return True
-    if specialty_carrier_would_collapse(source_type, target_type):
+    if specialty_carrier_would_collapse(source_type, target_type, dest_db=dest_db):
+        return True
+    if specialty_domain_would_invent(source_type, target_type):
+        return True
+    if specialty_polarity_mismatch(source_type, target_type):
+        return True
+    if case_fold_polarity_invent(source_type, target_type):
+        return True
+    if accent_polarity_invent(source_type, target_type):
+        return True
+    if width_fold_polarity_invent(source_type, target_type):
+        return True
+    if kana_fold_polarity_invent(source_type, target_type):
+        return True
+    if date_to_tz_aware_invent(source_type, target_type):
+        return True
+    if vector_dim_mismatch(source_type, target_type):
+        return True
+    if vector_encoding_would_collapse(source_type, target_type):
         return True
     if rowversion_would_collapse_to_temporal(source_type, target_type):
         return True
@@ -4786,13 +8235,29 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         return True
     if uuid_would_collapse(source_type, target_type):
         return True
+    if objectid_would_collapse(source_type, target_type):
+        return True
     if generated_always_overwrite_risk(target_type):
         return True
-    if temporal_precision_would_narrow(source_type, target_type):
+    if identity_polarity_would_collapse(source_type, target_type):
+        return True
+    if identity_domain_would_invent(source_type, target_type):
+        return True
+    if bfile_locator_would_collapse(source_type, target_type):
+        return True
+    if temporal_precision_would_narrow(source_type, target_type, dest_db=dest_db):
+        return True
+    if document_domain_would_collapse(source_type, target_type, dest_db=dest_db):
+        return True
+    if document_domain_would_invent(source_type, target_type):
         return True
     # ARRAY→ARRAY is in the safe allow-list below only when element types widen.
     if src == LOGICAL_ARRAY and tgt == LOGICAL_ARRAY and is_nested_shape_collapse(
-        source_type, target_type
+        source_type, target_type, dest_db=dest_db
+    ):
+        return True
+    if src == LOGICAL_MAP and tgt == LOGICAL_MAP and is_nested_shape_collapse(
+        source_type, target_type, dest_db=dest_db
     ):
         return True
 
@@ -4800,19 +8265,15 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         # text / structural containers are universal sinks
         (LOGICAL_STRING, LOGICAL_TEXT),
         (LOGICAL_TEXT, LOGICAL_STRING),
-        (LOGICAL_STRING, LOGICAL_JSON),
-        (LOGICAL_TEXT, LOGICAL_JSON),
-        (LOGICAL_JSON, LOGICAL_STRING),
-        (LOGICAL_JSON, LOGICAL_TEXT),
+        # Open string → JSON invents document domain — not allow-listed.
+        # JSON/VARIANT/SUPER → open string drops document domain — not allow-listed.
         (LOGICAL_JSON, LOGICAL_JSON),
-        (LOGICAL_ARRAY, LOGICAL_STRING),
-        (LOGICAL_ARRAY, LOGICAL_TEXT),
-        (LOGICAL_ARRAY, LOGICAL_JSON),
+        # ARRAY→JSON/text is document collapse (lossy) — not allow-listed.
+        # JSON→ARRAY invents array domain from a document — not allow-listed.
         (LOGICAL_ARRAY, LOGICAL_ARRAY),
-        (LOGICAL_JSON, LOGICAL_ARRAY),
         # numeric widening and text renderings
         (LOGICAL_INTEGER, LOGICAL_DECIMAL),
-        (LOGICAL_INTEGER, LOGICAL_FLOAT),
+        # integer→float is LOSSY for large ints (IEEE mantissa) — not allow-listed
         (LOGICAL_INTEGER, LOGICAL_STRING),
         (LOGICAL_INTEGER, LOGICAL_TEXT),
         (LOGICAL_INTEGER, LOGICAL_JSON),
@@ -4830,7 +8291,7 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         (LOGICAL_BOOLEAN, LOGICAL_INTEGER),
         (LOGICAL_BOOLEAN, LOGICAL_DECIMAL),
         (LOGICAL_BOOLEAN, LOGICAL_FLOAT),
-        # date/time renderings and date→datetime widening
+        # date→datetime NTZ widening only; DATE→TIMESTAMPTZ invents midnight TZ.
         (LOGICAL_DATE, LOGICAL_DATETIME),
         (LOGICAL_DATE, LOGICAL_STRING),
         (LOGICAL_DATE, LOGICAL_TEXT),
@@ -4841,40 +8302,37 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         (LOGICAL_TIME, LOGICAL_STRING),
         (LOGICAL_TIME, LOGICAL_TEXT),
         (LOGICAL_TIME, LOGICAL_JSON),
-        # uuid renderings
+        # uuid renderings (domain still collapses via uuid_would_collapse above)
         (LOGICAL_UUID, LOGICAL_STRING),
         (LOGICAL_UUID, LOGICAL_TEXT),
         (LOGICAL_UUID, LOGICAL_JSON),
-        # binary ↔ text reversible (base64)
-        (LOGICAL_BINARY, LOGICAL_STRING),
-        (LOGICAL_BINARY, LOGICAL_TEXT),
-        (LOGICAL_BINARY, LOGICAL_JSON),
-        (LOGICAL_STRING, LOGICAL_BINARY),
-        (LOGICAL_TEXT, LOGICAL_BINARY),
-        (LOGICAL_UUID, LOGICAL_BINARY),
-        (LOGICAL_JSON, LOGICAL_BINARY),
-        (LOGICAL_ARRAY, LOGICAL_BINARY),
-        # Specialty → lossless text / JSON (never invent a fake numeric cast)
-        (LOGICAL_INTERVAL, LOGICAL_STRING),
-        (LOGICAL_INTERVAL, LOGICAL_TEXT),
-        (LOGICAL_INTERVAL, LOGICAL_JSON),
-        (LOGICAL_GEOGRAPHY, LOGICAL_STRING),
-        (LOGICAL_GEOGRAPHY, LOGICAL_TEXT),
-        (LOGICAL_GEOGRAPHY, LOGICAL_JSON),
-        (LOGICAL_VECTOR, LOGICAL_STRING),
-        (LOGICAL_VECTOR, LOGICAL_TEXT),
-        (LOGICAL_VECTOR, LOGICAL_JSON),
-        (LOGICAL_VECTOR, LOGICAL_ARRAY),
-        # Fielded nested → text (JSON string form); opaque JSON path is lossy above.
-        (LOGICAL_STRUCT, LOGICAL_STRING),
-        (LOGICAL_STRUCT, LOGICAL_TEXT),
-        (LOGICAL_MAP, LOGICAL_STRING),
-        (LOGICAL_MAP, LOGICAL_TEXT),
+        # VECTOR→ARRAY drops embedding domain — not allow-listed.
+        # STRUCT/MAP → text/JSON is nested document collapse (handled above).
         (LOGICAL_STRUCT, LOGICAL_STRUCT),
         (LOGICAL_MAP, LOGICAL_MAP),
     }
 
     if (src, tgt) in safe:
+        # DATE→TIMESTAMPTZ / DATETIMEOFFSET invents an instant — not a free widen.
+        if date_to_tz_aware_invent(source_type, target_type):
+            return True
+        if case_fold_polarity_invent(source_type, target_type):
+            return True
+        if accent_polarity_invent(source_type, target_type):
+            return True
+        if width_fold_polarity_invent(source_type, target_type):
+            return True
+        if kana_fold_polarity_invent(source_type, target_type):
+            return True
+        if national_charset_would_collapse(source_type, target_type):
+            return True
+        if national_charset_would_invent(source_type, target_type):
+            return True
+        if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
+            return True
+        # INTEGER→VARCHAR(1) / JSON→CHAR(10) — bounded sink truncates.
+        if bounded_string_sink_would_truncate(source_type, target_type):
+            return True
         return False
     return True
 

@@ -1,7 +1,18 @@
 # CDC lease Redis HA runbook
 
-DataFlow CDC leases prevent two workers from consuming the same logical slot /
-binlog `server_id` / capture instance. Delivery remains **at-least-once upsert**.
+Datawrap CDC leases prevent two workers from consuming the same logical slot /
+binlog `server_id` / capture instance.
+
+## Delivery semantics (honest)
+
+| Claim | Status |
+|---|---|
+| Log / change-stream delivery | **at-least-once** (peek → apply → ack) |
+| Destination apply | Must **upsert on PK** with LSN/SCN/`_df_lsn` guards |
+| Exactly-once end-to-end | **Not claimed** |
+| Leases | Prevent concurrent consumers only — do not upgrade delivery |
+
+Canonical constants: `apps/api/services/cdc_effectively_once.py` (`DELIVERY_DEFAULT = "at-least-once"`).
 
 ## Backends
 
@@ -17,7 +28,7 @@ Fencing: each steal increments `generation`. Renew/release require matching hold
 ## Production checklist
 
 1. Point **all** API replicas at the same Redis URL (`DATAFLOW_CDC_LEASE_REDIS_URL`).
-2. Prefer Redis Sentinel / managed HA — DataFlow does not invent split-brain fallback to file when `backend=redis`.
+2. Prefer Redis Sentinel / managed HA — Datawrap does not invent split-brain fallback to file when `backend=redis`.
 3. TTL default `DATAFLOW_CDC_LEASE_TTL_SEC=120`. Keep heartbeat renew well under TTL.
 4. On conflict: Jobs / Theater → **Force-release lease** (fencing-aware) or cancel the holder job first.
 5. Ops APIs: `GET /api/v1/ops/cdc-leases?cursor_key=…`, `POST /api/v1/ops/cdc-leases/force-release`.

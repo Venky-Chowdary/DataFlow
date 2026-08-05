@@ -266,7 +266,9 @@ export function MappingCanvas({
                       <span className="df2-conf-val">{(link.confidence * 100).toFixed(0)}%</span>
                     </div>
                     <span className="df2-mapping-evidence">
-                      {confidenceTier(link.confidence) === "high" ? "auto-approved" : "review"}
+                      {confidenceTier(link.confidence) === "high"
+                        ? "high confidence · needs Approve"
+                        : "review"}
                     </span>
                   </>
                 )}

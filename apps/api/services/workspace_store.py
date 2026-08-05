@@ -12,7 +12,7 @@ from services.value_serializer import json_default
 STORE_PATH = data_dir() / "workspace.json"
 
 _DEFAULTS: dict[str, Any] = {
-    "org_name": "DataFlow",
+    "org_name": "Datawrap",
     "timezone": "UTC",
     "retention_days": 90,
 }

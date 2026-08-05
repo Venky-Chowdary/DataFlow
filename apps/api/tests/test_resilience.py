@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
@@ -22,10 +24,24 @@ from services.resilience import (
 class _MemoryCheckpointService:
     def __init__(self):
         self._jobs: dict[str, dict] = {}
+        self.failed_saves = 0
+
+    @property
+    def has_failed_saves(self) -> bool:
+        return self.failed_saves > 0
 
     def save(self, checkpoint: Checkpoint) -> bool:
         self._jobs[checkpoint.job_id] = {"checkpoint": checkpoint.to_dict()}
         return True
+
+    def require_save(self, checkpoint: Checkpoint) -> None:
+        if not self.save(checkpoint):
+            from services.checkpoint_service import (
+                CHECKPOINT_PERSISTENCE_FAILED,
+                CheckpointPersistenceError,
+            )
+
+            raise CheckpointPersistenceError(CHECKPOINT_PERSISTENCE_FAILED)
 
     def load(self, job_id: str) -> Checkpoint | None:
         data = self._jobs.get(job_id, {}).get("checkpoint")
@@ -145,3 +161,26 @@ def test_resilient_batcher_resumes_from_checkpoint():
     assert written == 4
     assert final.chunk_index == 2
     assert final.rows_processed == 4
+
+
+def test_resilient_batcher_hard_fails_on_checkpoint_save_failure():
+    from services.checkpoint_service import CheckpointPersistenceError
+
+    class _FailingCp(_MemoryCheckpointService):
+        def save(self, checkpoint: Checkpoint) -> bool:
+            self.failed_saves += 1
+            return False
+
+    batches = [[{"id": "1"}]]
+
+    def write_fn(ctx: BatchContext) -> BatchResult:
+        return BatchResult(rows_written=len(ctx.batch))
+
+    def read_next_fn(cp: Checkpoint):
+        if cp.chunk_index >= len(batches):
+            return None
+        return batches[cp.chunk_index], cp
+
+    batcher = _make_batcher("job-cp-fail", write_fn, read_next_fn, cp=_FailingCp())
+    with pytest.raises(CheckpointPersistenceError, match="refusing to continue"):
+        batcher.run()

@@ -1,4 +1,4 @@
-"""Cross-engine transfer proof for Data Pilot — Postgres, MySQL, MongoDB.
+"""Cross-engine transfer proof for Datawrap Pilot — Postgres, MySQL, MongoDB.
 
 Wave 92 proved the pilot can plan and run a transfer, but only Postgres onto
 Postgres, where every type maps to itself. That route cannot catch the failures

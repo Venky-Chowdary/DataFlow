@@ -1,4 +1,4 @@
-# DataTransfer.space — Competitive Analysis & Market Gap Assessment
+# Datawrap — Competitive Analysis & Market Gap Assessment
 
 ## Executive Summary
 
@@ -122,7 +122,7 @@ After deep analysis of existing data integration products, **YES — this produc
 ### Gap 5: Affordable Enterprise Features
 **Problem:** Enterprise features (SSO, audit logs, governance) only available at $100K+ pricing.
 
-**Our Solution:** Enterprise security from day one. SOC2, GDPR, HIPAA at SMB-friendly pricing.
+**Our Solution:** Enterprise-oriented security controls from first deploy. SOC 2 / GDPR / HIPAA certification require auditor artifacts and are not claimed complete.
 
 ### Gap 6: Self-Healing Pipelines
 **Problem:** Pipelines break on schema changes, require manual intervention.
@@ -141,7 +141,7 @@ After deep analysis of existing data integration products, **YES — this produc
 
 ### Key Differentiators
 
-| Feature | Airbyte | Fivetran | Informatica | **DataTransfer.space** |
+| Feature | Airbyte | Fivetran | Informatica | **Datawrap** |
 |---------|---------|----------|-------------|------------------------|
 | AI Semantic Mapping | ❌ | ❌ | ❌ | ✅ Proof-backed confidence |
 | Universal File Support | ❌ | ❌ | Partial | ✅ All formats |

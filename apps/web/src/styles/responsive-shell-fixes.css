@@ -2,13 +2,10 @@
    Responsive shell fixes — sidebar, pilot, transfer studio
    ═══════════════════════════════════════════════════════════ */
 
-:root {
-  --df-header-height: 60px;
-  --df-viewport-h: 100dvh;
-}
+/* Header / viewport tokens owned by tokens.css */
 
 /* ─── Sidebar: nav scrolls, foot stays pinned ─── */
-@media (min-width: 1025px) {
+@media (min-width: 1024px) {
   .df2-app .df2-sidebar {
     display: flex !important;
     flex-direction: column !important;
@@ -378,32 +375,41 @@
   overflow: visible;
 }
 
-/* ─── Transfer Studio: 12–14" laptops ─── */
+/* ─── Transfer Studio: 12–16" laptops ───
+   Keep the source/dest 50/50 split side-by-side on typical laptop widths.
+   Stacking at 1440px was the density killer on 13–14" screens — the preview
+   dropped below the form and forced page scroll. Only stack when the pane
+   truly cannot hold two columns (~1100px). */
 @media (max-width: 1440px) {
   .df2-page-transfer-studio {
-    --df-studio-rail-w: clamp(200px, 18vw, 240px);
-    --df-studio-panel-min-h: clamp(260px, 42vh, 480px);
+    --df-studio-rail-w: clamp(180px, 16vw, 220px);
+    --df-studio-panel-min-h: clamp(240px, 40vh, 440px);
+    --df-studio-gap: 10px;
   }
 
   .df2-transfer-studio-body {
     grid-template-columns: minmax(0, 1fr) var(--df-studio-rail-w);
   }
 
+  /* Tighter split — still two columns on 13–14" */
   .df2-transfer-step-split {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+    gap: 12px;
+  }
+
+  .df2-transfer-step-primary,
+  .df2-transfer-step-secondary {
+    gap: 10px;
   }
 
   .df2-transfer-step-secondary {
-    border-left: none;
-    padding-left: 0;
-    border-top: 1px solid #f1f5f9;
-    padding-top: 16px;
+    padding-left: 12px;
   }
 }
 
 @media (max-width: 1280px) {
   .df2-page-transfer-studio {
-    --df-studio-panel-min-h: clamp(240px, 38vh, 420px);
+    --df-studio-panel-min-h: clamp(220px, 36vh, 400px);
   }
 
   .df2-transfer-studio-body {
@@ -433,7 +439,21 @@
   }
 }
 
-@media (max-width: 1024px) {
+/* Narrow laptop / small window — only then stack primary over secondary */
+@media (max-width: 1100px) {
+  .df2-transfer-step-split {
+    grid-template-columns: 1fr;
+  }
+
+  .df2-transfer-step-secondary {
+    border-left: none;
+    padding-left: 0;
+    border-top: 1px solid #f1f5f9;
+    padding-top: 12px;
+  }
+}
+
+@media (max-width: 1023px) {
   .df2-pilot-body {
     flex-direction: column;
   }
@@ -483,4 +503,48 @@
   justify-content: center;
   min-height: min(480px, 60vh);
   padding: 32px 16px;
+}
+
+/* --- Global workspace density: no clipped action bars / overflow --- */
+@media (max-width: 1100px) {
+  .df2-page-actionbar,
+  .df2-wizard-footer,
+  .df2-theater-v3-footer,
+  .df2-jobs-detail-footer {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .df2-run-footer-actions,
+  .df2-map-footer-actions,
+  .df2-validate-footer-actions,
+  .df2-theater-v3-footer-actions {
+    width: 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 900px) {
+  .df2-jobs-v3-layout {
+    grid-template-columns: 1fr !important;
+  }
+
+  .df2-jobs-detail-footer .df2-btn,
+  .df2-jobs-detail-footer .df2-jobs-v3-actions > *,
+  .df2-jobs-detail-footer .df2-jobs-quarantine-actions > * {
+    flex: 1 1 auto;
+    min-width: min(100%, 140px);
+  }
+
+  .df2-vd-fix-actions {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+@media (max-height: 700px) {
+  .df2-theater-v3-log-section .df2-live-log.is-open {
+    max-height: min(36vh, 280px) !important;
+    min-height: 120px !important;
+  }
 }

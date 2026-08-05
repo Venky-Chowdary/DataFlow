@@ -415,11 +415,12 @@ def build_scenarios() -> list[Scenario]:
                 )
 
     # ── 16. Published mapping confidence floors by validation mode ───────────
+    # G9 reports the floor breach as warning-only; Gate-4 owns hard-blocking.
     floors = {"maximum": 0.95, "strict": 0.85, "balanced": 0.75}
     for dest in all_dests:
         fam = _family(dest)
         for mode in MODES:
-            for relation, expect in (("at_floor", "pass"), ("below_floor", "block")):
+            for relation, expect in (("at_floor", "pass"), ("below_floor", "pass")):
                 out.append(
                     Scenario(
                         id=f"confidence.{relation}.{dest}.{mode}",
@@ -428,7 +429,10 @@ def build_scenarios() -> list[Scenario]:
                         dest_family=fam,
                         mode=mode,
                         expect=expect,
-                        note=f"{mode} confidence floor is {floors[mode]:.2f}",
+                        note=(
+                            f"{mode} confidence floor is {floors[mode]:.2f}; "
+                            "G9 never hard-blocks (authority=g4_mapping_confidence)"
+                        ),
                         runner="confidence",
                     )
                 )
@@ -443,8 +447,10 @@ def build_scenarios() -> list[Scenario]:
                     dest=dest,
                     dest_family=_family(dest),
                     mode=mode,
-                    expect="pass" if mode == "balanced" else "block",
-                    note="A sole user_id is the natural identity candidate",
+                    # Duplicate identity always blocks — balanced softens encoding/
+                    # confidence, not silent duplicate-key writes (enterprise proof bar).
+                    expect="block",
+                    note="Sole user_id is the identity candidate; duplicates must block Execute",
                     runner="identity_duplicate",
                 )
             )
@@ -968,8 +974,17 @@ def _run_confidence(sc: Scenario) -> dict[str, Any]:
     )
     check = next(c for c in report["checks"] if c["check"] == "mapping_confidence")
     blocked = bool(check["blocks_transfer"])
+    # Module 3: G9 is advisory for confidence; below_floor must warn without blocking.
+    if ".below_floor." in sc.id:
+        ok = (
+            not blocked
+            and bool(check.get("warnings"))
+            and check.get("authority") == "g4_mapping_confidence"
+        )
+    else:
+        ok = (not blocked) if sc.expect == "pass" else blocked
     return {
-        "ok": (not blocked) if sc.expect == "pass" else blocked,
+        "ok": ok,
         "confidence": confidence,
         "floor": floor,
         "check": check,

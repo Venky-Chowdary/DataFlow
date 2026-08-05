@@ -28,15 +28,26 @@ _PUBLIC_PREFIXES = (
     "/auth/bootstrap",
     "/auth/sso/providers",
     "/api/v1/auth/sso/providers",
-    "/api/v1/mcp",
 )
 
 if docs_enabled():
     _PUBLIC_PREFIXES = _PUBLIC_PREFIXES + ("/docs", "/redoc", "/openapi.json")
 
 
+def _is_public_mcp_path(path: str) -> bool:
+    if path in ("/api/v1/mcp", "/api/v1/mcp/"):
+        return True
+    if path.startswith("/api/v1/mcp/manifest") or path.startswith("/api/v1/mcp/status"):
+        return True
+    if path.rstrip("/") == "/api/v1/mcp/tools":
+        return True
+    return False
+
+
 def _is_public_path(path: str) -> bool:
-    return any(path.startswith(p) for p in _PUBLIC_PREFIXES)
+    if any(path.startswith(p) for p in _PUBLIC_PREFIXES):
+        return True
+    return _is_public_mcp_path(path)
 
 
 def _client_ip(request: Request) -> str:

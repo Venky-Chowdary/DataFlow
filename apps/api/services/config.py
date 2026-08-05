@@ -1,4 +1,4 @@
-"""Runtime configuration for DataFlow API."""
+"""Runtime configuration for Datawrap API."""
 
 from __future__ import annotations
 

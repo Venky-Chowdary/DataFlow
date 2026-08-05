@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+from services.brand_env import getenv_brand
 import re
 import tempfile
 import threading
@@ -38,7 +39,7 @@ _SPILL_LOCK = threading.Lock()
 # Default TTL for cached spilled objects (seconds).  A TTL defends against
 # stale data without forcing a re-download on every call; callers that need a
 # guaranteed fresh copy (e.g. per-transfer runs) can pass force=True.
-_SPILL_TTL_SECONDS = int(os.getenv("DATAFLOW_SPILL_TTL", "300"))
+_SPILL_TTL_SECONDS = int(getenv_brand("SPILL_TTL", "300"))
 
 _STREAMABLE = {"csv", "tsv", "jsonl", "ndjson", "json", "excel", "parquet", "avro", "orc"}
 

@@ -51,3 +51,17 @@ def test_build_draft_from_fields():
     assert draft["port"] == 32253
     assert draft["username"] == "root"
     assert draft["name"] == "Railway MySQL"
+
+
+def test_build_draft_from_inline_prose():
+    msg = (
+        "create a postgres connector named Demo PG host localhost "
+        "user demo password secret database appdb"
+    )
+    draft = build_connector_draft(msg)
+    assert draft["type"] == "postgresql"
+    assert draft["host"] == "localhost"
+    assert draft["username"] == "demo"
+    assert draft["password"] == "secret"
+    assert draft["database"] == "appdb"
+    assert draft["name"] == "Demo PG"

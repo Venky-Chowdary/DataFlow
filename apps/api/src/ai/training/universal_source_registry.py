@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Universal Source Registry
+Datawrap — Universal Source Registry
 
 Expands training data from 620+ connector catalog entries, industry templates,
 and category-specific schema patterns — simulating millions of data source profiles.

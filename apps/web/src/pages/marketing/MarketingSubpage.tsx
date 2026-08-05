@@ -1,6 +1,10 @@
 import { useState, type CSSProperties, type FormEvent } from "react";
-import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../../components/DtIcon";
+import { ConnectorIcon } from "../../app/brand-icons";
+import {
+  AlgorithmCinemaBand,
+  ProofCinema,
+} from "../../components/landing/AlgorithmCinema";
 import { MarketingHeroBand } from "../../components/marketing/MarketingHeroBand";
 import { MarketingIllustration } from "../../components/marketing/MarketingIllustration";
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
@@ -24,19 +28,6 @@ interface PageActions {
   onGetStarted: () => void;
   onLogin: () => void;
   onNavigate: (route: PublicRoute) => void;
-}
-
-function FeatureList({ items }: { items: string[] }) {
-  return (
-    <ul className="lp-mkt-list">
-      {items.map((item) => (
-        <li key={item}>
-          <DtIcon name="check" size={16} />
-          <span>{item}</span>
-        </li>
-      ))}
-    </ul>
-  );
 }
 
 function StatsStrip({ items }: { items: { value: string; label: string }[] }) {
@@ -114,341 +105,144 @@ export function MarketingSubpage({ route, onGetStarted, onLogin, onNavigate }: {
 }
 
 function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStarted" | "onNavigate">) {
-  const tiers = [
+  const plans = [
     {
       name: "Starter",
       price: "Free",
-      period: "forever for pilots",
-      blurb: "Ship your first governed transfer without a sales call.",
-      items: [
-        "Transfer Studio wizard end-to-end",
-        "Community connectors",
-        "Local / developer workspace",
-        "Basic job history & checksum proof",
-        "Preflight gates + quarantine",
-      ],
+      period: "forever",
+      blurb: "Ship a governed transfer today — same engine, real preflight, no teaser demo.",
       cta: "Start free",
       action: onGetStarted,
-      featured: false,
       tone: "starter" as const,
+      features: ["Transfer Studio", "8 preflight gates", "Quarantine + checksum", "Community support"],
     },
     {
       name: "Team",
       price: "Custom",
-      period: "usage-aligned quote",
-      blurb: "Shared migrations, recurring sync, and collaborative ops.",
-      items: [
-        "Everything in Starter",
-        "Pipelines & schedules",
-        "Data Pilot assist",
-        "Shared connectors & workspaces",
-        "Quarantine, reconcile, email support",
-      ],
+      period: "usage-aligned",
+      blurb: "Pipelines, Pilot, and shared connectors — priced to cadence, never seats-first.",
       cta: "Talk to sales",
       action: () => onNavigate("contact"),
-      featured: true,
       tone: "team" as const,
+      featured: true,
+      features: ["Everything in Starter", "Scheduled pipelines", "Datawrap Pilot", "Email support"],
     },
     {
       name: "Enterprise",
       price: "Custom",
       period: "security & scale",
-      blurb: "Regulated orgs that need SSO, isolation, and agent-native control.",
-      items: [
-        "Everything in Team",
-        "SSO / SAML & RBAC audit trails",
-        "Tenant isolation & BYOK",
-        "MCP for agents under policy",
-        "Dedicated success & questionnaires",
-      ],
+      blurb: "SSO, BYOK, tenant isolation, MCP under policy, and a dedicated success engineer.",
       cta: "Contact sales",
       action: () => onNavigate("contact"),
-      featured: false,
       tone: "enterprise" as const,
+      features: ["Everything in Team", "SSO / SAML + BYOK", "MCP for agents", "Dedicated success"],
     },
   ];
 
   const compareRows = [
-    { feature: "Transfer Studio", starter: "Included", team: "Included", enterprise: "Included" },
-    { feature: "Preflight gates & quarantine", starter: "Included", team: "Included", enterprise: "Included" },
-    { feature: "Checksum proof", starter: "Included", team: "Included", enterprise: "Included" },
-    { feature: "Pipelines & schedules", starter: "—", team: "Included", enterprise: "Included" },
-    { feature: "Data Pilot", starter: "—", team: "Included", enterprise: "Included" },
-    { feature: "MCP for agents", starter: "—", team: "—", enterprise: "Included" },
-    { feature: "SSO / SAML", starter: "—", team: "—", enterprise: "Included" },
-    { feature: "BYOK & dedicated tenant", starter: "—", team: "—", enterprise: "Included" },
-    { feature: "Support", starter: "Community", team: "Email", enterprise: "Dedicated" },
+    { feature: "Transfer Studio", starter: true, team: true, enterprise: true },
+    { feature: "Preflight gates & quarantine", starter: true, team: true, enterprise: true },
+    { feature: "Checksum proof", starter: true, team: true, enterprise: true },
+    { feature: "Pipelines & schedules", starter: false, team: true, enterprise: true },
+    { feature: "Datawrap Pilot", starter: false, team: true, enterprise: true },
+    { feature: "MCP for agents", starter: false, team: false, enterprise: true },
+    { feature: "SSO / SAML", starter: false, team: false, enterprise: true },
+    { feature: "BYOK & dedicated tenant", starter: false, team: false, enterprise: true },
   ];
 
   return (
-    <div className="lp-mkt-page lp-mkt-page-rich lp-page-pricing">
-      <MarketingHeroBand
-        tone="ink"
-        motion="pricing"
-        kicker="Pricing"
-        title="Clear plans. No silent-failure tax."
-        lead="Start free in Transfer Studio. Move to Team when pipelines and collaboration matter. Enterprise when SSO, BYOK, and MCP are non-negotiable."
-        actions={
+    <div className="lp-mkt-page lp-page-pricing lp-pricing-v2">
+      <section className="lp-pricing-hero" aria-label="Pricing">
+        <div className="lp-pricing-hero-waves" aria-hidden>
+          <span className="lp-wave lp-wave--a" />
+          <span className="lp-wave lp-wave--b" />
+          <span className="lp-wave lp-wave--c" />
+          <span className="lp-wave-grid" />
+          <span className="lp-wave-glow lp-wave-glow--1" />
+          <span className="lp-wave-glow lp-wave-glow--2" />
+          <svg className="lp-wave-svg" viewBox="0 0 1440 320" preserveAspectRatio="none">
+            <path
+              className="lp-wave-path lp-wave-path--1"
+              d="M0,192 C240,128 360,256 600,192 C840,128 960,64 1200,128 C1320,160 1380,176 1440,160 L1440,320 L0,320 Z"
+            />
+            <path
+              className="lp-wave-path lp-wave-path--2"
+              d="M0,224 C180,160 420,288 720,224 C1020,160 1200,96 1440,176 L1440,320 L0,320 Z"
+            />
+            <path
+              className="lp-wave-path lp-wave-path--3"
+              d="M0,256 C300,200 540,300 780,240 C1020,180 1260,220 1440,200 L1440,320 L0,320 Z"
+            />
+          </svg>
+          <svg className="lp-wave-flow" viewBox="0 0 400 200" preserveAspectRatio="xMidYMid meet">
+            <path d="M20 100 C80 40, 140 160, 200 100 S320 40, 380 100" fill="none" stroke="rgba(94,234,212,0.55)" strokeWidth="2.5" strokeLinecap="round" />
+            <path d="M20 130 C90 70, 150 180, 210 120 S320 70, 380 120" fill="none" stroke="rgba(245,158,11,0.4)" strokeWidth="2" strokeLinecap="round" />
+            <path d="M20 70 C100 20, 160 120, 220 70 S310 20, 380 70" fill="none" stroke="rgba(45,212,191,0.35)" strokeWidth="1.75" strokeLinecap="round" />
+            <circle cx="200" cy="100" r="6" fill="#2dd4bf" />
+            <circle cx="200" cy="100" r="14" fill="none" stroke="rgba(45,212,191,0.35)" strokeWidth="2" />
+          </svg>
+        </div>
+        <div className="lp-pricing-hero-inner">
+          <p className="lp-pricing-hero-kicker">
+            <span className="lp-pricing-hero-dot" aria-hidden />
+            Pricing
+          </p>
+          <h1>
+            Plans that scale with
+            <span className="lp-pricing-hero-em"> proof</span>
+          </h1>
+          <p className="lp-pricing-hero-lead">
+            Semantic mapping, nine core gates, quarantine, and checksum reconcile — included from first
+            pilot to regulated pipelines. Pay for cadence and security, not seats.
+          </p>
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
-              Start free
+              Start for free
             </button>
-            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("contact")}>
-              Get a quote
-            </button>
-          </div>
-        }
-        visual={<MarketingIllustration kind="pricing" />}
-      />
-
-      <MarketingReveal className="lp-pricing-promise">
-        <div className="lp-pricing-promise-inner" role="list">
-          {[
-            { t: "Honest free tier", d: "Full Transfer Studio path — not a teaser demo." },
-            { t: "Quote when you scale", d: "Team & Enterprise priced to your connectors and cadence." },
-            { t: "Same engine everywhere", d: "UI, Pipelines, Pilot, and MCP share one governed path." },
-          ].map((item) => (
-            <div key={item.t} className="lp-pricing-promise-item" role="listitem">
-              <strong>{item.t}</strong>
-              <span>{item.d}</span>
-            </div>
-          ))}
-        </div>
-      </MarketingReveal>
-
-      <MarketingReveal>
-        <section className="lp-mkt-pricing lp-mkt-body lp-pricing-tiers" aria-label="Plans">
-          {tiers.map((tier, i) => (
-            <article
-              key={tier.name}
-              className={`lp-mkt-price-card lp-price-card--${tier.tone}${tier.featured ? " is-featured" : ""}`}
-              style={{ "--reveal-i": i } as CSSProperties}
+            <button
+              type="button"
+              className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink"
+              onClick={() => onNavigate("contact")}
             >
-              {tier.featured ? <span className="lp-price-badge">Most chosen</span> : null}
-              <header className="lp-price-card-head">
-                <h2>{tier.name}</h2>
-                <p className="lp-mkt-price">{tier.price}</p>
-                <p className="lp-price-period">{tier.period}</p>
-                <p className="lp-mkt-price-blurb">{tier.blurb}</p>
-              </header>
-              <FeatureList items={tier.items} />
-              <button type="button" className={`lp-btn ${tier.featured ? "lp-btn--brand" : "lp-btn--outline"}`} onClick={tier.action}>
-                {tier.cta}
-              </button>
-            </article>
-          ))}
-        </section>
-      </MarketingReveal>
-
-      <MarketingReveal>
-        <section className="lp-mkt-body lp-pricing-compare">
-          <div className="lp-pricing-compare-head">
-            <h2>Compare capabilities</h2>
-            <p>Everything that prevents silent loss ships in Starter. Collaboration and control unlock as you grow.</p>
-          </div>
-          <div className="lp-mkt-compare-wrap">
-            <table className="lp-mkt-compare-table">
-              <thead>
-                <tr>
-                  <th scope="col">Capability</th>
-                  <th scope="col">Starter</th>
-                  <th scope="col">Team</th>
-                  <th scope="col">Enterprise</th>
-                </tr>
-              </thead>
-              <tbody>
-                {compareRows.map((row) => (
-                  <tr key={row.feature}>
-                    <th scope="row">{row.feature}</th>
-                    <td data-empty={row.starter === "—" ? "true" : undefined}>{row.starter}</td>
-                    <td data-empty={row.team === "—" ? "true" : undefined}>{row.team}</td>
-                    <td data-empty={row.enterprise === "—" ? "true" : undefined}>{row.enterprise}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <MarketingSectionFooter>
-            <p className="lp-section-cta-text">Need a formal quote, MSA, or security questionnaire?</p>
-            <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("contact")}>
-              Contact sales
-            </button>
-          </MarketingSectionFooter>
-        </section>
-      </MarketingReveal>
-    </div>
-  );
-}
-
-function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStarted" | "onNavigate">) {
-  const layers = [
-    {
-      phase: "01",
-      t: "Identity",
-      d: "SAML/OIDC SSO, SCIM-ready roles, and workspace membership — every transfer inherits who is allowed to run it.",
-    },
-    {
-      phase: "02",
-      t: "Tenancy",
-      d: "Dedicated tenants, custom domains, and region pinning. No shared control-plane bleed between customers.",
-    },
-    {
-      phase: "03",
-      t: "Keys",
-      d: "BYOK wraps connector secrets with your KMS. Purpose keys stay scoped to the job that needs them.",
-    },
-    {
-      phase: "04",
-      t: "Audit",
-      d: "Immutable logs for jobs, mapping decisions, quarantine, and agent MCP calls — ready for SOC review.",
-    },
-  ];
-
-  return (
-    <div className="lp-mkt-page lp-mkt-page-rich lp-mkt-enterprise">
-      <MarketingHeroBand
-        tone="ink"
-        kicker="Enterprise"
-        title="Governed data movement for the enterprise"
-        lead="SSO, RBAC, audit trails, tenant controls, and the same Transfer Studio engine your team already trusts."
-        actions={
-          <div className="lp-hero-cta">
-            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
-              Contact sales
-            </button>
-            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={onGetStarted}>
-              Start a pilot
-            </button>
-          </div>
-        }
-        visual={<MarketingIllustration kind="enterprise" />}
-      />
-
-      <MarketingReveal>
-        <StatsStrip
-          items={[
-            { value: "SSO", label: "SAML & OIDC" },
-            { value: "BYOK", label: "Customer keys" },
-            { value: "100%", label: "Audit coverage" },
-            { value: "Multi", label: "Tenant isolation" },
-          ]}
-        />
-      </MarketingReveal>
-
-      <MarketingReveal>
-        <section className="lp-mkt-body lp-mkt-security-flow">
-          <p className="lp-mkt-kicker">Control plane</p>
-          <h2>Enterprise controls on every run</h2>
-          <p className="lp-mkt-lead">
-            A continuous path — identity, tenancy, keys, and audit — not a grid of feature cards.
-          </p>
-          <ol className="lp-mkt-security-timeline">
-            {layers.map((layer) => (
-              <li key={layer.phase} className="lp-mkt-security-step">
-                <span className="lp-mkt-security-phase">{layer.phase}</span>
-                <div>
-                  <h3>{layer.t}</h3>
-                  <p>{layer.d}</p>
-                </div>
-              </li>
-            ))}
-          </ol>
-          <ComplianceBadges items={["SOC 2 Type II posture", "GDPR-ready", "HIPAA paths", "Regional residency"]} />
-          <MarketingSectionFooter>
-            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("security")}>
-              Read the security overview
-            </button>
-            <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("contact")}>
               Talk to sales
             </button>
-          </MarketingSectionFooter>
-        </section>
-      </MarketingReveal>
-    </div>
-  );
-}
-
-function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
-  const stories = [
-    {
-      industry: "Retail",
-      metric: "Weekend cutover",
-      q: "We replaced a tangle of brittle scripts with DataFlow in a weekend. Preflight caught schema drift that would have cost hours of rework.",
-      a: "Alex R.",
-      r: "Staff Data Engineer, Fortune 500 retailer",
-    },
-    {
-      industry: "Healthcare",
-      metric: "Semantic maps",
-      q: "Semantic mapping is genuinely better than string matching. AMT and payment_amount line up even when names change.",
-      a: "Priya K.",
-      r: "Data Architect, health systems",
-    },
-    {
-      industry: "SaaS",
-      metric: "Agent-native",
-      q: "MCP let our agent trigger governed transfers from Cursor. Same gates as the UI — that is the future of data ops.",
-      a: "Jordan M.",
-      r: "Head of Platform, SaaS scale-up",
-    },
-  ];
-
-  const sectors = [
-    { name: "Retail & commerce", detail: "Catalog, orders, inventory — checksummed every load" },
-    { name: "Healthcare", detail: "HIPAA-ready posture with quarantine you can audit" },
-    { name: "Financial ops", detail: "RBAC, audit trails, and zero silent coercion" },
-    { name: "SaaS platforms", detail: "MCP + Studio share one policy surface" },
-    { name: "Data mesh teams", detail: "Domain ownership without brittle glue scripts" },
-  ];
-
-  return (
-    <div className="lp-mkt-page lp-mkt-page-rich lp-page-customers">
-      <MarketingHeroBand
-        tone="ink"
-        motion="customers"
-        kicker="Customers"
-        title="Proof over promises"
-        lead="Teams choose DataFlow when accuracy beats raw throughput — retail, healthcare, SaaS, and finance loads that cannot silently fail."
-        actions={
-          <div className="lp-hero-cta">
-            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
-              Become a design partner
-            </button>
-            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("solution-migrations")}>
-              Migration stories
-            </button>
           </div>
-        }
-        visual={<MarketingIllustration kind="customers" />}
-      />
-
-      <MarketingReveal>
-        <div className="lp-cust-metrics" role="list">
-          {[
-            { value: "12k+", label: "Migrations governed" },
-            { value: "99.2%", label: "Preflight pass rate" },
-            { value: "0", label: "Silent drops by design" },
-            { value: "48h", label: "Pilot kickoff" },
-          ].map((item, i) => (
-            <div key={item.label} className="lp-cust-metric" role="listitem" style={{ "--reveal-i": i } as CSSProperties}>
-              <strong>{item.value}</strong>
-              <span>{item.label}</span>
-            </div>
-          ))}
         </div>
-      </MarketingReveal>
+      </section>
 
       <MarketingReveal>
-        <section className="lp-mkt-body lp-cust-sectors">
-          <div className="lp-cust-sectors-head">
-            <h2>Industries that refuse silent failure</h2>
-            <p>Real operating contexts — not anonymous logo wallpaper.</p>
-          </div>
-          <div className="lp-cust-sector-grid">
-            {sectors.map((s, i) => (
-              <article key={s.name} className="lp-cust-sector" style={{ "--reveal-i": i } as CSSProperties}>
-                <strong>{s.name}</strong>
-                <span>{s.detail}</span>
+        <section className="lp-pricing-v2-plans" aria-label="Plans">
+          <div className="lp-pricing-v2-grid">
+            {plans.map((plan, i) => (
+              <article
+                key={plan.name}
+                className={`lp-pricing-card lp-pricing-card--${plan.tone}${plan.featured ? " is-featured" : ""}`}
+                style={{ "--reveal-i": i } as CSSProperties}
+              >
+                {plan.featured ? <span className="lp-pricing-card-flag">Recommended</span> : null}
+                <header className="lp-pricing-card-head">
+                  <h2>{plan.name}</h2>
+                  <p className="lp-pricing-card-period">{plan.period}</p>
+                </header>
+                <p className="lp-pricing-card-price">
+                  <strong>{plan.price}</strong>
+                </p>
+                <p className="lp-pricing-card-blurb">{plan.blurb}</p>
+                <ul className="lp-pricing-card-features">
+                  {plan.features.map((f) => (
+                    <li key={f}>
+                      <DtIcon name="check" size={14} />
+                      {f}
+                    </li>
+                  ))}
+                </ul>
+                <button
+                  type="button"
+                  className={plan.featured ? "lp-btn lp-btn--brand lp-btn--block" : "lp-btn lp-btn--outline lp-btn--block"}
+                  onClick={plan.action}
+                >
+                  {plan.cta}
+                </button>
               </article>
             ))}
           </div>
@@ -456,161 +250,812 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
       </MarketingReveal>
 
       <MarketingReveal>
-        <section className="lp-mkt-body lp-cust-stories">
-          <div className="lp-cust-stories-head">
-            <h2>From the teams running production loads</h2>
+        <section className="lp-pricing-v2-compare" aria-label="Plan comparison">
+          <div className="lp-pricing-v2-compare-head">
+            <p className="lp-mkt-kicker">Compare</p>
+            <h2>One engine. Three unlock levels.</h2>
+            <p>
+              Silent-data-loss prevention ships in Starter. Collaboration unlocks in Team.
+              Identity, tenancy, and agents unlock in Enterprise.
+            </p>
           </div>
-          <div className="lp-cust-story-grid">
-            {stories.map((item, i) => (
-              <blockquote key={item.a} className="lp-cust-story" style={{ "--reveal-i": i } as CSSProperties}>
-                <div className="lp-cust-story-meta">
-                  <span className="lp-cust-industry">{item.industry}</span>
-                  <span className="lp-cust-metric-chip">{item.metric}</span>
-                </div>
-                <p>&ldquo;{item.q}&rdquo;</p>
-                <footer>
-                  <strong>{item.a}</strong>
-                  <span>{item.r}</span>
-                </footer>
-              </blockquote>
-            ))}
+          <div className="lp-pricing-v2-table-wrap">
+            <table className="lp-pricing-v2-table">
+              <thead>
+                <tr>
+                  <th scope="col">Capability</th>
+                  <th scope="col">Starter</th>
+                  <th scope="col" className="is-hot">Team</th>
+                  <th scope="col">Enterprise</th>
+                </tr>
+              </thead>
+              <tbody>
+                {compareRows.map((row) => (
+                  <tr key={row.feature}>
+                    <th scope="row">{row.feature}</th>
+                    <td>{row.starter ? <span className="lp-pricing-yes" aria-label="Included">✓</span> : <span className="lp-pricing-no">—</span>}</td>
+                    <td className="is-hot">{row.team ? <span className="lp-pricing-yes" aria-label="Included">✓</span> : <span className="lp-pricing-no">—</span>}</td>
+                    <td>{row.enterprise ? <span className="lp-pricing-yes" aria-label="Included">✓</span> : <span className="lp-pricing-no">—</span>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-          <MarketingSectionFooter>
-            <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("contact")}>
-              Become a design partner
-            </button>
-            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("pricing")}>
-              See pricing
-            </button>
-          </MarketingSectionFooter>
+        </section>
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-pricing-v2-principles" aria-label="Pricing principles">
+          <div className="lp-pricing-principle">
+            <strong>Honest free tier</strong>
+            <span>Full Transfer Studio path — no teaser demo.</span>
+          </div>
+          <div className="lp-pricing-principle">
+            <strong>Quote when you scale</strong>
+            <span>Priced to connectors and cadence, never seats-first.</span>
+          </div>
+          <div className="lp-pricing-principle">
+            <strong>One engine everywhere</strong>
+            <span>UI, Pipelines, Pilot, and MCP share the same gates.</span>
+          </div>
+        </section>
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-pricing-v2-cta">
+          <div className="lp-pricing-v2-cta-inner">
+            <div>
+              <h3>Procurement, MSA, or a security pack?</h3>
+              <p>
+                Enterprise deals ship with negotiated MSA, DPA, SOC&nbsp;2 posture pack, and a
+                pre-populated security questionnaire — reviewed by a solutions engineer.
+              </p>
+            </div>
+            <div className="lp-pricing-v2-cta-actions">
+              <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
+                Contact sales
+              </button>
+              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("security")}>
+                Security overview
+              </button>
+            </div>
+          </div>
         </section>
       </MarketingReveal>
     </div>
   );
 }
 
+function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStarted" | "onNavigate">) {
+  const capabilities = [
+    {
+      id: "identity",
+      kicker: "01 · Identity",
+      title: "SSO that actually gates runs",
+      body: "SAML/OIDC and SCIM-ready roles. Every Transfer Studio job, Pilot session, and MCP call inherits who is allowed to map, approve, and write.",
+    },
+    {
+      id: "tenancy",
+      kicker: "02 · Tenancy",
+      title: "Isolation without a fork",
+      body: "Dedicated tenants, custom domains, and region pinning. Same governed engine — no shared control-plane bleed between customers.",
+    },
+    {
+      id: "keys",
+      kicker: "03 · Keys",
+      title: "BYOK on connector secrets",
+      body: "Customer-managed keys wrap credentials. Purpose keys stay scoped to the job that needs them — never a global vault shortcut.",
+    },
+    {
+      id: "audit",
+      kicker: "04 · Audit",
+      title: "Proof ready for SOC review",
+      body: "Immutable logs for jobs, mapping decisions, quarantine samples, and agent MCP calls — checksum reconcile included.",
+    },
+  ];
+
+  return (
+    <div className="lp-mkt-page lp-mkt-enterprise-v2">
+      <section className="lp-ent-hero" aria-label="Enterprise">
+        <div className="lp-ent-hero-waves" aria-hidden>
+          <span className="lp-wave-grid" />
+          <span className="lp-wave-glow lp-wave-glow--1" />
+          <span className="lp-wave-glow lp-wave-glow--2" />
+          <svg className="lp-wave-svg" viewBox="0 0 1440 320" preserveAspectRatio="none">
+            <path
+              className="lp-wave-path lp-wave-path--1"
+              d="M0,192 C240,128 360,256 600,192 C840,128 960,64 1200,128 C1320,160 1380,176 1440,160 L1440,320 L0,320 Z"
+            />
+            <path
+              className="lp-wave-path lp-wave-path--2"
+              d="M0,224 C180,160 420,288 720,224 C1020,160 1200,96 1440,176 L1440,320 L0,320 Z"
+            />
+          </svg>
+        </div>
+        <div className="lp-ent-hero-inner">
+          <div className="lp-ent-hero-copy">
+            <p className="lp-pricing-hero-kicker">
+              <span className="lp-pricing-hero-dot" aria-hidden />
+              Enterprise
+            </p>
+            <h1>
+              Controls that travel with
+              <span className="lp-pricing-hero-em"> every load</span>
+            </h1>
+            <p className="lp-ent-hero-lead">
+              SSO, RBAC, BYOK, and tenant isolation on the same Transfer Studio engine your operators
+              already trust. No parallel “enterprise-only” path that skips gates.
+            </p>
+            <div className="lp-hero-cta">
+              <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
+                Contact sales
+              </button>
+              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={onGetStarted}>
+                Start a pilot
+              </button>
+            </div>
+            <ul className="lp-ent-hero-proof">
+              <li>SSO enforced</li>
+              <li>8 / 8 preflight</li>
+              <li>Checksum MATCH</li>
+            </ul>
+          </div>
+          <aside className="lp-ent-hero-stage" aria-label="Enterprise control plane preview">
+            <div className="lp-ent-stage-chrome">
+              <span className="lp-ent-stage-dots" aria-hidden>
+                <i /><i /><i />
+              </span>
+              <em>datawrap.company.com · SSO enforced</em>
+            </div>
+            <div className="lp-ent-stage-body">
+              <div className="lp-ent-stage-rail">
+                <span className="is-active">Workspaces</span>
+                <span>Identity</span>
+                <span>Keys</span>
+                <span>Audit</span>
+              </div>
+              <div className="lp-ent-stage-main">
+                <header className="lp-ent-stage-head">
+                  <strong>Tenant posture</strong>
+                  <span className="lp-ent-stage-pill">Live</span>
+                </header>
+                <div className="lp-ent-stage-cards">
+                  <article>
+                    <span>Workspace A</span>
+                    <strong>Analytics ops</strong>
+                    <p>Preflight 8/8 · checksum match</p>
+                    <div className="lp-ent-stage-bar"><i style={{ width: "92%" }} /></div>
+                  </article>
+                  <article>
+                    <span>Workspace B</span>
+                    <strong>Regulated loads</strong>
+                    <p>Region pinned · tenant isolated</p>
+                    <div className="lp-ent-stage-bar"><i style={{ width: "78%" }} /></div>
+                  </article>
+                </div>
+                <div className="lp-ent-stage-rows">
+                  <div><span>Identity</span><em>SAML · Okta</em></div>
+                  <div><span>Secrets</span><em>BYOK · AWS KMS</em></div>
+                  <div><span>Agents</span><em>MCP under RBAC</em></div>
+                  <div className="is-ok"><span>Reconcile</span><em>MATCH</em></div>
+                </div>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <MarketingReveal>
+        <section className="lp-ent-metrics" aria-label="Enterprise capabilities at a glance">
+          {[
+            { value: "SSO", label: "SAML & OIDC" },
+            { value: "BYOK", label: "Customer keys" },
+            { value: "Full", label: "Job audit trail" },
+            { value: "Multi", label: "Tenant isolation" },
+          ].map((item) => (
+            <div key={item.label} className="lp-ent-metric">
+              <strong>{item.value}</strong>
+              <span>{item.label}</span>
+            </div>
+          ))}
+        </section>
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-ent-capabilities">
+          <div className="lp-ent-section-head">
+            <p className="lp-mkt-kicker">Control plane</p>
+            <h2>Enterprise controls on every run</h2>
+            <p>
+              Identity, tenancy, keys, and audit wrap the same map → preflight → prove path — not a
+              wall of feature cards bolted on after the fact.
+            </p>
+          </div>
+          <div className="lp-ent-capability-grid">
+            {capabilities.map((cap) => (
+              <article key={cap.id} className="lp-ent-capability">
+                <span>{cap.kicker}</span>
+                <h3>{cap.title}</h3>
+                <p>{cap.body}</p>
+              </article>
+            ))}
+          </div>
+        </section>
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-ent-engine">
+          <div className="lp-ent-engine-split">
+            <div>
+              <p className="lp-mkt-kicker">How it lands</p>
+              <h2>One engine. Enterprise controls on top.</h2>
+              <p>
+                Procurement does not get a different transfer algorithm. Your teams map, preflight,
+                quarantine, and reconcile the same way — with identity, tenancy, and keys wrapping
+                every run.
+              </p>
+              <ul className="lp-ent-checklist">
+                <li>Workspace RBAC for who can map, approve drift, and run production loads</li>
+                <li>Region pinning for jobs and artifacts when policy requires residency</li>
+                <li>MCP and Datawrap Pilot inherit the same gates — agents never get a silent shortcut</li>
+                <li>Security questionnaire + SOC 2 posture pack for procurement kickoff</li>
+              </ul>
+            </div>
+            <aside className="lp-ent-panel" aria-label="Enterprise control snapshot">
+              <h3>Control snapshot</h3>
+              <div className="lp-ent-panel-row"><span>Identity</span><em>SSO enforced</em></div>
+              <div className="lp-ent-panel-row"><span>Secrets</span><em>BYOK wrapped</em></div>
+              <div className="lp-ent-panel-row"><span>Preflight</span><em>8 / 8 required</em></div>
+              <div className="lp-ent-panel-row"><span>Quarantine</span><em>surfaced, never dropped</em></div>
+              <div className="lp-ent-panel-row"><span>Reconcile</span><em>checksum + counts</em></div>
+              <div className="lp-ent-panel-row"><span>Audit</span><em>jobs · maps · agents</em></div>
+            </aside>
+          </div>
+        </section>
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-ent-cta-band">
+          <div className="lp-ent-cta-inner">
+            <div>
+              <p className="lp-mkt-kicker lp-mkt-kicker--on-ink">Ready when procurement is</p>
+              <h2>Ship governed transfers under enterprise policy</h2>
+              <p>
+                Start a pilot on the same engine. Add SSO, BYOK, and audit when security is ready —
+                without re-platforming operators.
+              </p>
+              <ComplianceBadges items={["SOC 2 Type II posture", "GDPR-ready", "HIPAA paths", "Regional residency"]} />
+            </div>
+            <div className="lp-ent-cta-actions">
+              <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
+                Talk to sales
+              </button>
+              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("security")}>
+                Security overview
+              </button>
+            </div>
+          </div>
+        </section>
+      </MarketingReveal>
+    </div>
+  );
+}
+
+function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
+  const featured = {
+    industry: "Fortune 500 retail",
+    title: "Weekend cutover with checksum MATCH",
+    quote:
+      "We replaced a tangle of brittle scripts with Datawrap in a weekend. Preflight caught schema drift that would have cost hours of rework — then checksum MATCH signed the cutover.",
+    author: "Alex R.",
+    role: "Staff Data Engineer",
+    results: [
+      { k: "Cutover", v: "48 hours" },
+      { k: "Silent drops", v: "Zero" },
+      { k: "Gates cleared", v: "8 / 8" },
+    ],
+  };
+
+  const stories = [
+    {
+      industry: "Healthcare",
+      title: "Semantic maps that survive schema drift",
+      quote:
+        "Semantic mapping is genuinely better than string matching. AMT and payment_amount line up even when names change — and quarantine keeps coerce failures visible.",
+      author: "Priya K.",
+      role: "Data Architect, health systems",
+    },
+    {
+      industry: "SaaS platform",
+      title: "Agents under the same RBAC as Studio",
+      quote:
+        "MCP let our agent trigger governed transfers from Cursor. Same gates as the UI — that is the future of data ops for our platform team.",
+      author: "Jordan M.",
+      role: "Head of Platform",
+    },
+    {
+      industry: "Financial ops",
+      title: "Audit packs finance can archive",
+      quote:
+        "Reconcile artifacts and RBAC trails mean we can show auditors exactly what moved, what quarantined, and why — without reconstructing from logs.",
+      author: "Sam T.",
+      role: "Director of Data Governance",
+    },
+  ];
+
+  const sectors = [
+    "Retail & commerce",
+    "Healthcare",
+    "Financial services",
+    "SaaS platforms",
+    "Data mesh teams",
+  ];
+
+  return (
+    <div className="lp-mkt-page lp-cust-v3">
+      <section className="lp-cust3-hero" aria-label="Customers">
+        <div className="lp-shell lp-cust3-hero-inner">
+          <p className="lp-mkt-kicker">Customers</p>
+          <h1>
+            Teams that refuse
+            <em> silent failure</em>
+          </h1>
+          <p className="lp-cust3-lead">
+            Datawrap is chosen when accuracy beats raw throughput — retail cutovers, healthcare
+            loads, SaaS agents, and finance archives that must prove every row.
+          </p>
+          <div className="lp-hero-cta">
+            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
+              Become a design partner
+            </button>
+            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("enterprise")}>
+              Enterprise overview
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section className="lp-cust3-metrics" aria-label="Operating outcomes">
+        <div className="lp-shell lp-cust3-metrics-row">
+          <div><strong>12k+</strong><span>Migrations governed</span></div>
+          <div><strong>0</strong><span>Silent drops by design</span></div>
+          <div><strong>48h</strong><span>Typical pilot kickoff</span></div>
+          <div><strong>8 / 8</strong><span>Gates on every load</span></div>
+        </div>
+      </section>
+
+      <MarketingReveal>
+        <section className="lp-cust3-featured" aria-label="Featured story">
+          <div className="lp-shell lp-cust3-featured-grid">
+            <div className="lp-cust3-featured-copy">
+              <p className="lp-mkt-kicker">{featured.industry}</p>
+              <h2>{featured.title}</h2>
+              <blockquote>
+                <p>&ldquo;{featured.quote}&rdquo;</p>
+                <footer>
+                  <strong>{featured.author}</strong>
+                  <span>{featured.role}</span>
+                </footer>
+              </blockquote>
+            </div>
+            <aside className="lp-cust3-featured-aside" aria-label="Results">
+              <p className="lp-mkt-kicker">Results</p>
+              <ul>
+                {featured.results.map((r) => (
+                  <li key={r.k}>
+                    <strong>{r.v}</strong>
+                    <span>{r.k}</span>
+                  </li>
+                ))}
+              </ul>
+              <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("solution-migrations")}>
+                See migration path →
+              </button>
+            </aside>
+          </div>
+        </section>
+      </MarketingReveal>
+
+      <section className="lp-cust3-sectors" aria-label="Industries">
+        <div className="lp-shell">
+          <p className="lp-mkt-kicker">Industries</p>
+          <div className="lp-cust3-sector-rail">
+            {sectors.map((name) => (
+              <span key={name}>{name}</span>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <MarketingReveal>
+        <section className="lp-cust3-stories" aria-label="Customer stories">
+          <div className="lp-shell">
+            <div className="lp-cust3-section-head">
+              <p className="lp-mkt-kicker">Stories</p>
+              <h2>From teams running production loads</h2>
+            </div>
+            <div className="lp-cust3-story-stack">
+              {stories.map((s, i) => (
+                <article key={s.author} className={`lp-cust3-story ${i % 2 === 1 ? "is-flip" : ""}`}>
+                  <div className="lp-cust3-story-meta">
+                    <span>{s.industry}</span>
+                    <h3>{s.title}</h3>
+                  </div>
+                  <blockquote>
+                    <p>&ldquo;{s.quote}&rdquo;</p>
+                    <footer>
+                      <strong>{s.author}</strong>
+                      <span>{s.role}</span>
+                    </footer>
+                  </blockquote>
+                </article>
+              ))}
+            </div>
+          </div>
+        </section>
+      </MarketingReveal>
+
+      <section className="lp-cust3-cta">
+        <div className="lp-shell lp-cust3-cta-inner">
+          <div>
+            <h2>Join teams shipping with proof</h2>
+            <p>Design partners get a scoped pilot on your sources — same nine core gates as production.</p>
+          </div>
+          <div className="lp-hero-cta">
+            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
+              Talk to sales
+            </button>
+            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("pricing")}>
+              See pricing
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+const CONTACT_SOURCES = ["PostgreSQL", "MySQL", "MongoDB", "Salesforce", "S3", "Kafka", "Other"] as const;
+const CONTACT_DESTINATIONS = ["Snowflake", "BigQuery", "Redshift", "PostgreSQL", "Other"] as const;
+
+const CONTACT_STEPS = [
+  { id: 1 as const, label: "Stack", hint: "Sources & scale" },
+  { id: 2 as const, label: "You", hint: "How we reach you" },
+];
+
+function ContactPickGrid({
+  label,
+  options,
+  value,
+  onChange,
+}: {
+  label: string;
+  options: readonly string[];
+  value: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const toggle = (opt: string) => {
+    onChange(value.includes(opt) ? value.filter((v) => v !== opt) : [...value, opt]);
+  };
+  return (
+    <fieldset className="lp-ct6-pick">
+      <legend>{label}</legend>
+      <div className="lp-ct6-pick-grid">
+        {options.map((opt) => (
+          <button
+            key={opt}
+            type="button"
+            className={`lp-ct6-pick-item${value.includes(opt) ? " is-on" : ""}`}
+            onClick={() => toggle(opt)}
+            aria-pressed={value.includes(opt)}
+          >
+            {opt}
+          </button>
+        ))}
+      </div>
+    </fieldset>
+  );
+}
+
 function ContactPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
+  const [step, setStep] = useState<1 | 2>(1);
   const [sent, setSent] = useState(false);
+  const [sources, setSources] = useState<string[]>([]);
+  const [destinations, setDestinations] = useState<string[]>([]);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [company, setCompany] = useState("");
   const [role, setRole] = useState("");
+  const [volume, setVolume] = useState("");
+  const [region, setRegion] = useState("");
+  const [timeframe, setTimeframe] = useState("");
   const [message, setMessage] = useState("");
+  const [honeypot, setHoneypot] = useState("");
+
+  const canAdvance =
+    step === 1
+      ? sources.length > 0 && destinations.length > 0 && Boolean(volume && region && timeframe)
+      : Boolean(name.trim() && email.trim() && company.trim());
+
+  const goNext = () => {
+    if (!canAdvance || step !== 1) return;
+    setStep(2);
+  };
+
+  const goBack = () => {
+    if (step === 2) setStep(1);
+  };
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
+    if (honeypot.trim()) {
+      setSent(true);
+      return;
+    }
+    if (step !== 2 || !canAdvance) return;
+    // eslint-disable-next-line no-console
+    console.info("[marketing/contact] pilot request", {
+      sources,
+      destinations,
+      volume,
+      region,
+      timeframe,
+      name: name.trim(),
+      email: email.trim(),
+      company: company.trim(),
+      role: role.trim(),
+      message: message.trim().slice(0, 1200),
+      submittedAt: new Date().toISOString(),
+    });
     setSent(true);
   };
 
   return (
-    <div className="lp-mkt-page lp-mkt-page-rich lp-page-contact">
-      <MarketingHeroBand
-        tone="ink"
-        motion="contact"
-        kicker="Contact sales"
-        title="Build a pilot that fits your stack"
-        lead="Tell us sources, destinations, and compliance constraints. You get a scoped pilot plan — not a generic demo reel."
-        visual={<MarketingIllustration kind="contact" />}
-      />
-
-      <section className="lp-mkt-body lp-contact-stage">
-        <div className="lp-contact-stage-grid">
-          <aside className="lp-contact-rail" aria-label="What happens next">
-            <h2>What happens next</h2>
-            <ol className="lp-contact-steps">
-              {[
-                { t: "Day 0", d: "You submit stack + constraints" },
-                { t: "Day 1", d: "Solutions engineer assigned" },
-                { t: "48h", d: "Pilot scoped to your sources" },
-                { t: "Week 1", d: "First governed load with proof" },
-              ].map((step) => (
-                <li key={step.t}>
-                  <strong>{step.t}</strong>
-                  <span>{step.d}</span>
-                </li>
-              ))}
-            </ol>
-            <div className="lp-contact-trust">
-              <span>
-                <DtIcon name="shield" size={16} /> SOC 2 posture
-              </span>
-              <span>
-                <DtIcon name="lock" size={16} /> Security questionnaire ready
-              </span>
-              <span>
-                <DtIcon name="check" size={16} /> Start free anytime
-              </span>
+    <div className="lp-mkt-page lp-contact-v6">
+      <div className="lp-ct6">
+        <header className="lp-ct6-top">
+          <div className="lp-ct6-top-inner">
+            <div className="lp-ct6-top-copy">
+              <p className="lp-ct6-kicker">Contact sales</p>
+              <h1>Request a pilot</h1>
+              <p className="lp-ct6-lead">
+                Scoped on your stack — Map → Preflight → Prove. A solutions engineer replies within one
+                business day.
+              </p>
             </div>
-          </aside>
-
-          <div className="lp-contact-panel">
-            {sent ? (
-              <div className="lp-contact-success" role="status">
-                <div className="lp-contact-success-mark" aria-hidden>
-                  <DtIcon name="check" size={28} />
-                </div>
-                <h2>Thanks — we received your note</h2>
-                <p>
-                  This workspace stores the request locally for demo. In production it routes to sales.
-                  Meanwhile explore docs or start free in Transfer Studio.
-                </p>
-                <div className="lp-hero-cta">
-                  <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("help")}>
-                    Open docs
-                  </button>
-                  <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("pricing")}>
-                    View pricing
-                  </button>
-                </div>
+            <aside className="lp-ct6-top-aside" aria-label="What you get">
+              <div>
+                <strong>&lt;1 day</strong>
+                <span>Engineer reply</span>
               </div>
-            ) : (
-              <form className="lp-mkt-form lp-contact-form" onSubmit={submit}>
-                <div className="lp-contact-form-head">
-                  <h2>Request a pilot plan</h2>
-                  <p>We respond within one business day.</p>
-                </div>
-                <div className="lp-contact-fields">
-                  <label>
-                    Name
-                    <input className="lp-mkt-input" value={name} onChange={(e) => setName(e.target.value)} required autoComplete="name" />
-                  </label>
-                  <label>
-                    Work email
-                    <input className="lp-mkt-input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="email" />
-                  </label>
-                  <label>
-                    Company
-                    <input className="lp-mkt-input" value={company} onChange={(e) => setCompany(e.target.value)} required autoComplete="organization" />
-                  </label>
-                  <label>
-                    Role
-                    <input className="lp-mkt-input" value={role} onChange={(e) => setRole(e.target.value)} placeholder="e.g. Data platform lead" />
-                  </label>
-                  <label className="lp-contact-span-2">
-                    What are you moving?
-                    <textarea
-                      className="lp-mkt-input lp-mkt-textarea"
-                      value={message}
-                      onChange={(e) => setMessage(e.target.value)}
-                      rows={5}
-                      required
-                      placeholder="Sources, destinations, volume, compliance needs…"
-                    />
-                  </label>
-                </div>
-                <div className="lp-contact-form-actions">
-                  <button type="submit" className="lp-btn lp-btn--brand lp-btn--lg">
-                    Send to sales
-                  </button>
-                  <button type="button" className="lp-btn lp-btn--ghost" onClick={() => onNavigate("pricing")}>
-                    Compare plans
-                  </button>
+              <div>
+                <strong>9 gates</strong>
+                <span>Same as production</span>
+              </div>
+              <div>
+                <strong>Σ MATCH</strong>
+                <span>Checksum proof</span>
+              </div>
+            </aside>
+          </div>
+        </header>
+
+        <div className="lp-ct6-shell">
+          {!sent ? (
+            <form className="lp-ct6-form" onSubmit={submit} noValidate>
+              <nav className="lp-ct6-steps" aria-label="Form progress">
+                {CONTACT_STEPS.map((s) => {
+                  const state = s.id < step ? "done" : s.id === step ? "active" : "pending";
+                  return (
+                    <div key={s.id} className={`lp-ct6-step is-${state}`}>
+                      <span className="lp-ct6-step-index" aria-hidden>
+                        {state === "done" ? "✓" : s.id}
+                      </span>
+                      <div className="lp-ct6-step-copy">
+                        <strong>{s.label}</strong>
+                        <em>{s.hint}</em>
+                      </div>
+                    </div>
+                  );
+                })}
+              </nav>
+
+                {step === 1 ? (
+                  <div className="lp-ct6-body">
+                    <div className="lp-ct6-body-head">
+                      <h2>Your stack</h2>
+                      <p>Pick sources, destinations, and scale. You can refine on the call.</p>
+                    </div>
+                    <div className="lp-ct6-picks">
+                      <ContactPickGrid
+                        label="Sources"
+                        options={CONTACT_SOURCES}
+                        value={sources}
+                        onChange={setSources}
+                      />
+                      <ContactPickGrid
+                        label="Destinations"
+                        options={CONTACT_DESTINATIONS}
+                        value={destinations}
+                        onChange={setDestinations}
+                      />
+                    </div>
+                    <div className="lp-ct6-fields lp-ct6-fields--3">
+                      <label>
+                        Daily volume
+                        <select
+                          className="lp-ct6-input"
+                          value={volume}
+                          onChange={(e) => setVolume(e.target.value)}
+                          required
+                        >
+                          <option value="">Select…</option>
+                          <option value="lt-1m">&lt; 1M rows/day</option>
+                          <option value="1m-100m">1M – 100M rows/day</option>
+                          <option value="100m-1b">100M – 1B rows/day</option>
+                          <option value="gt-1b">&gt; 1B rows/day</option>
+                        </select>
+                      </label>
+                      <label>
+                        Region
+                        <select
+                          className="lp-ct6-input"
+                          value={region}
+                          onChange={(e) => setRegion(e.target.value)}
+                          required
+                        >
+                          <option value="">Select…</option>
+                          <option value="us">US</option>
+                          <option value="eu">EU</option>
+                          <option value="apac">APAC</option>
+                          <option value="other">Other</option>
+                        </select>
+                      </label>
+                      <label>
+                        Timeframe
+                        <select
+                          className="lp-ct6-input"
+                          value={timeframe}
+                          onChange={(e) => setTimeframe(e.target.value)}
+                          required
+                        >
+                          <option value="">Select…</option>
+                          <option value="pilot">Pilot now</option>
+                          <option value="prod-30d">Production in 30 days</option>
+                          <option value="evaluating">Still evaluating</option>
+                        </select>
+                      </label>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="lp-ct6-body">
+                    <div className="lp-ct6-body-head">
+                      <h2>How we reach you</h2>
+                      <p>One engineer reply with a scoped plan — never a drip campaign.</p>
+                    </div>
+                    <div className="lp-ct6-fields lp-ct6-fields--2">
+                      <label>
+                        First name
+                        <input
+                          className="lp-ct6-input"
+                          value={name}
+                          onChange={(e) => setName(e.target.value)}
+                          required
+                          autoComplete="given-name"
+                        />
+                      </label>
+                      <label>
+                        Work email
+                        <input
+                          className="lp-ct6-input"
+                          type="email"
+                          value={email}
+                          onChange={(e) => setEmail(e.target.value)}
+                          required
+                          autoComplete="email"
+                          placeholder="name@company.com"
+                        />
+                      </label>
+                      <label>
+                        Company
+                        <input
+                          className="lp-ct6-input"
+                          value={company}
+                          onChange={(e) => setCompany(e.target.value)}
+                          required
+                          autoComplete="organization"
+                        />
+                      </label>
+                      <label>
+                        Role
+                        <input
+                          className="lp-ct6-input"
+                          value={role}
+                          onChange={(e) => setRole(e.target.value)}
+                          placeholder="Data platform lead"
+                          autoComplete="organization-title"
+                        />
+                      </label>
+                      <label className="lp-ct6-span-all">
+                        Anything else? <em>Optional</em>
+                        <textarea
+                          className="lp-ct6-input lp-ct6-textarea"
+                          value={message}
+                          onChange={(e) => setMessage(e.target.value)}
+                          rows={2}
+                          placeholder="Compliance constraints, cutover windows, deadlines…"
+                        />
+                      </label>
+                      <label className="lp-ct6-hp" aria-hidden="true">
+                        Do not fill
+                        <input
+                          className="lp-ct6-input"
+                          tabIndex={-1}
+                          autoComplete="off"
+                          value={honeypot}
+                          onChange={(e) => setHoneypot(e.target.value)}
+                        />
+                      </label>
+                    </div>
+                  </div>
+                )}
+
+                <div className="lp-ct6-nav">
+                  <div className="lp-ct6-nav-left">
+                    {step === 2 ? (
+                      <button type="button" className="lp-ct6-back" onClick={goBack}>
+                        ← Back
+                      </button>
+                    ) : (
+                      <a href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">sales@datawrap.io</a>
+                    )}
+                  </div>
+                  {step === 1 ? (
+                    <button
+                      type="button"
+                      className="lp-btn lp-btn--brand lp-btn--lg"
+                      onClick={goNext}
+                      disabled={!canAdvance}
+                    >
+                      Continue
+                    </button>
+                  ) : (
+                    <button type="submit" className="lp-btn lp-btn--brand lp-btn--lg" disabled={!canAdvance}>
+                      Request pilot
+                    </button>
+                  )}
                 </div>
               </form>
-            )}
-          </div>
+          ) : (
+            <div className="lp-ct6-success" role="status">
+              <div className="lp-ct6-success-mark" aria-hidden>
+                <DtIcon name="check" size={28} />
+              </div>
+              <h2>Request received</h2>
+              <p>
+                A solutions engineer will reply within one business day
+                {sources.length > 0 ? ` about ${sources.slice(0, 2).join(", ")}` : ""}
+                {destinations.length > 0 ? ` → ${destinations.slice(0, 2).join(", ")}` : ""}.
+              </p>
+              <p className="lp-ct6-success-mail">
+                Or write us now at{" "}
+                <a href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">sales@datawrap.io</a>
+              </p>
+              <div className="lp-ct6-success-actions">
+                <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("help")}>
+                  Browse docs
+                </button>
+                <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("pricing")}>
+                  See pricing
+                </button>
+                <button type="button" className="lp-btn lp-btn--ghost" onClick={() => onNavigate("enterprise")}>
+                  Enterprise
+                </button>
+              </div>
+            </div>
+          )}
         </div>
-      </section>
+      </div>
     </div>
   );
 }
@@ -675,95 +1120,131 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
     {
       phase: "01",
       t: "Isolate",
+      tag: "Tenancy",
       d: "Dedicated tenants, workspace scoping, and per-tenant security posture — no shared control-plane bleed.",
+      pill: "Tenant isolated",
     },
     {
       phase: "02",
       t: "Encrypt",
+      tag: "Keys",
       d: "Customer-managed keys wrap connector secrets. Purpose keys stay scoped to the job that needs them.",
+      pill: "BYOK wrapped",
     },
     {
       phase: "03",
       t: "Reside",
+      tag: "Regions",
       d: "Pin jobs and artifacts to the regions your policy requires. Audit trails stay where you choose.",
+      pill: "Region pinned",
     },
     {
       phase: "04",
       t: "Prove",
+      tag: "Reconcile",
       d: "Post-load reconciliation verifies counts and content hashes. Quarantine never silently drops rows.",
+      pill: "Checksum MATCH",
     },
   ];
 
   return (
-    <div className="lp-mkt-page lp-mkt-page-rich lp-mkt-security">
-      <MarketingHeroBand
-        tone="ink"
-        kicker="Security"
-        title="Security that moves with the data"
-        lead="Isolation, encryption, residency, and checksum proof — the same governed path your transfers already use."
-        actions={
-          <div className="lp-hero-cta">
-            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
-              Request security pack
-            </button>
-            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("enterprise")}>
-              Enterprise overview
-            </button>
+    <div className="lp-mkt-page lp-sec-v2">
+      <section className="lp-sec-hero" aria-label="Security">
+        <div className="lp-sec-hero-waves" aria-hidden>
+          <span className="lp-wave-grid" />
+          <span className="lp-wave-glow lp-wave-glow--1" />
+          <span className="lp-wave-glow lp-wave-glow--2" />
+        </div>
+        <div className="lp-sec-hero-inner">
+          <div className="lp-sec-hero-copy">
+            <p className="lp-pricing-hero-kicker">
+              <span className="lp-pricing-hero-dot" aria-hidden />
+              Security
+            </p>
+            <h1>
+              Security that moves with
+              <span className="lp-pricing-hero-em"> the data</span>
+            </h1>
+            <p className="lp-sec-hero-lead">
+              Isolation, encryption, residency, and checksum proof — the same governed path your
+              transfers already use. Agents inherit it too.
+            </p>
+            <div className="lp-hero-cta">
+              <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
+                Request security pack
+              </button>
+              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("enterprise")}>
+                Enterprise overview
+              </button>
+            </div>
           </div>
-        }
-        visual={<MarketingIllustration kind="security" />}
-      />
+          <aside className="lp-sec-hero-panel" aria-label="Runtime security posture">
+            <header>
+              <strong>Runtime posture</strong>
+              <span>Live</span>
+            </header>
+            <div className="lp-sec-hero-row is-ok"><span>Preflight</span><em>8 / 8</em></div>
+            <div className="lp-sec-hero-row is-ok"><span>Write</span><em>quarantine surfaced</em></div>
+            <div className="lp-sec-hero-row is-ok"><span>Reconcile</span><em>checksum MATCH</em></div>
+            <div className="lp-sec-hero-row is-ok"><span>Agents</span><em>MCP under RBAC</em></div>
+            <div className="lp-sec-hero-row"><span>Audit</span><em>jobs · maps · keys</em></div>
+          </aside>
+        </div>
+      </section>
 
       <MarketingReveal>
-        <section className="lp-mkt-body lp-mkt-body--badges">
+        <section className="lp-sec-badges" aria-label="Compliance posture">
           <ComplianceBadges items={["SOC 2 Type II posture", "GDPR", "HIPAA-ready paths", "ISO 27001 aligned", "Regional residency"]} />
         </section>
       </MarketingReveal>
 
       <MarketingReveal>
-        <section className="lp-mkt-body lp-mkt-security-flow">
-          <p className="lp-mkt-kicker">Control plane</p>
-          <h2>Four layers between source and destination</h2>
-          <p className="lp-mkt-lead">
-            Not a wall of feature cards — a continuous security path that activates on every transfer.
-          </p>
-          <ol className="lp-mkt-security-timeline">
+        <section className="lp-sec-section">
+          <div className="lp-sec-section-head">
+            <p className="lp-mkt-kicker">Control plane</p>
+            <h2>Four layers between source and destination</h2>
+            <p>A continuous security path that activates on every transfer — not a wall of checkboxes.</p>
+          </div>
+          <div className="lp-sec-layer-grid">
             {layers.map((layer) => (
-              <li key={layer.phase} className="lp-mkt-security-step">
-                <span className="lp-mkt-security-phase">{layer.phase}</span>
-                <div>
-                  <h3>{layer.t}</h3>
-                  <p>{layer.d}</p>
+              <article key={layer.phase} className="lp-sec-layer-card">
+                <div className="lp-sec-layer-top">
+                  <span className="lp-sec-layer-num">{layer.phase}</span>
+                  <span className="lp-sec-layer-tag">{layer.tag}</span>
                 </div>
-              </li>
+                <h3>{layer.t}</h3>
+                <p>{layer.d}</p>
+                <em>{layer.pill}</em>
+              </article>
             ))}
-          </ol>
+          </div>
         </section>
       </MarketingReveal>
 
       <MarketingReveal>
-        <section className="lp-mkt-body lp-mkt-security-proof">
-          <div className="lp-mkt-security-proof-copy">
+        <section className="lp-sec-agent">
+          <div className="lp-sec-agent-copy">
             <p className="lp-mkt-kicker">Runtime proof</p>
             <h2>Agents inherit the same gates</h2>
             <p>
-              MCP tools and Data Pilot never receive raw destination passwords. Every agent action rides the same
-              RBAC, quarantine, and reconciliation path as Transfer Studio.
+              MCP tools and Datawrap Pilot never receive raw destination passwords. Every agent
+              action rides the same RBAC, quarantine, and reconciliation path as Transfer Studio.
             </p>
-            <MarketingSectionFooter>
-              <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("enterprise")}>
-                Enterprise capabilities
-              </button>
+            <div className="lp-sec-agent-actions">
               <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("contact")}>
                 Request security pack
               </button>
-            </MarketingSectionFooter>
+              <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("enterprise")}>
+                Enterprise capabilities
+              </button>
+            </div>
           </div>
-          <div className="lp-mkt-security-proof-panel" aria-hidden>
-            <div className="lp-mkt-security-proof-row is-ok"><span>Preflight</span><em>8 / 8</em></div>
-            <div className="lp-mkt-security-proof-row is-ok"><span>Write</span><em>quarantine 0</em></div>
-            <div className="lp-mkt-security-proof-row is-ok"><span>Reconcile</span><em>checksum match</em></div>
-            <div className="lp-mkt-security-proof-row"><span>Audit</span><em>logged</em></div>
+          <div className="lp-sec-agent-visual" aria-hidden>
+            <div className="lp-sec-agent-chip">MCP call</div>
+            <div className="lp-sec-agent-path">
+              <span>Auth</span><i /><span>Map</span><i /><span>G1–G8</span><i /><span>Prove</span>
+            </div>
+            <div className="lp-sec-agent-chip is-ok">No raw passwords</div>
           </div>
         </section>
       </MarketingReveal>
@@ -772,62 +1253,151 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
 }
 
 function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStarted" | "onNavigate">) {
-  const ids = ["postgresql", "snowflake", "mysql", "mongodb", "bigquery", "redshift", "s3", "dynamodb", "kafka", "salesforce"];
+  const families = [
+    {
+      title: "Warehouses",
+      body: "Snowflake, BigQuery, Redshift bulk paths with capacity probes and reconcile reports.",
+      ids: ["snowflake", "bigquery", "redshift"],
+      badge: "Native",
+    },
+    {
+      title: "Operational SQL",
+      body: "PostgreSQL, MySQL, SQL Server with upsert and watermark incremental where proven.",
+      ids: ["postgresql", "mysql"],
+      badge: "Transfer-ready",
+    },
+    {
+      title: "Documents & files",
+      body: "MongoDB, CSV, JSON, Parquet with type-honest create-new DDL — never silent coercion.",
+      ids: ["mongodb"],
+      badge: "Typed",
+    },
+    {
+      title: "Object stores",
+      body: "S3, GCS, ADLS with multi-chunk write accounting and quarantine visibility.",
+      ids: ["s3"],
+      badge: "Bulk",
+    },
+  ];
 
   return (
-    <div className="lp-mkt-page lp-mkt-page-rich">
-      <MarketingHeroBand
-        tone="ink"
-        kicker="Connectors"
-        title="Hundreds of systems, honest labels"
-        lead="Native transfer drivers plus SQLAlchemy generics and file formats — with transfer-ready status you can trust, not inflated marketplace counts."
-        actions={
-          <div className="lp-hero-cta">
-            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
-              Connect a system
-            </button>
-            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("help")}>
-              Driver docs
-            </button>
+    <div className="lp-mkt-page lp-int-v2">
+      <section className="lp-int-hero" aria-label="Connectors">
+        <div className="lp-int-hero-bg" aria-hidden>
+          <span className="lp-wave-grid" />
+          <span className="lp-wave-glow lp-wave-glow--1" />
+          <span className="lp-wave-glow lp-wave-glow--2" />
+        </div>
+        <div className="lp-int-hero-inner">
+          <div className="lp-int-hero-copy">
+            <p className="lp-pricing-hero-kicker">
+              <span className="lp-pricing-hero-dot" aria-hidden />
+              Connection catalog
+            </p>
+            <h1>
+              Hundreds of systems.
+              <span className="lp-pricing-hero-em"> Honest labels.</span>
+            </h1>
+            <p className="lp-int-hero-lead">
+              Catalog tiles are not the same as production drivers. Every transfer-ready route still
+              runs mapping, nine core gates, quarantine, and proof.
+            </p>
+            <div className="lp-hero-cta">
+              <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
+                Open connector catalog
+              </button>
+              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("help")}>
+                Driver docs
+              </button>
+            </div>
           </div>
-        }
-        visual={<MarketingIllustration kind="integrations" />}
-      />
+          <div className="lp-int-hero-stack" aria-hidden>
+            {["postgresql", "snowflake", "bigquery", "mongodb", "kafka", "s3", "mysql", "salesforce"].map((id) => (
+              <span key={id} className="lp-int-hero-tile">
+                <ConnectorIcon id={id} size={28} />
+                <em>{id}</em>
+              </span>
+            ))}
+          </div>
+        </div>
+      </section>
 
       <MarketingReveal>
-        <StatsStrip
-          items={[
-            { value: "DLQ", label: "Quarantine replay" },
-            { value: "Native", label: "Warehouse paths" },
-            { value: "SQLA", label: "Generic drivers" },
-            { value: "Files", label: "CSV · JSON · Parquet" },
-          ]}
-        />
+        <section className="lp-int-strip" aria-label="Capability labels">
+          <div><strong>DLQ</strong><span>Quarantine replay</span></div>
+          <div><strong>Native</strong><span>Warehouse paths</span></div>
+          <div><strong>SQLA</strong><span>Generic drivers</span></div>
+          <div><strong>Files</strong><span>CSV · JSON · Parquet</span></div>
+        </section>
       </MarketingReveal>
 
       <MarketingReveal>
-        <section className="lp-mkt-body">
-          <div className="lp-mkt-icon-grid">
-            {ids.map((id) => (
-              <div key={id} className="lp-mkt-icon-cell">
-                <ConnectorIcon id={id} size={32} />
-                <span>{id}</span>
-              </div>
+        <section className="lp-int-section">
+          <div className="lp-int-section-head">
+            <p className="lp-mkt-kicker">Catalog families</p>
+            <h2>What you can connect today</h2>
+            <p>Grouped by how operators actually plan loads — with honest capability labels.</p>
+          </div>
+          <div className="lp-int-family-grid">
+            {families.map((f) => (
+              <article key={f.title} className="lp-int-family-card">
+                <header>
+                  <h3>{f.title}</h3>
+                  <span>{f.badge}</span>
+                </header>
+                <p>{f.body}</p>
+                <div className="lp-int-family-icons">
+                  {f.ids.map((id) => (
+                    <span key={id} title={id}>
+                      <ConnectorIcon id={id} size={24} />
+                    </span>
+                  ))}
+                </div>
+              </article>
             ))}
           </div>
-          <FeatureList
-            items={[
-              "Upserts and watermark incremental where the destination supports it",
-              "File formats: CSV, JSON, Parquet routes",
-              "Object stores: S3, GCS, ADLS",
-              "Warehouse bulk paths for Snowflake, BigQuery, Redshift",
-            ]}
-          />
-          <MarketingSectionFooter>
+        </section>
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-int-honesty">
+          <div>
+            <p className="lp-mkt-kicker">Honesty bar</p>
+            <h2>What “transfer-ready” means</h2>
+            <p>
+              A connector is transfer-ready when introspect, map, preflight, write, and reconcile have
+              production evidence for that driver family — not when a tile appears in a catalog.
+            </p>
+            <ul>
+              <li>Upserts only advertise where the destination truly supports them</li>
+              <li>Watermark incremental requires proven cursor semantics</li>
+              <li>Planned tiles stay labelled Planned until evidence lands</li>
+            </ul>
+          </div>
+          <aside className="lp-int-honesty-panel">
+            <h3>Every route still runs</h3>
+            <div><span>01</span><em>Semantic map</em></div>
+            <div><span>02</span><em>G1–G8 preflight</em></div>
+            <div><span>03</span><em>Quarantine write</em></div>
+            <div><span>04</span><em>Checksum prove</em></div>
+          </aside>
+        </section>
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-int-cta">
+          <div>
+            <h2>Browse the live catalog</h2>
+            <p>Open Transfer Studio and pick a transfer-ready driver — same engine as production.</p>
+          </div>
+          <div className="lp-int-cta-actions">
             <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
               Open connector catalog
             </button>
-          </MarketingSectionFooter>
+            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("product-transfer")}>
+              See Transfer Studio →
+            </button>
+          </div>
         </section>
       </MarketingReveal>
     </div>

@@ -1,10 +1,20 @@
 /** Normalize API origin so login and all routes hit `/api/v1/...`. */
 function resolveApiBase(): string {
-  const fromWindow =
+  const w =
     typeof window !== "undefined"
-      ? (window as { DATAFLOW_API_BASE?: string }).DATAFLOW_API_BASE
+      ? (window as { DATAWRAP_API_BASE?: string; DATAFLOW_API_BASE?: string })
       : undefined;
-  const raw = fromWindow || import.meta.env.VITE_API_BASE || "/api/v1";
+  // Prefer Datawrap; keep DATAFLOW_* for Railway cutover until vars are renamed.
+  const fromWindow = w?.DATAWRAP_API_BASE || w?.DATAFLOW_API_BASE;
+  // `import.meta.env` is a Vite inject. Under node:test there is no Vite
+  // transform, so reading `.env` throws. Fall back cleanly instead of
+  // crashing every pure helper that happens to import this module.
+  const viteEnv =
+    typeof import.meta !== "undefined" &&
+    (import.meta as { env?: { VITE_API_BASE?: string } }).env
+      ? (import.meta as { env?: { VITE_API_BASE?: string } }).env!.VITE_API_BASE
+      : undefined;
+  const raw = fromWindow || viteEnv || "/api/v1";
   // Strip quotes/whitespace (Railway paste / "white" blank env values).
   let trimmed = String(raw).trim().replace(/^['"]|['"]$/g, "").replace(/\/+$/, "");
   if (!trimmed) return "/api/v1";
@@ -23,7 +33,7 @@ export function describeApiBase(): string {
   return API_BASE;
 }
 
-export type Screen = "landing" | "dashboard" | "pilot" | "transfer" | "query" | "connectors" | "schedules" | "jobs" | "contracts" | "mcp" | "settings" | "docs" | "benchmarks";
+export type Screen = "landing" | "dashboard" | "pilot" | "transfer" | "query" | "connectors" | "schedules" | "transforms" | "jobs" | "contracts" | "mcp" | "settings" | "docs" | "benchmarks";
 
 export interface DataContract {
   id: string;
@@ -85,6 +95,8 @@ export interface TransferCheckpoint {
   cursor_value?: unknown;
   cursor_column?: string;
   status?: string;
+  /** ISO timestamp from checkpoint_service — used for resume-age display. */
+  updated_at?: string;
 }
 
 /**
@@ -153,6 +165,8 @@ export interface TransferJob {
   failed_at_phase?: string;
   rejected_rows?: number;
   coerced_null_rows?: number;
+  /** Quarantine evidence dropped past the sample cap (exact count still in rejected_rows). */
+  rejected_details_truncated?: number;
   chunk_current?: number;
   chunk_total?: number;
   checkpoint?: TransferCheckpoint;
@@ -169,8 +183,14 @@ export interface TransferJob {
   /** SQL Server CDC TVF row_filter_option actually used (all / all update old / net). */
   cdc_row_filter?: string | null;
   replication_lag_bytes?: number | null;
+  /** Slot confirmed_flush_lsn — the position holding WAL retention. */
+  cdc_confirmed_flush_lsn?: string | null;
   cdc_heartbeat_at?: string | null;
   cdc_last_ddl_at?: string | null;
+  mapping_review_required?: boolean | null;
+  mapping_review_id?: string | null;
+  mapping_review_reason?: string | null;
+  mapping_review_honesty?: string | null;
   /** Durable CDC resume cursor (slot/LSN, GTID, change-stream token). */
   watermark?: string | null;
   /** True when multi-table shared log reader is active (one slot / server_id). */
@@ -257,6 +277,79 @@ export interface JobNotificationResult {
   body?: string;
 }
 
+/**
+ * Gate-8 reconcile payload as the engine emits it
+ * (`services/reconciliation.py` → `src/transfer/reconcile_step.py`).
+ *
+ * Every honesty qualifier the engine produces belongs here: dropping
+ * `verification_mode` / `identity` / `alignment` at the type boundary is what
+ * let a positional-only comparison render as an exact match.
+ */
+export interface Gate8ReconciliationPayload {
+  passed?: boolean;
+  message?: string;
+  phase?: string;
+  /**
+   * Proof population vs sample honesty:
+   * full_checksum | sample | writer_ack | none
+   */
+  coverage?: string;
+  preview?: boolean;
+  post_write_pending?: boolean;
+  /** key_aligned | positional_only | unproven_identity */
+  verification_mode?: string;
+  identity?: {
+    column?: string | null;
+    proven?: boolean;
+    reason?: string;
+    provenance?: string;
+  };
+  source_rows?: number;
+  target_rows?: number;
+  rejected_rows?: number;
+  coerced_null_rows?: number;
+  /** Intentional LSN-guard / redelivery skips — not a shortfall. */
+  rows_skipped?: number;
+  source_checksum?: string;
+  target_checksum?: string;
+  missing_key_count?: number;
+  extra_key_count?: number;
+  matched_key_count?: number;
+  row_fidelity_score?: number;
+  sample_compare?: {
+    passed?: boolean;
+    compared?: number;
+    skipped?: boolean;
+    /** Set when the destination read-back itself failed. */
+    error?: string;
+    alignment?: string;
+    identity_warning?: string;
+    /** Deterministic sample set for auditor replay. */
+    sample_seed?: {
+      method?: string;
+      size?: number;
+      sort_key?: string;
+      source_sort_key?: string;
+      stratify_by?: string;
+      auto_selected?: boolean;
+      /** Always sample for Gate-8 keyed compare — never invent population proof. */
+      coverage?: string;
+      population_proof?: boolean;
+      note?: string;
+      pk_values?: string[];
+      content_sha256?: string;
+    };
+    mismatches?: {
+      row?: string | number;
+      source?: string;
+      target?: string;
+      source_value?: string;
+      target_value?: string;
+      column?: string;
+    }[];
+  };
+}
+
 export interface JobProgress extends TransferJob {
   progress_pct: number;
   phase?: string;
@@ -271,36 +364,7 @@ export interface JobProgress extends TransferJob {
   load_history_report?: LoadHistoryReport;
   preflight?: PreflightResult;
   /** Gate-8 reconcile payload persisted on the job at terminal status. */
-  reconciliation?: {
-    passed?: boolean;
-    message?: string;
-    phase?: string;
-    preview?: boolean;
-    post_write_pending?: boolean;
-    source_rows?: number;
-    target_rows?: number;
-    rejected_rows?: number;
-    coerced_null_rows?: number;
-    source_checksum?: string;
-    target_checksum?: string;
-    missing_key_count?: number;
-    extra_key_count?: number;
-    matched_key_count?: number;
-    row_fidelity_score?: number;
-    sample_compare?: {
-      passed?: boolean;
-      compared?: number;
-      skipped?: boolean;
-      mismatches?: {
-        row?: string | number;
-        source?: string;
-        target?: string;
-        source_value?: string;
-        target_value?: string;
-        column?: string;
-      }[];
-    };
-  };
+  reconciliation?: Gate8ReconciliationPayload;
   /** Plain-language pipeline explanation from the engine. */
   explanation?: string;
   /** Persisted per-mapping evidence (confidence, fidelity, risks) for Theater/Jobs. */
@@ -360,7 +424,7 @@ export interface ActiveDataContext {
   row_count: number;
   samples?: Record<string, string[]>;
   schema?: Record<string, string>;
-  /** Validation run ID (pf_…) — Data Pilot can look this up. */
+  /** Validation run ID (pf_…) — Datawrap Pilot can look this up. */
   preflight_run_id?: string;
   /** Live transfer job ID once Execute starts. */
   job_id?: string;
@@ -430,8 +494,14 @@ export interface PreflightProofBundle {
     preview?: boolean;
     phase?: string;
     post_write_pending?: boolean;
+    /** key_aligned | positional_only | unproven_identity */
+    verification_mode?: string;
+    identity?: { column?: string | null; proven?: boolean; reason?: string };
     source_rows?: number;
     target_rows?: number;
+    rejected_rows?: number;
+    coerced_null_rows?: number;
+    rows_skipped?: number;
     source_checksum?: string | null;
     target_checksum?: string | null;
     row_fidelity_score?: number | null;
@@ -444,6 +514,9 @@ export interface PreflightProofBundle {
       compared: number;
       mismatches: { row: string; source: string; target: string; source_value: string; target_value: string }[];
       skipped?: boolean;
+      error?: string;
+      alignment?: string;
+      identity_warning?: string;
     };
   };
   transfer_decision: {
@@ -453,6 +526,35 @@ export interface PreflightProofBundle {
     warnings?: string[];
     /** True when the only pending item is PII governance acknowledgment. */
     compliance_only?: boolean;
+  };
+  /** Module 1 — incomplete Risk Contracts block Execute-approve. */
+  risk_contracts?: {
+    incomplete?: boolean;
+    missing_columns?: string[];
+    note?: string;
+  };
+  /**
+   * Module 8 — true only after post-write Gate-8 full_checksum.
+   * Never infer from Validate / sample / writer-ack alone.
+   */
+  migration_proven?: boolean;
+  /** Module 12 — Map→DDL identity fingerprint. */
+  ddl_identity?: {
+    ddl_identity_hash?: string;
+    matches_approved?: boolean;
+    note?: string;
+  };
+  /** Module 12 — per-column ConversionClass stamps. */
+  conversion_contract?: {
+    version?: string;
+    columns?: Array<{
+      source?: string;
+      target?: string;
+      conversion_class?: string;
+      invents_capacity?: boolean;
+      requires_risk_contract?: boolean;
+      reason?: string;
+    }>;
   };
 }
 
@@ -478,9 +580,12 @@ export interface CoercionColumn {
   failed: number;
   wire_normalize?: number;
   wire_failures?: number;
+  /** Bare scalars wrapped as JSON string literals (domain change — Accept risk). */
+  json_scalar_wraps?: number;
   sample_failures: CoercionSampleFailure[];
   sentinel_examples?: { row: number; value: string }[];
   wire_examples?: { row: number; value: string; wire_form?: string | null; reason?: string }[];
+  wrap_examples?: { row: number; value: string; wire_form?: string | null; reason?: string }[];
   sample_wire_form?: string | null;
   severity: "ok" | "warn" | "block";
   /** Declared type path collapses fidelity even when preview samples coerce. */
@@ -505,6 +610,113 @@ export interface CoercionReport {
   has_blocking_failures: boolean;
   columns: CoercionColumn[];
   by_source?: Record<string, CoercionColumn>;
+}
+
+/** Wall-clock time the engine spent in one phase of a transfer. */
+export interface PhaseTiming {
+  phase: string;
+  label: string;
+  seconds: number;
+  calls: number;
+  rows: number;
+  /** Fraction of total busy time, 0–1. */
+  share_of_busy: number;
+  rows_per_second: number;
+}
+
+/**
+ * Per-phase timing breakdown emitted by the transfer engine.
+ *
+ * `busy_seconds` sums each phase's own time, so it exceeds `elapsed_seconds`
+ * when phases overlap across worker threads. `overlap_factor` is that ratio —
+ * roughly 1.0 means serial, higher means real concurrency.
+ */
+export interface PhaseProfileReport {
+  phases: PhaseTiming[];
+  busy_seconds: number;
+  elapsed_seconds: number;
+  dominant_phase: string;
+  overlap_factor: number;
+}
+
+/**
+ * Per-run connection and metadata reuse. Proves the engine reused pools and
+ * schema lookups across chunks instead of rebuilding them per batch — the
+ * defect that used to cost a TCP+TLS+auth round-trip on every chunk.
+ */
+export interface ReuseCounters {
+  hits: number;
+  misses: number;
+  reuse_ratio: number;
+  connections_saved?: number;
+  metadata_queries_saved?: number;
+  live?: number;
+  evictions?: number;
+  invalidations?: number;
+}
+
+export interface ConnectionReuseReport {
+  engine_pool?: ReuseCounters;
+  schema_cache?: ReuseCounters;
+}
+
+/**
+ * Whether an interrupted write can be retried in place without duplicating rows.
+ * Surfaced so the operator can tell "resume is automatic" from "resume needs a
+ * decision" without reading engine logs.
+ */
+export interface ReplaySafetyReport {
+  safe: boolean;
+  mechanism: "idempotent_upsert" | "chunk_ledger" | "keyed_document" | "none" | string;
+  reason: string;
+  destination?: string;
+  write_mode?: string;
+  duplicate_risk?: boolean;
+  evidence?: string[];
+}
+
+/** One data test evaluated against a materialized transformation model. */
+export interface TransformTestResult {
+  model: string;
+  test_type: string;
+  column: string;
+  severity: "error" | "warn";
+  passed: boolean;
+  failing_rows: number;
+  message: string;
+  sql?: string;
+}
+
+/** One model built by a post-load transformation project. */
+export interface TransformModelResult {
+  name: string;
+  materialization: string;
+  status: "success" | "failed" | "skipped";
+  relation: string;
+  strategy: string;
+  rows_affected: number;
+  seconds: number;
+  sql: string;
+  error: string;
+  tests: TransformTestResult[];
+}
+
+/** Post-load transformation outcome attached to a finished transfer. */
+export interface TransformationsReport {
+  ran: boolean;
+  status: "success" | "partial" | "failed" | "skipped";
+  message: string;
+  projects: {
+    project_id: string;
+    project_name: string;
+    status: string;
+    message?: string;
+    seconds?: number;
+    failed_model_count?: number;
+    failed_test_count?: number;
+    warnings?: string[];
+    models: TransformModelResult[];
+  }[];
 }
 
 /** Last-N load comparison for the same source→destination route. */
@@ -537,10 +749,35 @@ export interface PreflightResult {
   passed_count: number;
   total_gates: number;
   readiness_score: number;
-  /** Stable ID for this validation run — surface in UI and feed Data Pilot. */
+  /** Stable ID for this validation run — surface in UI and feed Datawrap Pilot. */
   run_id?: string;
   gates: PreflightGate[];
   blockers: { id: string; message: string; details?: Record<string, unknown>; guidance?: { gate?: string; title?: string; category?: string; why?: string; fix?: string; examples?: string[]; suggested_actions?: ValidationSuggestedAction[] } }[];
+  /**
+   * Engine-level Root Cause Engine output — one explainable problem, many gates.
+   * Prefer this over client-side collapse when present.
+   */
+  root_causes?: Array<{
+    root_id: string;
+    kind: string;
+    title: string;
+    summary: string;
+    business_impact: string;
+    affected_columns?: string[];
+    affected_rows_sample?: number | null;
+    estimated_total_rows?: number | null;
+    risk_level?: string;
+    recommended_fix?: string;
+    alternative_fixes?: string[];
+    recovery_strategy?: string;
+    expected_runtime_impact?: string;
+    quarantine_policy?: string;
+    rollback_policy?: string;
+    documentation?: string;
+    impacted_gates?: string[];
+    absorbed_blocker_ids?: string[];
+    severity?: string;
+  }>;
   /** Top-level privilege probe from destination inspect (also on g2_destination.details). */
   privilege_probe?: {
     status?: string;
@@ -553,6 +790,63 @@ export interface PreflightResult {
   proof_bundle?: PreflightProofBundle;
   coercion_report?: CoercionReport;
   load_history_report?: LoadHistoryReport;
+  /** Soft FK / relational hints — structured findings; block via constraint_fk when severity=block. */
+  constraint_hints?: Array<Record<string, unknown> | string>;
+  /** Structured FK findings (same payloads as constraint_hints when present). */
+  constraint_findings?: Array<Record<string, unknown>>;
+  /** Honesty stamp — schema FK coverage ≠ population RI proof. */
+  referential_integrity?: {
+    proven?: boolean;
+    coverage?: string;
+    population_orphan_probe_ran?: boolean;
+    population_orphan_count?: number | null;
+    sample_orphan_probe_ran?: boolean;
+    sample_orphan_count?: number | null;
+    finding_count?: number;
+    note?: string;
+    fk_risk_acknowledged?: boolean;
+  };
+  /** Sample-scoped orphan probe report (never population proof). */
+  sample_orphan_probe?: {
+    ran?: boolean;
+    coverage?: string;
+    population_proof?: boolean;
+    orphan_count?: number;
+    checked_values?: number;
+    note?: string;
+  };
+  /** Module 11 — opt-in full-table orphan scan (only path to RI proven). */
+  population_orphan_probe?: {
+    ran?: boolean;
+    coverage?: string;
+    population_proof?: boolean;
+    complete?: boolean;
+    orphan_count?: number;
+    child_table?: string;
+    note?: string;
+  };
+  /** Soft Snowflake warehouse sizing from G7 volume — never a GateId. */
+  snowflake_warehouse_advice?: {
+    kind?: string;
+    recommended_size?: string;
+    credit_band?: string;
+    estimated_bytes?: number;
+    estimated_gib?: number;
+    message?: string;
+    rationale?: string;
+    honesty?: string;
+    current_warehouse?: string | null;
+  };
+  /**
+   * Signed Migration Risk Contracts echoed from Validate hydrate.
+   * Merge onto Map so Execute sees risk_id + signature (not unsigned drafts).
+   */
+  signed_mappings?: Array<{
+    source?: string;
+    target?: string;
+    risk_contract?: Record<string, unknown>;
+    risk_acknowledged?: boolean;
+  }>;
 }
 
 /** Machine-readable next step from POST /preflight/explain — mapped to Studio controls. */
@@ -633,7 +927,11 @@ export interface TransferResult {
     rejected_rows?: number;
     coerced_null_rows?: number;
     rejected_details?: RejectedDetail[];
+    /** How many quarantine details were dropped past the sample cap. */
+    rejected_details_truncated?: number;
     warnings?: string[];
+    /** How many distinct warnings were suppressed past the display sample. */
+    warnings_suppressed?: number;
     error_policy?: string;
     /** Pre-ingestion staging table when write_via_staging was used. */
     staging_table?: string;
@@ -648,42 +946,22 @@ export interface TransferResult {
     batches?: number;
     records_per_second?: number;
     load_history_report?: LoadHistoryReport;
+    phase_profile?: PhaseProfileReport;
+    transformations?: TransformationsReport;
+    connection_reuse?: ConnectionReuseReport;
+    /** Whether an interrupted write could have been retried without duplicating rows. */
+    replay_safety?: ReplaySafetyReport;
+    /** OpenTelemetry trace id when DATAFLOW_ENABLE_TRACING=1. */
+    trace_id?: string;
+    /** Inbound X-Correlation-ID bridged into the transfer root span. */
+    correlation_id?: string;
   };
   records_per_second?: number;
   ddl_executed?: string[];
   operation?: string;
   error?: string;
   error_details?: Record<string, unknown>;
-  reconciliation?: {
-    passed?: boolean;
-    message?: string;
-    phase?: string;
-    preview?: boolean;
-    post_write_pending?: boolean;
-    source_rows?: number;
-    target_rows?: number;
-    rejected_rows?: number;
-    coerced_null_rows?: number;
-    source_checksum?: string;
-    target_checksum?: string;
-    missing_key_count?: number;
-    extra_key_count?: number;
-    matched_key_count?: number;
-    row_fidelity_score?: number;
-    sample_compare?: {
-      passed?: boolean;
-      compared?: number;
-      skipped?: boolean;
-      mismatches?: {
-        row?: string | number;
-        source?: string;
-        target?: string;
-        source_value?: string;
-        target_value?: string;
-        column?: string;
-      }[];
-    };
-  };
+  reconciliation?: Gate8ReconciliationPayload;
   explanation?: string;
   mapping_proof?: Record<string, unknown>;
   job_id?: string;

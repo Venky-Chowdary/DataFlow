@@ -121,26 +121,6 @@
   flex-wrap: wrap;
 }
 
-.df2-settings-member-drawer {
-  margin-top: 16px;
-  padding: 16px 18px;
-  border: 1px solid var(--df-line, #e2e8f0);
-  border-radius: 10px;
-  background: #f8fafc;
-}
-
-.df2-settings-member-drawer h3 {
-  margin: 0 0 12px;
-  font-size: 15px;
-}
-
-.df2-settings-member-drawer-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 12px;
-}
-
 /* ─── Pilot loading skeletons ─── */
 
 .df2-pilot-skeleton {

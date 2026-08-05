@@ -15,6 +15,7 @@ Env (any one host form is enough when credentials work):
 from __future__ import annotations
 
 import os
+from services.brand_env import getenv_brand
 import socket
 import sys
 import uuid
@@ -28,16 +29,16 @@ if str(_API_ROOT) not in sys.path:
 
 
 def _oracle_cfg() -> dict:
-    host = os.environ.get("DATAFLOW_ORACLE_HOST", "localhost").strip()
-    port = int(os.environ.get("DATAFLOW_ORACLE_PORT", "1521") or 1521)
+    host = getenv_brand("ORACLE_HOST", "localhost").strip()
+    port = int(getenv_brand("ORACLE_PORT", "1521") or 1521)
     service = (
-        os.environ.get("DATAFLOW_ORACLE_SERVICE")
-        or os.environ.get("DATAFLOW_ORACLE_DATABASE")
+        getenv_brand("ORACLE_SERVICE")
+        or getenv_brand("ORACLE_DATABASE")
         or "ORCLPDB1"
     ).strip()
-    user = os.environ.get("DATAFLOW_ORACLE_USER", "").strip()
-    password = os.environ.get("DATAFLOW_ORACLE_PASSWORD", "").strip()
-    schema = (os.environ.get("DATAFLOW_ORACLE_SCHEMA") or user).strip().upper()
+    user = getenv_brand("ORACLE_USER", "").strip()
+    password = getenv_brand("ORACLE_PASSWORD", "").strip()
+    schema = (getenv_brand("ORACLE_SCHEMA") or user).strip().upper()
     return {
         "host": host,
         "port": port,
@@ -54,7 +55,7 @@ def _oracle_cfg() -> dict:
 
 
 def _oracle_enabled() -> bool:
-    return os.environ.get("DATAFLOW_ORACLE_ENABLE", "").strip().lower() in {
+    return getenv_brand("ORACLE_ENABLE", "").strip().lower() in {
         "1",
         "true",
         "yes",

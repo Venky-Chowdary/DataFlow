@@ -13,7 +13,7 @@ from pathlib import Path
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mapping_golden.json"
 PROOF_DIR = Path(__file__).resolve().parents[1] / "data" / "proofs"
-ACCURACY_FLOOR = 1.0  # Current 20-case fixture must be perfect; expand fixture before lowering.
+ACCURACY_FLOOR = 1.0  # 75+ case fixture must be perfect; expand fixture before lowering.
 
 
 def _load_cases() -> list[dict]:
@@ -24,7 +24,7 @@ def test_mapping_golden_accuracy_with_proof_artifact(tmp_path: Path) -> None:
     from services.semantic_mapper import map_columns
 
     cases = _load_cases()
-    assert len(cases) >= 15, "golden fixture too small for a meaningful eval"
+    assert len(cases) >= 75, "golden fixture too small for a meaningful eval"
 
     sources = [c["source"] for c in cases]
     list({c["target"] for c in cases})

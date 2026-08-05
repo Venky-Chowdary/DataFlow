@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
+from services import reflection_cache
 from services.value_serializer import cell_to_string
 
 
@@ -94,10 +95,27 @@ def _primary_key_columns(cur, schema: str, table: str) -> list[str] | None:
     return None
 
 
-def _order_by_clause(cur, schema: str, table: str, columns: list[str] | None) -> str:
-    """Return a deterministic ORDER BY for stable LIMIT/OFFSET pagination."""
+def _order_by_clause(
+    cur, schema: str, table: str, columns: list[str] | None, identity: str = ""
+) -> str:
+    """Return a deterministic ORDER BY for stable LIMIT/OFFSET pagination.
+
+    The primary key lookup — a two-way join across ``information_schema`` — is
+    cached per table, because a chunked read asks for it once per chunk and the
+    answer cannot change under a running transfer without breaking the load
+    anyway.
+    """
     from psycopg2 import sql
-    pk = _primary_key_columns(cur, schema, table)
+    if identity:
+        pk = reflection_cache.get_or_load_by_identity(
+            identity,
+            schema,
+            table,
+            "pk_columns",
+            lambda: _primary_key_columns(cur, schema, table),
+        )
+    else:
+        pk = _primary_key_columns(cur, schema, table)
     if pk:
         return ", ".join(sql.Identifier(c).as_string(cur) for c in pk)
     if columns:
@@ -149,7 +167,20 @@ def read_table_batch(
                     ssl=ssl,
                     table=table,
                 )
-            order_by = _order_by_clause(cur, schema, table, columns)
+            order_by = _order_by_clause(
+                cur,
+                schema,
+                table,
+                columns,
+                identity=reflection_cache.dsn_identity(
+                    driver="postgresql",
+                    host=host,
+                    port=port,
+                    database=database,
+                    username=username,
+                    connection_string=connection_string,
+                ),
+            )
             order_sql = sql.SQL(order_by)
             if columns:
                 col_sql = sql.SQL(", ").join(map(sql.Identifier, columns))

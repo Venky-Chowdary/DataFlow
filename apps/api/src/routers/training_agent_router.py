@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Dedicated Training Agent API
+Datawrap — Dedicated Training Agent API
 
 Separate from Copilot chat — manages continuous model training on universal data.
 """
@@ -30,7 +30,7 @@ async def training_agent_status():
     agent = get_training_agent()
     status = agent.get_status()
     status["interval_seconds"] = TRAINING_INTERVAL_SECONDS
-    status["description"] = "Trains Data Pilot on 620+ connectors, industry schemas, uploads, and transfer history"
+    status["description"] = "Trains Datawrap Pilot on 620+ connectors, industry schemas, uploads, and transfer history"
     return status
 
 

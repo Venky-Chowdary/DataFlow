@@ -1,4 +1,5 @@
 import type { EditableMapping } from "./mapping";
+import { engineStampedRiskChip, hasCreateNewTypeRisk } from "./mapping";
 import type { ColumnAnalysis, EnhancedAnalysis, PreflightResult, TransferPlan } from "./types";
 import {
   decimalWouldCollapse,
@@ -51,7 +52,7 @@ export function detectNestedDocumentFields(
       insights.push({
         column: col,
         kind: "dot_notation",
-        detail: "Flattened path detected — DataFlow preserves structure across SQL warehouses.",
+        detail: "Flattened path detected — Datawrap preserves structure across SQL warehouses.",
         flattenTarget: col.replace(/\./g, "_"),
       });
       continue;
@@ -83,7 +84,7 @@ export function detectNestedDocumentFields(
   return insights.slice(0, 8);
 }
 
-/** Why DataFlow vs single-tool import (Compass JSON, manual ETL, etc.) */
+/** Why Datawrap vs single-tool import (Compass JSON, manual ETL, etc.) */
 export function buildCompetitiveAdvantages(ctx: {
   sourceKind?: string;
   destType?: string;
@@ -159,11 +160,24 @@ export function fidelityChipLabel(risk: TypeRisk): string {
   return "fidelity";
 }
 
-/** Pair-row fidelity chip — same rules as detectTypeRisks, keyed by source. */
+/** Pair-row fidelity chip — prefer engine stamps over client-side type heuristics. */
 export function fidelityRiskForMapping(
   mapping: EditableMapping,
   opts?: FidelityRiskOptions,
 ): TypeRisk | null {
+  const stamped = engineStampedRiskChip(mapping);
+  if (stamped) {
+    return {
+      id: hasCreateNewTypeRisk(mapping)
+        ? `create-new-${mapping.source}`
+        : `engine-${mapping.source}`,
+      column: mapping.source,
+      severity: stamped.severity,
+      title: stamped.label,
+      detail: stamped.detail,
+    };
+  }
+  // No engine stamp — fall back to local carrier checks (operator dest-type edits).
   const risks = detectTypeRisks([mapping], null, null, opts);
   const fidelity = risks.find(
     (r) =>
@@ -221,6 +235,19 @@ export function detectTypeRisks(
       });
     }
 
+    // Engine stamp is SSOT for fidelity/create-new — do not invent parallel type rules.
+    const stamped = engineStampedRiskChip(m);
+    if (stamped) {
+      risks.push({
+        id: hasCreateNewTypeRisk(m) ? `create-new-${m.source}` : `engine-${m.source}`,
+        column: m.source,
+        severity: stamped.severity,
+        title: stamped.label,
+        detail: stamped.detail,
+      });
+      continue;
+    }
+
     if (NUMERIC_HINTS.test(srcType) && m.sample && /[^\d.,\-eE+]/.test(m.sample.replace(/\s/g, ""))) {
       risks.push({
         id: `num-${m.source}`,
@@ -264,7 +291,30 @@ export function detectTypeRisks(
       const tzToNtz =
         /\b(timestamptz|timestamp with time zone|timestamp_tz|timestamp_ltz)\b/.test(src) &&
         /\b(timestamp_ntz|datetime|timestamp without time zone)\b/.test(dest);
-      if (floatToDecimal || decimalToFloat || decimalToInt || datetimeToDate || stringToNumber || tzToNtz) {
+      const ntzToTz =
+        /\b(timestamp_ntz|datetime|timestamp without time zone)\b/.test(src) &&
+        /\b(timestamptz|timestamp with time zone|timestamp_tz|timestamp_ltz|datetimeoffset)\b/.test(dest);
+      const timeToTimetz =
+        /\btime\b/.test(src) && !/time\s*zone|timetz/.test(src) &&
+        /\b(timetz|time with time zone)\b/.test(dest);
+      const dateToTz =
+        /\bdate\b/.test(src) && !/time/.test(src) &&
+        /\b(timestamptz|timestamp with time zone|timestamp_tz|timestamp_ltz|datetimeoffset)\b/.test(dest);
+      const jsonToString =
+        /\b(jsonb?|variant|super)\b/.test(src) &&
+        /\b(string|text|varchar|nvarchar|char)\b/.test(dest);
+      const stringToJson =
+        /\b(string|text|varchar|nvarchar|char)\b/.test(src) &&
+        /\b(jsonb?|variant|super)\b/.test(dest);
+      const intWidthNarrow =
+        /\b(int64|bigint|long|int8)\b/.test(src) &&
+        /\b(int32|integer|int4|int\b|smallint|tinyint)\b/.test(dest) &&
+        !/\b(int64|bigint|long)\b/.test(dest);
+      if (
+        floatToDecimal || decimalToFloat || decimalToInt || datetimeToDate || stringToNumber
+        || tzToNtz || ntzToTz || timeToTimetz || dateToTz || jsonToString || stringToJson
+        || intWidthNarrow
+      ) {
         risks.push({
           id: `lossy-${m.source}`,
           column: m.source,
@@ -277,7 +327,15 @@ export function detectTypeRisks(
                 ? "Datetime → date drops time-of-day"
                 : tzToNtz
                   ? "Timestamptz → NTZ drops timezone polarity"
-                  : "Possible precision loss",
+                  : ntzToTz || timeToTimetz || dateToTz
+                    ? "Wall-clock → timezone-aware invents an offset"
+                    : jsonToString
+                      ? "Document → open string drops JSON validation domain"
+                      : stringToJson
+                        ? "Open string → document invents JSON validation domain"
+                        : intWidthNarrow
+                          ? "Integer width narrows (e.g. INT64 → INT) — values may truncate"
+                          : "Possible precision loss",
           detail: floatToDecimal
             ? `${srcTypeRaw} → ${destCarrier}: keep FLOAT/DOUBLE on the destination, or accept rounding risk and approve on Validate.`
             : decimalToFloat
@@ -341,7 +399,9 @@ export function detectTypeRisks(
         column: m.source,
         severity: "block",
         title: "String enum cannot map to BOOLEAN",
-        detail: m.existsInDestination
+        detail: m.assignmentStrategy === "pending_dest_schema"
+          ? `Sample "${(m.sample || "").slice(0, 40)}" looks like a status label — load destination schema first; Widen is not available until create-new is proven.`
+          : m.existsInDestination === true
           ? `Sample "${(m.sample || "").slice(0, 40)}" is a status label but destination column already exists as BOOLEAN — remap to a VARCHAR column or ALTER the destination. Mapping Widen alone will not change DDL.`
           : `Sample "${(m.sample || "").slice(0, 40)}" looks like a status label — use VARCHAR (Widen → VARCHAR), not Cast boolean.`,
       });

@@ -5,13 +5,42 @@ stream and the resume/retry flow can read them from the same record.  A
 checkpoint captures the last successfully committed chunk and the cursor that
 must be used to read the *next* chunk.  This makes resume deterministic:
 re-read from `cursor_after` (or `offset`) instead of starting over.
+
+Fail-closed
+-----------
+A rejected checkpoint write means the job has no durable resume point. Callers
+must **hard-fail** the transfer (via ``require_save`` or by raising
+``CheckpointPersistenceError``) - never continue writing while reporting healthy
+progress. Continuing without a checkpoint creates silent resume risk: a crash
+would re-read from an older cursor and risk duplicate or skipped work under
+at-least-once delivery.
 """
 
 from __future__ import annotations
 
+import logging
+from services.brand_env import getenv_brand
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+#: Hard cap on quarantine evidence carried inside a checkpoint document.
+#: The checkpoint is rewritten on every chunk and lives inside the job record,
+#: so this list is the one field that can push the document past MongoDB's
+#: 16 MB limit and break resume entirely. 500 rows is far more than an operator
+#: reads, and the exact count still lives in ``rejected_rows``.
+MAX_REJECTED_DETAILS = int(getenv_brand("MAX_REJECTED_DETAILS", "500") or 500)
+
+#: Operator-facing message when checkpoint persistence fails (fail-closed).
+CHECKPOINT_PERSISTENCE_FAILED = (
+    "Checkpoint persistence failed - refusing to continue without durable resume point."
+)
+
+
+class CheckpointPersistenceError(RuntimeError):
+    """Raised when a checkpoint cannot be durably persisted - job must abort."""
 
 
 def _now() -> str:
@@ -54,7 +83,32 @@ class Checkpoint:
     # Metadata
     updated_at: str = field(default_factory=_now)
     rejected_rows: int = 0
+    #: Bounded sample of quarantined rows. ``rejected_rows`` remains the exact
+    #: count; this list is evidence for the operator, not the ledger.
     rejected_details: list[dict[str, Any]] = field(default_factory=list)
+    #: How many rejection details were dropped once the sample cap was reached,
+    #: so the UI can say "showing N of M" instead of implying the list is whole.
+    rejected_details_truncated: int = 0
+
+    def add_rejected_details(self, details: list[dict[str, Any]] | None) -> None:
+        """Append rejection evidence, keeping the checkpoint document bounded.
+
+        The checkpoint is persisted in full on *every* chunk. An uncapped list
+        grew with the number of quarantined rows until the document crossed
+        MongoDB's 16 MB limit, at which point every subsequent checkpoint save
+        failed and the job silently lost its ability to resume - the failure
+        mode was worst exactly when the operator most needed the evidence.
+        """
+        if not details:
+            return
+        room = MAX_REJECTED_DETAILS - len(self.rejected_details)
+        if room > 0:
+            self.rejected_details.extend(details[:room])
+            overflow = len(details) - room
+        else:
+            overflow = len(details)
+        if overflow > 0:
+            self.rejected_details_truncated += overflow
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -87,6 +141,7 @@ class Checkpoint:
             "updated_at": self.updated_at,
             "rejected_rows": self.rejected_rows,
             "rejected_details": self.rejected_details,
+            "rejected_details_truncated": self.rejected_details_truncated,
         }
 
     @classmethod
@@ -101,6 +156,22 @@ class CheckpointService:
 
     def __init__(self, mongo=None) -> None:
         self.mongo = mongo
+        #: Number of checkpoint writes the store rejected or could not reach.
+        self.failed_saves = 0
+
+    @property
+    def has_failed_saves(self) -> bool:
+        """True once any checkpoint write has failed (fail-closed signal)."""
+        return self.failed_saves > 0
+
+    @property
+    def degraded(self) -> bool:
+        """Alias for ``has_failed_saves`` - checkpoint durability is broken.
+
+        Callers must abort the job when this is True; continuing without a
+        durable resume point is forbidden.
+        """
+        return self.has_failed_saves
 
     def _mongo(self):
         if self.mongo is None:
@@ -112,14 +183,41 @@ class CheckpointService:
         return self.mongo
 
     def save(self, checkpoint: Checkpoint) -> bool:
-        """Persist the checkpoint without overwriting the job status."""
+        """Persist the checkpoint without overwriting the job status.
+
+        ``update_job_status`` returns ``False`` rather than raising when the job
+        store is unreachable. Callers **must** treat ``False`` / ``has_failed_saves``
+        as a hard failure (prefer ``require_save``). Returning bool lets unit
+        tests assert the failure counter without catching exceptions.
+        """
         mongo = self._mongo()
-        return mongo.update_job_status(
+        ok = mongo.update_job_status(
             checkpoint.job_id,
             checkpoint.status,
             checkpoint=checkpoint.to_dict(),
             updated_at=datetime.now(timezone.utc),
         )
+        if not ok:
+            self.failed_saves += 1
+            if self.failed_saves == 1:
+                logger.error(
+                    "Checkpoint write failed for job %s (chunk %s, %s rows). "
+                    "%s The job store rejected or could not accept the checkpoint.",
+                    checkpoint.job_id,
+                    getattr(checkpoint, "chunk_index", "?"),
+                    getattr(checkpoint, "rows_processed", "?"),
+                    CHECKPOINT_PERSISTENCE_FAILED,
+                )
+        return ok
+
+    def require_save(self, checkpoint: Checkpoint) -> None:
+        """Persist the checkpoint or raise ``CheckpointPersistenceError``.
+
+        Transfer / stream / resilience paths use this so a failed write aborts
+        the job instead of continuing with resume risk.
+        """
+        if not self.save(checkpoint):
+            raise CheckpointPersistenceError(CHECKPOINT_PERSISTENCE_FAILED)
 
     def load(self, job_id: str) -> Checkpoint | None:
         """Load the most recent checkpoint for a job."""
@@ -143,6 +241,113 @@ class CheckpointService:
     def mark_paused(self, job_id: str, checkpoint: Checkpoint) -> bool:
         """Pause a job (retriable) and persist the checkpoint for resume."""
         return self.save(checkpoint)
+
+
+
+
+def evaluate_resume_safety(
+    checkpoint: "Checkpoint | dict | None",
+    *,
+    job: dict | None = None,
+    max_age_hours: float | None = None,
+) -> dict[str, Any]:
+    """Decide whether Resume is safe for operators.
+
+    Returns ok / age_hours / reasons / warnings. Refuses when there is no
+    durable progress token, the checkpoint is older than
+    DATAFLOW_RESUME_MAX_AGE_HOURS (when set >0), or write_mode drifted vs
+    the saved transfer request. Delivery remains at-least-once.
+    """
+    import os
+
+    out: dict[str, Any] = {
+        "ok": False,
+        "age_hours": None,
+        "reasons": [],
+        "warnings": [],
+        "checkpoint": None,
+        "honesty": (
+            "Resume continues from last committed chunk - "
+            "at-least-once upsert, not exactly-once."
+        ),
+    }
+    if checkpoint is None:
+        out["reasons"].append(
+            "No durable checkpoint - use Retry from start or re-run from Transfer Studio."
+        )
+        return out
+    cp = checkpoint if isinstance(checkpoint, Checkpoint) else Checkpoint.from_dict(checkpoint)
+    out["checkpoint"] = {
+        "chunk_index": cp.chunk_index,
+        "rows_processed": cp.rows_processed,
+        "write_mode": cp.write_mode,
+        "conflict_columns": list(cp.conflict_columns or []),
+        "updated_at": cp.updated_at,
+        "phase": cp.phase,
+        "status": cp.status,
+    }
+    has_progress = (
+        int(cp.chunk_index or 0) > 0
+        or int(cp.rows_processed or 0) > 0
+        or cp.cursor_value is not None
+        or int(cp.offset or 0) > 0
+        or int(cp.file_offset or 0) > 0
+        or bool(cp.dynamodb_cursor)
+        or bool(cp.kafka_cursor)
+        or cp.es_search_after is not None
+    )
+    if not has_progress:
+        out["reasons"].append(
+            "Checkpoint has no committed progress - refuse Resume to avoid a false restart."
+        )
+        return out
+
+    age_hours = None
+    if cp.updated_at:
+        try:
+            raw = str(cp.updated_at).replace("Z", "+00:00")
+            ts = datetime.fromisoformat(raw)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            age_hours = max(
+                0.0,
+                (datetime.now(timezone.utc) - ts.astimezone(timezone.utc)).total_seconds() / 3600.0,
+            )
+            out["age_hours"] = round(age_hours, 3)
+        except Exception:
+            out["warnings"].append("Checkpoint updated_at could not be parsed - age unknown.")
+
+    if max_age_hours is None:
+        try:
+            max_age_hours = float(os.getenv("DATAFLOW_RESUME_MAX_AGE_HOURS", "168") or "168")
+        except ValueError:
+            max_age_hours = 168.0
+    if max_age_hours and age_hours is not None and age_hours > float(max_age_hours):
+        out["reasons"].append(
+            f"Checkpoint is {age_hours:.1f}h old (max {max_age_hours:g}h) - "
+            "refuse stale Resume; Retry from start or re-Validate."
+        )
+        return out
+
+    job = job or {}
+    payload = job.get("transfer_request") if isinstance(job.get("transfer_request"), dict) else {}
+    req_mode = str(payload.get("write_mode") or payload.get("load_mode") or "").strip().lower()
+    cp_mode = str(cp.write_mode or "").strip().lower()
+    if req_mode and cp_mode and req_mode != cp_mode and req_mode not in {"", "auto"}:
+        out["reasons"].append(
+            f"Write mode drifted (checkpoint={cp_mode}, request={req_mode}) - refuse unsafe Resume."
+        )
+        return out
+
+    if str(job.get("status") or "").lower() in {"running", "pending"}:
+        out["warnings"].append("Job already running/pending - Resume may be a no-op or race.")
+
+    out["ok"] = True
+    if age_hours is not None and age_hours > 24:
+        out["warnings"].append(
+            f"Checkpoint is {age_hours:.1f}h old - confirm destination still matches before Resume."
+        )
+    return out
 
 
 def get_checkpoint_service(mongo=None) -> CheckpointService:

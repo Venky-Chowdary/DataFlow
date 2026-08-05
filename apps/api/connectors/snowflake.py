@@ -32,6 +32,17 @@ def test_snowflake(
             error="Provide account (host) + username or a Snowflake connection string",
         )
 
+    wh = ""
+    if warehouse:
+        # Identifier-quote only — never interpolate raw operator input into SQL.
+        wh = warehouse.strip().strip('"').replace('"', "")
+        if not wh or not all(c.isalnum() or c in ("_", "$") for c in wh):
+            return ConnectResult(
+                ok=False,
+                tables=[],
+                error="Invalid Snowflake warehouse identifier",
+            )
+
     conn = None
     try:
         conn = get_connection(
@@ -40,13 +51,13 @@ def test_snowflake(
             password=password,
             database=database,
             schema=schema or "PUBLIC",
-            warehouse=warehouse,
+            warehouse=wh,
             connection_string=connection_string,
             role=role,
         )
         with conn.cursor() as cur:
-            if warehouse:
-                cur.execute(f"USE WAREHOUSE {warehouse}")
+            if wh:
+                cur.execute(f'USE WAREHOUSE "{wh}"')
             cur.execute(
                 """
                 SELECT table_name

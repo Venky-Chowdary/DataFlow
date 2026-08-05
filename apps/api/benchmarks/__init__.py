@@ -1,1 +1,1 @@
-"""Optional scale and correctness benchmarks for DataFlow."""
+"""Optional scale and correctness benchmarks for Datawrap."""

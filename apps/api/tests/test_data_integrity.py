@@ -183,6 +183,37 @@ def test_integrity_balanced_still_blocks_dupes_on_upsert():
     assert dup_check.get("warnings") or dup_check.get("issues")
 
 
+def test_integrity_source_probe_blocks_even_balanced_append():
+    """Full-table probe findings must keep Validate red after Quarantine/balanced."""
+    # Clean sample (would pass sample-only) + probe says 153 keys repeat.
+    rows = [{"id": "unique-a"}, {"id": "unique-b"}, {"id": "unique-c"}]
+    mappings = [{"source": "id", "target": "id", "confidence": 0.99, "primary_key": True}]
+    findings = [
+        {"value": "507f1f77bcf86cd799439011", "count": 4},
+        {"value": "507f1f77bcf86cd799439012", "count": 3},
+    ]
+    report = run_integrity_audit(
+        source_columns=["id"],
+        mappings=mappings,
+        sample_rows=rows,
+        validation_mode="balanced",
+        destination_db_type="postgresql",
+        sync_mode="full_refresh_append",
+        contract_primary_key="id",
+        source_duplicate_findings=findings,
+        source_duplicate_probe_ran=True,
+        source_duplicate_probe_pk="id",
+    )
+    dup_check = next((c for c in report["checks"] if c["check"] == "duplicate_keys"), None)
+    assert dup_check is not None
+    assert dup_check["blocks_transfer"] is True
+    assert dup_check["passed"] is False
+    assert report["blocks_transfer"] is True
+    joined = " ".join(dup_check.get("issues") or [])
+    assert "source probe" in joined.lower()
+    assert "Strip/Quarantine cannot fix" in (dup_check.get("note") or "")
+
+
 # ── Coercion safety ──────────────────────────────────────────────────────────
 
 def test_integrity_blocks_lossy_coercion():
@@ -201,8 +232,8 @@ def test_integrity_blocks_lossy_coercion():
     assert coercion["blocks_transfer"] is True
 
 
-def test_integrity_allows_varchar_to_number_when_samples_coerce():
-    """JSON/CSV numeric strings onto Snowflake NUMBER must not false-block G5."""
+def test_integrity_blocks_varchar_to_number_without_risk_ack():
+    """Declared VARCHAR→NUMBER is lossy — sample soft-pass requires Accept risk (G3)."""
     mappings = [{
         "source": "population",
         "target": "population",
@@ -226,13 +257,81 @@ def test_integrity_allows_varchar_to_number_when_samples_coerce():
     )
     coercion = next((c for c in report["checks"] if c["check"] == "coercion_safety"), None)
     assert coercion is not None
+    assert coercion["blocks_transfer"] is True
+
+
+def test_integrity_sample_clears_varchar_to_number_with_risk_ack():
+    """With a continue-policy Risk Contract, clean samples may clear the coercion block."""
+    from services.migration_risk_contract import create_migration_risk_contract
+
+    contract = create_migration_risk_contract(
+        column="population",
+        source_type="VARCHAR",
+        destination_type="NUMBER(38,0)",
+        approved_by="admin@dataflow.app",
+        reason="Numeric VARCHAR population cast",
+        execution_policy="CAST_AND_CONTINUE",
+    ).to_dict()
+    mappings = [{
+        "source": "population",
+        "target": "population",
+        "confidence": 0.93,
+        "transform": "none",
+        "target_type": "NUMBER(38,0)",
+        "risk_acknowledged": True,
+        "risk_contract": contract,
+    }]
+    report = run_integrity_audit(
+        source_columns=["population"],
+        target_columns=["population"],
+        mappings=mappings,
+        source_schemas=[{"name": "population", "inferred_type": "VARCHAR"}],
+        target_schemas=[{"name": "population", "inferred_type": "NUMBER(38,0)"}],
+        sample_rows=[
+            {"population": "331002651"},
+            {"population": "1402112000"},
+            {"population": "45195799"},
+        ],
+        destination_db_type="snowflake",
+        validation_mode="strict",
+    )
+    coercion = next((c for c in report["checks"] if c["check"] == "coercion_safety"), None)
+    assert coercion is not None
     assert coercion["blocks_transfer"] is False
-    assert report["blocks_transfer"] is False
+
+
+def test_integrity_boolean_ack_alone_does_not_sample_clear():
+    """GA: bare risk_acknowledged must not soft-pass G9 coercion_safety."""
+    mappings = [{
+        "source": "population",
+        "target": "population",
+        "confidence": 0.93,
+        "transform": "none",
+        "target_type": "NUMBER(38,0)",
+        "risk_acknowledged": True,
+    }]
+    report = run_integrity_audit(
+        source_columns=["population"],
+        target_columns=["population"],
+        mappings=mappings,
+        source_schemas=[{"name": "population", "inferred_type": "VARCHAR"}],
+        target_schemas=[{"name": "population", "inferred_type": "NUMBER(38,0)"}],
+        sample_rows=[
+            {"population": "331002651"},
+            {"population": "1402112000"},
+        ],
+        destination_db_type="snowflake",
+        validation_mode="strict",
+    )
+    coercion = next((c for c in report["checks"] if c["check"] == "coercion_safety"), None)
+    assert coercion is not None
+    assert coercion["blocks_transfer"] is True
 
 
 # ── Mapping confidence ───────────────────────────────────────────────────────
 
-def test_integrity_blocks_low_confidence_in_strict_mode():
+def test_integrity_reports_low_confidence_without_blocking():
+    """Module 3: G9 reports confidence; G4 owns the hard block."""
     mappings = [{"source": "AMT", "target": "amount", "confidence": 0.55}]
     report = run_integrity_audit(
         source_columns=["AMT"],
@@ -242,7 +341,29 @@ def test_integrity_blocks_low_confidence_in_strict_mode():
     )
     conf = next((c for c in report["checks"] if c["check"] == "mapping_confidence"), None)
     assert conf is not None
-    assert conf["blocks_transfer"] is True
+    assert conf["blocks_transfer"] is False
+    assert conf.get("authority") == "g4_mapping_confidence"
+    assert conf.get("warnings") or conf.get("issues")
+
+
+def test_integrity_honors_user_override_like_g4():
+    """Approved Map overrides must not be re-blocked by G9 confidence."""
+    mappings = [{
+        "source": "companyNumEmployees",
+        "target": "company_number_employees",
+        "confidence": 0.82,
+        "user_override": True,
+    }]
+    report = run_integrity_audit(
+        source_columns=["companyNumEmployees"],
+        mappings=mappings,
+        sample_rows=[{"companyNumEmployees": "1000"}],
+        validation_mode="strict",
+    )
+    conf = next((c for c in report["checks"] if c["check"] == "mapping_confidence"), None)
+    assert conf is not None
+    assert conf["blocks_transfer"] is False
+    assert conf["passed"] is True
 
 
 def test_integrity_balanced_mode_allows_moderate_confidence():

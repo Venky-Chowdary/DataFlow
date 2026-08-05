@@ -50,9 +50,13 @@ def test_apply_json_and_boolean():
     assert err is None
     assert val == '{"b":2,"a":1}'
 
-    bool_val, bool_err = apply_transform("yes", "boolean")
+    bool_val, bool_err = apply_transform("true", "boolean")
     assert bool_err is None
     assert bool_val is True
+    # Informal yes/on must not invent TRUE (type_system / bind SSOT).
+    yes_val, yes_err = apply_transform("yes", "boolean")
+    assert yes_val is None
+    assert yes_err is not None
 
 
 def test_apply_integer_rejects_fractional_value():

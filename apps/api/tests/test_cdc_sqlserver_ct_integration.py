@@ -10,6 +10,7 @@ Requires:
 from __future__ import annotations
 
 import os
+from services.brand_env import getenv_brand
 import socket
 import sys
 import uuid
@@ -29,11 +30,11 @@ from connectors.sqlserver_change_stream import (  # noqa: E402
 
 def _sqlserver_cfg() -> dict:
     return {
-        "host": os.environ.get("DATAFLOW_SQLSERVER_HOST", "localhost"),
-        "port": int(os.environ.get("DATAFLOW_SQLSERVER_PORT", "1433") or 1433),
-        "database": os.environ.get("DATAFLOW_SQLSERVER_DATABASE", "dataflow"),
-        "username": os.environ.get("DATAFLOW_SQLSERVER_USER", "sa"),
-        "password": os.environ.get("DATAFLOW_SQLSERVER_PASSWORD", "DataFlow_CDC_2022!"),
+        "host": getenv_brand("SQLSERVER_HOST", "localhost"),
+        "port": int(getenv_brand("SQLSERVER_PORT", "1433") or 1433),
+        "database": getenv_brand("SQLSERVER_DATABASE", "dataflow"),
+        "username": getenv_brand("SQLSERVER_USER", "sa"),
+        "password": getenv_brand("SQLSERVER_PASSWORD", "Datawrap_CDC_2022!"),
         "connection_string": "",
         "ssl": False,
     }
@@ -49,14 +50,14 @@ def _sqlserver_ct_ready() -> bool:
             pass
     except OSError:
         return False
-    if os.environ.get("DATAFLOW_SQLSERVER_ENABLE", "").strip().lower() not in {
+    if getenv_brand("SQLSERVER_ENABLE", "").strip().lower() not in {
         "1",
         "true",
         "yes",
     } and host == "localhost":
         # Default-localhost integration still allowed without explicit enable.
         pass
-    elif not os.environ.get("DATAFLOW_SQLSERVER_ENABLE", "").strip():
+    elif not getenv_brand("SQLSERVER_ENABLE", "").strip():
         return False
     try:
         cdc = SqlServerChangeTrackingCdc(

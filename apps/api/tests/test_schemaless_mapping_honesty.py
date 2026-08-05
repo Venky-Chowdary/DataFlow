@@ -87,6 +87,34 @@ def test_redshift_ddl_not_postgres_jsonb():
     assert ddl_type("redshift", "FLOAT") == "DOUBLE PRECISION"
 
 
+def test_materialize_never_invents_illegal_dest_tokens():
+    """Pass-through must not emit CREATE types the destination cannot accept.
+
+    Map stamps that are already native (SUPER, JSONB, VARIANT, UUID on PG) stay.
+    Logical aliases (json/uuid) rematerialize to create-new wire.
+    """
+    from services.type_system import materialize_dest_ddl
+
+    # Redshift — no JSON / UUID types.
+    assert materialize_dest_ddl("redshift", "json") == "SUPER"
+    assert materialize_dest_ddl("redshift", "JSON") == "SUPER"
+    assert materialize_dest_ddl("redshift", "uuid") == "VARCHAR(36)"
+    assert materialize_dest_ddl("redshift", "SUPER") == "SUPER"
+    assert materialize_dest_ddl("redshift", "VARCHAR(36)") == "VARCHAR(36)"
+
+    # PostgreSQL — create-new document wire is JSONB; UUID is native.
+    assert materialize_dest_ddl("postgresql", "json") == "JSONB"
+    assert materialize_dest_ddl("postgresql", "JSONB") == "JSONB"
+    assert materialize_dest_ddl("postgresql", "UUID") == "UUID"
+
+    # Snowflake / BigQuery — never invent bare UUID or JSON where illegal.
+    assert materialize_dest_ddl("snowflake", "json").upper() == "VARIANT"
+    assert "VARCHAR" in materialize_dest_ddl("snowflake", "UUID").upper()
+    assert materialize_dest_ddl("bigquery", "UUID").upper() == "STRING(36)"
+    assert materialize_dest_ddl("bigquery", "JSON") == "JSON"
+    assert materialize_dest_ddl("mysql", "JSON") == "JSON"
+
+
 def test_generic_sql_float_is_double():
     from connectors.generic_sql import _sa_type_for_logical
     import sqlalchemy as sa

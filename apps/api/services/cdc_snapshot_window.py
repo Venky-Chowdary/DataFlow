@@ -25,15 +25,29 @@ _PK_SEP = "\x1f"
 
 
 def _pk_columns(primary_key: str | Sequence[str]) -> list[str]:
+    """Normalize a primary key declaration into an ordered column list.
+
+    Accepts a list/tuple of columns, or a single string that is either one
+    column or a comma-/semicolon-joined composite (``order_id,line_id``). The
+    streaming CDC path and the incremental-snapshot path share this helper so
+    a composite key cannot be treated as one literal column name in one place
+    and as a list in another — that mismatch is what made CDC silently fall
+    through to append-only writes with zero deletes.
+    """
     if isinstance(primary_key, (list, tuple)):
         cols = [str(c).strip() for c in primary_key if str(c).strip()]
         if not cols:
             raise ValueError("primary_key list must contain at least one column")
         return cols
-    col = str(primary_key or "").strip()
-    if not col:
+    raw = str(primary_key or "").strip()
+    if not raw:
         raise ValueError("primary_key is required")
-    return [col]
+    if "," in raw or ";" in raw:
+        cols = [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
+        if not cols:
+            raise ValueError("primary_key is required")
+        return cols
+    return [raw]
 
 
 def _row_get(row: dict[str, Any], col: str) -> Any:
@@ -60,6 +74,48 @@ def _pk_row_dict(primary_key: str | Sequence[str], key: str) -> dict[str, Any]:
         return {cols[0]: key}
     parts = key.split(_PK_SEP)
     return {cols[i]: (parts[i] if i < len(parts) else None) for i in range(len(cols))}
+
+
+def keyset_successor_predicate(
+    quoted_pk_columns: Sequence[str],
+    last_pk: str,
+    placeholder: str = "%s",
+) -> tuple[str, list[Any]]:
+    """Build a strict lexicographic ``> last_pk`` predicate for a chunk read.
+
+    For key columns ``(a, b, c)`` this produces::
+
+        (a > ?) OR (a = ? AND b > ?) OR (a = ? AND b = ? AND c > ?)
+
+    which is the only correct successor for a composite ordering — a naive
+    ``a > ?`` would skip every remaining row sharing the last chunk's leading
+    key value, and a per-column ``AND`` chain would skip rows that differ only
+    in the trailing column.
+
+    Shared by the MySQL and Postgres incremental-snapshot readers so both agree
+    on chunk boundaries and on the ``_PK_SEP`` encoding of ``last_pk``.
+
+    Raises ``ValueError`` when ``last_pk`` does not carry one part per key
+    column, because a silent arity mismatch would read the wrong range.
+    """
+    cols = list(quoted_pk_columns)
+    if not cols:
+        raise ValueError("keyset predicate requires at least one primary key column")
+    parts = last_pk.split(_PK_SEP) if len(cols) > 1 else [last_pk]
+    if len(parts) != len(cols):
+        raise ValueError(
+            f"composite last_pk arity mismatch: expected {len(cols)} parts, "
+            f"got {len(parts)}"
+        )
+    clauses: list[str] = []
+    params: list[Any] = []
+    for i, col in enumerate(cols):
+        equalities = " AND ".join(f"{cols[j]} = {placeholder}" for j in range(i))
+        greater = f"{col} > {placeholder}"
+        clauses.append(f"({greater})" if not equalities else f"({equalities} AND {greater})")
+        params.extend(parts[:i])
+        params.append(parts[i])
+    return " OR ".join(clauses), params
 
 
 @dataclass

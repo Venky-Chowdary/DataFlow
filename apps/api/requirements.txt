@@ -92,3 +92,12 @@ responses>=0.24.0  # HTTP mocking for SaaS connector tests
 urllib3>=2.6.3
 python-dotenv>=1.2.2
 
+# OpenTelemetry — opt-in via DATAFLOW_ENABLE_TRACING=1. The product boots
+# without these packages (services.tracing falls back to no-op spans), but a
+# production deploy that wants APM must install them. Declared here so a
+# default `pip install -r requirements.txt` is enough; previously they only
+# arrived transitively via the optional chromadb / RAG stack.
+opentelemetry-api>=1.27.0,<2
+opentelemetry-sdk>=1.27.0,<2
+opentelemetry-exporter-otlp-proto-http>=1.27.0,<2
+

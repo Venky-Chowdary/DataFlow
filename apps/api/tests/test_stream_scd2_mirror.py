@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from services.brand_env import getenv_brand
 import sqlite3
 import sys
 import tempfile
@@ -28,7 +29,7 @@ def _endpoint(path: Path, table: str):
     )
 
 
-@pytest.mark.skipif(os.getenv("DATAFLOW_SKIP_SQLITE") == "1", reason="SQLite tests disabled")
+@pytest.mark.skipif(getenv_brand("SKIP_SQLITE") == "1", reason="SQLite tests disabled")
 def test_stream_scd2_sqlite_to_sqlite():
     fd, db_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
@@ -71,7 +72,7 @@ def test_stream_scd2_sqlite_to_sqlite():
         Path(db_path).unlink(missing_ok=True)
 
 
-@pytest.mark.skipif(os.getenv("DATAFLOW_SKIP_SQLITE") == "1", reason="SQLite tests disabled")
+@pytest.mark.skipif(getenv_brand("SKIP_SQLITE") == "1", reason="SQLite tests disabled")
 def test_stream_mirror_sqlite_to_sqlite():
     fd, db_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)

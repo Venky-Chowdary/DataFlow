@@ -1,9 +1,10 @@
-"""Build full context for Data Pilot — every data source in the platform."""
+"""Build full context for Datawrap Pilot — every data source in the platform."""
 
 from __future__ import annotations
 
 import os
 
+from services.brand_env import getenv_brand
 from .data_analyst import get_data_analyst
 
 
@@ -32,7 +33,7 @@ class PilotContextBuilder:
         jobs = self._safe_jobs()
         capabilities = self._safe_capabilities()
         # RAG is optional — hub/embedding init must never block chat.
-        rag_on = (os.environ.get("DATAFLOW_PILOT_RAG") or "").lower() in {"1", "true", "on", "yes"}
+        rag_on = (getenv_brand("PILOT_RAG") or "").lower() in {"1", "true", "on", "yes"}
         rag_snippets = self._safe_rag(message) if rag_on else []
 
         dataset_summaries = []

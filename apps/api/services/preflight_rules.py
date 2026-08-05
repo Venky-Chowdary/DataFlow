@@ -1,6 +1,6 @@
 """Preflight rulebook and user-facing remediation guidance.
 
-Defines the data-governance rules for DataFlow preflight: what blocks a
+Defines the data-governance rules for Datawrap preflight: what blocks a
 transfer, why it blocks, and what the user can do to fix it.  Aligned with the
 universal data-transfer orchestration framework: hard gates block commits,
 soft gates inform confidence, and every blocker carries a concrete
@@ -31,6 +31,7 @@ HARD_GATE_IDS = {
     "g9_data_integrity",
     "g9_sync_contract",
     "schema_drift",
+    "constraint_fk",
     "proof_bundle",
 }
 
@@ -48,10 +49,10 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
     "g1_source": {
         "title": "Source connectivity",
         "category": "hard",
-        "why": "DataFlow cannot read the source. Without a readable source there is nothing to transfer.",
+        "why": "Datawrap cannot read the source. Without a readable source there is nothing to transfer.",
         "fix": "Check the host/port/credentials, ensure the source is online, and that the chosen table/file/collection exists and is accessible.",
         "examples": [
-            "PostgreSQL connection refused → whitelist the DataFlow host or start the database.",
+            "PostgreSQL connection refused → whitelist the Datawrap host or start the database.",
             "S3 bucket not found → verify the bucket name, region, and access key.",
             "CSV parse error → open the file in a text editor and remove malformed quoted lines.",
         ],
@@ -63,7 +64,7 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         "title": "Destination write access",
         "category": "hard",
         "why": (
-            "DataFlow can connect but cannot prove write privileges on the destination "
+            "Datawrap can connect but cannot prove write privileges on the destination "
             "(INSERT/CREATE, index/write, SET, produce, PutObject). Writes would fail or "
             "silently skip. Privilege probes never mutate operator data."
         ),
@@ -138,7 +139,7 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         "why": "The target table or collection cannot accept the data as mapped. This could be a duplicate primary key, a missing column, a width overflow, or a NOT-NULL constraint.",
         "fix": (
             "Fix every listed issue before Run: remap columns, enable create-new / "
-            "backfill so DataFlow can ADD COLUMN, widen types, or clean source samples. "
+            "backfill so Datawrap can ADD COLUMN, widen types, or clean source samples. "
             "Do not Execute until this gate is green — warehouse errors after Run are too late."
         ),
         "examples": [
@@ -156,7 +157,7 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         "title": "Capacity / staging",
         "category": "soft",
         "why": "The local staging volume may not have enough free space to stage the transfer.",
-        "fix": "Free disk space on the DataFlow host, reduce the batch size, or write directly to the destination without local staging.",
+        "fix": "Free disk space on the Datawrap host, reduce the batch size, or write directly to the destination without local staging.",
         "examples": [
             "A 100 GB export needs at least 300 GB staging free space. Clear old exports or mount a larger volume.",
         ],
@@ -235,6 +236,29 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
             {"kind": "review_mappings", "label": "Re-map drifted columns"},
         ],
     },
+    "constraint_fk": {
+        "title": "Foreign key / referential integrity",
+        "category": "hard",
+        "why": (
+            "FK mapping coverage is incomplete and/or an orphan probe found missing "
+            "parents. Strict/maximum mode fails closed. Sample orphan probe never "
+            "equals population RI; proven requires opt-in population orphan scan."
+        ),
+        "fix": (
+            "Map unmapped FK columns, fix missing parent rows / load order, run the "
+            "opt-in population orphan scan when you need RI proven, or acknowledge "
+            "FK risk for this run (audit trail required). Acknowledgement clears the "
+            "block but never claims referential integrity proven."
+        ),
+        "examples": [
+            "Mapped table has customer_id FK → customers.id but customer_id is unmapped.",
+            "Sample orphan probe: customer_id values missing from customers.id.",
+        ],
+        "suggested_actions": [
+            {"kind": "map_column", "label": "Map foreign-key columns"},
+            {"kind": "review_mappings", "label": "Review mappings"},
+        ],
+    },
 }
 
 
@@ -294,7 +318,7 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         "keywords": ["ambiguous mapping"],
         "gate": "g4_mapping_confidence",
         "why": "Two or more target columns are equally plausible for a source column, so the winner is uncertain.",
-        "fix": "Manually select the correct target column in the mapping panel. If the ambiguity is a false positive because the target uses '_id' vs 'id' or another common alias, DataFlow will learn the alias.",
+        "fix": "Manually select the correct target column in the mapping panel. If the ambiguity is a false positive because the target uses '_id' vs 'id' or another common alias, Datawrap will learn the alias.",
         "examples": ["'_id' mapped to 'id' with a low gap between alternatives."],
     },
     {
@@ -384,7 +408,7 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
             "exist on the destination table yet."
         ),
         "fix": (
-            "Go back to Map and confirm create-new columns. Re-run so DataFlow can "
+            "Go back to Map and confirm create-new columns. Re-run so Datawrap can "
             "ADD COLUMN for create_compatible_new mappings, or remap onto an existing "
             "compatible column. Enable 'backfill new fields' if you added columns manually."
         ),
@@ -423,7 +447,7 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
             "create_compatible_new target was written before ALTER TABLE ADD COLUMN."
         ),
         "fix": (
-            "Confirm create-new mappings on Map, re-run so DataFlow ADDs the column, "
+            "Confirm create-new mappings on Map, re-run so Datawrap ADDs the column, "
             "or enable backfill new fields / remap to an existing column."
         ),
         "examples": [
@@ -471,7 +495,7 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
             "typically a create-new mapping without schema evolution."
         ),
         "fix": (
-            "Re-run so DataFlow can ADD the missing column for create_compatible_new, "
+            "Re-run so Datawrap can ADD the missing column for create_compatible_new, "
             "enable backfill new fields, or remap onto an existing Oracle column."
         ),
         "examples": [
@@ -484,7 +508,7 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         "gate": "g6_target_ddl",
         "why": "The mapping references a target column that does not exist and the destination cannot be altered.",
         "fix": (
-            "Enable backfill new fields / create-new so DataFlow can ADD COLUMN, allow "
+            "Enable backfill new fields / create-new so Datawrap can ADD COLUMN, allow "
             "create table for new targets, or map only to existing columns."
         ),
         "examples": ["Target 'email' does not exist in the existing table."],
@@ -500,7 +524,7 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         "keywords": ["unmapped"],
         "gate": "g4_mapping_confidence",
         "why": "A source column has no target, or a target column has no source.",
-        "fix": "Map the column explicitly, or leave it unmapped if it is not needed. For an unknown target, DataFlow will create identity columns automatically.",
+        "fix": "Map the column explicitly, or leave it unmapped if it is not needed. For an unknown target, Datawrap will create identity columns automatically.",
         "examples": ["'notes' source column has no mapped target."],
     },
     {
@@ -518,13 +542,103 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         "examples": ["A new 'status' column appeared in the source."],
     },
     {
-        "keywords": ["replacement character", "encoding", "format-control character"],
+        "keywords": ["foreign key", "fk_column_unmapped", "destination_fk_metadata"],
+        "gate": "constraint_fk",
+        "why": (
+            "Destination FK columns are undeclared in the mapping. Schema FK metadata "
+            "coverage is incomplete — population orphan detection is not claimed."
+        ),
+        "fix": (
+            "Map the FK columns, confirm parent rows exist, or acknowledge FK risk for "
+            "this run with an audit reason."
+        ),
+        "examples": ["customer_id FK unmapped under strict validation."],
+        "suggested_actions": [
+            {"kind": "map_column", "label": "Map foreign-key columns"},
+            {"kind": "review_mappings", "label": "Review mappings"},
+        ],
+    },
+    {
+        "keywords": [
+            "fk_orphan_in_sample",
+            "sample orphan",
+            "sample_orphan_probe",
+            "missing from",
+            "population ri not proven",
+        ],
+        "gate": "constraint_fk",
+        "why": (
+            "Sample orphan probe found child FK values with no matching parent key "
+            "in the Validate sample scope. This is not population RI proof."
+        ),
+        "fix": (
+            "Fix missing parent rows or load order, remap the FK, run the opt-in "
+            "population orphan scan for RI proven, or acknowledge FK risk for this "
+            "run (never claims RI proven)."
+        ),
+        "examples": [
+            "Sample orphan probe: 2/10 customer_id values missing from customers.id.",
+        ],
+        "suggested_actions": [
+            {
+                "kind": "fix_orphans",
+                "label": "Fix parent rows / load order",
+            },
+            {
+                "kind": "run_population_orphan_scan",
+                "label": "Run population orphan scan",
+            },
+            {"kind": "review_mappings", "label": "Review FK mapping"},
+        ],
+    },
+    {
+        "keywords": [
+            "fk_orphan_in_population",
+            "population orphan",
+            "population_orphan_probe",
+            "composite_fk_not_probed",
+        ],
+        "gate": "constraint_fk",
+        "why": (
+            "Population orphan scan found missing parents or could not complete "
+            "(e.g. composite FK). Referential integrity is not proven."
+        ),
+        "fix": (
+            "Fix orphan rows at source, complete a full population scan for every "
+            "FK, or acknowledge FK risk. Never treat sample Validate as RI proven."
+        ),
+        "examples": [
+            "Population orphan scan: 12 rows in orders.customer_id missing from customers.id.",
+        ],
+        "suggested_actions": [
+            {
+                "kind": "fix_orphans",
+                "label": "Fix parent rows / load order",
+            },
+            {"kind": "review_mappings", "label": "Review FK mapping"},
+        ],
+    },
+    {
+        # Do NOT match bare "encoding" — column names like encoding_id would
+        # steal type-mismatch CTAs into Fix bad data (Strip cannot cast types).
+        "keywords": [
+            "replacement character",
+            "format-control character",
+            "format-control",
+            "encoding anomaly",
+            "character encoding",
+            "u+200b",
+            "zero-width",
+        ],
         "gate": "g5_dry_run",
         "why": "The sample contains replacement characters or invisible format/control characters (zero-width spaces, null bytes, etc.) that warehouses often reject.",
         "fix": "Open Fix bad data and choose Strip control characters (applies strip_controls), or quarantine affected rows. In balanced mode this is a warning; strict mode blocks until sanitized.",
         "examples": [
             "Zero-width space U+200B in a MongoDB string field.",
             "Null byte U+0000 in a scraped HTML description (also breaks Postgres COPY).",
+        ],
+        "suggested_actions": [
+            {"kind": "open_bad_data_fix", "label": "Fix bad data…"},
         ],
     },
     {
@@ -551,14 +665,14 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
     {
         "keywords": ["source not connected", "source error"],
         "gate": "g1_source",
-        "why": "DataFlow cannot connect to or read the source.",
+        "why": "Datawrap cannot connect to or read the source.",
         "fix": "Check the connection settings, credentials, network, and that the source object exists.",
         "examples": ["PostgreSQL connection refused."],
     },
     {
         "keywords": ["destination not reachable", "destination error", "authentication failed"],
         "gate": "g2_destination",
-        "why": "DataFlow cannot authenticate to or reach the destination — Validate blocks before any write.",
+        "why": "Datawrap cannot authenticate to or reach the destination — Validate blocks before any write.",
         "fix": (
             "Open Connectors → edit the destination → set Auth source (often `admin` for Railway/Atlas MongoDB) "
             "and re-enter username/password if needed → click Test until it passes → return to Transfer and Re-validate. "
@@ -576,16 +690,33 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
 # Helpers
 # ═══════════════════════════════════════════════════════════════════════════
 def _match_issue(message: str) -> dict[str, Any] | None:
-    """Return the first catalog entry that matches the issue message."""
+    """Return the best catalog entry for the issue message.
+
+    Prefer the longest keyword match so specific remediations (encoding → Fix
+    bad data) beat broad gate summaries (dry-run / integrity failed → Map).
+    """
     lower = message.lower()
+    best: dict[str, Any] | None = None
+    best_score = -1
     for entry in ISSUE_CATALOG:
+        score = -1
         for kw in entry.get("keywords", []):
-            if kw.lower() in lower:
-                return entry
+            k = kw.lower()
+            if k in lower:
+                score = max(score, len(k))
         pattern = entry.get("pattern")
         if pattern and re.search(pattern, message, re.IGNORECASE):
-            return entry
-    return None
+            # Pattern matches are moderately specific; don't beat long keywords.
+            score = max(score, 24)
+        if score < 0:
+            continue
+        # Prefer remediations with a concrete CTA over broad gate summaries.
+        if entry.get("suggested_actions"):
+            score += 100
+        if score > best_score:
+            best_score = score
+            best = entry
+    return best if best_score >= 0 else None
 
 
 def explain_issue(
@@ -611,15 +742,58 @@ def explain_issue(
         ),
         "examples": entry.get("examples", []),
         "severity": entry.get("severity", "warning"),
-        "suggested_actions": [],
+        "suggested_actions": entry.get("suggested_actions", []),
     }
 
 
 def explain_gate(gate_id: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return the rule for a gate failure."""
+    details = details or {}
+    coverage = str(details.get("coverage") or "").lower()
+    # Module 4 residual: orphan coverage must not get the "Map FK columns" CTA alone.
+    if gate_id == "constraint_fk" and coverage in {
+        "sample_orphan_probe",
+        "population_orphan_probe",
+    }:
+        orphan_msg = message or coverage
+        issue_match = explain_issue(orphan_msg, dest_kind="", validation_mode="balanced")
+        if not issue_match.get("suggested_actions") or all(
+            (a.get("kind") == "map_column") for a in (issue_match.get("suggested_actions") or [])
+        ):
+            issue_match = explain_issue(
+                f"{coverage} orphan probe {message}",
+                dest_kind="",
+                validation_mode="balanced",
+            )
+        rule = PREFLIGHT_GATE_RULES.get(gate_id) or {}
+        return {
+            "gate": gate_id,
+            "title": rule.get("title") or "Foreign key / referential integrity",
+            "category": rule.get("category", "hard"),
+            "why": issue_match.get("why") or rule.get("why", ""),
+            "fix": issue_match.get("fix") or rule.get("fix", ""),
+            "examples": issue_match.get("examples") or rule.get("examples", []),
+            "suggested_actions": issue_match.get("suggested_actions") or [
+                {"kind": "fix_orphans", "label": "Fix parent rows / load order"},
+                {"kind": "run_population_orphan_scan", "label": "Run population orphan scan"},
+            ],
+        }
+    # Prefer issue-catalog match so encoding/nulls beat generic gate CTAs.
+    issue_match = explain_issue(message, dest_kind="", validation_mode="balanced")
+    if issue_match.get("suggested_actions"):
+        rule = PREFLIGHT_GATE_RULES.get(gate_id) or {}
+        return {
+            "gate": gate_id or issue_match.get("gate", "general"),
+            "title": rule.get("title") or issue_match.get("gate", "Issue"),
+            "category": rule.get("category", "hard"),
+            "why": issue_match.get("why") or rule.get("why", ""),
+            "fix": issue_match.get("fix") or rule.get("fix", ""),
+            "examples": issue_match.get("examples") or rule.get("examples", []),
+            "suggested_actions": issue_match["suggested_actions"],
+        }
     rule = PREFLIGHT_GATE_RULES.get(gate_id)
     if not rule:
-        return explain_issue(message, dest_kind="", validation_mode="balanced")
+        return issue_match
     return {
         "gate": gate_id,
         "title": rule["title"],
@@ -641,15 +815,47 @@ def enrich_blockers(
     enriched: list[dict[str, Any]] = []
     for b in blockers:
         gate_id = b.get("id") or b.get("gate") or "general"
-        guidance = explain_gate(gate_id, b.get("message", ""), b.get("details"))
-        # Also explain nested issues if present
         details = b.get("details") or {}
+        # Fold only encoding-integrity nested lines into the gate blob.
+        # Never concatenate bare column names like encoding_id (type mismatch)
+        # or they steal Fix-bad-data over review_mappings (+100 encoding score).
+        _ENC_NESTED = (
+            "format-control",
+            "replacement character",
+            "encoding anomaly",
+            "character encoding",
+            "u+200b",
+            "zero-width",
+        )
+        nested_bits: list[str] = []
+        for key in ("issues", "errors", "issue_texts", "warnings"):
+            raw = details.get(key)
+            items = raw if isinstance(raw, list) else ([raw] if isinstance(raw, str) else [])
+            for item in items[:12]:
+                text = str(item)
+                low = text.lower()
+                if any(tok in low for tok in _ENC_NESTED):
+                    nested_bits.append(text)
+        message_blob = " ".join([str(b.get("message") or ""), *nested_bits]).strip()
+        guidance = explain_gate(gate_id, message_blob or str(b.get("message") or ""), details)
         nested = details.get("issues") or details.get("errors") or []
         if nested and isinstance(nested, list):
             guidance["details"] = [
                 explain_issue(str(item), dest_kind=dest_kind, validation_mode=validation_mode)
                 for item in nested
             ]
+            # Promote nested encoding CTAs onto the blocker when gate-level was generic.
+            if not guidance.get("suggested_actions") or all(
+                (a or {}).get("kind") == "review_mappings"
+                for a in (guidance.get("suggested_actions") or [])
+            ):
+                for nested_g in guidance["details"]:
+                    nested_actions = nested_g.get("suggested_actions") or []
+                    if any((a or {}).get("kind") == "open_bad_data_fix" for a in nested_actions):
+                        guidance["suggested_actions"] = nested_actions
+                        guidance["why"] = nested_g.get("why") or guidance.get("why")
+                        guidance["fix"] = nested_g.get("fix") or guidance.get("fix")
+                        break
         enriched.append({**b, "guidance": guidance})
     return enriched
 

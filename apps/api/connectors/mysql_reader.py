@@ -22,6 +22,7 @@ _api_root = Path(__file__).resolve().parents[1]
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
+from services import reflection_cache
 from services.value_serializer import cell_to_string
 
 
@@ -30,11 +31,19 @@ def _cell(value: Any) -> str:
 
 
 def _primary_key_columns(cur, table: str) -> list[str] | None:
-    """Return the ordered list of PRIMARY KEY columns for ``table`` if one exists."""
+    """Return the ordered list of PRIMARY KEY columns for ``table`` if one exists.
+
+    Scoped to the session's own database. Without that predicate a table name
+    that also exists in another schema on the same server returns both primary
+    keys interleaved by ordinal position, which yields a bogus ORDER BY — and a
+    non-deterministic ORDER BY is how LIMIT/OFFSET pagination silently drops
+    and duplicates rows between chunks.
+    """
     try:
         cur.execute(
             "SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE "
-            "WHERE TABLE_NAME = %s AND CONSTRAINT_NAME = 'PRIMARY' "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s "
+            "AND CONSTRAINT_NAME = 'PRIMARY' "
             "ORDER BY ORDINAL_POSITION",
             (table,),
         )
@@ -46,13 +55,21 @@ def _primary_key_columns(cur, table: str) -> list[str] | None:
     return None
 
 
-def _order_by_clause(cur, table: str, columns: list[str] | None) -> str:
+def _order_by_clause(cur, table: str, columns: list[str] | None, identity: str = "") -> str:
     """Build a deterministic ORDER BY clause for stable pagination.
 
     Uses the primary key when available; otherwise falls back to the first column
     so LIMIT/OFFSET batches are reproducible and do not drop or duplicate rows.
+
+    The primary key lookup is cached per table: a chunked read calls this once
+    per chunk and a table's key does not change underneath a running transfer.
     """
-    pk = _primary_key_columns(cur, table)
+    if identity:
+        pk = reflection_cache.get_or_load_by_identity(
+            identity, "", table, "pk_columns", lambda: _primary_key_columns(cur, table)
+        )
+    else:
+        pk = _primary_key_columns(cur, table)
     if pk:
         return ", ".join(
             quote_sql_identifier(require_safe_identifier(c, preserve_case=True), "`") for c in pk
@@ -100,7 +117,19 @@ def read_table_batch(
             else:
                 cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
                 total = int(cur.fetchone()[0])
-            order_by = _order_by_clause(cur, safe_table, columns)
+            order_by = _order_by_clause(
+                cur,
+                safe_table,
+                columns,
+                identity=reflection_cache.dsn_identity(
+                    driver="mysql",
+                    host=host,
+                    port=port,
+                    database=database,
+                    username=username,
+                    connection_string=connection_string,
+                ),
+            )
             if columns:
                 col_list = quote_column_list(
                     [require_safe_identifier(c, preserve_case=True) for c in columns],

@@ -68,6 +68,16 @@ def test_security_posture_report(client):
     assert posture["environment"] in ("production", "development")
     assert "encryption_at_rest" in posture
     assert "byok" in posture
+    assert posture["cdc_delivery"] == "at-least-once"
+    assert posture["cdc_exactly_once_claimed"] is False
+    assert posture["cdc_at_most_once_claimed"] is False
+    assert posture["cdc_honesty"]["delivery_classes"]["at_least_once"]["claimed"] is True
+    assert posture["cdc_honesty"]["delivery_classes"]["exactly_once"]["claimed"] is False
+    assert posture["cdc_honesty"]["delivery_classes"]["at_most_once"]["claimed"] is False
+    assert posture["transfer_undo_claimed"] is False
+    assert posture["recovery_honesty"]["transfer_undo_claimed"] is False
+    assert "checkpoint_fail_closed" in posture["deployment"]["data_loss_controls"]
+    assert "no_product_transfer_undo" in posture["deployment"]["data_loss_controls"]
 
     response = client.get(
         "/api/v1/workspace/security/report",
@@ -76,5 +86,5 @@ def test_security_posture_report(client):
     assert response.status_code == 200, response.text
     assert response.headers["content-type"] == "text/markdown; charset=utf-8"
     body = response.text
-    assert "DataFlow Security & Compliance Report" in body
+    assert "Datawrap Security & Compliance Report" in body
     assert posture["data_region"] in body

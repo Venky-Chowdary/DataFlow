@@ -68,6 +68,7 @@ import {
 } from "../lib/dialectDefaults";
 import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, isTransferLiveType, resolveDriverType, setTransferLiveDrivers } from "../lib/connectorTypes";
 import {
+  availableSyncModes,
   DATE_LOCALES,
   SCHEMA_POLICIES,
   SYNC_MODES,
@@ -76,6 +77,8 @@ import {
   type SchemaPolicyId,
   type SyncModeId,
   type ValidationModeId,
+  multiStreamScd2MirrorBlockCopy,
+  MULTI_STREAM_SCD2_MIRROR_BLOCK,
 } from "../lib/transferConstants";
 import { isJobSuccess } from "../lib/uiUtils";
 import {
@@ -91,12 +94,22 @@ import {
   ENGINE_TO_UI_TRANSFORM,
   engineTransformToUi,
   isEnumToBooleanConflict,
+  mappingRequiresRiskAck,
+  mergeSignedRiskContracts,
   uiTransformToEngine,
   widenMappingToVarchar,
   mappingsFromAnalysis,
   type EditableMapping,
   type MappingTransform,
 } from "../lib/mapping";
+
+/** Remediations must not clear fidelity/STRUCT risk without Accept risk. */
+function sealRemediationApproval(m: EditableMapping): EditableMapping {
+  if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) {
+    return { ...m, approved: false, requiresReview: true };
+  }
+  return m;
+}
 import {
   Connector,
   EnhancedAnalysis,
@@ -112,8 +125,13 @@ import { runLocalFileExport } from "../lib/localFileExport";
 import { runLocalPreflight } from "../lib/localPreflight";
 import { readJobEventLog } from "../lib/jobEventLog";
 import { schemaIntrospectionFailureMessage } from "../lib/preflightMessages";
-import { buildDisplayBlockers, findDuplicateKeyRoot } from "../lib/validateIssueGrouping";
-import { suggestUniqueKeyCandidates } from "../lib/uniqueKeySuggestions";
+import {
+  buildDisplayBlockers,
+  findDuplicateKeyRoot,
+  isEncodingIntegritySignal,
+} from "../lib/validateIssueGrouping";
+import { suggestUniqueKeyCandidates, suggestCompositeUniqueKeyCandidates } from "../lib/uniqueKeySuggestions";
+import { needsMappingReview } from "../lib/columnWorkbench";
 import {
   buildStreamContracts,
   seedStreamFieldsFromCandidates,
@@ -189,7 +207,7 @@ const ACCEPTED_UPLOAD_EXTENSIONS = new Set([
   "csv", "json", "jsonl", "tsv", "parquet", "pdf", "docx", "html", "htm", "xlsx", "xls", "xml",
 ]);
 const MAX_UPLOAD_BYTES = 250 * 1024 * 1024;
-const UPLOAD_FORMATS = ["JSON", "CSV", "JSONL", "TSV", "Parquet", "PDF", "DOCX", "HTML"] as const;
+const UPLOAD_FORMATS = ["JSON", "CSV", "JSONL", "TSV", "Excel", "Parquet", "PDF", "DOCX", "HTML"] as const;
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -263,6 +281,8 @@ export function TransferPage({
   const [sourceCollection, setSourceCollection] = useState("");
   const [cloudPath, setCloudPath] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  /** Shared Fix-bad-data drawer open state (Validate dashboard + rail Fix CTA). */
+  const [badDataFixOpen, setBadDataFixOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [parsed, setParsed] = useState<ParsedUpload | null>(null);
   /** Opt-in Tesseract OCR for scanned/image-only PDFs. */
@@ -325,6 +345,9 @@ export function TransferPage({
   const [validationMode, setValidationMode] = useState<ValidationMode>("strict");
   const [complianceAcknowledged, setComplianceAcknowledged] = useState(false);
   const [schemaDriftAcknowledged, setSchemaDriftAcknowledged] = useState(false);
+  const [fkRiskAcknowledged, setFkRiskAcknowledged] = useState(false);
+  /** Module 16 — opt-in population orphan scan (only path to RI proven). */
+  const [runPopulationOrphanScan, setRunPopulationOrphanScan] = useState(false);
   const [dateLocale, setDateLocale] = useState<DateLocaleId>("");
   const [backfillNewFields, setBackfillNewFields] = useState(false);
   const [writeViaStaging, setWriteViaStaging] = useState(false);
@@ -385,8 +408,11 @@ export function TransferPage({
   const [runStartupPhase, setRunStartupPhase] = useState<string>(RUN_LAUNCH_STAGES[0]);
 
   const confidenceThreshold = confidenceThresholdForMode(validationMode);
-  const mappingReviewCount = columnMappings.filter(
-    (m) => !m.approved && (m.requiresReview || m.confidence < confidenceThreshold),
+  const mappingReviewCount = columnMappings.filter((m) =>
+    needsMappingReview(m, confidenceThreshold),
+  ).length;
+  const riskAckPendingCount = columnMappings.filter(
+    (m) => mappingRequiresRiskAck(m) && !m.riskAcknowledged,
   ).length;
   const duplicateKeyRoot = useMemo(
     () => findDuplicateKeyRoot(preflight, syncMode),
@@ -504,6 +530,17 @@ export function TransferPage({
     destDriverType === "weaviate" ||
     destDriverType === "pinecone" ||
     destDriverType === "milvus";
+
+  const writeViaStagingSupported = [
+    "postgresql", "mysql", "sqlite", "sqlserver", "mssql", "oracle",
+    "snowflake", "redshift", "bigquery", "duckdb", "generic_sql",
+  ].includes(destDriverType);
+
+  useEffect(() => {
+    if (!writeViaStagingSupported && writeViaStaging) {
+      setWriteViaStaging(false);
+    }
+  }, [writeViaStagingSupported, writeViaStaging]);
 
   const applyVectorRoutingPlan = (plan: VectorRoutingPlan) => {
     if (plan.content_column) setVectorContentColumn(plan.content_column);
@@ -811,12 +848,50 @@ export function TransferPage({
   const multiStreamUnsupportedMode =
     isMultiStreamSource && (syncMode === "scd2" || syncMode === "mirror");
   const advancedStreamNames = isMultiStreamSource ? multiStreamNames : [sourceStreamName];
+  const routeSyncModes = useMemo(
+    () =>
+      availableSyncModes({
+        destDriver: destDriverType || destType || "",
+        sourceDriver: resolveDriverType(sourceConnector?.type || "") || "",
+        sourceKind,
+        isMultiStream: isMultiStreamSource,
+      }),
+    [destDriverType, destType, sourceConnector?.type, sourceKind, isMultiStreamSource],
+  );
+  // Client deploy: never leave an engine-unsupported mode selected after route change.
+  useEffect(() => {
+    if (!routeSyncModes.some((m) => m.id === syncMode)) {
+      const fallback =
+        routeSyncModes.find((m) => m.id === "full_refresh_append")?.id
+        || routeSyncModes[0]?.id
+        || "full_refresh_append";
+      setSyncMode(fallback as SyncModeId);
+    }
+  }, [routeSyncModes, syncMode]);
   const mapStreamsDiverge = useMemo(() => {
     const ok = streamPreviews.filter((s) => s.status === "ok" && (s.columns?.length ?? 0) > 0);
     if (ok.length < 2) return false;
     const sig = (cols: string[]) => [...cols].map((c) => c.toLowerCase()).sort().join("|");
     const first = sig(ok[0].columns || []);
     return ok.some((s) => sig(s.columns || []) !== first);
+  }, [streamPreviews]);
+  const sourceColumnsByStream = useMemo(() => {
+    const out: Record<string, string[]> = {};
+    for (const preview of streamPreviews) {
+      if (preview.status === "ok" && preview.columns?.length) {
+        out[preview.name] = preview.columns;
+      }
+    }
+    return out;
+  }, [streamPreviews]);
+  const sourceSchemaByStream = useMemo(() => {
+    const out: Record<string, Record<string, string>> = {};
+    for (const preview of streamPreviews) {
+      if (preview.status === "ok" && preview.schema && Object.keys(preview.schema).length) {
+        out[preview.name] = preview.schema;
+      }
+    }
+    return out;
   }, [streamPreviews]);
   const streamContracts = buildStreamContracts({
     streamNames: advancedStreamNames,
@@ -840,13 +915,17 @@ export function TransferPage({
   const streamNeedsReview = streamContractsNeedReview({
     streamNames: advancedStreamNames,
     sourceColumns: currentSourceColumns,
+    sourceColumnsByStream,
     requiresCursor,
     requiresPrimaryKey,
     defaultCursor: cursorField,
     defaultPrimaryKey: primaryKeyField,
     streamFields,
   });
-  const syncModeLabel = SYNC_MODES.find((m) => m.id === syncMode)?.label ?? syncMode;
+  const syncModeLabel =
+    routeSyncModes.find((m) => m.id === syncMode)?.label
+    ?? SYNC_MODES.find((m) => m.id === syncMode)?.label
+    ?? syncMode;
   const schemaPolicyLabel = SCHEMA_POLICIES.find((p) => p.id === schemaPolicy)?.label ?? schemaPolicy;
 
   const uniqueKeySuggestions = useMemo(
@@ -858,17 +937,31 @@ export function TransferPage({
       ),
     [samplePreviewRows, currentSourceColumns, primaryKeyField],
   );
+  const compositeKeySuggestions = useMemo(
+    () =>
+      suggestCompositeUniqueKeyCandidates(
+        samplePreviewRows as Record<string, unknown>[],
+        currentSourceColumns,
+        { exclude: primaryKeyField && !primaryKeyField.includes(",") ? [primaryKeyField] : [], limit: 3 },
+      ),
+    [samplePreviewRows, currentSourceColumns, primaryKeyField],
+  );
 
+  /** Opens Advanced drawer in-place — never navigates away from Map / Validate. */
   const openIdentitySettings = useCallback(() => {
-    setStep(STEP_DESTINATION);
     setAdvancedOpen(true);
     toast({
-      title: "Identity & sync settings",
+      title: "Advanced settings",
       message:
-        "Change the primary key field or sync mode here, then return to Validate and Re-run. Mapping approve cannot remove duplicate source rows.",
+        "Primary key, sync mode, cursor, and write policies. Stay on this step — close the drawer when done, then continue or re-run Validate.",
       tone: "info",
     });
   }, [toast]);
+
+  // Fix-bad-data is Validate-only — close if the operator leaves the step.
+  useEffect(() => {
+    if (step !== STEP_VALIDATE && badDataFixOpen) setBadDataFixOpen(false);
+  }, [step, badDataFixOpen]);
 
   const applyPrimaryKeySuggestion = useCallback(
     (column: string) => {
@@ -884,9 +977,12 @@ export function TransferPage({
           },
         }));
       }
+      const isComposite = column.includes(",");
       toast({
-        title: `Primary key → ${column}`,
-        message: "Unique in the Validate sample only — confirm in Advanced, then Re-run Validate.",
+        title: isComposite ? `Composite PK → ${column.replace(/,/g, " + ")}` : `Primary key → ${column}`,
+        message: isComposite
+          ? "Composite unique in the Validate sample only — use when a single column is a false PK. Confirm in Advanced, then Re-run Validate."
+          : "Unique in the Validate sample only — confirm in Advanced, then Re-run Validate.",
         tone: "success",
       });
     },
@@ -1406,7 +1502,7 @@ export function TransferPage({
         lastNewTableToastRef.current = tableKey;
         toast({
           title: "New table will be created",
-          message: `${targetCollection.trim()} was not found on the destination — DataFlow will CREATE TABLE on first write.`,
+          message: `${targetCollection.trim()} was not found on the destination — Datawrap will CREATE TABLE on first write.`,
           tone: "info",
         });
       }
@@ -1883,7 +1979,7 @@ export function TransferPage({
     if (!ACCEPTED_UPLOAD_EXTENSIONS.has(ext)) {
       toast({
         title: "Unsupported file type",
-        message: "Use CSV, TSV, JSON, or JSONL for this transfer flow.",
+        message: "Use CSV, TSV, JSON, JSONL, Excel (.xlsx), or Parquet for this transfer flow.",
         tone: "warning",
       });
       return;
@@ -2001,7 +2097,7 @@ export function TransferPage({
 
   const explainSourceGap = () => {
     if (sourceKind === "file" && !parsed) {
-      toast({ title: "Source file required", message: "Upload a CSV, TSV, JSON, JSONL, or Parquet file to continue.", tone: "warning" });
+      toast({ title: "Source file required", message: "Upload a CSV, TSV, JSON, JSONL, Excel (.xlsx), or Parquet file to continue.", tone: "warning" });
       setStep(STEP_SOURCE);
       return true;
     }
@@ -2628,8 +2724,20 @@ export function TransferPage({
   const goToPreflight = () => {
     if (explainDestinationGap()) return;
     const threshold = confidenceThreshold;
-    const pendingReview = columnMappings.filter(
-      (m) => !m.approved && (m.requiresReview || m.confidence < threshold),
+    const pendingRisk = columnMappings.filter(
+      (m) => mappingRequiresRiskAck(m) && !m.riskAcknowledged,
+    ).length;
+    if (pendingRisk > 0) {
+      toast({
+        title: "Accept risk before Validate",
+        message: `${pendingRisk} column(s) still need Accept risk (lossy/cast/create-new). Approve alone is not enough.`,
+        tone: "warning",
+      });
+      setStep(STEP_MAP);
+      return;
+    }
+    const pendingReview = columnMappings.filter((m) =>
+      needsMappingReview(m, threshold),
     ).length;
     if (columnMappings.length && pendingReview > 0) {
       toast({
@@ -2668,6 +2776,23 @@ export function TransferPage({
   const approveAllAndPreflight = async () => {
     const approved = approveMappingsHonestly(columnMappings);
     setColumnMappings(approved);
+    const pendingRisk = approved.filter(
+      (m) => mappingRequiresRiskAck(m) && !m.riskAcknowledged,
+    ).length;
+    const pendingReview = approved.filter((m) =>
+      needsMappingReview(m, confidenceThreshold),
+    ).length;
+    if (pendingRisk > 0 || pendingReview > 0) {
+      toast({
+        title: pendingRisk > 0 ? "Accept risk before Validate" : "Review column mappings",
+        message: pendingRisk > 0
+          ? `${pendingRisk} column(s) still need Accept risk — Approve alone cannot clear them.`
+          : `${pendingReview} column(s) still need Approve before validation.`,
+        tone: "warning",
+      });
+      setStep(STEP_MAP);
+      return;
+    }
     setStep(STEP_VALIDATE);
     await executePreflight(approved);
   };
@@ -2689,11 +2814,15 @@ export function TransferPage({
     const changed: string[] = [];
     const next = columnMappings.map((m) => {
       if (m.transform && typed.has(m.transform)) {
-        return { ...m, approved: true };
+        return sealRemediationApproval({ ...m, approved: true });
       }
       const label = m.target ? `${m.source} → ${m.target}` : m.source;
       changed.push(label);
-      return { ...m, transform: "strip_controls" as MappingTransform, approved: true };
+      return sealRemediationApproval({
+        ...m,
+        transform: "strip_controls" as MappingTransform,
+        approved: true,
+      });
     });
     const mode = modeOverride ?? validationMode;
     setColumnMappings(next);
@@ -2724,7 +2853,28 @@ export function TransferPage({
     // quarantine/strip — send the operator back to Map with a clear reason.
     const dry = preflight?.gates?.find((g) => /dry_run|integrity/i.test(g.id));
     const dryMsg = `${dry?.message || ""} ${JSON.stringify(dry?.details || {})}`;
-    const encodingOnly = /format-control|replacement character|encoding|strip_controls/i.test(dryMsg)
+    const allGateText = (preflight?.gates ?? [])
+      .map((g) => `${g.message || ""} ${JSON.stringify(g.details || {})}`)
+      .join(" ");
+    const blockerText = (preflight?.blockers ?? []).map((b) => b.message || "").join(" ");
+    const integrityText = `${dryMsg} ${allGateText} ${blockerText}`;
+    // Duplicate identity keys survive Strip/Quarantine/balanced — write-time DQ
+    // still fails. Never switch to balanced and falsely enable Execute.
+    if (
+      duplicateKeyRoot
+      || /duplicate (primary )?key|keys repeat|identity-key|source probe/i.test(integrityText)
+    ) {
+      toast({
+        title: "Cannot quarantine duplicate identity keys",
+        message:
+          "Strip/Quarantine only sanitize encoding. Open Destination → Advanced and set Primary key "
+          + "to a column that is unique in the source, or use append without that PK / dedupe upstream — then Re-run Validate.",
+        tone: "warning",
+      });
+      openIdentitySettings();
+      return;
+    }
+    const encodingOnly = isEncodingIntegritySignal(dryMsg)
       && !/\([A-Z_]+\)\s*→\s*\w+\s*\([A-Z_]+\)/i.test(dryMsg)
       && !/confidence\s+\d+%\s*</i.test(dryMsg);
     const looksLikeBadMapping =
@@ -2782,8 +2932,17 @@ export function TransferPage({
         const next = columnMappings.map((m) => {
           if (!matches(m)) return m;
           hit = true;
-          if (!m.existsInDestination) {
-            return { ...m, destType: action.to_type, approved: true, requiresReview: false };
+          if (m.existsInDestination === false) {
+            return sealRemediationApproval({
+              ...m,
+              destType: action.to_type,
+              approved: true,
+              requiresReview: false,
+            });
+          }
+          if (m.existsInDestination !== true) {
+            // Unknown / pending schema — do not invent create-new type rewrite.
+            return m;
           }
           // Existing DDL cannot be widened by mapping alone — remappoint to a free text
           // column, or invent a new VARCHAR target (ADD / create on write).
@@ -2796,7 +2955,7 @@ export function TransferPage({
             usedTargets.delete(m.target.toLowerCase());
             usedTargets.add(freeText.toLowerCase());
             remapped = true;
-            return {
+            return sealRemediationApproval({
               ...m,
               target: freeText,
               destType: destSchemaMap[freeText] || action.to_type,
@@ -2809,7 +2968,7 @@ export function TransferPage({
               ]
                 .filter(Boolean)
                 .join(" · "),
-            };
+            });
           }
           // Prefer original source name for ADD COLUMN (_id stays _id).
           // Stripping underscores first produced id_text beside DECIMAL id and
@@ -2834,7 +2993,7 @@ export function TransferPage({
           usedTargets.delete(m.target.toLowerCase());
           usedTargets.add(candidate.toLowerCase());
           remapped = true;
-          return {
+          return sealRemediationApproval({
             ...m,
             target: candidate,
             destType: action.to_type,
@@ -2853,7 +3012,7 @@ export function TransferPage({
             ]
               .filter(Boolean)
               .join(" · "),
-          };
+          });
         });
         setColumnMappings(next);
         if (!hit) {
@@ -2874,17 +3033,20 @@ export function TransferPage({
         void executePreflight(next);
         break;
       }
-      case "normalize_control_chars": {
-        void stripControlCharsAndRerun();
-        break;
-      }
-      case "quarantine_and_rerun": {
-        void stripControlCharsAndRerun("balanced");
-        break;
-      }
+      case "normalize_control_chars":
       case "open_bad_data_fix":
-        // ValidateDashboard opens the drawer; keep as no-op fallback.
+        setStep(STEP_VALIDATE);
+        setBadDataFixOpen(true);
         break;
+      case "quarantine_and_rerun": {
+        if (duplicateKeyRoot) {
+          openIdentitySettings();
+          break;
+        }
+        setStep(STEP_VALIDATE);
+        setBadDataFixOpen(true);
+        break;
+      }
       case "add_transform": {
         const uiTransform = action.transform
           ? (ENGINE_TO_UI_TRANSFORM[action.transform] || engineTransformToUi(action.transform) || (action.transform as MappingTransform))
@@ -2902,7 +3064,13 @@ export function TransferPage({
         const next = columnMappings.map((m) => {
           if (matches(m)) {
             hit = true;
-            return { ...m, transform: uiTransform, approved: true, requiresReview: false };
+            return sealRemediationApproval({
+              ...m,
+              transform: uiTransform,
+              approved: true,
+              requiresReview: false,
+              riskAcknowledged: false,
+            });
           }
           return m;
         });
@@ -2932,7 +3100,7 @@ export function TransferPage({
         const next = columnMappings.map((m) => {
           if (!matches(m)) return m;
           hit = true;
-          return {
+          return sealRemediationApproval({
             ...m,
             target: dest,
             destType: destSchemaMap[dest] || m.destType,
@@ -2940,7 +3108,7 @@ export function TransferPage({
             approved: true,
             requiresReview: false,
             reason: [m.reason, `Remapped → ${dest}`].filter(Boolean).join(" · "),
-          };
+          });
         });
         setColumnMappings(next);
         toast({
@@ -2975,10 +3143,10 @@ export function TransferPage({
         });
         break;
       case "check_connection":
-        setStep(STEP_DESTINATION);
+        window.location.hash = "#/connectors";
         toast({
-          title: "Opened connection settings",
-          message: "Check the source/destination connection, then re-run preflight.",
+          title: "Opened Connectors",
+          message: "Fix credentials, Test until green, then return to Validate and Re-run.",
           tone: "info",
         });
         break;
@@ -2993,6 +3161,7 @@ export function TransferPage({
     opts?: {
       complianceAcknowledged?: boolean;
       schemaDriftAcknowledged?: boolean;
+      fkRiskAcknowledged?: boolean;
       acknowledgmentReason?: string;
     },
   ) => {
@@ -3000,17 +3169,24 @@ export function TransferPage({
     const activeValidation = validationOverride ?? validationMode;
     const ackCompliance = opts?.complianceAcknowledged ?? complianceAcknowledged;
     const ackSchemaDrift = opts?.schemaDriftAcknowledged ?? schemaDriftAcknowledged;
+    const ackFkRisk = opts?.fkRiskAcknowledged ?? fkRiskAcknowledged;
     const ackActor = readSession()?.email || readSession()?.name || "";
     const ackReason = opts?.acknowledgmentReason || "";
-    if ((opts?.complianceAcknowledged || opts?.schemaDriftAcknowledged) && (!ackActor || ackActor.length < 2)) {
+    if (
+      (opts?.complianceAcknowledged || opts?.schemaDriftAcknowledged || opts?.fkRiskAcknowledged)
+      && (!ackActor || ackActor.length < 2)
+    ) {
       toast({
         title: "Sign in required for acknowledgment",
-        message: "PII and schema-drift acknowledgments need a signed-in operator identity.",
+        message: "PII, schema-drift, and FK-risk acknowledgments need a signed-in operator identity.",
         tone: "warning",
       });
       return;
     }
-    if ((opts?.complianceAcknowledged || opts?.schemaDriftAcknowledged) && ackReason.trim().length < 8) {
+    if (
+      (opts?.complianceAcknowledged || opts?.schemaDriftAcknowledged || opts?.fkRiskAcknowledged)
+      && ackReason.trim().length < 8
+    ) {
       toast({
         title: "Reason required",
         message: "Provide a clear acknowledgment reason before re-validating.",
@@ -3033,8 +3209,8 @@ export function TransferPage({
       setStep(STEP_SOURCE);
       return;
     }
-    const pendingReview = activeMappings.filter(
-      (m) => !m.approved && (m.requiresReview || m.confidence < threshold),
+    const pendingReview = activeMappings.filter((m) =>
+      needsMappingReview(m, threshold),
     ).length;
     if (pendingReview > 0) {
       toast({
@@ -3047,6 +3223,30 @@ export function TransferPage({
     }
     if (!canRunPreflight || streamNeedsReview) {
       explainDestinationGap();
+      return;
+    }
+    if (writeViaStaging && !writeViaStagingSupported) {
+      toast({
+        title: "Staging not supported",
+        message: "Write via staging requires a SQL table destination. Turn it off in Advanced, or pick a SQL sink.",
+        tone: "error",
+      });
+      return;
+    }
+    if (multiStreamUnsupportedMode) {
+      toast({
+        title: "Sync mode not supported",
+        message: "SCD2 and Mirror are not available for multi-stream transfers. Switch to full refresh, incremental, or CDC.",
+        tone: "error",
+      });
+      return;
+    }
+    if (!routeSyncModes.some((m) => m.id === syncMode)) {
+      toast({
+        title: "Sync mode not supported",
+        message: "This sync mode is not available for the current source and destination. Open Advanced and pick a supported mode.",
+        tone: "error",
+      });
       return;
     }
     setPreflighting(true);
@@ -3171,7 +3371,10 @@ export function TransferPage({
         try {
           await syncTransferPlanMappings(planId, mappings);
           const pf = await preflightTransferPlan(planId);
-          if (pf.passed) {
+          // Never stamp plan approved on review-grade / soft-pass — Execute
+          // unlock requires decision===approve (same bar as Validate rail).
+          const decision = pf.proof_bundle?.transfer_decision?.decision;
+          if (pf.passed && decision === "approve") {
             await approveTransferPlan(planId);
           }
           setPreflight(pf);
@@ -3183,11 +3386,13 @@ export function TransferPage({
               tone: "warning",
             });
           } else {
-            // Stay on Validate so operators can review every gate/rule before Execute.
+            // Stay on Validate — never claim "Ready" on review-grade.
             toast({
-              title: "Ready to transfer",
-              message: `All ${pf.total_gates} checks passed. Review the gate cards, then Execute when ready.`,
-              tone: "success",
+              title: decision === "approve" ? "Preflight passed" : "Review-grade preflight",
+              message: decision === "approve"
+                ? `All ${pf.total_gates} API checks passed. Review gate cards, then Execute when ready.`
+                : "Checks completed with review-grade decision — re-run or fix blockers before Execute unlocks.",
+              tone: decision === "approve" ? "success" : "warning",
             });
           }
           return;
@@ -3261,8 +3466,13 @@ export function TransferPage({
           stream_contracts: streamContracts,
           compliance_acknowledged: ackCompliance,
           schema_drift_acknowledged: ackSchemaDrift,
+          fk_risk_acknowledged: ackFkRisk,
+          run_population_orphan_scan: runPopulationOrphanScan,
           acknowledgment_actor: ackActor || undefined,
           acknowledgment_reason: ackReason || undefined,
+          write_via_staging: writeViaStaging,
+          source_kind: sourceKind,
+          source_type: resolveDriverType(sourceConnector?.type || "") || undefined,
         });
       } catch (apiErr) {
         if (sourceKind === "file" && destKindMode === "file_export" && parsed) {
@@ -3284,6 +3494,10 @@ export function TransferPage({
         }
       }
       setPreflight(pf);
+      // Echo signed Risk Contracts from Validate onto Map — Execute verifies signatures.
+      if (Array.isArray(pf.signed_mappings) && pf.signed_mappings.length) {
+        setColumnMappings((prev) => mergeSignedRiskContracts(prev, pf.signed_mappings));
+      }
       setValidatedContractKey(buildValidateContractKey(activeMappings));
       if (!pf.passed) {
         toast({
@@ -3292,11 +3506,23 @@ export function TransferPage({
           tone: "warning",
         });
       } else {
-        toast({
-          title: "Ready to transfer",
-          message: `All ${pf.total_gates} checks passed. Review the gate cards and rules below, then Execute when ready.`,
-          tone: "success",
-        });
+        const isLocal = String(pf.run_id || "").startsWith("pf_local_");
+        const decision = pf.proof_bundle?.transfer_decision?.decision;
+        if (isLocal || decision === "review") {
+          toast({
+            title: isLocal ? "Validated locally" : "Review-grade preflight",
+            message: isLocal
+              ? "Browser preview gates only — re-run Validate when the API responds. Execute stays locked until API approve."
+              : "API returned review-grade — fix blockers or acknowledge policy, then re-run before Execute.",
+            tone: "warning",
+          });
+        } else {
+          toast({
+            title: "Preflight passed",
+            message: `All ${pf.total_gates} API checks passed. Review the gate cards, then Execute when ready.`,
+            tone: "success",
+          });
+        }
       }
     } catch (e) {
       if (sourceKind === "file" && destKindMode === "file_export" && parsed) {
@@ -3345,6 +3571,15 @@ export function TransferPage({
     }
     if (!preflight) return { onPrimaryFix: undefined, primaryFixLabel: undefined };
     const firstBlocker = buildDisplayBlockers(preflight, syncMode)[0];
+    const blockerBlob = `${firstBlocker?.message || ""} ${firstBlocker?.impact || ""} ${JSON.stringify(firstBlocker?.source?.details || {})}`;
+    // Encoding beats generic gate-rulebook review_mappings so rail matches dashboard.
+    // Never match bare "encoding" — column names like encoding_id must stay on Map.
+    if (isEncodingIntegritySignal(blockerBlob)) {
+      return {
+        onPrimaryFix: () => setBadDataFixOpen(true),
+        primaryFixLabel: "Fix bad data…",
+      };
+    }
     const action = firstBlocker?.suggested_actions?.[0];
     if (!action) return { onPrimaryFix: undefined, primaryFixLabel: undefined };
 
@@ -3353,30 +3588,59 @@ export function TransferPage({
       case "change_target_type":
       case "add_transform":
       case "map_column":
+        return { onPrimaryFix: () => setStep(STEP_MAP), primaryFixLabel: action.label };
       case "normalize_control_chars":
       case "open_bad_data_fix":
-        return { onPrimaryFix: () => setStep(STEP_MAP), primaryFixLabel: action.label };
-      case "rerun_mapping":
-        return { onPrimaryFix: () => executePreflight(), primaryFixLabel: action.label };
-      case "quarantine_and_rerun":
         return {
-          onPrimaryFix: () => void quarantineAndRerun(),
+          onPrimaryFix: () => setBadDataFixOpen(true),
+          primaryFixLabel: "Fix bad data…",
+        };
+      case "rerun_mapping":
+        return {
+          onPrimaryFix: () => {
+            setStep(STEP_MAP);
+            toast({
+              title: "Opened Map",
+              message: "Re-run mapping to accept schema changes, then return to Validate.",
+              tone: "info",
+            });
+          },
           primaryFixLabel: action.label,
         };
+      case "quarantine_and_rerun":
+        // Never offer Quarantine as the primary Fix when identity duplicates
+        // are in the gate text — Strip/balanced cannot make Execute safe.
+        if (
+          /duplicate (primary )?key|keys repeat|identity-key|source probe/i.test(blockerBlob)
+        ) {
+          return {
+            onPrimaryFix: openIdentitySettings,
+            primaryFixLabel: "Fix identity / sync mode",
+          };
+        }
+        return {
+          onPrimaryFix: () => setBadDataFixOpen(true),
+          primaryFixLabel: "Fix bad data…",
+        };
       case "check_connection":
-        return { onPrimaryFix: () => setStep(STEP_SOURCE), primaryFixLabel: action.label };
+        return {
+          onPrimaryFix: () => {
+            window.location.hash = "#/connectors";
+          },
+          primaryFixLabel: "Fix connector credentials",
+        };
       case "fix_source_keys":
         return { onPrimaryFix: openIdentitySettings, primaryFixLabel: action.label };
       default:
         return { onPrimaryFix: undefined, primaryFixLabel: undefined };
     }
-  }, [duplicateKeyRoot, openIdentitySettings, preflight, syncMode, executePreflight, quarantineAndRerun]);
+  }, [duplicateKeyRoot, openIdentitySettings, preflight, syncMode, toast]);
 
   const executeTransfer = async () => {
     if (multiStreamUnsupportedMode) {
       toast({
         title: "Multi-stream not supported for this mode",
-        message: "SCD2/mirror require a single stream. Use full/incremental/CDC for multi-table, or select one table.",
+        message: multiStreamScd2MirrorBlockCopy("toast"),
         tone: "error",
       });
       setStep(STEP_DESTINATION);
@@ -3398,8 +3662,16 @@ export function TransferPage({
       setStep(STEP_DESTINATION);
       return;
     }
-    if (destKindMode === "database" && !preflight?.passed) {
-      toast({ title: "Preflight required", message: "Run and pass preflight gates before writing to a database.", tone: "warning" });
+    const decision = preflight?.proof_bundle?.transfer_decision?.decision;
+    const localPf = String(preflight?.run_id || "").startsWith("pf_local_");
+    if (!preflight?.passed || decision !== "approve" || localPf) {
+      toast({
+        title: localPf || decision === "review" ? "API Validate required" : "Preflight required",
+        message: localPf || decision === "review"
+          ? "Browser/local or review-grade results cannot unlock Execute. Re-run Validate until API decision is approve."
+          : "Run and pass API preflight gates (decision: approve) before writing.",
+        tone: "warning",
+      });
       setStep(STEP_VALIDATE);
       return;
     }
@@ -3418,7 +3690,7 @@ export function TransferPage({
       return;
     }
 
-    const enforcePreflight = destKindMode === "database";
+    const enforcePreflight = true;
 
     setTransferring(true);
     setStep(STEP_RUN);
@@ -3427,8 +3699,13 @@ export function TransferPage({
     setTransferLaunch(null);
     setRunStartupProgress(12);
     setRunStartupPhase(RUN_LAUNCH_STAGES[0]);
-    const transferMappings = columnMappings.length
-      ? buildPreflightMappings(analysis?.columns ?? [], columnMappings)
+    // Prefer Validate-echoed signed contracts over Map drafts (setState race).
+    const mappingsForExecute = mergeSignedRiskContracts(
+      columnMappings,
+      preflight?.signed_mappings,
+    );
+    const transferMappings = mappingsForExecute.length
+      ? buildPreflightMappings(analysis?.columns ?? [], mappingsForExecute)
       : analysis
         ? buildPreflightMappings(analysis.columns)
         : undefined;
@@ -3556,9 +3833,33 @@ export function TransferPage({
       });
       setRunStartupProgress(36);
       setRunStartupPhase(RUN_LAUNCH_STAGES[3]);
+      // A double-click / retry that hit an already-running equivalent transfer.
+      // Open the live job instead of starting a second writer against the same table.
+      if (
+        (data as { duplicate?: boolean }).duplicate
+        && (data as { existing_job_id?: string }).existing_job_id
+      ) {
+        const existingId = String((data as { existing_job_id: string }).existing_job_id);
+        const existingStatus = String(
+          (data as { existing_status?: string }).existing_status || "in progress",
+        );
+        setRunStartupProgress(40);
+        setActiveJobId(existingId);
+        setTransferring(false);
+        toast({
+          title: "Transfer already running",
+          message: `Opened the ${existingStatus} job instead of starting a second writer.`,
+          tone: "warning",
+        });
+        return;
+      }
       if (data.job_id && (data as { async?: boolean }).async) {
         setRunStartupProgress(40);
         setActiveJobId(data.job_id);
+        setTransferLaunch({
+          jobId: data.job_id,
+          rows: Number(sourceRowEstimate ?? parsed?.row_count ?? 0),
+        });
         setTransferring(false);
         toast({
           title: "Transfer started",
@@ -3589,7 +3890,8 @@ export function TransferPage({
         setResult(localResult);
         setRunStartupProgress(100);
         setStep(STEP_RUN);
-        onTransferComplete();
+        // Local export has no server job — skip onTransferComplete (that toast
+        // says "View progress in Job Theater" and would double with this one).
         toast({
           title: "Exported locally",
           message: `${localResult.records_transferred?.toLocaleString() ?? 0} rows saved — start the API for governed Job Theater proof.`,
@@ -3692,7 +3994,7 @@ export function TransferPage({
     if (multiStreamUnsupportedMode) {
       toast({
         title: "Multi-stream not supported for this mode",
-        message: "SCD2/mirror cannot be scheduled for multiple streams — use full/incremental/CDC or a single stream.",
+        message: multiStreamScd2MirrorBlockCopy("schedule"),
         tone: "error",
       });
       return;
@@ -3730,7 +4032,7 @@ export function TransferPage({
       });
       toast({
         title: "Pipeline created",
-        message: "Daily sync enabled. Manage cadence in Pipelines.",
+        message: "Daily sync enabled. Manage cadence in Schedules.",
         tone: "success",
       });
       onOpenSchedules?.();
@@ -3816,10 +4118,14 @@ export function TransferPage({
     }
   }, [validateContractKey, validatedContractKey, preflight]);
 
-  const canExecute =
-    destKindMode === "file_export"
-      ? canConfigureDest
-      : Boolean(preflight?.passed && validatedContractKey === validateContractKey);
+  /** API-approved preflight only — local/review-grade never unlocks Execute. */
+  const isGovernedExecuteReady = Boolean(
+    preflight?.passed
+    && validatedContractKey === validateContractKey
+    && preflight.proof_bundle?.transfer_decision?.decision === "approve"
+    && !String(preflight.run_id || "").startsWith("pf_local_"),
+  );
+  const canExecute = Boolean(canConfigureDest && isGovernedExecuteReady);
 
   const destinationLabel = destKindMode === "file_export"
     ? exportFormat.toUpperCase()
@@ -3913,7 +4219,7 @@ export function TransferPage({
     };
   }, [columnMappings.length, effectiveMappingProof]);
 
-  // Keep Data Pilot fed with the active validation/job IDs for NL triage & remediations.
+  // Keep Datawrap Pilot fed with the active validation/job IDs for NL triage & remediations.
   useEffect(() => {
     if (!preflight && !activeJobId) return;
     setActiveData((prev) => {
@@ -3933,7 +4239,9 @@ export function TransferPage({
           ? "running"
           : preflight
             ? preflight.passed
-              ? "passed"
+              ? ((preflight.proof_bundle?.transfer_decision?.decision || "") === "approve"
+                ? "passed"
+                : "review")
               : "blocked"
             : base.validation_status,
         route: `${sourceLabel} → ${mapDestRouteLabel}`,
@@ -3956,20 +4264,27 @@ export function TransferPage({
     const handler = async (action: StudioAction) => {
       switch (action.kind) {
         case "normalize_control_chars":
-          setStep(STEP_VALIDATE);
-          await stripControlCharsAndRerun();
-          break;
-        case "quarantine_and_rerun":
-          setStep(STEP_VALIDATE);
-          await quarantineAndRerun();
-          break;
         case "open_bad_data_fix":
           setStep(STEP_VALIDATE);
+          setBadDataFixOpen(true);
           toast({
             title: "Fix bad data",
             message: action.run_id
-              ? `Opened Validate for run ${action.run_id}. Use Fix bad data on the Dry-run gate.`
-              : "Opened Validate — use Fix bad data on the blocked Dry-run gate.",
+              ? `Opened Fix bad data for run ${action.run_id}. Choose Strip or Quarantine, then re-run Validate.`
+              : "Opened Fix bad data — choose Strip or Quarantine, then re-run Validate.",
+            tone: "info",
+          });
+          break;
+        case "quarantine_and_rerun":
+          if (duplicateKeyRoot) {
+            openIdentitySettings();
+            break;
+          }
+          setStep(STEP_VALIDATE);
+          setBadDataFixOpen(true);
+          toast({
+            title: "Fix bad data",
+            message: "Opened Fix bad data — choose Strip or Quarantine, then re-run Validate.",
             tone: "info",
           });
           break;
@@ -4184,7 +4499,7 @@ export function TransferPage({
         </div>
       </header>
 
-      <div className={`df2-transfer-studio-body ${step === STEP_MAP ? "is-map-step is-full-width" : ""}${step === STEP_VALIDATE ? " is-validate-step" : " is-full-width"}`}>
+      <div className={`df2-transfer-studio-body ${step === STEP_MAP ? "is-map-step is-full-width" : ""}${step === STEP_VALIDATE ? " is-validate-step is-full-width" : " is-full-width"}`}>
       <main className="df2-transfer-main-panel" key={step}>
       {step === STEP_MAP && columnMappings.length > 0 && !analyzing && (
         <TransferMapStep
@@ -4286,6 +4601,7 @@ export function TransferPage({
           requiresCursor={requiresCursor}
           onOpenIdentitySettings={openIdentitySettings}
           uniqueKeySuggestions={uniqueKeySuggestions}
+          compositeKeySuggestions={compositeKeySuggestions}
           onApplyPrimaryKey={applyPrimaryKeySuggestion}
           sampleRows={(samplePreviewRows as Record<string, unknown>[]) || []}
         />
@@ -4332,15 +4648,6 @@ export function TransferPage({
 
       {step === STEP_SOURCE && (
       <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-source-step">
-        <div className="df2-card-head">
-          <div>
-            <h3 className="df2-card-title">Source</h3>
-            <p className="df2-card-sub">
-              Upload a file or pick a saved connector, then name the table or collection to read.
-              For CDC / incremental multi-stream, comma-separate several names.
-            </p>
-          </div>
-        </div>
         <div className="df2-card-body">
           <div className="df2-transfer-step-split">
             <div className="df2-transfer-step-primary">
@@ -4348,6 +4655,11 @@ export function TransferPage({
                 <label className="df2-label">Where is your data?</label>
                 <SourceKindTiles
                   value={sourceKind}
+                  hideHint={
+                    (sourceKind === "file" && Boolean(parsed))
+                    || (sourceKind === "database" && Boolean(sourceConnectorId || currentSourceColumns.length))
+                    || (sourceKind === "cloud" && Boolean(cloudPath))
+                  }
                   onChange={(kind) => {
                     setSourceKind(kind);
                     setSourceConnectorId("");
@@ -4375,7 +4687,18 @@ export function TransferPage({
                   </div>
                 </div>
               )}
-              <label className="df2-policy-toggle" style={{ marginBottom: 10 }} onClick={(e) => e.stopPropagation()}>
+              <label
+                className="df2-policy-toggle df2-source-ocr-toggle"
+                style={{ marginBottom: 8 }}
+                onClick={(e) => e.stopPropagation()}
+                title={
+                  ocrStatus?.available === false
+                    ? `OCR not ready: ${ocrStatus.message || "install tesseract + pypdfium2/Pillow/pytesseract"}`
+                    : ocrStatus?.available
+                      ? "Tesseract is available — OCR scanned PDFs when no text layer exists"
+                      : "OCR scanned PDFs when no text layer exists (requires Tesseract on the API host)"
+                }
+              >
                 <input
                   type="checkbox"
                   checked={enableOcr}
@@ -4384,17 +4707,34 @@ export function TransferPage({
                 <span>
                   <strong>OCR scanned PDFs</strong>
                   <small>
-                    When a PDF has no text layer, render pages and run Tesseract before chunking.
                     {ocrStatus?.available === false
-                      ? ` Not ready on this host: ${ocrStatus.message || "install tesseract + pypdfium2/Pillow/pytesseract"}.`
+                      ? "Not ready on this host — hover for install steps."
                       : ocrStatus?.available
-                        ? " Tesseract is available on this API host."
-                        : " Requires system Tesseract on the API host."}
+                        ? "Tesseract ready — used when a PDF has no text layer."
+                        : "Optional · runs Tesseract when a PDF has no text layer."}
                   </small>
                 </span>
               </label>
+              {file && parsed ? (
+                <div className="df2-upload-result df2-upload-result-compact">
+                  <div className="df2-upload-result-main">
+                    <span className="df2-badge df2-badge-live"><DtIcon name="check" size={14} /> {file.name}</span>
+                    <span className="df2-upload-result-meta">
+                      {formatFileSize(file.size)} · {parsed.row_count.toLocaleString()} rows · {parsed.columns.length} columns
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="df2-btn df2-btn-sm"
+                    onClick={() => fileInputRef.current?.click()}
+                    title="Replace source file"
+                  >
+                    <DtIcon name="upload" size={14} /> Replace
+                  </button>
+                </div>
+              ) : (
               <div
-                className={`df2-upload df2-upload-studio ${dragOver ? "drag-over" : ""} ${uploading ? "is-loading" : ""} ${parsed ? "has-file" : ""}`}
+                className={`df2-upload df2-upload-studio ${dragOver ? "drag-over" : ""} ${uploading ? "is-loading" : ""}`}
                 onClick={() => !uploading && fileInputRef.current?.click()}
                 onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
                 onDragLeave={() => setDragOver(false)}
@@ -4407,7 +4747,7 @@ export function TransferPage({
                   {uploading || analyzing ? <Spinner /> : <DtIcon name="upload" size={22} />}
                 </div>
                 <p className="df2-upload-title">
-                  {uploading ? "Profiling source file…" : parsed ? "Replace source file" : "Drop your data file here"}
+                  {uploading ? "Profiling source file…" : "Drop your data file here"}
                 </p>
                 <p className="df2-upload-hint">
                   {uploading ? "Parsing schema and sampling rows" : "or click to browse · max 250 MB"}
@@ -4418,9 +4758,10 @@ export function TransferPage({
                   ))}
                 </div>
               </div>
+              )}
               {!parsed && !uploading && (
                 <div className="df2-upload-sample-row">
-                  <span className="df2-label-hint">New to DataFlow?</span>
+                  <span className="df2-label-hint">New to Datawrap?</span>
                   <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => void loadSampleDataset()}>
                     <DtIcon name="sparkle" size={14} /> Load sample orders CSV
                   </button>
@@ -4428,14 +4769,6 @@ export function TransferPage({
               )}
               {file && parsed && (
                 <>
-                  <div className="df2-upload-result">
-                    <div className="df2-upload-result-main">
-                      <span className="df2-badge df2-badge-live"><DtIcon name="check" size={14} /> {file.name}</span>
-                      <span className="df2-upload-result-meta">
-                        {formatFileSize(file.size)} · {parsed.row_count.toLocaleString()} rows · {parsed.columns.length} columns
-                      </span>
-                    </div>
-                  </div>
                   {["pdf", "docx", "html", "htm"].includes((parsed.file_type || "").toLowerCase()) && (
                     <p className="df2-label-hint" role="status">
                       Document source: {parsed.row_count.toLocaleString()} text chunk(s) with page/heading
@@ -4507,7 +4840,7 @@ export function TransferPage({
                   </div>
                 </div>
                 <p className="df2-label-hint" style={{ marginTop: 8 }}>
-                  DataFlow will detect format from the object key and profile schema on continue.
+                  Datawrap will detect format from the object key and profile schema on continue.
                 </p>
               </>
             )
@@ -4571,14 +4904,14 @@ export function TransferPage({
                   <DtIcon name="activity" size={15} />
                   <strong>
                     {isMultiStreamSource
-                      ? `${multiStreamNames.length} streams — each read separately`
-                      : "Single stream or multi-stream"}
+                      ? `${multiStreamNames.length} streams`
+                      : "Stream selection"}
                   </strong>
                 </div>
                 <p>
                   {isMultiStreamSource
-                    ? "Each comma-separated name is a real table/collection. Preview opens one tab per stream. Full/incremental runs streams sequentially (own watermark each); CDC prefers a shared log reader when available. Divergent schemas get a Map tab per stream. Configure cursor / primary key per stream in Destination → Advanced."
-                    : "For CDC or incremental across multiple tables, enter comma-separated names (example: sessions, users). Preview shows a tab for each; each stream keeps its own watermark. Map step rematches when stream schemas differ."}
+                    ? "Each name is a separate table/collection with its own watermark. Configure identity in Destination → Advanced."
+                    : "Use commas for multi-table sync (example: sessions, users)."}
                 </p>
                 {isMultiStreamSource && (
                   <ul className="df2-source-stream-chips" aria-label="Streams to sync">
@@ -4675,96 +5008,100 @@ export function TransferPage({
 
       {step === STEP_DESTINATION && (
       <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-dest-step">
-        <div className="df2-card-head">
-          <div>
-            <h3 className="df2-card-title">Destination</h3>
-            <p className="df2-card-sub">Pick a saved connector, then set database & table — schema loads before mapping.</p>
-          </div>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => setAdvancedOpen(true)}
-            leadingIcon={<DtIcon name="settings" size={14} />}
-          >
-            Advanced settings
-          </Button>
-        </div>
         <div className="df2-card-body">
-          <div className="df2-field">
-            <label className="df2-label">Destination Mode</label>
-            <FilterBar ariaLabel="Destination mode">
-              <FilterTabs
-                ariaLabel="Destination mode"
-                value={destKindMode}
-                onChange={(mode) => {
-                  setDestKindMode(mode);
-                  resetRouteForDestinationChange();
-                  if (mode === "file_export") void loadTransferPlan();
-                }}
-                items={[
-                  { id: "database", label: "Database / Warehouse" },
-                  { id: "file_export", label: "File Export" },
-                ]}
-              />
-            </FilterBar>
-          </div>
+          <div className="df2-dest-step-layout">
+            <div className="df2-dest-step-left">
+              <div className="df2-dest-toolbar">
+                <div className="df2-field df2-dest-mode-field">
+                  <label className="df2-label">Mode</label>
+                  <div className="df2-dest-mode-row">
+                    <FilterBar ariaLabel="Destination mode">
+                      <FilterTabs
+                        ariaLabel="Destination mode"
+                        value={destKindMode}
+                        onChange={(mode) => {
+                          setDestKindMode(mode);
+                          resetRouteForDestinationChange();
+                        }}
+                        items={[
+                          { id: "database", label: "Database / Warehouse" },
+                          { id: "file_export", label: "File Export" },
+                        ]}
+                      />
+                    </FilterBar>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                  className="df2-dest-advanced-btn"
+                  onClick={() => setAdvancedOpen(true)}
+                  leadingIcon={<DtIcon name="settings" size={14} />}
+                  title="Advanced settings — sync mode, primary key, cursor, and write policies"
+                >
+                  Advanced
+                </Button>
+                  </div>
+                </div>
+              </div>
 
-          {destKindMode === "file_export" ? (
-            <>
-              <div className="df2-field">
-                <label className="df2-label">Export Format</label>
-                <FilterBar ariaLabel="Export format">
-                  <FilterTabs
-                    ariaLabel="Export format"
-                    value={exportFormat}
-                    onChange={(format) => {
-                      setExportFormat(format);
-                      setTransferPlan(null);
-                    }}
-                    items={liveExportFormats.map((f) => ({ id: f.id, label: f.label }))}
-                  />
-                </FilterBar>
-              </div>
-              <div className="df2-field">
-                <label className="df2-label">Output path (optional)</label>
-                <input
-                  className="df2-input"
-                  value={destOutputPath}
-                  onChange={(e) => setDestOutputPath(e.target.value)}
-                  placeholder="exports/my-export.csv — leave empty for server exports folder"
+              {destKindMode === "file_export" ? (
+                <div className="df2-field">
+                  <label className="df2-label">Export Format</label>
+                  <FilterBar ariaLabel="Export format">
+                    <FilterTabs
+                      ariaLabel="Export format"
+                      value={exportFormat}
+                      onChange={(format) => {
+                        setExportFormat(format);
+                        setTransferPlan(null);
+                      }}
+                      items={liveExportFormats.map((f) => ({ id: f.id, label: f.label }))}
+                    />
+                  </FilterBar>
+                </div>
+              ) : (
+                <DestinationPicker
+                  connectors={transferDestConnectors}
+                  connectorId={connectorId}
+                  destType={destType}
+                  liveDestTypes={liveDestTypes}
+                  onSelectConnector={applyConnectorSelection}
+                  onSelectManual={() => {
+                    setConnectorId("");
+                    resetRouteForDestinationChange();
+                  }}
+                  onSelectType={(type) => {
+                    resetRouteForDestinationChange();
+                    setDestType(type);
+                    setConnectorId("");
+                    setTargetCollection("");
+                    setDestHost(getConnectorDefaults(type).host);
+                    setDestPort(defaultPortForType(type));
+                    setDestConnectionString("");
+                    setDestSchema(defaultSchemaForDriver(type));
+                    if (resolveDriverType(type) === "iceberg") {
+                      setTargetDb("");
+                    }
+                  }}
                 />
-                <p className="df2-label-hint">
-                  Leave empty to generate a downloadable file in the server exports folder.
-                </p>
-              </div>
-            </>
+              )}
+            </div>
+
+            <div className="df2-dest-step-right">
+          {destKindMode === "file_export" ? (
+            <div className="df2-field">
+              <label className="df2-label">Output path (optional)</label>
+              <input
+                className="df2-input"
+                value={destOutputPath}
+                onChange={(e) => setDestOutputPath(e.target.value)}
+                placeholder={`exports/my-export.${exportFormat || "json"} — leave empty for server exports folder`}
+              />
+              <p className="df2-label-hint">
+                Leave empty to generate a downloadable {exportFormat.toUpperCase()} file in the server exports folder.
+              </p>
+            </div>
           ) : (
             <>
-          <DestinationPicker
-            connectors={transferDestConnectors}
-            connectorId={connectorId}
-            destType={destType}
-            liveDestTypes={liveDestTypes}
-            onSelectConnector={applyConnectorSelection}
-            onSelectManual={() => {
-              setConnectorId("");
-              resetRouteForDestinationChange();
-            }}
-            onSelectType={(type) => {
-              resetRouteForDestinationChange();
-              setDestType(type);
-              setConnectorId("");
-              setTargetCollection("");
-              setDestHost(getConnectorDefaults(type).host);
-              setDestPort(defaultPortForType(type));
-              setDestConnectionString("");
-              setDestSchema(defaultSchemaForDriver(type));
-              if (resolveDriverType(type) === "iceberg") {
-                setTargetDb("");
-              }
-            }}
-          />
-
           {!connectorId && destType && destType !== "bigquery" && destDriverType === "iceberg" && (
           <div className="df2-dest-section df2-dest-manual-fields df2-dest-iceberg">
             <label className="df2-label">Iceberg warehouse</label>
@@ -4791,10 +5128,10 @@ export function TransferPage({
           {!connectorId && destType && destType !== "bigquery" && destDriverType !== "iceberg" && (
           <div className="df2-dest-section df2-dest-manual-fields">
             <label className="df2-label">Connection</label>
-            <div className="df2-form-row">
-              {destDriverType === "mongodb" || isGenericSql(destType) || ["mysql", "postgresql", "redshift", "sqlite"].includes(destDriverType) ? (
-                <div className="df2-field df2-field-flex">
-                  <label className="df2-label">Connection String (optional)</label>
+            <div className="df2-dest-manual-grid">
+              {(destDriverType === "mongodb" || isGenericSql(destType) || ["mysql", "postgresql", "redshift", "sqlite"].includes(destDriverType)) && (
+                <div className="df2-field df2-dest-manual-span">
+                  <label className="df2-label">Connection string (optional)</label>
                   <input
                     className="df2-input"
                     value={destConnectionString}
@@ -4802,8 +5139,8 @@ export function TransferPage({
                     placeholder={destDriverType === "mongodb" ? "mongodb://localhost:27017/" : getGenericSqlPlaceholder(destType)}
                   />
                 </div>
-              ) : null}
-              <div className="df2-field df2-field-md">
+              )}
+              <div className="df2-field">
                 <label className="df2-label">
                   {destDriverType === "pinecone" ? "Index host" : "Host"}
                 </label>
@@ -4814,11 +5151,9 @@ export function TransferPage({
                   placeholder={
                     destDriverType === "pinecone"
                       ? "my-index-xxxx.svc.pinecone.io"
-                      : destDriverType === "weaviate"
+                      : destDriverType === "weaviate" || destDriverType === "milvus"
                         ? "localhost"
-                        : destDriverType === "milvus"
-                          ? "localhost"
-                          : undefined
+                        : undefined
                   }
                 />
               </div>
@@ -4828,26 +5163,26 @@ export function TransferPage({
                 <input type="number" className="df2-input" value={destPort} onChange={(e) => setDestPort(Number(e.target.value))} />
               </div>
               )}
+              {destDriverType === "snowflake" && (
+                <div className="df2-field">
+                  <label className="df2-label">Warehouse</label>
+                  <input className="df2-input" value={destWarehouse} onChange={(e) => setDestWarehouse(e.target.value)} placeholder="COMPUTE_WH" />
+                </div>
+              )}
               {destType !== "mongodb" && (
-                <>
+                <div className="df2-dest-manual-creds">
                   {destDriverType !== "pinecone" && destDriverType !== "qdrant" && destDriverType !== "weaviate" && (
-                  <div className="df2-field df2-field-140">
+                  <div className="df2-field">
                     <label className="df2-label">Username</label>
                     <input className="df2-input" value={destUsername} onChange={(e) => setDestUsername(e.target.value)} placeholder={destDriverType === "milvus" ? "root" : undefined} />
                   </div>
                   )}
-                  <div className="df2-field df2-field-140">
+                  <div className="df2-field">
                     <label className="df2-label">
                       {["pinecone", "qdrant", "weaviate"].includes(destDriverType) ? "API key" : "Password"}
                     </label>
                     <input type="password" className="df2-input" value={destPassword} onChange={(e) => setDestPassword(e.target.value)} placeholder={destDriverType === "milvus" ? "Milvus" : undefined} />
                   </div>
-                </>
-              )}
-              {destDriverType === "snowflake" && (
-                <div className="df2-field df2-field-160">
-                  <label className="df2-label">Warehouse</label>
-                  <input className="df2-input" value={destWarehouse} onChange={(e) => setDestWarehouse(e.target.value)} placeholder="COMPUTE_WH" />
                 </div>
               )}
             </div>
@@ -4863,15 +5198,9 @@ export function TransferPage({
             </p>
           )}
 
-          {!destType && destKindMode === "database" && (
-            <p className="df2-label-hint" style={{ marginTop: 8 }}>
-              Select a saved connector or Custom connection engine above. The route stays empty until you choose a destination.
-            </p>
-          )}
-
           {destType ? (
             <>
-          <div className="df2-dest-section df2-dest-target-fields">
+          <div className="df2-dest-section df2-dest-target-fields df2-dest-right-section">
             <div className="df2-dest-target-head">
               <label className="df2-label" id="dest-target-location-label">
                 Target location
@@ -4977,7 +5306,7 @@ export function TransferPage({
                         : destDriverType === "pinecone"
                           ? "default"
                           : destDriverType === "weaviate"
-                            ? "DataflowChunk"
+                            ? "DatawrapChunk"
                             : destDriverType === "qdrant" || destDriverType === "milvus"
                               ? "chunks"
                               : "Pick table or type new name"
@@ -5063,7 +5392,7 @@ export function TransferPage({
                       <strong>
                         {destDriverType === "mongodb" ? "Collection not found." : "Table not found."}
                       </strong>{" "}
-                      DataFlow will create it automatically on first write.
+                      Datawrap will create it automatically on first write.
                     </p>
                   </>
                 ) : (
@@ -5090,7 +5419,11 @@ export function TransferPage({
             </p>
           )}
             </>
-          ) : null}
+          ) : (
+            <p className="df2-label-hint df2-dest-right-empty">
+              Select a saved connector or engine on the left to configure the destination.
+            </p>
+          )}
             </>
           )}
 
@@ -5105,26 +5438,23 @@ export function TransferPage({
                 {VALIDATION_MODES.find((m) => m.id === validationMode)?.label ?? validationMode} validation
               </p>
               <p className="df2-label-hint">
-                Destination selection stays on this page. Overwrite, CDC, SCD2, mirror, cursors, and drift
-                policies open in Advanced settings.
+                Change overwrite, CDC, and identity in Advanced.
               </p>
             </div>
             <div className="df2-dest-sync-summary-actions">
               <span className={`df2-badge ${streamNeedsReview ? "df2-badge-run" : "df2-badge-live"}`}>
-                {currentSourceColumns.length ? (streamNeedsReview ? "Review required" : "Ready") : "Waiting for schema"}
+                {!currentSourceColumns.length
+                  ? "Waiting for schema"
+                  : streamNeedsReview
+                    ? "Sync contract incomplete"
+                    : requiresPrimaryKey || requiresCursor
+                      ? "Identity fields set"
+                      : "Sync mode ready"}
               </span>
-              <Button
-                size="sm"
-                variant="secondary"
-                onClick={() => setAdvancedOpen(true)}
-                leadingIcon={<DtIcon name="settings" size={14} />}
-              >
-                Advanced settings
-              </Button>
             </div>
             {(syncMode === "scd2" || syncMode === "mirror") && requiresPrimaryKey && !primaryKeyField && (
               <p className="df2-label-hint df2-dest-sync-warning">
-                {syncMode === "scd2" ? "SCD Type 2" : "Mirror"} requires a primary key — open Advanced settings to set it.
+                {syncMode === "scd2" ? "SCD Type 2" : "Mirror"} requires a primary key — open Advanced to set it.
               </p>
             )}
             {isMultiStreamSource && syncMode === "cdc" && (
@@ -5142,134 +5472,10 @@ export function TransferPage({
             )}
             {multiStreamUnsupportedMode && (
               <p className="df2-label-hint df2-dest-sync-warning" role="alert">
-                Multi-stream SCD2/mirror is not supported. Switch to full/incremental/CDC, or enter a single table.
+                {MULTI_STREAM_SCD2_MIRROR_BLOCK}
               </p>
             )}
           </div>
-
-          <DestinationAdvancedDrawer
-            open={advancedOpen}
-            onClose={() => setAdvancedOpen(false)}
-            syncModes={SYNC_MODES}
-            schemaPolicies={SCHEMA_POLICIES}
-            validationModes={VALIDATION_MODES}
-            dateLocales={DATE_LOCALES}
-            syncMode={syncMode}
-            schemaPolicy={schemaPolicy}
-            validationMode={validationMode}
-            dateLocale={dateLocale}
-            backfillNewFields={backfillNewFields}
-            streamNames={advancedStreamNames}
-            streamFields={streamFields}
-            defaultCursor={cursorField}
-            defaultPrimaryKey={primaryKeyField}
-            sourceColumns={currentSourceColumns}
-            sourceSchema={currentSourceSchema}
-            syncModeLabel={syncModeLabel}
-            schemaPolicyLabel={schemaPolicyLabel}
-            requiresCursor={requiresCursor}
-            requiresPrimaryKey={requiresPrimaryKey}
-            streamNeedsReview={streamNeedsReview}
-            suggestedCursor={cursorCandidate}
-            suggestedPrimaryKey={primaryKeyCandidate}
-            uniqueKeySuggestions={uniqueKeySuggestions}
-            snapshotMode={snapshotMode}
-            onSnapshotModeChange={setSnapshotMode}
-            allowAppendOnly={allowAppendOnly}
-            onAllowAppendOnlyChange={setAllowAppendOnly}
-            multiSubnetFailover={multiSubnetFailover}
-            onMultiSubnetFailoverChange={setMultiSubnetFailover}
-            showMultiSubnetFailover={
-              syncMode === "cdc"
-              && ["sqlserver", "mssql", "azure_sql_database", "microsoft_sql_server", "amazon_rds_sql_server"].includes(
-                resolveDriverType(sourceConnector?.type || ""),
-              )
-            }
-            cdcRowFilter={cdcRowFilter}
-            onCdcRowFilterChange={setCdcRowFilter}
-            showCdcRowFilter={
-              syncMode === "cdc"
-              && ["sqlserver", "mssql", "azure_sql_database", "microsoft_sql_server", "amazon_rds_sql_server"].includes(
-                resolveDriverType(sourceConnector?.type || ""),
-              )
-            }
-            writeViaStaging={writeViaStaging}
-            onWriteViaStagingChange={setWriteViaStaging}
-            showVectorOptions={
-              destDriverType === "pgvector" ||
-              destDriverType === "qdrant" ||
-              destDriverType === "weaviate" ||
-              destDriverType === "pinecone" ||
-              destDriverType === "milvus"
-            }
-            vectorContentColumn={vectorContentColumn}
-            vectorEmbeddingColumn={vectorEmbeddingColumn}
-            vectorMetadataColumns={vectorMetadataColumns}
-            vectorEmbeddingModel={vectorEmbeddingModel}
-            vectorChunkSize={vectorChunkSize}
-            vectorChunkOverlap={vectorChunkOverlap}
-            onVectorContentColumnChange={setVectorContentColumn}
-            onVectorEmbeddingColumnChange={setVectorEmbeddingColumn}
-            onVectorMetadataColumnsChange={setVectorMetadataColumns}
-            onVectorEmbeddingModelChange={setVectorEmbeddingModel}
-            onVectorChunkSizeChange={setVectorChunkSize}
-            onVectorChunkOverlapChange={setVectorChunkOverlap}
-            vectorRoutingFields={vectorRoutingFields}
-            vectorRoutingLoading={vectorRoutingLoading}
-            vectorExcludePiiColumns={vectorExcludePiiColumns}
-            onApplyVectorRouting={() => void runVectorRouting(true)}
-            vectorDurableCache={vectorDurableCache}
-            onVectorDurableCacheChange={setVectorDurableCache}
-            embeddingCacheStats={embeddingCacheStats}
-            embeddingCacheBusy={embeddingCacheBusy}
-            onRefreshEmbeddingCache={() => void refreshEmbeddingCacheStats()}
-            onClearEmbeddingCache={() => void handleClearEmbeddingCache()}
-            priorityColumn={priorityColumn}
-            priorityDirection={priorityDirection}
-            rowLimit={rowLimit}
-            onPriorityColumnChange={setPriorityColumn}
-            onPriorityDirectionChange={setPriorityDirection}
-            onRowLimitChange={setRowLimit}
-            onSyncModeChange={setSyncMode}
-            onSchemaPolicyChange={(policy) => {
-              setSchemaPolicy(policy);
-              if (policy === "propagate_columns" || policy === "propagate_all") {
-                setBackfillNewFields(true);
-              } else {
-                // Leaving propagate must clear the stuck toggle — otherwise Execute
-                // fails with "Backfill new fields requires automatic column propagation"
-                // after Validate already passed under manual_review.
-                setBackfillNewFields(false);
-              }
-            }}
-            onValidationModeChange={setValidationMode}
-            onDateLocaleChange={setDateLocale}
-            onBackfillChange={setBackfillNewFields}
-            onStreamCursorChange={(stream, value) => {
-              setStreamFields((prev) => ({
-                ...prev,
-                [stream]: {
-                  cursorField: value,
-                  primaryKeyField: prev[stream]?.primaryKeyField ?? primaryKeyField,
-                },
-              }));
-              if (!isMultiStreamSource || stream === advancedStreamNames[0]) {
-                setCursorField(value);
-              }
-            }}
-            onStreamPrimaryKeyChange={(stream, value) => {
-              setStreamFields((prev) => ({
-                ...prev,
-                [stream]: {
-                  cursorField: prev[stream]?.cursorField ?? cursorField,
-                  primaryKeyField: value,
-                },
-              }));
-              if (!isMultiStreamSource || stream === advancedStreamNames[0]) {
-                setPrimaryKeyField(value);
-              }
-            }}
-          />
 
           {destKindMode === "database" && destColumns.length > 0 && !destSchemaLoading && (
             <div className="df2-dest-schema-preview">
@@ -5277,7 +5483,7 @@ export function TransferPage({
                 columns={destColumns}
                 schema={destSchemaMap}
                 title="Existing destination schema"
-                subtitle={`${destColumns.length} fields in ${targetDb}.${targetCollection} — mapping will align to these columns`}
+                subtitle={`${destColumns.length} fields in ${targetDb}.${targetCollection}`}
               />
             </div>
           )}
@@ -5307,13 +5513,15 @@ export function TransferPage({
               )}
             </div>
           )}
+            </div>
+          </div>
         </div>
         <div className="df2-card-footer df2-wizard-footer">
           <button type="button" className="df2-btn" onClick={() => setStep(STEP_SOURCE)}>← Back to source</button>
           <div className="df2-btn-row">
           <button
             type="button"
-            className="df2-btn"
+            className="df2-btn df2-btn-ghost"
             onClick={() => void loadTransferPlan()}
             disabled={
               !canConfigureDest
@@ -5337,7 +5545,8 @@ export function TransferPage({
       )}
 
       {step === STEP_VALIDATE && (
-        <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-validate-step df2-validate-split df2-validate-dashboard-host">
+        <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-validate-step df2-validate-dashboard-host">
+          <div className="df2-card-body df2-validate-body">
           <ValidateDashboard
             preflight={preflight}
             running={preflighting}
@@ -5345,12 +5554,15 @@ export function TransferPage({
             destType={destKindMode === "file_export" ? exportFormat : destType}
             validationMode={validationMode}
             syncMode={syncMode}
+            writeViaStaging={writeViaStaging}
             onApplyAction={applySuggestedAction}
             onStripControlChars={stripControlCharsAndRerun}
             stripControlsApplied={columnMappings.some(
               (m) => m.transform === "strip_controls",
             )}
             onQuarantineAndRerun={quarantineAndRerun}
+            badDataFixOpen={badDataFixOpen}
+            onBadDataFixOpenChange={setBadDataFixOpen}
             cellPreview={cellPreview}
             onReviewMappings={(opts) => {
               if (opts?.focusSource) {
@@ -5363,6 +5575,7 @@ export function TransferPage({
             }}
             onOpenIdentitySettings={openIdentitySettings}
             uniqueKeySuggestions={uniqueKeySuggestions}
+            compositeKeySuggestions={compositeKeySuggestions}
             onApplyPrimaryKey={(column) => {
               applyPrimaryKeySuggestion(column);
               openIdentitySettings();
@@ -5394,6 +5607,20 @@ export function TransferPage({
                 acknowledgmentReason: "Keep existing mappings for this run; ignore new/changed columns",
               });
             }}
+            onAcknowledgeFkRisk={() => {
+              setFkRiskAcknowledged(true);
+              toast({
+                title: "FK risk acknowledged",
+                message: "Re-running Validate — FK mapping risk accepted for this run (RI not proven).",
+                tone: "info",
+              });
+              void executePreflight(undefined, undefined, {
+                fkRiskAcknowledged: true,
+                acknowledgmentReason: "Accept destination FK mapping risk for this run; population orphans not proven",
+              });
+            }}
+            runPopulationOrphanScan={runPopulationOrphanScan}
+            onRunPopulationOrphanScanChange={setRunPopulationOrphanScan}
             repairJobId={activeJobId || seedStudioIntent?.jobId || persistedPlanId || ""}
             seedRepairProposalId={seedRepairProposalId}
             onSeedRepairConsumed={() => setSeedRepairProposalId(null)}
@@ -5417,27 +5644,35 @@ export function TransferPage({
                     || (Array.isArray(hit.transforms) && hit.transforms[0]?.type)
                     || existing?.transform;
                   const nextType = hit.destination_type || hit.target_type || existing?.destType || "";
-                  bySource.set(src, {
-                    source: src,
-                    target: String(hit.destination || existing?.target || src),
-                    confidence: existing?.confidence ?? 1,
-                    destType: String(nextType),
-                    // Operator already approved the repair proposal — stay on Validate
-                    // and re-run preflight (same path as one-click type/transform fixes).
-                    approved: true,
-                    requiresReview: false,
-                    transform: (xf as EditableMapping["transform"]) || existing?.transform,
-                    reason: [
-                      existing?.reason,
-                      `Repair applied (${hit.destination_type || hit.transform || "update"})`,
-                    ].filter(Boolean).join(" · "),
-                    sample: existing?.sample,
-                    inferredType: existing?.inferredType,
-                    isPii: existing?.isPii,
-                    existsInDestination: existing?.existsInDestination,
-                    createNew: existing?.createNew,
-                    assignmentStrategy: existing?.assignmentStrategy,
-                  });
+                  const typeChanged = Boolean(nextType) && nextType !== (existing?.destType || "");
+                  bySource.set(
+                    src,
+                    sealRemediationApproval({
+                      source: src,
+                      target: String(hit.destination || existing?.target || src),
+                      confidence: existing?.confidence ?? 1,
+                      destType: String(nextType),
+                      // Operator approved the repair proposal — still fail-closed on lossy.
+                      approved: true,
+                      requiresReview: false,
+                      transform: (xf as EditableMapping["transform"]) || existing?.transform,
+                      reason: [
+                        existing?.reason,
+                        `Repair applied (${hit.destination_type || hit.transform || "update"})`,
+                      ].filter(Boolean).join(" · "),
+                      sample: existing?.sample,
+                      inferredType: existing?.inferredType,
+                      isPii: existing?.isPii,
+                      existsInDestination: existing?.existsInDestination,
+                      createNew: existing?.createNew,
+                      assignmentStrategy: existing?.assignmentStrategy,
+                      // Dest-type repair must not reuse stale preserve / Accept risk.
+                      fidelity: typeChanged ? undefined : existing?.fidelity,
+                      fidelityReason: typeChanged ? undefined : existing?.fidelityReason,
+                      typeNarrowing: typeChanged ? undefined : existing?.typeNarrowing,
+                      riskAcknowledged: typeChanged ? false : existing?.riskAcknowledged,
+                    }),
+                  );
                 }
                 const next = [...bySource.values()];
                 queueMicrotask(() => void executePreflight(next));
@@ -5449,6 +5684,56 @@ export function TransferPage({
                 tone: "success",
               });
             }}
+          />
+          </div>
+          <ValidateActionsRail
+            preflight={preflight}
+            preflighting={preflighting}
+            transferring={transferring}
+            mappingReviewCount={mappingReviewCount}
+            riskAckPendingCount={riskAckPendingCount}
+            rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
+            transferLaunch={transferLaunch}
+            savingContract={savingContract}
+            executeBlocked={multiStreamUnsupportedMode}
+            executeBlockedReason={
+              multiStreamUnsupportedMode
+                ? MULTI_STREAM_SCD2_MIRROR_BLOCK
+                : undefined
+            }
+            cdcRetentionSlot={
+              syncMode === "cdc"
+              && sourceConnector
+              && ["sqlserver", "mssql", "oracle", "azure_sql_database", "microsoft_sql_server", "amazon_rds_sql_server"].includes(
+                resolveDriverType(sourceConnector.type),
+              )
+                ? (
+                  <CdcRetentionPanel
+                    probeRequest={{
+                      type: sourceConnector.type,
+                      host: sourceConnector.host,
+                      port: sourceConnector.port,
+                      database: sourceConnector.database,
+                      username: sourceConnector.username,
+                      password: sourceConnector.password,
+                      schema: sourceConnector.schema,
+                      connection_string: sourceConnector.connection_string,
+                      table: primarySourceStream || "",
+                      multi_subnet_failover: multiSubnetFailover || undefined,
+                    }}
+                  />
+                )
+                : undefined
+            }
+            onBack={() => setStep(STEP_MAP)}
+            onRunPreflight={() => void executePreflight()}
+            onApproveMappings={() => void approveAllAndPreflight()}
+            onOpenMapForRisk={() => setStep(STEP_MAP)}
+            onExecute={() => void executeTransfer()}
+            onOpenJobTheater={openJobTheater}
+            onSaveAsContract={() => void handleSaveAsContract()}
+            onPrimaryFix={primaryFix.onPrimaryFix}
+            primaryFixLabel={primaryFix.primaryFixLabel}
           />
         </div>
       )}
@@ -5469,15 +5754,14 @@ export function TransferPage({
             <div className="df2-run-readiness" aria-label="Run readiness summary">
               <div className="df2-run-readiness-head">
                 {(() => {
-                  const decision = preflight?.proof_bundle?.transfer_decision?.decision;
-                  const apiCleared = Boolean(preflight?.passed) && decision !== "review" && decision !== "block";
-                  if (apiCleared) {
+                  if (isGovernedExecuteReady) {
                     return (
                       <span className="df2-badge df2-badge-live">
-                        <DtIcon name="check" size={12} /> Preflight passed
+                        <DtIcon name="check" size={12} /> Preflight approved
                       </span>
                     );
                   }
+                  const decision = preflight?.proof_bundle?.transfer_decision?.decision;
                   if (preflight?.passed && decision === "review") {
                     return (
                       <span className="df2-badge df2-badge-warn">
@@ -5510,48 +5794,62 @@ export function TransferPage({
                 <strong>{mapDestRouteLabel}</strong>
               </div>
               <p>
-                {preflight?.passed && preflight?.proof_bundle?.transfer_decision?.decision !== "review"
+                {isGovernedExecuteReady
                   ? "Execute now to start governed transfer with live theater progress and reconciliation evidence."
-                  : "Re-open Validate to confirm API preflight before treating this run as fully cleared."}
+                  : "Re-open Validate to confirm API preflight (decision approve) before treating this run as cleared."}
+                {writeViaStaging
+                  ? " Staging is on — rows land in {table}_df_staging first; only clean rows promote to primary."
+                  : ""}
               </p>
             </div>
             <EmptyState
               icon="transfer"
-              title={
-                preflight?.passed && preflight?.proof_bundle?.transfer_decision?.decision !== "review"
-                  ? "Ready to transfer"
-                  : "Confirm Validate before write"
-              }
+              title={isGovernedExecuteReady ? "Ready to transfer" : "Confirm Validate before write"}
               description={
-                preflight?.passed && preflight?.proof_bundle?.transfer_decision?.decision !== "review"
-                  ? "Preflight passed on Validate. Re-open gate cards anytime, or execute here to start the write."
-                  : "This Run step is available, but preflight is missing or review-grade. Prefer Validate → API pass before Execute."
-              }
-              action={
-                <div className="df2-run-ready-actions">
-                  <button
-                    type="button"
-                    className="df2-btn"
-                    onClick={() => setStep(STEP_VALIDATE)}
-                  >
-                    ← Review Validate gates
-                  </button>
-                  <button
-                    type="button"
-                    className="df2-btn df2-btn-primary df2-btn-lg"
-                    onClick={() => void executeTransfer()}
-                    disabled={multiStreamUnsupportedMode}
-                    title={
-                      multiStreamUnsupportedMode
-                        ? "Multi-stream SCD2/mirror is not supported — switch mode or select a single stream"
-                        : undefined
-                    }
-                  >
-                    <DtIcon name="transfer" size={18} /> Execute Transfer
-                  </button>
-                </div>
+                isGovernedExecuteReady
+                  ? "API preflight approved on Validate. Re-open gate cards anytime, or execute here to start the write."
+                  : "Execute stays locked until API Validate returns decision approve (local/review-grade cannot unlock)."
               }
             />
+          </div>
+          <div className="df2-card-footer df2-wizard-footer df2-run-footer">
+            <button
+              type="button"
+              className="df2-btn"
+              onClick={() => setStep(STEP_VALIDATE)}
+            >
+              ← Back
+            </button>
+            <div className="df2-run-footer-status" aria-live="polite">
+              <span>
+                <strong>Route</strong> {sourceLabel} → {mapDestRouteLabel}
+              </span>
+              <span>
+                <strong>Preflight</strong>{" "}
+                {isGovernedExecuteReady
+                  ? "API approved"
+                  : preflight
+                    ? `${preflight.passed_count}/${preflight.total_gates} · not approved`
+                    : "not proven"}
+              </span>
+            </div>
+            <div className="df2-run-footer-actions">
+              <button
+                type="button"
+                className="df2-btn df2-btn-primary"
+                onClick={() => void executeTransfer()}
+                disabled={!canExecute || multiStreamUnsupportedMode}
+                title={
+                  multiStreamUnsupportedMode
+                    ? MULTI_STREAM_SCD2_MIRROR_BLOCK
+                    : !canExecute
+                      ? "Requires API Validate with decision approve"
+                      : undefined
+                }
+              >
+                <DtIcon name="transfer" size={16} /> Execute Transfer
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -5624,31 +5922,129 @@ export function TransferPage({
 
       {step === STEP_RUN && result && !activeJobId && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-run-step df2-result-host">
-          <TransferResultDashboard
-            result={result}
-            sourceLabel={sourceLabel}
-            destLabel={mapDestRouteLabel}
-            sourceType={sourceKind === "file" ? "file" : sourceConnector?.type || sourceKind}
-            destType={destKindMode === "file_export" ? exportFormat : destType}
-            mappingProof={mappingProof}
-            repairMappings={columnMappings.map((m) => ({
-              source: m.source,
-              destination: m.target || m.source,
-              destination_type: m.destType,
-              target_type: m.destType,
-              transform: m.transform || undefined,
-            }))}
-            onNewTransfer={resetTransferStudio}
-            onSchedule={() => void handleScheduleRoute()}
-            onOpenValidate={() => setStep(STEP_VALIDATE)}
-            onOpenChildJob={(childId) => {
-              setActiveJobId(childId);
-              setTransferring(true);
-              setResult(null);
-            }}
-            onResume={
-              result.job_id && !result.success
-                ? () => {
+          <div className="df2-card-body df2-result-body">
+            <TransferResultDashboard
+              result={result}
+              sourceLabel={sourceLabel}
+              destLabel={mapDestRouteLabel}
+              sourceType={sourceKind === "file" ? "file" : sourceConnector?.type || sourceKind}
+              destType={destKindMode === "file_export" ? exportFormat : destType}
+              mappingProof={mappingProof}
+              hideActions
+              repairMappings={columnMappings.map((m) => ({
+                source: m.source,
+                destination: m.target || m.source,
+                destination_type: m.destType,
+                target_type: m.destType,
+                transform: m.transform || undefined,
+              }))}
+              onRepairMappingsApplied={(updated) => {
+                setColumnMappings((prev) => {
+                  const bySource = new Map(prev.map((m) => [m.source, m]));
+                  for (const hit of updated) {
+                    const src = String(hit.source || "");
+                    if (!src) continue;
+                    const existing = bySource.get(src);
+                    const xf =
+                      hit.transform
+                      || (Array.isArray(hit.transforms) && hit.transforms[0]?.type)
+                      || existing?.transform;
+                    const nextType = hit.destination_type || hit.target_type || existing?.destType || "";
+                    const typeChanged = Boolean(nextType) && nextType !== (existing?.destType || "");
+                    bySource.set(
+                      src,
+                      sealRemediationApproval({
+                        source: src,
+                        target: String(hit.destination || existing?.target || src),
+                        confidence: existing?.confidence ?? 1,
+                        destType: String(nextType),
+                        approved: true,
+                        requiresReview: false,
+                        transform: (xf as EditableMapping["transform"]) || existing?.transform,
+                        reason: [
+                          existing?.reason,
+                          `Repair applied (${hit.destination_type || hit.transform || "update"})`,
+                        ].filter(Boolean).join(" · "),
+                        sample: existing?.sample,
+                        inferredType: existing?.inferredType,
+                        isPii: existing?.isPii,
+                        existsInDestination: existing?.existsInDestination,
+                        createNew: existing?.createNew,
+                        assignmentStrategy: existing?.assignmentStrategy,
+                        fidelity: typeChanged ? undefined : existing?.fidelity,
+                        fidelityReason: typeChanged ? undefined : existing?.fidelityReason,
+                        typeNarrowing: typeChanged ? undefined : existing?.typeNarrowing,
+                        riskAcknowledged: typeChanged ? false : existing?.riskAcknowledged,
+                      }),
+                    );
+                  }
+                  const next = [...bySource.values()];
+                  queueMicrotask(() => void executePreflight(next));
+                  return next;
+                });
+              }}
+              onNewTransfer={resetTransferStudio}
+              onSchedule={() => void handleScheduleRoute()}
+              onOpenValidate={() => setStep(STEP_VALIDATE)}
+              onOpenChildJob={(childId) => {
+                setActiveJobId(childId);
+                setTransferring(true);
+                setResult(null);
+              }}
+              onResume={
+                result.job_id && !result.success
+                  ? () => {
+                      void (async () => {
+                        try {
+                          await resumeJob(result.job_id!);
+                          toast({
+                            title: "Resume started",
+                            message: "Continuing from the last durable checkpoint.",
+                            tone: "success",
+                          });
+                          setActiveJobId(result.job_id!);
+                          setTransferring(true);
+                          setResult(null);
+                        } catch (e) {
+                          toast({
+                            title: "Resume failed",
+                            message: e instanceof Error ? e.message : "Resume failed",
+                            tone: "error",
+                          });
+                        }
+                      })();
+                    }
+                  : undefined
+              }
+            />
+          </div>
+          <div className="df2-card-footer df2-wizard-footer df2-run-footer">
+            <button
+              type="button"
+              className="df2-btn"
+              onClick={() => setStep(STEP_VALIDATE)}
+            >
+              ← Back
+            </button>
+            <div className="df2-run-footer-status" aria-live="polite">
+              <span>
+                <strong>Result</strong> {result.success ? "Completed" : "Needs attention"}
+              </span>
+              <span>
+                <strong>Rows</strong> {(result.records_transferred ?? 0).toLocaleString()}
+              </span>
+            </div>
+            <div className="df2-run-footer-actions">
+              {(!result.success || Boolean(result.destination_summary?.rejected_rows)) && (
+                <button type="button" className="df2-btn" onClick={() => setStep(STEP_VALIDATE)}>
+                  <DtIcon name="gate" size={14} /> Open Validate
+                </button>
+              )}
+              {result.job_id && !result.success && (
+                <button
+                  type="button"
+                  className="df2-btn"
+                  onClick={() => {
                     void (async () => {
                       try {
                         await resumeJob(result.job_id!);
@@ -5668,63 +6064,149 @@ export function TransferPage({
                         });
                       }
                     })();
-                  }
-                : undefined
-            }
-          />
+                  }}
+                >
+                  Resume
+                </button>
+              )}
+              <button type="button" className="df2-btn" onClick={() => void handleScheduleRoute()}>
+                <DtIcon name="activity" size={14} /> Schedule
+              </button>
+              <button type="button" className="df2-btn df2-btn-primary" onClick={resetTransferStudio}>
+                New transfer
+              </button>
+            </div>
+          </div>
         </div>
       )}
       </main>
-      {step === STEP_VALIDATE && (
-        <ValidateActionsRail
-          preflight={preflight}
-          preflighting={preflighting}
-          transferring={transferring}
-          mappingReviewCount={mappingReviewCount}
-          rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
-          transferLaunch={transferLaunch}
-          savingContract={savingContract}
-          executeBlocked={multiStreamUnsupportedMode}
-          executeBlockedReason={
-            multiStreamUnsupportedMode
-              ? "Multi-stream SCD2/mirror is not supported — switch to full/incremental/CDC or a single stream."
-              : undefined
-          }
-          cdcRetentionSlot={
-            syncMode === "cdc"
-            && sourceConnector
-            && ["sqlserver", "mssql", "oracle", "azure_sql_database", "microsoft_sql_server", "amazon_rds_sql_server"].includes(
-              resolveDriverType(sourceConnector.type),
-            )
-              ? (
-                <CdcRetentionPanel
-                  probeRequest={{
-                    type: sourceConnector.type,
-                    host: sourceConnector.host,
-                    port: sourceConnector.port,
-                    database: sourceConnector.database,
-                    username: sourceConnector.username,
-                    password: sourceConnector.password,
-                    schema: sourceConnector.schema,
-                    connection_string: sourceConnector.connection_string,
-                    table: primarySourceStream || "",
-                    multi_subnet_failover: multiSubnetFailover || undefined,
-                  }}
-                />
-              )
-              : undefined
-          }
-          onBack={() => setStep(STEP_MAP)}
-          onRunPreflight={() => void executePreflight()}
-          onApproveMappings={() => void approveAllAndPreflight()}
-          onExecute={() => void executeTransfer()}
-          onOpenJobTheater={openJobTheater}
-          onSaveAsContract={() => void handleSaveAsContract()}
-          onPrimaryFix={primaryFix.onPrimaryFix}
-          primaryFixLabel={primaryFix.primaryFixLabel}
-        />
-      )}
       </div>
+
+      {/* Shared Advanced drawer — Dest / Map / Validate open it in-place (no step change). */}
+      <DestinationAdvancedDrawer
+        open={advancedOpen}
+        onClose={() => setAdvancedOpen(false)}
+        syncModes={routeSyncModes}
+        schemaPolicies={SCHEMA_POLICIES}
+        validationModes={VALIDATION_MODES}
+        dateLocales={DATE_LOCALES}
+        syncMode={syncMode}
+        schemaPolicy={schemaPolicy}
+        validationMode={validationMode}
+        dateLocale={dateLocale}
+        backfillNewFields={backfillNewFields}
+        streamNames={advancedStreamNames}
+        streamFields={streamFields}
+        defaultCursor={cursorField}
+        defaultPrimaryKey={primaryKeyField}
+        sourceColumns={currentSourceColumns}
+        sourceSchema={currentSourceSchema}
+        sourceColumnsByStream={sourceColumnsByStream}
+        sourceSchemaByStream={sourceSchemaByStream}
+        syncModeLabel={syncModeLabel}
+        schemaPolicyLabel={schemaPolicyLabel}
+        requiresCursor={requiresCursor}
+        requiresPrimaryKey={requiresPrimaryKey}
+        streamNeedsReview={streamNeedsReview}
+        suggestedCursor={cursorCandidate}
+        suggestedPrimaryKey={primaryKeyCandidate}
+        uniqueKeySuggestions={uniqueKeySuggestions}
+        compositeKeySuggestions={compositeKeySuggestions}
+        snapshotMode={snapshotMode}
+        onSnapshotModeChange={setSnapshotMode}
+        allowAppendOnly={allowAppendOnly}
+        onAllowAppendOnlyChange={setAllowAppendOnly}
+        multiSubnetFailover={multiSubnetFailover}
+        onMultiSubnetFailoverChange={setMultiSubnetFailover}
+        showMultiSubnetFailover={
+          syncMode === "cdc"
+          && ["sqlserver", "mssql", "azure_sql_database", "microsoft_sql_server", "amazon_rds_sql_server"].includes(
+            resolveDriverType(sourceConnector?.type || ""),
+          )
+        }
+        cdcRowFilter={cdcRowFilter}
+        onCdcRowFilterChange={setCdcRowFilter}
+        showCdcRowFilter={
+          syncMode === "cdc"
+          && ["sqlserver", "mssql", "azure_sql_database", "microsoft_sql_server", "amazon_rds_sql_server"].includes(
+            resolveDriverType(sourceConnector?.type || ""),
+          )
+        }
+        writeViaStaging={writeViaStaging}
+        onWriteViaStagingChange={setWriteViaStaging}
+        writeViaStagingSupported={writeViaStagingSupported}
+        showVectorOptions={
+          destDriverType === "pgvector" ||
+          destDriverType === "qdrant" ||
+          destDriverType === "weaviate" ||
+          destDriverType === "pinecone" ||
+          destDriverType === "milvus"
+        }
+        vectorContentColumn={vectorContentColumn}
+        vectorEmbeddingColumn={vectorEmbeddingColumn}
+        vectorMetadataColumns={vectorMetadataColumns}
+        vectorEmbeddingModel={vectorEmbeddingModel}
+        vectorChunkSize={vectorChunkSize}
+        vectorChunkOverlap={vectorChunkOverlap}
+        onVectorContentColumnChange={setVectorContentColumn}
+        onVectorEmbeddingColumnChange={setVectorEmbeddingColumn}
+        onVectorMetadataColumnsChange={setVectorMetadataColumns}
+        onVectorEmbeddingModelChange={setVectorEmbeddingModel}
+        onVectorChunkSizeChange={setVectorChunkSize}
+        onVectorChunkOverlapChange={setVectorChunkOverlap}
+        vectorRoutingFields={vectorRoutingFields}
+        vectorRoutingLoading={vectorRoutingLoading}
+        vectorExcludePiiColumns={vectorExcludePiiColumns}
+        onApplyVectorRouting={() => void runVectorRouting(true)}
+        vectorDurableCache={vectorDurableCache}
+        onVectorDurableCacheChange={setVectorDurableCache}
+        embeddingCacheStats={embeddingCacheStats}
+        embeddingCacheBusy={embeddingCacheBusy}
+        onRefreshEmbeddingCache={() => void refreshEmbeddingCacheStats()}
+        onClearEmbeddingCache={() => void handleClearEmbeddingCache()}
+        priorityColumn={priorityColumn}
+        priorityDirection={priorityDirection}
+        rowLimit={rowLimit}
+        onPriorityColumnChange={setPriorityColumn}
+        onPriorityDirectionChange={setPriorityDirection}
+        onRowLimitChange={setRowLimit}
+        onSyncModeChange={setSyncMode}
+        onSchemaPolicyChange={(policy) => {
+          setSchemaPolicy(policy);
+          if (policy === "propagate_columns" || policy === "propagate_all") {
+            setBackfillNewFields(true);
+          } else {
+            setBackfillNewFields(false);
+          }
+        }}
+        onValidationModeChange={setValidationMode}
+        onDateLocaleChange={setDateLocale}
+        onBackfillChange={setBackfillNewFields}
+        onStreamCursorChange={(stream, value) => {
+          setStreamFields((prev) => ({
+            ...prev,
+            [stream]: {
+              cursorField: value,
+              primaryKeyField: prev[stream]?.primaryKeyField ?? primaryKeyField,
+            },
+          }));
+          if (!isMultiStreamSource || stream === advancedStreamNames[0]) {
+            setCursorField(value);
+          }
+        }}
+        onStreamPrimaryKeyChange={(stream, value) => {
+          setStreamFields((prev) => ({
+            ...prev,
+            [stream]: {
+              cursorField: prev[stream]?.cursorField ?? cursorField,
+              primaryKeyField: value,
+            },
+          }));
+          if (!isMultiStreamSource || stream === advancedStreamNames[0]) {
+            setPrimaryKeyField(value);
+          }
+        }}
+      />
       </PageFrame>
     </PageShell>
   );

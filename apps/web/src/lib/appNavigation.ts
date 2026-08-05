@@ -8,6 +8,7 @@ const SCREENS: Screen[] = [
   "connectors",
   "contracts",
   "schedules",
+  "transforms",
   "jobs",
   "mcp",
   "settings",
@@ -21,9 +22,22 @@ export type AppHashFocus = {
   panel?: string;
 };
 
+/** Friendly URL aliases → Screen ids (nav label “Pipelines” uses schedules).
+ * Do not alias `home` — that path is the public marketing route. */
+const HASH_ALIASES: Record<string, Screen> = {
+  pipelines: "schedules",
+  pipeline: "schedules",
+  overview: "dashboard",
+  studio: "transfer",
+  theater: "jobs",
+  proofs: "benchmarks",
+  proof: "benchmarks",
+};
+
 export function screenFromHash(hash: string): Screen | null {
   const raw = hash.replace(/^#\/?/, "").split("?")[0].trim().toLowerCase();
   if (!raw || raw === "landing") return null;
+  if (HASH_ALIASES[raw]) return HASH_ALIASES[raw];
   return SCREENS.includes(raw as Screen) ? (raw as Screen) : null;
 }
 
@@ -39,8 +53,15 @@ export function focusFromHash(hash: string): AppHashFocus | null {
   return { screen, jobId, panel };
 }
 
+/** Prefer operator-facing path segments when writing the hash. */
+const HASH_WRITE: Partial<Record<Screen, string>> = {
+  schedules: "pipelines",
+  dashboard: "overview",
+};
+
 export function hashForScreen(screen: Screen, focus?: { jobId?: string; panel?: string }): string {
-  const base = `#/${screen}`;
+  const segment = HASH_WRITE[screen] || screen;
+  const base = `#/${segment}`;
   if (!focus?.jobId && !focus?.panel) return base;
   const params = new URLSearchParams();
   if (focus.jobId) params.set("jobId", focus.jobId);

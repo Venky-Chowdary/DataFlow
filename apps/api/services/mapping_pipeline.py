@@ -6,7 +6,12 @@ import re
 
 from services.semantic_mapper import map_columns
 from services.transform_engine import infer_transform_for_mapping
-from services.type_system import ddl_carrier_type, ddl_type, normalize_logical_type
+from services.type_system import (
+    create_new_mapping_target_type,
+    ddl_carrier_type,
+    ddl_type,
+    normalize_logical_type,
+)
 
 CONFIDENCE_FLOOR = 0.72
 # Untyped VARCHAR with no samples — refuse inflated confidence (thin SaaS / failed introspect).
@@ -40,6 +45,21 @@ def _canonicalize_schema_rows(schemas: list[dict] | None) -> list[dict] | None:
         carrier = ddl_carrier_type(str(raw))
         out.append({**s, "inferred_type": carrier})
     return out
+
+
+def _stamp_create_new_type_risks(
+    mappings: list[dict],
+    *,
+    destination_db_type: str = "",
+) -> list[dict]:
+    """Annotate create-new mappings with cross-dialect precision/width risk.
+
+    Competitors often hide create-new type loss until write time. We surface it
+    on the mapping so Map / Validate / Pilot all see the same risk chip.
+    """
+    from services.semantic_mapper import _apply_create_new_risk_stamps
+
+    return _apply_create_new_risk_stamps(mappings, destination_db_type)
 
 
 def _demote_untyped_varchar_confidence(
@@ -305,6 +325,59 @@ def validate_mappings(mappings: list[dict], *, confidence_threshold: float = 0.8
     }
 
 
+def assert_mappings_executable(mappings: list[dict] | None) -> None:
+    """Hard-block Execute when any mapping still requires operator review.
+
+    ``user_override`` / ``approved`` clear the block after an explicit Studio
+    confirmation. ``skip_preflight`` must never bypass this gate.
+
+    Enterprise GA: boolean ``risk_acknowledged`` alone never unlocks a lossy
+    write — lossy mappings must carry a verified continue-policy Risk Contract.
+
+    Unsigned Map drafts are signed here (same hydrate Validate uses) so a green
+    Validate cannot fail Execute solely because the FE still held drafts.
+    When ``mappings`` is a list, it is updated in place with signed contracts.
+    """
+    from services.migration_risk_contract import (
+        hydrate_mappings_risk_contracts,
+        lossy_mappings_missing_risk_contracts,
+    )
+
+    hydrated = hydrate_mappings_risk_contracts(list(mappings or []))
+    if isinstance(mappings, list):
+        mappings[:] = hydrated
+    work = hydrated
+
+    pending: list[str] = []
+    for m in work:
+        if not m.get("requires_review"):
+            continue
+        if m.get("user_override") or m.get("approved") or m.get("operator_approved"):
+            continue
+        src = str(m.get("source") or "?")
+        tgt = str(m.get("target") or "?")
+        pending.append(f"{src} → {tgt}")
+    if pending:
+        sample = "; ".join(pending[:8])
+        more = f" (+{len(pending) - 8} more)" if len(pending) > 8 else ""
+        raise ValueError(
+            f"{len(pending)} mapping(s) require review before Execute: {sample}{more}"
+        )
+
+    missing_contracts = lossy_mappings_missing_risk_contracts(work)
+    if missing_contracts:
+        sample = "; ".join(missing_contracts[:8])
+        more = (
+            f" (+{len(missing_contracts) - 8} more)"
+            if len(missing_contracts) > 8
+            else ""
+        )
+        raise ValueError(
+            f"{len(missing_contracts)} lossy mapping(s) lack a verified Migration "
+            f"Risk Contract (execution policy): {sample}{more}"
+        )
+
+
 def run_mapping_pipeline(
     source_columns: list[str],
     target_columns: list[str],
@@ -321,6 +394,7 @@ def run_mapping_pipeline(
     sync_mode: str = "",
     destination_table_exists: bool | None = None,
     source_types_authoritative: bool = False,
+    prior_mappings: list[dict] | None = None,
 ) -> dict:
     from services.semantic_analyzer import analyze_schema
 
@@ -427,6 +501,16 @@ def run_mapping_pipeline(
         enabled=use_llm,
     )
 
+    # Module 13 — re-apply operator-locked priors before constraints / proof.
+    override_report: dict = {}
+    if prior_mappings:
+        from services.mapping_engine_contract import merge_mappings_preserve_overrides
+
+        pruned, override_report = merge_mappings_preserve_overrides(
+            prior_mappings,
+            pruned,
+        )
+
     from services.mapping_constraints import (
         enforce_destination_constraints,
         mapping_plan_summary,
@@ -461,7 +545,7 @@ def run_mapping_pipeline(
                 # INT/MEDIUMINT/SMALLINT UNSIGNED → BIGINT create-new (signed INT overflows).
                 tgt_type = "BIGINT"
             elif destination_db_type:
-                tgt_type = ddl_type(destination_db_type, src_type)
+                tgt_type = create_new_mapping_target_type(src_type, destination_db_type)
             else:
                 tgt_type = src_type
         else:
@@ -470,17 +554,22 @@ def run_mapping_pipeline(
         col_samples = [
             str(x) for x in (schema_by_name.get(m["source"], {}).get("samples") or [])[:8]
         ] or None
-        transform = infer_transform_for_mapping(
-            m["source"],
-            m["target"],
-            src_type,
-            tgt_type,
-            source_samples=col_samples,
-            destination_db_type=destination_db_type,
-        )
-        # New/generic destinations: the DDL type should match the chosen typed
-        # transform so a date column is created for "date" transforms, etc.
-        # Do not collapse parametric DECIMAL(p,s) → bare DECIMAL.
+        # LLM-invented transforms are held as suggested_transform until Map accept —
+        # do not let deterministic infer silently re-apply the invent.
+        if m.get("llm_invented_transform") and not m.get("user_override"):
+            transform = m.get("transform") or "none"
+        else:
+            transform = infer_transform_for_mapping(
+                m["source"],
+                m["target"],
+                src_type,
+                tgt_type,
+                source_samples=col_samples,
+                destination_db_type=destination_db_type,
+            )
+        # New/generic destinations: typed transforms must stamp *physical* DDL
+        # for the destination (DATETIME(6)/CHAR(36)/JSONB) — never bare logical
+        # tokens (DATETIME/UUID/JSON) that later false-block Validate.
         if normalize_logical_type(tgt_type) in {"string", "text", "varchar", "unknown"}:
             typed_target = _TYPED_TRANSFORM_TARGET_TYPE.get(transform)
             if typed_target:
@@ -490,6 +579,14 @@ def run_mapping_pipeline(
                         if destination_db_type
                         else src_type
                     )
+                elif destination_db_type:
+                    seed = (
+                        src_type
+                        if normalize_logical_type(src_type)
+                        == normalize_logical_type(typed_target)
+                        else typed_target
+                    )
+                    tgt_type = create_new_mapping_target_type(seed, destination_db_type)
                 else:
                     tgt_type = typed_target
 
@@ -567,6 +664,7 @@ def run_mapping_pipeline(
         target_types={s["name"]: s.get("inferred_type", "VARCHAR") for s in (target_schemas or [])},
         schema_policy=schema_policy,
         validation_mode=validation_mode,
+        dest_db_type=destination_db_type,
     )
     if coercion_issues:
         quality_issues = [*quality_issues, *[c["message"] for c in coercion_issues if c.get("severity") == "block"]]
@@ -590,6 +688,11 @@ def run_mapping_pipeline(
         enriched_mappings,
         source_types=declared_source_types,
         target_types=declared_target_types,
+        destination_db_type=destination_db_type or "",
+    )
+    enriched_mappings = _stamp_create_new_type_risks(
+        enriched_mappings,
+        destination_db_type=destination_db_type or "",
     )
 
     transforms = generate_transforms(
@@ -675,6 +778,36 @@ def run_mapping_pipeline(
     if dropped:
         agents_used.insert(3, "EntailmentPruner")
 
+    from services.semantic_mapper import ml_baseline_status
+
+    from services.mapping_engine_contract import stamp_mappings_evidence
+
+    enriched_mappings = stamp_mappings_evidence(enriched_mappings)
+
+    engine = {
+        "automapper": "bm25_hungarian_semantic",
+        "ml_baseline": ml_baseline_status(),
+        "llm": {
+            "used": bool(llm_meta.get("llm_used")),
+            "strategy": llm_meta.get("strategy") or "deterministic_only",
+            "policy": llm_meta.get("llm_policy"),
+            "provider": llm_meta.get("llm_provider"),
+            "error": llm_meta.get("llm_error"),
+        },
+        "mapping_engine_contract": override_report or {
+            "contract_version": "mapping_engine_contract.v1",
+            "note": "Evidence stamped; no prior operator mappings supplied.",
+        },
+        "deterministic_guarantees": [
+            "optimal_bipartite_hungarian",
+            "type_compat_penalty",
+            "sample_consistency_probe",
+            "create_new_type_risk_stamp",
+            "g1_g9_preflight",
+            "operator_locked_mapping_preserve",
+        ],
+    }
+
     return {
         "mappings": enriched_mappings,
         "transforms": transforms,
@@ -690,4 +823,6 @@ def run_mapping_pipeline(
         "integrity": integrity,
         "agents_used": agents_used,
         "llm": llm_meta,
+        "engine": engine,
+        "mapping_override_report": override_report,
     }

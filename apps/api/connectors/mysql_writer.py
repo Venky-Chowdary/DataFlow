@@ -8,10 +8,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from services.type_system import ddl_type
+from services import reflection_cache
+from services.type_system import ddl_type, materialize_dest_ddl
 
 from connectors.mysql_conn import get_connection
-from connectors.schema_drift import is_wider_type, widen_existing_columns_native
+from connectors.schema_drift import widen_existing_columns_native
 from connectors.sql_temporal import (
     extract_column_from_sql_error,
     is_sql_data_error,
@@ -19,11 +20,11 @@ from connectors.sql_temporal import (
 from connectors.write_resilience import (
     build_write_batch_key,
     close_quietly,
-    ensure_mysql_write_ledger,
+    ensure_raw_write_ledger,
     is_connection_lost,
     is_public_proxy_host,
-    mark_mysql_chunk_committed,
-    mysql_chunk_committed,
+    mark_raw_chunk_committed,
+    raw_chunk_rows_written,
     reconnect_backoff_seconds,
     should_retry_connection_lost,
     write_chunk_size,
@@ -67,20 +68,45 @@ class WriteResult(_WriteResult):
 
 
 def mysql_type(inferred: str) -> str:
-    return ddl_type("mysql", inferred)
+    return materialize_dest_ddl("mysql", inferred)
 
 
-def _fetch_mysql_column_types(cursor: Any, table_name: str) -> dict[str, str]:
-    """Return physical ``COLUMN_TYPE`` for an existing table (empty if missing)."""
-    try:
-        cursor.execute(
-            "SELECT COLUMN_NAME, COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
-            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
-            (table_name,),
-        )
-        return {str(name): str(ctype or "") for name, ctype in cursor.fetchall()}
-    except Exception:
-        return {}
+def _fetch_mysql_column_types(
+    cursor: Any, table_name: str, identity: str = ""
+) -> dict[str, str]:
+    """Return physical ``COLUMN_TYPE`` for an existing table (empty if missing).
+
+    Cached per table when ``identity`` is supplied. This runs once per write
+    chunk, so on a large load it was thousands of identical
+    ``INFORMATION_SCHEMA.COLUMNS`` scans describing a table that only changes
+    when the drift path below alters it — and that path invalidates.
+
+    An empty result is never cached. Empty means "table missing or not
+    readable", which is precisely the answer that goes stale the moment the
+    ``CREATE TABLE IF NOT EXISTS`` above succeeds.
+    """
+
+    def _load() -> dict[str, str]:
+        try:
+            cursor.execute(
+                "SELECT COLUMN_NAME, COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
+                (table_name,),
+            )
+            return {str(name): str(ctype or "") for name, ctype in cursor.fetchall()}
+        except Exception:
+            return {}
+
+    if not identity:
+        return _load()
+
+    cached = reflection_cache.peek_by_identity(identity, "", table_name, "mysql_col_types")
+    if cached:
+        return dict(cached)
+    fresh = _load()
+    if fresh:
+        reflection_cache.put_by_identity(identity, "", table_name, "mysql_col_types", fresh)
+    return fresh
 
 
 def _apply_physical_temporal_types(
@@ -185,6 +211,7 @@ def _open_mysql(
     password: str,
     connection_string: str,
     ssl: bool,
+    purpose: str = "write",
 ):
     conn = get_connection(
         host=host,
@@ -194,6 +221,7 @@ def _open_mysql(
         password=password,
         connection_string=connection_string,
         ssl=ssl,
+        purpose=purpose,
     )
     conn.autocommit = False
     return conn
@@ -440,20 +468,34 @@ def write_mapped_rows(
     conn = None
     converted_rows: list[tuple] = []
 
-    def _reconnect():
+    # CREATE/ALTER opens with purpose="setup" (short lock wait) so contended
+    # metadata locks fail fast. After setup we reconnect with purpose="write"
+    # for the proxy-friendly INSERT budget. DROP uses purpose="ddl" in
+    # table_manager separately.
+    def _reconnect(*, purpose: str = "write"):
         nonlocal conn, cur
         close_quietly(conn)
         conn = _open_mysql(
             host=host, port=port, database=database,
             username=username, password=password,
             connection_string=connection_string, ssl=ssl,
+            purpose=purpose,
         )
         cur = conn.cursor()
+
+    _identity = reflection_cache.dsn_identity(
+        driver="mysql",
+        host=host,
+        port=port,
+        database=database,
+        username=username,
+        connection_string=connection_string,
+    )
 
     def _run_setup(cursor) -> None:
         nonlocal target_types, converted_rows
         if use_ledger:
-            ensure_mysql_write_ledger(cursor)
+            ensure_raw_write_ledger(cursor, dialect="mysql")
         if create_table:
             col_defs = ", ".join(
                 f"{quote_sql_identifier(c, '`')} {t}" for c, t in zip(target_cols, target_types)
@@ -467,6 +509,9 @@ def write_mapped_rows(
                     cols = ", ".join(quote_sql_identifier(c, "`") for c in conflict_cols)
                     col_defs += f", UNIQUE KEY {quote_sql_identifier(index_name, '`')} ({cols})"
             cursor.execute(f"CREATE TABLE IF NOT EXISTS {table_q} ({col_defs})")
+            # Empty physical-type answers are never cached (see
+            # ``_fetch_mysql_column_types``), so a just-created table has no
+            # stale entry to drop — only real ALTER paths invalidate.
 
         if backfill_new_fields:
             cursor.execute(
@@ -475,15 +520,21 @@ def write_mapped_rows(
                 (table_name,),
             )
             existing = {row[0] for row in cursor.fetchall()}
+            altered = False
             for col, typ in zip(target_cols, target_types):
                 if col not in existing:
                     cursor.execute(
                         f"ALTER TABLE {table_q} ADD COLUMN {quote_sql_identifier(col, '`')} {typ}"
                     )
+                    altered = True
+            if altered:
+                # Real shape change: any cached physical types describe the
+                # table as it was before these columns existed.
+                reflection_cache.invalidate_by_identity(_identity, "", table_name)
 
-            # Pick the wider of the mapping-proposed target DDL and the freshly
-            # introspected source DDL, then widen any destination columns that are
-            # now too narrow for the source drift.
+            # Map≡ALTER: source DDL may propose a wider type, but an explicit
+            # Map target_type is a hard ceiling — never MODIFY past it.
+            from connectors.writer_common import desired_types_honoring_map_stamps
             from services.mapping_constraints import write_mappings
 
             active_by_tgt: dict[str, dict] = {}
@@ -491,8 +542,8 @@ def write_mapped_rows(
                 tgt = sanitize_identifier(str(mapping.get("target") or ""), preserve_case=False)
                 if tgt and tgt not in active_by_tgt:
                     active_by_tgt[tgt] = mapping
-            desired_types: list[str] = []
-            for col, target_type in zip(target_cols, target_types):
+            candidate_by_col: dict[str, str] = {}
+            for col in target_cols:
                 mapping = active_by_tgt.get(col) or {}
                 source = mapping.get("source") or ""
                 source_type = (
@@ -500,13 +551,19 @@ def write_mapped_rows(
                     or mapping.get("source_type")
                     or "VARCHAR"
                 )
-                source_ddl = mysql_type(source_type)
-                desired = (
-                    source_ddl
-                    if is_wider_type(target_type, source_ddl)
-                    else target_type
+                candidate_by_col[col] = mysql_type(source_type)
+
+            desired_types, alter_refusals = desired_types_honoring_map_stamps(
+                target_cols=target_cols,
+                current_target_types=target_types,
+                mappings=mappings,
+                candidate_by_col=candidate_by_col,
+            )
+            if alter_refusals:
+                logger.info(
+                    "mysql Map≡ALTER refusals (stamp ceiling): %s",
+                    alter_refusals,
                 )
-                desired_types.append(desired)
 
             widen_existing_columns_native(
                 cursor,
@@ -519,14 +576,19 @@ def write_mapped_rows(
                 skip_cols=conflict_columns or [],
             )
             target_types = desired_types
+            reflection_cache.invalidate_by_identity(_identity, "", table_name)
 
         # Bind using physical types so ISO Z never hits a DATETIME column as TEXT.
-        physical = _fetch_mysql_column_types(cursor, table_name)
+        physical = _fetch_mysql_column_types(cursor, table_name, identity=_identity)
         target_types = _apply_physical_temporal_types(target_cols, target_types, physical)
-        converted_rows = [
-            tuple(_to_mysql_value(v, target_types[i]) for i, v in enumerate(row))
-            for row in mapped_rows
-        ]
+        from connectors.writer_common import materialize_missing_as_null_for_dense_write
+
+        converted_rows = materialize_missing_as_null_for_dense_write(
+            [
+                tuple(_to_mysql_value(v, target_types[i]) for i, v in enumerate(row))
+                for row in mapped_rows
+            ]
+        )
         conn.commit()
 
     try:
@@ -534,6 +596,7 @@ def write_mapped_rows(
             host=host, port=port, database=database,
             username=username, password=password,
             connection_string=connection_string, ssl=ssl,
+            purpose="setup",
         )
         cur = conn.cursor()
         try:
@@ -554,14 +617,23 @@ def write_mapped_rows(
                     ):
                         raise
                     time.sleep(reconnect_backoff_seconds(setup_attempt))
-                    _reconnect()
+                    _reconnect(purpose="setup")
+
+            # Setup used short lock waits; INSERT/UPSERT needs write I/O budget.
+            _reconnect(purpose="write")
 
             # Defensive: if setup skipped conversion somehow, coerce with mapping types.
             if not converted_rows and mapped_rows:
-                converted_rows = [
-                    tuple(_to_mysql_value(v, target_types[i]) for i, v in enumerate(row))
-                    for row in mapped_rows
-                ]
+                from connectors.writer_common import materialize_missing_as_null_for_dense_write
+
+                converted_rows = materialize_missing_as_null_for_dense_write(
+                    [
+                        tuple(
+                            _to_mysql_value(v, target_types[i]) for i, v in enumerate(row)
+                        )
+                        for row in mapped_rows
+                    ]
+                )
 
             rows_skipped = 0
             sparse_written = 0
@@ -600,14 +672,21 @@ def write_mapped_rows(
                 chunk_written = 0
                 while True:
                     try:
-                        if use_ledger and mysql_chunk_committed(
-                            cur,
-                            job_id=job_id,
-                            batch_key=write_batch_key,
-                            chunk_idx=chunk_idx,
-                        ):
-                            chunk_written = len(batch)
-                            break
+                        if use_ledger:
+                            already = raw_chunk_rows_written(
+                                cur,
+                                dialect="mysql",
+                                job_id=job_id,
+                                batch_key=write_batch_key,
+                                chunk_idx=chunk_idx,
+                            )
+                            if already is not None:
+                                # Credit what the first attempt actually landed.
+                                # The chunk may have quarantined rows, so
+                                # len(batch) would over-report and make the
+                                # reconcile checksum disagree with the table.
+                                chunk_written = already
+                                break
                         write_batch = batch
                         if (
                             write_mode == "upsert"
@@ -629,8 +708,9 @@ def write_mapped_rows(
                         if write_batch:
                             cur.executemany(insert_sql, write_batch)
                         if use_ledger:
-                            mark_mysql_chunk_committed(
+                            mark_raw_chunk_committed(
                                 cur,
+                                dialect="mysql",
                                 job_id=job_id,
                                 batch_key=write_batch_key,
                                 chunk_idx=chunk_idx,
@@ -677,8 +757,9 @@ def write_mapped_rows(
                                     transform_errors.append(str(row_exc)[:200])
                             if use_ledger and chunk_written:
                                 try:
-                                    mark_mysql_chunk_committed(
+                                    mark_raw_chunk_committed(
                                         cur,
+                                        dialect="mysql",
                                         job_id=job_id,
                                         batch_key=write_batch_key,
                                         chunk_idx=chunk_idx,

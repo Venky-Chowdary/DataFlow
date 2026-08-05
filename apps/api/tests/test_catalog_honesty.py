@@ -92,6 +92,23 @@ def test_postgresql_is_certified_transfer_ready() -> None:
     assert certification_tier("postgresql", "postgresql", row["capabilities"], transfer_ready_flag=True) == "certified"
 
 
+def test_redshift_is_planned_until_production_sku() -> None:
+    """Redshift RW exists but is not SKU-proven — never pitch as Full transfer."""
+    row = enrich_catalog_entry(
+        {"id": "redshift", "name": "Amazon Redshift", "category": "warehouse", "status": "live", "description": ""}
+    )
+    assert row["transfer_ready"] is False
+    assert row["certification_tier"] == "planned"
+    assert row["effective_status"] == "planned"
+
+
+def test_uncertified_saas_not_in_transfer_ready_catalog_ids() -> None:
+    from src.transfer.connector_capabilities import TRANSFER_READY_CATALOG_IDS
+
+    for brand in ("stripe", "shopify", "airtable", "zendesk", "notion", "redshift"):
+        assert brand not in TRANSFER_READY_CATALOG_IDS, brand
+
+
 def test_uncertified_generic_sql_brands_are_planned() -> None:
     # db2/teradata always Planned; oracle/sql_server only when DBAPI missing.
     for brand in ("db2", "teradata"):

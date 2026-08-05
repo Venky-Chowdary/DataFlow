@@ -1,7 +1,7 @@
 import { useRevealOnScroll } from "../../hooks/useRevealOnScroll";
 import { DtIcon } from "../DtIcon";
 
-// Category comparison only — DataFlow vs the managed-ELT and open-source
+// Category comparison only — Datawrap vs the managed-ELT and open-source
 // pipeline categories. We never name competitor brands in public copy.
 const FEATURES = [
   { label: "Semantic schema intelligence", dataflow: true, managed: "partial", oss: "partial" },
@@ -27,14 +27,14 @@ export function ComparisonSection() {
       <div className="lp-section-head">
         <p className="lp-section-kicker">Comparison</p>
         <h2>Built where legacy ETL stops</h2>
-        <p>DataFlow combines the breadth of managed ELT, the openness of self-hosted pipelines, and an AI-first control plane you can audit.</p>
+        <p>Datawrap combines the breadth of managed ELT, the openness of self-hosted pipelines, and an AI-first control plane you can audit.</p>
       </div>
 
       <div className="lp-compare-wrap">
         <div className="lp-compare-table" role="table" aria-label="Category comparison">
           <div className="lp-compare-row lp-compare-header" role="row">
             <span role="columnheader">Capability</span>
-            <span role="columnheader" className="lp-compare-brand lp-compare-brand--dataflow">DataFlow</span>
+            <span role="columnheader" className="lp-compare-brand lp-compare-brand--dataflow">Datawrap</span>
             <span role="columnheader" className="lp-compare-brand">Managed ELT</span>
             <span role="columnheader" className="lp-compare-brand">Open-source pipelines</span>
           </div>

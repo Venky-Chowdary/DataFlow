@@ -8,11 +8,13 @@ import {
   STRUCT_POLICIES,
   applyDestTypeChange,
   applyStructPolicyChange,
+  acknowledgeMappingRisk,
   applyTransformChange,
   approveMappingHonestly,
   approveMappingsHonestly,
   canWidenMapping,
   countApproveEligible,
+  EXECUTION_POLICY_OPTIONS,
   flagExistingEnumBooleanConflict,
   isArrayLogicalType,
   isEnumToBooleanConflict,
@@ -20,9 +22,17 @@ import {
   isIntentionalOmit,
   isSpecialtyLogicalType,
   isStructLogicalType,
+  createNewRiskDetail,
+  engineStampedRiskChip,
+  hasCreateNewTypeRisk,
+  mappingAckDoneLabel,
+  mappingAckLabel,
+  mappingAckTier,
+  mappingRequiresRiskAck,
   pipelineTransformChip,
   widenMappingToVarchar,
   type EditableMapping,
+  type ExecutionPolicy,
   type MappingTransform,
   type StructPolicy,
 } from "../lib/mapping";
@@ -67,11 +77,22 @@ interface ColumnReviewPanelProps {
   onSearchChange?: (value: string) => void;
   filter?: ColumnFilter;
   onFilterChange?: (value: ColumnFilter) => void;
+  /** Plan / migration id stamped onto Risk Contracts for audit. */
+  migrationId?: string;
+  /** Destination table stamped onto Risk Contracts. */
+  tableName?: string;
 }
 
-function confidenceClass(c: number, threshold: number, approved: boolean): string {
+function confidenceClass(
+  c: number,
+  threshold: number,
+  approved: boolean,
+  riskOpen = false,
+): string {
+  // Confidence is evidence, not clearance — never paint green until Approve.
+  if (riskOpen) return "block";
   if (approved) return "ok";
-  if (c >= threshold) return "ok";
+  if (c >= threshold) return "warn";
   if (c >= threshold - 0.1) return "warn";
   return "block";
 }
@@ -109,9 +130,11 @@ export function ColumnReviewPanel({
   onSearchChange,
   filter: filterProp,
   onFilterChange,
+  migrationId = "",
+  tableName = "",
 }: ColumnReviewPanelProps) {
   const [internalSearch, setInternalSearch] = useState("");
-  const [internalFilter, setInternalFilter] = useState<ColumnFilter>("all");
+  const [internalFilter, setInternalFilter] = useState<ColumnFilter>("review");
   const [sort, setSort] = useState<ColumnSort>("confidence-asc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<ColumnPageSize>(50);
@@ -151,6 +174,14 @@ export function ColumnReviewPanel({
     ? mappings.reduce((s, m) => s + m.confidence, 0) / mappings.length
     : 0;
 
+
+  // Issues-first default when the panel owns its filter (uncontrolled).
+  useEffect(() => {
+    if (filterProp !== undefined) return;
+    const needs = mappings.filter((m) => needsMappingReview(m, confidenceThreshold)).length;
+    setInternalFilter(needs > 0 ? "review" : "all");
+  }, [mappings, confidenceThreshold, filterProp]);
+
   useEffect(() => {
     setPage(1);
   }, [search, filter, sort, pageSize, mappings.length]);
@@ -189,6 +220,9 @@ export function ColumnReviewPanel({
     return undefined;
   }, [focusSource, pageItems, filtered, onFocusHandled]);
 
+  /** Per-row execution policy choice — no hidden CAST_AND_CONTINUE default. */
+  const [policyBySource, setPolicyBySource] = useState<Record<string, ExecutionPolicy | "">>({});
+
   const updateMapping = (index: number, patch: Partial<EditableMapping>) => {
     const next = mappings.map((m, i) => (i === index ? { ...m, ...patch } : m));
     onChange(next);
@@ -201,6 +235,33 @@ export function ColumnReviewPanel({
   const approveOne = (index: number) => {
     const m = mappings[index];
     if (!m) return;
+    // Fidelity / STRUCT / specialty need explicit risk ack — bare Approve must not clear G4.
+    if (mappingRequiresRiskAck(m)) {
+      const chosen = policyBySource[m.source];
+      if (!chosen) {
+        // Fail closed: refuse to invent CAST_AND_CONTINUE.
+        updateMapping(index, {
+          ...m,
+          approved: false,
+          requiresReview: true,
+          reason: [m.reason, "Choose an execution policy before signing Risk Contract"]
+            .filter(Boolean)
+            .join(" · "),
+        });
+        return;
+      }
+      updateMapping(
+        index,
+        acknowledgeMappingRisk(m, {
+          executionPolicy: chosen,
+          migrationId: migrationId || undefined,
+          table: tableName || undefined,
+          planId: migrationId || undefined,
+          estimatedRows: rowCount ?? null,
+        }),
+      );
+      return;
+    }
     updateMapping(index, approveMappingHonestly(m));
   };
 
@@ -212,6 +273,38 @@ export function ColumnReviewPanel({
     setSearch("");
     setPage(1);
   };
+
+  // Map hotkeys: A approve eligible, R review filter, X accept risk on first open row.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (!t) return;
+      const tag = (t.tagName || "").toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select" || t.isContentEditable) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const key = e.key.toLowerCase();
+      if (key === "a") {
+        e.preventDefault();
+        approveAll();
+        return;
+      }
+      if (key === "r") {
+        e.preventDefault();
+        focusIssues();
+        return;
+      }
+      if (key === "x") {
+        const idx = mappings.findIndex(
+          (m) => mappingRequiresRiskAck(m) && !m.riskAcknowledged && !isIntentionalOmit(m),
+        );
+        if (idx < 0) return;
+        e.preventDefault();
+        approveOne(idx);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [mappings, onChange]);
 
   const pageStart = filtered.length === 0 ? 0 : (page - 1) * pageSize + 1;
   const pageEnd = Math.min(page * pageSize, filtered.length);
@@ -456,21 +549,33 @@ export function ColumnReviewPanel({
             <DtIcon name="alert" size={16} />
             <span>
               <strong>{needsReview.length} column(s)</strong> need review before transfer.
+              {mappings.some((m) => mappingRequiresRiskAck(m) && !m.riskAcknowledged && !isIntentionalOmit(m)) && (
+                <>
+                  {" "}
+                  Use <strong>Review</strong> for reversible casts and <strong>Accept risk</strong> for lossy / irreversible changes — Approve alone will not unlock Validate on those rows.
+                </>
+              )}
             </span>
           </div>
         )}
 
-        {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && destTableExists === false && (
+        {!isDialog && !compact && !destSchemaLoading && destColumnSet.size === 0 && destTableExists === false && (
           <div className="df2-column-review-alert df2-column-review-alert-info" role="status">
             <DtIcon name="sparkle" size={16} />
             <span>
               <strong>New destination table</strong>
               {" — create-new fields; types will CREATE on first write"}
               {destType ? ` with ${destType}-native DDL` : ""}.
+              {mappings.some((m) => hasCreateNewTypeRisk(m)) && (
+                <>
+                  {" "}
+                  Precision / width / timezone risks are stamped on rows — review amber chips before Validate.
+                </>
+              )}
             </span>
           </div>
         )}
-        {!isDialog && !destSchemaLoading && destColumnSet.size > 0 && destTableExists === true && (
+        {!isDialog && !compact && !destSchemaLoading && destColumnSet.size > 0 && destTableExists === true && (
           <div className="df2-column-review-alert df2-column-review-alert-info" role="status">
             <DtIcon name="check" size={16} />
             <span>
@@ -481,7 +586,7 @@ export function ColumnReviewPanel({
             </span>
           </div>
         )}
-        {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && destTableExists === true && (
+        {!isDialog && !compact && !destSchemaLoading && destColumnSet.size === 0 && destTableExists === true && (
           <div className="df2-column-review-alert df2-column-review-alert-warn" role="status">
             <DtIcon name="alert" size={16} />
             <span>
@@ -490,7 +595,7 @@ export function ColumnReviewPanel({
             </span>
           </div>
         )}
-        {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && destTableExists == null && (
+        {!isDialog && !compact && !destSchemaLoading && destColumnSet.size === 0 && destTableExists == null && (
           <div className="df2-column-review-alert df2-column-review-alert-warn" role="status">
             <DtIcon name="alert" size={16} />
             <span>
@@ -507,7 +612,7 @@ export function ColumnReviewPanel({
               ) : (
                 <>
                   <strong>Destination schema unknown</strong>
-                  {" — existence not confirmed. Retry Destination/Map; DataFlow will not invent create-new fields yet."}
+                  {" — existence not confirmed. Retry Destination/Map; Datawrap will not invent create-new fields yet."}
                 </>
               )}
             </span>
@@ -534,9 +639,10 @@ export function ColumnReviewPanel({
           </thead>
           <tbody>
             {pageItems.map(({ mapping: m, index }) => {
-              const tier = confidenceClass(m.confidence, confidenceThreshold, m.approved);
-              const ready = isMappingReady(m, confidenceThreshold);
               const omitted = isIntentionalOmit(m);
+              const riskOpen = mappingRequiresRiskAck(m) && !m.riskAcknowledged && !omitted;
+              const tier = confidenceClass(m.confidence, confidenceThreshold, m.approved, riskOpen);
+              const ready = isMappingReady(m, confidenceThreshold);
               return (
                 <tr
                   key={`${m.source}-${index}`}
@@ -556,7 +662,29 @@ export function ColumnReviewPanel({
                         </span>
                       )}
                       {m.isPii && <span className="df2-badge df2-badge-run df2-badge-xs">PII</span>}
-                      {m.requiresReview && !m.approved && !omitted && (
+                      {(() => {
+                        const engineRisk = engineStampedRiskChip(m);
+                        if (!engineRisk || omitted) return null;
+                        if (!m.riskAcknowledged) {
+                          return (
+                            <span
+                              className="df2-badge df2-badge-run df2-badge-xs"
+                              title={engineRisk.detail}
+                            >
+                              {engineRisk.label}
+                            </span>
+                          );
+                        }
+                        return (
+                          <span
+                            className="df2-badge df2-badge-warn df2-badge-xs"
+                            title={engineRisk.detail}
+                          >
+                            risk accepted · {engineRisk.label}
+                          </span>
+                        );
+                      })()}
+                      {m.requiresReview && !m.approved && !omitted && !mappingRequiresRiskAck(m) && (
                         <span className="df2-badge df2-badge-run df2-badge-xs">ambiguous</span>
                       )}
                       {(m.semanticRole === "string_enum" || isEnumToBooleanConflict(m)) && !omitted && (
@@ -640,10 +768,10 @@ export function ColumnReviewPanel({
                       )}
                       {!omitted && (
                       <div className="df2-column-dest-badges">
-                        {m.existsInDestination && (
+                        {m.existsInDestination === true && (
                           <span className="df2-col-badge-exists">exists</span>
                         )}
-                        {!m.existsInDestination && destColumnSet.size > 0 && (
+                        {m.existsInDestination === false && destColumnSet.size > 0 && (
                           <span className="df2-col-badge-new">new</span>
                         )}
                         {(isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType)) && (
@@ -670,6 +798,33 @@ export function ColumnReviewPanel({
                           </span>
                         )}
                       </div>
+                      )}
+                      {!omitted && m.flattenCollisions && m.flattenCollisions.length > 0 && (
+                        <div className="df2-flatten-collision" role="note">
+                          <p className="df2-label-hint">Flatten collisions (kept as JSON path owners)</p>
+                          <table className="df2-flatten-collision-table">
+                            <thead>
+                              <tr><th>Flat name</th><th>Paths</th></tr>
+                            </thead>
+                            <tbody>
+                              {m.flattenCollisions.map((c) => (
+                                <tr key={c.flat}>
+                                  <td className="df2-mono">{c.flat}</td>
+                                  <td className="df2-mono">{c.paths.map((p) => p.join(".")).join(" · ")}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                          <button
+                            type="button"
+                            className="df2-btn df2-btn-sm"
+                            onClick={() =>
+                              onChange(applyStructPolicyChange(mappings, index, "store_as_json"))
+                            }
+                          >
+                            Keep as JSON blob
+                          </button>
+                        </div>
                       )}
                       {!omitted && isExistingEnumBooleanConflict(m) && (
                         <button
@@ -735,15 +890,72 @@ export function ColumnReviewPanel({
                     {omitted ? (
                       <span className="df2-badge df2-badge-muted df2-badge-xs">Omitted</span>
                     ) : ready ? (
-                      <span className="df2-badge df2-badge-live df2-badge-xs">Ready</span>
+                      <div className="df2-column-contract-done">
+                        <span className="df2-badge df2-badge-live df2-badge-xs">
+                          {mappingAckDoneLabel(m)}
+                        </span>
+                        {m.riskContract?.risk_id && (
+                          <span
+                            className="df2-column-risk-id"
+                            title={[
+                              m.riskContract.signature
+                                ? `sig ${String(m.riskContract.signature).slice(0, 24)}…`
+                                : "unsigned draft — Validate will sign",
+                              m.riskContract.loss_classification
+                                ? `loss=${m.riskContract.loss_classification}`
+                                : "",
+                              m.riskContract.approved_by
+                                ? `by ${m.riskContract.approved_by}`
+                                : "",
+                            ].filter(Boolean).join(" · ")}
+                          >
+                            {m.riskContract.risk_id}
+                          </span>
+                        )}
+                      </div>
                     ) : (
-                      <button
-                        type="button"
-                        className="df2-btn df2-btn-sm"
-                        onClick={() => approveOne(index)}
-                      >
-                        Approve
-                      </button>
+                      <div className="df2-column-risk-actions">
+                        {mappingRequiresRiskAck(m) && (
+                          <select
+                            className="df2-input df2-select df2-select-xs"
+                            value={policyBySource[m.source] || ""}
+                            onChange={(e) => {
+                              const v = e.target.value as ExecutionPolicy | "";
+                              setPolicyBySource((prev) => ({ ...prev, [m.source]: v }));
+                            }}
+                            aria-label={`Execution policy for ${m.source}`}
+                            title="Required — no hidden default"
+                          >
+                            <option value="">Policy…</option>
+                            {EXECUTION_POLICY_OPTIONS.map((p) => (
+                              <option key={p.id} value={p.id}>
+                                {p.label}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                        <button
+                          type="button"
+                          className={`df2-btn df2-btn-sm${mappingAckTier(m) === "accept_risk" ? " df2-btn-danger" : ""}`}
+                          onClick={() => approveOne(index)}
+                          disabled={
+                            mappingRequiresRiskAck(m) && !policyBySource[m.source]
+                          }
+                          title={
+                            mappingRequiresRiskAck(m)
+                              ? (!policyBySource[m.source]
+                                ? "Choose an execution policy first — no hidden defaults"
+                                : createNewRiskDetail(m)
+                                  || m.fidelityReason
+                                  || (mappingAckTier(m) === "review"
+                                    ? "Review this conversion before Execute"
+                                    : "Sign Migration Risk Contract for this column"))
+                              : undefined
+                          }
+                        >
+                          {mappingAckLabel(m)}
+                        </button>
+                      </div>
                     )}
                   </td>
                 </tr>

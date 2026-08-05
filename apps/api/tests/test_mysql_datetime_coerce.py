@@ -53,9 +53,10 @@ def test_humanize_mysql_1292_datetime_has_mapped_remediation():
     assert "ISO" in (explained.get("fix") or "") or "DATETIME" in (explained.get("fix") or "")
 
 
-def test_iso_offset_datetime_normalized_to_utc_naive():
+def test_iso_offset_datetime_keeps_wall_clock_on_mysql_datetime():
+    """MySQL DATETIME is NTZ — keep civil digits; do not UTC-shift then strip."""
     got = _to_mysql_value("2024-08-09T03:58:42+02:00", "DATETIME(6)")
-    assert got == datetime(2024, 8, 9, 1, 58, 42)
+    assert got == datetime(2024, 8, 9, 3, 58, 42)
 
 
 def test_date_column_from_iso_datetime():

@@ -16,11 +16,40 @@ additional policy gates (sync contract, schema policy, validation posture).
 | G8 | Pre-write sample reconciliation (requires Validate samples; post-write checksum runs after Execute) |
 | G9 | Data integrity audit (unproven / not-configured audit fails closed) |
 
+**Required core gates = G1–G9 only.** Do not add a `GateId` for optional extras.
+
+### Constraint findings (host / Studio policy — not a numbered GateId)
+
+`assess_constraint_compatibility(ctx) -> list[dict]` in `constraint_hints.py`
+returns structured FK findings when destination foreign-key metadata is present.
+Severity is `block` / `ack_required` / `info` based on validation mode and
+`fk_risk_acknowledged`. Hosts attach findings as `constraint_findings` /
+`constraint_hints` and must flip `passed=false` when
+`constraint_findings_block_transfer(...)` is true.
+
+The API host may also run `services.sample_orphan_probe.probe_sample_fk_orphans`
+against Validate sample values. That path stamps
+`coverage=sample_orphan_probe` and **never** sets population RI `proven`.
+`referential_integrity_posture(..., population_orphan_count=0)` is required
+before `proven=True`.
+
 ```python
 from preflight import PreflightEngine, PreflightContext, TransferPlan
+from preflight import (
+    assess_constraint_compatibility,
+    constraint_findings_block_transfer,
+    referential_integrity_posture,
+)
 
 engine = PreflightEngine(fail_fast=True)
 result = engine.run(PreflightContext(plan=transfer_plan, sample_rows=samples))
 if not result.passed:
     raise PreflightBlocked(result.blockers)
+findings = assess_constraint_compatibility(ctx)
+if constraint_findings_block_transfer(findings, validation_mode="strict"):
+    raise PreflightBlocked("unmapped destination FK columns")
+assert referential_integrity_posture(findings)["proven"] is False
+assert referential_integrity_posture(
+    [], sample_orphan_probe_ran=True, sample_orphan_count=0
+)["proven"] is False
 ```

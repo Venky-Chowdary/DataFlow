@@ -11,15 +11,16 @@ import {
   fetchModelCapabilities,
   formatPilotReachError,
   ModelCapabilities,
-  runScheduleNow,
 } from "../lib/api";
-import { AUTOMATION_CATEGORIES, AUTOMATION_IDEAS } from "../lib/automationIdeas";
+import { AUTOMATION_IDEAS } from "../lib/automationIdeas";
 import { useActiveData } from "../lib/DataContext";
 import {
-  confirmPilotPending,
-  isDestructiveTransfer,
-  transferOverwriteMessage,
-} from "../lib/pilotConfirm";
+  applyPilotSafeActions,
+  buildPilotDataContext,
+  nextPilotResultId,
+  pilotActionChipLabel,
+  runPilotConfirm,
+} from "../lib/pilotChat";
 import { useStudioActions } from "../lib/StudioActionsContext";
 import { API_BASE, Screen } from "../lib/types";
 import { useToast } from "../components/Toast";
@@ -27,63 +28,36 @@ import { useConfirm } from "../components/ui/ConfirmDialog";
 import { renderSafeMarkdown } from "../lib/safeMarkdown";
 import { CopyIdChip } from "../components/ui/CopyIdChip";
 import { PageFrame } from "../components/ui/PageFrame";
-import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageShell } from "../components/ui/PageShell";
 import {
   createEmptySession,
   loadAsideOpen,
   loadPilotWorkspace,
+  loadRailChat,
   PilotSession,
+  promoteRailChatToPilotSession,
   saveAsideOpen,
   savePilotWorkspace,
+  saveRailChat,
 } from "../lib/pilotChatStore";
 
 interface PilotPageProps {
   onNavigate: (screen: Screen) => void;
 }
 
-function extractResultIdFromTools(
-  tools?: { name: string; success: boolean; summary: string }[],
-): string | undefined {
-  if (!tools?.length) return undefined;
-  for (let i = tools.length - 1; i >= 0; i -= 1) {
-    const t = tools[i];
-    if (!t.success) continue;
-    if (!["sample_connector_object", "run_query", "filter_result", "analyze_result", "aggregate_data"].includes(t.name)) {
-      continue;
-    }
-    const m = /\b(pr_[a-f0-9]+)\b/i.exec(t.summary || "");
-    if (m) return m[1];
-  }
-  return undefined;
-}
-
-const SCREEN_LABELS: Record<string, string> = {
-  dashboard: "Overview",
-  pilot: "Data Pilot",
-  transfer: "Transfer Studio",
-  connectors: "Connectors",
-  jobs: "Jobs",
-  settings: "Settings",
-  schedules: "Pipelines",
-  contracts: "Contracts",
-  query: "Query",
-  mcp: "MCP",
-  docs: "Docs",
-  benchmarks: "Proofs",
-};
-
 export function PilotPage({ onNavigate }: PilotPageProps) {
   const { toast } = useToast();
   const { confirm } = useConfirm();
   const { activeData } = useActiveData();
   const { dispatchStudioAction } = useStudioActions();
-  const boot = useRef(loadPilotWorkspace());
+  const boot = useRef((() => {
+    // Bring FAB/rail continuity into the full Pilot page on first mount.
+    return promoteRailChatToPilotSession() || loadPilotWorkspace();
+  })());
   const [sessions, setSessions] = useState<PilotSession[]>(boot.current.sessions);
   const [activeId, setActiveId] = useState(boot.current.activeId);
   const [asideOpen, setAsideOpen] = useState(() => loadAsideOpen(true));
   const [input, setInput] = useState("");
-  const [category, setCategory] = useState("all");
   const [loading, setLoading] = useState(false);
   /** Which pending action is currently being confirmed — drives the Confirm button spinner. */
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
@@ -115,6 +89,17 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
   // Persist chats + active session across refresh.
   useEffect(() => {
     savePilotWorkspace(sessions, activeId);
+    // Keep FAB/rail in sync when it shares this session id (wave 35 handoff).
+    const active = sessions.find((s) => s.id === activeId);
+    const rail = loadRailChat();
+    if (active && rail && rail.sessionId === activeId) {
+      saveRailChat({
+        messages: active.messages,
+        history: active.history,
+        sessionId: active.id,
+        lastResultId: active.lastResultId,
+      });
+    }
   }, [sessions, activeId]);
 
   useEffect(() => {
@@ -130,16 +115,10 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
     }
   }, [session.messages.length, loading]);
 
-  const ideas = category === "all"
-    ? AUTOMATION_IDEAS
-    : AUTOMATION_IDEAS.filter((i) => i.category === category);
+  const ideas = AUTOMATION_IDEAS;
 
   const applySafeActions = (actions?: CopilotAction[]) => {
-    actions?.forEach((a) => {
-      if (a.risk === "mutate" || a.type === "studio") return;
-      const screen = a.screen || a.route;
-      if ((a.type === "navigate" || !a.type) && screen) onNavigate(screen as Screen);
-    });
+    applyPilotSafeActions(actions, onNavigate);
   };
 
   const clearPending = (msgIndex: number, actionId: string) => {
@@ -156,61 +135,13 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
     if (confirmingId) return;
     setConfirmingId(action.id);
     try {
-      if (action.type === "studio" || (action.kind && action.type !== "start_transfer" && action.type !== "create_connector")) {
-        onNavigate("transfer");
-        dispatchStudioAction({
-          kind: (action.kind || String(action.payload?.kind || "")) as string,
-          label: action.label,
-          run_id: action.run_id || (action.payload?.run_id as string | undefined),
-        });
-        toast({ title: "Action confirmed", message: action.label || "Applied in Transfer Studio", tone: "success" });
-      } else if (action.type === "run_schedule") {
-        const sid = String(action.payload?.schedule_id || "");
-        if (!sid) throw new Error("Missing schedule id");
-        onNavigate("schedules");
-        const res = await runScheduleNow(sid);
-        toast({
-          title: "Pipeline started",
-          message: `Job ${res.job_id || "queued"}`,
-          tone: "success",
-        });
-      } else if (action.type === "create_connector") {
-        const res = await confirmPilotPending(action);
-        if (res.kind !== "create_connector") throw new Error("Unexpected confirm result");
-        window.dispatchEvent(new CustomEvent("df2:connectors-changed"));
-        onNavigate("connectors");
-        toast({
-          title: res.idempotent ? "Connector already saved" : "Connector saved",
-          message: `“${res.name}” (${res.type}) is ready in Connectors.`,
-          tone: "success",
-        });
-      } else if (action.type === "start_transfer") {
-        // Overwrite is the one action that deletes destination rows. Ask once
-        // more with the enterprise ConfirmDialog so a misclick cannot wipe a table.
-        if (isDestructiveTransfer(action)) {
-          const ok = await confirm({
-            title: "Overwrite the destination?",
-            message: transferOverwriteMessage(action),
-            confirmLabel: "Overwrite & run",
-            tone: "danger",
-          });
-          if (!ok) return;
-        }
-        const res = await confirmPilotPending(action);
-        if (res.kind !== "start_transfer") throw new Error("Unexpected confirm result");
-        toast({
-          title: res.idempotent ? "Transfer already running" : "Transfer started",
-          message: `${res.source} → ${res.destination}`,
-          tone: "success",
-        });
-        // Hand the operator to Jobs so they can watch the theater — that is the
-        // next correct action after Confirm, not sitting on a dead chat button.
-        onNavigate("jobs");
-      } else {
-        toast({ title: "Unknown action", message: action.type, tone: "error" });
-        return;
-      }
-      clearPending(msgIndex, action.id);
+      const outcome = await runPilotConfirm(action, {
+        onNavigate,
+        toast,
+        confirm,
+        dispatchStudioAction,
+      });
+      if (outcome === "cleared") clearPending(msgIndex, action.id);
     } catch (error) {
       toast({
         title: "Action failed",
@@ -244,20 +175,11 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
     updateSession(activeId, { messages: nextMessages, title });
 
     try {
-      const pilotContext = {
-        name: activeData?.name || "pilot",
-        columns: activeData?.columns || [],
-        row_count: activeData?.row_count ?? 0,
-        filename: activeData?.filename,
-        samples: activeData?.samples,
-        preflight_run_id: activeData?.preflight_run_id,
-        job_id: activeData?.job_id,
-        validation_status: activeData?.validation_status,
-        route: activeData?.route,
-        blockers: activeData?.blockers,
-        pilot_session_id: activeId,
-        last_result_id: session.lastResultId,
-      };
+      const pilotContext = buildPilotDataContext(activeData, {
+        sessionId: activeId,
+        lastResultId: session.lastResultId,
+        nameFallback: "pilot",
+      });
       const res = await copilotChat(q, session.history, pilotContext);
       const newHistory: CopilotChatMessage[] = [
         ...session.history,
@@ -265,19 +187,11 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
         { role: "assistant" as const, content: res.answer },
       ].slice(-20);
 
-      const liveTools = (res.tools_used || []).filter((t) =>
-        ["sample_connector_object", "run_query", "filter_result"].includes(t.name),
+      const nextResultId = nextPilotResultId(
+        res.tools_used,
+        res.data_insight?.last_result_id,
+        session.lastResultId,
       );
-      const freshId =
-        res.data_insight?.last_result_id
-        || extractResultIdFromTools(res.tools_used);
-      let nextResultId = session.lastResultId;
-      if (freshId) {
-        nextResultId = freshId;
-      } else if (liveTools.length > 0 && liveTools.every((t) => !t.success)) {
-        // Failed live sample/query must not leave a stale ref for “analyze that”.
-        nextResultId = undefined;
-      }
 
       updateSession(activeId, {
         history: newHistory,
@@ -305,7 +219,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
     } catch (error) {
       setPilotOnline(false);
       const detail = formatPilotReachError(error, API_BASE);
-      toast({ title: "Data Pilot unavailable", message: detail, tone: "error" });
+      toast({ title: "Datawrap Pilot unavailable", message: detail, tone: "error" });
       updateSession(activeId, {
         messages: [...nextMessages, { role: "assistant", text: detail }],
       });
@@ -349,15 +263,28 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
   const recentChats = sessions.filter((s) => s.messages.length > 0 || s.id === activeId);
   const canDeleteActive = Boolean(session?.messages.length);
 
+  const cloudBroken = cloudProviders.some((p) => p.configured && !p.available);
   const pilotInsightPill =
-    pilotOnline === false ? "Offline" : pilotOnline && modelCapabilities && !anyCloudReady ? "Local engine" : pilotOnline ? "Online" : "Connecting…";
+    pilotOnline === false
+      ? "Offline"
+      : pilotOnline == null
+        ? "Connecting…"
+        : anyCloudReady
+          ? `LLM · ${modelCapabilities?.active_provider || "cloud"}`
+          : cloudBroken
+            ? "Local · fix API key"
+            : "Local engine";
 
   const pilotStatusClass =
-    pilotOnline === false ? "is-offline" : pilotOnline && modelCapabilities && !anyCloudReady ? "is-local" : "";
+    pilotOnline === false
+      ? "is-offline"
+      : anyCloudReady
+        ? ""
+        : "is-local";
 
   return (
     <PageShell
-      title="Data Pilot"
+      title="Datawrap Pilot"
       description="Natural-language triage on the same governed transfer engine."
       wide
       fit
@@ -448,28 +375,16 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
               </button>
               <button
                 type="button"
-                className="df2-btn df2-btn-ghost df2-btn-sm df2-pilot-aside-close"
+                className="df2-btn df2-btn-ghost df2-btn-sm df2-pilot-aside-collapse"
                 onClick={() => setAsideOpen(false)}
-                aria-label="Close recent chats"
-                title="Close recent chats"
+                aria-label="Collapse recent chats"
+                title="Collapse"
               >
-                <DtIcon name="x" size={14} />
+                <DtIcon name="chevron-left" size={14} />
               </button>
             </div>
 
             <div className="df2-pilot-aside-scroll">
-              <div className="df2-pilot-section-label">Categories</div>
-              <FilterTabs
-                ariaLabel="Automation ideas by category"
-                className="df2-pilot-categories"
-                value={category}
-                onChange={setCategory}
-                items={[
-                  { id: "all", label: "All" },
-                  ...AUTOMATION_CATEGORIES.filter((c) => c.id !== "all").map((c) => ({ id: c.id, label: c.label })),
-                ]}
-              />
-
               <div className="df2-pilot-section-label">
                 Recent chats
                 <span className="df2-pilot-session-count">
@@ -511,7 +426,6 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                   })
                 )}
               </div>
-
             </div>
           </>
         ) : (
@@ -544,7 +458,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
             <div className="df2-pilot-main-inner">
               <div className="df2-pilot-hero">
                 <div className="df2-pilot-hero-icon"><DtIcon name="sparkle" size={28} /></div>
-                <h1 className="df2-pilot-title">Ask Data Pilot to move, inspect, or govern data.</h1>
+                <h1 className="df2-pilot-title">Ask Datawrap Pilot to move, inspect, or govern data.</h1>
                 <p className="df2-pilot-subtitle">
                   Natural-language data ops — schema, mappings, connectors, and jobs with the same governed engine as Transfer Studio.
                   Chats are saved in this browser so a refresh does not wipe your thread.
@@ -594,7 +508,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                     const screen = a.screen || a.route;
                     return screen ? (
                       <button key={j} type="button" className="df2-btn df2-btn-sm df2-mt-sm" onClick={() => onNavigate(screen as Screen)}>
-                        {a.label || `Open ${SCREEN_LABELS[screen] || screen}`}
+                        {pilotActionChipLabel(a)}
                       </button>
                     ) : null;
                   })}

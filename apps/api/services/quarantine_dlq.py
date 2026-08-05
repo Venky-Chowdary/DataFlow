@@ -26,6 +26,56 @@ _MONGO_COLL = "quarantine_dlq"
 _DLQ_MAX_BYTES = 100 * 1024 * 1024  # 100 MiB
 
 
+class QuarantineDlqLostError(RuntimeError):
+    """Rejected rows exist but durable DLQ persist failed — fail closed.
+
+    Migration Assurance forbids completing a transfer as success/quarantine-ok
+    when rejected rows cannot be recovered from the control-plane DLQ.
+    """
+
+
+def persist_job_quarantine_outcome(dest_summary: dict[str, Any] | None) -> dict[str, Any]:
+    """Evaluate whether quarantine durability is acceptable for terminal status."""
+    summary = dest_summary or {}
+    details = list(summary.get("rejected_details") or [])
+    if not details:
+        return {
+            "ok": True,
+            "fail_closed": False,
+            "rejected_count": 0,
+            "quarantine_durable": True,
+            "note": "No rejected rows — DLQ durability not required.",
+        }
+    durable = summary.get("quarantine_durable")
+    ok = durable is True
+    return {
+        "ok": ok,
+        "fail_closed": not ok,
+        "rejected_count": len(details),
+        "quarantine_durable": durable,
+        "error": summary.get("quarantine_dlq_error"),
+        "note": (
+            "Control-plane DLQ durable."
+            if ok
+            else (
+                "Rejected rows exist but control-plane DLQ is not durable — "
+                "fail closed (Module 5). Replay would find nothing."
+            )
+        ),
+    }
+
+
+def assert_quarantine_durable_or_raise(dest_summary: dict[str, Any] | None) -> None:
+    """Raise when rejected rows would be lost from the durable DLQ."""
+    outcome = persist_job_quarantine_outcome(dest_summary)
+    if outcome["ok"]:
+        return
+    err = (dest_summary or {}).get("quarantine_dlq_error") or outcome["note"]
+    raise QuarantineDlqLostError(
+        f"Quarantine DLQ not durable for {outcome['rejected_count']} rejected row(s): {err}"
+    )
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -94,24 +144,62 @@ def append_dlq_event(
     raise last_exc
 
 
+_DLQ_CHUNK_SIZE = 200
+
+
 def persist_rejected_rows(
     *,
     job_id: str,
     rejected_details: list[dict[str, Any]] | None,
     workspace_id: str = "",
     source: str = "transfer",
+    connector: str = "",
 ) -> dict[str, Any] | None:
-    """Persist rejected/quarantined rows to the DLQ. Returns event or None if empty."""
-    rows = list(rejected_details or [])
-    if not rows:
-        return None
-    return append_dlq_event(
-        job_id=job_id,
-        action="quarantine",
-        rows=len(rows),
-        workspace_id=workspace_id,
-        details={"source": source, "rejected_details": rows[:500]},
+    """Persist rejected/quarantined rows to the DLQ. Returns summary event or None.
+
+    Module 9 / GA: normalize to quarantine row contract and fail closed without
+    job_id. Chunk appends so row bodies are never silently truncated to 500.
+    """
+    from services.quarantine_row_contract import (
+        QuarantineRowContractError,
+        assert_quarantine_rows_contract,
+        normalize_quarantine_rows,
     )
+
+    raw = list(rejected_details or [])
+    if not raw:
+        return None
+    jid = str(job_id or "").strip()
+    if not jid:
+        raise QuarantineRowContractError(
+            "persist_rejected_rows requires job_id — refuse undurable quarantine"
+        )
+    rows = normalize_quarantine_rows(raw, job_id=jid, connector=connector)
+    assert_quarantine_rows_contract(rows, require_job_id=True)
+    chunk_size = _DLQ_CHUNK_SIZE
+    chunks = [rows[i : i + chunk_size] for i in range(0, len(rows), chunk_size)]
+    last_event: dict[str, Any] | None = None
+    for idx, chunk in enumerate(chunks):
+        last_event = append_dlq_event(
+            job_id=jid,
+            action="quarantine" if idx == 0 else "quarantine_chunk",
+            rows=len(chunk),
+            workspace_id=workspace_id,
+            details={
+                "source": source,
+                "rejected_details": chunk,
+                "chunk_index": idx,
+                "chunk_count": len(chunks),
+                "total_rejected": len(rows),
+            },
+        )
+    return {
+        **(last_event or {}),
+        "rows": len(rows),
+        "chunks": len(chunks),
+        "quarantine_durable": True,
+        "total_rejected": len(rows),
+    }
 
 
 def list_dlq_events(*, job_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:

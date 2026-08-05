@@ -1,4 +1,4 @@
-"""Natural-language aggregation for Data Pilot — real GROUP BY against live tables.
+"""Natural-language aggregation for Datawrap Pilot — real GROUP BY against live tables.
 
 The pilot could sample and profile rows but had no way to answer the most common
 analytics questions ("how many orders by status", "average price", "revenue by
@@ -73,7 +73,7 @@ _TEMPORAL_GRAINS = {
 
 _TEMPORAL_TYPE_HINTS = ("date", "time", "timestamp")
 
-# DataFlow's own objects, not warehouse tables. "how many jobs failed" belongs to
+# Datawrap's own objects, not warehouse tables. "how many jobs failed" belongs to
 # list_jobs, not to SELECT COUNT(*) FROM jobs — unless the user named a connector,
 # which means they really do mean a table with that name.
 _PLATFORM_NOUNS = frozenset({
@@ -122,9 +122,11 @@ class AggregationRequest:
 _METRIC_PHRASES: tuple[tuple[str, str], ...] = (
     (r"how many (?:different|distinct|unique)", "count_distinct"),
     (r"(?:number|count) of (?:different|distinct|unique)", "count_distinct"),
-    (r"(?:how many|number of|total number of|count of|count)", "count"),
+    (r"(?:distinct|unique)\s+count(?:\s+of)?", "count_distinct"),
+    (r"count\s+(?:of\s+)?(?:the\s+)?(?:different|distinct|unique)", "count_distinct"),
     (r"(?:distinct|unique) (?:values|count)? ?of", "count_distinct"),
     (r"(?:distinct|unique)", "count_distinct"),
+    (r"(?:how many|how mny|number of|total number of|count of|count)", "count"),
     (r"(?:average|avg|mean)(?: of)?", "avg"),
     (r"(?:sum|total)(?: of)?", "sum"),
     (r"(?:minimum|min|lowest|smallest|earliest)(?: of)?", "min"),
@@ -155,6 +157,14 @@ _STOP_TOKENS = frozenset({
     "was", "were", "have", "has", "had", "there", "here", "please", "thanks",
     "that", "this", "to", "and", "or", "be", "been", "get", "got", "show",
     "me", "tell", "currently", "right", "now", "again", "still",
+})
+
+# Adjectives that mean a status/state filter, not part of the table name.
+# "how many paid orders" → table=orders, where status='paid'.
+_STATUS_ADJECTIVES = frozenset({
+    "paid", "pending", "cancelled", "canceled", "active", "inactive",
+    "open", "closed", "failed", "success", "successful", "complete",
+    "completed", "draft", "approved", "rejected", "shipped", "refunded",
 })
 
 
@@ -253,6 +263,21 @@ def parse_aggregation_request(message: str) -> AggregationRequest | None:
     if re.match(r"^\s*(?:select|with|show|describe|explain)\b", text.lower()):
         return None
 
+    # "orders where amount > 10 on PilotSQLite" — table-first filtered count.
+    table_where = re.match(
+        r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s+where\s+(.+?)\s+on\s+(?:the\s+)?"
+        r"([A-Za-z0-9_][A-Za-z0-9_\- ]{0,48}?)\s*$",
+        text,
+        re.I,
+    )
+    if table_where:
+        return AggregationRequest(
+            metric="count",
+            table=_clean_identifier(table_where.group(1)),
+            where=table_where.group(2).strip(),
+            connector_name=_clean_identifier(table_where.group(3)),
+        )
+
     # Pull filter phrases out first. Left in place, "where status = open" would
     # be scanned for a table name and produce a lookup for a table called
     # "status = open".
@@ -305,6 +330,9 @@ def _finish_request(
     measure_tail: str = "",
 ) -> AggregationRequest | None:
     """Pull connector, grouping, table and measure out of the remaining text."""
+    # Strip trailing sentence punctuation so "on Local Postgres?" still binds.
+    working = re.sub(r"[?\s.!;,:]+$", "", (working or "").strip())
+    measure_tail = re.sub(r"[?\s.!;,:]+$", "", (measure_tail or "").strip())
     # Connector: trailing "on <connector>" mirrors the pilot's existing
     # "sample <table> on <connector>" convention.
     conn = re.search(
@@ -316,6 +344,15 @@ def _finish_request(
     if conn:
         req.connector_name = _clean_identifier(conn.group(1))
         working = _strip_span(working, conn.span())
+        # "on orders PilotSQLite" (missing second "on") → table + connector.
+        tokens = (req.connector_name or "").split()
+        if len(tokens) == 2 and not req.table:
+            left, right = tokens[0], tokens[1]
+            if left.islower() and left not in _PLATFORM_NOUNS and (
+                right[:1].isupper() or "sql" in right.lower() or "ware" in right.lower()
+            ):
+                req.table = left
+                req.connector_name = right
 
     # Grouping dimension: "by status", "per region", "grouped by month".
     grp = re.search(
@@ -372,9 +409,29 @@ def _finish_request(
     if req.metric == "count" and not req.table and req.column:
         req.table, req.column = req.column, ""
 
+    # "how many paid orders" → table=orders + status filter (not table "paid orders").
+    if req.table and " " in req.table.strip():
+        parts = req.table.strip().split()
+        if len(parts) >= 2 and parts[0].lower() in _STATUS_ADJECTIVES:
+            status = parts[0].lower()
+            req.table = parts[-1]
+            clause = f"status = '{status}'"
+            req.where = f"({req.where}) AND {clause}" if req.where else clause
+
+    # "distinct count of region" leaves column=region with metric count_distinct.
+    if req.metric == "count" and req.column and req.table:
+        # count + column without "distinct" stays as filtered? No — COUNT(col)
+        # is unusual; prefer count_distinct when the NL said distinct earlier.
+        pass
+    if req.metric == "count_distinct" and req.column and not req.table:
+        # measure was the dimension; table may still be missing
+        pass
+
+    coreferent_subject = False
     if is_coreferent(req.table):
         # "how many rows in it" — the subject comes from working memory.
         req.table = ""
+        coreferent_subject = True
     if is_coreferent(req.column):
         req.column = ""
     if is_coreferent(req.group_by):
@@ -389,11 +446,34 @@ def _finish_request(
         # Platform inventory question — let the jobs/connectors routes answer it.
         return None
 
+    # "connector count" / bare "how many" with only a platform noun as measure.
+    if (
+        not req.table
+        and not req.connector_name
+        and (req.column or "").lower() in _PLATFORM_NOUNS
+    ):
+        return None
+    # Bare metric with no subject at all ("how many", "count") — leave to
+    # inventory / unmapped, unless the utterance was coreferent ("… in it").
+    if (
+        not req.table
+        and not req.column
+        and not req.group_by
+        and not req.connector_name
+        and not coreferent_subject
+        and req.metric in {"count", "sum", "avg"}
+    ):
+        return None
+
     needs_column = _METRICS[req.metric][1]
     if needs_column and not req.column:
         req.missing.append("column")
     if not req.table:
         req.missing.append("table")
+    # Spoken plurals ("by regions") → singular stem for schema resolve.
+    # Status-like stems (status/basis) are preserved inside `_singular`.
+    if req.group_by and " " not in req.group_by.strip():
+        req.group_by = _singular(req.group_by.strip())
     return req
 
 
@@ -417,7 +497,10 @@ def _singular(token: str) -> str:
         return token[:-3] + "y"
     if token.endswith(("ses", "xes", "zes", "ches", "shes")) and len(token) > 4:
         return token[:-2]
-    if token.endswith("s") and not token.endswith("ss") and len(token) > 3:
+    # Don't turn status/genus/basis into broken stems.
+    if token.endswith(("ss", "us", "is", "os")):
+        return token
+    if token.endswith("s") and len(token) > 3:
         return token[:-1]
     return token
 
@@ -655,13 +738,8 @@ def aggregate_connector_data(
         )
 
     table = (table or "").strip()
-    if not table:
-        return _tool_result(
-            tool,
-            success=False,
-            error='Which table? Example: "count of orders by status on Local Postgres".',
-        )
-    if not _SAFE_IDENT.match(table):
+    # Unsafe identifiers never reach the store — fail closed before connector lookup.
+    if table and not _SAFE_IDENT.match(table):
         return _tool_result(
             tool,
             success=False,
@@ -670,10 +748,74 @@ def aggregate_connector_data(
                 "(letters, numbers, underscore, optional schema.table)."
             ),
         )
+    # Empty table with no connector hint → ask for the table first (tests + UX).
+    if not table and not (connector_id or connector_name):
+        from .example_phrases import example_connector_name
+
+        ex = example_connector_name()
+        return _tool_result(
+            tool,
+            success=False,
+            error=f'Which table? Example: "count of orders by status on {ex}".',
+        )
 
     conn, err = _safe_connector(connector_id, connector_name, tool)
     if err:
         return err
+
+    if not table:
+        # Railway-class: don't dead-end — list real tables and auto-pick if unique.
+        try:
+            from .schema_tools import list_connector_objects
+
+            listed = list_connector_objects(
+                connector_id=str(conn.get("id") or conn.get("_id") or ""),
+                connector_name=str(conn.get("name") or connector_name or ""),
+            )
+            objs = []
+            if listed.success and isinstance(listed.output, dict):
+                objs = listed.output.get("objects") or listed.output.get("tables") or []
+            names = []
+            for o in objs:
+                if isinstance(o, dict):
+                    n = o.get("name") or o.get("table") or o.get("id")
+                    if n:
+                        names.append(str(n))
+                elif isinstance(o, str):
+                    names.append(o)
+            if len(names) == 1:
+                table = names[0]
+            elif names:
+                shown = ", ".join(f"`{n}`" for n in names[:12])
+                more = f" (+{len(names) - 12} more)" if len(names) > 12 else ""
+                return _tool_result(
+                    tool,
+                    success=False,
+                    error=(
+                        f"Which table on **{conn.get('name') or 'this connector'}**? "
+                        f"{shown}{more}. "
+                        'Example: "sum amount by region from orders on '
+                        f'{conn.get("name") or "PilotSQLite"}".'
+                    ),
+                )
+            else:
+                return _tool_result(
+                    tool,
+                    success=False,
+                    error=(
+                        'Which table? Example: "count of orders by status on '
+                        f'{conn.get("name") or "your connector"}".'
+                    ),
+                )
+        except Exception:
+            from .example_phrases import example_connector_name
+
+            ex = example_connector_name()
+            return _tool_result(
+                tool,
+                success=False,
+                error=f'Which table? Example: "count of orders by status on {ex}".',
+            )
 
     ctype = str(conn.get("type") or conn.get("format") or "").lower()
     cid = str(conn.get("id") or conn.get("_id") or "")
@@ -923,6 +1065,7 @@ def aggregate_connector_data(
         "column": measure_col or None,
         "group_by": dim_alias or None,
         "grain": grain or None,
+        "where": (where or "").strip() or None,
         "query": query_text,
         "truncated": truncated,
         "filters": _describe_predicates(predicates),

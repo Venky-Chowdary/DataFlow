@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from services.brand_env import getenv_brand
 from pathlib import Path
 from typing import Optional
 
@@ -26,13 +27,35 @@ router = APIRouter(prefix="/transfer", tags=["Universal Transfer"])
 
 
 def _can_access_job(request: Request | None, job: dict) -> bool:
-    """Workspace gate for job-scoped transfer sub-resources (CDC snapshots, etc.)."""
+    """Workspace + optional resource-ACL gate for job-scoped sub-resources."""
     if request is None:
         return True
     workspace_id = (job.get("workspace_id") or "").strip()
-    if not workspace_id:
+    actor = _actor_email(request)
+    if workspace_id and not can_read_workspace(workspace_id, actor):
+        return False
+    job_id = str(job.get("_id") or job.get("id") or "").strip()
+    if not job_id:
         return True
-    return can_read_workspace(workspace_id, _actor_email(request))
+    try:
+        from services.resource_acl import assert_resource_acl
+
+        user = getattr(request.state, "user", None) or {}
+        is_admin = str(user.get("role") or "").lower() == "admin"
+        assert_resource_acl(
+            tenant_id=workspace_id,
+            resource_type="job",
+            resource_id=job_id,
+            principal=actor,
+            min_role="viewer",
+            is_admin=is_admin,
+        )
+    except PermissionError:
+        return False
+    except Exception as exc:
+        logging.getLogger(__name__).warning("resource ACL check fail-closed: %s", exc)
+        return False
+    return True
 
 
 def _stamp_job_mapping_artifacts(
@@ -103,8 +126,8 @@ def _residency_check(request, endpoint, allowed_region: str):
     """
     if not allowed_region:
         return
-    tenant_region = getattr(request.state, "data_region", "") or os.getenv("DATAFLOW_DEFAULT_REGION", "us-east-1")
-    strict = os.getenv("DATAFLOW_RESIDENCY_STRICT", "").lower() in ("1", "true", "yes")
+    tenant_region = getattr(request.state, "data_region", "") or getenv_brand("DEFAULT_REGION", "us-east-1")
+    strict = getenv_brand("RESIDENCY_STRICT", "").lower() in ("1", "true", "yes")
     if not strict and (not tenant_region or tenant_region == "us-east-1"):
         return
     dest_region = _destination_data_region(endpoint)
@@ -184,6 +207,8 @@ class ExecuteTransferRequest(BaseModel):
     require_signed_contract: bool = False
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian), 'MDY' (US), or ''.
     date_locale: str = ""
+    # Delivery guarantee selector — only at_least_once is allowed (GA).
+    delivery_guarantee: str = "at_least_once"
 
 
 class MapColumnsRequest(BaseModel):
@@ -204,6 +229,9 @@ class MapColumnsRequest(BaseModel):
     # "database"/"warehouse" means source_schema came from introspected DDL, so
     # sample inference must not re-guess DECIMAL(12,2) down to a bare DECIMAL.
     source_kind: str = ""
+    # Module 13 — prior operator mappings (user_override / risk contracts) must
+    # survive re-map; engine alternatives attach as engine_suggestion only.
+    prior_mappings: list[dict] = Field(default_factory=list)
 
 
 @router.get("/capabilities")
@@ -338,24 +366,39 @@ async def map_columns_route(body: MapColumnsRequest):
         for c in body.target_columns
     ] if body.target_columns else None
 
-    result = run_mapping_pipeline(
-        body.source_columns,
-        body.target_columns or [],
-        source_schemas=source_schemas,
-        target_schemas=target_schemas,
-        file_format=body.file_format,
-        confidence_threshold=threshold,
-        use_llm=body.use_llm,
-        source_samples=body.source_samples or None,
-        validation_mode=body.validation_mode,
-        destination_db_type=body.destination_db_type or "",
-        schema_policy=body.schema_policy or "manual_review",
-        sync_mode=body.sync_mode or "",
-        destination_table_exists=body.destination_table_exists,
-        source_types_authoritative=source_types_are_authoritative(
-            body.source_kind, body.file_format or ""
-        ),
-    )
+    try:
+        from services.tracing import get_correlation_id, start_span
+    except Exception:
+        start_span = None  # type: ignore[assignment]
+        get_correlation_id = lambda: ""  # noqa: E731
+
+    span_attrs = {
+        "dataflow.phase": "map",
+        "dataflow.source_column_count": len(body.source_columns or []),
+        "dataflow.target_column_count": len(body.target_columns or []),
+        "dataflow.validation_mode": body.validation_mode or "",
+        "dataflow.correlation_id": get_correlation_id() if callable(get_correlation_id) else "",
+    }
+    with (start_span("studio.map", attributes=span_attrs, kind="internal") if start_span is not None else __import__('contextlib').nullcontext()):
+        result = run_mapping_pipeline(
+            body.source_columns,
+            body.target_columns or [],
+            source_schemas=source_schemas,
+            target_schemas=target_schemas,
+            file_format=body.file_format,
+            confidence_threshold=threshold,
+            use_llm=body.use_llm,
+            source_samples=body.source_samples or None,
+            validation_mode=body.validation_mode,
+            destination_db_type=body.destination_db_type or "",
+            schema_policy=body.schema_policy or "manual_review",
+            sync_mode=body.sync_mode or "",
+            destination_table_exists=body.destination_table_exists,
+            source_types_authoritative=source_types_are_authoritative(
+                body.source_kind, body.file_format or ""
+            ),
+            prior_mappings=list(body.prior_mappings or []),
+        )
     nested_fields: list[dict[str, str]] = []
     try:
         from services.json_intelligence import flatten_column_recommendations
@@ -383,6 +426,7 @@ async def map_columns_route(body: MapColumnsRequest):
         "coercion_issues": result.get("coercion_issues", []),
         "integrity": result.get("integrity", {}),
         "nested_fields": nested_fields,
+        "correlation_id": get_correlation_id(),
     }
 
 
@@ -583,11 +627,21 @@ async def execute_transfer_json(
     background_tasks: BackgroundTasks,
     request: Request = None,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+    idempotency_key: str = Header(default="", alias="Idempotency-Key"),
 ):
     """JSON transfer execute for SDK/GitOps — Form upload remains on POST /transfer/run."""
+    from services.execution_engine_contract import (
+        DeliveryGuaranteeError,
+        assert_delivery_guarantee_allowed,
+    )
     from ..transfer.background import run_transfer_async
-    from ..transfer.engine import get_transfer_engine
+    from ..transfer.engine import DuplicateTransferSubmission, get_transfer_engine
     from ..transfer.models import EndpointConfig, TransferRequest
+
+    try:
+        assert_delivery_guarantee_allowed(body.delivery_guarantee)
+    except DeliveryGuaranteeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     workspace_id = _resolve_write_workspace(request, workspace_id)
     src = EndpointConfig.from_dict(body.source.kind, body.source.model_dump(by_alias=True))
@@ -602,7 +656,8 @@ async def execute_transfer_json(
         destination=dst,
         mappings=list(body.mappings or []),
         column_types=dict(body.column_types or {}),
-        skip_preflight=bool(body.skip_preflight),
+        # Public execute never honors client skip_preflight (enterprise fail-closed).
+        skip_preflight=False,
         sync_mode=body.sync_mode or "full_refresh_overwrite",
         schema_policy=body.schema_policy or "manual_review",
         validation_mode=body.validation_mode or "strict",
@@ -620,6 +675,8 @@ async def execute_transfer_json(
         require_signed_contract=bool(body.require_signed_contract),
         date_locale=body.date_locale,
         triggered_by=_actor_email(request),
+        idempotency_key=idempotency_key,
+        delivery_guarantee=body.delivery_guarantee or "at_least_once",
     )
     from services.batch_progress import effective_backfill_new_fields
 
@@ -656,6 +713,18 @@ async def execute_transfer_json(
     engine = get_transfer_engine()
     try:
         job_id = engine._create_pending_job(request_obj)
+    except DuplicateTransferSubmission as exc:
+        # A conflict, not a server error. Answer with 409 and the in-flight job
+        # so the caller can follow it instead of starting a second writer.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "duplicate_transfer",
+                "message": str(exc),
+                "existing_job_id": exc.existing_job_id,
+                "existing_status": exc.existing_status,
+            },
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -787,16 +856,27 @@ async def run_universal_transfer(
     stream_contracts_json: str = Form(""),
     data_region: str = Form(""),
     date_locale: str = Form(""),
+    delivery_guarantee: str = Form("at_least_once"),
     request: Request = None,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+    idempotency_key: str = Header(default="", alias="Idempotency-Key"),
 ):
     """
     Execute universal transfer: file/db → db/file/warehouse.
     Auto-creates tables, collections, and typed schemas.
     """
+    from services.execution_engine_contract import (
+        DeliveryGuaranteeError,
+        assert_delivery_guarantee_allowed,
+    )
     from ..transfer.background import run_transfer_async
-    from ..transfer.engine import get_transfer_engine
+    from ..transfer.engine import DuplicateTransferSubmission, get_transfer_engine
     from ..transfer.models import EndpointConfig, TransferRequest
+
+    try:
+        assert_delivery_guarantee_allowed(delivery_guarantee)
+    except DeliveryGuaranteeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     workspace_id = _resolve_write_workspace(request, workspace_id)
 
@@ -888,7 +968,7 @@ async def run_universal_transfer(
     request_obj = TransferRequest(
         source=source,
         destination=destination,
-        skip_preflight=skip_preflight.lower() in ("true", "1", "yes"),
+        skip_preflight=False,
         source_filename=filename,
         source_content=content,
         sync_mode=sync_mode,
@@ -904,6 +984,8 @@ async def run_universal_transfer(
         write_via_staging=write_via_staging.lower() in ("true", "1", "yes"),
         date_locale=date_locale,
         triggered_by=_actor_email(request),
+        idempotency_key=idempotency_key,
+        delivery_guarantee=delivery_guarantee or "at_least_once",
     )
     # Explicit form fields win over stored plan policies (plan used to force
     # validation_mode=strict and re-block encoding after Studio quarantine).
@@ -997,6 +1079,16 @@ async def run_universal_transfer(
     engine = get_transfer_engine()
     try:
         job_id = engine._create_pending_job(request_obj)
+    except DuplicateTransferSubmission as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "duplicate_transfer",
+                "message": str(exc),
+                "existing_job_id": exc.existing_job_id,
+                "existing_status": exc.existing_status,
+            },
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -1085,7 +1177,7 @@ async def run_universal_transfer(
 
 
 @router.get("/{job_id}/explanation")
-async def get_transfer_explanation(job_id: str):
+async def get_transfer_explanation(job_id: str, request: Request):
     """Return the human-readable pipeline explanation for a transfer job."""
     from ..services.mongodb_service import get_mongodb_service
 
@@ -1094,7 +1186,7 @@ async def get_transfer_explanation(job_id: str):
         job = mongo.get_job(job_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
-    if not job:
+    if not job or not _can_access_job(request, job):
         raise HTTPException(status_code=404, detail="Job not found")
     return {
         "job_id": job_id,
@@ -1106,7 +1198,7 @@ async def get_transfer_explanation(job_id: str):
 
 
 @router.get("/{job_id}/mapping-proof")
-async def get_transfer_mapping_proof(job_id: str):
+async def get_transfer_mapping_proof(job_id: str, request: Request):
     """Return persisted per-mapping evidence for Theater / Jobs deep-link."""
     from services.mapping_proof import mapping_proof_or_build
 
@@ -1117,7 +1209,7 @@ async def get_transfer_mapping_proof(job_id: str):
         job = mongo.get_job(job_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
-    if not job:
+    if not job or not _can_access_job(request, job):
         raise HTTPException(status_code=404, detail="Job not found")
 
     proof = job.get("mapping_proof") if isinstance(job.get("mapping_proof"), dict) else {}
@@ -1152,6 +1244,174 @@ async def get_transfer_mapping_proof(job_id: str):
             "exactly-once CDC."
         ),
     }
+
+
+@router.get("/{job_id}/proof-pack")
+async def get_transfer_proof_pack(job_id: str, request: Request):
+    """Export a signed Gate-8 + mapping proof pack (HMAC + content SHA-256).
+
+    Engineering diligence artifact — not an auditor SOC2 / HIPAA letter.
+    """
+    from services.audit_log import actor_from_request, append_audit_event
+    from services.signed_proof_pack import export_proof_pack_for_job
+
+    from ..services.mongodb_service import get_mongodb_service
+
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    if not job or not _can_access_job(request, job):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    actor = actor_from_request(request)
+    pack = export_proof_pack_for_job(job, actor=actor)
+    try:
+        append_audit_event(
+            action="proof_pack.export",
+            resource=f"job:{job_id}",
+            actor=actor,
+            level="info",
+            details={"content_sha256": pack.get("content_sha256"), "version": pack.get("version")},
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning("proof_pack audit failed: %s", exc, exc_info=exc)
+    return pack
+
+
+class ProofPackVerifyBody(BaseModel):
+    pack: dict = Field(default_factory=dict)
+
+
+@router.post("/proof-pack/verify")
+async def verify_transfer_proof_pack(body: ProofPackVerifyBody):
+    """Verify a previously exported signed proof pack against the platform secret."""
+    from services.signed_proof_pack import verify_signed_proof_pack
+
+    result = verify_signed_proof_pack(body.pack if isinstance(body.pack, dict) else {})
+    return result
+
+
+class RollbackExecuteBody(BaseModel):
+    approved_by: str = ""
+    reason: str = ""
+    # Optional override — defaults to job destination_summary.rollback_plan
+    plan: dict | None = None
+
+
+@router.post("/{job_id}/rollback/execute")
+async def execute_job_rollback(job_id: str, body: RollbackExecuteBody, request: Request):
+    """Execute a signed rollback plan — DISCARD_STAGING only.
+
+    Warehouse restore / population undo are never executed here (fail closed).
+    """
+    from services.audit_log import actor_from_request, append_audit_event
+    from services.migration_rollback import (
+        RollbackContractError,
+        RollbackRefuseError,
+        discard_staging_table,
+        execute_rollback,
+    )
+
+    from ..services.mongodb_service import get_mongodb_service
+    from ..transfer.models import EndpointConfig
+
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    if not job or not _can_access_job(request, job):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    actor = (body.approved_by or actor_from_request(request) or "").strip()
+    reason = (body.reason or "").strip()
+    if not actor or not reason:
+        raise HTTPException(
+            status_code=400,
+            detail="approved_by and reason are required for rollback execution",
+        )
+
+    dest = job.get("destination_summary") if isinstance(job.get("destination_summary"), dict) else {}
+    plan = body.plan if isinstance(body.plan, dict) else dest.get("rollback_plan")
+    if not isinstance(plan, dict) or not plan:
+        raise HTTPException(
+            status_code=400,
+            detail="No signed rollback_plan on job — refuse execution",
+        )
+    # Fail closed: never execute a plan bound to a different job (cross-job drop).
+    plan_job = str(plan.get("job_id") or "").strip()
+    if body.plan is not None and not plan_job:
+        raise HTTPException(
+            status_code=400,
+            detail="rollback_plan.job_id required when supplying an explicit plan",
+        )
+    if plan_job and plan_job != str(job_id):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"rollback_plan.job_id {plan_job!r} does not match path job "
+                f"{job_id!r} — refuse execution"
+            ),
+        )
+
+    dest_ep = None
+    req = job.get("request") if isinstance(job.get("request"), dict) else {}
+    raw_dest = req.get("destination") if isinstance(req.get("destination"), dict) else {}
+    if not raw_dest:
+        raw_dest = job.get("destination") if isinstance(job.get("destination"), dict) else {}
+
+    def _drop(staging: str) -> bool:
+        nonlocal dest_ep
+        if dest_ep is None:
+            dest_ep = EndpointConfig.from_dict(
+                str(raw_dest.get("kind") or "database"),
+                {**raw_dest, "table": staging},
+            )
+        return bool(discard_staging_table(dest_ep, staging))
+
+    try:
+        result = execute_rollback(
+            plan,
+            approved_by=actor,
+            reason=reason,
+            drop_staging_fn=_drop,
+        )
+    except RollbackContractError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RollbackRefuseError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    try:
+        append_audit_event(
+            action="migration_rollback.executed",
+            resource=f"job:{job_id}",
+            actor=actor,
+            level="warning",
+            details={
+                "rollback_id": result.get("rollback_id"),
+                "strategy": result.get("strategy"),
+                "staging_table": result.get("staging_table"),
+                "reason": reason,
+                "population_undo_claimed": False,
+            },
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning("rollback audit failed: %s", exc, exc_info=exc)
+
+    try:
+        mongo.update_job_status(
+            job_id,
+            job.get("status") or "completed",
+            rollback_execution=result,
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "rollback result persist failed: %s", exc, exc_info=exc
+        )
+
+    return result
 
 
 class JobCdcSnapshotBody(BaseModel):

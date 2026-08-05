@@ -50,9 +50,61 @@ def test_policy_gates_merge_into_preflight_result():
     )
 
     assert merged["passed"] is True
-    assert merged["total_gates"] == 11
+    assert merged["total_gates"] == 12
     assert merged["readiness_score"] == 100
     assert confidence_threshold_for_mode("maximum") == 0.95
+
+
+def test_scd2_blocks_on_non_sql_destination():
+    gates = run_transfer_policy_gates(
+        sync_mode="scd2",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "primary_key": "order_id",
+        }],
+        source_columns=["order_id", "updated_at"],
+        dest_type="mongodb",
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    assert g9["status"] == "block"
+    assert "SQL table destination" in str(g9["details"])
+
+
+def test_cdc_blocks_for_file_source():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "primary_key": "order_id",
+        }],
+        source_columns=["order_id", "updated_at"],
+        source_kind="file",
+        dest_type="postgresql",
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    assert g9["status"] == "block"
+    assert "database source" in str(g9["details"]).lower()
+
+
+def test_staging_blocks_on_unsupported_destination():
+    gates = run_transfer_policy_gates(
+        sync_mode="full_refresh_append",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[],
+        dest_type="mongodb",
+        write_via_staging=True,
+    )
+    g12 = next(g for g in gates if g["id"] == "g12_staging_policy")
+    assert g12["status"] == "block"
+    assert "not supported" in str(g12["details"]).lower()
 
 
 def test_stuck_backfill_under_manual_review_does_not_block():

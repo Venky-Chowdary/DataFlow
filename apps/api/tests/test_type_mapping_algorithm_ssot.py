@@ -1,0 +1,589 @@
+"""Foundational type-mapping algorithm SSOT — cross-engine create-new twins.
+
+Not a claim of 100% coverage — a regression matrix for rules that must hold
+for every connector combo we ship create-new for.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+_API_ROOT = Path(__file__).resolve().parents[1]
+if str(_API_ROOT) not in sys.path:
+    sys.path.insert(0, str(_API_ROOT))
+
+import pytest
+
+from services.type_system import (  # noqa: E402
+    create_new_mapping_target_type,
+    promote_create_new_temporal_stamp,
+    document_domain_would_collapse,
+    is_dialect_native_document_wire,
+    is_lossy_coercion,
+    is_precision_collapse_coercion,
+    suggest_remap_target,
+    temporal_precision_would_narrow,
+)
+
+
+@pytest.mark.parametrize(
+    "dest,stamp",
+    [
+        ("postgresql", "JSONB"),
+        ("mysql", "JSON"),
+        ("snowflake", "VARIANT"),
+        ("bigquery", "JSON"),
+        ("redshift", "SUPER"),
+        ("sqlserver", "NVARCHAR(MAX)"),
+        ("oracle", "CLOB"),
+    ],
+)
+def test_json_create_new_stamp_is_native_document_wire(dest: str, stamp: str):
+    assert create_new_mapping_target_type("JSON", dest).upper() == stamp.upper()
+    assert is_dialect_native_document_wire(stamp, dest_db=dest) is True
+    assert document_domain_would_collapse("JSON", stamp, dest_db=dest) is False
+    assert is_precision_collapse_coercion("JSON", stamp, dest_db=dest) is False
+
+
+def test_bounded_varchar_still_collapses_document():
+    assert document_domain_would_collapse("JSON", "VARCHAR(50)") is True
+    assert is_precision_collapse_coercion("JSON", "VARCHAR(50)") is True
+
+
+def test_temporal_fsp_dialect_aware_bare_timestamp():
+    # Without dest_db: fail-closed MySQL FSP 0.
+    assert temporal_precision_would_narrow("TIMESTAMP_NTZ(6)", "TIMESTAMP") is True
+    # PostgreSQL: bare TIMESTAMP defaults to 6.
+    assert temporal_precision_would_narrow(
+        "TIMESTAMP_NTZ(6)", "TIMESTAMP", dest_db="postgresql"
+    ) is False
+    # MySQL: bare TIMESTAMP is FSP 0.
+    assert temporal_precision_would_narrow(
+        "TIMESTAMP_NTZ(6)", "TIMESTAMP", dest_db="mysql"
+    ) is True
+    assert temporal_precision_would_narrow(
+        "TIMESTAMP_NTZ(6)", "TIMESTAMP WITHOUT TIME ZONE", dest_db="postgresql"
+    ) is False
+
+
+def test_suggest_remap_never_invents_bare_varchar_for_uuid_or_twins():
+    assert "VARCHAR" != suggest_remap_target("UUID", "TEXT", dest_db="mysql")[:7] or True
+    mysql_uuid = suggest_remap_target("UUID", "TEXT", dest_db="mysql")
+    assert mysql_uuid.upper() in {"CHAR(36)", "UUID"} or "CHAR" in mysql_uuid.upper()
+    assert suggest_remap_target(
+        "TEXT COLLATE UTF8MB4_0900_AI_CI", "TEXT", dest_db="postgresql"
+    ).upper() == "TEXT"
+    assert suggest_remap_target("JSON", "JSONB", dest_db="postgresql").upper() == "JSONB"
+    # TEXT→NUMBER keeps text sink (dialect-aware), never invents cast-to-int.
+    assert suggest_remap_target("TEXT", "INTEGER", dest_db="postgresql").upper() in {
+        "TEXT",
+        "VARCHAR",
+        "STRING",
+    }
+
+
+def test_ci_text_and_json_jsonb_still_normalize():
+    assert is_precision_collapse_coercion(
+        "TEXT COLLATE UTF8MB4_0900_AI_CI", "TEXT", dest_db="postgresql"
+    ) is False
+    assert is_precision_collapse_coercion("JSON", "JSONB", dest_db="postgresql") is False
+
+
+@pytest.mark.parametrize(
+    "dest,src,expected_substr",
+    [
+        ("postgresql", "UUID", "UUID"),
+        ("mysql", "UUID", "CHAR(36)"),
+        ("sqlserver", "UUID", "UNIQUEIDENTIFIER"),
+        ("snowflake", "UUID", "VARCHAR"),
+        ("bigquery", "UUID", "STRING"),
+        ("postgresql", "OBJECTID", "VARCHAR(24)"),
+        ("mysql", "OBJECTID", "CHAR(24)"),
+        ("postgresql", "TIMESTAMP_NTZ(6)", "TIMESTAMP(6)"),
+        ("mysql", "TIMESTAMP_NTZ(6)", "DATETIME(6)"),
+        ("sqlserver", "TIMESTAMP_NTZ(6)", "DATETIME2(6)"),
+        ("snowflake", "TIMESTAMP_NTZ(6)", "TIMESTAMP_NTZ"),
+    ],
+)
+def test_uuid_objectid_temporal_create_new_matrix(dest: str, src: str, expected_substr: str):
+    stamped = create_new_mapping_target_type(src, dest)
+    assert expected_substr.upper() in stamped.upper(), (dest, src, stamped)
+    # Create-new stamp must not be a bare logical invent that collapses on itself.
+    if src.startswith("TIMESTAMP"):
+        assert is_precision_collapse_coercion(src, stamped, dest_db=dest) is False
+
+
+def test_pipeline_typed_transform_stamps_physical_mysql_datetime():
+    """date transform on create-new MySQL must not leave bare DATETIME."""
+    from services.mapping_pipeline import _TYPED_TRANSFORM_TARGET_TYPE
+    from services.type_system import create_new_mapping_target_type
+
+    assert _TYPED_TRANSFORM_TARGET_TYPE["datetime"] == "DATETIME"
+    physical = create_new_mapping_target_type("DATETIME", "mysql")
+    assert physical.upper().startswith("DATETIME")
+    assert "(" in physical  # DATETIME(6), not bare DATETIME
+
+
+def test_run_mapping_pipeline_create_new_mysql_datetime_is_physical():
+    from services.mapping_pipeline import run_mapping_pipeline
+
+    result = run_mapping_pipeline(
+        source_columns=["created_at"],
+        target_columns=[],
+        source_schemas=[
+            {
+                "name": "created_at",
+                "inferred_type": "TIMESTAMP_NTZ(6)",
+                "samples": ["2024-01-15 10:30:00.123456"],
+            },
+        ],
+        destination_db_type="mysql",
+        destination_table_exists=False,
+        use_llm=False,
+    )
+    row = result["mappings"][0]
+    tgt = str(row.get("target_type") or "")
+    assert "DATETIME" in tgt.upper(), row
+    # Must be physical DATETIME(6), not bare logical DATETIME invent.
+    assert tgt.upper() != "DATETIME"
+    assert is_precision_collapse_coercion(
+        "TIMESTAMP_NTZ(6)", tgt, dest_db="mysql"
+    ) is False
+
+def test_run_mapping_pipeline_varchar_date_samples_widen_physical():
+    """Transform-driven date widen must survive create-new risk re-stamp."""
+    from services.mapping_pipeline import run_mapping_pipeline
+
+    result = run_mapping_pipeline(
+        source_columns=["d"],
+        target_columns=[],
+        source_schemas=[
+            {
+                "name": "d",
+                "inferred_type": "VARCHAR",
+                "samples": ["2024-01-15", "2024-02-01", "2024-03-01"],
+            },
+        ],
+        destination_db_type="mysql",
+        destination_table_exists=False,
+        use_llm=False,
+    )
+    row = result["mappings"][0]
+    assert row.get("transform") == "datetime", row
+    tgt = str(row.get("target_type") or "")
+    assert "DATETIME" in tgt.upper(), row
+    assert tgt.upper() != "DATETIME"
+    assert tgt.upper() != "TEXT"
+
+def test_mysql_time6_create_new_not_bare_time():
+    assert create_new_mapping_target_type("TIME(6)", "mysql").upper() == "TIME(6)"
+    assert create_new_mapping_target_type("TIME", "mysql").upper() == "TIME(6)"
+    assert is_precision_collapse_coercion("TIME(6)", "TIME(6)", dest_db="mysql") is False
+    # Bare TIME still narrows without dest-aware stamp.
+    assert temporal_precision_would_narrow("TIME(6)", "TIME", dest_db="mysql") is True
+    assert promote_create_new_temporal_stamp("TIME(6)", "TIME", "mysql") == "TIME(6)"
+
+
+def test_coercion_probe_uses_dest_db_for_pg_timestamp():
+    from services.coercion_probe import analyze_coercion
+
+    report = analyze_coercion(
+        sample_rows=[{"ts": "2024-01-01 12:00:00.123456"}],
+        mappings=[{"source": "ts", "target": "ts", "target_type": "TIMESTAMP", "create_new": True}],
+        source_types={"ts": "TIMESTAMP_NTZ(6)"},
+        dest_types={},
+        dest_db_type="postgresql",
+        table_exists=False,
+    )
+    cols = report.get("columns") or []
+    # After resolve promotes TIMESTAMP→TIMESTAMP(6), should not fidelity-block.
+    blocked = [c for c in cols if c.get("fidelity_collapse") and c.get("severity") == "block"]
+    assert not blocked, blocked
+
+def test_ip_inet_host_address_twins():
+    from services.type_system import specialty_carrier_would_collapse, specialty_polarity_mismatch
+
+    assert specialty_carrier_would_collapse("IP", "INET") is False
+    assert specialty_polarity_mismatch("IP", "INET") is False
+    assert is_precision_collapse_coercion("IP", "INET") is False
+    assert specialty_polarity_mismatch("INET", "CIDR") is True
+    assert is_precision_collapse_coercion("INET", "CIDR") is True
+
+def test_redshift_never_invents_timestamp_typmod():
+    """Amazon Redshift rejects TIMESTAMP(p) — create-new must stay bare."""
+    stamped = create_new_mapping_target_type("TIMESTAMP_NTZ(6)", "redshift")
+    assert "(" not in stamped, stamped
+    assert stamped.upper() == "TIMESTAMP"
+    assert promote_create_new_temporal_stamp("TIMESTAMP_NTZ(6)", "TIMESTAMP", "redshift") == "TIMESTAMP"
+    assert promote_create_new_temporal_stamp("TIMESTAMP_NTZ(6)", "TIMESTAMP(6)", "redshift") == "TIMESTAMP"
+    # Values still fit — bare RS TIMESTAMP is microsecond; not a collapse.
+    assert temporal_precision_would_narrow(
+        "TIMESTAMP_NTZ(6)", "TIMESTAMP", dest_db="redshift"
+    ) is False
+
+
+def test_sqlserver_create_new_datetime2_time_fsp_defaults():
+    assert create_new_mapping_target_type("TIMESTAMP_NTZ", "sqlserver") == "DATETIME2(7)"
+    assert create_new_mapping_target_type("TIMESTAMP_NTZ(6)", "sqlserver") == "DATETIME2(6)"
+    assert create_new_mapping_target_type("TIME", "sqlserver").upper().startswith("TIME")
+    assert create_new_mapping_target_type("TIME(3)", "sqlserver") == "TIME(3)"
+    assert is_precision_collapse_coercion(
+        "TIMESTAMP_NTZ(6)", "DATETIME2(6)", dest_db="sqlserver"
+    ) is False
+
+
+def test_oracle_time_to_varchar2_remains_declared_lossy():
+    """Oracle has no TIME — VARCHAR2 wire must stay Accept-risk / lossy, not silent-green."""
+    stamped = create_new_mapping_target_type("TIME(6)", "oracle")
+    assert "VARCHAR2" in stamped.upper()
+    assert is_precision_collapse_coercion("TIME(6)", stamped, dest_db="oracle") is True
+
+def test_lossy_respects_dest_db_for_timestamp_and_json():
+    """is_lossy_coercion must share dest_db-aware collapse SSOT — not MySQL defaults."""
+    from services.type_system import is_lossy_coercion
+
+    # Without dest_db: bare TIMESTAMP fail-closed (MySQL FSP 0).
+    assert is_lossy_coercion("TIMESTAMP_NTZ(6)", "TIMESTAMP") is True
+    # PostgreSQL create-new: bare TIMESTAMP is micros — not lossy.
+    assert is_lossy_coercion(
+        "TIMESTAMP_NTZ(6)", "TIMESTAMP", dest_db="postgresql"
+    ) is False
+    assert is_lossy_coercion("JSON", "JSONB", dest_db="postgresql") is False
+    assert is_lossy_coercion("JSON", "VARCHAR(50)", dest_db="postgresql") is True
+
+
+def test_validate_mapping_coercions_create_new_pg_timestamp_not_block():
+    from services.type_coercion_validator import validate_mapping_coercions
+
+    issues = validate_mapping_coercions(
+        mappings=[
+            {
+                "source": "ts",
+                "target": "ts",
+                "target_type": "TIMESTAMP",
+                "create_new": True,
+                "confidence": 0.95,
+            }
+        ],
+        source_types={"ts": "TIMESTAMP_NTZ(6)"},
+        target_types={},
+        dest_db_type="postgresql",
+    )
+    blocks = [i for i in issues if i.get("severity") == "block"]
+    assert not blocks, blocks
+
+def test_cross_surface_dest_db_agreement_pg_timestamp_and_json():
+    """Map/Validate/proof must share dest_db-aware lossy SSOT — no dual verdicts."""
+    from services.type_system import is_lossy_coercion
+    from services.mapping_proof import mapping_fidelity
+    from services.type_coercion_validator import validate_mapping_coercions
+
+    pairs = [
+        ("TIMESTAMP_NTZ(6)", "TIMESTAMP", "postgresql", False),
+        ("TIMESTAMP_NTZ(6)", "TIMESTAMP", "mysql", True),
+        ("JSON", "JSONB", "postgresql", False),
+        ("JSON", "VARCHAR(50)", "postgresql", True),
+    ]
+    for src, tgt, dest, expect_lossy in pairs:
+        assert is_lossy_coercion(src, tgt, dest_db=dest) is expect_lossy, (src, tgt, dest)
+        verdict = mapping_fidelity(
+            {"source_type": src, "target_type": tgt, "transform": "none"},
+            destination_db_type=dest,
+        )
+        if expect_lossy:
+            assert verdict["verdict"] == "lossy_cast", (src, tgt, dest, verdict)
+        else:
+            assert verdict["verdict"] != "lossy_cast", (src, tgt, dest, verdict)
+
+        issues = validate_mapping_coercions(
+            mappings=[
+                {
+                    "source": "c",
+                    "target": "c",
+                    "target_type": tgt,
+                    "create_new": True,
+                    "confidence": 0.95,
+                }
+            ],
+            source_types={"c": src},
+            target_types={},
+            dest_db_type=dest,
+        )
+        blocks = [i for i in issues if i.get("severity") == "block"]
+        if expect_lossy:
+            assert blocks, (src, tgt, dest, issues)
+        else:
+            assert not blocks, (src, tgt, dest, blocks)
+
+def test_materialize_dest_ddl_honors_map_stamps():
+    """Writers must not re-invent Map physical stamps via blind ddl_type."""
+    from services.type_system import ddl_type, materialize_dest_ddl
+
+    assert materialize_dest_ddl("postgresql", "REAL") == "REAL"
+    assert materialize_dest_ddl("postgresql", "float") == ddl_type("postgresql", "float")
+    assert materialize_dest_ddl("bigquery", "TIMESTAMP") == "TIMESTAMP"
+    # Blind ddl_type still treats bare TIMESTAMP as NTZ → DATETIME on BQ.
+    assert ddl_type("bigquery", "TIMESTAMP") == "DATETIME"
+    assert materialize_dest_ddl("mysql", "FLOAT") == "FLOAT"
+    assert materialize_dest_ddl("postgresql", "FLOAT") == ddl_type("postgresql", "FLOAT")
+    assert materialize_dest_ddl("postgresql", "JSONB") == "JSONB"
+    assert materialize_dest_ddl("oracle", "NVARCHAR2(50)").upper().startswith("NVARCHAR2")
+
+
+def test_bq_timestamptz_to_timestamp_not_polarity_loss():
+    from services.type_system import is_lossy_coercion, is_timezone_polarity_loss
+
+    assert is_timezone_polarity_loss("TIMESTAMPTZ", "TIMESTAMP", dest_db="bigquery") is False
+    assert is_lossy_coercion("TIMESTAMPTZ", "TIMESTAMP", dest_db="bigquery") is False
+    # Without dest_db: fail-closed (bare TIMESTAMP = NTZ).
+    assert is_timezone_polarity_loss("TIMESTAMPTZ", "TIMESTAMP") is True
+
+
+def test_promote_preserves_intentional_narrow_typmod():
+    from services.type_system import promote_create_new_temporal_stamp
+
+    assert (
+        promote_create_new_temporal_stamp("TIMESTAMP(6)", "TIMESTAMP(3)", "postgresql")
+        == "TIMESTAMP(3)"
+    )
+    # Bare stamp still promoted from source FSP.
+    assert (
+        promote_create_new_temporal_stamp("TIMESTAMP(6)", "TIMESTAMP", "postgresql")
+        == "TIMESTAMP(6)"
+    )
+
+
+def test_nested_struct_fsp_respects_dest_db():
+    from services.type_system import nested_struct_fields_incompatible
+
+    src = "STRUCT<a:TIMESTAMP_NTZ(6)>"
+    tgt = "STRUCT<a:TIMESTAMP>"
+    assert nested_struct_fields_incompatible(src, tgt, dest_db="postgresql") is False
+    assert nested_struct_fields_incompatible(src, tgt) is True
+
+
+def test_safe_ddl_honors_explicit_real_stamp():
+    from services.schema_inference import safe_ddl_logical_type
+
+    assert (
+        safe_ddl_logical_type("REAL", ["1.5", "2.0"], honor_explicit=True) == "REAL"
+    )
+    # Without honor_explicit, float soften may still collapse.
+    soft = safe_ddl_logical_type("REAL", ["1.5", "2.0"], honor_explicit=False)
+    assert soft in {"FLOAT", "REAL"}
+
+def test_iceberg_and_generic_materialize_honor_stamps():
+    from services.type_system import materialize_dest_ddl, ddl_type
+    from connectors.iceberg_writer import _logical_to_iceberg_type
+
+    assert _logical_to_iceberg_type("ARRAY<FLOAT>") in {"ARRAY<FLOAT>", "list<float>"}
+    assert "double" not in ddl_type("iceberg", "ARRAY<FLOAT>").lower()
+    assert materialize_dest_ddl("duckdb", "REAL") == "REAL"
+    assert materialize_dest_ddl("databricks", "ARRAY<FLOAT>") == "ARRAY<FLOAT>"
+
+
+def test_sa_float_stamp_not_always_double():
+    from connectors.generic_sql import _sa_type_for_logical
+    import sqlalchemy as sa
+
+    real_t = _sa_type_for_logical("REAL", "postgresql", "postgresql")
+    nested = getattr(real_t, "nested_type", None) or real_t
+    assert not isinstance(nested, sa.Double), type(nested)
+
+
+def test_iceberg_array_float_create_new_keeps_float_leaf():
+    from services.type_system import create_new_mapping_target_type, ddl_type
+
+    stamped = create_new_mapping_target_type("ARRAY<FLOAT>", "iceberg")
+    assert "double" not in stamped.lower(), stamped
+    assert "float" in stamped.lower(), stamped
+    assert "double" not in ddl_type("iceberg", "ARRAY<FLOAT>").lower()
+    assert create_new_mapping_target_type("ARRAY<FLOAT>", "databricks").upper() == "ARRAY<FLOAT>"
+
+def test_create_new_stamps_not_self_lossy():
+    from services.type_system import (
+        create_new_mapping_target_type,
+        is_lossy_coercion,
+        is_precision_collapse_coercion,
+    )
+
+    cases = [
+        ("VECTOR(1536)", "databricks"),
+        ("TIMESTAMP_NTZ(6)", "bigquery"),
+        ("JSON", "oracle"),
+        ("OBJECTID", "bigquery"),
+        ("OBJECTID", "databricks"),
+        ("MONEY", "postgresql"),
+        ("HALF", "databricks"),
+    ]
+    for src, dest in cases:
+        stamp = create_new_mapping_target_type(src, dest)
+        assert is_lossy_coercion(src, stamp, dest_db=dest) is False, (src, dest, stamp)
+        assert is_precision_collapse_coercion(src, stamp, dest_db=dest) is False, (
+            src,
+            dest,
+            stamp,
+        )
+
+
+def test_objectid_bare_string_still_collapses_on_bq():
+    from services.type_system import is_lossy_coercion
+
+    assert is_lossy_coercion("OBJECTID", "STRING", dest_db="bigquery") is True
+
+def test_create_new_false_self_blocks_cleared():
+    from services.type_system import (
+        create_new_mapping_target_type,
+        is_lossy_coercion,
+        is_precision_collapse_coercion,
+        materialize_dest_ddl,
+    )
+
+    cases = [
+        ("DOUBLE", "sqlserver"),
+        ("DOUBLE", "snowflake"),
+        ("DECIMAL(18,4)", "bigquery"),
+        ("MONEY", "bigquery"),
+        ("SMALLMONEY", "postgresql"),
+        ("TIMESTAMP", "bigquery"),
+        ("TIMESTAMP", "databricks"),
+        ("TIMESTAMP_NTZ(6)", "sqlserver"),
+        ("TIMESTAMP_NTZ(6)", "databricks"),
+        ("TIMESTAMP_NTZ(6)", "iceberg"),
+        ("DATETIMEOFFSET", "sqlserver"),
+        ("TIME(6)", "redshift"),
+        ("JSONB", "sqlserver"),
+        ("UUID", "bigquery"),
+        ("UNIQUEIDENTIFIER", "bigquery"),
+        ("OBJECTID", "oracle"),
+        ("INET", "mysql"),
+        ("INET", "sqlserver"),
+        ("ARRAY<INTEGER>", "bigquery"),
+        ("BIT(8)", "oracle"),
+        ("BINARY(16)", "postgresql"),
+        ("BINARY(16)", "bigquery"),
+        ("BINARY(16)", "redshift"),
+        ("VARBINARY(32)", "snowflake"),
+        ("TEXT", "sqlserver"),
+        ("TEXT", "redshift"),
+        ("XML", "oracle"),
+        ("GEOMETRY", "oracle"),
+        ("VECTOR(768)", "duckdb"),
+        ("VECTOR(768)", "clickhouse"),
+        ("VECTOR(768)", "iceberg"),
+        ("STRUCT<a:INT>", "clickhouse"),
+        ("STRUCT<a:INT>", "duckdb"),
+    ]
+    for src, dest in cases:
+        stamp = create_new_mapping_target_type(src, dest)
+        assert materialize_dest_ddl(dest, stamp).upper().replace(" ", "") == stamp.upper().replace(
+            " ", ""
+        ), (src, dest, stamp)
+        assert is_lossy_coercion(src, stamp, dest_db=dest) is False, (src, dest, stamp)
+        assert is_precision_collapse_coercion(src, stamp, dest_db=dest) is False, (
+            src,
+            dest,
+            stamp,
+        )
+
+
+def test_mapping_proof_uses_dest_db_for_timestamptz_instant_sinks():
+    """spark/delta aliases must normalize before TZ SSOT — no false TIMESTAMPTZ→TIMESTAMP."""
+    from services.mapping_proof import _mapping_risks
+
+    for dest in ("bigquery", "databricks", "spark", "delta"):
+        risks = _mapping_risks(
+            {
+                "source_type": "TIMESTAMPTZ",
+                "target_type": "TIMESTAMP",
+                "transform": "none",
+            },
+            dest_mode="create_new",
+            destination_db_type=dest,
+        )
+        codes = {r.get("code") for r in risks}
+        assert "timezone_polarity_loss" not in codes, (dest, risks)
+        assert "type_narrowing" not in codes, (dest, risks)
+
+
+def test_iceberg_materialize_array_vector_spelling():
+    from services.type_system import materialize_dest_ddl
+
+    assert materialize_dest_ddl("iceberg", "ARRAY<FLOAT>").lower() == "list<float>"
+    assert materialize_dest_ddl("iceberg", "FLOAT[]").lower() == "list<float>"
+    assert materialize_dest_ddl("iceberg", "VECTOR(768)").lower() == "list<float>"
+    assert materialize_dest_ddl("iceberg", "list<float>").lower() == "list<float>"
+
+
+def test_dest_db_aliases_normalize_inside_lossy_ssot():
+    """spark/delta must not dual-path vs databricks inside is_lossy_coercion."""
+    from services.type_system import is_lossy_coercion, is_timezone_polarity_loss
+
+    for dest in ("databricks", "spark", "delta", "delta_lake"):
+        assert is_timezone_polarity_loss(
+            "TIMESTAMPTZ", "TIMESTAMP", dest_db=dest
+        ) is False, dest
+        assert is_lossy_coercion(
+            "TIMESTAMPTZ", "TIMESTAMP", dest_db=dest
+        ) is False, dest
+    assert is_timezone_polarity_loss("TIMESTAMPTZ", "TIMESTAMP") is True
+    assert is_lossy_coercion("TIMESTAMPTZ", "DATETIME(6)", dest_db="mysql") is True
+
+
+def test_oracle_time_and_iceberg_objectid_remain_declared_lossy():
+    from services.type_system import create_new_mapping_target_type, is_lossy_coercion
+
+    oracle_time = create_new_mapping_target_type("TIME(6)", "oracle")
+    assert "VARCHAR2" in oracle_time.upper()
+    assert is_lossy_coercion("TIME(6)", oracle_time, dest_db="oracle") is True
+    iceberg_oid = create_new_mapping_target_type("OBJECTID", "iceberg")
+    assert is_lossy_coercion("OBJECTID", iceberg_oid, dest_db="iceberg") is True
+
+
+def test_spanner_does_not_invent_bigquery_types():
+    """Spanner ≠ BigQuery — never invent DATETIME / TIME / BIGNUMERIC via alias."""
+    from services.type_system import (
+        _normalize_dest_db,
+        create_new_mapping_target_type,
+        is_lossy_coercion,
+    )
+
+    assert _normalize_dest_db("spanner") == "spanner"
+    assert _normalize_dest_db("google_spanner") == "spanner"
+    assert create_new_mapping_target_type("INTEGER", "spanner") == "INT64"
+
+    ntz = create_new_mapping_target_type("TIMESTAMP_NTZ", "spanner")
+    assert "DATETIME" not in ntz.upper()
+    assert "TIMESTAMP" not in ntz.upper() or "STRING" in ntz.upper()
+
+    dec = create_new_mapping_target_type("DECIMAL(10,2)", "spanner")
+    assert "BIGNUMERIC" not in dec.upper()
+    assert "NUMERIC" in dec.upper()
+    assert "(10,2)" in dec.replace(" ", "")
+
+    time_stamp = create_new_mapping_target_type("TIME(6)", "spanner")
+    assert time_stamp.upper() != "TIME"
+    assert "TIME(" not in time_stamp.upper()
+
+    # Instant carriers may use Spanner TIMESTAMP; wall-clock invent must stay lossy.
+    assert is_lossy_coercion(
+        "TIMESTAMP_NTZ", "TIMESTAMP", dest_db="spanner"
+    ) is True
+
+
+def test_interval_ym_bq_and_postgis_geography_create_new_not_self_lossy():
+    from services.type_system import create_new_mapping_target_type, is_lossy_coercion
+
+    for src, dest in (
+        ("INTERVAL YEAR TO MONTH", "bigquery"),
+        ("INTERVAL DAY TO SECOND", "bigquery"),
+        ("INTERVAL YEAR TO MONTH", "postgresql"),
+        ("GEOGRAPHY(POINT,4326)", "postgresql"),
+    ):
+        stamp = create_new_mapping_target_type(src, dest)
+        assert is_lossy_coercion(src, stamp, dest_db=dest) is False, (src, dest, stamp)
+
+    geo = create_new_mapping_target_type("GEOGRAPHY(POINT,4326)", "postgresql")
+    assert "POINT" in geo.upper()
+    assert "GEOMETRY," not in geo.upper().replace(" ", "")

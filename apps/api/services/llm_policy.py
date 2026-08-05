@@ -8,6 +8,7 @@ assistant privacy-safe even when no local model is configured.
 from __future__ import annotations
 
 import os
+from services.brand_env import getenv_brand
 import re
 
 # PII / sensitive patterns we do not send to cloud LLMs.
@@ -29,14 +30,14 @@ _SANITIZE_RE = re.compile(
 
 def is_llm_enabled() -> bool:
     """Return whether LLM inference is globally enabled."""
-    return os.getenv("DATAFLOW_LLM_ENABLED", "true").lower() not in (
+    return getenv_brand("LLM_ENABLED", "true").lower() not in (
         "false", "0", "off", "disabled", "no"
     )
 
 
 def is_pii_masking_enabled() -> bool:
     """Return whether PII masking before LLM prompts is required."""
-    return os.getenv("DATAFLOW_PII_MASKING", "true").lower() not in (
+    return getenv_brand("PII_MASKING", "true").lower() not in (
         "false", "0", "off", "disabled", "no"
     )
 
@@ -67,3 +68,28 @@ def mask_pii_samples(samples: dict[str, list[str]] | None) -> dict[str, list[str
 def llm_use_allowed(requested: bool) -> bool:
     """Combine caller request with global policy."""
     return requested and is_llm_enabled() and is_pii_masking_enabled()
+
+
+# Deterministic fail-closed gates — AI/Pilot/MCP may suggest only.
+AI_OFF_GATE_DECISIONS = frozenset({
+    "g1_source",
+    "g2_destination",
+    "g3_schema_contract",
+    "g4_mapping_confidence",
+    "g5_dry_run",
+    "g6_target_ddl",
+    "g7_capacity",
+    "g8_reconciliation",
+    "g9_data_integrity",
+})
+
+
+def ai_may_decide_preflight_gate(gate_id: str | None = None) -> bool:
+    """Product policy: AI never decides G1–G9 pass/fail (suggestions only).
+
+    ``gate_id`` is accepted for call-site clarity; the answer is always False
+    for any numbered preflight gate. See docs/AI_GATE_POLICY.md.
+    """
+    _ = gate_id  # documented parameter for call-site readability
+    return False
+

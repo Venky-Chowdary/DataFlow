@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { suggestUniqueKeyCandidates } from "./uniqueKeySuggestions.js";
+import { suggestUniqueKeyCandidates, suggestCompositeUniqueKeyCandidates } from "./uniqueKeySuggestions.js";
 
 describe("suggestUniqueKeyCandidates", () => {
   it("returns columns unique in the sample and prefers natural keys", () => {
@@ -26,5 +26,17 @@ describe("suggestUniqueKeyCandidates", () => {
     ];
     const hits = suggestUniqueKeyCandidates(rows, ["a", "b"], { exclude: ["a"] });
     assert.deepEqual(hits.map((h) => h.column), ["b"]);
+  });
+});
+
+describe("suggestCompositeUniqueKeyCandidates", () => {
+  it("finds a unique pair when singles collide", () => {
+    const rows = [
+      { tenant: "t1", order: "1", note: "a" },
+      { tenant: "t1", order: "2", note: "a" },
+      { tenant: "t2", order: "1", note: "a" },
+    ];
+    const hits = suggestCompositeUniqueKeyCandidates(rows, ["tenant", "order", "note"]);
+    assert.ok(hits.some((h) => h.columns.join(",") === "tenant,order"));
   });
 });

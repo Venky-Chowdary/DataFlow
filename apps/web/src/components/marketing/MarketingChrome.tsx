@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { DtLogo } from "../DtLogo";
+import { BrandWordmark } from "../BrandWordmark";
 import { DtIcon } from "../DtIcon";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { hashForPublicRoute } from "../../lib/publicNavigation";
@@ -77,12 +77,25 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
       className={`lp ${isHome ? "lp-home" : "lp-subpage"} ${scrolled ? "is-page-scrolled" : ""}`}
       data-lp-route={route}
     >
-      <div className={`lp-ambient${isHome ? "" : " lp-ambient--quiet"}`} aria-hidden>
-        <span className="lp-ambient-orb lp-ambient-orb--a" />
-        <span className="lp-ambient-orb lp-ambient-orb--b" />
-        {isHome ? <span className="lp-ambient-orb lp-ambient-orb--c" /> : null}
+      {/* Quiet grid only — floating orbs read as AI decoration; remove everywhere. */}
+      <div className="lp-ambient lp-ambient--quiet" aria-hidden>
         <span className="lp-ambient-grid" />
       </div>
+
+      <a
+        className="lp-announce"
+        href={link("product-mcp")}
+        onClick={(e) => {
+          e.preventDefault();
+          go("product-mcp");
+        }}
+      >
+        <span className="lp-announce-tag">New</span>
+        MCP for agents — governed transfers from Cursor &amp; Claude. Same nine core gates.
+        <span className="lp-announce-cta" aria-hidden>
+          Learn more →
+        </span>
+      </a>
 
       <header
         ref={navRef}
@@ -95,13 +108,13 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
               <a
                 className="lp-nav-brand"
                 href={link("home")}
+                aria-label="Datawrap"
                 onClick={(e) => {
                   e.preventDefault();
                   go("home");
                 }}
               >
-                <DtLogo size={34} />
-                <span className="lp-nav-brand-text">DataFlow</span>
+                <BrandWordmark markSize={36} title="" />
               </a>
             </div>
 
@@ -136,7 +149,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                     <span>Ad-hoc SQL &amp; document queries</span>
                   </a>
                   <a href={link("product-pilot")} onClick={(e) => { e.preventDefault(); go("product-pilot"); }}>
-                    <strong>Data Pilot</strong>
+                    <strong>Datawrap Pilot</strong>
                     <span>Natural-language triage for transfers</span>
                   </a>
                   <a href={link("product-mcp")} onClick={(e) => { e.preventDefault(); go("product-mcp"); }}>
@@ -251,14 +264,14 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
 
             <div className="lp-nav-end">
               <div className="lp-nav-actions">
-                <button type="button" className="lp-btn lp-btn--ghost lp-nav-action-secondary" onClick={() => go("contact")}>
-                  Contact sales
-                </button>
                 <button type="button" className="lp-btn lp-btn--ghost lp-nav-action-login" onClick={onLogin}>
                   Log in
                 </button>
                 <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
                   Get started
+                </button>
+                <button type="button" className="lp-btn lp-btn--outline lp-nav-action-secondary" onClick={() => go("contact")}>
+                  Contact sales
                 </button>
               </div>
               <button
@@ -277,6 +290,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
 
       <main className="lp-main">{children}</main>
 
+      {route !== "contact" ? (
       <footer className="lp-footer lp-footer--compact">
         <div className="lp-footer-inner">
           <div className="lp-footer-grid">
@@ -284,14 +298,17 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
               <a
                 className="lp-footer-brand-link"
                 href={link("home")}
+                aria-label="Datawrap"
                 onClick={(e) => {
                   e.preventDefault();
                   go("home");
                 }}
               >
-                <DtLogo size={22} />
-                <strong>DataFlow</strong>
+                <BrandWordmark markSize={28} title="" size="sm" />
               </a>
+              <p className="lp-footer-tagline">
+                Anywhere to anywhere — wrapped with proof.
+              </p>
             </div>
             <div>
               <h4>Product</h4>
@@ -317,7 +334,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
           </div>
 
           <div className="lp-footer-bottom">
-            <span>© {new Date().getFullYear()} DataFlow</span>
+            <span>© {new Date().getFullYear()} Datawrap</span>
             <span className="lp-footer-legal">
               <a href={link("privacy")} onClick={(e) => { e.preventDefault(); go("privacy"); }}>Privacy</a>
               <a href={link("terms")} onClick={(e) => { e.preventDefault(); go("terms"); }}>Terms</a>
@@ -326,6 +343,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
           </div>
         </div>
       </footer>
+      ) : null}
     </div>
   );
 }

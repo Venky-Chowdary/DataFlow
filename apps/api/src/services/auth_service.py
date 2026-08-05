@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import os
+from services.brand_env import getenv_brand
 import re
 import time
 from typing import Any, Optional
@@ -15,10 +16,10 @@ from services.platform_config import is_production
 
 logger = logging.getLogger("dataflow.auth")
 
-_REAUTH_SECRET = os.getenv("DATAFLOW_AUTH_SECRET", "dev-change-me-before-production")
-_REQUIRE_AUTH = os.getenv("DATAFLOW_REQUIRE_AUTH", "1" if is_production() else "0").lower() in ("1", "true", "yes")
-_TOKEN_TTL_SEC = int(os.getenv("DATAFLOW_TOKEN_TTL_SEC", "86400"))
-_ALLOW_DEV_USER = os.getenv("DATAFLOW_ALLOW_DEV_USER", "0").lower() in ("1", "true", "yes")
+_REAUTH_SECRET = getenv_brand("AUTH_SECRET", "dev-change-me-before-production")
+_REQUIRE_AUTH = getenv_brand("REQUIRE_AUTH", "1" if is_production() else "0").lower() in ("1", "true", "yes")
+_TOKEN_TTL_SEC = int(getenv_brand("TOKEN_TTL_SEC", "86400"))
+_ALLOW_DEV_USER = getenv_brand("ALLOW_DEV_USER", "0").lower() in ("1", "true", "yes")
 
 # bcrypt hash of "password123" for test@gmail.com (dev/staging only, never production)
 _DEV_USER = {
@@ -63,8 +64,8 @@ def _normalize_secret(value: str) -> str:
 
 def _admin_user_from_env() -> dict[str, str] | None:
     global _ADMIN_USER_CACHE, _ADMIN_CACHE_KEY
-    admin_email = _normalize_secret(os.getenv("DATAFLOW_ADMIN_EMAIL", ""))
-    admin_password = _normalize_secret(os.getenv("DATAFLOW_ADMIN_PASSWORD", ""))
+    admin_email = _normalize_secret(getenv_brand("ADMIN_EMAIL", ""))
+    admin_password = _normalize_secret(getenv_brand("ADMIN_PASSWORD", ""))
     if not admin_email or not admin_password:
         return None
     key = (admin_email.lower(), admin_password)
@@ -86,7 +87,7 @@ _AUTH_USERS_JSON_WARNED = False
 
 def _users_from_auth_users_env() -> list[dict[str, str]]:
     global _AUTH_USERS_JSON_WARNED
-    raw = os.getenv("DATAFLOW_AUTH_USERS", "").strip()
+    raw = getenv_brand("AUTH_USERS", "").strip()
     if not raw:
         return []
     try:
@@ -152,6 +153,11 @@ def _load_users() -> list[dict[str, str]]:
     if users:
         return users
 
+    # Never expose the hard-coded test@gmail.com account in production — even
+    # when ALLOW_DEV_USER is mistakenly set (validate_production_config rejects it).
+    if is_production():
+        return []
+
     if _ALLOW_DEV_USER or not is_production():
         return [_DEV_USER]
     return []
@@ -159,9 +165,9 @@ def _load_users() -> list[dict[str, str]]:
 
 def auth_bootstrap_status() -> dict[str, Any]:
     """Safe diagnostics for operators (no secrets)."""
-    admin_email = _normalize_secret(os.getenv("DATAFLOW_ADMIN_EMAIL", ""))
-    admin_password = _normalize_secret(os.getenv("DATAFLOW_ADMIN_PASSWORD", ""))
-    raw_users = os.getenv("DATAFLOW_AUTH_USERS", "").strip()
+    admin_email = _normalize_secret(getenv_brand("ADMIN_EMAIL", ""))
+    admin_password = _normalize_secret(getenv_brand("ADMIN_PASSWORD", ""))
+    raw_users = getenv_brand("AUTH_USERS", "").strip()
     auth_users_json_valid: bool | None = None
     if raw_users:
         try:
@@ -233,7 +239,8 @@ def authenticate(email: str, password: str) -> Optional[dict[str, str]]:
             }
         logger.info("Login failed for %s — password mismatch", normalized)
         return None
-    logger.info("Login failed — unknown email %s (configured: %s)", normalized, [u.get("email") for u in users])
+    # Never dump the configured user directory — aids account discovery via logs.
+    logger.info("Login failed — unknown email (users_configured=%s)", len(users))
     return None
 
 

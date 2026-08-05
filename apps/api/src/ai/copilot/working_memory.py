@@ -1,4 +1,4 @@
-"""Per-session working memory for Data Pilot — the state a follow-up turn edits.
+"""Per-session working memory for Datawrap Pilot — the state a follow-up turn edits.
 
 Conversational data questions are not self-contained. The multi-turn text-to-SQL
 literature (SParC, CoSQL) catalogues exactly the phenomena operators produce:
@@ -41,6 +41,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from services.brand_env import getenv_brand
 import threading
 import time
 import uuid
@@ -60,7 +61,7 @@ _AUTHORITATIVE_SLOTS = frozenset({"metric", "column", "group_by", "grain"})
 
 
 def _default_path() -> Path:
-    override = os.environ.get("DATAFLOW_PILOT_MEMORY_PATH", "").strip()
+    override = getenv_brand("PILOT_MEMORY_PATH", "").strip()
     if override:
         return Path(override)
     return Path(__file__).resolve().parents[3] / "data" / "pilot_memory.json"
@@ -87,6 +88,7 @@ class PilotFocus:
     descending: bool = True
     result_id: str = ""
     tool: str = ""
+    where: str = ""
     updated_at: float = 0.0
 
     def has_target(self) -> bool:

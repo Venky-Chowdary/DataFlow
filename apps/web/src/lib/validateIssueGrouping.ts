@@ -2,6 +2,10 @@
  * Validate storytelling helpers — present root causes clearly without changing
  * engine gate outcomes. Duplicate identity keys often fail G9 + G6 + G8; ISO
  * timestamp bind notes are warnings, not blockers.
+ *
+ * ``remapToTypeForMismatch`` mirrors backend
+ * ``validation_assistant._remap_to_type_for_mismatch`` so one-click Fix CTAs
+ * do not invent bare VARCHAR for UUID/ObjectId/DECIMAL/temporal blockers.
  */
 import { gateLabel } from "./preflightGates.js";
 import type {
@@ -18,6 +22,47 @@ const DUPLICATE_GATE_IDS = new Set([
   "g6_ddl",
   "g8_reconciliation",
 ]);
+
+/** Mirror apps/api/services/validation_assistant._remap_to_type_for_mismatch. */
+export function remapToTypeForMismatch(sourceType: string, targetType: string): string {
+  const src = (sourceType || "").trim();
+  const tgt = (targetType || "").trim();
+  const srcU = src.toUpperCase();
+  const tgtU = tgt.toUpperCase();
+  // Include CHAR(n) / NCHAR — backend normalize_logical_type maps these to string.
+  const stringSink = /^(N?VAR)?CHAR|TEXT|STRING|JSON|LONGTEXT|CLOB|NVARCHAR|VARCHAR2/.test(tgtU);
+  if ((srcU.includes("UUID") || srcU.includes("GUID") || srcU.includes("UNIQUEIDENTIFIER")) && stringSink) {
+    return "UUID";
+  }
+  if (srcU.includes("OBJECTID") && stringSink) return "OBJECTID";
+  const specialty = srcU.match(
+    /^(INET|CIDR|IPV4|IPV6|IP|MACADDR8?|HSTORE|LTREE|PG_LSN|OBJECTID)\b/,
+  );
+  if (specialty && stringSink) return specialty[1];
+  if (/FLOAT|DOUBLE|REAL/.test(srcU) && /DECIMAL|NUMBER|NUMERIC|INT/.test(tgtU)) {
+    return "DOUBLE";
+  }
+  if (/DECIMAL|NUMERIC|NUMBER/.test(srcU) && /INT|FLOAT|DOUBLE|REAL/.test(tgtU)) {
+    return src || "DECIMAL";
+  }
+  if (
+    /TIMESTAMP|DATETIME|DATE|TIME/.test(srcU)
+    && /TIMESTAMP|DATETIME|DATE|TIME|VARCHAR|TEXT|STRING|CHAR/.test(tgtU)
+  ) {
+    return src || "TIMESTAMP";
+  }
+  if (/VARCHAR|TEXT|STRING|CHAR/.test(srcU) && /INT|DECIMAL|NUMBER|FLOAT|DOUBLE/.test(tgtU)) {
+    return "VARCHAR";
+  }
+  // Same-logical text/json create-new twins — keep destination type, never invent VARCHAR.
+  if (
+    (/VARCHAR|TEXT|STRING|CHAR|CLOB/.test(srcU) && /VARCHAR|TEXT|STRING|CHAR|CLOB/.test(tgtU))
+    || (/JSON/.test(srcU) && /JSON/.test(tgtU))
+  ) {
+    return tgt || src || "TEXT";
+  }
+  return "VARCHAR";
+}
 
 const DUPLICATE_RE =
   /duplicate\s+(?:key|id|target\s+key)|keys?\s+repeat|primary\s+key\s+candidate.*duplicate|expect_column_unique/i;
@@ -56,7 +101,7 @@ export interface ExecutiveSummary {
 
 export interface DisplayBlocker {
   key: string;
-  kind: "duplicate_root" | "blocker";
+  kind: "duplicate_root" | "fidelity_root" | "blocker";
   title: string;
   message: string;
   impact?: string;
@@ -64,9 +109,94 @@ export interface DisplayBlocker {
   issues?: string[];
   fix?: string;
   why?: string;
+  quarantinePolicy?: string;
+  rollbackPolicy?: string;
+  /** Sample rows examined for this root (honesty — not population proof). */
+  affectedRowsSample?: number | null;
+  /** Estimated population when known. */
+  estimatedTotalRows?: number | null;
+  /** Confidence band / score when present on the root. */
+  confidenceNote?: string | null;
+  /** Whether any rollback strategy is executable (usually false except staging discard). */
+  rollbackExecutable?: boolean | null;
   suggested_actions?: ValidationSuggestedAction[];
   /** Original blocker for dry-run / encoding action hooks. */
   source?: PreflightResult["blockers"][number];
+}
+
+const FIDELITY_RE =
+  /fidelity.?collapse|lossy|precision.?loss|scale.?truncat|nested.?shape.?collapse|declared type path collapses|width.?truncat|timezone.?shift/i;
+
+const FIDELITY_GATE_IDS = new Set([
+  "g3_type_compat",
+  "g3_type_compatibility",
+  "g4_transform",
+  "g5_sample",
+  "g5_sample_validation",
+  "g8_reconciliation",
+]);
+
+export function isFidelityCollapseSignal(
+  message: string,
+  details?: Record<string, unknown> | null,
+  gateId?: string,
+): boolean {
+  const blob = textBlob(message, details);
+  if (FIDELITY_RE.test(blob)) return true;
+  if (details?.fidelity_collapse === true) return true;
+  const framing = asRecord(details?.framing);
+  const kind = String(framing?.kind || details?.kind || "").toLowerCase();
+  if (
+    kind === "fidelity_collapse"
+    || kind === "nested_shape_collapse"
+    || kind === "nested_document_serialization"
+  ) {
+    return true;
+  }
+  if (gateId && FIDELITY_GATE_IDS.has(gateId) && /loss|truncat|collapse|\bcast\b/i.test(blob)) {
+    return true;
+  }
+  return false;
+}
+
+/** Collapse multi-gate fidelity/lossy failures into one operator-facing root. */
+export function findFidelityCollapseRoot(
+  preflight: PreflightResult | null | undefined,
+): {
+  title: string;
+  impact: string;
+  fixHint: string;
+  gateIds: string[];
+  messages: string[];
+  absorbedBlockerIds: string[];
+} | null {
+  if (!preflight) return null;
+  const gateHits = (preflight.gates ?? []).filter(
+    (g) => g && g.status === "block" && isFidelityCollapseSignal(g.message, g.details, g.id),
+  );
+  const blockerHits = (preflight.blockers ?? []).filter((b) =>
+    Boolean(b && isFidelityCollapseSignal(b.message, b.details, b.id)),
+  );
+  if (gateHits.length + blockerHits.length < 2) return null;
+  const gateIds = [...new Set([
+    ...gateHits.map((g) => g.id),
+    ...blockerHits.map((b) => b.id).filter((id) => FIDELITY_GATE_IDS.has(id)),
+  ])];
+  if (gateIds.length < 2 && blockerHits.length < 2) return null;
+  const messages = [
+    ...gateHits.map((g) => g.message),
+    ...blockerHits.map((b) => b.message),
+  ].filter(Boolean);
+  return {
+    title: "Lossy / fidelity collapse across type path",
+    impact:
+      "Declared types or nested shapes collapse fidelity on write — Accept risk on Map or remap carriers before Execute.",
+    fixHint:
+      "Open Map → review Approve/Review/Accept risk tiers → remap width/scale or ack intentional loss → re-run Validate.",
+    gateIds,
+    messages,
+    absorbedBlockerIds: blockerHits.map((b) => b.id),
+  };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -92,6 +222,18 @@ function textBlob(message: string, details?: Record<string, unknown> | null): st
     }
   }
   return parts.join(" ");
+}
+
+/**
+ * True when the text describes format-control / character-encoding integrity
+ * failures — not when a column is merely named ``encoding_id``.
+ * Keep in sync with ``preflight_rules`` encoding keywords (no bare "encoding").
+ */
+export const ENCODING_INTEGRITY_RE =
+  /format-control(?:\s+character)?|replacement character|encoding anomaly|character encoding|U\+200B|zero-width|strip_controls/i;
+
+export function isEncodingIntegritySignal(text: string): boolean {
+  return ENCODING_INTEGRITY_RE.test(text || "");
 }
 
 export function isDuplicateIdentitySignal(
@@ -151,10 +293,10 @@ export function findDuplicateKeyRoot(
   if (!preflight) return null;
 
   const gateHits = (preflight.gates ?? []).filter(
-    (g) => g.status === "block" && isDuplicateIdentitySignal(g.message, g.details, g.id),
+    (g) => g && g.status === "block" && isDuplicateIdentitySignal(g.message, g.details, g.id),
   );
   const blockerHits = (preflight.blockers ?? []).filter((b) =>
-    isDuplicateIdentitySignal(b.message, b.details, b.id),
+    Boolean(b && isDuplicateIdentitySignal(b.message, b.details, b.id)),
   );
 
   if (gateHits.length + blockerHits.length < 1) return null;
@@ -208,15 +350,13 @@ export function findDuplicateKeyRoot(
   const sync = (syncMode || "").toLowerCase();
   const appendLike =
     sync.includes("append")
-    || sync === "full_refresh_overwrite"
-    || sync === "overwrite"
-    || sync === "full_refresh";
+    && !sync.includes("upsert")
+    && !/overwrite|cdc|mirror|scd/.test(sync);
   const fixHint = appendLike
     ? (
-      "You already chose append/overwrite — uniqueness is not required for this sync mode. "
-      + "Re-run Validate after the API picks up the latest gates. If it still blocks, the destination "
-      + "table may enforce a real PRIMARY KEY on this column: clean duplicate source rows, or pick a "
-      + "different identity column in Destination → Advanced."
+      "Append sync can keep duplicate source rows only when that column is not the destination "
+      + "PRIMARY KEY. If Validate or Execute still blocks, open Destination → Advanced and clear "
+      + "Primary key (or pick a unique column), or dedupe the source."
     )
     : (
       "Open Destination → Advanced and set Primary key to a unique column "
@@ -247,6 +387,8 @@ export function isIsoNormalizeIssue(issue: ValidationIssue): boolean {
 
 export function isIsoNormalizeCoercion(col: CoercionColumn): boolean {
   if (col.severity === "block") return false;
+  // JSON scalar wraps are a domain change — never bury under "normalize, no loss".
+  if ((col.json_scalar_wraps ?? 0) > 0) return false;
   if ((col.wire_normalize ?? 0) > 0 && col.failed === 0) return true;
   const fix = col.suggested_fix || "";
   return /ISO timestamps?/i.test(fix) && /normaliz/i.test(fix);
@@ -342,8 +484,75 @@ export function buildDisplayBlockers(
   preflight: PreflightResult,
   syncMode?: string,
 ): DisplayBlocker[] {
+  // Engine Root Cause SSOT — prefer when present (Module 2).
+  const engineRoots = preflight.root_causes ?? [];
+  if (engineRoots.length > 0) {
+    const absorbed = new Set(engineRoots.flatMap((r) => r.absorbed_blocker_ids ?? []));
+    const items: DisplayBlocker[] = engineRoots.map((r) => ({
+      key: r.root_id,
+      kind: r.kind === "duplicate_identity"
+        ? "duplicate_root"
+        : r.kind === "fidelity_collapse" || r.kind === "mapping_confidence"
+          ? "fidelity_root"
+          : "blocker",
+      title: r.title,
+      message: r.summary,
+      impact: r.business_impact,
+      gateChips: (r.impacted_gates ?? []).map((id) => ({ id, label: gateLabel(id) })),
+      issues: [
+        ...(r.affected_columns?.length
+          ? [`Columns: ${r.affected_columns.slice(0, 8).join(", ")}${r.affected_columns.length > 8 ? "…" : ""}`]
+          : []),
+        ...(typeof r.affected_rows_sample === "number"
+          ? [`Sample rows: ${r.affected_rows_sample}`]
+          : []),
+        ...(typeof r.estimated_total_rows === "number"
+          ? [`Estimated rows: ${r.estimated_total_rows.toLocaleString()}`]
+          : []),
+        ...(r.alternative_fixes ?? []).slice(0, 3),
+      ],
+      fix: r.recommended_fix,
+      quarantinePolicy: r.quarantine_policy,
+      rollbackPolicy: r.rollback_policy,
+      affectedRowsSample: typeof r.affected_rows_sample === "number" ? r.affected_rows_sample : null,
+      estimatedTotalRows: typeof r.estimated_total_rows === "number" ? r.estimated_total_rows : null,
+      confidenceNote: r.risk_level ? `Risk level: ${r.risk_level}` : null,
+      // Engine roots document DOCUMENT_ONLY — staging discard is the only executable product path.
+      rollbackExecutable: String(r.rollback_policy || "").toUpperCase() === "DISCARD_STAGING",
+      why: [
+        r.business_impact,
+        r.recovery_strategy,
+        r.quarantine_policy ? `Quarantine: ${r.quarantine_policy}` : "",
+        r.rollback_policy ? `Rollback: ${r.rollback_policy}` : "",
+      ].filter(Boolean).join(" "),
+    }));
+    for (const b of preflight.blockers ?? []) {
+      if (!b) continue;
+      if (absorbed.has(b.id)) continue;
+      if ((b.details as { root_cause?: boolean } | undefined)?.root_cause) continue;
+      items.push({
+        key: b.id,
+        kind: "blocker",
+        title: gateLabel(b.id),
+        message: b.message,
+        issues: Array.isArray(b.details?.issue_texts)
+          ? (b.details.issue_texts as string[])
+          : undefined,
+        fix: b.guidance?.fix,
+        why: b.guidance?.why,
+        suggested_actions: b.guidance?.suggested_actions,
+        source: b,
+      });
+    }
+    return items;
+  }
+
   const root = findDuplicateKeyRoot(preflight, syncMode);
-  const absorbed = new Set(root?.absorbedBlockerIds ?? []);
+  const fidelityRoot = findFidelityCollapseRoot(preflight);
+  const absorbed = new Set([
+    ...(root?.absorbedBlockerIds ?? []),
+    ...(fidelityRoot?.absorbedBlockerIds ?? []),
+  ]);
   const items: DisplayBlocker[] = [];
 
   if (root) {
@@ -360,9 +569,25 @@ export function buildDisplayBlockers(
     });
   }
 
-  for (const b of preflight.blockers) {
+  if (fidelityRoot) {
+    items.push({
+      key: "fidelity-collapse",
+      kind: "fidelity_root",
+      title: fidelityRoot.title,
+      message: fidelityRoot.messages[0] || fidelityRoot.impact,
+      impact: fidelityRoot.impact,
+      gateChips: fidelityRoot.gateIds.map((id) => ({ id, label: gateLabel(id) })),
+      issues: fidelityRoot.messages.slice(1),
+      fix: fidelityRoot.fixHint,
+      why: "The same lossy carrier path failed multiple gates — one Map risk decision, not N separate warnings.",
+    });
+  }
+
+  for (const b of preflight.blockers ?? []) {
+    if (!b) continue;
     if (absorbed.has(b.id)) continue;
     if (root && isDuplicateIdentitySignal(b.message, b.details, b.id)) continue;
+    if (fidelityRoot && isFidelityCollapseSignal(b.message, b.details, b.id)) continue;
     items.push({
       key: b.id,
       kind: "blocker",
@@ -402,11 +627,14 @@ export function buildExecutiveSummary(
 
   if (preflight.passed) {
     const decision = preflight.proof_bundle?.transfer_decision?.decision;
-    if (decision === "review") {
+    // Missing decision must never claim Execute unlocked (align with rail / isGovernedExecuteReady).
+    if (decision !== "approve") {
       return {
         title: "Review before Execute",
-        subtitle: `${passed}/${total} checks passed · review-grade / local preflight — confirm API Validate before Execute`,
-        untilLines: ["Confirm API preflight (not browser-local only)"],
+        subtitle: `${passed}/${total} checks passed · ${
+          decision === "review" ? "review-grade / local preflight" : "awaiting transfer decision"
+        } — confirm API Validate before Execute`,
+        untilLines: ["Confirm API preflight with decision approve (not browser-local only)"],
         rootCauseCount: 0,
         readinessCaption,
         railLine: "Review-grade — Execute not fully unlocked",
@@ -438,8 +666,11 @@ export function buildExecutiveSummary(
 
   const untilLines: string[] = [];
   if (root) untilLines.push("Duplicate identity keys resolved");
+  if (displayBlockers.some((b) => b.kind === "fidelity_root")) {
+    untilLines.push("Lossy / fidelity risk acknowledged or remapped on Map");
+  }
   for (const item of displayBlockers) {
-    if (item.kind === "duplicate_root") continue;
+    if (item.kind === "duplicate_root" || item.kind === "fidelity_root") continue;
     untilLines.push(item.title);
   }
   // Cap bullets so the hero stays scannable.
@@ -459,3 +690,57 @@ export function buildExecutiveSummary(
     aiPromptHint: root ? "Why are duplicate IDs blocking this transfer?" : null,
   };
 }
+
+
+/** Cap and dedupe Validate remediation CTAs — one primary per kind/column family. */
+export function rankAndDedupeSuggestedActions(
+  actions: ValidationSuggestedAction[] | null | undefined,
+  max = 6,
+): ValidationSuggestedAction[] {
+  if (!actions?.length) return [];
+  const priority = (kind: string): number => {
+    switch (kind) {
+      case "fix_source_keys":
+        return 0;
+      case "change_target_type":
+        return 1;
+      case "add_transform":
+        return 2;
+      case "open_bad_data_fix":
+      case "normalize_control_chars":
+      case "quarantine_and_rerun":
+        return 3;
+      case "map_column":
+      case "review_mappings":
+      case "rerun_mapping":
+        return 4;
+      case "check_connection":
+        return 5;
+      default:
+        return 9;
+    }
+  };
+  const sorted = [...actions].sort((a, b) => priority(String(a.kind)) - priority(String(b.kind)));
+  const seenExact = new Set<string>();
+  const seenFamily = new Set<string>();
+  const out: ValidationSuggestedAction[] = [];
+  for (const action of sorted) {
+    const kind = String(action.kind || "");
+    const col = String(action.column || action.target || "");
+    const exact = [kind, col, String(action.to_type || ""), String(action.transform || ""), String(action.label || "")].join("|");
+    if (seenExact.has(exact)) continue;
+    const family =
+      kind === "map_column" || kind === "review_mappings" || kind === "rerun_mapping"
+        ? `map:${col || "*"}`
+        : kind === "normalize_control_chars" || kind === "quarantine_and_rerun" || kind === "open_bad_data_fix"
+          ? "encoding"
+          : `${kind}:${col || "*"}`;
+    if (seenFamily.has(family)) continue;
+    seenExact.add(exact);
+    seenFamily.add(family);
+    out.push(action);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+

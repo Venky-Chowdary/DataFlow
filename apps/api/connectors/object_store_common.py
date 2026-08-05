@@ -1,8 +1,10 @@
-"""Shared helpers for object-store readers."""
+"""Shared helpers for object-store readers and multi-chunk writers."""
 
 from __future__ import annotations
 
-from typing import Any
+import re
+from dataclasses import dataclass
+from typing import Any, Callable
 
 from services.object_streaming import (
     download_for_object_store,
@@ -12,7 +14,201 @@ from services.object_streaming import (
 
 from connectors.base import ReadBatch
 
-__all__ = ["ReadBatch", "read_object_from_store", "_object_version_token"]
+__all__ = [
+    "ObjectWriteLayout",
+    "ReadBatch",
+    "normalize_object_base_key",
+    "object_parts_prefix",
+    "object_run_token",
+    "object_store_read_keys",
+    "purge_object_store_parts",
+    "read_object_from_store",
+    "resolve_object_write_key",
+    "resolve_object_write_layout",
+    "_object_version_token",
+]
+
+_PART_NAME_RE = re.compile(r"^part-\d{5}\.(json|jsonl|csv)$", re.IGNORECASE)
+
+
+def normalize_object_base_key(table_name: str, schema: str = "") -> str:
+    """Canonical object key from table/schema (single-chunk layout)."""
+    key = (table_name or schema or "exports/dataflow_export.json").strip()
+    if not key.endswith((".json", ".jsonl", ".csv")):
+        key = f"{key.rstrip('/')}/export.json"
+    return key
+
+
+def object_parts_prefix(base_key: str) -> str:
+    """Listing prefix that holds every part object for ``base_key``."""
+    base = normalize_object_base_key(base_key)
+    parent, _, name = base.rpartition("/")
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    return f"{parent}/{stem}/" if parent else f"{stem}/"
+
+
+def object_run_token(job_id: str | None) -> str:
+    """Filesystem-safe run token used to isolate append runs."""
+    raw = str(job_id or "").strip()
+    token = re.sub(r"[^A-Za-z0-9_-]", "", raw)[:40]
+    return f"run-{token}" if token else ""
+
+
+def resolve_object_write_key(
+    base_key: str,
+    *,
+    file_batch_idx: int = 0,
+    total_chunks: int = 1,
+    run_token: str = "",
+) -> tuple[str, str]:
+    """Resolve the object key for one writer chunk.
+
+    Single-chunk jobs keep ``base_key`` for backward compatibility. Multi-chunk
+    jobs write ``{stem}/part-{NNNNN}{ext}`` so later chunks cannot silently
+    overwrite earlier ones (the prior fixed-key bug that kept only the last
+    20k rows while reporting the full count).
+
+    ``run_token`` nests the parts one level deeper (``{stem}/{run}/part-N``).
+    Append syncs need this: without it a second run rewrites ``part-00001..M``
+    while leaving a longer first run's ``part-M+1..N`` in place, producing a
+    single object set mixing two generations of data.
+
+    Returns ``(write_key, parts_prefix)``. ``parts_prefix`` is empty for
+    single-chunk writes; otherwise it is the listing prefix for this run.
+    """
+    base = normalize_object_base_key(base_key) if base_key else normalize_object_base_key("")
+    total = max(1, int(total_chunks or 1))
+    if total <= 1:
+        return base, ""
+
+    idx = int(file_batch_idx or 0)
+    # Engine passes 1-based chunk indexes; tolerate 0-based callers.
+    part_n = idx if idx >= 1 else 1
+    name = base.rpartition("/")[2]
+    stem, _, ext_raw = name.rpartition(".")
+    ext = f".{ext_raw}" if stem else ".json"
+    parts_dir = object_parts_prefix(base).rstrip("/")
+    if run_token:
+        parts_dir = f"{parts_dir}/{run_token}"
+    return f"{parts_dir}/part-{part_n:05d}{ext}", f"{parts_dir}/"
+
+
+@dataclass(frozen=True)
+class ObjectWriteLayout:
+    """Where one chunk writes, and what an overwrite must clear first."""
+
+    base_key: str
+    write_key: str
+    parts_prefix: str
+    purge_prefix: str
+    purge_legacy_key: str
+    should_purge: bool
+
+
+def resolve_object_write_layout(
+    *,
+    table_name: str,
+    schema: str = "",
+    sync_mode: str = "",
+    file_batch_idx: int = 0,
+    total_chunks: int = 1,
+    job_id: str = "",
+) -> ObjectWriteLayout:
+    """Single source of truth for S3/GCS/ADLS chunked object layout.
+
+    Overwrite syncs reuse one stable part set and clear stale parts once, on
+    the first chunk. Append syncs isolate each run under a token so reruns
+    cannot interleave with a previous run's parts.
+
+    Raises ``ValueError`` when a multi-chunk append has no ``job_id`` to derive
+    a run token from — writing colliding part keys would silently mix runs.
+    """
+    from services.sync_cursor import is_overwrite_sync
+
+    base = normalize_object_base_key(table_name or schema)
+    total = max(1, int(total_chunks or 1))
+    overwrite = is_overwrite_sync(sync_mode)
+
+    run_token = ""
+    if total > 1 and not overwrite:
+        run_token = object_run_token(job_id)
+        if not run_token:
+            raise ValueError(
+                "Multi-chunk append to an object store requires a job id to "
+                "isolate this run's part files; without it a rerun would "
+                "overwrite part of a previous run and leave the rest, mixing "
+                "two generations of data in one export."
+            )
+
+    write_key, parts_prefix = resolve_object_write_key(
+        base,
+        file_batch_idx=file_batch_idx,
+        total_chunks=total,
+        run_token=run_token,
+    )
+    is_first_chunk = int(file_batch_idx or 0) in (0, 1)
+    return ObjectWriteLayout(
+        base_key=base,
+        write_key=write_key,
+        parts_prefix=parts_prefix,
+        # Purge the whole stem prefix so stale parts from a previous run with a
+        # different chunk count (or a previous append run token) cannot survive.
+        purge_prefix=object_parts_prefix(base),
+        purge_legacy_key=base if total > 1 else "",
+        should_purge=overwrite and is_first_chunk,
+    )
+
+
+def object_store_read_keys(base_key: str, listed_under_prefix: list[str]) -> list[str]:
+    """Keys to read for Gate-8: prefer ``part-*`` layout when present.
+
+    Multi-chunk writers emit ``{stem}/part-NNNNN{ext}`` and may delete the
+    legacy single object. Verifiers that only open ``base_key`` would report
+    missing read-back (or empty) while rows live in part objects — a Gate-8
+    false pass under writer-ack fallback.
+    """
+    base = normalize_object_base_key(base_key)
+    parts_prefix = object_parts_prefix(base)
+    # Sorted so parts read back in write order, including append runs nested
+    # one level deeper under a run token.
+    parts = sorted(
+        k
+        for k in listed_under_prefix
+        if k.startswith(parts_prefix) and _PART_NAME_RE.match(k.rsplit("/", 1)[-1])
+    )
+    if parts:
+        return parts
+    return [base]
+
+
+def purge_object_store_parts(
+    *,
+    list_keys: Callable[[str], list[str]],
+    delete_key: Callable[[str], None],
+    parts_prefix: str,
+    legacy_base_key: str = "",
+) -> list[str]:
+    """Delete stale part objects (and optional legacy single-object key).
+
+    Called only on the first chunk of an overwrite sync so a smaller re-run
+    cannot leave orphaned parts from a larger previous run.
+    """
+    removed: list[str] = []
+    if parts_prefix:
+        for key in list_keys(parts_prefix):
+            name = key.rsplit("/", 1)[-1]
+            # Only delete part-* under the prefix — never wipe sibling objects.
+            if _PART_NAME_RE.match(name):
+                delete_key(key)
+                removed.append(key)
+    if legacy_base_key:
+        try:
+            delete_key(legacy_base_key)
+            removed.append(legacy_base_key)
+        except Exception:
+            # Missing legacy key is fine; other errors surface on the write.
+            pass
+    return removed
 
 
 def _object_version_token(store: str, cfg: dict[str, Any], bucket: str, key: str) -> str:

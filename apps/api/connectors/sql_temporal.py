@@ -46,15 +46,19 @@ def sql_base_type(source_type: str) -> str:
     # silently strip offsets (enterprise fidelity failure).
     if "WITH LOCAL TIME ZONE" in upper or upper.startswith("TIMESTAMP_LTZ"):
         return "TIMESTAMPTZ"
+    # TIMETZ before TIMESTAMPTZ — ``TIMETZ``.startswith("TIME") is true but
+    # ``TIME\b`` does not match, so TIMETZ was mis-routed to TIMESTAMPTZ and
+    # naive UTC invent ran on time-of-day wires.
+    if upper.startswith("TIMETZ") or re.match(r"^TIME\s+WITH\s+TIME\s+ZONE\b", upper):
+        return "TIMETZ"
     if (
         re.search(r"\bWITH TIME ZONE\b", upper)
         or upper.startswith("TIMESTAMPTZ")
-        or upper.startswith("TIMETZ")
         or upper == "DATETIMEOFFSET"
         or upper.startswith("DATETIMEOFFSET")
     ):
         if re.match(r"^TIME\b", upper) and not upper.startswith("TIMESTAMP"):
-            return "TIME WITH TIME ZONE"
+            return "TIMETZ"
         return "TIMESTAMPTZ"
     if re.search(r"\bWITHOUT TIME ZONE\b", upper) or "TIMESTAMP_NTZ" in upper:
         if re.match(r"^TIME\b", upper) and not upper.startswith("TIMESTAMP"):
@@ -65,23 +69,57 @@ def sql_base_type(source_type: str) -> str:
     return upper
 
 
-def parse_sql_datetime(value: Any, *, aware_utc: bool = False) -> datetime | None:
+def input_has_timezone(value: Any) -> bool:
+    """True when the wire/value carries an explicit offset or Z (not invented)."""
+    if isinstance(value, datetime):
+        return value.tzinfo is not None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        # Epoch seconds are instants by definition.
+        return True
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text:
+        return False
+    if text.endswith(("Z", "z")) or text.upper().endswith(" UTC"):
+        return True
+    if text.isdigit() or (text[0] in "+-" and text[1:].isdigit()):
+        return True
+    # Trailing ±HH:MM / ±HHMM after a datetime body.
+    return bool(re.search(r"[+-]\d{2}:?\d{2}$", text))
+
+
+def parse_sql_datetime(
+    value: Any,
+    *,
+    aware_utc: bool = False,
+    wall_clock: bool = False,
+) -> datetime | None:
     """Parse ISO-8601 / common CSV timestamps.
 
-    Default returns **naive UTC** (MySQL DATETIME / TIMESTAMP without TZ).
-    When ``aware_utc=True`` (Postgres TIMESTAMPTZ), keep ``tzinfo=UTC`` so the
-    driver does not reinterpret naive values in the session time zone.
+    Default returns **naive UTC** (MySQL DATETIME / TIMESTAMP without TZ) —
+    offset wires are converted to UTC then stripped.
+    When ``aware_utc=True`` (Postgres TIMESTAMPTZ), keep ``tzinfo=UTC``.
+    When ``wall_clock=True`` (Snowflake NTZ / BQ DATETIME), keep civil digits
+    and strip tzinfo **without** ``astimezone(UTC)`` so Validate/Accept-risk
+    owns TZ→NTZ polarity instead of the bind silently rewriting the clock.
     """
     if value is None:
         return None
     if isinstance(value, datetime):
         dt = value
         if dt.tzinfo is not None:
+            if wall_clock:
+                return dt.replace(tzinfo=None)
             dt = dt.astimezone(timezone.utc)
             return dt if aware_utc else dt.replace(tzinfo=None)
+        if wall_clock:
+            return dt
         return dt.replace(tzinfo=timezone.utc) if aware_utc else dt
     if isinstance(value, date) and not isinstance(value, datetime):
         dt = datetime.combine(value, time.min)
+        if wall_clock:
+            return dt
         return dt.replace(tzinfo=timezone.utc) if aware_utc else dt
     # Unix epoch seconds / millis as int/float (Stripe / HubSpot / SaaS wire).
     if isinstance(value, bool):
@@ -92,6 +130,8 @@ def parse_sql_datetime(value: Any, *, aware_utc: bool = False) -> datetime | Non
             if abs(raw) >= 10**12:
                 raw //= 1000  # epoch millis
             dt = datetime.fromtimestamp(raw, tz=timezone.utc)
+            if wall_clock:
+                return dt.replace(tzinfo=None)
             return dt if aware_utc else dt.replace(tzinfo=None)
         except (OverflowError, OSError, ValueError):
             return None
@@ -107,6 +147,8 @@ def parse_sql_datetime(value: Any, *, aware_utc: bool = False) -> datetime | Non
             if abs(raw) >= 10**12:
                 raw = raw // 1000
             dt = datetime.fromtimestamp(raw, tz=timezone.utc)
+            if wall_clock:
+                return dt.replace(tzinfo=None)
             return dt if aware_utc else dt.replace(tzinfo=None)
         except (OverflowError, OSError, ValueError):
             pass
@@ -132,8 +174,12 @@ def parse_sql_datetime(value: Any, *, aware_utc: bool = False) -> datetime | Non
         else:
             return None
     if dt.tzinfo is not None:
+        if wall_clock:
+            return dt.replace(tzinfo=None)
         dt = dt.astimezone(timezone.utc)
         return dt if aware_utc else dt.replace(tzinfo=None)
+    if wall_clock:
+        return dt
     return dt.replace(tzinfo=timezone.utc) if aware_utc else dt
 
 
@@ -163,19 +209,25 @@ def coerce_sql_temporal(value: Any, source_type: str) -> Any:
         "TIMESTAMP WITH TIME ZONE",
         "TIMESTAMP WITH LOCAL TIME ZONE",
         "DATETIMEOFFSET",
+        "TIMESTAMP_LTZ",
     }:
+        # Refuse naive wall-clock → UTC invent (parity with BQ TIMESTAMP / TIMETZ).
+        if not input_has_timezone(value):
+            raise ValueError(
+                f"{base} refuses naive wall-clock (would invent UTC). "
+                "Provide an offset/Z, or map to TIMESTAMP_NTZ / DATETIME."
+            )
         parsed = parse_sql_datetime(value, aware_utc=True)
         return parsed if parsed is not None else value
     if base in {
         "DATETIME",
         "TIMESTAMP",
-        "TIMESTAMP_LTZ",
         "TIMESTAMP_NTZ",
         "DATETIME2",
         "SMALLDATETIME",
         "TIMESTAMP WITHOUT TIME ZONE",
     }:
-        parsed = parse_sql_datetime(value)
+        parsed = parse_sql_datetime(value, wall_clock=True)
         if parsed is None:
             return value
         if base == "SMALLDATETIME":
@@ -186,28 +238,47 @@ def coerce_sql_temporal(value: Any, source_type: str) -> Any:
         return parsed if parsed is not None else value
     if base in {"TIME", "TIME WITH TIME ZONE", "TIME WITHOUT TIME ZONE", "TIMETZ"}:
         aware = base in {"TIME WITH TIME ZONE", "TIMETZ"}
-        if isinstance(value, time):
-            if aware and value.tzinfo is None:
-                return value.replace(tzinfo=timezone.utc)
-            if not aware and value.tzinfo is not None:
-                return value.replace(tzinfo=None)
-            return value
-        parsed = parse_sql_datetime(value, aware_utc=aware)
-        if parsed is not None:
-            tm = parsed.timetz() if aware else parsed.time()
+
+        def _timetz_or_refuse(tm: time) -> time:
+            if aware and tm.tzinfo is None:
+                raise ValueError(
+                    "TIMETZ refuses naive wall-clock (would invent UTC). "
+                    "Provide an offset/Z, or map to TIME without time zone."
+                )
+            if not aware and tm.tzinfo is not None:
+                # Keep civil clock digits — do not UTC-shift then strip.
+                return tm.replace(tzinfo=None)
             return tm
-        if isinstance(value, str):
-            text = value.strip()
+
+        def _parse_time_wire(raw: Any) -> time | None:
+            if isinstance(raw, time):
+                return raw
+            if not isinstance(raw, str):
+                return None
+            text = raw.strip()
+            if not text:
+                return None
+            iso = text[:-1] + "+00:00" if text.upper().endswith("Z") else text
             try:
-                tm = time.fromisoformat(text.replace("Z", "+00:00"))
-                if aware and tm.tzinfo is None:
-                    return tm.replace(tzinfo=timezone.utc)
-                if not aware and tm.tzinfo is not None:
-                    return tm.replace(tzinfo=None)
-                return tm
+                return time.fromisoformat(iso)
             except ValueError:
-                return value
-        return value
+                pass
+            # Offset time that fromisoformat rejected — attach dummy date.
+            if input_has_timezone(text):
+                try:
+                    body = text[:-1] + "+00:00" if text.upper().endswith("Z") else text
+                    dt = datetime.fromisoformat(f"1970-01-01T{body}")
+                    return dt.timetz()
+                except ValueError:
+                    return None
+            # AM/PM / odd forms via datetime parse (naive wall-clock).
+            parsed = parse_sql_datetime(text, wall_clock=True)
+            return parsed.time() if parsed is not None else None
+
+        tm = _parse_time_wire(value)
+        if tm is None:
+            return value
+        return _timetz_or_refuse(tm)
     return value
 
 
@@ -337,8 +408,16 @@ def wire_check_temporal(value: Any, ddl_type: str) -> dict[str, Any]:
     if isinstance(value, str) and not value.strip():
         return {"ok": True, "wire_value": None, "reason": "", "needs_normalize": False}
 
-    coerced = coerce_sql_temporal(value, ddl_type)
-    wire = format_wire_value(value, ddl_type)
+    try:
+        coerced = coerce_sql_temporal(value, ddl_type)
+        wire = format_wire_value(value, ddl_type)
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "wire_value": None,
+            "reason": str(exc),
+            "needs_normalize": False,
+        }
 
     # Still a string after coerce → cannot bind as temporal.
     if isinstance(coerced, str):

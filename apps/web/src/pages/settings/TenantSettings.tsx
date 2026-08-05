@@ -10,7 +10,7 @@ const REGIONS = [
 ];
 
 const PROVIDER_LABELS: Record<ByokKey["provider"], string> = {
-  local: "DataFlow-managed (local)",
+  local: "Datawrap-managed (local)",
   wrapped: "Customer-supplied wrapped key",
   aws_kms: "AWS KMS",
   azure_keyvault: "Azure Key Vault",

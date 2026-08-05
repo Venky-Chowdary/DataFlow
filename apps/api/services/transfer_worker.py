@@ -120,21 +120,42 @@ def dispatch_file_to_database(
             combined_checksum = row_checksum([[c] for c in final_checksum_list])
 
             set_phase(job_id, WorkflowPhase.RECONCILE, "Verifying row fidelity")
+            from services.reconciliation import ReconciliationReport
+
+            # Never invent independent dest digest from writer chunk checksums.
             target_rows, target_checksum = verify_target(
                 db_type,
                 dest,
                 schema=verify_schema,
                 table_name=table_name_out,
                 fallback_rows=rows_written,
-                fallback_checksum=combined_checksum,
+                fallback_checksum="",
             )
-            recon = reconcile(
-                source_rows=total_rows,
-                target_rows=target_rows,
-                source_checksum="N/A (Streamed)",
-                target_checksum=target_checksum if target_checksum else combined_checksum,
-                rejected_rows=rejected_rows,
-            )
+            tgt_chk = (target_checksum or "").strip()
+            if not tgt_chk:
+                recon = ReconciliationReport(
+                    passed=False,
+                    source_rows=total_rows,
+                    target_rows=target_rows,
+                    source_checksum="N/A (Streamed)",
+                    target_checksum="",
+                    message=(
+                        "Gate-8: destination checksum unavailable — "
+                        "refuse fidelity claim (never spoof writer digest)"
+                    ),
+                    rejected_rows=rejected_rows,
+                    checksum_match=False,
+                    population_proof=False,
+                    assurance_level="none",
+                )
+            else:
+                recon = reconcile(
+                    source_rows=total_rows,
+                    target_rows=target_rows,
+                    source_checksum="N/A (Streamed)",
+                    target_checksum=tgt_chk,
+                    rejected_rows=rejected_rows,
+                )
 
             job_store.complete(
                 job_id,

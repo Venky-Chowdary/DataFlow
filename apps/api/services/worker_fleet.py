@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+from services.brand_env import getenv_brand
 import threading
 import time
 from datetime import datetime, timezone
@@ -36,7 +37,7 @@ def fleet_enabled() -> bool:
     forever-pending (demo-breaking). Opt in with ``DATAFLOW_WORKER_FLEET=1``
     after the Worker service is live on Railway.
     """
-    raw = os.getenv("DATAFLOW_WORKER_FLEET", "").strip().lower()
+    raw = getenv_brand("WORKER_FLEET", "").strip().lower()
     if raw in ("0", "false", "no", "off"):
         return False
     if raw in ("1", "true", "yes", "on"):

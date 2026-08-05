@@ -27,12 +27,27 @@ export function parseStringCarrierWidth(inferred: string | null | undefined): nu
  * Bare ``string`` / ``varchar`` stay unknown (no invented narrow), matching
  * ``type_system.is_unlimited_string_carrier`` (LOGICAL_TEXT only).
  */
+const MYSQL_TEXT_TIER_RANK: Record<string, number> = {
+  tinytext: 1,
+  text: 2,
+  mediumtext: 3,
+  longtext: 4,
+};
+
+function mysqlTextTierRank(inferred: string | null | undefined): number | null {
+  const token = (inferred || "").trim().toLowerCase().split(/\s+/)[0] || "";
+  return MYSQL_TEXT_TIER_RANK[token] ?? null;
+}
+
 export function isUnlimitedStringCarrier(inferred: string | null | undefined): boolean {
   const text = (inferred || "").trim();
   if (!text) return false;
   if (/\b(?:varchar|nvarchar|char)\s*\(\s*max\s*\)/i.test(text)) return true;
+  const token = text.toLowerCase().split(/\s+/)[0] || "";
+  // TINYTEXT is tight (255) — not an unlimited sink (API SSOT).
+  if (token === "tinytext") return false;
   if (
-    /^(?:text|ntext|clob|nclob|longtext|mediumtext|tinytext|long\s+varchar|json|jsonb)\b/i.test(
+    /^(?:text|ntext|clob|nclob|longtext|mediumtext|long\s+varchar|json|jsonb)\b/i.test(
       text,
     )
   ) {
@@ -44,16 +59,27 @@ export function isUnlimitedStringCarrier(inferred: string | null | undefined): b
 export function isStringFamily(inferred: string | null | undefined): boolean {
   const t = (inferred || "").trim().toLowerCase();
   if (!t) return false;
-  if (isUnlimitedStringCarrier(t)) return true;
+  if (isUnlimitedStringCarrier(t) || mysqlTextTierRank(t) != null) return true;
   return /\b(?:varchar|nvarchar|char|character|string|text|clob)\b/.test(t);
 }
 
 /** True when source string capacity exceeds destination VARCHAR(n). */
 export function stringWidthWouldNarrow(sourceType: string, targetType: string): boolean {
   if (!isStringFamily(sourceType) || !isStringFamily(targetType)) return false;
+  const srcRank = mysqlTextTierRank(sourceType);
+  const tgtRank = mysqlTextTierRank(targetType);
+  if (srcRank != null && tgtRank != null && srcRank > tgtRank) return true;
   if (isUnlimitedStringCarrier(targetType)) return false;
   const tgtW = parseStringCarrierWidth(targetType);
-  if (tgtW == null) return false;
+  if (tgtW == null) {
+    // TINYTEXT capacity = 255 when typmod absent.
+    if ((targetType || "").trim().toLowerCase().startsWith("tinytext")) {
+      if (isUnlimitedStringCarrier(sourceType)) return true;
+      const srcW = parseStringCarrierWidth(sourceType);
+      return srcW != null && srcW > 255;
+    }
+    return false;
+  }
   if (isUnlimitedStringCarrier(sourceType)) return true;
   const srcW = parseStringCarrierWidth(sourceType);
   if (srcW == null) return false;
@@ -83,10 +109,222 @@ export function decimalWouldCollapse(sourceType: string, targetType: string): bo
   if (!isDecimalFamily(sourceType) || !isDecimalFamily(targetType)) return false;
   const src = parseDecimalPrecisionScale(sourceType);
   const tgt = parseDecimalPrecisionScale(targetType);
-  if (!src || !tgt) return false;
+  if (!src) return false;
+  // Proven (p,s) → bare DECIMAL invents platform default — Accept risk.
+  if (!tgt) return true;
   if (src.scale > tgt.scale) return true;
   // Integer digits capacity: precision − scale.
   return src.precision - src.scale > tgt.precision - tgt.scale;
+}
+
+function isTzAwareTemporal(inferred: string | null | undefined): boolean {
+  const t = (inferred || "").trim().toLowerCase();
+  return /\b(timestamptz|timestamp with time zone|timestamp_tz|timestamp_ltz|timetz|time with time zone|datetimeoffset)\b/.test(
+    t,
+  );
+}
+
+function isNtzTemporal(inferred: string | null | undefined): boolean {
+  const t = (inferred || "").trim().toLowerCase();
+  if (isTzAwareTemporal(t)) return false;
+  return /\b(timestamp_ntz|datetime|timestamp without time zone|timestamp|time)\b/.test(t);
+}
+
+function isDocumentCarrier(inferred: string | null | undefined): boolean {
+  const t = (inferred || "").trim().toLowerCase();
+  return /\b(jsonb?|variant|super|object)\b/.test(t);
+}
+
+function isOpenStringCarrier(inferred: string | null | undefined): boolean {
+  const t = (inferred || "").trim().toLowerCase();
+  return /\b(string|text|varchar|nvarchar|char|nchar|clob)\b/.test(t) && !isDocumentCarrier(t);
+}
+
+/** Approximate signed bit width — mirrors API integer_bit_width for Map chips. */
+function integerBitWidth(inferred: string | null | undefined): number | null {
+  const raw = (inferred || "").trim();
+  if (!raw) return null;
+  // ClickHouse Int8/UInt8 — must not collide with PG INT8≡BIGINT.
+  const ch = raw.match(/^(U?Int)(8|16|32|64)\b/);
+  if (ch) {
+    const bits = Number(ch[2]);
+    return ch[1].startsWith("U") ? bits + 1 : bits;
+  }
+  const u = raw.toUpperCase();
+  if (/\b(BIGINT|INT64|INT8|LONG|UINT64)\b/.test(u) || u.includes("BIGSERIAL")) return 64;
+  if (u.includes("MEDIUMINT")) return 24;
+  if (/\b(SMALLINT|INT16|INT2|UINT16|SHORT)\b/.test(u) || u.includes("SMALLSERIAL")) return 16;
+  if (/\b(TINYINT|INT1|UINT8)\b/.test(u) || u.includes("TINYSERIAL")) return 8;
+  if (/\b(INTEGER|INT32|INT4|UINT32)\b/.test(u) || (/\bSERIAL\b/.test(u) && !u.includes("BIG"))) return 32;
+  if (/\bINT\b/.test(u)) return 32;
+  return null;
+}
+
+function integerWidthWouldNarrow(sourceType: string, targetType: string): boolean {
+  const srcW = integerBitWidth(sourceType);
+  const tgtW = integerBitWidth(targetType);
+  if (srcW == null || tgtW == null) return false;
+  return srcW > tgtW;
+}
+
+/**
+ * Client-side Map fidelity risk when engine stamp is cleared (dest-type change).
+ * Aligns with API is_lossy / timezone / document-domain honesty — never invent Approve.
+ */
+export function declaredCarrierFidelityRisk(
+  sourceType: string | null | undefined,
+  targetType: string | null | undefined,
+): boolean {
+  const src = (sourceType || "").trim();
+  const tgt = (targetType || "").trim();
+  if (!src || !tgt) return false;
+  if (stringWidthWouldNarrow(src, tgt)) return true;
+  if (decimalWouldCollapse(src, tgt)) return true;
+  // Bare DECIMAL → DECIMAL(p,s) invents capacity (API SSOT).
+  if (
+    isDecimalFamily(src)
+    && isDecimalFamily(tgt)
+    && parseDecimalPrecisionScale(src) == null
+    && parseDecimalPrecisionScale(tgt) != null
+  ) {
+    return true;
+  }
+  // DECFLOAT → fixed DECIMAL/FLOAT invent.
+  if (/\bdecfloat\b/i.test(src) && !/\bdecfloat\b/i.test(tgt)) return true;
+  // Bare NUMBER/DECIMAL → BIGNUMERIC invents (76,38) class.
+  if (
+    isDecimalFamily(src)
+    && /\bbignumeric\b|\bbigdecimal\b/i.test(tgt)
+    && !/\bbignumeric\b|\bbigdecimal\b/i.test(src)
+  ) {
+    return true;
+  }
+  // SMALLDATETIME minute accuracy → second-level TIMESTAMP invent.
+  if (/\bsmalldatetime\b/i.test(src) && !/\bsmalldatetime\b/i.test(tgt)) return true;
+  // Float ↔ fixed-point invent/drop IEEE polarity.
+  const srcFloat = /\b(float|double|real|float64|float32|float4|float8|half|halffloat|float16|binary_float|binary_double)\b/i.test(src);
+  const tgtFloat = /\b(float|double|real|float64|float32|float4|float8|half|halffloat|float16|binary_float|binary_double)\b/i.test(tgt);
+  const srcDec = isDecimalFamily(src);
+  const tgtDec = isDecimalFamily(tgt);
+  if ((srcFloat && tgtDec) || (srcDec && tgtFloat)) return true;
+  // IEEE mantissa narrow (DOUBLE→HALF / REAL→FLOAT16 / BINARY_DOUBLE→BINARY_FLOAT).
+  const srcHalf = /\b(half|halffloat|float16)\b/i.test(src);
+  const tgtHalf = /\b(half|halffloat|float16)\b/i.test(tgt);
+  const srcDouble = /\b(double|float64|float8|binary_double)\b/i.test(src);
+  const tgtDouble = /\b(double|float64|float8|binary_double)\b/i.test(tgt);
+  const srcSingle = /\b(real|float32|float4|binary_float)\b/i.test(src);
+  const tgtSingle = /\b(real|float32|float4|binary_float)\b/i.test(tgt);
+  if ((srcDouble && (tgtHalf || tgtSingle)) || (srcSingle && tgtHalf)) {
+    return true;
+  }
+  if (srcDouble && !tgtDouble && tgtFloat && !srcHalf) return true;
+  // Bare DATETIME2 → DATETIME (SQL Server default precision 7 → ~3.33ms).
+  if (/\bdatetime2\b/i.test(src) && /\bdatetime\b/i.test(tgt) && !/datetime2/i.test(tgt)) return true;
+  // Oracle LONG text LOB → integer invent.
+  if (/^long$/i.test(src.trim()) && /\b(bigint|integer|int64|int8|number|decimal|numeric)\b/i.test(tgt)) {
+    return true;
+  }
+  // Specialty → open string (INET/XML/HSTORE/USER-DEFINED/IPv4/…).
+  if (
+    /\b(inet|cidr|macaddr|xmltype|xml|hstore|ltree|tsvector|tsquery|jsonpath|objectid|anydata|hllsketch|rowversion|sql_variant|hierarchyid|user-defined|user_defined|ipv4|ipv6|enum8|enum16|nothing|dynamic|aggregatefunction|simpleaggregatefunction)\b/i.test(src)
+    && isOpenStringCarrier(tgt)
+  ) {
+    return true;
+  }
+  // Unsigned → signed integer invent (UInt8→SMALLINT).
+  if (
+    (/\bunsigned\b/i.test(src) || /\buint\d*\b/i.test(src) || /^UInt(8|16|32|64)\b/.test(src.trim()))
+    && /\b(smallint|integer|int|bigint|int\d+)\b/i.test(tgt)
+    && !/\bunsigned\b/i.test(tgt)
+    && !/\buint\d*\b/i.test(tgt)
+    && !/^UInt(8|16|32|64)\b/.test(tgt.trim())
+  ) {
+    return true;
+  }
+  // National charset collapse / invent (NCHAR↔CHAR, NATIONAL CHARACTER).
+  if (
+    /\b(nchar|nvarchar|nvarchar2|nclob|national\s+character|national\s+char)\b/i.test(src)
+    && /\b(char|varchar|varchar2|text|string|clob)\b/i.test(tgt)
+    && !/\b(nchar|nvarchar|nvarchar2|nclob|national\s+character|national\s+char)\b/i.test(tgt)
+  ) {
+    return true;
+  }
+  if (
+    /\b(char|varchar|varchar2|text|string)\b/i.test(src)
+    && !/\b(nchar|nvarchar|nvarchar2|nclob|national\s+character|national\s+char)\b/i.test(src)
+    && /\b(nchar|nvarchar|nvarchar2|nclob|national\s+character|national\s+char)\b/i.test(tgt)
+  ) {
+    return true;
+  }
+  if (isDocumentCarrier(src) && isOpenStringCarrier(tgt)) return true;
+  if (isOpenStringCarrier(src) && isDocumentCarrier(tgt)) return true;
+  if (isTzAwareTemporal(src) && isNtzTemporal(tgt)) return true;
+  if (isNtzTemporal(src) && isTzAwareTemporal(tgt)) return true;
+  // Offset-aware → open string drops the TZ contract (API SSOT).
+  if (isTzAwareTemporal(src) && isOpenStringCarrier(tgt)) return true;
+  if (/\b(timetz|time\s+with\s+time\s+zone)\b/i.test(src) && isOpenStringCarrier(tgt)) {
+    return true;
+  }
+  if (/\bdate\b/.test(src.toLowerCase()) && isTzAwareTemporal(tgt)) return true;
+  if (integerWidthWouldNarrow(src, tgt)) return true;
+  // MONEY / SMALLMONEY domain collapse.
+  if (
+    /\b(money|smallmoney|currency)\b/i.test(src)
+    && !/\b(money|smallmoney)\b/i.test(tgt)
+  ) {
+    return true;
+  }
+  // INTERVAL family invent/collapse (bare↔YM↔DS).
+  const intervalFamily = (t: string): string | null => {
+    const u = t.toUpperCase();
+    if (!/\bINTERVAL\b/.test(u)) return null;
+    if (/YEAR|MONTH/.test(u) && !/DAY|SECOND|HOUR|MINUTE/.test(u.replace(/YEAR|MONTH/g, ""))) {
+      return "ym";
+    }
+    if (/DAY|SECOND|HOUR|MINUTE/.test(u)) return "ds";
+    return "bare";
+  };
+  const sif = intervalFamily(src);
+  const tif = intervalFamily(tgt);
+  if (sif != null && tif != null && sif !== tif) return true;
+  if (sif != null && isOpenStringCarrier(tgt)) return true;
+  // GEOGRAPHY ↔ GEOMETRY ↔ SDO polarity.
+  const geoPol = (t: string): string | null => {
+    if (/\b(sdo_geometry|st_geometry)\b/i.test(t)) return "sdo";
+    if (/\bgeography\b/i.test(t)) return "geography";
+    if (/\bgeometry\b/i.test(t)) return "geometry";
+    return null;
+  };
+  const sg = geoPol(src);
+  const tg = geoPol(tgt);
+  if (sg != null && tg != null && sg !== tg) return true;
+  // LONG RAW locator collapse.
+  if (/\blong\s+raw\b/i.test(src) && !/\blong\s+raw\b/i.test(tgt)) return true;
+  if (
+    /\b(timestamp|datetime|timestamptz)\b/.test(src.toLowerCase())
+    && /\bdate\b/.test(tgt.toLowerCase())
+    && !/time/.test(tgt.toLowerCase().replace("timestamp", "").replace("datetime", ""))
+  ) {
+    return true;
+  }
+  // Bare ARRAY/LIST/MAP ↔ typed element invent/drop.
+  const arrayTyped = (t: string): boolean | null => {
+    if (/^(array|list)$/i.test(t)) return false;
+    if (/^(?:array|list)\s*[<(]/i.test(t) || /\[\s*\]\s*$/.test(t)) return true;
+    return null;
+  };
+  const sa = arrayTyped(src);
+  const ta = arrayTyped(tgt);
+  if (sa != null && ta != null && sa !== ta) return true;
+  const mapTyped = (t: string): boolean | null => {
+    if (/^map$/i.test(t)) return false;
+    if (/^map\s*[<(]/i.test(t)) return true;
+    return null;
+  };
+  const sm = mapTyped(src);
+  const tm = mapTyped(tgt);
+  if (sm != null && tm != null && sm !== tm) return true;
+  return false;
 }
 
 /**

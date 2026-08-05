@@ -18,6 +18,8 @@ from services.type_system import (
     is_lossy_coercion,
     is_precision_collapse_coercion,
     normalize_logical_type,
+    specialty_carrier_would_collapse,
+    string_width_would_narrow,
     vector_dim_mismatch,
     vector_dim_unknown_for_native,
 )
@@ -250,7 +252,7 @@ def evaluate_ddl_compatibility(
                 continue
             issues.append(
                 f"Target column '{tgt}' does not exist in destination table; "
-                "enable backfill new fields / create-new mapping so DataFlow can ADD COLUMN, "
+                "enable backfill new fields / create-new mapping so Datawrap can ADD COLUMN, "
                 "or remap onto an existing column"
             )
             continue
@@ -286,59 +288,77 @@ def evaluate_ddl_compatibility(
                 f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type or 'proposed'}) "
                 f"— precision clamps on {dest_kind}"
             )
-        if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type):
-            # Sample-aware soft-pass only for textual→typed coercions that the
-            # write path can prove. Declared IEEE/precision collapses
-            # (float→decimal, float→integer, decimal→integer, VARCHAR width,
-            # UNSIGNED→signed) stay hard issues even when a head sample coerces.
+        # GA: boolean risk_acknowledged alone never clears G6 — need verified
+        # continue-policy Migration Risk Contract (G3/G4/Execute SSOT).
+        from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+        risk_cleared = mapping_has_clearing_risk_contract(m)
+        if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type, dest_db=dest_kind):
+            # Align with G3: declared lossy never soft-passes on head samples
+            # without a clearing Risk Contract.
             src_logical = normalize_logical_type(src_type)
             tgt_logical = normalize_logical_type(tgt_type)
-            precision_collapse = is_precision_collapse_coercion(src_type, tgt_type)
-            sample_ok = False
-            if sample_rows and not precision_collapse:
-                from services.coercion_probe import samples_coerce_mapping
-
-                sample_ok = samples_coerce_mapping(
-                    m,
-                    source_types=source_schema or {},
-                    target_types=target_schema or {},
-                    rows=sample_rows,
-                )
-            if not sample_ok:
+            # Without clearing contract: never sample soft-pass precision collapses.
+            if not risk_cleared:
                 note = ""
                 if src_logical == "float" and tgt_logical == "decimal":
-                    note = " — float→decimal (IEEE precision risk; not soft-passed by samples)"
+                    note = " — float→decimal (IEEE precision risk; accept risk or remap)"
                 elif src_logical == "float" and tgt_logical == "integer":
                     note = " — float→integer (fractional truncation risk)"
                 elif src_logical == "decimal" and tgt_logical == "integer":
                     note = " — decimal→integer (scale truncation risk)"
-                elif src_logical == "decimal" and tgt_logical == "decimal" and precision_collapse:
-                    note = " — DECIMAL(p,s) narrowing (scale/capacity shrink; not soft-passed by samples)"
+                elif (
+                    src_logical == "decimal"
+                    and tgt_logical == "decimal"
+                    and is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest_kind)
+                ):
+                    note = " — DECIMAL(p,s) narrowing (scale/capacity shrink; accept risk or remap)"
                 elif src_logical == "datetime" and tgt_logical == "date":
-                    note = " — datetime→date (time-of-day truncation; not soft-passed by samples)"
+                    note = " — datetime→date (time-of-day truncation; accept risk or remap)"
                 elif src_logical == "array" and tgt_logical == "array":
                     note = " — ARRAY element type contract mismatch"
                 elif "unsigned" in src_type.lower():
                     note = " — UNSIGNED→signed overflow risk (widen to BIGINT/DECIMAL)"
-                elif src_logical in {"string", "text"} and tgt_logical in {"string", "text"}:
-                    note = " — VARCHAR/CHAR width narrowing (declared capacity; not soft-passed by samples)"
+                elif specialty_carrier_would_collapse(src_type, tgt_type):
+                    note = (
+                        " — specialty polarity collapse "
+                        "(prefer VARCHAR(24)/BINARY(12) for ObjectId; bare TEXT/VARCHAR drops carrier domain)"
+                    )
+                elif (
+                    src_logical in {"string", "text"}
+                    and tgt_logical in {"string", "text"}
+                    and string_width_would_narrow(src_type, tgt_type)
+                ):
+                    note = " — VARCHAR/CHAR width narrowing (declared capacity; accept risk or remap)"
                 issues.append(
                     f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type}){note}"
                 )
 
-        # Declared width narrow without needing samples (body rows can exceed head).
+        # Declared width / specialty collapse — skip when Risk Contract cleared.
         if (
             not schemaless
             and tgt_type
-            and is_precision_collapse_coercion(src_type, tgt_type)
-            and normalize_logical_type(src_type) in {"string", "text"}
-            and normalize_logical_type(tgt_type) in {"string", "text"}
+            and is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest_kind)
+            and not risk_cleared
         ):
-            msg = (
-                f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type}) "
-                f"— VARCHAR/CHAR width narrowing (declared capacity; not soft-passed by samples)"
-            )
-            if msg not in issues:
+            if specialty_carrier_would_collapse(src_type, tgt_type):
+                msg = (
+                    f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type}) "
+                    "— specialty polarity collapse "
+                    "(prefer VARCHAR(24)/BINARY(12) for ObjectId; bare TEXT/VARCHAR drops carrier domain)"
+                )
+            elif (
+                normalize_logical_type(src_type) in {"string", "text"}
+                and normalize_logical_type(tgt_type) in {"string", "text"}
+                and string_width_would_narrow(src_type, tgt_type)
+            ):
+                msg = (
+                    f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type}) "
+                    "— VARCHAR/CHAR width narrowing (declared capacity; accept risk or remap)"
+                )
+            else:
+                msg = ""
+            if msg and msg not in issues:
                 issues.append(msg)
 
         if not schemaless and sample_rows and tgt_type:
@@ -382,17 +402,29 @@ def evaluate_ddl_compatibility(
     # compatibility; G9 audits source values (duplicates, nulls, precision).
 
     if not schemaless and table_exists is True and target_schema:
+        # Only enforced identity columns — optional FK *_id must not false-block
+        # partial maps on wide warehouse schemas (client deploy confusion).
         mapped_targets = {str(m.get("target")).lower() for m in mappings if m.get("target")}
-        required_unmapped = [
-            c
-            for c in target_schema
-            if c.lower().endswith("_id") and c.lower() not in mapped_targets and c.lower() not in {"id", "_id"}
-        ]
-        if required_unmapped[:3]:
-            issues.append(
-                f"{len(required_unmapped)} identifier column(s) in destination are unmapped: "
-                f"{', '.join(required_unmapped[:3])}"
-            )
+        pk_set = {
+            str(c).strip().lower()
+            for c in (destination_pk_columns or [])
+            if str(c).strip()
+        }
+        if contract_primary_key and str(contract_primary_key).strip():
+            pk_set.add(str(contract_primary_key).strip().lower())
+        if pk_set:
+            required_unmapped = [
+                c
+                for c in target_schema
+                if c.lower() in pk_set
+                and c.lower() not in mapped_targets
+                and c.lower() not in {"id", "_id"}
+            ]
+            if required_unmapped[:3]:
+                issues.append(
+                    f"{len(required_unmapped)} primary-key column(s) in destination are unmapped: "
+                    f"{', '.join(required_unmapped[:3])}"
+                )
 
     # Keep issues visible even when dest is disconnected — G2 still blocks connectivity,
     # but operators must see schema hazards immediately rather than a false clean G6.

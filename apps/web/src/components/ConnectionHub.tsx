@@ -118,7 +118,7 @@ function anchorForNode(pos: Point, side: "left" | "right"): Point {
 export function ConnectionHub({
   nodes,
   edges = [],
-  centerLabel = "DataFlow",
+  centerLabel = "Datawrap",
   emptyHint,
   variant = "default",
   bounded = false,

@@ -70,6 +70,51 @@ def test_g9_evidence_scope_full_selected_when_probe_ran() -> None:
     scope = result.details.get("evidence_scope") or {}
     assert scope.get("coverage") == "full_selected"
     assert "probe" in (scope.get("note") or "").lower() or "identity" in (scope.get("note") or "").lower()
+    assert "sample only" in (result.message or "").lower() or "full selected" in (result.message or "").lower() or "full-selected" in (result.message or "").lower() or "population" in (result.message or "").lower()
+
+
+def test_g9_sample_only_never_claims_full_table_uniqueness() -> None:
+    """When the source uniqueness probe did not run, refuse population claims."""
+    class Ctx(PreflightContext):
+        def __init__(self) -> None:
+            plan = TransferPlan(
+                source=SourceConfig(kind="database", connected=True, columns=[]),
+                destination=DestinationConfig(kind="database", db_type="postgresql", connected=True),
+                mappings=[ColumnMapping(source="id", target="id", confidence=0.95)],
+                sync_mode="append",
+            )
+            super().__init__(plan=plan)
+            self.sample_rows = [{"id": "1"}, {"id": "2"}]
+            self.source_duplicate_probe_ran = False
+
+        def run_integrity_audit(self, sample_size: int = 1000) -> dict:
+            return {
+                "blocks_transfer": False,
+                "checks_passed": 2,
+                "checks_failed": 0,
+                "issues": [],
+                "warnings": [],
+                "summary": "2/2 integrity checks passed",
+                "source_uniqueness_probe": {
+                    "ran": False,
+                    "primary_key": None,
+                    "finding_count": 0,
+                    "coverage": "sample",
+                },
+            }
+
+    result = gate_g9_data_integrity(Ctx())
+    assert result.status.value == "pass" or str(result.status).endswith("PASS")
+    scope = result.details.get("evidence_scope") or {}
+    assert scope.get("coverage") == "sample"
+    note = (scope.get("note") or "").lower()
+    msg = (result.message or "").lower()
+    # Must not invent full-table / population uniqueness when probe unavailable.
+    assert "full-table uniqueness when source probe is unavailable" not in note
+    assert "full-table" not in note or "not proven" in note or "did not run" in note
+    assert "sample" in note
+    assert "sample" in msg
+    assert "population" not in msg or "not" in msg
 
 
 def test_compliance_acknowledgment_trail() -> None:

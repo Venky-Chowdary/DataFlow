@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import os
+from services.brand_env import getenv_brand
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
@@ -28,7 +29,7 @@ from services.platform_config import data_dir
 from services.value_serializer import cell_to_string
 
 # Keep enough history to answer "what changed across the last ~10 loads".
-DEFAULT_HISTORY_LIMIT = max(5, min(50, int(os.getenv("DATAFLOW_QUALITY_HISTORY_LIMIT", "20"))))
+DEFAULT_HISTORY_LIMIT = max(5, min(50, int(getenv_brand("QUALITY_HISTORY_LIMIT", "20"))))
 
 
 @dataclass

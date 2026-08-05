@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from services.brand_env import getenv_brand
 from pathlib import Path
 
 
@@ -29,7 +30,7 @@ def sqlite_file_path(database: str, connection_string: str, host: str) -> str:
             path = path[1:]  # sqlite:///relative -> relative
     if "\x00" in path:
         raise ValueError("Invalid SQLite path")
-    root = (os.environ.get("DATAFLOW_SQLITE_ROOT") or "").strip()
+    root = (getenv_brand("SQLITE_ROOT") or "").strip()
     if not root:
         return path
     try:

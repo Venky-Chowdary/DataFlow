@@ -6,16 +6,25 @@ import tempfile
 import time
 from typing import Any, Callable
 
-from preflight.constants import SCHEMALESS_DESTS
+from preflight.constants import is_schemaless_dest
 from preflight.models import (
+    ColumnSchema,
     GateId,
     GateResult,
     GateStatus,
     PreflightContext,
 )
+from preflight.risk_contract import is_safe_normalize_mapping, mapping_risk_cleared
 
 GateFn = Callable[[PreflightContext], GateResult]
 
+
+def _risk_cleared(m: Any) -> bool:
+    """Continue-policy Risk Contract only — boolean risk_acknowledged never clears."""
+    return mapping_risk_cleared(m)
+
+# Offline fallback when apps.api type_system cannot be imported (package-only).
+# Hosted Validate must use is_lossy_coercion / is_precision_collapse_coercion.
 LOSSY_COERCIONS = {
     ("VARCHAR", "INTEGER"),
     ("VARCHAR", "TIMESTAMP"),
@@ -28,6 +37,19 @@ LOSSY_COERCIONS = {
     ("NUMERIC", "INTEGER"),
     ("NUMBER", "INTEGER"),
     ("TIMESTAMP", "DATE"),
+    # IEEE / fixed-point — kept even when host type_system is unavailable.
+    ("FLOAT", "DECIMAL"),
+    ("DOUBLE", "DECIMAL"),
+    ("REAL", "DECIMAL"),
+    ("FLOAT", "NUMERIC"),
+    ("DOUBLE", "NUMERIC"),
+    ("DECIMAL", "FLOAT"),
+    ("DECIMAL", "DOUBLE"),
+    ("NUMERIC", "FLOAT"),
+    ("INTEGER", "FLOAT"),
+    ("INTEGER", "DOUBLE"),
+    ("BIGINT", "FLOAT"),
+    ("BIGINT", "DOUBLE"),
 }
 
 
@@ -229,22 +251,111 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
     issues: list[str] = []
 
     # Schemaless document stores (MongoDB, DynamoDB, Redis) do not enforce a
-    # column-level type contract; every field can hold any BSON/DynamoDB type.
-    # Skip lossy-coercion checks for these destinations.
+    # column-level type contract — but declared BSON/AttributeValue affinity
+    # still matters (ObjectId↛NUMBER). Never invent green PASS from SKIP alone.
     dest_kind = (ctx.plan.destination.db_type or "").lower()
-    schemaless = dest_kind in SCHEMALESS_DESTS
+    schemaless = is_schemaless_dest(dest_kind)
     if schemaless:
-        # Honesty: no DDL type contract ≠ proven type safety. SKIP (not green PASS).
+        affinity_issues: list[str] = []
+        affinity_warnings: list[str] = []
+        affinity_detail: list[dict] = []
+        try:
+            from services.type_system import assess_bson_affinity
+        except ImportError:
+            assess_bson_affinity = None  # type: ignore[assignment]
+
+        if assess_bson_affinity is not None:
+            src_by_name = {c.name.lower(): c for c in ctx.plan.source.columns}
+            for m in ctx.plan.mappings:
+                if _is_intentional_omit_mapping(m) or not m.target:
+                    continue
+                source_col = src_by_name.get((m.source or "").lower())
+                if not source_col:
+                    continue
+                src_type = source_col.inferred_type or ""
+                dest_col = dest_by_name.get((m.target or "").lower())
+                tgt_type = (
+                    getattr(m, "target_type", None)
+                    or (dest_col.inferred_type if dest_col else None)
+                    or src_type
+                )
+                risks = assess_bson_affinity(
+                    src_type,
+                    str(tgt_type or src_type),
+                    destination_db_type=dest_kind,
+                )
+                for risk in risks:
+                    label = f"{m.source} → {m.target}: {risk.get('message') or risk.get('kind')}"
+                    detail = {
+                        "source": m.source,
+                        "target": m.target,
+                        "source_type": src_type,
+                        "target_type": tgt_type,
+                        "kind": risk.get("kind"),
+                        "severity": risk.get("severity"),
+                        "message": risk.get("message"),
+                        "risk_acknowledged": _risk_cleared(m),
+                    }
+                    affinity_detail.append(detail)
+                    if risk.get("severity") == "block":
+                        if _risk_cleared(m):
+                            affinity_warnings.append(label + " (risk contract)")
+                        else:
+                            affinity_issues.append(
+                                label + " — sign Migration Risk Contract or remap"
+                            )
+                    else:
+                        affinity_warnings.append(label)
+
+        if affinity_issues:
+            return GateResult(
+                gate_id=GateId.G3_SCHEMA_CONTRACT,
+                status=GateStatus.BLOCK,
+                message=(
+                    f"Schemaless BSON affinity blocked {len(affinity_issues)} mapping(s) "
+                    f"on {dest_kind}"
+                ),
+                details=_with_scope(
+                    {
+                        "schemaless": True,
+                        "dest_kind": dest_kind,
+                        "issues": affinity_issues,
+                        "warnings": affinity_warnings,
+                        "issues_detail": affinity_detail,
+                        "bson_affinity": True,
+                    },
+                    evidence_scope(
+                        kind="schema_contract",
+                        coverage="declared_types",
+                        note="Schemaless dest — BSON/AttributeValue affinity (no DDL)",
+                    ),
+                ),
+                duration_ms=(time.perf_counter() - start) * 1000,
+            )
+
+        # Honesty: affinity cleared (or no types) ≠ proven DDL type safety.
+        note = (
+            f"Schemaless destination — BSON affinity checked ({len(affinity_detail)} risk(s)); "
+            "no DDL type contract"
+            if affinity_detail or affinity_warnings
+            else "Schemaless destination — no DDL type contract to validate"
+        )
         return GateResult(
             gate_id=GateId.G3_SCHEMA_CONTRACT,
             status=GateStatus.SKIP,
-            message="Schemaless destination — no DDL type contract to validate",
+            message=note,
             details=_with_scope(
-                {"schemaless": True, "dest_kind": dest_kind},
+                {
+                    "schemaless": True,
+                    "dest_kind": dest_kind,
+                    "warnings": affinity_warnings,
+                    "issues_detail": affinity_detail,
+                    "bson_affinity": bool(affinity_detail or affinity_warnings),
+                },
                 evidence_scope(
                     kind="schema_contract",
-                    coverage="n/a",
-                    note="Document / key-value store — no column type DDL contract",
+                    coverage="n/a" if not affinity_detail else "declared_types",
+                    note="Document / key-value store — BSON affinity when types known",
                 ),
             ),
             duration_ms=(time.perf_counter() - start) * 1000,
@@ -285,18 +396,44 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
 
     warnings: list[str] = []
     issues_detail: list[dict] = []
+    examined = 0
+    skipped_missing_dest = 0
 
     for m in ctx.plan.mappings:
-        target = dest_by_name.get(m.target.lower())
-        if not target:
+        if _is_intentional_omit_mapping(m) or not m.target:
             continue
+        target = dest_by_name.get(m.target.lower())
         source_col = next((c for c in ctx.plan.source.columns if c.name == m.source), None)
         if not source_col:
             continue
+        # Create-new / empty dest / ADD column: still enforce stamped target_type.
+        # Never PASS by skipping every mapping when dest columns are empty.
+        if not target:
+            stamped = (getattr(m, "target_type", None) or "").strip()
+            if not stamped:
+                skipped_missing_dest += 1
+                label = f"{m.source} → {m.target}"
+                issues.append(
+                    f"{label} — destination column missing and no stamped "
+                    "target_type; cannot prove type contract"
+                )
+                continue
+            target = ColumnSchema(name=m.target, inferred_type=stamped)
+        examined += 1
         pair = (source_col.inferred_type.upper(), target.inferred_type.upper())
-        lossy = pair in LOSSY_COERCIONS
-        if not lossy and is_lossy_coercion:
-            lossy = is_lossy_coercion(source_col.inferred_type, target.inferred_type)
+        # Prefer type_system SSOT when available; LOSSY_COERCIONS is offline fallback only.
+        if is_lossy_coercion:
+            lossy = bool(
+                is_lossy_coercion(
+                    source_col.inferred_type,
+                    target.inferred_type,
+                    dest_db=dest_kind,
+                )
+            )
+        else:
+            lossy = pair in LOSSY_COERCIONS
+        # Declared type loss (not probe-only domain wraps) — samples cannot soft-pass.
+        declared_lossy = bool(lossy)
         # Fractional scale that exceeds destination DECIMAL caps is silent truncation
         # unless the mapping target is already a lossless text sink.
         platform_decimal_trunc = False
@@ -348,19 +485,38 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             not lossy
             and is_precision_collapse_coercion
             and is_precision_collapse_coercion(
-                source_col.inferred_type, target.inferred_type
-            )
+                source_col.inferred_type,
+                target.inferred_type,
+                dest_db=str(
+                    getattr(getattr(ctx.plan, "destination", None), "db_type", "")
+                    or getattr(getattr(ctx.plan, "destination", None), "kind", "")
+                    or ""
+                ),
+                    )
         ):
             lossy = True
         # Nested STRUCT/MAP field contract or nested→document collapse.
         nested_collapse = bool(
             is_nested_shape_collapse
             and is_nested_shape_collapse(
-                source_col.inferred_type, target.inferred_type
+                source_col.inferred_type,
+                target.inferred_type,
+                dest_db=dest_kind,
             )
         )
         if not lossy and nested_collapse:
             lossy = True
+        # Coercion probe may block wire values even when declared types look
+        # safe (naive DATETIME→TIMESTAMPTZ). Never skip those columns.
+        probe_early = by_source.get(m.source) if value_aware else None
+        if not lossy and probe_early:
+            sev = str(probe_early.get("severity") or "").lower()
+            if sev == "block" or bool(probe_early.get("has_blocking_failures")):
+                lossy = True
+            elif int(probe_early.get("json_scalar_wraps") or 0) > 0:
+                # Bare scalar→JSON string is a domain change even when declared
+                # types are not lossy (e.g. INTEGER→VARIANT). Examine wrap path.
+                lossy = True
         if not lossy:
             continue
 
@@ -380,7 +536,13 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             (
                 is_precision_collapse_coercion
                 and is_precision_collapse_coercion(
-                    source_col.inferred_type, target.inferred_type
+                    source_col.inferred_type,
+                    target.inferred_type,
+                    dest_db=str(
+                        getattr(getattr(ctx.plan, 'destination', None), 'db_type', '')
+                        or getattr(getattr(ctx.plan, 'destination', None), 'kind', '')
+                        or ''
+                    ),
                 )
             )
             or platform_decimal_trunc
@@ -419,20 +581,54 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     f"{label} — UNSIGNED→signed integer overflow risk "
                     "(not soft-passed by samples; widen to BIGINT/DECIMAL)"
                 )
-            elif normalize_logical_type and normalize_logical_type(
-                source_col.inferred_type
-            ) in {"string", "text"} and normalize_logical_type(
-                target.inferred_type
-            ) in {"string", "text"}:
-                label = (
-                    f"{label} — VARCHAR/CHAR width narrowing "
-                    "(declared capacity shrinks; not soft-passed by samples)"
-                )
             elif platform_decimal_trunc:
                 label = (
                     f"{label} — destination DECIMAL platform cap "
                     "(not soft-passed by samples)"
                 )
+            else:
+                # Specialty polarity (ObjectId→TEXT, …) must not be mislabeled
+                # as VARCHAR width narrowing — OBJECTID logical family is string.
+                try:
+                    from services.type_system import (
+                        specialty_carrier_base,
+                        specialty_carrier_would_collapse,
+                        string_width_would_narrow,
+                    )
+
+                    if specialty_carrier_would_collapse(
+                        source_col.inferred_type, target.inferred_type
+                    ):
+                        spec = specialty_carrier_base(source_col.inferred_type) or "specialty"
+                        label = (
+                            f"{label} — {spec} specialty polarity collapse "
+                            "(prefer VARCHAR(24)/BINARY(12) for ObjectId; "
+                            "bare TEXT/VARCHAR drops carrier domain)"
+                        )
+                    elif (
+                        normalize_logical_type
+                        and normalize_logical_type(source_col.inferred_type)
+                        in {"string", "text"}
+                        and normalize_logical_type(target.inferred_type)
+                        in {"string", "text"}
+                        and string_width_would_narrow(
+                            source_col.inferred_type, target.inferred_type
+                        )
+                    ):
+                        label = (
+                            f"{label} — VARCHAR/CHAR width narrowing "
+                            "(declared capacity shrinks; not soft-passed by samples)"
+                        )
+                except ImportError:
+                    if normalize_logical_type and normalize_logical_type(
+                        source_col.inferred_type
+                    ) in {"string", "text"} and normalize_logical_type(
+                        target.inferred_type
+                    ) in {"string", "text"}:
+                        label = (
+                            f"{label} — VARCHAR/CHAR width narrowing "
+                            "(declared capacity shrinks; not soft-passed by samples)"
+                        )
 
         document_collapse = bool(
             is_nested_document_collapse
@@ -443,7 +639,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         field_shape_loss = bool(nested_collapse and not document_collapse)
         if document_collapse:
             label = (
-                f"{label} — nested→document (STRUCT/MAP field DDL not preserved; "
+                f"{label} — nested→document (STRUCT/MAP/ARRAY field DDL not preserved; "
                 "Airbyte-style JSON/VARIANT path)"
             )
         elif field_shape_loss:
@@ -468,9 +664,209 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         # producing a wall of false coercion blocks.
         # Exception: fidelity_collapse / nested field mismatch always block.
         # nested→document blocks unless struct_policy acknowledges the path.
+        #
+        # Create-new UUID→STRING/TEXT or exact CHAR/VARCHAR(36) wire: domain not
+        # enforced at destination — Accept risk (never silent-green UUID→UUID).
+        uuid_string_create_new = False
+        uuid_exact_wire_domain = False
+        if (
+            not field_shape_loss
+            and (
+                getattr(m, "create_new", False)
+                or ctx.plan.destination.table_exists is False
+            )
+            and normalize_logical_type
+            and normalize_logical_type(source_col.inferred_type) == "uuid"
+        ):
+            try:
+                from services.type_system import (
+                    uuid_exact_wire_carrier,
+                    uuid_would_collapse,
+                )
+
+                if uuid_exact_wire_carrier(target.inferred_type) and (
+                    normalize_logical_type(target.inferred_type) != "uuid"
+                ):
+                    uuid_exact_wire_domain = True
+                elif fidelity_collapse and uuid_would_collapse(
+                    source_col.inferred_type, target.inferred_type
+                ):
+                    uuid_string_create_new = True
+            except ImportError:
+                uuid_string_create_new = False
+                uuid_exact_wire_domain = False
+
         probe = by_source.get(m.source) if value_aware else None
-        if fidelity_collapse or field_shape_loss:
-            issues.append(label)
+        # ObjectId→bare TEXT/VARCHAR: hex wire is value-lossless; domain polarity
+        # still needs Accept risk (not a silent hard-block on existing PG TEXT).
+        objectid_text_polarity = False
+        if fidelity_collapse and not field_shape_loss:
+            try:
+                from services.type_system import (
+                    specialty_carrier_base,
+                    specialty_carrier_would_collapse,
+                )
+
+                objectid_text_polarity = bool(
+                    specialty_carrier_would_collapse(
+                        source_col.inferred_type, target.inferred_type
+                    )
+                    and specialty_carrier_base(source_col.inferred_type) == "OBJECTID"
+                )
+            except ImportError:
+                objectid_text_polarity = False
+
+        if uuid_string_create_new or uuid_exact_wire_domain:
+            # Domain polarity needs Accept risk — never soft-pass create-new
+            # UUID→STRING/CHAR(36) while Map CTA stays silent.
+            risk_ack = _risk_cleared(m)
+            uuid_label = (
+                f"{label} — create-new stores UUID as {target.inferred_type} "
+                "(UUID domain is not enforced at destination)"
+            )
+            detail = {
+                "source": m.source,
+                "target": m.target,
+                "column": m.source,
+                "source_type": source_col.inferred_type,
+                "target_type": target.inferred_type,
+                "severity": "warn" if risk_ack else "block",
+                "fidelity_collapse": True,
+                "uuid_string_create_new": True,
+                "uuid_exact_wire_domain": uuid_exact_wire_domain,
+                "risk_acknowledged": risk_ack,
+                "reason": uuid_label,
+                "message": uuid_label,
+                "sampled": (probe or {}).get("sampled", 0) if probe else 0,
+                "failed": (probe or {}).get("failed", 0) if probe else 0,
+                "sentinel_nulls": (probe or {}).get("sentinel_nulls", 0) if probe else 0,
+                "sample_failures": (probe or {}).get("sample_failures", []) if probe else [],
+                "suggested_fix": (
+                    "Sign a Migration Risk Contract (continue policy) for UUID "
+                    "string-wire polarity, or choose a destination with native UUID."
+                ),
+                "suggested_target_type": (probe or {}).get("suggested_target_type") if probe else None,
+                "suggested_transform": (probe or {}).get("suggested_transform") if probe else None,
+            }
+            issues_detail.append(detail)
+            if risk_ack:
+                warnings.append(uuid_label + " (risk contract)")
+            else:
+                issues.append(
+                    uuid_label + " — sign Migration Risk Contract or remap to native UUID"
+                )
+        elif objectid_text_polarity:
+            risk_ack = _risk_cleared(m)
+            oid_label = (
+                f"{label} — ObjectId→TEXT keeps hex values; ObjectId domain "
+                "is not enforced at destination"
+            )
+            detail = {
+                "source": m.source,
+                "target": m.target,
+                "column": m.source,
+                "source_type": source_col.inferred_type,
+                "target_type": target.inferred_type,
+                "severity": "warn" if risk_ack else "block",
+                "fidelity_collapse": True,
+                "objectid_text_polarity": True,
+                "risk_acknowledged": risk_ack,
+                "reason": oid_label,
+                "message": oid_label,
+                "sampled": (probe or {}).get("sampled", 0) if probe else 0,
+                "failed": (probe or {}).get("failed", 0) if probe else 0,
+                "sentinel_nulls": (probe or {}).get("sentinel_nulls", 0) if probe else 0,
+                "sample_failures": (probe or {}).get("sample_failures", []) if probe else [],
+                "suggested_fix": (
+                    "Sign a Migration Risk Contract for ObjectId→TEXT, or remap to "
+                    "VARCHAR(24) / BINARY(12)."
+                ),
+                "suggested_target_type": "VARCHAR(24)",
+                "suggested_transform": None,
+            }
+            issues_detail.append(detail)
+            if risk_ack:
+                warnings.append(oid_label + " (risk contract)")
+            else:
+                issues.append(
+                    oid_label + " — sign Migration Risk Contract or remap to VARCHAR(24)"
+                )
+        elif fidelity_collapse or field_shape_loss:
+            # Nested field mismatch always hard-blocks. Declared fidelity collapses
+            # honor verified continue-policy Risk Contract only.
+            risk_ack = _risk_cleared(m)
+            collapse_warn = bool(fidelity_collapse and risk_ack and not field_shape_loss)
+            if collapse_warn:
+                warnings.append(label + " (risk contract)")
+            else:
+                issues.append(
+                    label
+                    if field_shape_loss or not fidelity_collapse
+                    else (label + " — sign Migration Risk Contract or remap")
+                )
+            detail = {
+                "source": m.source,
+                "target": m.target,
+                "column": m.source,
+                "source_type": source_col.inferred_type,
+                "target_type": target.inferred_type,
+                "severity": "warn" if collapse_warn else "block",
+                "fidelity_collapse": fidelity_collapse,
+                "nested_shape_collapse": field_shape_loss,
+                "risk_acknowledged": risk_ack,
+                "reason": label,
+                "message": label,
+                "sampled": 0,
+                "failed": 0,
+                "sentinel_nulls": 0,
+                "sample_failures": [],
+                "suggested_fix": (
+                    "Accept risk on Map, or remap to a fidelity-preserving type."
+                    if fidelity_collapse and not field_shape_loss
+                    else ""
+                ),
+                "suggested_target_type": None,
+                "suggested_transform": None,
+            }
+            if probe is not None:
+                detail.update({
+                    "sampled": probe.get("sampled", 0),
+                    "failed": probe.get("failed", 0),
+                    "sentinel_nulls": probe.get("sentinel_nulls", 0),
+                    "sample_failures": probe.get("sample_failures", []),
+                    "suggested_fix": probe.get("suggested_fix", "") or detail["suggested_fix"],
+                    "suggested_target_type": probe.get("suggested_target_type"),
+                    "suggested_transform": probe.get("suggested_transform"),
+                })
+            else:
+                # Schema-contract specialty / width collapses: guide remap.
+                try:
+                    from services.type_system import (
+                        specialty_carrier_would_collapse,
+                        create_new_mapping_target_type,
+                    )
+
+                    if specialty_carrier_would_collapse(
+                        source_col.inferred_type, target.inferred_type
+                    ):
+                        suggested = create_new_mapping_target_type(
+                            source_col.inferred_type,
+                            getattr(ctx.plan.destination, "db_type", "") or "",
+                        )
+                        detail["suggested_target_type"] = suggested
+                        detail["suggested_fix"] = (
+                            f"Remap target type to {suggested} (or create-new "
+                            "with that DDL) — bare TEXT/VARCHAR drops specialty domain."
+                        )
+                except ImportError:
+                    pass
+            issues_detail.append(detail)
+        elif document_collapse and not intentional_json:
+            # Nested→document always blocks without explicit Map struct_policy —
+            # balanced/review must not soft-pass (enterprise fail-closed).
+            issues.append(
+                label + " — set Map struct_policy to store_as_json (or flatten) to proceed"
+            )
             if probe is not None:
                 issues_detail.append({
                     "source": m.source,
@@ -478,31 +874,6 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     "source_type": source_col.inferred_type,
                     "target_type": target.inferred_type,
                     "severity": "block",
-                    "fidelity_collapse": fidelity_collapse,
-                    "nested_shape_collapse": field_shape_loss,
-                    "sampled": probe.get("sampled", 0),
-                    "failed": probe.get("failed", 0),
-                    "sentinel_nulls": probe.get("sentinel_nulls", 0),
-                    "sample_failures": probe.get("sample_failures", []),
-                    "suggested_fix": probe.get("suggested_fix", ""),
-                    "suggested_target_type": probe.get("suggested_target_type"),
-                    "suggested_transform": probe.get("suggested_transform"),
-                })
-        elif document_collapse and not intentional_json:
-            mode = (ctx.plan.validation_mode or "strict").strip().lower()
-            if mode in {"balanced", "review"}:
-                warnings.append(label + " — set struct_policy=store_as_json to acknowledge")
-            else:
-                issues.append(
-                    label + " — set Map struct_policy to store_as_json (or flatten) to proceed"
-                )
-            if probe is not None:
-                issues_detail.append({
-                    "source": m.source,
-                    "target": m.target,
-                    "source_type": source_col.inferred_type,
-                    "target_type": target.inferred_type,
-                    "severity": "block" if mode not in {"balanced", "review"} else "warn",
                     "nested_document_collapse": True,
                     "sampled": probe.get("sampled", 0),
                     "failed": probe.get("failed", 0),
@@ -516,37 +887,117 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             warnings.append(label + f" — acknowledged via struct_policy={policy}")
         elif probe is not None:
             severity = probe.get("severity", "ok")
+            risk_ack = _risk_cleared(m)
+            # Head-sample "ok" must never soft-pass declared lossy without a
+            # verified continue-policy Migration Risk Contract.
+            force_block = bool(declared_lossy and not risk_ack)
+            sample_clean = int(probe.get("failed") or 0) == 0
+            if (
+                risk_ack
+                and declared_lossy
+                and severity == "block"
+                and sample_clean
+            ):
+                severity = "warn"
+            json_wraps = int(probe.get("json_scalar_wraps") or 0)
             detail = {
                 "source": m.source,
                 "target": m.target,
                 "source_type": source_col.inferred_type,
                 "target_type": target.inferred_type,
-                "severity": severity,
+                "severity": "block" if force_block or severity == "block" else severity,
                 "sampled": probe.get("sampled", 0),
                 "failed": probe.get("failed", 0),
                 "sentinel_nulls": probe.get("sentinel_nulls", 0),
+                "json_scalar_wraps": json_wraps,
                 "sample_failures": probe.get("sample_failures", []),
-                "suggested_fix": probe.get("suggested_fix", ""),
+                "suggested_fix": probe.get("suggested_fix", "")
+                or (
+                    "Sign a Migration Risk Contract, widen the destination type, or remap"
+                    if force_block
+                    else (
+                        "Sign a Migration Risk Contract if wrapping bare scalars as "
+                        "JSON strings is intentional, or emit real JSON objects/arrays upstream."
+                        if json_wraps
+                        else ""
+                    )
+                ),
                 "suggested_target_type": probe.get("suggested_target_type"),
                 "suggested_transform": probe.get("suggested_transform"),
+                "risk_acknowledged": risk_ack,
+                "declared_lossy": True,
             }
             issues_detail.append(detail)
-            if severity == "block":
+            if force_block:
+                issues.append(
+                    label
+                    + " — declared lossy; sign Migration Risk Contract or remap "
+                    "(samples cannot soft-pass)"
+                )
+            elif severity == "block":
                 issues.append(label)
+            elif json_wraps:
+                wrap_label = (
+                    label
+                    + " — bare scalar(s) wrapped as JSON string (domain change)"
+                )
+                if risk_ack:
+                    warnings.append(wrap_label + " (risk contract)")
+                else:
+                    issues.append(
+                        wrap_label + " — sign Migration Risk Contract if intentional"
+                    )
+                    detail["severity"] = "block"
+                    detail["suggested_fix"] = (
+                        "Accept risk on Map if wrapping bare scalars as JSON "
+                        "strings is intentional, or emit real JSON objects/arrays upstream."
+                    )
             else:
                 warnings.append(label)
         elif value_aware:
-            # Report exists and covers this pair as clean (no entry ⇒ all values
-            # coerce): downgrade the declared-type mismatch to a warning.
-            warnings.append(label)
+            # Probe omits pure text sinks (no cast risk) — declared mismatch
+            # stays a warn. Typed sinks with samples but no by_source row are
+            # unproven: never invent "all values coerce" from absence.
+            tgt_l = (
+                normalize_logical_type(target.inferred_type)
+                if normalize_logical_type
+                else str(target.inferred_type or "").lower()
+            )
+            if tgt_l in {"string", "text", "json", "variant", "document"}:
+                warnings.append(label)
+            else:
+                unproven = label + " — unproven (no per-column coercion probe)"
+                # Typed sinks stay fail-closed in every validation mode.
+                issues.append(unproven)
+                issues_detail.append({
+                    "source": m.source,
+                    "target": m.target,
+                    "source_type": source_col.inferred_type,
+                    "target_type": target.inferred_type,
+                    "severity": "block",
+                    "probe_unproven": True,
+                    "suggested_fix": (
+                        "Re-run Validate so every mapped column receives a "
+                        "coercion probe, or remap to a proven-compatible type."
+                    ),
+                })
         else:
-            # No samples — strict/maximum fail-closed on declared lossy pairs;
-            # balanced warns so operators can proceed after acknowledging risk.
+            # No samples — declared lossy blocks unless verified Risk Contract.
+            risk_ack = _risk_cleared(m)
             mode = (ctx.plan.validation_mode or "strict").strip().lower()
-            if mode in {"balanced", "review"}:
+            if lossy and risk_ack:
+                warnings.append(
+                    label + " — declared lossy; risk contract (no samples)"
+                )
+            elif lossy and not risk_ack:
+                issues.append(
+                    label + " — declared lossy; sign Migration Risk Contract or remap"
+                )
+            elif mode in {"balanced", "review"}:
                 warnings.append(label + " (declared; no samples — balanced warn)")
             else:
-                issues.append(label)
+                # Non-lossy declared mismatch without samples — still fail-closed in strict.
+                issues.append(label + " — no samples to prove coercion")
 
     # Destination NOT NULL contract (Airbyte required-field class): existing
     # typed columns that refuse NULL must not receive nullable sources / empty samples.
@@ -564,15 +1015,12 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             val = row.get(m.source)
             if val is None or str(val).strip() == "":
                 null_samples += 1
-        if src_nullable or null_samples:
+        if null_samples:
             label = (
                 f"NOT NULL contract: {m.source} → {m.target} "
-                f"({target.inferred_type}) rejects NULL"
+                f"({target.inferred_type}) rejects NULL — "
+                f"{null_samples} empty/null sample value(s)"
             )
-            if null_samples:
-                label += f" — {null_samples} empty/null sample value(s)"
-            elif src_nullable:
-                label += " — source column is nullable"
             issues.append(label)
             issues_detail.append({
                 "source": m.source,
@@ -583,6 +1031,18 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 "not_null_contract": True,
                 "null_samples": null_samples,
             })
+        elif src_nullable and sample_rows:
+            # Mongo/file introspect defaults nullable=True — clean samples must not
+            # false-block every NOT NULL destination column.
+            warnings.append(
+                f"NOT NULL contract: {m.source} → {m.target} — source marked nullable; "
+                f"{len(sample_rows[:200])} sample row(s) have no nulls"
+            )
+        elif src_nullable and not sample_rows:
+            warnings.append(
+                f"NOT NULL contract: {m.source} → {m.target} — source marked nullable "
+                "(no samples to prove non-null)"
+            )
 
     sample_n = int(report.get("sampled_rows") or 0) if isinstance(report, dict) else 0
     g3_scope = evidence_scope(
@@ -596,6 +1056,39 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             else "Declared types only — no sample values"
         ),
     )
+
+    # Fail-closed: never invent PASS when every mapping was skipped (empty dest,
+    # missing stamps, or omit-only plans with unexamined create-new rows).
+    active = [
+        m
+        for m in ctx.plan.mappings
+        if not _is_intentional_omit_mapping(m) and getattr(m, "target", None)
+    ]
+    if active and examined == 0:
+        return _block(
+            GateId.G3_SCHEMA_CONTRACT,
+            (
+                f"Schema contract unproven — {len(active)} mapping(s) could not be "
+                f"examined ({skipped_missing_dest} missing dest/target_type)"
+            ),
+            start,
+            _with_scope(
+                {
+                    "issues": issues
+                    or [
+                        "No destination columns and no stamped target_type — "
+                        "cannot prove schema contract"
+                    ],
+                    "issues_detail": issues_detail,
+                    "warnings": warnings,
+                    "examined": examined,
+                    "skipped_missing_dest": skipped_missing_dest,
+                    "rule_id": "g3_schema_contract.unexamined",
+                    "remediation_kind": "confirm_destination_schema",
+                },
+                g3_scope,
+            ),
+        )
 
     if issues:
         # Sample-proven or strict declared write hazards always block Validate.
@@ -637,20 +1130,59 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
     )
 
 
+def _is_intentional_omit_mapping(m: Any) -> bool:
+    if getattr(m, "intentional_omit", False):
+        return True
+    raw = str(getattr(m, "transform", None) or "").strip().lower()
+    return raw in {"omit", "intentional_omit", "drop", "exclude"}
+
+
+def _is_lossy_mapping(m: Any) -> bool:
+    fidelity = str(getattr(m, "fidelity", None) or "").strip().lower()
+    if fidelity == "lossy_cast":
+        return True
+    return bool(getattr(m, "type_narrowing", False))
+
+
+def _requires_risk_ack(m: Any) -> bool:
+    """Lossy casts, type narrowing, and value-mutating transforms need a contract.
+
+    Safe normalize (trim / trim_id / email / phone / case) is Map-Ready — not a
+    Migration Risk Contract path. Must stay aligned with Map ``isSafeNormalizeMapping``.
+    """
+    if is_safe_normalize_mapping(m):
+        return False
+    if _is_lossy_mapping(m):
+        return True
+    fidelity = str(getattr(m, "fidelity", None) or "").strip().lower()
+    return fidelity == "mutate"
+
+
+def _is_structural_review_mapping(m: Any) -> bool:
+    """STRUCT flatten / specialty identity cannot clear via bare user_override."""
+    if getattr(m, "struct_derived", False):
+        return True
+    policy = str(getattr(m, "struct_policy", None) or "").strip().lower()
+    if policy in {"flatten_top_level_keys", "flatten_deep", "explode_rows"}:
+        return True
+    xf = str(getattr(m, "transform", None) or "").strip().lower()
+    return xf in {"identity_specialty", "specialty"}
+
+
 def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     threshold = ctx.plan.confidence_threshold
-    # Mapping candidates below the floor (used by the semantic mapper) are too
-    # weak to keep, but values between the floor and the user threshold are
-    # accepted by G4 so G5's data-integrity audit can apply the stricter check.
-    confidence_floor = max(0.55, threshold - 0.3)
+    # Client fail-closed: Map threshold is the G4 floor. Soft band (threshold−0.3)
+    # previously let low-confidence exact-name remaps pass into Execute.
+    confidence_floor = max(0.55, float(threshold or 0.85))
+    active = [m for m in ctx.plan.mappings if not _is_intentional_omit_mapping(m)]
     g4_scope = evidence_scope(
         kind="mapping_confidence",
-        columns=len(ctx.plan.mappings),
+        columns=len(active),
         coverage="full_schema",
         note="All mapped columns · confidence classes (not a row scan)",
     )
-    mapped_targets = {m.target.lower() for m in ctx.plan.mappings}
+    mapped_targets = {m.target.lower() for m in active if m.target}
     unmapped_required = [
         r for r in ctx.plan.required_targets if r.lower() not in mapped_targets
     ]
@@ -662,10 +1194,46 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
             _with_scope({"unmapped": unmapped_required}, g4_scope),
         )
 
+    # Lossy / mutate / narrowing cannot clear via bare user_override or boolean ack.
+    risk_unacked = [
+        m for m in active if _requires_risk_ack(m) and not _risk_cleared(m)
+    ]
+    if risk_unacked:
+        names = [f"{m.source}→{m.target}" for m in risk_unacked]
+        return _block(
+            GateId.G4_MAPPING_CONFIDENCE,
+            f"{len(risk_unacked)} mapping(s) require a signed Migration Risk Contract "
+            "with a continue execution policy (lossy/narrowing/mutate)",
+            start,
+            _with_scope({"risk_unacknowledged": names}, g4_scope),
+        )
+
+    # STRUCT flatten / specialty — boolean ack alone is insufficient.
+    structural_unacked = [
+        m
+        for m in active
+        if (
+            (m.requires_review or _is_structural_review_mapping(m))
+            and _is_structural_review_mapping(m)
+            and not _risk_cleared(m)
+        )
+    ]
+    if structural_unacked:
+        names = [f"{m.source}→{m.target}" for m in structural_unacked]
+        return _block(
+            GateId.G4_MAPPING_CONFIDENCE,
+            f"{len(structural_unacked)} STRUCT/specialty mapping(s) require a "
+            "signed Migration Risk Contract",
+            start,
+            _with_scope({"structural_unacknowledged": names}, g4_scope),
+        )
+
     low_confidence = [
         m
-        for m in ctx.plan.mappings
-        if m.confidence < confidence_floor and not m.user_override
+        for m in active
+        if m.confidence < confidence_floor
+        and not m.user_override
+        and not _requires_risk_ack(m)
     ]
     if low_confidence:
         names = [f"{m.source}→{m.target} ({m.confidence:.2f})" for m in low_confidence]
@@ -678,8 +1246,11 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
 
     ambiguous = [
         m
-        for m in ctx.plan.mappings
-        if m.requires_review and not m.user_override
+        for m in active
+        if m.requires_review
+        and not m.user_override
+        and not _requires_risk_ack(m)
+        and not _is_structural_review_mapping(m)
     ]
     if ambiguous:
         names = [
@@ -694,7 +1265,7 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
         )
     return _pass(
         GateId.G4_MAPPING_CONFIDENCE,
-        f"All {len(ctx.plan.mappings)} mappings meet confidence floor",
+        f"All {len(active)} mappings meet confidence floor",
         start,
         _with_scope({}, g4_scope),
     )
@@ -806,7 +1377,7 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
         )
 
     dest_kind = (ctx.plan.destination.db_type or "").lower()
-    schemaless = dest_kind in SCHEMALESS_DESTS
+    schemaless = is_schemaless_dest(dest_kind)
     # Host apps must never fold fingerprint drift into DDL. Scrub defensively so
     # a stale process cannot block Redis/Mongo/Dynamo as "Target DDL incompatible".
     raw_issues = [str(i) for i in (ctx.plan.ddl_issues or [])]
@@ -1229,6 +1800,8 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
     for row_idx, row in enumerate(sample_rows, start=1):
         mapped: dict[str, Any] = {}
         for m in ctx.plan.mappings:
+            if _is_intentional_omit_mapping(m) or not m.target:
+                continue
             raw = row.get(m.source, "")
             raw_s = _serialize_for_write(raw)
             if m.transform and str(m.transform).lower().strip() in _NON_DETERMINISTIC:
@@ -1395,8 +1968,23 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                     "remediation_kind": "fix_source_keys",
                 },
             )
-    except Exception:
-        pass
+    except Exception as exc:
+        # Never silent-pass uniqueness proof when the destination declared UNIQUE/PK.
+        if getattr(ctx.plan, "destination_unique_keys", None) or getattr(
+            ctx.plan, "destination_pk_columns", None
+        ):
+            return _block(
+                GateId.G8_RECONCILIATION,
+                "Dry-run reconciliation could not prove destination UNIQUE/PK constraints",
+                start,
+                {
+                    "issues": [f"UNIQUE probe error: {exc}"],
+                    "target_rows": len(mapped_rows),
+                    "rule_id": "g8_reconciliation.destination_unique_probe",
+                    "remediation_kind": "retry_validate",
+                    "note": str(exc)[:400],
+                },
+            )
 
     # Fingerprint: raw source cells vs write-path transformed values (not transform↔transform).
     if not nondeterministic:
@@ -1411,7 +1999,10 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
         for row_idx, row in enumerate(sample_rows, start=1):
             for m in ctx.plan.mappings:
                 tname = str(m.transform or "").lower().strip()
-                # Identity / rename-only: raw must equal transformed after write-path bind.
+                # Identity / rename-only: serialized source wire must equal mapped
+                # cell after destination bind. Use cell_to_string for arrays/objects
+                # (same as mapped_rows) — never Python repr. Identity transforms must
+                # not strip whitespace (that false-failed Mongo long-text samples).
                 if tname in {"", "none", "identity", "passthrough", "string", "varchar", "text"}:
                     raw = row.get(m.source, "")
                     got = mapped_rows[row_idx - 1].get(m.target)
@@ -1427,8 +2018,9 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                     try:
                         from services.reconciliation import fingerprint_for_reconcile
 
+                        wire = _serialize_for_write(raw)
                         left = fingerprint_for_reconcile(
-                            raw, ddl_type=ddl or "VARCHAR", engine=dest_eng, transform=None
+                            wire, ddl_type=ddl or "VARCHAR", engine=dest_eng, transform=None
                         )
                         right = fingerprint_for_reconcile(
                             got, ddl_type=ddl or "VARCHAR", engine=dest_eng, transform=None
@@ -1508,7 +2100,12 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
 
 
 def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
-    """Critical data integrity — financial precision, required nulls, duplicate keys."""
+    """Critical data integrity — financial precision, required nulls, duplicate keys.
+
+    Coverage honesty: sample-only passes must never claim population / full-table
+    uniqueness. When ``source_uniqueness_probe.ran`` is true, coverage is
+    ``full_selected`` for that probe only — other checks remain sample-scoped.
+    """
     start = time.perf_counter()
     audit = getattr(ctx, "run_integrity_audit", None)
     if not callable(audit):
@@ -1563,18 +2160,29 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
         )
     probe = report.get("source_uniqueness_probe") or {}
     probe_ran = bool(probe.get("ran")) or bool(getattr(ctx, "source_duplicate_probe_ran", False))
+    coverage = "full_selected" if probe_ran else "sample"
+    if probe_ran:
+        pk_label = (
+            probe.get("primary_key")
+            or getattr(ctx, "source_duplicate_probe_pk", "")
+            or "pk"
+        )
+        g9_note = (
+            f"Source uniqueness probe on identity key {pk_label} "
+            f"(GROUP BY / aggregate over selected transfer) · "
+            f"other integrity checks use Validate sample — not a full population proof"
+        )
+    else:
+        g9_note = (
+            "Integrity checks on Validate sample only — source uniqueness probe "
+            "did not run; full-table / population uniqueness is not proven"
+        )
     g9_scope = evidence_scope(
         kind="data_integrity",
         sample_rows=len(sample_rows) or None,
         columns=len(ctx.plan.mappings),
-        coverage="full_selected" if probe_ran else "sample",
-        note=(
-            f"Source uniqueness probe on identity key "
-            f"{probe.get('primary_key') or getattr(ctx, 'source_duplicate_probe_pk', '') or 'pk'} "
-            f"(GROUP BY / aggregate over selected transfer) · other integrity checks use Validate sample"
-            if probe_ran
-            else "Integrity checks on Validate sample — full-table uniqueness when source probe is unavailable"
-        ),
+        coverage=coverage,
+        note=g9_note,
     )
     encoding = next(
         (c for c in (report.get("checks") or []) if c.get("check") == "encoding_anomalies"),
@@ -1601,9 +2209,23 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
     warnings = list(report.get("warnings") or [])
     if encoding_issues and not warnings:
         warnings = [str(i.get("message") if isinstance(i, dict) else i) for i in encoding_issues[:8]]
+    base_summary = str(report.get("summary") or "Data integrity checks passed")
+    # Operator-facing message must distinguish sample vs population coverage.
+    if coverage == "sample":
+        if "sample" not in base_summary.lower():
+            pass_msg = f"{base_summary} (Validate sample only — population uniqueness not proven)"
+        else:
+            pass_msg = base_summary
+    else:
+        if "full" not in base_summary.lower() and "population" not in base_summary.lower():
+            pass_msg = (
+                f"{base_summary} (full-selected uniqueness probe · other checks on sample)"
+            )
+        else:
+            pass_msg = base_summary
     return _pass(
         GateId.G9_DATA_INTEGRITY,
-        report.get("summary", "Data integrity checks passed"),
+        pass_msg,
         start,
         _with_scope(
             {
@@ -1611,6 +2233,7 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
                 "warnings": warnings[:12],
                 "encoding_issues": encoding_issues[:12],
                 "source_uniqueness_probe": probe,
+                "coverage": coverage,
             },
             g9_scope,
         ),

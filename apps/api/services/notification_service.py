@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from services.brand_env import getenv_brand
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -37,12 +38,12 @@ def _allowed_url(url: str) -> bool:
 
 def _env_smtp() -> dict[str, Any]:
     return {
-        "host": os.getenv("DATAFLOW_SMTP_HOST", ""),
-        "port": int(os.getenv("DATAFLOW_SMTP_PORT", "587")),
-        "user": os.getenv("DATAFLOW_SMTP_USER", ""),
-        "password": os.getenv("DATAFLOW_SMTP_PASSWORD", ""),
-        "use_tls": os.getenv("DATAFLOW_SMTP_USE_TLS", "true").lower() in ("1", "true", "yes"),
-        "from": os.getenv("DATAFLOW_SMTP_FROM", "dataflow@localhost"),
+        "host": getenv_brand("SMTP_HOST", ""),
+        "port": int(getenv_brand("SMTP_PORT", "587")),
+        "user": getenv_brand("SMTP_USER", ""),
+        "password": getenv_brand("SMTP_PASSWORD", ""),
+        "use_tls": getenv_brand("SMTP_USE_TLS", "true").lower() in ("1", "true", "yes"),
+        "from": getenv_brand("SMTP_FROM", "dataflow@localhost"),
     }
 
 
@@ -165,7 +166,7 @@ def _send_teams(channel: NotificationChannel, payload: dict[str, Any]) -> dict[s
             "@type": "MessageCard",
             "@context": "https://schema.org/extensions",
             "themeColor": payload.get("color", "0076D7"),
-            "summary": payload.get("title", "DataFlow alert"),
+            "summary": payload.get("title", "Datawrap alert"),
             "sections": [{"activityTitle": payload.get("title", ""), "text": text}],
         },
     )
@@ -179,7 +180,7 @@ def _send_email(channel: NotificationChannel, payload: dict[str, Any]) -> dict[s
         return {"ok": False, "error": "Email recipients missing"}
 
     text = payload.get("text") or _payload_text(payload)
-    subject = payload.get("title", "DataFlow alert")
+    subject = payload.get("title", "Datawrap alert")
 
     # 1. Channel-level explicit custom SMTP takes precedence.
     smtp_cfg = {
@@ -231,7 +232,7 @@ def _send_servicenow(channel: NotificationChannel, payload: dict[str, Any]) -> d
         headers["Authorization"] = f"Bearer {token}"
 
     record = {
-        "short_description": payload.get("title", "DataFlow alert"),
+        "short_description": payload.get("title", "Datawrap alert"),
         "description": payload.get("text") or _payload_text(payload),
         "urgency": payload.get("urgency", "3"),
         "impact": payload.get("impact", "3"),
@@ -326,7 +327,7 @@ def build_job_payload(
     web_url: str = "",
 ) -> dict[str, Any]:
     color = "28a745" if status in ("completed", "success") else "ffc107" if status in ("partial", "failed_with_quarantine", "completed_with_quarantine") else "dc3545"
-    title = f"DataFlow transfer {status}: {source} → {destination}"
+    title = f"Datawrap transfer {status}: {source} → {destination}"
     api_base = (base_url or "").rstrip("/")
     web_base = (web_url or "").rstrip("/")
     absolute_retry_url = f"{api_base}/api/v1/connectors/jobs/{job_id}/resume" if api_base else retry_url

@@ -816,7 +816,7 @@ class FileParser:
         except ImportError:
             return ParseResult(
                 success=False, data=[], columns=[], row_count=0,
-                error="Parquet import is not ready on this platform node. DataFlow bundles file parsers — retry shortly.",
+                error="Parquet import is not ready on this platform node. Datawrap bundles file parsers — retry shortly.",
                 file_type="parquet",
             )
         except Exception as exc:
@@ -882,7 +882,7 @@ class FileParser:
         except ImportError:
             return ParseResult(
                 success=False, data=[], columns=[], row_count=0,
-                error="Avro parser is not ready on this platform node. DataFlow bundles file parsers — retry shortly.",
+                error="Avro parser is not ready on this platform node. Datawrap bundles file parsers — retry shortly.",
                 file_type="avro",
             )
         except Exception as exc:
@@ -938,7 +938,7 @@ class FileParser:
         except ImportError:
             return ParseResult(
                 success=False, data=[], columns=[], row_count=0,
-                error="ORC parser is not ready on this platform node. DataFlow bundles file parsers — retry shortly.",
+                error="ORC parser is not ready on this platform node. Datawrap bundles file parsers — retry shortly.",
                 file_type="orc",
             )
         except Exception as exc:
@@ -1008,7 +1008,7 @@ class FileParser:
         except ImportError:
             return ParseResult(
                 success=False, data=[], columns=[], row_count=0,
-                error="XML parser is not ready on this platform node. DataFlow bundles file parsers — retry shortly.",
+                error="XML parser is not ready on this platform node. Datawrap bundles file parsers — retry shortly.",
                 file_type="xml",
             )
         except Exception as exc:

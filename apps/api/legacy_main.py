@@ -48,7 +48,7 @@ from services.transfer_worker import dispatch_file_to_database
 from services.workflow import WorkflowPhase, set_phase
 
 app = FastAPI(
-    title="DataFlow API",
+    title="Datawrap API",
     description="One-click data transfer with fail-fast preflight gates",
     version="0.2.0",
 )

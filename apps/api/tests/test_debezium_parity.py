@@ -472,7 +472,15 @@ def test_extract_cdc_lsn_supports_gtid_mongo_scn() -> None:
     assert extract_cdc_lsn("slot=x|phase=streaming|lsn=0/1A") == "0/1A"
 
 
-def test_pg_heartbeat_emits_logical_message() -> None:
+def test_pg_heartbeat_advances_idle_slot_instead_of_emitting_wal() -> None:
+    """Idle slots must release WAL, not write more of it.
+
+    The previous Debezium-class pattern of ``pg_logical_emit_message`` was
+    inverted: it grew retention on a quiet slot. The heartbeat now peeks for
+    pending changes and advances ``confirmed_flush_lsn`` when the slot is empty,
+    which is what actually frees WAL segments. Emitting through the slot is the
+    failure mode this test must keep from returning.
+    """
     from connectors.postgresql_change_stream import PostgreSqlChangeStreamCdc
 
     cdc = PostgreSqlChangeStreamCdc(
@@ -484,7 +492,16 @@ def test_pg_heartbeat_emits_logical_message() -> None:
     )
     cdc.slot_name = "df_slot"
     cdc._pending_ack_lsn = None
+    # No open incremental snapshot: that gate would refuse to advance.
+    cdc._incremental_snapshot_open = lambda: False  # type: ignore[method-assign]
     cur = MagicMock()
+    # Sequence the probe answers: current WAL → empty peek → confirmed LSN → advance.
+    cur.fetchone.side_effect = [
+        ("0/900",),  # pg_current_wal_lsn
+        None,  # peek: nothing pending
+        ("0/100",),  # confirmed_flush_lsn
+        ("advanced",),
+    ]
     conn = MagicMock()
     conn.__enter__ = MagicMock(return_value=conn)
     conn.__exit__ = MagicMock(return_value=None)
@@ -493,9 +510,10 @@ def test_pg_heartbeat_emits_logical_message() -> None:
     with patch.object(cdc, "_conn", return_value=conn):
         cdc.heartbeat()
     assert cdc._last_heartbeat_at is not None
-    assert cur.execute.called
-    sql = cur.execute.call_args[0][0]
-    assert "pg_logical_emit_message" in sql
+    sqls = [call.args[0] for call in cur.execute.call_args_list]
+    assert not any("pg_logical_emit_message" in s for s in sqls), sqls
+    assert any("pg_replication_slot_advance" in s for s in sqls), sqls
+    assert cdc.consistent_point_lsn == "0/900"
 
 
 def test_sqlserver_and_oracle_have_incremental_chunk() -> None:

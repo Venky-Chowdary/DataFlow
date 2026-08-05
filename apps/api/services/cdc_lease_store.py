@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from services.brand_env import getenv_brand
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -768,14 +769,14 @@ _STORE_LOCK = threading.RLock()
 
 def redis_url_from_env() -> str:
     return (
-        os.getenv("DATAFLOW_CDC_LEASE_REDIS_URL")
-        or os.getenv("DATAFLOW_REDIS_URL")
+        getenv_brand("CDC_LEASE_REDIS_URL")
+        or getenv_brand("REDIS_URL")
         or ""
     ).strip()
 
 
 def configured_backend_name() -> str:
-    raw = (os.getenv("DATAFLOW_CDC_LEASE_BACKEND") or "auto").strip().lower()
+    raw = (getenv_brand("CDC_LEASE_BACKEND") or "auto").strip().lower()
     if raw in {"file", "redis", "memory"}:
         return raw
     return "auto"
@@ -801,11 +802,11 @@ def build_store(backend: str | None = None) -> LeaseStore:
                 "DATAFLOW_CDC_LEASE_BACKEND=redis requires "
                 "DATAFLOW_CDC_LEASE_REDIS_URL or DATAFLOW_REDIS_URL"
             )
-        prefix = (os.getenv("DATAFLOW_CDC_LEASE_REDIS_PREFIX") or "").strip()
+        prefix = (getenv_brand("CDC_LEASE_REDIS_PREFIX") or "").strip()
         return RedisLeaseStore(url, key_prefix=prefix)
     if name == "file":
-        path = os.getenv("DATAFLOW_CDC_LEASE_PATH", "").strip() or None
-        data_dir = os.getenv("DATAFLOW_CDC_LEASE_DIR", "").strip() or None
+        path = getenv_brand("CDC_LEASE_PATH", "").strip() or None
+        data_dir = getenv_brand("CDC_LEASE_DIR", "").strip() or None
         return FileLeaseStore(path=path, data_dir=data_dir)
     raise LeaseStoreError(f"Unknown CDC lease backend: {name!r}")
 

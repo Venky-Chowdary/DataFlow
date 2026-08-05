@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Data Pilot Agent
+Datawrap — Datawrap Pilot Agent
 
 Anthropic/Cursor-style agent: full data context, tool use, natural conversation.
 Answers any data question and performs work in the app when asked.
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -28,10 +29,9 @@ from .tools import (
 )
 
 logger = logging.getLogger(__name__)
-# Per-provider hard cap. Client abort is 120s — keep total LLM attempts well under that
+# Per-provider hard cap. Client abort is 120s — keep native LLM attempts under that
 # so the local agent can always answer before the browser times out.
 _LLM_TURN_TIMEOUT_S = 20
-_LLM_TOTAL_BUDGET_S = 55
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pilot-llm")
 
 
@@ -154,11 +154,13 @@ def _render_transfer(tool: str, o: dict[str, Any]) -> str:
     )
     lines = [f"{route} — sync `{plan.get('sync_mode')}`"]
 
-    dest_note = (
-        "destination table exists"
-        if dst.get("table_exists")
-        else "destination table will be created"
-    )
+    dest_exists = dst.get("table_exists")
+    if dest_exists is True:
+        dest_note = "destination table exists"
+    elif dest_exists is False:
+        dest_note = "destination table will be created"
+    else:
+        dest_note = "destination schema pending — not proven create-new"
     lines.append(
         f"• Mapped **{plan.get('mapped_count')}** of {src.get('column_count')} source "
         f"columns ({dest_note})."
@@ -173,20 +175,26 @@ def _render_transfer(tool: str, o: dict[str, Any]) -> str:
         )
 
     lossy = plan.get("lossy_conversions") or []
+    conversions = plan.get("type_conversions") or []
+    if not lossy and conversions:
+        # Older plans may only mark lossy_cast — still refuse round-trip invent.
+        lossy = [
+            c for c in conversions
+            if str(c.get("fidelity") or "").strip().lower() in {"lossy_cast", "cast", "mutate"}
+        ]
     if lossy:
-        lines.append(f"• **{len(lossy)} lossy cast(s)** — data changes shape on write:")
+        lines.append(f"• **{len(lossy)} fidelity risk conversion(s)** — Accept risk / remap before write:")
         for c in lossy[:5]:
             lines.append(
                 f"  – `{c.get('source_column')}` {c.get('from_type')} → "
                 f"{c.get('to_type')} on `{c.get('target_column')}`"
+                + (f" ({c.get('fidelity')})" if c.get("fidelity") else "")
             )
-    else:
-        conversions = plan.get("type_conversions") or []
-        if conversions:
-            lines.append(
-                f"• {len(conversions)} type conversion(s), none lossy — "
-                "every value round-trips."
-            )
+    elif conversions:
+        lines.append(
+            f"• {len(conversions)} type conversion(s) stamped preserve — "
+            "no cast/mutate/lossy fidelity risks in the plan."
+        )
 
     gates = pf.get("gates") or []
     if gates:
@@ -283,6 +291,9 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
     had understood and was offering a tour. Operators reading "I can help with…"
     after asking for an export or a transfer start thought the pilot ignored them.
     """
+    from .tools import _looks_like_live_data_fetch
+    from .example_phrases import example_connector_name, example_dest_connector_name
+
     lower = (message or "").strip().lower()
     connectors = ctx.get("connectors") or ctx.get("saved_connectors") or []
     conn_names = [
@@ -290,25 +301,36 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
         for c in connectors
         if isinstance(c, dict) and c.get("name")
     ][:4]
+    src_ex = conn_names[0] if conn_names else example_connector_name(ctx)
+    dst_ex = example_dest_connector_name(ctx, source_hint=src_ex)
 
     suggestions: list[str] = []
     if any(w in lower for w in ("export", "download", "csv", "parquet", "excel")):
         suggestions.append(
-            'I can\'t export files yet — sample the table and use **Query** to pull '
-            'larger result sets: "sample orders on Local Postgres".'
+            f'I can\'t export files yet — sample the table and use **Query** to pull '
+            f'larger result sets: "sample orders on {src_ex}".'
+        )
+    if _looks_like_live_data_fetch(lower) or re.search(
+        r"\b(?:get|fetch|pull|show|sample)\b.+\b(?:from|on|in)\b",
+        lower,
+    ):
+        on_conn = f" on {src_ex}"
+        suggestions.append(
+            f'To pull live rows, name the table and a saved connector: '
+            f'"sample users{on_conn}" or "show orders from {dst_ex}".'
         )
     if any(w in lower for w in ("transfer", "sync", "move", "migrate", "copy", "replicate")):
         suggestions.append(
-            'I can plan a route or open Transfer Studio, but I can\'t start a sync '
-            'myself yet. Try: "plan transfer from Postgres to Snowflake" or '
-            '"open transfer studio".'
+            'I can plan a transfer and stage a start — nothing moves until you Confirm. '
+            f'Try: "plan transfer of orders from {src_ex} to {dst_ex}" or '
+            f'"transfer orders from {src_ex} to {dst_ex} as upsert".'
         )
     if any(w in lower for w in ("delete", "drop", "remove", "destroy")):
         suggestions.append(
             "I only run read-only actions and confirmed connector creates — "
             "deletes have to be done in the UI so they can't be triggered by a prompt."
         )
-    if any(w in lower for w in ("schedule", "pipeline", "cron", "every hour", "daily")):
+    if any(w in lower for w in ("schedule", "pipeline", "cron", "every hour", "daily", "nightly")):
         suggestions.append(
             'I can list and trigger existing pipelines: "show my pipelines" or '
             '"run schedule <name> now". Creating a new schedule still needs the UI.'
@@ -323,11 +345,11 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
     ):
         suggestions.append(
             'For live totals name the table and connector: '
-            '"count of orders by status on Local Postgres" or '
-            '"average price in products on Local Postgres".'
+            f'"count of orders by status on {src_ex}" or '
+            f'"average price in products on {src_ex}".'
         )
     if not suggestions:
-        on_conn = f" on {conn_names[0]}" if conn_names else ""
+        on_conn = f" on {src_ex}" if src_ex and src_ex != "your connector" else ""
         suggestions.append(
             "I can count / sum / average live tables, sample and profile rows, "
             "introspect schemas, map columns, list jobs and pipelines, and open "
@@ -350,8 +372,42 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
     return head + "\n\n" + "\n".join(f"• {s}" for s in suggestions[:3])
 
 
+def _llm_unavailable_footnote(engine: str, method: str) -> str:
+    """Only when operator explicitly opted into hybrid/cloud polish."""
+    if engine not in {"hybrid", "cloud"}:
+        return ""
+    if method not in {"pilot_local_engine", "greeting"}:
+        return ""
+    try:
+        from ..llm.provider import _AUTH_FAILED_PROVIDERS, pick_narration_provider
+
+        provider, _ = pick_narration_provider()
+        if provider is not None:
+            return ""
+        if _AUTH_FAILED_PROVIDERS & {"openai", "anthropic"}:
+            return (
+                "\n\n— Optional cloud polish is off (API key rejected). "
+                "Local Datawrap Pilot still answered from your workspace. "
+                "Fix the key in **Settings → AI**, or clear hybrid mode."
+            )
+        return (
+            "\n\n— Optional narration polish is off (no Ollama/cloud provider ready). "
+            "Local Datawrap Pilot still answered — that is the primary chatbot."
+        )
+    except Exception:
+        return ""
+
+
+def _with_llm_footnote(resp: CopilotResponse, engine: str) -> CopilotResponse:
+    note = _llm_unavailable_footnote(engine, resp.method or "")
+    if not note or note.strip() in (resp.answer or ""):
+        return resp
+    resp.answer = f"{(resp.answer or '').rstrip()}{note}"
+    return resp
+
+
 def _score_response(resp: CopilotResponse | None) -> float:
-    """Prefer grounded workspace answers over fluent ungrounded LLM prose."""
+    """Prefer grounded workspace answers; let a tool-using LLM beat local templates."""
     if not isinstance(resp, CopilotResponse):
         return -1.0
     score = float(resp.confidence or 0)
@@ -366,10 +422,19 @@ def _score_response(resp: CopilotResponse | None) -> float:
     if ok > 0:
         score += 1.0
     else:
-        # Cloud prose with zero workspace checks loses to local tool answers
-        if any(m in method for m in ("anthropic", "openai", "ollama", "llm")):
-            score -= 1.35
         score -= fail * 0.1
+
+    is_llm = any(m in method for m in ("anthropic", "openai", "ollama", "llm"))
+    is_local = "local" in method
+
+    # Ungrounded fluent LLM prose loses to local refuse / clarify.
+    if is_llm and ok == 0:
+        score -= 1.35
+    # Tool-using optional polish can beat templates slightly when opted in.
+    elif is_llm and ok > 0:
+        score += 0.25
+    elif is_local and ok > 0:
+        score += 0.35
 
     if resp.pending_actions:
         score += 0.45
@@ -392,6 +457,13 @@ def _score_response(resp: CopilotResponse | None) -> float:
     return score
 
 
+def _resolve_pilot_engine() -> str:
+    """Delegate to provider SSOT — local is primary; hybrid is opt-in polish only."""
+    from ..llm.provider import resolve_pilot_engine
+
+    return resolve_pilot_engine()
+
+
 @dataclass
 class PilotTurn:
     tool_results: list[ToolResult] = field(default_factory=list)
@@ -402,10 +474,12 @@ class PilotTurn:
 
 class DataPilotAgent:
     """
-    Primary agent — like Claude with tools or a Cursor agent.
+    Primary agent — ChatGPT-style tool loop when an LLM key is configured,
+    otherwise a deterministic local planner that still executes real tools.
+
     1. Build full platform + data context
-    2. Run tool loop (Anthropic tool_use or local inference)
-    3. Compose natural-language answer grounded in real data
+    2. Run tool loop (Anthropic/OpenAI when available, else local NL routing)
+    3. Compose a natural-language answer grounded in real tool results
     """
 
     MAX_TOOL_ITERATIONS = 6
@@ -415,6 +489,10 @@ class DataPilotAgent:
         self.analyst = get_data_analyst()
         self.context_builder = get_context_builder()
         self._anthropic = None
+        import uuid
+
+        # Same-process multi-turn when the UI hasn't sent pilot_session_id yet.
+        self._ephemeral_session = f"ephemeral-{uuid.uuid4().hex[:12]}"
 
     @property
     def anthropic(self):
@@ -434,6 +512,8 @@ class DataPilotAgent:
     ) -> CopilotResponse:
         message = message.strip()
         lower_msg = message.lower()
+        history = history or []
+        data_context = self._ensure_data_context(data_context, history)
         if not message or lower_msg in {
             "hi",
             "hello",
@@ -446,11 +526,13 @@ class DataPilotAgent:
         }:
             return CopilotResponse(
                 answer=(
-                    "I'm **Data Pilot** — ask me anything about your workspace. "
-                    "I can count and aggregate live tables, sample and profile "
-                    "rows, inspect schemas, triage jobs, and open the right screen. "
-                    'Try: "how many rows in airports on Local Postgres" or '
-                    '"count of orders by status".'
+                    "I'm **Datawrap Pilot** — ask me anything about your workspace. "
+                    "I can count and aggregate live tables, sample and profile rows, "
+                    "inspect schemas, plan or stage transfers (**Confirm** before anything moves), "
+                    "triage jobs, and open Fix bad data in Transfer Studio. "
+                    'Try: "how many rows in airports on Local Postgres", '
+                    '"plan transfer of orders from Local Postgres to Warehouse", '
+                    'or "fix bad data".'
                 ),
                 intent="greeting",
                 confidence=1.0,
@@ -460,54 +542,92 @@ class DataPilotAgent:
 
         # Meta questions stay on the local agent — never RAG-dump ontology shards
         # and never race cloud LLMs for a "who are you" answer.
-        from .tools import _is_meta_pilot_question
+        from .tools import _is_meta_pilot_question, _looks_like_unsupported_mutation
         if _is_meta_pilot_question(lower_msg):
             ctx = self.context_builder.build(data_context, message)
-            return self._local_agent(message, history or [], ctx, data_context)
+            return self._local_agent(message, history, ctx, data_context)
+
+        # Delete / export / create-schedule paraphrases must refuse locally —
+        # never race cloud or RAG into a fluent "here's how to delete…" answer.
+        if _looks_like_unsupported_mutation(lower_msg):
+            ctx = self.context_builder.build(data_context, message)
+            return self._local_agent(message, history, ctx, data_context)
 
         ctx = self.context_builder.build(data_context, message)
-        system = self._build_system_prompt(ctx)
 
+        # Local always works offline. Hybrid/cloud when keys exist (auto detects).
+        engine = _resolve_pilot_engine()
+        local = self._local_agent(message, history or [], ctx, data_context)
+        if engine == "local":
+            return local
+
+        system = self._build_system_prompt(ctx, data_context)
+
+        # Product path: deterministic tools once, then optional LLM narration.
+        # Never re-run mutating tools in a native LLM race (orphan Confirm acks).
+        polished = self._polish_with_llm(message, history or [], local, system)
+        local_ok = sum(1 for t in (local.tools_used or []) if t.get("success"))
+        if local.pending_actions or local_ok > 0 or local.needs_clarification:
+            return _with_llm_footnote(polished, engine)
+
+        # Ops failures with a recoverable clarification must NOT race the LLM —
+        # that path dumps synonym/telecom RAG junk after a missing-table sample.
+        local_errs = " ".join(
+            str(t.get("error") or "") for t in (local.tools_used or []) if not t.get("success")
+        ).lower()
+        if any(
+            needle in local_errs
+            for needle in (
+                "no table",
+                "did you mean",
+                "which table",
+                "which connector",
+                "sample failed",
+                "does not exist",
+                "undefinedtable",
+                "list tables on",
+            )
+        ):
+            return _with_llm_footnote(polished, engine)
+
+        # Local had nothing grounded — allow a single native LLM tool loop for hard paraphrases.
         import time as _time
         from concurrent.futures import wait, FIRST_COMPLETED
 
-        # Race local agent vs cloud LLMs. Prefer a finished LLM answer, but never
-        # make the UI wait on a hung provider once the local agent is ready.
-        local_fut = _executor.submit(
-            self._local_agent, message, history or [], ctx, data_context
-        )
         llm_futs: list = []
-
-        openai_ready = False
-        try:
-            from ..llm.provider import DataTransferOpenAIProvider
-
-            openai_ready = DataTransferOpenAIProvider().is_available()
-        except Exception:
-            openai_ready = False
-
-        if self.anthropic.is_available():
-            llm_futs.append(
-                _executor.submit(
-                    self._anthropic_agent_loop, message, history or [], system, data_context
-                )
-            )
-        if openai_ready:
-            llm_futs.append(
-                _executor.submit(
-                    self._openai_agent, message, history or [], system, data_context
-                )
-            )
+        # Self-hosted Ollama first, then cloud — OpenAI is optional.
         if self._ollama_available_quick():
             llm_futs.append(
                 _executor.submit(
                     self._ollama_agent, message, history or [], system, data_context
                 )
             )
+        elif self.anthropic.is_available():
+            llm_futs.append(
+                _executor.submit(
+                    self._anthropic_agent_loop, message, history or [], system, data_context
+                )
+            )
+        else:
+            openai_ready = False
+            try:
+                from ..llm.provider import DataTransferOpenAIProvider
 
-        pending = {local_fut, *llm_futs}
-        deadline = _time.monotonic() + _LLM_TOTAL_BUDGET_S
-        local_result: CopilotResponse | None = None
+                openai_ready = DataTransferOpenAIProvider().is_available()
+            except Exception:
+                openai_ready = False
+            if openai_ready:
+                llm_futs.append(
+                    _executor.submit(
+                        self._openai_agent, message, history or [], system, data_context
+                    )
+                )
+
+        if not llm_futs:
+            return _with_llm_footnote(polished, engine)
+
+        pending = set(llm_futs)
+        deadline = _time.monotonic() + _LLM_TURN_TIMEOUT_S
         best_llm: CopilotResponse | None = None
 
         while pending and _time.monotonic() < deadline:
@@ -517,34 +637,205 @@ class DataPilotAgent:
                 try:
                     result = fut.result()
                 except Exception as exc:
-                    logger.warning("Data Pilot worker failed: %s", exc)
-                    continue
-                if fut is local_fut:
-                    local_result = result
-                    # Tiny grace so a nearly-finished LLM can still win; don't stall the UI.
-                    deadline = min(deadline, _time.monotonic() + 0.4)
+                    logger.warning("Datawrap Pilot worker failed: %s", exc)
                     continue
                 if isinstance(result, CopilotResponse):
                     if best_llm is None or _score_response(result) > _score_response(best_llm):
                         best_llm = result
 
-        candidates = [c for c in (best_llm, local_result) if isinstance(c, CopilotResponse)]
-        if candidates:
-            return max(candidates, key=_score_response)
-        try:
-            return local_fut.result(timeout=5)
-        except Exception as exc:
-            logger.warning("Data Pilot local agent failed: %s", exc)
-            return CopilotResponse(
-                answer=(
-                    "Data Pilot hit an internal error answering that. "
-                    "Retry, or ask about a specific job_id / preflight run_id."
-                ),
-                intent="error",
-                confidence=0.2,
-                method="pilot_error",
-                suggested_prompts=self._starter_prompts()[:3],
+        candidates = [c for c in (best_llm, polished, local) if isinstance(c, CopilotResponse)]
+        return _with_llm_footnote(max(candidates, key=_score_response), engine)
+
+    def _run_local_recovery(
+        self,
+        turn: PilotTurn,
+        message: str,
+        data_context: dict | None,
+    ) -> None:
+        """OpenAI-style follow-up tools when the first plan fails closed.
+
+        Railway-class chatbots don't stop at \"connector not found\" — they list
+        what exists and tell the operator the next accurate step.
+        """
+        names = {tr.name for tr in turn.tool_results}
+        def _is_connector_miss(err: str) -> bool:
+            low = (err or "").lower()
+            return any(
+                needle in low
+                for needle in (
+                    "no connector matched",
+                    "which connector",
+                    "connector not found",
+                    "connector not found in store",
+                    "name a saved connector",
+                )
             )
+
+        connector_miss = any(
+            (not tr.success) and tr.error and _is_connector_miss(tr.error)
+            for tr in turn.tool_results
+        )
+        if connector_miss and "list_connectors" not in names:
+            tr = self.tools.execute("list_connectors", {})
+            turn.tool_results.append(tr)
+            self._append_tool_actions(turn, tr)
+            if tr.success and not turn.needs_clarification:
+                conns = (tr.output or {}).get("connectors") or []
+                if conns:
+                    listed = ", ".join(
+                        f"**{c.get('name')}**" for c in conns[:6] if c.get("name")
+                    )
+                    turn.needs_clarification = (
+                        "Which saved connector should I use? "
+                        f"{listed}. Or say e.g. "
+                        '"create a postgres connector at host…".'
+                    )
+                else:
+                    turn.needs_clarification = (
+                        "No saved connectors yet. Add one under **Connectors**, or paste a "
+                        "connection URL and ask me to create it (Confirm required)."
+                    )
+
+        # Dataset miss → list uploads so the operator can pick a real name.
+        dataset_miss = any(
+            (not tr.success)
+            and tr.error
+            and "dataset" in tr.error.lower()
+            and "not found" in tr.error.lower()
+            for tr in turn.tool_results
+        )
+        if dataset_miss and "list_datasets" not in names:
+            ds = self.tools.execute("list_datasets", {})
+            turn.tool_results.append(ds)
+            self._append_tool_actions(turn, ds)
+            if ds.success and not turn.needs_clarification:
+                datasets = (ds.output or {}).get("datasets") or []
+                if datasets:
+                    listed = ", ".join(
+                        f"**{d.get('name')}**" for d in datasets[:6] if d.get("name")
+                    )
+                    turn.needs_clarification = (
+                        "I couldn't find that dataset. Indexed uploads: "
+                        f"{listed}. Name one exactly, or upload in **New Transfer**."
+                    )
+                else:
+                    turn.needs_clarification = (
+                        "No uploaded datasets indexed yet. Upload a CSV/JSON in "
+                        "**New Transfer**, then ask me to analyze it."
+                    )
+
+        # Aggregate missing table → list objects on the named connector.
+        for tr in list(turn.tool_results):
+            if tr.name != "aggregate_data" or tr.success or not tr.error:
+                continue
+            if "which table" not in tr.error.lower():
+                continue
+            if "list_connector_objects" in {t.name for t in turn.tool_results}:
+                break
+            # Prefer connector from the failed tool args if present in error/output.
+            cname = ""
+            # Recover from sibling planned args via clarification text bold name.
+            import re as _re
+
+            m = _re.search(r"on \*\*([^*]+)\*\*", tr.error or "")
+            if m:
+                cname = m.group(1).strip()
+            if not cname:
+                # Fall back: ask list_connectors if we cannot scope.
+                continue
+            objs = self.tools.execute("list_connector_objects", {"connector_name": cname})
+            turn.tool_results.append(objs)
+            self._append_tool_actions(turn, objs)
+            if objs.success and not turn.needs_clarification:
+                rows = (objs.output or {}).get("objects") or (objs.output or {}).get("tables") or []
+                table_names = []
+                for o in rows[:12]:
+                    if isinstance(o, dict) and (o.get("name") or o.get("table")):
+                        table_names.append(str(o.get("name") or o.get("table")))
+                    elif isinstance(o, str):
+                        table_names.append(o)
+                if table_names:
+                    turn.needs_clarification = (
+                        f"Which table on **{cname}**? "
+                        + ", ".join(f"`{n}`" for n in table_names)
+                        + '. Say e.g. "from orders".'
+                    )
+            break
+
+        # Suggestions with no active dataset → list uploads so the operator can pick.
+        for tr in list(turn.tool_results):
+            if tr.name != "profile_quality_rules" or not tr.success:
+                continue
+            cols = int((tr.output or {}).get("column_count") or 0)
+            if cols > 0:
+                continue
+            if "list_datasets" not in {t.name for t in turn.tool_results}:
+                ds = self.tools.execute("list_datasets", {})
+                turn.tool_results.append(ds)
+                self._append_tool_actions(turn, ds)
+            # Live focus: sample the remembered table so suggestions aren't empty.
+            try:
+                from .working_memory import get_working_memory
+
+                sid = self._session_id(data_context)
+                focus = get_working_memory().get_focus(sid) if sid else None
+                if (
+                    focus
+                    and focus.table
+                    and "sample_connector_object" not in {t.name for t in turn.tool_results}
+                ):
+                    sample_args = {"table": focus.table, "limit": 50}
+                    if focus.connector_name:
+                        sample_args["connector_name"] = focus.connector_name
+                    elif focus.connector_id:
+                        sample_args["connector_id"] = focus.connector_id
+                    sample = self.tools.execute("sample_connector_object", sample_args)
+                    turn.tool_results.append(sample)
+                    self._append_tool_actions(turn, sample)
+            except Exception:
+                pass
+            break
+
+        # Uploaded-dataset compare miss → list datasets (and live tables if focused).
+        for tr in list(turn.tool_results):
+            if tr.name != "compare_datasets" or tr.success or not tr.error:
+                continue
+            if "not found" not in tr.error.lower():
+                continue
+            if "list_datasets" not in {t.name for t in turn.tool_results}:
+                ds = self.tools.execute("list_datasets", {})
+                turn.tool_results.append(ds)
+                self._append_tool_actions(turn, ds)
+            try:
+                from .working_memory import get_working_memory
+
+                sid = self._session_id(data_context)
+                focus = get_working_memory().get_focus(sid) if sid else None
+                if (
+                    focus
+                    and (focus.connector_name or focus.connector_id)
+                    and "list_connector_objects" not in {t.name for t in turn.tool_results}
+                ):
+                    args = {}
+                    if focus.connector_name:
+                        args["connector_name"] = focus.connector_name
+                    else:
+                        args["connector_id"] = focus.connector_id
+                    objs = self.tools.execute("list_connector_objects", args)
+                    turn.tool_results.append(objs)
+                    self._append_tool_actions(turn, objs)
+                    if objs.success and not turn.needs_clarification:
+                        names = (objs.output or {}).get("objects") or []
+                        listed = ", ".join(f"`{n}`" for n in names[:12] if n)
+                        turn.needs_clarification = (
+                            f"{tr.error} Those look like live tables — on "
+                            f"**{focus.connector_name or 'this connector'}** I see: "
+                            f"{listed or 'none'}. "
+                            'Try: "diff schema orders on PilotSQLite vs orders on Warehouse".'
+                        )
+            except Exception:
+                pass
+            break
 
     @staticmethod
     def _ollama_available_quick() -> bool:
@@ -562,6 +853,10 @@ class DataPilotAgent:
             if err and (
                 err.startswith("Which ")
                 or "did you mean" in err.lower()
+                or "no connector matched" in err.lower()
+                or "which connector" in err.lower()
+                or "connector not found" in err.lower()
+                or ("dataset" in err.lower() and "not found" in err.lower())
                 or tr.name in ("run_schedule_now", "get_schedule", "open_schedule", "create_connector")
             ):
                 turn.needs_clarification = err
@@ -582,7 +877,7 @@ class DataPilotAgent:
                 "mcp": "MCP",
                 "docs": "Docs",
                 "benchmarks": "Proofs",
-                "pilot": "Data Pilot",
+                "pilot": "Datawrap Pilot",
             }
             screen = out.get("screen")
             turn.actions.append({
@@ -644,13 +939,15 @@ class DataPilotAgent:
 
         if tr.name == "run_schedule_now":
             turn.pending_actions.append({
-                "id": f"run_schedule:{out.get('schedule_id')}",
+                "id": f"run_schedule:{out.get('ack_id') or out.get('schedule_id')}",
                 "type": "run_schedule",
                 "label": out.get("label") or "Run pipeline now",
                 "risk": "mutate",
                 "payload": {
+                    "ack_id": out.get("ack_id"),
                     "schedule_id": out.get("schedule_id"),
                     "name": out.get("name"),
+                    "preview": out.get("preview") or {},
                 },
             })
             turn.actions.append({
@@ -713,6 +1010,12 @@ class DataPilotAgent:
             if not tool_calls:
                 text = response.get("content", "").strip()
                 if text:
+                    self._commit_memory(
+                        [(tr.name, {}) for tr in turn.tool_results],
+                        turn,
+                        data_context,
+                    )
+                    self._run_local_recovery(turn, message, data_context)
                     return CopilotResponse(
                         answer=text,
                         intent=intent,
@@ -759,10 +1062,114 @@ class DataPilotAgent:
     def _session_id(data_context: dict | None) -> str:
         return str((data_context or {}).get("pilot_session_id") or "").strip()
 
+    def _ensure_data_context(
+        self,
+        data_context: dict | None,
+        history: list[dict] | None = None,
+    ) -> dict:
+        """Guarantee a session id so follow-ups / result refs work like Railway chat.
+
+        The web UI sends ``pilot_session_id`` per conversation. API callers and
+        tests often omit it — without a fallback, \"only paid ones\" and
+        \"analyze that\" become amnesiac dead-ends. Fall back to this agent's
+        ephemeral id so same-process multi-turn stays coherent.
+        """
+        ctx = dict(data_context or {})
+        if str(ctx.get("pilot_session_id") or "").strip():
+            return ctx
+        ctx["pilot_session_id"] = self._ephemeral_session
+        # Keep a short transcript digest for LLM narration (not used for hashing).
+        if history:
+            ctx["_history_turns"] = len(history)
+        return ctx
+
+    def _polish_with_llm(
+        self,
+        message: str,
+        history: list[dict],
+        local: CopilotResponse,
+        system: str,
+    ) -> CopilotResponse:
+        """Narrate grounded local tool results with a cloud LLM when available.
+
+        Tools stay deterministic (local). The LLM only rewrites the answer in
+        natural ChatGPT-quality prose — never invents new facts.
+        """
+        tools = local.tools_used or []
+        ok = sum(1 for t in tools if t.get("success"))
+        if ok == 0 and not local.pending_actions:
+            return local
+
+        provider = None
+        method = "llm_polish"
+        try:
+            from ..llm.provider import pick_narration_provider
+
+            provider, method = pick_narration_provider()
+        except Exception:
+            return local
+        if provider is None:
+            return local
+
+        tool_bits = []
+        for t in tools[:8]:
+            tool_bits.append(
+                f"- {t.get('name')}: {'ok' if t.get('success') else 'fail'} — {t.get('summary')}"
+            )
+        history_text = "\n".join(
+            f"{m.get('role', 'user').capitalize()}: {m.get('content', '')}"
+            for m in (history or [])[-6:]
+            if (m.get("content") or "").strip()
+        )
+        prompt = f"""Rewrite the Datawrap Pilot answer below in clear, natural product language.
+
+Rules:
+- Keep every fact from the draft answer and tool summaries — do not invent IDs, row counts, or connectors
+- Do not mention tools, APIs, or method names
+- If the draft asks a clarification question, keep it
+- If Confirm is required, say so plainly
+- Be concise (2–8 short sentences or a short bullet list)
+
+Tool evidence:
+{chr(10).join(tool_bits) or 'None'}
+
+History:
+{history_text or 'None'}
+
+User: {message}
+
+Draft answer:
+{local.answer}
+"""
+        try:
+            response = provider.generate(prompt, system=system, max_tokens=900)
+        except Exception:
+            return local
+        if not response.success or not (response.content or "").strip():
+            return local
+        polished = response.content.strip()
+        # Guardrail: empty or tiny polish is useless; keep local.
+        if len(polished) < 20:
+            return local
+        return CopilotResponse(
+            answer=polished,
+            intent=local.intent,
+            confidence=min(0.96, float(local.confidence or 0.9) + 0.03),
+            method=method,
+            reasoning=f"Local tools + {method.split('_')[0].title()} narration",
+            suggested_actions=local.suggested_actions,
+            pending_actions=local.pending_actions,
+            needs_clarification=local.needs_clarification,
+            suggested_prompts=local.suggested_prompts,
+            data_insight=local.data_insight,
+            tools_used=local.tools_used,
+        )
+
     def _plan_with_memory(
         self,
         message: str,
         data_context: dict | None,
+        history: list[dict] | None = None,
     ) -> list[tuple[str, dict]]:
         """Resolve this turn against session working memory, then plan tools.
 
@@ -773,34 +1180,98 @@ class DataPilotAgent:
         """
         from .followup import (
             inherit_focus_slots,
+            looks_like_elliptical_edit,
+            looks_like_followup,
+            looks_like_fresh_intent,
+            pending_from_assistant_clarification,
             resolve_followup,
             resolve_pending_answer,
+            resolve_platform_coreference,
+            resolve_table_coreference_tools,
         )
         from .working_memory import get_working_memory
 
         session_id = self._session_id(data_context)
         if not session_id:
+            platform = resolve_platform_coreference(message, history)
+            if platform:
+                return platform
             return infer_tools_from_message(message)
 
         memory = get_working_memory()
         focus = memory.get_focus(session_id)
 
         pending = memory.get_pending(session_id)
+        if not pending:
+            soft = pending_from_assistant_clarification(history)
+            if soft:
+                answered = resolve_pending_answer(message, soft)
+                if answered:
+                    return [answered]
+                # Typo / non-answer against a transcript clarification — promote
+                # to hard pending and re-ask (same as memory-backed slots).
+                if not looks_like_fresh_intent(message) and not looks_like_elliptical_edit(message):
+                    memory.remember_pending(session_id, soft)
+                    return []
         if pending:
             answered = resolve_pending_answer(message, pending)
             if answered:
                 memory.clear_pending(session_id)
                 return [answered]
+            # Fresh intents and elliptical edits clear the slot; typos keep it open.
+            if looks_like_fresh_intent(message) or looks_like_elliptical_edit(message):
+                memory.clear_pending(session_id)
+            else:
+                return []
+
+        platform = resolve_platform_coreference(message, history)
+        if platform:
+            return platform
+
+        table_coref = resolve_table_coreference_tools(message, focus)
+        if table_coref:
+            return table_coref
 
         planned = infer_tools_from_message(message)
+        # Elliptical edits beat a fresh under-specified parse ("what about average
+        # amount" would otherwise lose the remembered WHERE / table).
+        if focus and looks_like_followup(message, focus):
+            low = message.lower().strip()
+            # Fully grounded fresh aggregate (explicit table ≠ focus) wins.
+            for name, args in planned:
+                if name != "aggregate_data":
+                    continue
+                explicit_table = str((args or {}).get("table") or "").strip().lower()
+                if explicit_table and explicit_table != (focus.table or "").lower():
+                    return inherit_focus_slots(planned, focus)
+                if explicit_table and (args or {}).get("connector_name"):
+                    return planned
+            # Stored-sample row filters stay on filter_result, not a new aggregate.
+            if focus.result_id and re.match(r"^(?:filter|where)\b", low):
+                if planned and any(n == "filter_result" for n, _ in planned):
+                    return inherit_focus_slots(planned, focus)
+                return [("filter_result", {"result_id": focus.result_id})]
+            edit = resolve_followup(message, focus)
+            if edit is not None:
+                return [("aggregate_data", edit.as_tool_args())]
+            # Coreference with focus but no metric edit — still prefer table tools.
+            if table_coref := resolve_table_coreference_tools(message, focus):
+                return table_coref
         if not planned:
             edit = resolve_followup(message, focus)
-            if edit is not None and not edit.missing:
-                return [("aggregate_data", edit.as_tool_args())]
             if edit is not None:
-                # Known subject, missing measure — let the tool ask against the
-                # real schema rather than answering the wrong question.
+                # Known subject (even with missing measure) — let the tool ask
+                # against the real schema rather than answering the wrong question.
                 return [("aggregate_data", edit.as_tool_args())]
+            # Result follow-ups when focus has a stored sample/query.
+            if focus and focus.result_id:
+                low = message.lower().strip()
+                if re.search(r"\b(?:analyze|profile|summarize)\b.*\b(?:that|this|it|result|sample)\b", low) or low in {
+                    "analyze that", "analyze this", "profile that", "summarize that",
+                }:
+                    return [("analyze_result", {"result_id": focus.result_id})]
+                if re.match(r"^(?:filter|where)\b", low):
+                    return [("filter_result", {"result_id": focus.result_id})]
         return inherit_focus_slots(planned, focus)
 
     def _commit_memory(
@@ -818,6 +1289,19 @@ class DataPilotAgent:
 
         memory = get_working_memory()
         args_by_tool = {name: args for name, args in planned}
+
+        # Remember the asked subject even when the tool fails (missing connector)
+        # so elliptical follow-ups like "only paid ones" still have a table/metric.
+        for name, args in planned:
+            if name != "aggregate_data" or not isinstance(args, dict):
+                continue
+            update = {
+                k: args.get(k)
+                for k in ("table", "connector_name", "metric", "column", "group_by", "where")
+                if args.get(k)
+            }
+            if update.get("table") or update.get("connector_name"):
+                memory.update_focus(session_id, **update)
 
         for tr in turn.tool_results:
             if tr.success:
@@ -838,6 +1322,15 @@ class DataPilotAgent:
         ctx = data_context or {}
         session_id = str(ctx.get("pilot_session_id") or "").strip()
         last_result_id = str(ctx.get("last_result_id") or "").strip()
+        if not last_result_id and session_id and name in ("analyze_result", "filter_result"):
+            try:
+                from .working_memory import get_working_memory
+
+                focus = get_working_memory().get_focus(session_id)
+                if focus and focus.result_id:
+                    last_result_id = focus.result_id
+            except Exception:
+                pass
         if session_id and name in (
             "sample_connector_object",
             "aggregate_data",
@@ -862,13 +1355,118 @@ class DataPilotAgent:
         if not openai.is_available():
             return None
 
-        planned = self._plan_with_memory(message, data_context)
+        intent = self._detect_intent(message)
+        turn = PilotTurn()
+        messages: list[dict] = []
+        for m in history[-10:]:
+            role = m.get("role", "user")
+            if role not in ("user", "assistant"):
+                continue
+            content = (m.get("content") or "").strip()
+            if content:
+                messages.append({"role": role, "content": content})
+        messages.append({"role": "user", "content": message})
+
+        # Prefer native tool calling; fall back to local plan + narration.
+        used_native = False
+        for _ in range(self.MAX_TOOL_ITERATIONS):
+            response = openai.generate_agent(
+                messages=messages,
+                system=system,
+                tools=TOOL_DEFINITIONS,
+                max_tokens=4096,
+            )
+            if not response.get("success"):
+                break
+            used_native = True
+            tool_calls = response.get("tool_calls") or []
+            if not tool_calls:
+                text = (response.get("content") or "").strip()
+                if text:
+                    self._commit_memory(
+                        [(tr.name, {}) for tr in turn.tool_results],
+                        turn,
+                        data_context,
+                    )
+                    self._run_local_recovery(turn, message, data_context)
+                    return CopilotResponse(
+                        answer=text,
+                        intent=intent,
+                        confidence=0.92,
+                        method="openai_agent",
+                        reasoning=f"OpenAI tool loop, {len(turn.tool_results)} tool calls",
+                        suggested_actions=turn.actions,
+                        pending_actions=turn.pending_actions,
+                        needs_clarification=turn.needs_clarification,
+                        suggested_prompts=self._follow_ups(message, turn),
+                        data_insight=self._data_insight_from_turn(turn),
+                        tools_used=_tools_used(turn),
+                    )
+                break
+
+            assistant_msg: dict = {
+                "role": "assistant",
+                "content": response.get("content") or None,
+                "tool_calls": [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": json.dumps(tc.get("input") or {}, default=json_default),
+                        },
+                    }
+                    for tc in tool_calls
+                ],
+            }
+            messages.append(assistant_msg)
+            for tc in tool_calls:
+                args = self._with_result_context(tc["name"], tc.get("input") or {}, data_context)
+                tr = self.tools.execute(tc["name"], args)
+                turn.tool_results.append(tr)
+                self._append_tool_actions(turn, tr)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": json.dumps(
+                        tr.output if tr.success else {"error": tr.error},
+                        default=json_default,
+                    ),
+                })
+
+        if used_native and turn.tool_results:
+            # Tool loop exhausted without a final text — compose locally.
+            self._commit_memory(
+                [(tr.name, {}) for tr in turn.tool_results],
+                turn,
+                data_context,
+            )
+            self._run_local_recovery(turn, message, data_context)
+            ctx = get_context_builder().build(data_context)
+            insight = self._data_insight_from_turn(turn)
+            answer = self._compose_local_answer(message, intent, turn, insight, ctx)
+            return CopilotResponse(
+                answer=answer,
+                intent=intent,
+                confidence=0.88,
+                method="openai_agent_compose",
+                suggested_actions=turn.actions,
+                pending_actions=turn.pending_actions,
+                needs_clarification=turn.needs_clarification,
+                suggested_prompts=self._follow_ups(message, turn),
+                data_insight=insight,
+                tools_used=_tools_used(turn),
+            )
+
+        # Fallback: local NL plan + OpenAI narration (no native tools).
+        planned = self._plan_with_memory(message, data_context, history)
         turn = PilotTurn()
         for name, args in planned:
             tr = self.tools.execute(name, self._with_result_context(name, args, data_context))
             turn.tool_results.append(tr)
             self._append_tool_actions(turn, tr)
         self._commit_memory(planned, turn, data_context)
+        self._run_local_recovery(turn, message, data_context)
 
         tool_context = format_tool_results_for_llm(turn.tool_results)
         history_text = "\n".join(
@@ -885,14 +1483,14 @@ History:
 
 User: {message}
 
-Respond as Data Pilot in natural language. Ground your answer in tool results and context."""
+Respond as Datawrap Pilot in natural language. Ground your answer in tool results and context."""
 
         response = openai.generate(prompt, system=DATA_PILOT_PERSONA, max_tokens=2048)
         if not response.success or not response.content.strip():
             return None
         return CopilotResponse(
             answer=response.content.strip(),
-            intent=self._detect_intent(message),
+            intent=intent,
             confidence=0.9,
             method="openai_agent",
             suggested_actions=turn.actions,
@@ -915,13 +1513,14 @@ Respond as Data Pilot in natural language. Ground your answer in tool results an
         if not ollama.is_available():
             return None
 
-        planned = self._plan_with_memory(message, data_context)
+        planned = self._plan_with_memory(message, data_context, history)
         turn = PilotTurn()
         for name, args in planned:
             tr = self.tools.execute(name, self._with_result_context(name, args, data_context))
             turn.tool_results.append(tr)
             self._append_tool_actions(turn, tr)
         self._commit_memory(planned, turn, data_context)
+        self._run_local_recovery(turn, message, data_context)
 
         tool_context = format_tool_results_for_llm(turn.tool_results)
         history_text = "\n".join(
@@ -938,7 +1537,7 @@ History:
 
 User: {message}
 
-Respond as Data Pilot — grounded in tool results."""
+Respond as Datawrap Pilot — grounded in tool results."""
 
         response = ollama.generate(prompt, system=DATA_PILOT_PERSONA, max_tokens=2048)
         if not response.success or not response.content.strip():
@@ -966,12 +1565,37 @@ Respond as Data Pilot — grounded in tool results."""
         intent = self._detect_intent(message)
         turn = PilotTurn()
 
-        planned = self._plan_with_memory(message, data_context)
+        planned = self._plan_with_memory(message, data_context, history)
+        if not planned:
+            # Typo / non-answer while a clarification is open — re-ask, keep slot.
+            session_id = self._session_id(data_context)
+            if session_id:
+                from .working_memory import get_working_memory
+
+                pending = get_working_memory().get_pending(session_id)
+                if pending and pending.question:
+                    turn.needs_clarification = pending.question
+                    hint = ""
+                    if pending.candidates:
+                        shown = ", ".join(f"**{c}**" for c in pending.candidates[:6])
+                        hint = f"\n\nAvailable: {shown}."
+                    return CopilotResponse(
+                        answer=f"{pending.question}{hint}\n\nI didn't match that reply — try a name from the list, or ask a new question.".strip(),
+                        intent=intent,
+                        confidence=0.78,
+                        method="pilot_local_engine",
+                        reasoning="Re-ask open clarification",
+                        needs_clarification=pending.question,
+                        suggested_prompts=list(pending.candidates or [])[:4] or self._starter_prompts()[:3],
+                        tools_used=[],
+                    )
+
         for name, args in planned:
             tr = self.tools.execute(name, self._with_result_context(name, args, data_context))
             turn.tool_results.append(tr)
             self._append_tool_actions(turn, tr)
         self._commit_memory(planned, turn, data_context)
+        self._run_local_recovery(turn, message, data_context)
 
         # Ground answers in active session IDs when the user asks about failure/status
         # without pasting an ID (Jobs / Validate feed these into data_context).
@@ -1000,7 +1624,7 @@ Respond as Data Pilot — grounded in tool results."""
         navigated = any(tr.name == "navigate" for tr in turn.tool_results)
         has_knowledge = any(tr.name == "search_knowledge" for tr in turn.tool_results)
         has_connector = any(tr.name == "search_connectors" for tr in turn.tool_results)
-        described = any(tr.name == "describe_pilot" for tr in turn.tool_results)
+        described = any(tr.name in ("describe_pilot", "explain_product") for tr in turn.tool_results)
         live_schema = any(
             tr.name in (
                 "list_connector_objects",
@@ -1064,8 +1688,8 @@ Respond as Data Pilot — grounded in tool results."""
             answer=answer,
             intent=intent,
             confidence=confidence,
-            method="pilot_local_agent",
-            reasoning=f"Local agent with {len(turn.tool_results)} tools",
+            method="pilot_local_engine",
+            reasoning=f"Local OpenAI-style tool loop · {len(turn.tool_results)} tools",
             suggested_actions=turn.actions,
             pending_actions=turn.pending_actions,
             needs_clarification=turn.needs_clarification,
@@ -1100,9 +1724,15 @@ Respond as Data Pilot — grounded in tool results."""
                     "mcp": "MCP",
                     "docs": "Docs",
                     "benchmarks": "Proofs",
-                    "pilot": "Data Pilot",
+                    "pilot": "Datawrap Pilot",
                 }
-                parts.append(f"Opening **{labels.get(screen, screen)}** for you.")
+                # When Confirm is still required, do not claim we already opened the screen.
+                if turn.pending_actions:
+                    parts.append(
+                        f"After you Confirm, I'll take you to **{labels.get(screen, screen)}**."
+                    )
+                else:
+                    parts.append(f"Opening **{labels.get(screen, screen)}** for you.")
             elif tr.name in ("open_job", "open_schedule", "start_transfer_studio") and tr.success:
                 parts.append(f"{tr.output.get('label') or 'Opening that screen'} for you.")
             elif tr.name == "list_schedules" and tr.success:
@@ -1153,16 +1783,53 @@ Respond as Data Pilot — grounded in tool results."""
                     parts.append("\n".join(lines))
             elif tr.name == "list_jobs" and tr.success:
                 jobs = tr.output.get("jobs", [])
+                want_failures = any(
+                    w in (message or "").lower()
+                    for w in ("fail", "failed", "failure", "error", "broken")
+                )
+                failed = [
+                    j
+                    for j in jobs
+                    if str(j.get("status") or "").lower()
+                    in {"failed", "cancelled", "error"}
+                ]
                 if jobs:
-                    lines = ["Here are your **recent transfer jobs**:"]
-                    for j in jobs[:5]:
-                        lines.append(
-                            f"• `{j.get('id', '?')}` · {j.get('source', '?')} → {j.get('destination', '?')}: "
-                            f"**{j.get('status')}** ({j.get('records', 0):,} records)"
-                        )
+                    if want_failures:
+                        if failed:
+                            lines = [
+                                f"**{len(failed)}** of your last **{len(jobs)}** job(s) failed:"
+                            ]
+                            show = failed[:5]
+                        else:
+                            lines = [
+                                f"None of your last **{len(jobs)}** job(s) failed "
+                                "(in this window):"
+                            ]
+                            show = jobs[:5]
+                        for j in show:
+                            lines.append(
+                                f"• `{j.get('id', '?')}` · {j.get('source', '?')} -> "
+                                f"{j.get('destination', '?')}: "
+                                f"**{j.get('status')}** ({j.get('records', 0):,} records)"
+                            )
+                        if not failed:
+                            lines.append(
+                                "Open **Jobs** for full history, or paste a job id."
+                            )
+                    else:
+                        lines = ["Here are your **recent transfer jobs**:"]
+                        for j in jobs[:5]:
+                            lines.append(
+                                f"• `{j.get('id', '?')}` · {j.get('source', '?')} -> "
+                                f"{j.get('destination', '?')}: "
+                                f"**{j.get('status')}** ({j.get('records', 0):,} records)"
+                            )
                     parts.append("\n".join(lines))
                 else:
-                    parts.append("No transfer jobs yet. Start one from **New Transfer**.")
+                    parts.append(
+                        "No transfer jobs yet. Ask me to **plan** or **start** a transfer "
+                        "(Confirm required), or open **Transfer Studio**."
+                    )
             elif tr.name == "get_job" and tr.success:
                 job = tr.output or {}
                 lines = [
@@ -1199,11 +1866,28 @@ Respond as Data Pilot — grounded in tool results."""
                 parts.append("\n".join(lines))
             elif tr.name == "get_preflight_run" and tr.success:
                 run = tr.output or {}
+                decision = str(
+                    (
+                        (run.get("proof_bundle") or {}).get("transfer_decision") or {}
+                    ).get("decision")
+                    or ""
+                ).strip().lower()
+                if decision == "approve" and run.get("passed"):
+                    status = "APPROVED"
+                elif run.get("passed"):
+                    status = "REVIEW-GRADE"
+                else:
+                    status = "BLOCKED"
+                ready_note = (
+                    f", {run.get('readiness_score', '?')}% readiness evidence"
+                    if decision == "approve" and run.get("passed")
+                    else " — not Execute-cleared"
+                )
                 lines = [
                     f"Validation run **`{run.get('run_id')}`** — "
-                    f"{'PASSED' if run.get('passed') else 'BLOCKED'} "
-                    f"({run.get('passed_count', '?')}/{run.get('total_gates', '?')} gates, "
-                    f"{run.get('readiness_score', '?')}% ready).",
+                    f"{status} "
+                    f"({run.get('passed_count', '?')}/{run.get('total_gates', '?')} gates"
+                    f"{ready_note}).",
                 ]
                 route = run.get("route") or {}
                 if run.get("source_label") or run.get("dest_label"):
@@ -1220,8 +1904,9 @@ Respond as Data Pilot — grounded in tool results."""
                 parts.append("\n".join(lines))
             elif tr.name == "remediate_validation" and tr.success:
                 parts.append(
-                    f"Proposed Studio remediation: **{tr.output.get('label')}**. "
-                    "Confirm to apply it in Transfer Studio (Validate step)."
+                    f"Proposed Studio remediation: **{tr.output.get('label')}**.\n"
+                    "Confirm opens **Fix bad data** in Transfer Studio — "
+                    "it does not rewrite quarantine rows inside this chat."
                 )
             elif tr.name in ("plan_transfer", "start_transfer") and tr.success:
                 parts.append(_render_transfer(tr.name, tr.output or {}))
@@ -1260,10 +1945,36 @@ Respond as Data Pilot — grounded in tool results."""
             elif tr.name == "profile_quality_rules" and tr.success:
                 o = tr.output or {}
                 rules = o.get("rules") or []
-                parts.append(
-                    f"Quality rules for **{o.get('dataset')}** ({o.get('column_count', 0)} columns):\n"
-                    + "\n".join(f"• {r}" for r in rules)
-                )
+                cols = int(o.get("column_count") or 0)
+                if cols <= 0:
+                    gates = o.get("preflight_gates") or []
+                    gate_line = (
+                        f"\n\nValidate runs **{len(gates)} preflight gates**: "
+                        + ", ".join(f"`{g}`" for g in gates[:9])
+                        if gates
+                        else "\n\nValidate runs **9 preflight gates** (G1–G9) before Execute."
+                    )
+                    parts.append(
+                        "I can suggest quality gates, but there's **no active dataset** loaded yet.\n"
+                        "• Upload a CSV/JSON in **Transfer**, or\n"
+                        "• Ask me to **list datasets** / analyze a named upload, or\n"
+                        "• Sample a live table: "
+                        '"sample orders on <connector>"\n\n'
+                        "Enterprise rules I apply once data is in scope:\n"
+                        + "\n".join(f"• {r}" for r in rules[:6])
+                        + gate_line
+                    )
+                else:
+                    pii = o.get("pii_candidates") or []
+                    extra = (
+                        f"\nPII-looking columns: {', '.join(f'`{c}`' for c in pii[:8])}"
+                        if pii else ""
+                    )
+                    parts.append(
+                        f"Quality suggestions for **{o.get('dataset')}** "
+                        f"({cols} columns):{extra}\n"
+                        + "\n".join(f"• {r}" for r in rules)
+                    )
             elif tr.name == "list_connector_objects" and tr.success:
                 o = tr.output or {}
                 objs = o.get("objects") or []
@@ -1289,7 +2000,7 @@ Respond as Data Pilot — grounded in tool results."""
                 for c in cols[:40]:
                     null = "NULL" if c.get("nullable", True) else "NOT NULL"
                     lines.append(
-                        f"• `{c.get('name')}` → **{c.get('inferred_type')}**"
+                        f"• `{c.get('name')}` -> **{c.get('inferred_type')}**"
                         + (f" ({c.get('data_type')})" if c.get("data_type") else "")
                         + f" · {null}"
                     )
@@ -1488,13 +2199,30 @@ Respond as Data Pilot — grounded in tool results."""
                 )
             elif tr.name == "list_connectors" and tr.success:
                 conns = tr.output.get("connectors", [])
+                ask_tables = any(
+                    w in (message or "").lower()
+                    for w in ("table", "tables", "collections", "objects")
+                )
                 if conns:
                     lines = [f"You have **{len(conns)} saved connector(s)**:"]
                     for c in conns:
-                        lines.append(f"• **{c.get('name')}** ({c.get('type')}) → {c.get('database', c.get('host', ''))}")
+                        lines.append(
+                            f"• **{c.get('name')}** ({c.get('type')}) → "
+                            f"{c.get('database', c.get('host', ''))}"
+                        )
+                    if ask_tables:
+                        names = [str(c.get("name") or "") for c in conns if c.get("name")]
+                        sample = names[0] if names else "your connector"
+                        lines.append(
+                            f'To list tables, name the connector: '
+                            f'"list tables on {sample}".'
+                        )
                     parts.append("\n".join(lines))
                 else:
-                    parts.append("No connectors saved yet. Go to **Connectors** to add MongoDB, PostgreSQL, or Snowflake.")
+                    parts.append(
+                        "No connectors saved yet. Go to **Connectors** to add "
+                        "MongoDB, PostgreSQL, or Snowflake."
+                    )
             elif tr.name == "analyze_dataset" and tr.success:
                 parts.append(self._format_analysis(tr.output))
             elif tr.name == "search_data" and tr.success:
@@ -1538,8 +2266,8 @@ Respond as Data Pilot — grounded in tool results."""
             elif tr.name == "describe_pilot" and tr.success:
                 o = tr.output or {}
                 lines = [
-                    "I'm **Data Pilot** — I help with analytics, routes, schema "
-                    "risk, mappings, jobs, and fixes inside DataFlow. I answer from "
+                    "I'm **Datawrap Pilot** — I help with analytics, routes, schema "
+                    "risk, mappings, jobs, and fixes inside Datawrap. I answer from "
                     "your workspace first; I never invent warehouse facts.",
                     "**I can:**",
                 ]
@@ -1572,6 +2300,27 @@ Respond as Data Pilot — grounded in tool results."""
                 if examples:
                     lines.append("Try: " + " · ".join(f'"{e}"' for e in examples[:4]))
                 parts.append("\n".join(lines))
+            elif tr.name == "explain_product" and tr.success:
+                o = tr.output or {}
+                answer = (o.get("answer") or "").strip()
+                if answer:
+                    parts.append(answer)
+                else:
+                    caps = o.get("capabilities") or []
+                    if caps:
+                        parts.append(
+                            "Datawrap helps you move data with honesty and Confirm:\n"
+                            + "\n".join(f"• {c}" for c in caps[:5])
+                        )
+                for act in o.get("actions") or []:
+                    route = act.get("route") or act.get("screen")
+                    label = act.get("label") or route
+                    if route:
+                        turn.actions.append({
+                            "type": "navigate",
+                            "screen": route,
+                            "label": label,
+                        })
             elif tr.name == "search_knowledge" and tr.success:
                 hits = tr.output.get("hits", [])
                 if hits:
@@ -1582,9 +2331,13 @@ Respond as Data Pilot — grounded in tool results."""
                             lines.append(f"• {summary[:400]}")
                     parts.append("\n".join(lines))
                 else:
+                    hint = (tr.output.get("hint") or "").strip()
                     parts.append(
-                        "No solid knowledge match for that. Ask about a dataset, a job ID, "
-                        "or say **what can you do** for my capabilities."
+                        hint
+                        or (
+                            "No solid knowledge match for that. Ask about a dataset, a job ID, "
+                            "or say **what can you do** for my capabilities."
+                        )
                     )
 
         if insight and not any(tr.name == "analyze_dataset" for tr in turn.tool_results):
@@ -1612,10 +2365,26 @@ Respond as Data Pilot — grounded in tool results."""
                 lines.append(f"• {tr.error}")
             parts.append("\n".join(lines))
         elif failed and parts:
-            # Mixed success+failure: append the failure so users see what was wrong
-            clarify = [tr.error for tr in failed if tr.error and ("Which " in tr.error or "did you mean" in tr.error.lower())]
-            if clarify:
-                parts.append(clarify[0])
+            # Mixed success+failure: keep connector/clarification errors visible.
+            for tr in failed:
+                err = (tr.error or "").strip()
+                if not err:
+                    continue
+                low = err.lower()
+                if (
+                    err.startswith("Which ")
+                    or "did you mean" in low
+                    or "no connector matched" in low
+                    or "which connector" in low
+                    or "connector not found" in low
+                    or ("dataset" in low and "not found" in low)
+                ):
+                    if err not in "\n".join(parts):
+                        parts.insert(0, err)
+                    break
+
+        if turn.needs_clarification and turn.needs_clarification not in "\n".join(parts):
+            parts.insert(0, turn.needs_clarification)
 
         if not parts:
             parts.append(_unmapped_intent_reply(message, ctx))
@@ -1624,9 +2393,16 @@ Respond as Data Pilot — grounded in tool results."""
 
     def _format_analysis(self, output: dict) -> str:
         name = output.get("dataset", "dataset").replace("sample_", "").replace("_", " ")
+        cols = output.get("columns") or []
+        rows = int(output.get("row_count") or 0)
+        if not cols and rows == 0:
+            return (
+                f"**{name}** has no columns or rows I can profile yet. "
+                "Re-upload the file in **New Transfer**, or name a different indexed dataset."
+            )
         lines = [
             f"**{name}** analysis:",
-            f"• {len(output.get('columns', []))} columns, {output.get('row_count', 0):,} rows",
+            f"• {len(cols)} columns, {rows:,} rows",
             f"• Quality score: **{output.get('quality_score', 0):.0f}%**",
         ]
         if output.get("pii_columns"):
@@ -1636,23 +2412,53 @@ Respond as Data Pilot — grounded in tool results."""
             lines.append("• Key columns:")
             for c in details:
                 pii = " · PII" if c.get("is_pii") else ""
-                lines.append(f"  - `{c['name']}` → {c.get('semantic_type', '?')}{pii}")
+                lines.append(f"  - `{c['name']}` -> {c.get('semantic_type', '?')}{pii}")
         preview = output.get("sample_preview", [])
         if preview:
             lines.append("• Sample row: " + ", ".join(f"{k}={v}" for k, v in list(preview[0].items())[:4]))
+        recs = output.get("recommendations") or []
+        if recs:
+            lines.append("• Suggestions:")
+            for r in recs[:4]:
+                lines.append(f"  - {r}")
         return "\n".join(lines)
 
-    def _build_system_prompt(self, ctx: dict) -> str:
+    def _build_system_prompt(self, ctx: dict, data_context: dict | None = None) -> str:
         tool_names = ", ".join(t["name"] for t in TOOL_DEFINITIONS)
+        session_bits: list[str] = []
+        try:
+            from .working_memory import get_working_memory
+
+            sid = self._session_id(data_context)
+            if sid:
+                memory = get_working_memory()
+                focus = memory.get_focus(sid)
+                pending = memory.get_pending(sid)
+                if focus and (focus.table or focus.connector_name or focus.result_id):
+                    session_bits.append(
+                        "Session focus: "
+                        f"connector={focus.connector_name or '?'}, "
+                        f"table={focus.table or '?'}, "
+                        f"result_id={focus.result_id or 'none'}."
+                    )
+                if pending and pending.question:
+                    session_bits.append(
+                        f"Open clarification: {pending.question} "
+                        f"(waiting for {pending.missing})."
+                    )
+        except Exception:
+            pass
+        session_block = ("\n".join(session_bits) + "\n") if session_bits else ""
         return f"""{DATA_PILOT_PERSONA}
 
 {self.context_builder.to_system_context(ctx)}
-
-You are Data Pilot for DataFlow only — data knowledge, product capabilities, and in-app actions.
+{session_block}
+You are Datawrap Pilot for Datawrap only — data knowledge, product capabilities, and in-app actions.
 Available tools (internal — never name these in user-facing answers): {tool_names}.
 Use tools for any factual claim about jobs, connectors, datasets, schedules, or capabilities.
 Never invent IDs or warehouse state. Never mention tool names, APIs, or internal method labels in replies — write in plain product language.
 For mutating actions (remediate, run schedule), propose and wait for UI confirm — do not claim they already ran.
+Respect session focus and open clarifications above — do not invent a different connector or table.
 Navigate to any screen when asked (including schedules/pipelines, contracts, query, docs, proofs)."""
 
     def _detect_intent(self, message: str) -> str:
@@ -1678,14 +2484,30 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
                     "pii_count": len(o.get("pii_columns", [])),
                     "quality_score": o.get("quality_score", 0),
                 }
-            if tr.name in ("sample_connector_object", "run_query", "filter_result", "analyze_result") and tr.success:
+            if tr.name in (
+                "sample_connector_object",
+                "run_query",
+                "filter_result",
+                "analyze_result",
+                "aggregate_data",
+            ) and tr.success:
                 o = tr.output or {}
                 rid = o.get("result_id")
                 if rid:
                     return {
                         "dataset": o.get("table") or o.get("connector_name") or "pilot_result",
-                        "columns": len(o.get("columns") or (o.get("analysis") or {}).get("columns") or []),
-                        "rows": o.get("row_count") or o.get("match_count") or (o.get("analysis") or {}).get("row_count_sampled") or 0,
+                        "columns": len(
+                            o.get("columns")
+                            or (o.get("analysis") or {}).get("columns")
+                            or []
+                        ),
+                        "rows": (
+                            o.get("row_count")
+                            or o.get("match_count")
+                            or (o.get("analysis") or {}).get("row_count_sampled")
+                            or o.get("group_count")
+                            or 0
+                        ),
                         "pii_count": 0,
                         "quality_score": 0,
                         "last_result_id": rid,
@@ -1713,13 +2535,41 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
             else:
                 prompts.append("Null rates on that result")
         if not any(tr.name == "analyze_dataset" for tr in turn.tool_results):
-            prompts.append("Analyze my logistics data")
+            # Only suggest dataset analysis when indexed uploads actually exist.
+            try:
+                datasets = self.analyst.list_datasets()
+            except Exception:
+                datasets = []
+            if datasets:
+                for d in datasets[:4]:
+                    name = str(d.get("name") or "")
+                    low = name.lower()
+                    if "synonym" in low or "industry schema" in low:
+                        continue
+                    if len(name) >= 20 and all(
+                        c in "0123456789abcdef"
+                        for c in name.replace("-", "").replace("_", "")[:16]
+                    ):
+                        continue
+                    label = name.replace("sample_", "").replace("_", " ")
+                    if label and len(label) < 40:
+                        prompts.append(f"Tell me about {label}")
+                        break
         prompts.extend([
             "Show my pipelines",
             "Show my transfer jobs",
-            "Take me to contracts",
-            "How does mapping assurance work?",
         ])
+        try:
+            from .example_phrases import example_connector_name
+
+            ex = example_connector_name()
+            if ex and ex != "your connector":
+                prompts.append(f"How many rows in airports on {ex}?")
+            else:
+                prompts.append("How many rows in airports on your connector?")
+        except Exception:
+            prompts.append("Show my connectors")
+        prompts.append("What can you do?")
         # Dedupe preserve order
         seen: set[str] = set()
         out: list[str] = []
@@ -1735,18 +2585,47 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
     def _starter_prompts(self) -> list[str]:
         datasets = self.analyst.list_datasets()
         prompts = []
-        for d in datasets[:2]:
-            label = d["name"].replace("sample_", "").replace("_", " ")
-            prompts.append(f"Tell me everything about {label}")
+        for d in datasets[:4]:
+            name = str(d.get("name") or "")
+            # Skip RAG/catalog junk that looks like hash ids or synonym dumps.
+            low = name.lower()
+            if (
+                "synonym" in low
+                or "industry schema" in low
+                or len(name) >= 20 and all(c in "0123456789abcdef" for c in name.replace("-", "").replace("_", "")[:16])
+            ):
+                continue
+            label = name.replace("sample_", "").replace("_", " ")
+            if label and len(label) < 40:
+                prompts.append(f"Tell me everything about {label}")
+            if len(prompts) >= 2:
+                break
+        try:
+            from .example_phrases import example_connector_name
+
+            ex = example_connector_name()
+            if ex and ex != "your connector":
+                prompts.extend([
+                    f"How many rows in airports on {ex}?",
+                    f"Count of orders by status on {ex}",
+                ])
+            else:
+                prompts.extend([
+                    "Show my connectors",
+                    "Show my recent jobs",
+                ])
+        except Exception:
+            prompts.extend([
+                "Show my connectors",
+                "Show my recent jobs",
+            ])
         prompts.extend([
-            "How many rows in airports on Local Postgres?",
-            "Count of orders by status on Local Postgres",
             "Show my recent jobs",
             "What can you do?",
         ])
         # Keep a couple of curated domain prompts after the proven ones.
         for extra in (SUGGESTED_PROMPTS or [])[:2]:
-            if extra not in prompts:
+            if extra not in prompts and "logistics" not in extra.lower():
                 prompts.append(extra)
         return prompts
 

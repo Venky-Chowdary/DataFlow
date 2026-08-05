@@ -8,6 +8,7 @@ import heapq
 import json
 import logging
 import os
+from services.brand_env import getenv_brand
 import re
 import struct
 import tempfile
@@ -17,7 +18,7 @@ from datetime import datetime as _datetime
 from datetime import time as _time
 from datetime import timezone
 from decimal import Decimal, InvalidOperation, Overflow
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from services.transform_engine import (
     _DATE_LIKE_RE,
@@ -29,7 +30,7 @@ from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
 
-SPILL_THRESHOLD = int(os.getenv("DATAFLOW_FINGERPRINT_SPILL_THRESHOLD", "1000000"))
+SPILL_THRESHOLD = int(getenv_brand("FINGERPRINT_SPILL_THRESHOLD", "1000000"))
 
 # Quick pre-filter for the expensive Decimal / date normalization in
 # normalize_cell.  Most string columns (names, emails, codes) are clearly not
@@ -79,13 +80,25 @@ class ReconciliationReport:
     phase: str = ""
     post_write_pending: bool = False
     preview: bool = False
+    # Module 4 honesty: sample authority must never hide checksum mismatch.
+    checksum_match: bool | None = None
+    population_proof: bool = False
+    assurance_level: str = ""
 
     def to_dict(self) -> dict:
         return stamp_post_write_phase(asdict(self))
 
 
 def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
-    """Stamp explicit post-write phase so UIs never confuse writer-ack with Verified."""
+    """Stamp explicit post-write phase so UIs never confuse writer-ack with Verified.
+
+    Also stamps ``coverage``, ``checksum_match``, ``population_proof``,
+    ``assurance_level`` — Gate-8 never invents population RI proof.
+      * ``full_checksum`` — independent source↔dest digests match
+      * ``sample`` — keyed sample is the authority (checksums missing or diverge)
+      * ``writer_ack`` — writer digest only
+      * ``none`` / omitted — failed / skipped / pending
+    """
     out = dict(report or {})
     if out.get("preview") is True or str(out.get("phase") or "").lower().startswith("pre_write"):
         # Leave preflight simulation alone.
@@ -98,20 +111,27 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
     src = str(out.get("source_checksum") or "").strip()
     tgt = str(out.get("target_checksum") or "").strip()
     msg = str(out.get("message") or "").lower()
+    independent_match = bool(src and tgt and src == tgt)
+    # Module 4: always stamp checksum honesty; never invent population RI proof.
+    out["checksum_match"] = independent_match if (src and tgt) else False
+    out["population_proof"] = False
 
     if "file export" in msg or ("skipped" in msg and "reconciliation skipped" in msg):
         out["phase"] = "post_write_skipped"
         out["post_write_pending"] = False
         out["preview"] = False
+        out["coverage"] = "none"
+        out["assurance_level"] = "none"
         return out
 
     if not passed:
         out["phase"] = "post_write_failed"
         out["post_write_pending"] = False
         out["preview"] = False
+        out["coverage"] = "none"
+        out["assurance_level"] = "none"
         return out
 
-    independent_match = bool(src and tgt and src == tgt)
     writer_only = (
         not tgt
         or "verified by writer" in msg
@@ -120,39 +140,55 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
     )
     sample = out.get("sample_compare") if isinstance(out.get("sample_compare"), dict) else {}
     sample_ok = bool(sample.get("passed")) and int(sample.get("compared") or 0) > 0
-    # Reverse-ETL / Kafka: keyed sample read-back is real proof when full-table
-    # checksum is unavailable (Hightouch/Census-class row sync status).
-    if (
-        passed
-        and sample_ok
-        and (
-            "sample-verified" in msg
-            or "sample verified" in msg
-            or "key-aligned" in msg
-            or writer_only
-            or not tgt
-        )
-    ):
+    # GA: diverging independent digests never become sample-verified success.
+    # Sample may only classify when digests are missing (not when they disagree).
+    if src and tgt and not independent_match:
+        out["phase"] = "post_write_failed"
+        out["post_write_pending"] = False
+        out["preview"] = False
+        out["passed"] = False
+        out["coverage"] = "none"
+        out["assurance_level"] = "none"
+        out["checksum_match"] = False
+        return out
+
+    sample_authority = sample_ok and (
+        writer_only
+        or not tgt
+        or "sample-verified" in msg
+        or "sample verified" in msg
+        or "key-aligned" in msg
+        or "sample-only assurance" in msg
+    )
+    if passed and sample_authority and not (src and tgt):
         out["phase"] = "post_write_sample_verified"
         out["post_write_pending"] = False
         out["preview"] = False
+        out["coverage"] = "sample"
+        out["assurance_level"] = "sample"
         return out
 
     if independent_match and not writer_only:
         out["phase"] = "post_write_verified"
         out["post_write_pending"] = False
         out["preview"] = False
+        out["coverage"] = "full_checksum"
+        out["assurance_level"] = "full_checksum"
         return out
 
     if writer_only or (passed and src and not tgt):
         out["phase"] = "post_write_writer_ack"
         out["post_write_pending"] = False
         out["preview"] = False
+        out["coverage"] = "writer_ack"
+        out["assurance_level"] = "writer_ack"
         return out
 
     out["phase"] = "post_write_pending"
     out["post_write_pending"] = True
     out["preview"] = False
+    out["coverage"] = "none"
+    out["assurance_level"] = "none"
     return out
 
 
@@ -425,10 +461,19 @@ def canonical_checksum_from_iter(
 ) -> str:
     """Streaming variant of canonical_checksum with optional sample limit.
 
-    Reads rows lazily, collects fingerprints, and hashes them after sorting.
-    A limit of 0 means process all rows.
+    Reads rows lazily and hashes fingerprints in sorted order. A limit of 0
+    means process all rows.
+
+    Accumulation goes through :class:`FingerprintAccumulator`, which spills
+    sorted chunks to disk past a threshold. It used to append every
+    ``(row_key, fingerprint)`` pair to a plain list, which made the strict
+    reconcile — the default validation mode, and the one that passes
+    ``limit=0`` — allocate roughly 250 bytes per destination row. That is about
+    5 GB at 20M rows, and the OOM landed in the *verification* step after the
+    data had already been written. The digest is unchanged: with no spill the
+    accumulator sorts and hashes exactly as before.
     """
-    fingerprints: list[tuple[str, str]] = []
+    acc = FingerprintAccumulator()
     for i, (row_key, fp) in enumerate(
         _iter_fingerprints(
             rows,
@@ -440,8 +485,8 @@ def canonical_checksum_from_iter(
     ):
         if limit and i >= limit:
             break
-        fingerprints.append((row_key, fp))
-    return _hash_fingerprints(fingerprints)
+        acc.add(row_key, fp)
+    return acc.digest()
 
 
 def checksum_rows(
@@ -540,90 +585,32 @@ def reconcile(
         )
 
     if source_checksum != target_checksum:
-        # When the target legitimately contains extra rows (append/upsert),
-        # whole-table checksums are not comparable; require a key-aligned
-        # sample compare that actually compared rows (fail-closed otherwise).
-        if allow_extra_rows and target_rows > expected_rows:
-            compared = int((sample_compare or {}).get("compared") or 0)
-            sample_ok = (
-                bool(sample_compare)
-                and bool(sample_compare.get("passed", False))
-                and compared > 0
-            )
-            if sample_ok:
-                return ReconciliationReport(
-                    passed=True,
-                    source_rows=source_rows,
-                    target_rows=target_rows,
-                    source_checksum=source_checksum,
-                    target_checksum=target_checksum,
-                    message=(
-                        f"Transfer verified by key-aligned sample ({compared} compared; "
-                        f"{target_rows} rows"
-                        + (f", {rejected_rows} rejected" if rejected_rows else "")
-                        + f"; {target_rows - expected_rows} pre-existing rows skipped in checksum)"
-                    ),
-                    rejected_rows=rejected_rows,
-                    rows_skipped=rows_skipped,
-                    sample_compare=sample_compare,
-                )
-            return ReconciliationReport(
-                passed=False,
-                source_rows=source_rows,
-                target_rows=target_rows,
-                source_checksum=source_checksum,
-                target_checksum=target_checksum,
-                message=(
-                    "Checksum mismatch with extra destination rows: key-aligned "
-                    "sample compare with compared>0 is required (fail-closed; "
-                    "whole-table checksums are not comparable under append/upsert)"
-                ),
-                rejected_rows=rejected_rows,
-                coerced_null_rows=coerced_null_rows,
-                rows_skipped=rows_skipped,
-                sample_compare=sample_compare,
-            )
-        if strict_checksum:
-            return ReconciliationReport(
-                passed=False,
-                source_rows=source_rows,
-                target_rows=target_rows,
-                source_checksum=source_checksum,
-                target_checksum=target_checksum,
-                message=(
-                    f"Checksum mismatch in strict mode: source {source_checksum} "
-                    f"vs target {target_checksum}"
-                ),
-                rejected_rows=rejected_rows,
-                rows_skipped=rows_skipped,
-            )
-        # Balanced: never soft-pass a checksum mismatch without key-aligned
-        # sample proof (compared>0). Cross-engine "rendering" is not an excuse
-        # for green Gate-8 — bind-aware fingerprints close that class of drift.
+        # Enterprise GA: checksum mismatch always fails Gate-8.
+        # Sample compare may attach diagnostics only — never green-pass / override.
         compared = int((sample_compare or {}).get("compared") or 0)
         sample_ok = (
             bool(sample_compare)
             and bool(sample_compare.get("passed", False))
             and compared > 0
         )
-        if sample_ok:
-            return ReconciliationReport(
-                passed=True,
-                source_rows=source_rows,
-                target_rows=target_rows,
-                source_checksum=source_checksum,
-                target_checksum=target_checksum,
-                message=(
-                    f"Transfer verified by key-aligned sample ({compared} compared; "
-                    f"{target_rows} rows"
-                    + (f", {rejected_rows} rejected" if rejected_rows else "")
-                    + "; whole-table checksums differed — sample is the authority)"
-                ),
-                rejected_rows=rejected_rows,
-                coerced_null_rows=coerced_null_rows,
-                rows_skipped=rows_skipped,
-                sample_compare=sample_compare,
+        extra_note = ""
+        if allow_extra_rows and target_rows > expected_rows:
+            extra_note = (
+                f" Destination has {target_rows - expected_rows} extra row(s) "
+                "(append/upsert); whole-table digests are not comparable."
             )
+        sample_note = ""
+        if sample_ok:
+            sample_note = (
+                f" Key-aligned sample compared {compared} row(s) without value "
+                "mismatches — diagnostic only; does NOT override checksum failure."
+            )
+        elif sample_compare:
+            sample_note = (
+                " Key-aligned sample compare incomplete or failed — not used to "
+                "soften checksum mismatch."
+            )
+        mode_label = "strict" if strict_checksum else "balanced"
         return ReconciliationReport(
             passed=False,
             source_rows=source_rows,
@@ -631,13 +618,17 @@ def reconcile(
             source_checksum=source_checksum,
             target_checksum=target_checksum,
             message=(
-                "Checksum mismatch in balanced mode: key-aligned sample compare "
-                "with compared>0 is required (refuse unverified soft-pass)"
+                f"Checksum mismatch ({mode_label}): source {source_checksum} vs "
+                f"target {target_checksum}.{extra_note}{sample_note} "
+                "Sample success cannot override full-table checksum mismatch."
             ),
             rejected_rows=rejected_rows,
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             sample_compare=sample_compare,
+            checksum_match=False,
+            population_proof=False,
+            assurance_level="none",
         )
     if coerced_null_rows:
         # Row counts and checksums can still match here because the SAME failed
@@ -665,6 +656,9 @@ def reconcile(
         coerced_null_rows=coerced_null_rows,
         rows_skipped=rows_skipped,
         sample_compare=sample_compare,
+        checksum_match=True,
+        population_proof=False,
+        assurance_level="full_checksum",
     )
 
 
@@ -1422,9 +1416,20 @@ def verify_s3_object(
     target_columns: list[str] | None = None,
     limit: int = 0,
 ) -> tuple[int, str]:
-    """Reconcile an S3 object by downloading and parsing its contents."""
+    """Reconcile an S3 object by downloading and parsing its contents.
+
+    Multi-chunk writers emit ``part-*`` keys under a stem prefix; aggregate
+    those parts when present so Gate-8 does not fall through to writer-ack
+    while most rows live only in part objects.
+    """
     try:
         from connectors.aws_common import boto3_client
+        from connectors.object_store_common import (
+            normalize_object_base_key,
+            object_parts_prefix,
+            object_store_read_keys,
+        )
+        from connectors.s3_reader import list_objects
 
         cfg = {
             "host": host,
@@ -1436,11 +1441,20 @@ def verify_s3_object(
             "database": bucket,
         }
         client = boto3_client("s3", cfg)
-        obj = client.get_object(Bucket=bucket, Key=key)
-        body = obj["Body"].read()
-        rows, headers = _rows_from_object_bytes(body, key, target_columns)
+        base = normalize_object_base_key(key)
+        parts_prefix = object_parts_prefix(base)
+        listed = list_objects(cfg, bucket, parts_prefix) if parts_prefix else []
+        read_keys = object_store_read_keys(base, listed)
+        all_rows: list[dict[str, Any]] = []
+        headers: list[str] = []
+        for obj_key in read_keys:
+            body = client.get_object(Bucket=bucket, Key=obj_key)["Body"].read()
+            rows, hdrs = _rows_from_object_bytes(body, obj_key, target_columns)
+            if not headers:
+                headers = list(hdrs or [])
+            all_rows.extend(rows)
         columns = headers or target_columns or []
-        return len(rows), canonical_checksum_from_iter(rows, columns, limit=limit)
+        return len(all_rows), canonical_checksum_from_iter(all_rows, columns, limit=limit)
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
@@ -1508,6 +1522,12 @@ def verify_gcs_blob(
     """Reconcile a GCS blob by downloading and parsing its contents."""
     try:
         from connectors.gcs_common import gcs_client
+        from connectors.gcs_reader import list_objects
+        from connectors.object_store_common import (
+            normalize_object_base_key,
+            object_parts_prefix,
+            object_store_read_keys,
+        )
 
         cfg = {
             "host": host,
@@ -1515,11 +1535,21 @@ def verify_gcs_blob(
             "connection_string": connection_string,
         }
         client = gcs_client(cfg)
-        blob = client.bucket(bucket).blob(key)
-        body = blob.download_as_bytes()
-        rows, headers = _rows_from_object_bytes(body, key, target_columns)
+        base = normalize_object_base_key(key)
+        parts_prefix = object_parts_prefix(base)
+        listed = list_objects(cfg, bucket, parts_prefix) if parts_prefix else []
+        read_keys = object_store_read_keys(base, listed)
+        bucket_obj = client.bucket(bucket)
+        all_rows: list[dict[str, Any]] = []
+        headers: list[str] = []
+        for obj_key in read_keys:
+            body = bucket_obj.blob(obj_key).download_as_bytes()
+            rows, hdrs = _rows_from_object_bytes(body, obj_key, target_columns)
+            if not headers:
+                headers = list(hdrs or [])
+            all_rows.extend(rows)
         columns = headers or target_columns or []
-        return len(rows), canonical_checksum_from_iter(rows, columns, limit=limit)
+        return len(all_rows), canonical_checksum_from_iter(all_rows, columns, limit=limit)
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
@@ -1542,6 +1572,12 @@ def verify_adls_blob(
     """Independent Azure Blob / ADLS Gen2 read-back (parity with S3/GCS Gate-8)."""
     try:
         from connectors.adls_common import blob_service_client
+        from connectors.adls_reader import list_objects
+        from connectors.object_store_common import (
+            normalize_object_base_key,
+            object_parts_prefix,
+            object_store_read_keys,
+        )
 
         cfg = {
             "host": host,
@@ -1553,12 +1589,21 @@ def verify_adls_blob(
             "database": container,
         }
         client = blob_service_client(cfg)
-        blob = client.get_blob_client(container, key)
-        body = blob.download_blob().readall()
-        rows, headers = _rows_from_object_bytes(body, key, target_columns)
+        base = normalize_object_base_key(key)
+        parts_prefix = object_parts_prefix(base)
+        listed = list_objects(cfg, container, parts_prefix) if parts_prefix else []
+        read_keys = object_store_read_keys(base, listed)
+        all_rows: list[dict[str, Any]] = []
+        headers: list[str] = []
+        for obj_key in read_keys:
+            body = client.get_blob_client(container, obj_key).download_blob().readall()
+            rows, hdrs = _rows_from_object_bytes(body, obj_key, target_columns)
+            if not headers:
+                headers = list(hdrs or [])
+            all_rows.extend(rows)
         columns = headers or target_columns or []
-        return len(rows), canonical_checksum_from_iter(
-            rows,
+        return len(all_rows), canonical_checksum_from_iter(
+            all_rows,
             columns,
             limit=limit,
             dest_db_type="adls",
@@ -3228,9 +3273,16 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     if value is None:
         # Distinct from empty string — SQL/Dynamo NULL must not checksum as "".
         return _NULL_SENTINEL
+    # Dense write materializes absent schemaless fields as SQL NULL; fingerprint
+    # must match. Sparse CDC sample_compare skips DF_MISSING columns (omit-from-SET).
+    from services.value_serializer import is_missing_sentinel
+
+    if is_missing_sentinel(value):
+        return _NULL_SENTINEL
     if isinstance(value, str) and value.strip().lower() in {
         "__df_sql_null__",
         "__df_ddb_null__",
+        "__df_missing__",
     }:
         return _NULL_SENTINEL
     # Oracle write-location: '' is stored/read as NULL — equate before other paths.
@@ -3594,10 +3646,187 @@ def build_reconciliation_proof(
         "missing_key_count": missing_key_count,
         "extra_key_count": extra_key_count,
         "row_fidelity_score": row_fidelity_score,
-        "sample_compare": sample_compare,
+        # Stamp alignment on every branch so the UI can distinguish keyed proof
+        # from positional comparison without inferring it from absence.
+        "sample_compare": {**sample_compare, "alignment": "key_aligned"},
         "identity": {"column": key_col, "proven": True, "provenance": key_provenance},
         "verification_mode": "key_aligned",
     }
+
+
+
+def _bucket_member_order(
+    idxs: list[int], *, seed: str, bucket_name: str
+) -> list[int]:
+    """Deterministic intra-bucket order (stable across process restarts)."""
+    import hashlib
+
+    return sorted(
+        idxs,
+        key=lambda i: hashlib.sha256(
+            f"{seed}:{bucket_name}:{i}".encode()
+        ).hexdigest(),
+    )
+
+
+def _stratified_sample_indices(
+    records: list[dict[str, Any]],
+    *,
+    stratify_col: str,
+    sample_size: int,
+    seed: str = "",
+) -> list[int]:
+    """Deterministic per-bucket quota sampling for skewed categoricals.
+
+    Rare classes get a guaranteed slot when buckets fit in ``sample_size``.
+    When bucket count exceeds ``sample_size``, prefer the *smallest* buckets
+    (rare classes) — never hash-trim across buckets (that reintroduces the
+    first-N trap stratification exists to prevent).
+
+    Still a **sample** plan — never population proof.
+    """
+    import hashlib
+
+    if sample_size <= 0 or not records or not stratify_col:
+        return list(range(min(max(sample_size, 0), len(records))))
+    buckets: dict[str, list[int]] = {}
+    for i, rec in enumerate(records):
+        if not isinstance(rec, dict):
+            continue
+        raw = rec.get(stratify_col)
+        key = normalize_cell(raw) if raw is not None else ""
+        buckets.setdefault(key or "<null>", []).append(i)
+    names = sorted(buckets.keys())
+    if not names:
+        return list(range(min(sample_size, len(records))))
+
+    n_buckets = len(names)
+
+    # More strata than slots: keep rare (smallest) buckets — 1 row each.
+    if n_buckets > sample_size:
+        ranked = sorted(
+            names,
+            key=lambda name: (
+                len(buckets[name]),
+                hashlib.sha256(f"{seed}:bucket:{name}".encode()).hexdigest(),
+                name,
+            ),
+        )
+        picked: list[int] = []
+        for name in ranked[:sample_size]:
+            scored = _bucket_member_order(
+                buckets[name], seed=seed, bucket_name=name
+            )
+            if scored:
+                picked.append(scored[0])
+        return picked[:sample_size]
+
+    # Proportional quota with floor 1 (always possible when n_buckets <= sample_size).
+    base = sample_size // n_buckets
+    rem = sample_size % n_buckets
+    picked = []
+    for bi, name in enumerate(names):
+        scored = _bucket_member_order(buckets[name], seed=seed, bucket_name=name)
+        take = base + (1 if bi < rem else 0)
+        take = min(max(take, 1), len(scored))
+        picked.extend(scored[:take])
+
+    # Shrink from largest buckets only — never drop a bucket entirely.
+    while len(picked) > sample_size:
+        # Count current picks per bucket
+        membership: dict[str, list[int]] = {n: [] for n in names}
+        for i in picked:
+            rec = records[i] if i < len(records) else {}
+            raw = rec.get(stratify_col) if isinstance(rec, dict) else None
+            key = normalize_cell(raw) if raw is not None else ""
+            membership.setdefault(key or "<null>", []).append(i)
+        # Drop one row from the largest bucket that still has >1
+        candidates = [
+            (len(idxs), name)
+            for name, idxs in membership.items()
+            if len(idxs) > 1
+        ]
+        if not candidates:
+            # Should not happen when n_buckets <= sample_size; fail closed trim.
+            picked = picked[:sample_size]
+            break
+        _, drop_name = max(
+            candidates,
+            key=lambda t: (
+                t[0],
+                hashlib.sha256(f"{seed}:drop:{t[1]}".encode()).hexdigest(),
+            ),
+        )
+        drop_idxs = membership[drop_name]
+        # Drop the last in deterministic bucket order
+        ordered = _bucket_member_order(drop_idxs, seed=seed, bucket_name=drop_name)
+        drop_i = ordered[-1]
+        picked = [i for i in picked if i != drop_i]
+
+    if len(picked) < sample_size:
+        used = set(picked)
+        for i in range(len(records)):
+            if i not in used and isinstance(records[i], dict):
+                picked.append(i)
+                used.add(i)
+            if len(picked) >= sample_size:
+                break
+    return picked[:sample_size]
+
+
+def _auto_stratify_source_column(
+    source_records: list[dict[str, Any]],
+    mappings: list[dict[str, Any]],
+    *,
+    sort_key: str | None,
+    source_sort_key: str | None,
+) -> str | None:
+    """Heuristic stratum: skewed low-cardinality mapped column (not the PK).
+
+    Returns ``None`` when no safe candidate exists — caller falls back to
+    keyed/positional sample. Never claims population coverage.
+    """
+    from collections import Counter
+
+    exclude = {
+        str(sort_key or "").strip().lower(),
+        str(source_sort_key or "").strip().lower(),
+        "id",
+        "_id",
+        "pk",
+        "uuid",
+        "guid",
+    }
+    exclude.discard("")
+    best_col: str | None = None
+    best_key: tuple[float, int, str] | None = None
+    for m in mappings:
+        src_col = str(m.get("source") or "").strip()
+        tgt_col = str(m.get("target") or "").strip()
+        if not src_col:
+            continue
+        if src_col.lower() in exclude or tgt_col.lower() in exclude:
+            continue
+        vals: list[str] = []
+        for r in source_records:
+            raw = r.get(src_col)
+            cell = normalize_cell(raw) if raw is not None else ""
+            vals.append(cell or "<null>")
+        if not vals:
+            continue
+        n_classes = len(set(vals))
+        if not (2 <= n_classes <= 20):
+            continue
+        counts = Counter(vals)
+        skew = max(counts.values()) / len(vals)
+        # Require imbalance so uniform enums don't pretend to stratify.
+        if skew < 0.55:
+            continue
+        key = (skew, n_classes, src_col.lower())
+        if best_key is None or key > best_key:
+            best_key = key
+            best_col = src_col
+    return best_col
 
 
 def sample_compare_rows(
@@ -3610,6 +3839,7 @@ def sample_compare_rows(
     sort_key: str | None = None,
     dest_db_type: str = "",
     dest_types: dict[str, str] | None = None,
+    stratify_by: str | None = None,
 ) -> dict[str, Any]:
     """
     Compare mapped column values between source records and destination read-back.
@@ -3717,13 +3947,88 @@ def sample_compare_rows(
         except Exception:
             return (1, text.lower())
 
-    source_sorted = sorted(
-        source_records, key=lambda r: _sortable(_row_key(r, source_side=True))
-    )[:sample_size]
+    import hashlib
+
+    dict_records = [r for r in source_records if isinstance(r, dict)]
+    auto_selected = False
+    # Auto-stratify: skewed low-cardinality mapped column (never the PK).
+    strat_col = (stratify_by or "").strip() or None
+    if not strat_col and len(dict_records) > sample_size:
+        strat_col = _auto_stratify_source_column(
+            dict_records,
+            mappings,
+            sort_key=sort_key,
+            source_sort_key=source_sort_key,
+        )
+        auto_selected = bool(strat_col)
+
+    if strat_col and dict_records:
+        idxs = _stratified_sample_indices(
+            dict_records,
+            stratify_col=strat_col,
+            sample_size=sample_size,
+            seed=f"{sort_key or ''}:{strat_col}",
+        )
+        source_sorted = [dict_records[i] for i in idxs if i < len(dict_records)]
+        method = "stratified"
+    else:
+        source_sorted = sorted(
+            dict_records or source_records,
+            key=lambda r: _sortable(_row_key(r, source_side=True)),
+        )[:sample_size]
+        method = "keyed_sorted" if sort_key else "positional_sorted"
+        strat_col = None
+        auto_selected = False
+
+    # Deterministic seed for auditor replay — sorted PK (or positional index) set.
+    pk_values: list[str] = []
+    for src in source_sorted:
+        key_raw = _row_key(src, source_side=True)
+        pk_values.append(normalize_cell(key_raw) if key_raw is not None else "")
+    seed_canon = json.dumps(
+        {
+            "method": method,
+            "size": len(source_sorted),
+            "sort_key": sort_key or "",
+            "source_sort_key": source_sort_key or "",
+            "stratify_by": strat_col or "",
+            "auto_selected": auto_selected,
+            "pk_values": pk_values,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    sample_seed = {
+        "method": method,
+        "size": len(source_sorted),
+        "sort_key": sort_key or "",
+        "source_sort_key": source_sort_key or "",
+        "stratify_by": strat_col or "",
+        "auto_selected": auto_selected,
+        "coverage": "sample",
+        "population_proof": False,
+        "note": (
+            "Stratified/keyed sample improves category coverage within the "
+            "read-back sample only — not population proof."
+            if method == "stratified"
+            else "Keyed/positional sample — not population proof."
+        ),
+        "pk_values": pk_values[:sample_size],
+        "content_sha256": hashlib.sha256(seed_canon.encode("utf-8")).hexdigest(),
+    }
 
     mismatches: list[dict[str, str]] = []
     compared = 0
     target_fallback = sorted(target_dicts, key=lambda d: _sortable(_row_key(d)))
+
+    def _result(*, passed: bool) -> dict[str, Any]:
+        return {
+            "passed": passed,
+            "compared": compared,
+            "mismatches": mismatches,
+            "sample_seed": sample_seed,
+            "alignment": "keyed" if (sort_key and target_by_key) else "positional",
+        }
 
     for idx, src in enumerate(source_sorted):
         if sort_key and target_by_key:
@@ -3787,17 +4092,66 @@ def sample_compare_rows(
                     }
                 )
                 if len(mismatches) >= 10:
-                    return {
-                        "passed": False,
-                        "compared": compared,
-                        "mismatches": mismatches,
-                    }
+                    return _result(passed=False)
 
-    return {
-        "passed": len(mismatches) == 0,
-        "compared": compared,
-        "mismatches": mismatches,
-    }
+    return _result(passed=len(mismatches) == 0)
+
+
+class TargetSampleUnavailable(RuntimeError):
+    """Destination sample could not be read — distinct from an empty table.
+
+    Callers that treat ``[]`` as "nothing is there" (CDC delete proof, Gate-8
+    fidelity) must catch this and fail the gate. Swallowing the error as an
+    empty list is what made a missing SELECT grant report delete proof as
+    passed while the rows were still live.
+    """
+
+
+def _object_store_target_sample(
+    *,
+    table_name: str,
+    list_keys: Callable[[str], list[str]],
+    fetch_bytes: Callable[[str], bytes],
+    cols: list[str],
+    limit: int,
+    sort_key: str,
+    keys: Iterable[Any] | None,
+) -> list[dict[str, Any]]:
+    """Gate-8 sample read shared by S3, GCS and ADLS destinations.
+
+    Object stores have no WHERE clause, so the sample is assembled by reading
+    the part objects (or the single legacy object) and filtering in memory.
+    Reading every part matters: a multi-chunk write keeps most rows outside the
+    base key, and sampling only the base key would compare against a fraction
+    of the data while reporting a clean Gate-8.
+    """
+    from connectors.object_store_common import (
+        normalize_object_base_key,
+        object_parts_prefix,
+        object_store_read_keys,
+    )
+
+    base = normalize_object_base_key(table_name)
+    listed = list_keys(object_parts_prefix(base))
+    read_keys = object_store_read_keys(base, listed)
+    lim = max(1, int(limit or 50))
+    wanted = {str(k) for k in keys} if keys else set()
+    projection = None if cols == ["*"] else cols
+
+    rows: list[dict[str, Any]] = []
+    for obj_key in read_keys:
+        part_rows, _headers = _rows_from_object_bytes(
+            fetch_bytes(obj_key), obj_key, projection
+        )
+        if wanted and sort_key:
+            # Key-targeted sample: keep only the rows Gate-8 asked about, but
+            # keep scanning parts because a key can live in any part.
+            rows.extend(r for r in part_rows if str(r.get(sort_key)) in wanted)
+        else:
+            rows.extend(part_rows)
+        if len(rows) >= lim and not wanted:
+            break
+    return rows[:lim]
 
 
 def read_target_sample(
@@ -3816,6 +4170,10 @@ def read_target_sample(
     When ``key_values`` is provided with ``sort_key``, prefer a keyed ``IN (...)``
     read so append/upsert Gate-8 can prove fidelity against pre-existing rows
     (ORDER BY … LIMIT alone often misses the batch keys in a large table).
+
+    Returns an empty list only when the destination is genuinely empty (or the
+    keyed ``IN`` matched nothing). Read failures raise
+    :class:`TargetSampleUnavailable` — never ``[]``.
     """
     from connectors.sql_identifiers import (
         quote_column_list,
@@ -3844,7 +4202,11 @@ def read_target_sample(
         return bool(dest.get("ssl", default))
 
     try:
-        if db_type == "postgresql":
+        if db_type in ("postgresql", "redshift"):
+            # Redshift speaks the Postgres wire protocol; local CI and many
+            # managed endpoints use the PG driver. Checksum verify already
+            # treated them as one family — sample compare must too, or Gate-8
+            # fails closed with "no sample reader" after a successful write.
             from connectors.postgresql_conn import get_connection
 
             col_sql = (
@@ -3902,8 +4264,13 @@ def read_target_sample(
                     last_exc = exc
                     continue
             if last_exc:
-                return []
-            return []
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {last_exc}"
+                ) from last_exc
+            raise TargetSampleUnavailable(
+                f"Could not read destination sample from {db_type!r}.{table_name!r}: "
+                "postgresql connection failed for both SSL modes"
+            )
 
         if db_type == "mysql":
             from connectors.mysql_conn import get_connection
@@ -4094,7 +4461,10 @@ def read_target_sample(
 
             path = dest.get("connection_string") or dest.get("database", "")
             if not path:
-                return []
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
+                    "duckdb path missing (connection_string/database)"
+                )
             duckdb_col_sql = (
                 "*"
                 if cols == ["*"]
@@ -4114,8 +4484,12 @@ def read_target_sample(
                 engine = get_sqlalchemy_engine(
                     {"type": "duckdb", "connection_string": path}
                 )
-            except Exception:
-                return []
+            except TargetSampleUnavailable:
+                raise
+            except Exception as exc:
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+                ) from exc
             with engine.connect() as conn:
                 if keys and sort_key:
                     key_col = quote_sql_identifier(
@@ -4145,8 +4519,12 @@ def read_target_sample(
                             for row in rows
                         ]
                     return [dict(row) for row in rows]
-                except Exception:
-                    return []
+                except TargetSampleUnavailable:
+                    raise
+                except Exception as exc:
+                    raise TargetSampleUnavailable(
+                        f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+                    ) from exc
 
         if db_type == "mongodb":
             from connectors.mongodb_common import (
@@ -4201,8 +4579,12 @@ def read_target_sample(
                 if sort_key:
                     cursor = cursor.sort(sort_key, 1)
                 return list(cursor.limit(int(limit)))
-            except Exception:
-                return []
+            except TargetSampleUnavailable:
+                raise
+            except Exception as exc:
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+                ) from exc
 
         if db_type == "sqlite" or (
             db_type == "generic_sql"
@@ -4224,7 +4606,10 @@ def read_target_sample(
                 dest.get("host") or "",
             )
             if not path:
-                return []
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
+                    "sqlite path missing"
+                )
             sqlite_col_sql = (
                 "*"
                 if cols == ["*"]
@@ -4255,8 +4640,12 @@ def read_target_sample(
                 rows = cur.fetchall()
                 names = _row_names(cur.description)
                 return [dict(zip(names, row)) for row in rows]
-            except Exception:
-                return []
+            except TargetSampleUnavailable:
+                raise
+            except Exception as exc:
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+                ) from exc
             finally:
                 conn.close()
 
@@ -4334,8 +4723,12 @@ def read_target_sample(
                         for row in rows_out
                     ]
                 return rows_out[:limit]
-            except Exception:
-                return []
+            except TargetSampleUnavailable:
+                raise
+            except Exception as exc:
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+                ) from exc
 
         if db_type in {"elasticsearch", "opensearch", "elastic"}:
             from connectors.elasticsearch_reader import read_index_batch
@@ -4381,8 +4774,12 @@ def read_target_sample(
                         for row in rows_out
                     ]
                 return rows_out[:limit]
-            except Exception:
-                return []
+            except TargetSampleUnavailable:
+                raise
+            except Exception as exc:
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+                ) from exc
 
         if db_type == "snowflake":
             from connectors.snowflake_conn import (
@@ -4464,8 +4861,12 @@ def read_target_sample(
                     rows = cur.fetchall()
                 conn.close()
                 return [dict(zip(names, row)) for row in rows]
-            except Exception:
-                return []
+            except TargetSampleUnavailable:
+                raise
+            except Exception as exc:
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+                ) from exc
 
         if db_type == "bigquery":
             from connectors.bigquery_conn import get_client, _is_local_endpoint
@@ -4552,8 +4953,12 @@ def read_target_sample(
                     {k: v for k, v in dict(row.items()).items() if k in (cols if cols != ["*"] else dict(row.items()).keys())}
                     for row in res
                 ]
-            except Exception:
-                return []
+            except TargetSampleUnavailable:
+                raise
+            except Exception as exc:
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+                ) from exc
 
         if db_type in {
             "adls",
@@ -4562,31 +4967,96 @@ def read_target_sample(
             "azure_data_lake_storage",
         }:
             from connectors.adls_common import blob_service_client
+            from connectors.adls_reader import list_objects
 
             container = (dest.get("database") or schema or "").strip()
             if not container or not table_name:
-                return []
-            client = blob_service_client(
-                {
-                    "host": dest.get("host", ""),
-                    "port": int(dest.get("port") or 0),
-                    "username": dest.get("username", ""),
-                    "password": dest.get("password", ""),
-                    "connection_string": dest.get("connection_string", ""),
-                    "service_account": dest.get("service_account", ""),
-                    "database": container,
-                }
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
+                    "ADLS container or blob path missing"
+                )
+            cfg_adls = {
+                "host": dest.get("host", ""),
+                "port": int(dest.get("port") or 0),
+                "username": dest.get("username", ""),
+                "password": dest.get("password", ""),
+                "connection_string": dest.get("connection_string", ""),
+                "service_account": dest.get("service_account", ""),
+                "database": container,
+            }
+            client = blob_service_client(cfg_adls)
+            return _object_store_target_sample(
+                table_name=table_name,
+                list_keys=lambda prefix: list_objects(cfg_adls, container, prefix),
+                fetch_bytes=lambda k: (
+                    client.get_blob_client(container, k).download_blob().readall()
+                ),
+                cols=cols,
+                limit=limit,
+                sort_key=sort_key,
+                keys=keys,
             )
-            body = client.get_blob_client(container, table_name).download_blob().readall()
-            rows, _headers = _rows_from_object_bytes(
-                body, table_name, None if cols == ["*"] else cols
+
+        if db_type in {"s3", "minio", "s3_compatible", "aws_s3"}:
+            from connectors.aws_common import boto3_client
+            from connectors.s3_reader import list_objects
+
+            bucket = (dest.get("database") or schema or "").strip()
+            if not bucket or not table_name:
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
+                    "S3 bucket or object key missing"
+                )
+            cfg_s3 = {
+                "host": dest.get("host", ""),
+                "port": int(dest.get("port") or 0),
+                "username": dest.get("username", ""),
+                "password": dest.get("password", ""),
+                "connection_string": dest.get("connection_string", ""),
+                "ssl": bool(dest.get("ssl", False)),
+                "database": bucket,
+                "endpoint_url": dest.get("endpoint_url", "") or "",
+                "path_style": bool(dest.get("path_style", False)),
+                "region": dest.get("region", "") or "",
+            }
+            client = boto3_client("s3", cfg_s3)
+            return _object_store_target_sample(
+                table_name=table_name,
+                list_keys=lambda prefix: list_objects(cfg_s3, bucket, prefix),
+                fetch_bytes=lambda k: client.get_object(Bucket=bucket, Key=k)["Body"].read(),
+                cols=cols,
+                limit=limit,
+                sort_key=sort_key,
+                keys=keys,
             )
-            lim = max(1, int(limit or 50))
-            if keys and sort_key:
-                widened = set(keys)
-                out = [r for r in rows if r.get(sort_key) in widened]
-                return out[:lim]
-            return rows[:lim]
+
+        if db_type in {"gcs", "google_cloud_storage"}:
+            from connectors.gcs_common import gcs_client
+            from connectors.gcs_reader import list_objects
+
+            bucket = (dest.get("database") or schema or "").strip()
+            if not bucket or not table_name:
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
+                    "GCS bucket or object key missing"
+                )
+            cfg_gcs = {
+                "host": dest.get("host", ""),
+                "port": int(dest.get("port") or 0),
+                "connection_string": dest.get("connection_string", ""),
+                "service_account": dest.get("service_account", ""),
+                "password": dest.get("password", ""),
+            }
+            bucket_obj = gcs_client(cfg_gcs).bucket(bucket)
+            return _object_store_target_sample(
+                table_name=table_name,
+                list_keys=lambda prefix: list_objects(cfg_gcs, bucket, prefix),
+                fetch_bytes=lambda k: bucket_obj.blob(k).download_as_bytes(),
+                cols=cols,
+                limit=limit,
+                sort_key=sort_key,
+                keys=keys,
+            )
 
         if db_type in {
             "databricks",
@@ -4867,7 +5337,10 @@ def read_target_sample(
                 dest.get("api_key") or dest.get("password") or dest.get("username") or ""
             )
             if not index_url or not key:
-                return []
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
+                    "pinecone index URL or API key missing"
+                )
             session = _requests_session()
             hdrs = _headers(key)
             ns = (table_name or dest.get("schema") or "").strip()
@@ -4884,7 +5357,10 @@ def read_target_sample(
                 timeout=30,
             )
             if fetch.status_code not in {200, 201}:
-                return []
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
+                    f"pinecone fetch HTTP {fetch.status_code}"
+                )
             vectors = (fetch.json() or {}).get("vectors") or {}
             out_rows = []
             for vid, payload in vectors.items():
@@ -5242,7 +5718,10 @@ def read_target_sample(
                 table=table_name,
             )
             if not cfg.host or not cfg.path:
-                return []
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
+                    "sftp host or path missing"
+                )
             transport, sftp = connect_sftp(cfg)
             try:
                 with sftp.file(cfg.path, "rb") as fh:
@@ -5272,6 +5751,13 @@ def read_target_sample(
                     break
             return out_rows
 
-    except Exception:
-        return []
-    return []
+    except TargetSampleUnavailable:
+        raise
+    except Exception as exc:
+        raise TargetSampleUnavailable(
+            f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+        ) from exc
+    raise TargetSampleUnavailable(
+        f"No sample reader is wired for destination type {db_type!r} "
+        f"(table {table_name!r}); refusing to treat as empty"
+    )

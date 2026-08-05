@@ -35,7 +35,7 @@ _AIRTABLE_CELL_CHARS = 100_000
 
 
 def airtable_field_to_carrier(field: dict[str, Any]) -> str:
-    """Map Airtable Meta field schema → DataFlow quarantine carrier.
+    """Map Airtable Meta field schema → Datawrap quarantine carrier.
 
     Number/percent precision is 0–8; currency 0–7 (Airtable field-model).
     We emit DECIMAL(38,s) so excess scale / non-numeric values quarantine

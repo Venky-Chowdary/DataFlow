@@ -42,6 +42,18 @@ from services.validation_plan import build_validation_plan
 from services.value_serializer import cell_to_string
 
 
+def _hydrate_risk_contract(
+    m: dict[str, Any],
+    *,
+    table: str = "",
+    migration_id: str = "",
+) -> dict[str, Any] | None:
+    """Verify or sign a Migration Risk Contract draft — SSOT in migration_risk_contract."""
+    from services.migration_risk_contract import hydrate_risk_contract_dict
+
+    return hydrate_risk_contract_dict(m, table=table, migration_id=migration_id)
+
+
 def _with_date_locale(fn):
     """Set the active date_locale context for the duration of the call."""
 
@@ -72,12 +84,43 @@ class FilePreflightContext(PreflightContext):
         self.source_duplicate_probe_ran = bool(source_duplicate_probe_ran)
         self.source_duplicate_probe_pk = str(source_duplicate_probe_pk or "")
 
+    def _mapping_dict_for_probe(self, m: Any, dest_types: dict[str, str]) -> dict[str, Any]:
+        """Serialize plan mappings for coercion / integrity — keep Map Accept risk.
+
+        Stripping risk_acknowledged / fidelity left Validate blocked after Map
+        Accept risk (G3 probe severity + G9 coercion_safety).
+        """
+        return {
+            "source": m.source,
+            "target": m.target,
+            "confidence": getattr(m, "confidence", 0.0),
+            "transform": getattr(m, "transform", None),
+            "requires_review": bool(getattr(m, "requires_review", False)),
+            "user_override": bool(getattr(m, "user_override", False)),
+            # Prefer live dest DDL; keep stamped create-new type when absent.
+            "target_type": dest_types.get(m.target) or getattr(m, "target_type", None),
+            "source_type": next(
+                (
+                    c.inferred_type
+                    for c in self.plan.source.columns
+                    if c.name == m.source
+                ),
+                None,
+            ),
+            "create_new": bool(getattr(m, "create_new", False)),
+            "fidelity": getattr(m, "fidelity", None) or None,
+            "type_narrowing": bool(getattr(m, "type_narrowing", False)),
+            "risk_acknowledged": bool(getattr(m, "risk_acknowledged", False)),
+            "intentional_omit": bool(getattr(m, "intentional_omit", False)),
+            "risk_contract": getattr(m, "risk_contract", None),
+        }
+
     def run_dry_run(self, sample_size: int = 1000) -> tuple[bool, list[str]]:
         if not self.sample_rows:
             return False, [
                 (
                     "No sample rows available for dry-run validation. "
-                    "Re-run Source introspect so DataFlow can load a preview sample "
+                    "Re-run Source introspect so Datawrap can load a preview sample "
                     "from the source table (column metadata alone is not enough)."
                 )
             ]
@@ -97,12 +140,7 @@ class FilePreflightContext(PreflightContext):
             c.name: c.inferred_type for c in self.plan.destination.target_columns
         }
         mapping_dicts = [
-            {
-                "source": m.source,
-                "target": m.target,
-                "transform": getattr(m, "transform", ""),
-                "target_type": dest_types_by_name.get(m.target),
-            }
+            self._mapping_dict_for_probe(m, dest_types_by_name)
             for m in self.plan.mappings
         ]
 
@@ -146,12 +184,7 @@ class FilePreflightContext(PreflightContext):
                 c.name: c.inferred_type for c in self.plan.destination.target_columns
             }
             mapping_dicts = [
-                {
-                    "source": m.source,
-                    "target": m.target,
-                    "transform": getattr(m, "transform", None),
-                    "target_type": dest_types.get(m.target),
-                }
+                self._mapping_dict_for_probe(m, dest_types)
                 for m in self.plan.mappings
             ]
             report = analyze_coercion(
@@ -163,6 +196,20 @@ class FilePreflightContext(PreflightContext):
                 table_exists=getattr(self.plan.destination, "table_exists", None),
                 validation_mode=getattr(self.plan, "validation_mode", None) or "strict",
             )
+            if isinstance(report, dict):
+                from services.validation_coverage import stamp_validation_coverage
+
+                report = {
+                    **report,
+                    "validation_coverage": stamp_validation_coverage(
+                        layer="datatype",
+                        rows_examined=len(self.sample_rows or []),
+                        note=(
+                            "Datatype / coercion classification only — "
+                            "not sample population proof."
+                        ),
+                    ),
+                }
         except Exception as exc:
             logger.warning(
                 "coercion probe failed during preflight: %s", exc, exc_info=exc
@@ -248,22 +295,11 @@ class FilePreflightContext(PreflightContext):
         from services.data_integrity import run_integrity_audit as audit
 
         source_columns = [c.name for c in self.plan.source.columns]
+        dest_types = {
+            c.name: c.inferred_type for c in self.plan.destination.target_columns
+        }
         mapping_dicts = [
-            {
-                "source": m.source,
-                "target": m.target,
-                "confidence": m.confidence,
-                "transform": m.transform,
-                "requires_review": m.requires_review,
-                "target_type": next(
-                    (
-                        c.inferred_type
-                        for c in self.plan.destination.target_columns
-                        if c.name == m.target
-                    ),
-                    None,
-                ),
-            }
+            self._mapping_dict_for_probe(m, dest_types)
             for m in self.plan.mappings
         ]
         source_schemas = [
@@ -299,15 +335,56 @@ class FilePreflightContext(PreflightContext):
 
 VALIDATION_CONFIDENCE_THRESHOLDS = {
     "balanced": 0.75,
+    "migration": 0.75,
     "strict": 0.85,
+    "audit": 0.85,
     "maximum": 0.95,
+    "discovery": 0.0,
 }
 
 
 def confidence_threshold_for_mode(validation_mode: str | None) -> float:
-    return VALIDATION_CONFIDENCE_THRESHOLDS.get(
-        (validation_mode or "strict").lower(), 0.85
-    )
+    try:
+        from services.validation_mode_contract import confidence_floor_for_mode
+
+        return confidence_floor_for_mode(validation_mode)
+    except Exception:
+        return VALIDATION_CONFIDENCE_THRESHOLDS.get(
+            (validation_mode or "strict").lower(), 0.85
+        )
+
+
+# Destinations that honor SCD2 / mirror streaming paths (must match Studio gating).
+_SQL_HISTORY_SYNC_DESTS = frozenset({
+    "postgresql",
+    "mysql",
+    "sqlite",
+    "snowflake",
+    "bigquery",
+    "redshift",
+    "generic_sql",
+    "sqlserver",
+    "mssql",
+    "oracle",
+    "duckdb",
+})
+
+# Sources that can drive CDC (log / change-stream) in production.
+_CDC_CAPABLE_SOURCES = frozenset({
+    "postgresql",
+    "mysql",
+    "sqlserver",
+    "mssql",
+    "oracle",
+    "mongodb",
+    "azure_sql_database",
+    "microsoft_sql_server",
+    "amazon_rds_sql_server",
+    "amazon_rds_postgresql",
+    "amazon_rds_mysql",
+    "amazon_aurora_postgresql",
+    "amazon_aurora_mysql",
+})
 
 
 def run_transfer_policy_gates(
@@ -318,12 +395,20 @@ def run_transfer_policy_gates(
     stream_contracts: list[dict[str, Any]] | None = None,
     backfill_new_fields: bool = False,
     source_columns: list[str] | None = None,
+    dest_type: str | None = None,
+    source_type: str | None = None,
+    source_kind: str = "file",
+    write_via_staging: bool = False,
 ) -> list[dict[str, Any]]:
     """Validate enterprise run policy that sits above source/destination probes."""
     contracts = [c for c in stream_contracts or [] if c.get("selected", True)]
     sync = (sync_mode or "full_refresh_overwrite").lower()
     schema = (schema_policy or "manual_review").lower()
     validation = (validation_mode or "strict").lower()
+    dest = (dest_type or "").strip().lower()
+    src = (source_type or "").strip().lower()
+    kind = (source_kind or "file").strip().lower()
+    multi_stream = len(contracts) > 1
     requires_cursor = sync in {"incremental_append", "incremental_deduped", "cdc"}
     requires_primary_key = sync in {
         "upsert",
@@ -367,6 +452,26 @@ def run_transfer_policy_gates(
 
     gates: list[dict[str, Any]] = []
     sync_issues: list[str] = []
+    if sync in {"scd2", "mirror"}:
+        if multi_stream:
+            sync_issues.append(
+                f"{sync.upper()} is not supported for multi-stream transfers"
+            )
+        elif not dest:
+            sync_issues.append(
+                f"{sync.upper()} requires a SQL table destination"
+            )
+        elif dest not in _SQL_HISTORY_SYNC_DESTS:
+            sync_issues.append(
+                f"{sync.upper()} requires a SQL table destination (not '{dest}')"
+            )
+    if sync == "cdc":
+        if kind in {"file", "cloud"}:
+            sync_issues.append("CDC requires a database source (not file/cloud)")
+        elif src and src not in _CDC_CAPABLE_SOURCES:
+            sync_issues.append(
+                f"CDC is not supported for source type '{src}'"
+            )
     if missing_cursor:
         sync_issues.append(f"Missing cursor field for {', '.join(missing_cursor[:5])}")
     if missing_primary_key:
@@ -486,6 +591,75 @@ def run_transfer_policy_gates(
             },
         }
     )
+
+    staging_issues: list[str] = []
+    if write_via_staging:
+        try:
+            from services.pre_ingestion_staging import dest_supports_staging
+
+            if not dest:
+                staging_issues.append(
+                    "write_via_staging requires a SQL destination type"
+                )
+            elif not dest_supports_staging(dest):
+                staging_issues.append(
+                    f"write_via_staging is not supported for destination '{dest}' "
+                    "(SQL table destinations only)"
+                )
+        except Exception:
+            staging_issues.append(
+                "write_via_staging could not be verified for this destination"
+            )
+    if staging_issues:
+        gates.append(
+            {
+                "id": "g12_staging_policy",
+                "status": GateStatus.BLOCK.value,
+                "message": "Write-via-staging not supported for this route",
+                "duration_ms": 0,
+                "details": {
+                    "issues": staging_issues,
+                    "write_via_staging": True,
+                    "dest_type": dest or None,
+                },
+            }
+        )
+    else:
+        gates.append(
+            {
+                "id": "g12_staging_policy",
+                "status": GateStatus.PASS.value,
+                "message": (
+                    "Write-via-staging enabled for SQL destination"
+                    if write_via_staging
+                    else "Direct write (staging off)"
+                ),
+                "duration_ms": 0,
+                "details": {
+                    "write_via_staging": bool(write_via_staging),
+                    "dest_type": dest or None,
+                },
+            }
+        )
+
+
+    # Redis KV TTL/EXPIRE is not a first-class transfer guarantee (soft warning).
+    if dest in {"redis", "redis_enterprise", "amazon_elasticache_redis", "azure_cache_redis", "google_memorystore_redis"} or src in {
+        "redis", "redis_enterprise", "amazon_elasticache_redis", "azure_cache_redis", "google_memorystore_redis",
+    }:
+        gates.append({
+            "id": "redis_ttl_semantics",
+            "name": "Redis TTL / EXPIRE",
+            "status": GateStatus.PASS.value,
+            "severity": "warn",
+            "message": (
+                "Redis TTL/EXPIRE is not preserved as a migration guarantee — "
+                "values transfer; set EXPIRE in a post-load job if needed. "
+                "See docs/REDIS_TTL_SEMANTICS.md."
+            ),
+            "blocks_transfer": False,
+            "details": {"honesty": "ttl_not_productized"},
+        })
 
     return gates
 
@@ -617,6 +791,7 @@ def apply_policy_gates(
             }
 
     from services.preflight_rules import enrich_blockers
+    from services.root_cause_engine import apply_root_causes_to_preflight
 
     dest_kind = normalize_dest_kind(destination_db_type)
     enriched_blockers = enrich_blockers(
@@ -625,7 +800,7 @@ def apply_policy_gates(
         validation_mode=validation_mode,
     )
 
-    return {
+    return apply_root_causes_to_preflight({
         **result,
         "passed": not has_blocks,
         "passed_count": passed_count,
@@ -634,10 +809,79 @@ def apply_policy_gates(
         "gates": gates,
         "blockers": enriched_blockers,
         "proof_bundle": proof_bundle,
-    }
+    })
 
 
 @_with_date_locale
+def _load_source_foreign_keys(
+    *,
+    source_connector_id: str = "",
+    source_config: dict[str, Any] | None = None,
+    source_table: str = "",
+    workspace_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Introspect source-table FOREIGN KEYs when a live SQL source is available.
+
+    Returns [] when unsupported — never invents FK metadata.
+    """
+    table = (source_table or "").strip()
+    if not table:
+        return []
+    if not source_connector_id and not source_config:
+        return []
+
+    cfg: dict[str, Any] | None = None
+    db_type = ""
+    if source_connector_id:
+        from services.connector_probe import probe_cfg_from_saved
+        from services.connector_store import get_connector
+
+        conn = get_connector(source_connector_id, workspace_id=workspace_id)
+        if conn:
+            cfg = probe_cfg_from_saved(conn)
+            db_type = (conn.type or "").lower()
+    if cfg is None and source_config:
+        cfg = dict(source_config)
+        db_type = (
+            cfg.get("type") or cfg.get("db_type") or cfg.get("format") or ""
+        ).lower()
+    if not cfg or not db_type:
+        return []
+    cfg = dict(cfg)
+    cfg.setdefault("type", db_type)
+
+    # Only engines with real FK catalog readers today.
+    if db_type not in {
+        "postgresql",
+        "postgres",
+        "cockroachdb",
+        "timescaledb",
+        "supabase",
+        "mysql",
+        "mariadb",
+        "singlestore",
+    }:
+        return []
+
+    from services.schema_introspect import introspect_schema
+
+    info = introspect_schema(
+        db_type,
+        host=str(cfg.get("host") or ""),
+        port=int(cfg.get("port") or 5432),
+        database=str(cfg.get("database") or ""),
+        username=str(cfg.get("username") or ""),
+        password=str(cfg.get("password") or ""),
+        schema=str(cfg.get("schema") or "public"),
+        connection_string=str(cfg.get("connection_string") or ""),
+        ssl=bool(cfg.get("ssl", False)),
+        table=table,
+    )
+    if not info.get("ok"):
+        return []
+    return list(info.get("foreign_keys") or [])
+
+
 def run_file_preflight(
     *,
     columns: list[str],
@@ -678,14 +922,17 @@ def run_file_preflight(
     contract_primary_key: str | None = None,
     destination_pk_columns: list[str] | None = None,
     destination_unique_keys: list[dict[str, Any]] | None = None,
+    destination_foreign_keys: list[dict[str, Any]] | None = None,
     date_locale: str = "",
     cursor_fields: list[str] | None = None,
     compliance_acknowledged: bool = False,
     schema_drift_acknowledged: bool = False,
+    fk_risk_acknowledged: bool = False,
     acknowledgment_actor: str = "",
     acknowledgment_reason: str = "",
+    run_population_orphan_scan: bool = False,
 ) -> dict[str, Any]:
-    """Run preflight gates for file/DB Studio transfers (G1–G8 + integrity)."""
+    """Run preflight gates for file/DB Studio transfers (G1–G9 + host policy)."""
 
     if row_count <= 0 and sample_rows:
         row_count = len(sample_rows)
@@ -697,6 +944,26 @@ def run_file_preflight(
 
     if sample_rows and len(sample_rows) > PREFLIGHT_SAMPLE_LIMIT:
         sample_rows = sample_rows[:PREFLIGHT_SAMPLE_LIMIT]
+
+    # Sign Migration Risk Contract drafts before gates / proof_bundle see them.
+    # Stamp destination table onto unsigned drafts (audit field — never invent DDL).
+    hydrated_mappings: list[dict[str, Any]] = []
+    for m in mappings or []:
+        row = dict(m) if isinstance(m, dict) else dict(m or {})
+        signed = _hydrate_risk_contract(
+            row,
+            table=str(destination_table or ""),
+            migration_id="",
+        )
+        if signed is not None:
+            row["risk_contract"] = signed
+            # Continue-policy contract implies operator ack for G3/G4.
+            from services.migration_risk_contract import contract_clears_validate_block
+
+            if contract_clears_validate_block(signed):
+                row["risk_acknowledged"] = True
+        hydrated_mappings.append(row)
+    mappings = hydrated_mappings
 
     # If the operator did not specify a locale for ambiguous day/month dates,
     # scan the sample for an unambiguous majority before any date coercion.
@@ -754,11 +1021,16 @@ def run_file_preflight(
         )
         for c in columns
     ]
+    from services.mapping_constraints import is_intentional_omit, write_mappings
+
     dest_types = destination_column_types or {}
     dest_nulls = destination_column_nullability or {}
+    write_maps = write_mappings(mappings)
     dest_cols = []
-    for m in mappings:
-        tgt = m["target"]
+    for m in write_maps:
+        tgt = m.get("target") or ""
+        if not tgt:
+            continue
         inferred = dest_types.get(
             tgt,
             m.get("target_type") or column_types.get(m["source"], "VARCHAR"),
@@ -780,18 +1052,30 @@ def run_file_preflight(
     plan_mappings = [
         ColumnMapping(
             source=m["source"],
-            target=m["target"],
+            target=m.get("target") or "",
             confidence=float(m.get("confidence", 0.0)),
             transform=m.get("transform"),
             user_override=bool(m.get("user_override", False)),
             reasoning=m.get("reasoning") or m.get("reason", ""),
             requires_review=bool(m.get("requires_review", False)),
             score_gap=float(m.get("score_gap", 1.0)),
+            target_type=m.get("target_type") or m.get("targetType"),
+            create_new=bool(m.get("create_new") or m.get("createNew", False)),
             struct_policy=m.get("struct_policy") or m.get("structPolicy"),
             struct_derived=bool(
                 m.get("struct_derived") or m.get("structDerived", False)
             ),
             struct_parent=m.get("struct_parent") or m.get("structParent"),
+            fidelity=(m.get("fidelity") or None),
+            type_narrowing=bool(m.get("type_narrowing") or m.get("typeNarrowing", False)),
+            risk_acknowledged=bool(
+                m.get("risk_acknowledged") or m.get("riskAcknowledged", False)
+            ),
+            intentional_omit=is_intentional_omit(m),
+            risk_contract=_hydrate_risk_contract(
+                m if isinstance(m, dict) else dict(m or {}),
+                table=str(destination_table or ""),
+            ),
         )
         for m in mappings
     ]
@@ -840,7 +1124,7 @@ def run_file_preflight(
 
     target_cols = list(drift_dest_types.keys())
     ddl_compatible, ddl_issues = evaluate_ddl_compatibility(
-        mappings=mappings,
+        mappings=write_maps,
         source_schema=column_types,
         target_schema=ddl_dest_types,
         sample_rows=sample_rows,
@@ -859,7 +1143,7 @@ def run_file_preflight(
     drift = detect_schema_drift(
         source_columns=columns,
         source_schema=column_types,
-        target_columns=target_cols or [m["target"] for m in mappings],
+        target_columns=target_cols or [m["target"] for m in write_maps if m.get("target")],
         target_schema=drift_dest_types,
         mappings=mappings,
         destination_db_type=destination_db_type,
@@ -925,6 +1209,8 @@ def run_file_preflight(
         contract_primary_key=str(contract_primary_key or "").strip(),
         destination_pk_columns=list(destination_pk_columns or []),
         destination_unique_keys=list(destination_unique_keys or []),
+        destination_foreign_keys=list(destination_foreign_keys or []),
+        fk_risk_acknowledged=bool(fk_risk_acknowledged),
     )
 
     # Source-side duplicate-key probe: a small sample can miss duplicates in large
@@ -999,12 +1285,79 @@ def run_file_preflight(
         acknowledgment_reason=acknowledgment_reason,
     )
 
+    # Module 12 — Conversion Contract + Map→DDL identity stamp (never invent green).
+    try:
+        from services.conversion_contract import (
+            classify_mapping,
+            ddl_identity_report,
+        )
+
+        dest_for_ddl = (destination_db_type or "").strip().lower()
+        proof_bundle = {
+            **proof_bundle,
+            "ddl_identity": ddl_identity_report(
+                list(mappings or []),
+                dest_db=dest_for_ddl,
+            ),
+            "conversion_contract": {
+                "version": "conversion_contract.v1",
+                "columns": [
+                    {
+                        "source": m.get("source"),
+                        "target": m.get("target"),
+                        **classify_mapping(
+                            m,
+                            destination_db_type=dest_for_ddl,
+                        ),
+                    }
+                    for m in (mappings or [])[:80]
+                    if isinstance(m, dict)
+                ],
+            },
+        }
+    except Exception as conv_exc:
+        # GA: never soft-skip conversion / DDL identity stamp — surface fail-closed.
+        logger.warning(
+            "conversion contract stamp failed closed: %s", conv_exc, exc_info=conv_exc
+        )
+        proof_bundle = {
+            **proof_bundle,
+            "ddl_identity": {
+                "ddl_identity_hash": "",
+                "error": str(conv_exc)[:400],
+                "stamp_failed": True,
+            },
+            "conversion_contract": {
+                "version": "conversion_contract.v1",
+                "stamp_failed": True,
+                "error": str(conv_exc)[:400],
+            },
+        }
+
     from services.preflight_rules import enrich_blockers
 
     blockers = [
         {"id": b.gate_id.value, "message": b.message, "details": b.details}
         for b in result.blockers
     ]
+    # Missing DDL identity after stamp failure → operator-facing blocker.
+    ddl_id = (proof_bundle.get("ddl_identity") or {}) if isinstance(proof_bundle, dict) else {}
+    if ddl_id.get("stamp_failed") or (
+        isinstance(proof_bundle, dict)
+        and proof_bundle.get("ddl_identity") is not None
+        and not str(ddl_id.get("ddl_identity_hash") or "").strip()
+        and ddl_id.get("error")
+    ):
+        blockers.append(
+            {
+                "id": "ddl_identity",
+                "message": (
+                    "Map→DDL identity stamp failed — re-run Validate after fixing "
+                    f"conversion contract: {ddl_id.get('error') or 'unknown'}"
+                ),
+                "details": {"ddl_identity": ddl_id},
+            }
+        )
     enriched_blockers = enrich_blockers(
         blockers,
         dest_kind=dest_kind,
@@ -1062,7 +1415,257 @@ def run_file_preflight(
             recommended_batch_size(_src_fmt),
             recommended_batch_size(_tgt_fmt) or recommended_batch_size(_src_fmt),
         ),
+        # Echo signed Risk Contracts so Map/Execute share the same stamped rows
+        # Validate greened — never leave FE with unsigned drafts after hydrate.
+        "signed_mappings": [
+            {
+                "source": str(m.get("source") or ""),
+                "target": str(m.get("target") or ""),
+                "risk_contract": m.get("risk_contract"),
+                "risk_acknowledged": bool(m.get("risk_acknowledged")),
+            }
+            for m in (mappings or [])
+            if isinstance(m, dict) and isinstance(m.get("risk_contract"), dict)
+        ],
     }
+
+    # FK / relational constraint findings + sample orphan probe.
+    # Schema unmapped-FK + sample orphans fail closed in strict/maximum unless
+    # acknowledged. Sample orphan never invents population RI proof.
+    try:
+        from preflight.constraint_hints import (
+            assess_constraint_compatibility,
+            constraint_findings_block_transfer,
+            referential_integrity_posture,
+        )
+        from services.sample_orphan_probe import probe_sample_fk_orphans
+
+        findings = list(
+            assess_constraint_compatibility(
+                ctx,
+                validation_mode=validation_mode,
+                fk_risk_acknowledged=bool(fk_risk_acknowledged),
+            )
+            or []
+        )
+
+        # Prefer source-introspected FKs for orphan probe (sample is source rows).
+        probe_fks = list(destination_foreign_keys or [])
+        try:
+            src_fks = _load_source_foreign_keys(
+                source_connector_id=source_connector_id or "",
+                source_config=source_config,
+                source_table=source_table or "",
+            )
+            if src_fks:
+                probe_fks = src_fks
+                out["source_foreign_keys"] = src_fks
+        except Exception as src_fk_exc:
+            logger.debug(
+                "source FK introspect skipped: %s", src_fk_exc, exc_info=src_fk_exc
+            )
+
+        orphan_report = probe_sample_fk_orphans(
+            sample_rows=sample_rows,
+            mappings=list(mappings or []),
+            foreign_keys=probe_fks,
+            source_connector_id=source_connector_id or "",
+            source_config=source_config,
+            validation_mode=validation_mode,
+            fk_risk_acknowledged=bool(fk_risk_acknowledged),
+        )
+        out["sample_orphan_probe"] = {
+            k: orphan_report.get(k)
+            for k in (
+                "ran",
+                "coverage",
+                "population_proof",
+                "orphan_count",
+                "checked_values",
+                "checks",
+                "note",
+                "error",
+            )
+            if k in orphan_report
+        }
+        for of in orphan_report.get("findings") or []:
+            if isinstance(of, dict):
+                findings.append(of)
+
+        # Module 11 — opt-in full-table population orphan scan (only path to RI proven).
+        pop_report: dict[str, Any] = {
+            "ran": False,
+            "coverage": "none",
+            "population_proof": False,
+            "complete": False,
+            "orphan_count": 0,
+            "note": "Population orphan scan not requested for this Validate.",
+        }
+        if run_population_orphan_scan:
+            from services.population_orphan_probe import probe_population_fk_orphans
+
+            pop_report = probe_population_fk_orphans(
+                child_table=source_table or "",
+                mappings=list(mappings or []),
+                foreign_keys=probe_fks,
+                source_connector_id=source_connector_id or "",
+                source_config=source_config,
+                validation_mode=validation_mode,
+                fk_risk_acknowledged=bool(fk_risk_acknowledged),
+            )
+            for of in pop_report.get("findings") or []:
+                if isinstance(of, dict):
+                    findings.append(of)
+        out["population_orphan_probe"] = {
+            k: pop_report.get(k)
+            for k in (
+                "ran",
+                "coverage",
+                "population_proof",
+                "complete",
+                "orphan_count",
+                "checks",
+                "child_table",
+                "note",
+                "error",
+            )
+            if k in pop_report
+        }
+
+        out["constraint_findings"] = findings
+        out["constraint_hints"] = findings
+        pop_ran = bool(pop_report.get("ran"))
+        # Incomplete population scan must not invent proven via orphan_count=0.
+        pop_count: int | None
+        if pop_ran and pop_report.get("complete"):
+            pop_count = int(pop_report.get("orphan_count") or 0)
+        else:
+            pop_count = None
+        ri_posture = referential_integrity_posture(
+            findings,
+            population_orphan_probe_ran=pop_ran,
+            population_orphan_count=pop_count,
+            sample_orphan_probe_ran=bool(orphan_report.get("ran")),
+            sample_orphan_count=int(orphan_report.get("orphan_count") or 0),
+        )
+        if fk_risk_acknowledged:
+            ri_posture = {
+                **ri_posture,
+                "fk_risk_acknowledged": True,
+                "acknowledgment": {
+                    "actor": (acknowledgment_actor or "operator").strip() or "operator",
+                    "reason": (
+                        (acknowledgment_reason or "").strip()
+                        or "Operator acknowledged destination FK mapping risk for this run"
+                    ),
+                },
+            }
+        out["referential_integrity"] = ri_posture
+
+        if constraint_findings_block_transfer(
+            findings,
+            validation_mode=validation_mode,
+            fk_risk_acknowledged=bool(fk_risk_acknowledged),
+        ):
+            block_msgs = [
+                str(f.get("message") or f.get("code") or "Foreign key coverage incomplete")
+                for f in findings
+                if isinstance(f, dict)
+                and str(f.get("severity") or "").lower() in {"block", "ack_required"}
+            ]
+            fk_msg = (
+                block_msgs[0]
+                if block_msgs
+                else "Destination FK columns unmapped — transfer blocked"
+            )
+            if any(
+                isinstance(f, dict)
+                and f.get("coverage") == "population_orphan_probe"
+                and str(f.get("severity") or "").lower() in {"block", "ack_required"}
+                for f in findings
+            ):
+                coverage = "population_orphan_probe"
+            elif any(
+                isinstance(f, dict) and f.get("coverage") == "sample_orphan_probe"
+                for f in findings
+                if str(f.get("severity") or "").lower() in {"block", "ack_required"}
+            ):
+                coverage = "sample_orphan_probe"
+            else:
+                coverage = "destination_fk_metadata"
+            fk_details = {
+                "findings": findings,
+                "coverage": coverage,
+                "remediation_kind": "acknowledge_fk_risk",
+                "ack_required": True,
+                "population_orphan_proven": bool(ri_posture.get("proven")),
+                "population_orphan_probe_ran": pop_ran,
+                "sample_orphan_probe_ran": bool(orphan_report.get("ran")),
+                "rule_id": (
+                    "constraint_fk.population_orphan"
+                    if coverage == "population_orphan_probe"
+                    else (
+                        "constraint_fk.sample_orphan"
+                        if coverage == "sample_orphan_probe"
+                        else "constraint_fk.unmapped"
+                    )
+                ),
+            }
+            fk_gate = {
+                "id": "constraint_fk",
+                "status": "block",
+                "message": fk_msg,
+                "duration_ms": 0,
+                "details": fk_details,
+            }
+            out["gates"] = [*out["gates"], fk_gate]
+            fk_blocker = enrich_blockers(
+                [
+                    {
+                        "id": "constraint_fk",
+                        "message": fk_msg,
+                        "details": fk_details,
+                    }
+                ],
+                dest_kind=dest_kind,
+                validation_mode=validation_mode,
+            )
+            out["blockers"] = [*out["blockers"], *fk_blocker]
+            out["passed"] = False
+            out["passed_count"] = sum(
+                1 for g in out["gates"] if g.get("status") == "pass"
+            )
+            out["total_gates"] = len(out["gates"])
+            out["readiness_score"] = round(
+                out["passed_count"] / max(out["total_gates"], 1) * 100, 1
+            )
+    except Exception as hint_exc:
+        logger.debug("constraint findings skipped: %s", hint_exc, exc_info=hint_exc)
+        out["constraint_hints"] = []
+        out["constraint_findings"] = []
+        out["referential_integrity"] = {
+            "proven": False,
+            "coverage": "none",
+            "population_orphan_probe_ran": False,
+            "sample_orphan_probe_ran": False,
+            "finding_count": 0,
+            "note": "Constraint assessment unavailable for this run.",
+        }
+
+    # Soft Snowflake warehouse sizing from G7 volume — never a GateId.
+    try:
+        dest_fmt = str(destination_db_type or "").strip().lower()
+        if "snowflake" in dest_fmt:
+            from services.snowflake_warehouse_advice import advise_snowflake_warehouse
+
+            advice = advise_snowflake_warehouse(
+                estimated_bytes=int(est_bytes or 0),
+                row_count=int(row_count or 0),
+            )
+            if advice:
+                out["snowflake_warehouse_advice"] = advice
+    except Exception as sf_exc:
+        logger.debug("snowflake warehouse advice skipped: %s", sf_exc, exc_info=sf_exc)
 
     # Multi-load intelligence: compare sample to last N loads of this route.
     try:
@@ -1088,6 +1691,23 @@ def run_file_preflight(
             dst_ep,
             schema=column_types,
         )
+        # Module 17 — measured historical success (never invent a rate).
+        from services.historical_success_contract import (
+            measure_route_historical_success,
+            stamp_mappings_historical_success,
+        )
+
+        hs = measure_route_historical_success(src_ep, dst_ep)
+        out["historical_success"] = hs
+        pb = dict(out.get("proof_bundle") or {})
+        pb["historical_success"] = hs
+        out["proof_bundle"] = pb
+        # Stamp route-scoped evidence onto mapping rows carried in conversion contract.
+        conv = dict(pb.get("conversion_contract") or {})
+        if isinstance(conv.get("columns"), list):
+            conv["columns"] = stamp_mappings_historical_success(conv["columns"], hs)
+            pb["conversion_contract"] = conv
+            out["proof_bundle"] = pb
     except Exception as hist_exc:
         logger.warning("load history compare failed during preflight", exc_info=True)
         out["load_history_report"] = {
@@ -1096,6 +1716,18 @@ def run_file_preflight(
             "prior_load_count": 0,
             "warning": f"Load-history compare unavailable: {hist_exc!s}"[:240],
         }
+        try:
+            from services.historical_success_contract import unmeasured_historical_success
+
+            hs = unmeasured_historical_success(
+                reason=f"Load history unavailable: {hist_exc!s}"[:200],
+            )
+            out["historical_success"] = hs
+            pb = dict(out.get("proof_bundle") or {})
+            pb["historical_success"] = hs
+            out["proof_bundle"] = pb
+        except Exception:
+            pass
 
     # Schema drift is its own rule — never masquerade as Target DDL.
     # Airbyte rule: hard-breaking ALWAYS pauses (even under propagate_*).
@@ -1315,7 +1947,28 @@ def run_file_preflight(
             out["passed_count"] / max(out["total_gates"], 1) * 100, 1
         )
 
-    return out
+    from services.root_cause_engine import apply_root_causes_to_preflight
+    from services.validation_mode_contract import stamp_validation_mode
+
+    stamp_validation_mode(out, validation_mode)
+    # Discovery / Audit: never invent an Execute unlock from Validate readiness.
+    try:
+        from services.validation_mode_contract import mode_allows_write, mode_contract
+
+        if not mode_allows_write(validation_mode):
+            c = mode_contract(validation_mode)
+            out["execute_unlocked"] = False
+            out["write_refused"] = True
+            out.setdefault("warnings", [])
+            if isinstance(out["warnings"], list):
+                out["warnings"].append(
+                    f"Mode `{c['id']}` refuses destination writes — "
+                    f"{c['non_guarantees'][0]}"
+                )
+    except Exception as mode_exc:
+        logger.debug("validation mode stamp side-effects skipped: %s", mode_exc)
+
+    return apply_root_causes_to_preflight(out)
 
 
 def probe_destination(endpoint) -> tuple[bool, str]:
@@ -1491,6 +2144,10 @@ def inspect_destination_for_preflight(
     out["primary_key_columns"] = list(info.get("primary_key_columns") or [])
     out["unique_keys"] = list(info.get("unique_keys") or [])
     out["pk_columns"] = list(out["primary_key_columns"])
+    # Pass through FK metadata when introspect provides it — never invent FKs.
+    out["foreign_keys"] = list(
+        info.get("foreign_keys") or info.get("destination_foreign_keys") or []
+    )
     # Advisory-key / introspect honesty notes (BQ NOT ENFORCED, Redshift
     # informational, Snowflake NOT ENFORCED) — warn-only, never invent blockers.
     dest_warnings = [str(w) for w in (info.get("warnings") or []) if w]

@@ -1,4 +1,4 @@
-"""Data Pilot — app tools the agent can invoke (like Cursor/Claude tool use)."""
+"""Datawrap Pilot — app tools the agent can invoke (like Cursor/Claude tool use)."""
 
 from __future__ import annotations
 
@@ -222,7 +222,7 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "search_knowledge",
-        "description": "Search trained Data Pilot knowledge base — connectors, transfers, PII, mappings, product help.",
+        "description": "Search trained Datawrap Pilot knowledge base — connectors, transfers, PII, mappings, product help.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -341,8 +341,22 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "describe_pilot",
-        "description": "Explain what Data Pilot knows and can do locally — capabilities, not raw RAG dumps.",
+        "description": "Explain what Datawrap Pilot knows and can do locally — capabilities, not raw RAG dumps.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "explain_product",
+        "description": (
+            "Answer product how-to questions about Datawrap (transfer, mapping, preflight, "
+            "connectors, PII, troubleshooting) from curated local knowledge — not RAG dumps."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+            },
+            "required": [],
+        },
     },
     {
         "name": "list_schedules",
@@ -597,7 +611,7 @@ TOOL_DEFINITIONS: list[dict] = [
         "name": "map_connector_schemas",
         "description": (
             "Live-introspect source and destination tables on saved connectors, then run "
-            "DataFlow's semantic column mapper (same engine as Transfer Studio Map step)."
+            "Datawrap's semantic column mapper (same engine as Transfer Studio Map step)."
         ),
         "input_schema": {
             "type": "object",
@@ -620,7 +634,6 @@ TOOL_FAMILIES: list[dict] = [
         "id": "discover",
         "label": "Discover",
         "tools": ["list_datasets", "search_data", "search_connectors", "search_knowledge", "describe_pilot"],
-        "generated_actions": 620,
     },
     {
         "id": "profile",
@@ -639,19 +652,22 @@ TOOL_FAMILIES: list[dict] = [
             "diff_schemas",
             "map_connector_schemas",
         ],
-        "generated_actions": 240,
     },
     {
         "id": "move",
         "label": "Move",
-        "tools": ["plan_transfer_route", "get_transfer_capabilities", "recommend_sync_mode"],
-        "generated_actions": 720,
+        "tools": [
+            "plan_transfer_route",
+            "plan_transfer",
+            "start_transfer",
+            "get_transfer_capabilities",
+            "recommend_sync_mode",
+        ],
     },
     {
         "id": "govern",
         "label": "Govern",
         "tools": ["explain_mapping_assurance", "inspect_schema_policy"],
-        "generated_actions": 140,
     },
     {
         "id": "operate",
@@ -669,28 +685,30 @@ TOOL_FAMILIES: list[dict] = [
             "open_job",
             "open_schedule",
             "start_transfer_studio",
+            "create_connector",
+            "list_connectors",
         ],
-        "generated_actions": 220,
     },
 ]
 
 
 def get_tool_registry() -> dict:
+    """Honest tool registry — counts only real TOOL_DEFINITIONS (no marketing inflation)."""
     tool_names = {t["name"] for t in TOOL_DEFINITIONS}
     families = []
-    generated_total = 0
     for family in TOOL_FAMILIES:
         available = [name for name in family["tools"] if name in tool_names]
-        generated_total += int(family.get("generated_actions", 0))
         families.append({
-            **family,
+            **{k: v for k, v in family.items() if k != "generated_actions"},
             "tools": available,
             "tool_count": len(available),
+            "generated_actions": 0,
         })
     return {
         "tool_count": len(TOOL_DEFINITIONS),
-        "generated_action_count": generated_total,
-        "total_routable_actions": len(TOOL_DEFINITIONS) + generated_total,
+        # Kept for API compat; always 0 — never invent phantom "routable actions".
+        "generated_action_count": 0,
+        "total_routable_actions": len(TOOL_DEFINITIONS),
         "families": families,
         "tools": [
             {
@@ -704,7 +722,7 @@ def get_tool_registry() -> dict:
 
 
 class DataPilotTools:
-    """Execute Data Pilot tools against live app state."""
+    """Execute Datawrap Pilot tools against live app state."""
 
     def __init__(self):
         self.analyst = get_data_analyst()
@@ -727,6 +745,7 @@ class DataPilotTools:
             "search_connectors": self._search_connectors,
             "search_knowledge": self._search_knowledge,
             "describe_pilot": self._describe_pilot,
+            "explain_product": self._explain_product,
             "plan_transfer_route": self._plan_transfer_route,
             "plan_transfer": self._plan_transfer,
             "start_transfer": self._start_transfer,
@@ -806,6 +825,7 @@ class DataPilotTools:
 
     def _list_connectors(self) -> ToolResult:
         summary = []
+        errors: list[str] = []
         try:
             from services.connector_store import list_connectors as store_list
 
@@ -820,7 +840,8 @@ class DataPilotTools:
                     "status": d.get("status", "saved"),
                 })
         except Exception as exc:
-            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+            logging.getLogger(__name__).warning("connector_store list failed: %s", exc, exc_info=exc)
+            errors.append(f"connector_store: {exc}")
         if not summary:
             try:
                 from ...services.mongodb_service import get_mongodb_service
@@ -836,7 +857,21 @@ class DataPilotTools:
                         "status": c.get("status", "unknown"),
                     })
             except Exception as exc:
-                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+                logging.getLogger(__name__).warning("mongo list_connectors failed: %s", exc, exc_info=exc)
+                errors.append(f"mongodb: {exc}")
+        # Empty workspace with healthy stores is success; broken stores must not
+        # greenwash as "you have zero connectors".
+        if not summary and errors:
+            return ToolResult(
+                name="list_connectors",
+                success=False,
+                output={"connectors": [], "count": 0, "errors": errors},
+                error=(
+                    "Could not load saved connectors ("
+                    + "; ".join(errors[:2])
+                    + "). Check Settings → storage, then retry."
+                ),
+            )
         return ToolResult(
             name="list_connectors",
             success=True,
@@ -877,7 +912,14 @@ class DataPilotTools:
         )
         ok, missing = draft_is_complete(draft)
         if not ok:
-            return ToolResult(name="create_connector", success=False, output=draft, error=missing)
+            from .ack_ledger import redact_payload
+
+            return ToolResult(
+                name="create_connector",
+                success=False,
+                output=redact_payload(draft),
+                error=missing,
+            )
 
         probe_msg = ""
         if test_first:
@@ -897,26 +939,31 @@ class DataPilotTools:
                         "ssl": bool(draft.get("ssl")),
                         "type": draft["type"],
                         "auth_mode": draft.get("auth_mode") or "",
+                        "warehouse": draft.get("warehouse") or "",
+                        "account": draft.get("account") or "",
                     },
                 )
                 if not probe_ok:
+                    from .ack_ledger import redact_payload
+
                     return ToolResult(
                         name="create_connector",
                         success=False,
-                        output=draft,
+                        output=redact_payload(draft),
                         error=(
                             f"Could not connect with those credentials: {probe_msg}. "
                             "Fix host/port/user/password (use the public proxy if this is Railway), then ask again."
                         ),
                     )
             except Exception as exc:
+                from .ack_ledger import redact_payload
+
                 return ToolResult(
                     name="create_connector",
                     success=False,
-                    output=draft,
+                    output=redact_payload(draft),
                     error=f"Connection test failed: {exc}",
                 )
-
         safe_preview = {
             "name": draft["name"],
             "type": draft["type"],
@@ -996,20 +1043,9 @@ class DataPilotTools:
             for d in quarantine[:8]
         ]
         remediations: list[dict[str, str]] = []
-        err = str(job.get("error") or "").lower()
         status = str(job.get("status") or "").lower()
-        q_blob = " ".join(str(s.get("reason") or "") for s in samples).lower()
         if status in {"failed", "cancelled"} or job.get("rejected_rows") or quarantine:
-            if "format-control" in err or "encoding" in err or "control" in err or "format-control" in q_blob:
-                remediations.append({
-                    "kind": "normalize_control_chars",
-                    "label": "Strip control characters and re-run validation",
-                })
-                remediations.append({
-                    "kind": "quarantine_and_rerun",
-                    "label": "Apply strip_controls + balanced quarantine posture",
-                })
-            remediations.append({"kind": "open_bad_data_fix", "label": "Open Fix bad data"})
+            remediations.append({"kind": "open_bad_data_fix", "label": "Fix bad data…"})
             remediations.append({"kind": "rerun_preflight", "label": "Re-run Validate in Transfer Studio"})
             remediations.append({"kind": "review_mappings", "label": "Review column mappings"})
         req = job.get("transfer_request") or {}
@@ -1145,9 +1181,9 @@ class DataPilotTools:
                 error=f"Unknown remediation kind '{kind}'. Use one of: {', '.join(sorted(allowed))}",
             )
         labels = {
-            "normalize_control_chars": "Strip control characters & re-run validation",
-            "open_bad_data_fix": "Open Fix bad data dialog",
-            "quarantine_and_rerun": "Quarantine bad cells & re-run (balanced)",
+            "normalize_control_chars": "Normalize control characters…",
+            "open_bad_data_fix": "Fix bad data…",
+            "quarantine_and_rerun": "Quarantine bad rows and re-run…",
             "review_mappings": "Open Map step to review mappings",
             "rerun_preflight": "Re-run Validate",
         }
@@ -1206,16 +1242,29 @@ class DataPilotTools:
                 connectors = (lc.output or {}).get("connectors", [])[:8]
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        from .example_phrases import example_connector_name, example_dest_connector_name
+
+        ex_src = next(
+            (str(c.get("name") or "").strip() for c in connectors if c.get("name")),
+            "",
+        ) or example_connector_name()
+        ex_dst = example_dest_connector_name(source_hint=ex_src)
         return ToolResult(
             name="describe_pilot",
             success=True,
             output={
-                "role": "Data Pilot",
-                "runtime": "local_first",
+                "role": "Datawrap Pilot",
+                "runtime": "local_engine",
+                "runtime_note": (
+                    "Primary brain is Datawrap's local Pilot engine "
+                    "(NL → tools → compose). OpenAI / Anthropic / Ollama are optional "
+                    "add-ons only — not required."
+                ),
                 "can": [
                     "Answer analytics questions with exact aggregates "
                     "(count / sum / avg / min / max / distinct / group by / top-N)",
                     "Plan source→destination routes and sync modes",
+                    "Stage a transfer (map + 9 preflight gates) and start it after you Confirm",
                     "Inspect schema risk, mappings, and validation failures",
                     "Triage jobs by ID (validation runs or job IDs)",
                     "Search your uploaded datasets for columns, PII, and quality",
@@ -1226,12 +1275,16 @@ class DataPilotTools:
                     "Create a saved connector from a URL or host/user/password (server ack + Confirm)",
                     "Compare source vs destination schemas and map columns",
                     "List and run pipeline schedules (with confirmation)",
+                    "Open Fix bad data / quarantine paths in Transfer Studio (Confirm required)",
                     "Open any app screen (Transfer, Jobs, Pipelines, Contracts, Query, …)",
                 ],
                 "cannot_yet": [
-                    "Start a transfer or create a schedule from chat "
-                    "(I can plan the route and open Transfer Studio)",
-                    "Export a table to a file (use Query for larger pulls)",
+                    "Export a table to a downloadable file from chat "
+                    "(sample the table or use Query for larger pulls)",
+                    "Create a brand-new schedule/pipeline definition from chat "
+                    "(I can list and run existing ones)",
+                    "Rewrite quarantine rows in place from chat "
+                    "(I open Transfer Studio Fix with your Confirm)",
                     "Delete connectors, jobs, or data",
                 ],
                 "tools": [t["name"] for t in TOOL_DEFINITIONS],
@@ -1253,12 +1306,12 @@ class DataPilotTools:
                     for c in connectors
                 ],
                 "ask_examples": [
-                    "How many rows in airports on Local Postgres?",
-                    "Count of orders by status on Local Postgres where amount > 100",
-                    "Average price in products on Local Postgres",
+                    f"How many rows in airports on {ex_src}?",
+                    f"Count of orders by status on {ex_src} where amount > 100",
+                    f"Average price in products on {ex_src}",
                     "and by region?",
-                    "Plan a transfer of orders from Local Postgres to Warehouse",
-                    "Transfer orders from Local Postgres to Warehouse as upsert",
+                    f"Plan a transfer of orders from {ex_src} to {ex_dst}",
+                    f"Transfer orders from {ex_src} to {ex_dst} as upsert",
                     "Why did job <id> fail?",
                     "Show my pipelines",
                 ],
@@ -1270,6 +1323,178 @@ class DataPilotTools:
                     "Plans use the same mapping pipeline and 9 gates as Transfer Studio",
                     "Nothing moves until you Confirm — overwrite is never the default",
                 ],
+            },
+        )
+
+    def _explain_product(self, query: str = "") -> ToolResult:
+        """Curated Datawrap product answers — independent of cloud LLMs and RAG noise."""
+        from ..knowledge.copilot_knowledge import (
+            CONVERSATION_TEMPLATES,
+            INTENT_PATTERNS,
+            PRODUCT_CAPABILITIES,
+        )
+
+        lower = (query or "").lower().strip()
+
+        # Direct high-value FAQ snippets (beat generic intent templates).
+        direct: list[tuple[re.Pattern[str], str, str]] = [
+            (
+                re.compile(r"\bappend(?:\s+mode)?\b"),
+                "sync_mode",
+                (
+                    "**Append** adds source rows onto the destination without replacing existing ones. "
+                    "Use it for insert-only feeds. Prefer **upsert** when you have a primary key and "
+                    "need updates; prefer **CDC** for continuous change streams; "
+                    "**full refresh overwrite** replaces the destination (Confirm required)."
+                ),
+            ),
+            (
+                re.compile(r"\bupsert\b"),
+                "sync_mode",
+                (
+                    "**Upsert** inserts new rows and updates existing ones matched by primary key. "
+                    "Needs a reliable key. If you only ever insert, use append; for log-based "
+                    "continuous sync, use CDC."
+                ),
+            ),
+            (
+                re.compile(
+                    r"\b(?:schema\s+types?|logical\s+types?|type\s+system|"
+                    r"mapping\s+types?|data\s+types?\s+(?:in\s+)?(?:map|mapping|validate))\b"
+                ),
+                "type_system",
+                (
+                    "**Schema / logical types** in Datawrap are the Map→Validate contract: "
+                    "source carriers (INTEGER, DECIMAL(p,s), TIMESTAMPTZ, UUID, OBJECTID, INET, "
+                    "VECTOR/HALFVEC, …) stamp a destination type before write. Create-new stamps "
+                    "**physical** DDL (e.g. MySQL `CHAR(36)` for UUID) with Accept-risk chips when "
+                    "domain is not enforced. G3 schema contract fails closed on lossy casts; "
+                    "Approve/Accept risk on Map unlocks Validate — confidence alone never invents Ready. "
+                    "Ask \"list tables on your connector\" or open Transfer Studio → Map for a live schema."
+                ),
+            ),
+            (
+                re.compile(r"\bcdc\b"),
+                "sync_mode",
+                (
+                    "**CDC** (change data capture) streams inserts/updates/deletes from the source "
+                    "log when the engine supports it. Ask me \"what sync mode should I use for CDC?\" "
+                    "for a workload-specific recommendation."
+                ),
+            ),
+            (
+                re.compile(r"\bfull refresh\b"),
+                "sync_mode",
+                (
+                    "**Full refresh** reloads the whole table. Overwrite variants replace destination "
+                    "rows — Pilot always asks you to **Confirm** before that runs."
+                ),
+            ),
+            (
+                re.compile(r"\boverwrite\b"),
+                "sync_mode",
+                (
+                    "**Overwrite** (full refresh overwrite) replaces every row at the destination. "
+                    "It is powerful and risky — Pilot stages Confirm and warns before anything moves. "
+                    "Prefer upsert or CDC when you only need changes."
+                ),
+            ),
+            (
+                re.compile(r"\b(?:ssn|social security)\b"),
+                "pii",
+                (
+                    "SSN-like fields are **PII**. Ask me to introspect or sample a table "
+                    '(e.g. "schema of employees on your saved connector") and I flag sensitive columns. '
+                    "Preflight keeps PII tags visible — I never invent column names without a live read."
+                ),
+            ),
+            (
+                re.compile(r"\b(?:g[1-9]|gate\s*[1-9]|dry\s+run|nine\s+gates|9\s+gates)\b"),
+                "preflight",
+                (
+                    "Preflight has **9 gates** (G1–G9). **G5 Dry run** samples coercion "
+                    "before Execute — fail-closed when types don't convert cleanly. "
+                    "Ask \"what quality gates do you have?\" for the full list."
+                ),
+            ),
+            (
+                re.compile(r"\bconfirm\b"),
+                "confirm",
+                (
+                    "Sensitive Pilot actions (**start transfer**, **save connector**, **run pipeline now**, "
+                    "**fix mapping**) stage a Confirm card. Nothing mutates until you press Allow/Confirm. "
+                    "Credentials for create-connector stay on the server ack ledger — the browser only "
+                    "sees a redacted preview."
+                ),
+            ),
+            (
+                re.compile(
+                    r"\b(?:without|no)\s+(?:openai|anthropic|ollama|cloud|api key)"
+                    r"|\blocal(?:-|\s)?primary\b"
+                    r"|\blocal\s+only\b"
+                    r"|\b(?:don'?t|do\s+not|never)\s+use\s+(?:openai|anthropic|ollama|cloud)\b"
+                    r"|\bare\s+you\s+local\b"
+                ),
+                "local_primary",
+                (
+                    "Yes. **Datawrap Pilot local engine is primary** — NL → tools → compose works with no "
+                    "OpenAI, Anthropic, or Ollama key. Optional `DATAFLOW_PILOT_ENGINE=hybrid` can polish "
+                    "narration with a cloud/local LLM, but transfers, aggregates, schema, and Confirm "
+                    "do not require them."
+                ),
+            ),
+        ]
+        for pattern, intent, answer in direct:
+            if pattern.search(lower):
+                return ToolResult(
+                    name="explain_product",
+                    success=True,
+                    output={
+                        "intent": intent,
+                        "answer": answer,
+                        "capabilities": PRODUCT_CAPABILITIES[:6],
+                        "actions": [],
+                        "source": "local_product_faq",
+                    },
+                )
+
+        scores: dict[str, int] = {}
+        for intent, keywords in INTENT_PATTERNS.items():
+            score = sum(1 for kw in keywords if kw in lower)
+            if score:
+                scores[intent] = score
+        # Boost common product how-tos
+        if re.search(r"\b(?:transfer|move|migrate|sync|copy)\b", lower):
+            scores["transfer_help"] = scores.get("transfer_help", 0) + 3
+        if re.search(r"\b(?:map|mapping|column|schema)\b", lower):
+            scores["mapping_help"] = scores.get("mapping_help", 0) + 2
+        if re.search(r"\b(?:preflight|gate|validate|validation)\b", lower):
+            scores["preflight_help"] = scores.get("preflight_help", 0) + 3
+        if re.search(r"\b(?:connector|mongodb|postgres|snowflake|connect)\b", lower):
+            scores["connector_help"] = scores.get("connector_help", 0) + 2
+        if re.search(r"\b(?:pii|gdpr|hipaa|compliance)\b", lower):
+            scores["pii_compliance"] = scores.get("pii_compliance", 0) + 2
+        if re.search(r"\b(?:fail|error|broke|troubleshoot|job)\b", lower):
+            scores["troubleshooting"] = scores.get("troubleshooting", 0) + 2
+        if re.search(r"\b(?:dataflow|datatransfer|what is|what'?s different|airbyte|fivetran)\b", lower):
+            scores["product_help"] = scores.get("product_help", 0) + 3
+        if re.search(r"\b(?:count|aggregate|analy[sz]e|how many|sql)\b", lower):
+            scores["analytics_help"] = scores.get("analytics_help", 0) + 2
+
+        intent = max(scores, key=scores.get) if scores else "greeting"
+        matched = next((t for t in CONVERSATION_TEMPLATES if t.get("intent") == intent), None)
+        if not matched:
+            matched = CONVERSATION_TEMPLATES[0]
+        actions = list(matched.get("actions") or [])
+        return ToolResult(
+            name="explain_product",
+            success=True,
+            output={
+                "intent": intent,
+                "answer": matched.get("assistant") or "",
+                "capabilities": PRODUCT_CAPABILITIES[:6],
+                "actions": actions,
+                "source": "local_product_faq",
             },
         )
 
@@ -1290,12 +1515,29 @@ class DataPilotTools:
                     continue
                 meta_type = str(d.metadata.get("type") or "").lower()
                 # Prefer real product/docs hits over synthetic catalog training docs.
-                if meta_type in {"synthetic_catalog", "catalog_schema", "generated_qna"} and score < 0.55:
+                if meta_type in {
+                    "synthetic_catalog",
+                    "catalog_schema",
+                    "generated_qna",
+                    "training",
+                    "ontology",
+                    "embedding_shard",
+                } and score < 0.62:
                     continue
                 if "650+" in text or "620+" in text:
                     # Catalog marketing counts are not transfer-ready evidence.
                     continue
                 if _is_raw_knowledge_shard(text) and not _query_targets_semantic_type(query, text):
+                    continue
+                # Synonym / industry catalog dumps are never answers to "get users
+                # from postgres" — only keep them when the operator asked about
+                # synonyms / PII / semantic types explicitly.
+                qlow = query.lower()
+                wants_ontology = any(
+                    w in qlow
+                    for w in ("synonym", "semantic type", "pii", "column pattern", "canonical")
+                )
+                if _is_noise_knowledge_hit(text) and not wants_ontology:
                     continue
                 hits.append({
                     "text": text[:600],
@@ -1308,7 +1550,21 @@ class DataPilotTools:
             return ToolResult(
                 name="search_knowledge",
                 success=True,
-                output={"query": query, "hits": hits, "count": len(hits)},
+                output={
+                    "query": query,
+                    "hits": hits,
+                    "count": len(hits),
+                    "empty": len(hits) == 0,
+                    "hint": (
+                        None
+                        if hits
+                        else (
+                            "No grounded product knowledge matched. Ask about a saved "
+                            "connector, table, job ID, or pf_ validation run — or say "
+                            "what can you do."
+                        )
+                    ),
+                },
             )
         except Exception as e:
             return ToolResult(name="search_knowledge", success=False, output=None, error=str(e))
@@ -1349,6 +1605,8 @@ class DataPilotTools:
         except Exception:
             gate_ids = []
 
+        from .example_phrases import example_connector_name, example_dest_connector_name
+
         return ToolResult(name="plan_transfer_route", success=True, output={
             "generic": True,
             "source": source or "source not specified",
@@ -1359,7 +1617,10 @@ class DataPilotTools:
                 "Name two saved connectors and a table and I will introspect both "
                 "ends, map the columns and run the real gates."
             ),
-            "next": 'Try: "plan a transfer of orders from Local Postgres to Warehouse".',
+            "next": (
+                f'Try: "plan a transfer of orders from {example_connector_name()} '
+                f'to {example_dest_connector_name()}".'
+            ),
         })
 
     def _explain_mapping_assurance(self) -> ToolResult:
@@ -1382,7 +1643,7 @@ class DataPilotTools:
                 "preflight blocks incompatible mappings before execution",
                 "reconciliation verifies row counts/checksums after execution",
             ],
-            "not_claimed": "No system can infer perfect business semantics without ground truth; DataFlow fails closed when evidence is ambiguous.",
+            "not_claimed": "No system can infer perfect business semantics without ground truth; Datawrap fails closed when evidence is ambiguous.",
         })
 
     def _recommend_sync_mode(
@@ -1396,15 +1657,24 @@ class DataPilotTools:
         if "cdc" in w:
             mode = "Incremental CDC"
             reason = "Source changes should be read from a log stream and resumed from cursor state."
+        elif "upsert" in w or "merge" in w or (has_primary_key and "incremental" in w):
+            mode = "Incremental Upsert"
+            reason = (
+                "Primary key (or upsert/merge wording) lets destination rows be "
+                "updated in place without a full reload."
+            )
         elif has_cursor and has_primary_key and needs_history:
             mode = "Incremental Append + Deduped"
             reason = "Cursor and key allow efficient updates while preserving change history."
         elif has_cursor:
             mode = "Incremental Append"
             reason = "Cursor allows new records to be read without a full scan."
-        elif "snapshot" in w or "full" in w:
+        elif "snapshot" in w or "full" in w or "overwrite" in w:
             mode = "Full Refresh Overwrite"
             reason = "Snapshot workloads should replace the destination with the latest source state."
+        elif has_primary_key:
+            mode = "Incremental Upsert"
+            reason = "A primary key is enough to upsert; add a cursor later to avoid full scans."
         else:
             mode = "Full Refresh Append"
             reason = "Use append until cursor/key metadata is confirmed."
@@ -1412,8 +1682,8 @@ class DataPilotTools:
             "recommended_mode": mode,
             "reason": reason,
             "requires": {
-                "cursor": mode.startswith("Incremental"),
-                "primary_key": "Deduped" in mode,
+                "cursor": "Append" in mode or "CDC" in mode,
+                "primary_key": "Upsert" in mode or "Deduped" in mode,
                 "cdc_log_access": "CDC" in mode,
             },
         })
@@ -1422,18 +1692,47 @@ class DataPilotTools:
         schema = self.analyst.resolve_dataset(dataset_name) if dataset_name else None
         columns = schema.columns if schema else []
         pii_candidates = [c for c in columns if any(t in c.lower() for t in ("email", "phone", "ssn", "card", "name"))]
+        gate_ids: list[str] = []
+        try:
+            from preflight.gates import PREFLIGHT_GATES
+
+            gate_ids = [
+                gid.value if hasattr(gid, "value") else str(gid)
+                for gid, _ in PREFLIGHT_GATES
+            ]
+        except Exception:
+            gate_ids = []
         return ToolResult(name="profile_quality_rules", success=True, output={
             "dataset": schema.name if schema else dataset_name or "active dataset",
             "rules": [
-                "type parse success rate >= 99.5%",
-                "null rate checked against inferred required fields",
+                "declared types validated by G3 schema contract (sample-aware when rows exist)",
+                "null rate checked against inferred required / NOT NULL fields",
                 "primary key uniqueness when candidate key exists",
                 "PII columns tagged before destination write",
                 "row rejection quarantine enabled for lossy coercions",
-                "post-write row count and checksum reconciliation",
+                "post-write row count and checksum reconciliation (G8/G9)",
             ],
+            "honesty": (
+                "No invented numeric parse-success floor — cite preflight_gates / "
+                "evidence pack measurements, not marketing thresholds."
+            ),
+            "preflight_gates": gate_ids,
             "pii_candidates": pii_candidates,
             "column_count": len(columns),
+            "has_dataset": bool(schema and columns),
+            "next_steps": (
+                [
+                    "Sample a live table to profile real null/type rates",
+                    "Say fix bad data to open Transfer Studio remediation (Confirm)",
+                    "Run Validate (9 gates) before Execute",
+                ]
+                if schema and columns
+                else [
+                    "Upload a file in Transfer or name a dataset to analyze",
+                    "Or: sample <table> on <connector>",
+                    "Ask what quality gates do you have for the G1–G9 list",
+                ]
+            ),
         })
 
     def _resolve_schedule(self, schedule_id: str = "", name: str = ""):
@@ -1512,6 +1811,22 @@ class DataPilotTools:
                 output=None,
                 error="Which pipeline should I run? Give a schedule name or id.",
             )
+        from .ack_ledger import get_ack_ledger
+
+        preview = {
+            "schedule_id": sched.id,
+            "name": sched.name,
+            "source_connector_id": getattr(sched, "source_connector_id", "") or "",
+            "dest_connector_id": getattr(sched, "dest_connector_id", "") or "",
+            "source_table": getattr(sched, "source_table", "") or "",
+            "dest_table": getattr(sched, "dest_table", "") or "",
+            "sync_mode": getattr(sched, "sync_mode", "") or "",
+        }
+        ack_id = get_ack_ledger().put(
+            kind="run_schedule",
+            payload={"schedule_id": sched.id, "name": sched.name},
+            preview=preview,
+        )
         return ToolResult(
             name="run_schedule_now",
             success=True,
@@ -1522,6 +1837,8 @@ class DataPilotTools:
                 "label": f"Run pipeline “{sched.name}” now",
                 "risk": "mutate",
                 "requires_confirm": True,
+                "ack_id": ack_id,
+                "preview": preview,
             },
         )
 
@@ -1871,6 +2188,21 @@ _META_PILOT_PHRASES = (
     "knowledge you have",
     "trained knowledge",
     "what can pilot",
+    "help me with data pilot",
+    "help with data pilot",
+    "describe yourself",
+    "describe data pilot",
+    "tell me about yourself",
+    "what tools do you have",
+    "your tools",
+    "what are you good at",
+    "what you can help",
+    "what can you help",
+    "what should i ask",
+    "are you able to help",
+    "can you help me move",
+    "able to help me move",
+    "tell me what you can",
 )
 
 
@@ -1879,7 +2211,97 @@ def _is_meta_pilot_question(lower: str) -> bool:
         return True
     if lower.strip() in {"capabilities", "help", "about", "about you"}:
         return True
-    return bool(re.search(r"\b(what|which)\s+(knowledge|skills|tools)\b", lower))
+    if re.search(r"\b(what|which)\s+(knowledge|skills|tools)\b", lower):
+        return True
+    if re.search(r"\btell me what you can\b", lower):
+        return True
+    return False
+
+
+def _looks_like_product_howto(lower: str) -> bool:
+    """Product how-to / FAQ — answer from curated local FAQ, not RAG or cloud."""
+    text = (lower or "").strip()
+    if not text:
+        return False
+    howto = bool(
+        re.search(
+            r"\b(?:what is|what'?s|what are|how do i|how does|how to|explain|"
+            r"tell me (?:everything |more )?about|where (?:do|can) i|can i|"
+            r"what makes|remind me|"
+            r"do i need|is .+ dangerous|how is)\b",
+            text,
+        )
+    )
+    product = bool(
+        re.search(
+            r"\b(?:dataflow|datatransfer|data transfer|transfer studio|preflight|"
+            r"mapping|connector|pipeline|validate|quarantine|sso|pii|gdpr|"
+            r"hipaa|airbyte|fivetran|gates?|move (?:my |the )?data|sync data|"
+            r"schema types?|semantic types?|type system|logical types?|"
+            r"transfers?|pilot|openai|anthropic|"
+            r"ollama|confirm|upsert|append|cdc|sync mode|full refresh|merge|"
+            r"api key|accurate)\b",
+            text,
+        )
+    )
+    if howto and product:
+        return True
+    # Bare product identity questions
+    if re.search(r"\bwhat is data(?:flow|transfer)\b", text):
+        return True
+    if re.search(r"\bhow do i (?:transfer|move|sync|map|connect|validate)\b", text):
+        return True
+    # Local-primary / no-cloud FAQ
+    if re.search(r"\b(?:without|no)\s+(?:openai|anthropic|ollama|cloud|api key)\b", text):
+        return True
+    if re.search(r"\b(?:don'?t|do\s+not|never)\s+use\s+(?:openai|anthropic|ollama|cloud)\b", text):
+        return True
+    if re.search(
+        r"\b(?:are\s+you|you\s+(?:are|run)|runs?)\s+local(?:\s+only|\s+primary)?\b"
+        r"|\blocal\s+only\b"
+        r"|\blocal(?:-|\s)?primary\b",
+        text,
+    ):
+        return True
+    if re.search(r"\b(?:need|require)\s+(?:an?\s+)?(?:openai|anthropic|ollama|api)\s+key\b", text):
+        return True
+    if re.search(r"\b(?:append|upsert|cdc|full refresh)\s+mode\b", text):
+        return True
+    if re.search(r"\bfull refresh\b.+\b(?:dangerous|safe|overwrite)\b|\b(?:dangerous|safe).+\bfull refresh\b", text):
+        return True
+    if re.search(r"\boverwrite\b.+\b(?:safe|dangerous|risk)\b|\b(?:safe|dangerous|risk).+\boverwrite\b", text):
+        return True
+    if re.search(r"\bconfirm\b.+\bwork", text) or re.search(r"\bhow\s+confirm\b", text):
+        return True
+    if re.search(r"\bmapping\b.+\baccurat", text):
+        return True
+    if re.search(r"\b(?:ssn|social security|pii)\b", text) and re.search(
+        r"\b(?:column|columns|look|detect|find|which)\b", text
+    ):
+        return True
+    if re.search(r"\b(?:g[1-9]|gate\s*[1-9]|dry\s*run|9\s+gates|nine\s+gates)\b", text):
+        return True
+    return False
+
+
+def _has_explicit_workspace_subject(lower: str) -> bool:
+    """True when the ask names a live connector/table/job — keep ops tools."""
+    if re.search(r"\bfrom\s+.+\s+to\s+\w", lower):
+        return True
+    if re.search(r"\b(?:to|into)\s+.+\s+from\s+\w", lower):
+        return True
+    if re.search(
+        r"\bon\s+(?:local\s+)?(?:postgres|postgresql|mongodb|mongo|warehouse|mysql|snowflake|bigquery)\b",
+        lower,
+    ):
+        return True
+    if re.search(r"\bfrom\s+(?:local\s+)?(?:postgres|postgresql|mongodb|mongo|warehouse|mysql|snowflake|bigquery)\b", lower):
+        return True
+    if re.search(r"\b(?:job_|pf_)[A-Za-z0-9_\-]+", lower):
+        return True
+    if re.search(r"\bmapping assurance\b", lower):
+        return True
+    return False
 
 
 # A pasted statement, not an English sentence that happens to contain "with".
@@ -1920,6 +2342,23 @@ def _extract_sql_statement(message: str) -> str:
         text = fenced.group(1).strip()
     if _SQL_SELECT_SHAPE.match(text) or _SQL_WITH_SHAPE.match(text):
         return text
+    # "please run this: SELECT …" / "execute SELECT … on Local Postgres"
+    prefixed = re.search(
+        r"(?:(?:please\s+)?(?:run|execute)\s+(?:this\s*)?:?\s*)?(select\b[\s\S]+)$",
+        text,
+        re.I,
+    )
+    if prefixed:
+        candidate = prefixed.group(1).strip()
+        # Drop trailing connector hints that are not SQL.
+        candidate = re.sub(
+            r"\s+on\s+[A-Za-z0-9_\- ]+$",
+            "",
+            candidate,
+            flags=re.I,
+        ).strip()
+        if _SQL_SELECT_SHAPE.match(candidate) or _SQL_WITH_SHAPE.match(candidate):
+            return candidate
     return ""
 
 
@@ -1930,10 +2369,43 @@ def _clean_connector_phrase(raw: str) -> str:
     phrase = phrase.strip(" .,;:!?")
     if not phrase:
         return ""
+    # "postgres connector Venkat" → "Venkat". Never strip glued names like
+    # "MySQL connectionCrown" (no space after connection) — those are saved as-is.
+    phrase = re.sub(
+        r"^(?:(?:a|an|the)\s+)?"
+        r"(?:mysql|mariadb|postgres(?:ql)?|pg|mongo(?:db)?|snowflake|redshift|"
+        r"bigquery|bq|sql\s*server|mssql|oracle|sqlite|redis|dynamodb|databricks)\s+"
+        r"(?:connection|connector)\s+",
+        "",
+        phrase,
+        flags=re.I,
+    ).strip()
+    phrase = re.sub(
+        r"^(?:(?:a|an|the)\s+)?(?:connection|connector)\s+",
+        "",
+        phrase,
+        flags=re.I,
+    ).strip()
     low = phrase.lower()
     if low in _NON_CONNECTOR_PHRASES or _TIME_PHRASE_RE.match(low):
         return ""
     return phrase
+
+
+def _capture_connector_name(raw: str) -> str:
+    """Capture a full connector name (multi-word). Never keep a 1-char `.+?` scrap.
+
+    Optional quotes around a non-greedy `.+?` otherwise match a single letter
+    (``Local Postgres`` → ``l``), which breaks every live DB ask.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    quoted = re.match(r'^[\"\']([^\"\']+)[\"\']\s*[.?!]?$', text)
+    if quoted:
+        return _clean_connector_phrase(quoted.group(1))
+    # Unquoted: take the whole remainder (supports "Local Postgres").
+    return _clean_connector_phrase(re.sub(r"[.?!]+$", "", text).strip())
 
 
 def _is_raw_knowledge_shard(text: str) -> bool:
@@ -1978,20 +2450,110 @@ def _summarize_knowledge_hit(text: str) -> str:
     return text[:280]
 
 
+def _looks_like_unsupported_mutation(lower: str) -> bool:
+    """True when the operator asked for delete / export / create-schedule we refuse.
+
+    These must never fall into RAG — synonym dumps look like we can do the action.
+    """
+    if any(
+        w in lower
+        for w in (
+            "export ", "export to", "download ", "download as",
+            "save as csv", "save as parquet", "to csv", "to parquet", "to excel",
+            "create a new schedule", "create schedule", "create a pipeline",
+            "new nightly", "build a cron", "cron pipeline",
+            "schedule this transfer", "schedule this nightly", "schedule it nightly",
+            "schedule nightly", "nightly schedule",
+        )
+    ):
+        return True
+    if re.search(
+        r"\b(?:delete|drop|destroy|remove)\b.+\b(?:connector|connection|schedule|pipeline)\b",
+        lower,
+    ):
+        return True
+    if re.search(r"\b(?:delete|drop|destroy)\b.+\b(?:table|collection)\b", lower):
+        return True
+    if re.search(r"\bremove\s+(?:the\s+)?[\w\s.-]+\s+connector\b", lower):
+        return True
+    if re.search(r"\bschedule\b.+\b(?:nightly|daily|hourly|every\s+\d+|cron)\b", lower):
+        return True
+    return False
+
+
+def _is_noise_knowledge_hit(text: str) -> bool:
+    """Synonym dumps / industry catalog shards are not answers to ops questions."""
+    t = (text or "").strip()
+    if not t:
+        return True
+    low = t.lower()
+    if low.startswith("synonym group:"):
+        return True
+    if low.startswith("industry schema:"):
+        return True
+    if "synonym group:" in low and "=" in t[:80]:
+        return True
+    return False
+
+
+def _looks_like_live_data_fetch(lower: str) -> bool:
+    """True when the operator wants live table rows — never answer with RAG synonyms."""
+    if re.search(
+        r"\b(?:get|fetch|pull|grab|load|show|preview|sample|give\s+me)\b.+\b(?:from|on|in)\b.+"
+        r"\b(?:postgres|postgresql|mysql|mongo|mongodb|snowflake|bigquery|sql\s*server|sqlite|warehouse|connector)\b",
+        lower,
+    ):
+        return True
+    if re.search(
+        r"\b(?:get|fetch|pull|show|preview|sample)\b.+\b(?:data|rows|table|records)\b.+\b(?:from|on|in)\b",
+        lower,
+    ):
+        return True
+    if re.search(
+        r"\b(?:users?|orders?|customers?|products?|employees?|invoices?)\s+(?:data\s+)?(?:from|on|in)\b",
+        lower,
+    ):
+        return True
+    return False
+
+
 def _looks_like_domain_knowledge_query(lower: str) -> bool:
     """RAG fallback only for substantive domain questions — never chat fluff."""
     if _is_meta_pilot_question(lower):
+        return False
+    if _looks_like_unsupported_mutation(lower):
+        return False
+    if _looks_like_live_data_fetch(lower):
         return False
     if len(lower.strip()) < 16:
         return False
     fluff = ("thank", "thanks", "ok", "okay", "sure", "cool", "great", "nice", "lol")
     if lower.strip() in fluff or any(lower.startswith(f + " ") for f in fluff):
         return False
+    # Destructive / unsupported intents must fall through to honest unmapped
+    # replies — never invent knowledge hits that sound like we can delete/export.
+    if any(
+        w in lower
+        for w in (
+            "delete ", "drop ", "destroy ", "truncate ", "remove connector",
+            "remove the ", "export ", "download ", "create a new schedule", "create schedule",
+            "create a pipeline", "new nightly", "cron ",
+        )
+    ):
+        return False
+    # Ops / data verbs are not "explain mapping" — route to live tools or refuse.
+    if any(
+        w in lower
+        for w in (
+            "get ", "fetch ", "pull ", "grab ", "give me ", "show me ",
+            "how many", "count ", "sum ", "average ", "list ", "sample ",
+        )
+    ):
+        return False
     signals = (
         "what is", "what's", "whats", "how do", "how does", "explain", "mean",
-        "pallet", "schema", "mapping", "pii", "cdc", "sync", "transfer",
-        "column", "type", "connector", "warehouse", "mongodb", "snowflake",
-        "postgres", "quality", "quarantine", "checksum", "reconcile",
+        "semantic", "synonym", "pii type", "cdc", "sync mode",
+        "mapping assurance", "checksum", "reconcile",
     )
     return any(s in lower for s in signals)
 
@@ -2032,14 +2594,15 @@ _TOOL_PRIORITY: dict[str, int] = {
     "recommend_sync_mode": 44,
     "inspect_schema_policy": 42,
     "profile_quality_rules": 40,
+    "search_knowledge": 22,
     "navigate": 35,
     "start_transfer_studio": 34,
     "list_datasets": 30,
     "compare_datasets": 25,
     "analyze_dataset": 20,
     "search_data": 15,
-    "search_knowledge": 10,
     "describe_pilot": 5,
+    "explain_product": 6,
 }
 
 _LIVE_SCHEMA_TOOLS = frozenset({
@@ -2068,11 +2631,38 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
         ]
     # A real aggregate answers the question; a 25-row sample or a regex-scraped
     # query on the same table is strictly worse noise beside it.
-    if "aggregate_data" in names:
+    # Explicit run_query (pasted SELECT / "run sql:") wins over NL aggregate.
+    if "aggregate_data" in names and "run_query" in names:
+        rq = next((a for n, a in planned if n == "run_query"), {}) or {}
+        q = (rq.get("query") or "").upper()
+        if any(
+            tok in q
+            for tok in (" GROUP BY ", " JOIN ", " UNION ", " HAVING ", " WITH ")
+        ) or q.lstrip().startswith(("SELECT", "WITH", "EXPLAIN", "SHOW", "PRAGMA")):
+            planned = [(n, a) for n, a in planned if n != "aggregate_data"]
+            names = {n for n, _ in planned}
+        else:
+            planned = [
+                (n, a) for n, a in planned
+                if n not in ("sample_connector_object", "run_query", "analyze_dataset")
+            ]
+            names = {n for n, _ in planned}
+    elif "aggregate_data" in names:
         planned = [
             (n, a) for n, a in planned
-            if n not in ("sample_connector_object", "run_query", "analyze_dataset")
+            if n not in (
+                "sample_connector_object",
+                "run_query",
+                "analyze_dataset",
+                "filter_result",
+            )
         ]
+        names = {n for n, _ in planned}
+    # Platform inventory: "how many jobs failed" / "connector count" must not
+    # become COUNT(*) — drop aggregate entirely beside inventory lists.
+    if "list_jobs" in names or "list_connectors" in names:
+        planned = [(n, a) for n, a in planned if n != "aggregate_data"]
+        names = {n for n, _ in planned}
     # A concrete transfer already contains the mapping, gates and route, so the
     # generic advice tools beside it are redundant noise.
     if names & {"start_transfer", "plan_transfer"}:
@@ -2089,12 +2679,25 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
     # Job ID triage wins over generic list_jobs
     if "get_job" in names or "get_preflight_run" in names or "open_job" in names:
         planned = [(n, a) for n, a in planned if n != "list_jobs"]
-    # Explicit run / remediate shouldn't also dump unrelated lists
-    if "run_schedule_now" in names or "remediate_validation" in names or "create_connector" in names:
+    # Job / remediate: keep inventory lists for triage ("why did validate fail").
+    if "run_schedule_now" in names or "create_connector" in names:
         planned = [
             (n, a) for n, a in planned
-            if n not in ("list_schedules", "list_jobs", "search_knowledge", "analyze_dataset", "list_connectors", "search_connectors")
+            if n not in (
+                "list_schedules", "list_jobs", "search_knowledge",
+                "analyze_dataset", "list_connectors", "search_connectors",
+            )
         ]
+    elif "remediate_validation" in names:
+        planned = [
+            (n, a) for n, a in planned
+            if n not in (
+                "list_schedules", "search_knowledge",
+                "analyze_dataset", "list_connectors", "search_connectors",
+            )
+        ]
+        # list_jobs stays as companion for validate / job triage.
+        names = {n for n, _ in planned}
     # Cap to top-priority tools (navigate may accompany primary)
     ranked = sorted(
         planned,
@@ -2108,8 +2711,25 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
             primary_tier = pri
             keep.append((name, args))
             continue
-        # Allow companions within 25 points, plus navigate/start_transfer
-        if name in ("navigate", "start_transfer_studio") or pri >= primary_tier - 25:
+        # Allow companions within 25 points, plus navigate / triage lists.
+        # Never attach RAG as a companion to ops tools — that caused synonym dumps.
+        # Exception: quality-profile suggestions may keep a knowledge companion.
+        if name == "search_knowledge" and primary_tier is not None and primary_tier >= 35:
+            if "profile_quality_rules" not in {k[0] for k in keep} and "profile_quality_rules" not in names:
+                continue
+        if (
+            name in (
+                "navigate",
+                "start_transfer_studio",
+                "list_jobs",
+                "list_datasets",
+                "describe_pilot",
+                "explain_product",
+                "profile_quality_rules",
+                "search_knowledge",
+            )
+            or pri >= primary_tier - 25
+        ):
             if len(keep) < 3:
                 keep.append((name, args))
     # Preserve original relative order among kept
@@ -2123,16 +2743,60 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
 # "move orders from Local Postgres to Warehouse" and its many phrasings. The
 # table is captured separately from the endpoints so the planner can introspect
 # a real object rather than pattern-matching the connector's name.
-_TRANSFER_VERBS = r"transfer|move|copy|sync|migrate|replicate|load|push|send|export"
+_TRANSFER_VERBS = r"transfer|trasfer|move|copy|sync|migrate|replicate|load|push|send|export"
+# Trailing politeness / urgency after the destination must not kill the match
+# ("…to Warehouse now", "…to wh please", "…to wh?").
+_TRANSFER_TRAIL = (
+    r"(?=(?:\s+(?:now|please|thanks|thank\s+you|for\s+me|asap|right\s+now)\b)"
+    r"|(?:\s*[,;?])"
+    r"|\s*$)"
+)
 _TRANSFER_RE = re.compile(
     rf"\b(?:{_TRANSFER_VERBS})\b"
-    r"(?:\s+(?:a|an|the))?"
+    r"(?:\s+(?:a|an|the|all|my|our|these|those))?"
     r"(?:\s+(?:transfer|copy|sync|data|rows|records|everything))?"
     r"(?:\s+(?:of|for))?"
     r"\s+(?P<table>[A-Za-z_][\w.$]*)"
     r"(?:\s+(?:table|collection|dataset))?"
     r"\s+(?:from|out\s+of)\s+(?P<src>.+?)"
-    r"\s+(?:to|into|onto|over\s+to|->)\s+(?P<dst>.+?)\s*$",
+    r"\s+(?:to|into|onto|over\s+to|->)\s+(?P<dst>.+?)"
+    rf"{_TRANSFER_TRAIL}",
+    re.IGNORECASE,
+)
+# "moving products Local Postgres -> Warehouse" (no explicit from)
+_TRANSFER_ARROW_RE = re.compile(
+    rf"\b(?:{_TRANSFER_VERBS}|moving)\b"
+    r"(?:\s+(?:a|an|the|all|my|our))?"
+    r"\s+(?P<table>[A-Za-z_][\w.$]*)"
+    r"\s+(?P<src>[A-Za-z0-9_][A-Za-z0-9_\- ]{0,48}?)"
+    r"\s*->\s*"
+    r"(?P<dst>.+?)"
+    rf"{_TRANSFER_TRAIL}",
+    re.IGNORECASE,
+)
+# "push orders to Warehouse from Local Postgres" (destination before source)
+_TRANSFER_TO_FROM_RE = re.compile(
+    rf"\b(?:{_TRANSFER_VERBS})\b"
+    r"(?:\s+(?:a|an|the|all|my|our))?"
+    r"(?:\s+(?:transfer|copy|sync|data|rows|records))?"
+    r"(?:\s+(?:of|for))?"
+    r"\s+(?P<table>[A-Za-z_][\w.$]*)"
+    r"(?:\s+(?:table|collection|dataset))?"
+    r"\s+(?:to|into|onto|over\s+to|->)\s+(?P<dst>.+?)"
+    r"\s+(?:from|out\s+of)\s+(?P<src>.+?)"
+    rf"{_TRANSFER_TRAIL}",
+    re.IGNORECASE,
+)
+# "transfer orders to Warehouse" (source omitted — plan route / clarify later)
+_TRANSFER_TO_ONLY_RE = re.compile(
+    rf"\b(?:{_TRANSFER_VERBS})\b"
+    r"(?:\s+(?:a|an|the|all|my|our))?"
+    r"(?:\s+(?:transfer|copy|sync|data|rows|records))?"
+    r"(?:\s+(?:of|for))?"
+    r"\s+(?P<table>[A-Za-z_][\w.$]*)"
+    r"(?:\s+(?:table|collection|dataset))?"
+    r"\s+(?:to|into|onto|over\s+to|->)\s+(?P<dst>.+?)"
+    rf"{_TRANSFER_TRAIL}",
     re.IGNORECASE,
 )
 # Trailing qualifiers that belong to the run, not to the destination's name.
@@ -2155,6 +2819,12 @@ def _strip_transfer_tail(dest: str) -> tuple[str, str]:
 
     # A trailing clause ("…to wh, is that safe?") is commentary, not a name.
     dest = re.split(r"[,;?]", dest, maxsplit=1)[0].strip()
+    dest = re.sub(
+        r"\s+(?:now|please|thanks|thank\s+you|for\s+me|asap|right\s+now)\s*$",
+        "",
+        dest,
+        flags=re.IGNORECASE,
+    ).strip()
     tail = _TRANSFER_TAIL_RE.search(dest)
     if not tail:
         return dest.strip(), ""
@@ -2171,13 +2841,38 @@ def parse_transfer_intent(message: str) -> dict | None:
     text = (message or "").strip()
     if not text:
         return None
-    match = _TRANSFER_RE.search(text)
+    match = (
+        _TRANSFER_RE.search(text)
+        or _TRANSFER_TO_FROM_RE.search(text)
+        or _TRANSFER_ARROW_RE.search(text)
+    )
     if not match:
+        # Table + destination only — still stage a plan so Confirm/clarify can ask source.
+        soft = _TRANSFER_TO_ONLY_RE.search(text)
+        if soft and not re.search(r"\bfrom\b|\bout\s+of\b", text, re.I):
+            table = soft.group("table").strip()
+            dest, mode = _strip_transfer_tail(soft.group("dst").strip().strip("\"'"))
+            if table and dest and table.lower() not in {
+                "data", "rows", "records", "everything", "all", "it", "them",
+            }:
+                lowered = text.lower()
+                if not mode:
+                    mode = normalize_sync_mode_for_message(lowered)
+                return {
+                    "source_table": table,
+                    "source_connector_name": "",
+                    "dest_connector_name": dest[:80],
+                    "sync_mode": mode,
+                    "plan_only": True,  # missing source → plan/clarify, never mutate
+                }
         return None
     table = match.group("table").strip()
     source = match.group("src").strip().strip("\"'")
     dest, mode = _strip_transfer_tail(match.group("dst").strip().strip("\"'"))
     if not table or not source or not dest:
+        return None
+    # Bare "data/rows/records" is not a real table — ask or plan the route instead.
+    if table.lower() in {"data", "rows", "records", "everything", "all", "it", "them"}:
         return None
     lowered = text.lower()
     if not mode:
@@ -2203,6 +2898,14 @@ def normalize_sync_mode_for_message(lowered: str) -> str:
 
 def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     """Local tool routing when no LLM tool-use is available."""
+    # Light typo normalization for high-frequency operator misspellings.
+    message = re.sub(r"\btrasfer\b", "transfer", message or "", flags=re.I)
+    message = re.sub(r"\bschdule\b", "schedule", message or "", flags=re.I)
+    message = re.sub(r"\bmny\b", "many", message or "", flags=re.I)
+    message = re.sub(r"\btbls\b", "tables", message or "", flags=re.I)
+    message = re.sub(r"\bcnt\b", "count", message or "", flags=re.I)
+    message = re.sub(r"\bconnectorz\b", "connectors", message or "", flags=re.I)
+    message = re.sub(r"\bdbs\b", "databases", message or "", flags=re.I)
     lower = message.lower()
     planned: list[tuple[str, dict]] = []
 
@@ -2213,31 +2916,106 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     nav_map = {
         "pilot": ["data pilot", "go to pilot", "open pilot"],
         "transfer": ["start transfer", "new transfer", "upload", "move data", "go to transfer", "transfer studio"],
-        "jobs": ["show jobs", "my jobs", "job history", "recent transfers", "go to jobs", "transfer jobs", "show my transfer"],
+        "jobs": ["show jobs", "my jobs", "job history", "recent transfers", "go to jobs", "transfer jobs", "show my transfer", "jobs"],
         "connectors": ["connectors", "connections", "add connector", "go to connectors"],
         "dashboard": ["dashboard", "overview", "home", "go home"],
         "schedules": ["pipelines", "schedules", "scheduled pipelines", "go to pipelines", "open pipelines"],
         "contracts": ["contracts", "data contracts", "go to contracts"],
         "query": ["query", "query playground", "sql playground", "go to query"],
-        "settings": ["settings", "sso", "security settings"],
+        "settings": ["settings", "sso", "security settings", "settings screen"],
         "mcp": ["mcp", "go to mcp"],
         "docs": ["docs", "documentation", "help docs", "go to docs"],
         "benchmarks": ["proofs", "benchmarks", "go to proofs"],
     }
-    nav_verbs = ("go", "open", "show", "take me", "navigate", "bring me")
-    for screen, phrases in nav_map.items():
-        label = screen.replace("_", " ")
-        if re.search(rf"(go to|open|show|take me to|navigate to)\s+{re.escape(label)}", lower):
+    nav_verbs = ("go", "open", "show", "take me", "navigate", "bring me", "need the", "i need")
+    # Short "docs please" / "pipelines please" / "overview please"
+    short_nav = {
+        "docs": r"^\s*(?:docs|documentation)\s*(?:please|pls)?\s*[.?!]*$",
+        "schedules": r"^\s*(?:pipelines|schedules)\s*(?:please|pls)?\s*[.?!]*$",
+        "jobs": r"^\s*(?:jobs|job\s+history)\s*(?:please|pls)?\s*[.?!]*$",
+        "connectors": r"^\s*(?:connectors|connections)\s*(?:please|pls)?\s*[.?!]*$",
+        "dashboard": r"^\s*(?:overview|dashboard|home)\s*(?:please|pls)?\s*[.?!]*$",
+        "transfer": r"^\s*(?:transfer(?:\s+studio)?)\s*(?:please|pls)?\s*[.?!]*$",
+        "settings": r"^\s*settings\s*(?:please|pls)?\s*[.?!]*$",
+        "mcp": r"^\s*(?:mcp(?:\s+(?:page|tools?|server))?)\s*(?:please|pls)?\s*[.?!]*$",
+        "contracts": r"^\s*(?:contracts|data\s+contracts)(?:\s+screen)?\s*(?:please|pls)?\s*[.?!]*$",
+        "query": r"^\s*(?:query(?:\s+playground)?|sql\s+playground)\s*(?:please|pls)?\s*[.?!]*$",
+        "benchmarks": r"^\s*(?:proofs|benchmarks)\s*(?:please|pls)?\s*[.?!]*$",
+    }
+    for screen, pat in short_nav.items():
+        if re.search(pat, lower):
             planned.append(("navigate", {"screen": screen}))
             break
-        if screen == "schedules" and re.search(r"(go to|open|show|take me to)\s+pipelines?", lower):
-            planned.append(("navigate", {"screen": "schedules"}))
-            break
-        if any(p in lower for p in phrases) and any(w in lower for w in nav_verbs):
+    # Telegraphic "go pipelines" / "go contracts" (missing "to").
+    if not planned:
+        go_short = re.search(
+            r"^\s*go\s+(?:to\s+)?"
+            r"(pipelines?|schedules?|contracts?|connectors?|connections?|"
+            r"jobs?|query|mcp|docs|proofs|benchmarks|settings|transfer|"
+            r"overview|dashboard|home|pilot)\s*[.?!]*$",
+            lower,
+        )
+        if go_short:
+            token = go_short.group(1)
+            screen = {
+                "pipeline": "schedules", "pipelines": "schedules",
+                "schedule": "schedules", "schedules": "schedules",
+                "contract": "contracts", "contracts": "contracts",
+                "connector": "connectors", "connectors": "connectors",
+                "connection": "connectors", "connections": "connectors",
+                "job": "jobs", "jobs": "jobs",
+                "proof": "benchmarks", "proofs": "benchmarks",
+                "benchmark": "benchmarks", "benchmarks": "benchmarks",
+                "overview": "dashboard", "home": "dashboard", "dashboard": "dashboard",
+            }.get(token, token)
             planned.append(("navigate", {"screen": screen}))
-            break
+    if not planned:
+        for screen, phrases in nav_map.items():
+            label = screen.replace("_", " ")
+            if re.search(
+                rf"(go to|open|show|take me to|navigate to|bring me to|need the|i need the)\s+"
+                rf"(?:the\s+)?{re.escape(label)}",
+                lower,
+            ):
+                planned.append(("navigate", {"screen": screen}))
+                break
+            if screen == "schedules" and re.search(r"(go to|open|show|take me to|bring me to)\s+pipelines?", lower):
+                planned.append(("navigate", {"screen": "schedules"}))
+                break
+            if screen == "contracts" and re.search(r"\bcontracts?\s+screen\b", lower):
+                planned.append(("navigate", {"screen": "contracts"}))
+                break
+            if screen == "mcp" and re.search(r"\bmcp\s+tools?\b", lower):
+                planned.append(("navigate", {"screen": "mcp"}))
+                break
+            if screen == "dashboard" and re.search(r"\b(?:go home|home to the overview|overview)\b", lower):
+                if any(w in lower for w in ("go", "home", "overview", "bring", "take")):
+                    planned.append(("navigate", {"screen": "dashboard"}))
+                    break
+            if any(p in lower for p in phrases) and any(w in lower for w in nav_verbs):
+                # Avoid treating content asks ("show my jobs" inventory) as navigate when
+                # list_* tools will handle them — only navigate for directional language.
+                if screen in {"jobs", "connectors", "schedules"} and not any(
+                    v in lower for v in ("go to", "take me", "navigate to", "bring me", "open ", "need the", "i need")
+                ):
+                    continue
+                planned.append(("navigate", {"screen": screen}))
+                break
 
-    if any(w in lower for w in ("all datasets", "what data", "available data", "list datasets", "what files")):
+    if any(
+        w in lower
+        for w in (
+            "all datasets",
+            "what data",
+            "available data",
+            "list datasets",
+            "list my datasets",
+            "show datasets",
+            "show my datasets",
+            "my datasets",
+            "what files",
+        )
+    ):
         planned.append(("list_datasets", {}))
 
     setup = re.search(r"(?:set up|setup|configure|connect)\s+(.+?)\s+as\s+(?:a\s+)?(?:source|destination)", lower)
@@ -2245,56 +3023,342 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         q = setup.group(1).strip()
         role = "destination" if "destination" in lower else "source"
         planned.append(("search_connectors", {"query": q[:40], "role": role}))
-    elif any(w in lower for w in ("connectors", "connections")) and "go" not in lower and "open" not in lower:
-        if any(w in lower for w in ("search", "find", "source", "destination", "setup", "postgres", "snowflake", "shopify")):
-            role = "destination" if "destination" in lower or "warehouse" in lower else "source" if "source" in lower else "all"
-            q = re.sub(r".*(?:search|find|setup)\s+", "", lower).strip() or lower
-            planned.append(("search_connectors", {"query": q[:40], "role": role}))
-        else:
+    elif re.search(r"\bconnectors?\b|\bconnections?\b", lower) and not any(
+        v in lower for v in ("go to", "take me", "navigate to")
+    ):
+        # "open connectors" is navigate; "find my postgres connector" is search.
+        bare_open_connectors = bool(
+            re.search(
+                r"\b(?:go to|open|take me to|navigate to)\s+(?:the\s+)?(?:connectors?|connections?)\b",
+                lower,
+            )
+        ) and not re.search(
+            r"\b(?:find|search|locate)\b.+\b(?:connectors?|connections?)\b|"
+            r"\b(?:connectors?|connections?)\b.+\b(?:named|called|for)\b",
+            lower,
+        )
+        if bare_open_connectors and "find" not in lower and "search" not in lower:
+            pass  # leave navigate alone
+        elif any(
+            w in lower
+            for w in (
+                "search", "find", "source", "destination", "setup",
+                "postgres", "postgresql", "mysql", "mongo", "snowflake",
+                "bigquery", "shopify", "warehouse",
+            )
+        ) and any(w in lower for w in ("search", "find", "locate", "which", "where")):
+            role = (
+                "destination" if "destination" in lower or "warehouse" in lower
+                else "source" if "source" in lower
+                else "all"
+            )
+            q = re.sub(r".*(?:search|find|locate)\s+", "", lower).strip() or lower
+            q = re.sub(r"\b(?:my|the|a|an)\s+", " ", q)
+            q = re.sub(r"\bconnectors?\b|\bconnections?\b", " ", q).strip()
+            planned.append(("search_connectors", {"query": (q or "connector")[:40], "role": role}))
+            planned = [
+                (n, a) for n, a in planned
+                if not (n == "navigate" and (a or {}).get("screen") == "connectors")
+            ]
+        elif not bare_open_connectors:
             planned.append(("list_connectors", {}))
+            planned = [
+                (n, a) for n, a in planned
+                if not (n == "navigate" and (a or {}).get("screen") == "connectors")
+            ]
 
     # Create / save connector from credentials pasted in chat
     from .connector_create import wants_create_connector
+
+    # "find the postgres one" — engine named without the word connector
+    if (
+        "search_connectors" not in {n for n, _ in planned}
+        and not wants_create_connector(message)
+        and re.search(
+            r"\b(?:find|search|locate)\b.+\b(?:postgres|postgresql|mysql|mongo|snowflake|bigquery)\b",
+            lower,
+        )
+        and "connector" not in lower
+        and "connection" not in lower
+    ):
+        eng = re.search(
+            r"\b(postgres(?:ql)?|mysql|mongo(?:db)?|snowflake|bigquery)\b",
+            lower,
+        )
+        if eng:
+            planned.append(("search_connectors", {"query": eng.group(1), "role": "all"}))
+            planned = [(n, a) for n, a in planned if n != "search_data"]
 
     if wants_create_connector(message):
         planned = [(n, a) for n, a in planned if n not in ("search_connectors", "list_connectors", "search_knowledge")]
         planned.append(("create_connector", {"message": message}))
 
     # Pipelines / schedules
-    if any(w in lower for w in ("list schedules", "list pipelines", "my pipelines", "my schedules", "show pipelines", "show schedules")):
+    if any(w in lower for w in ("list schedules", "list pipelines", "my pipelines", "my schedules", "show pipelines", "show schedules", "show my pipelines", "show my schedules")):
         planned.append(("list_schedules", {"limit": 20}))
+        planned = [
+            (n, a) for n, a in planned
+            if not (n == "navigate" and (a or {}).get("screen") == "schedules")
+        ]
     elif any(w in lower for w in ("pipeline", "schedule")) and any(w in lower for w in ("list", "show", "what")):
-        if "run" not in lower:
+        if "run" not in lower and not any(v in lower for v in ("go to", "take me", "navigate to", "open ")):
             planned.append(("list_schedules", {"limit": 20}))
+            planned = [
+                (n, a) for n, a in planned
+                if not (n == "navigate" and (a or {}).get("screen") == "schedules")
+            ]
+
+    # Open / show a named pipeline (must win over bare "open pipelines" navigate).
+    open_sched = re.search(
+        r"\b(?:open|show|view|get)\s+(?:the\s+)?(?:schedule|pipeline)\s+(.+?)(?:\s+for\s+me)?\s*[.?!]*$",
+        lower,
+    ) or re.search(
+        r"\b(?:open|show|view|get)\s+(.+?)\s+(?:schedule|pipeline)(?:\s+for\s+me)?\s*[.?!]*$",
+        lower,
+    ) or re.search(
+        r"\b(?:can\s+you\s+|could\s+you\s+|please\s+)?open\s+(?:the\s+)?(.+?)\s+pipeline(?:\s+for\s+me)?\s*[.?!]*$",
+        lower,
+    ) or re.search(
+        r"\b(?:details|detail|info)\s+(?:on|for|about)\s+(?:the\s+)?(?:schedule|pipeline)\s+(.+?)\s*$",
+        lower,
+    ) or re.search(
+        r"\bshow\s+me\s+details\s+on\s+(?:schedule|pipeline)\s+(.+?)\s*$",
+        lower,
+    )
+    if not open_sched and re.search(r"\b(?:details|detail|info)\b", lower) and not re.search(
+        r"\b(?:connector|job|transfer|table|schema|dataset|mapping)\b", lower
+    ):
+        # "details about Nightly Orders" / "Nightly Orders details"
+        open_sched = re.search(
+            r"\b(?:details|detail|info)\s+(?:on|for|about)\s+(?:the\s+)?(.+?)\s*$",
+            lower,
+        ) or re.search(
+            r"^\s*(.+?)\s+(?:details|detail|info)\s*$",
+            lower,
+        )
+    if not open_sched and re.search(
+        r"^\s*(?:show|view|open)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9_\-]{1,40}(?:\s+[A-Za-z][A-Za-z0-9_\-]{0,40}){0,3})\s*$",
+        lower,
+    ) and not re.search(
+        r"\b(?:connector|job|transfer|table|schema|dataset|mapping|failed|"
+        r"sample|data|from|on|in|rows|columns|me|some|a\s+sample|"
+        r"pipelines?|schedules?|jobs?|connectors?|contracts?|proofs?)\b",
+        lower,
+    ):
+        # "show Nightly Orders" — short title, no sample/table language
+        open_sched = re.search(
+            r"^\s*(?:show|view|open)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9_\-]{1,40}"
+            r"(?:\s+[A-Za-z][A-Za-z0-9_\-]{0,40}){0,3})\s*$",
+            lower,
+        )
+    if open_sched and "run" not in lower and "trigger" not in lower and "kick" not in lower:
+        sched_name = _clean_connector_phrase(open_sched.group(1))
+        sched_name = re.sub(
+            r"^(?:the\s+|my\s+|a\s+|an\s+)?(?:schedule|pipeline)\s+",
+            "",
+            sched_name,
+            flags=re.I,
+        ).strip()
+        sched_name = re.sub(r"\s+(?:schedule|pipeline)$", "", sched_name, flags=re.I).strip()
+        if sched_name and sched_name not in {"now", "it", "this", "that", "list", "all"}:
+            sched_name = re.sub(r"^(?:the|my|a|an)\s+", "", sched_name, flags=re.I).strip()
+            tool = "open_schedule" if any(w in lower for w in ("open", "view")) else "get_schedule"
+            if "detail" in lower or "info" in lower:
+                tool = "get_schedule"
+            planned.append((tool, {"name": sched_name}))
+            planned = [
+                (n, a) for n, a in planned
+                if not (n == "navigate" and (a or {}).get("screen") == "schedules")
+                and n != "sample_connector_object"
+            ]
 
     run_sched = re.search(
-        r"(?:run|trigger|execute)\s+(?:schedule|pipeline)\s+[\"']?([^\"'\n]+?)[\"']?(?:\s+now)?\s*$",
+        r"(?:run|trigger|execute|kick\s*off|start|fire|schdule|schedule)\s+(?:schedule|pipeline)\s+(.+?)(?:\s+(?:right\s+)?now)?\s*$",
         lower,
-    ) or re.search(r"run\s+[\"']?([^\"'\n]+?)[\"']?\s+(?:schedule|pipeline)\s*now", lower)
-    if any(w in lower for w in ("run now", "run schedule", "run pipeline", "trigger schedule", "trigger pipeline")):
+    ) or re.search(
+        r"(?:run|trigger|execute|kick\s*off|fire|schdule)\s+(.+?)\s+(?:schedule|pipeline)(?:\s+(?:right\s+)?now)?\s*$",
+        lower,
+    ) or re.search(
+        r"(?:run|trigger|execute|kick\s*off|fire|schdule)\s+(?:my\s+)?(.+?)\s+(?:pipeline|schedule)\s*$",
+        lower,
+    ) or re.search(
+        r"(?:run|trigger|execute|kick\s*off|fire|schdule|schedule)\s+(.+?)\s+(?:right\s+)?now\s*$",
+        lower,
+    ) or re.search(
+        r"(?:please\s+)?(?:run|trigger|execute|kick\s*off|fire|schdule)\s+(?:the\s+)?"
+        r"(.+?)(?:\s+(?:pipeline|schedule))?(?:\s+(?:immediately|right\s+now|now))?\s*$",
+        lower,
+    ) or re.search(
+        # "fire Nightly Orders" / "execute Nightly" (name-only, no now/pipeline word)
+        r"^\s*(?:fire|execute|trigger|kick\s*off)\s+(?:the\s+|my\s+)?"
+        r"([A-Za-z][A-Za-z0-9_\- ]{1,48}?)\s*$",
+        lower,
+    ) or re.search(
+        # "do the nightly one now" / "do nightly now"
+        r"^\s*(?:do|run)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9_\- ]{1,40}?)"
+        r"(?:\s+one)?\s+(?:right\s+)?now\s*$",
+        lower,
+    )
+    if any(
+        w in lower
+        for w in (
+            "run now", "run schedule", "run pipeline", "trigger schedule", "trigger pipeline",
+            "run my", "execute schedule", "execute pipeline", "kick off", "kickoff",
+            "schdule", "fire ",
+        )
+    ) or (
+        re.search(r"\b(?:run|trigger|execute|kick\s*off|fire|schdule)\b.+\b(?:now|pipeline|schedule|immediately)\b", lower)
+        and "sql" not in lower
+        and "query" not in lower
+    ) or (
+        re.search(r"\bschedule\b.+\bnow\b", lower)
+        and "every" not in lower
+        and "automatically" not in lower
+        and "create" not in lower
+        and "sql" not in lower
+    ) or (
+        re.search(r"\b(?:trigger|kick\s*off|fire)\s+[a-zA-Z]", lower)
+        and "sql" not in lower
+        and "query" not in lower
+    ) or (
+        re.search(r"^\s*execute\s+[A-Za-z]", lower)
+        and "sql" not in lower
+        and "query" not in lower
+        and "select" not in lower
+    ) or (
+        re.search(r"^\s*(?:do|run)\s+(?:the\s+)?[a-z].+\bnow\b", lower)
+        and "sql" not in lower
+        and "every" not in lower
+    ):
         name = ""
         if run_sched:
-            name = run_sched.group(1).strip()
-        else:
-            m = re.search(r"(?:schedule|pipeline)\s+[\"']?([a-z0-9 _-]+)[\"']?", lower)
-            if m:
-                name = m.group(1).strip()
-            else:
-                m2 = re.search(r"run\s+[\"']?([a-z0-9 _-]+)[\"']?\s+now", lower)
-                if m2 and m2.group(1) not in ("schedule", "pipeline", "it", "this"):
-                    name = m2.group(1).strip()
+            name = _clean_connector_phrase(run_sched.group(1))
+            # Strip filler words from the schedule title capture.
+            name = re.sub(
+                r"^(?:the\s+|my\s+|a\s+|an\s+)?(?:schedule|pipeline)\s+",
+                "",
+                name,
+                flags=re.I,
+            ).strip()
+            name = re.sub(r"^(?:my\s+|the\s+|a\s+|an\s+)", "", name, flags=re.I).strip()
+            name = re.sub(r"\s+(?:schedule|pipeline)$", "", name, flags=re.I).strip()
+            name = re.sub(r"\s+(?:right\s+)?now$", "", name, flags=re.I).strip()
+            name = re.sub(r"\s+immediately$", "", name, flags=re.I).strip()
+            name = re.sub(r"\s+one$", "", name, flags=re.I).strip()
+        if name.lower() in {"now", "it", "this", "that", "schedule", "pipeline", "my", "the"}:
+            name = ""
         planned.append(("run_schedule_now", {"name": name} if name else {}))
+        planned = [
+            (n, a) for n, a in planned
+            if not (n == "navigate" and (a or {}).get("screen") == "schedules")
+        ]
+
+    # Pause / stop / resume / clone — no mutate tools yet; open the named pipeline in UI.
+    manage_sched = None
+    if not re.search(
+        r"\b(?:change\s+data\s+capture|cdc|sync\s+mode|write\s+mode|upsert|append)\b",
+        lower,
+    ):
+        manage_sched = re.search(
+            r"\b(?:pause|stop|disable|resume|clone|duplicate)\s+"
+            r"(?:the\s+)?(?:schedule|pipeline)\s+(.+?)\s*$",
+            lower,
+        ) or re.search(
+            r"\b(?:pause|stop|disable|resume|clone|duplicate)\s+"
+            r"(?:the\s+)?(.+?)\s+(?:schedule|pipeline)\s*$",
+            lower,
+        ) or re.search(
+            r"\b(?:pause|stop|disable|resume|clone|duplicate)\s+"
+            r"(?:the\s+)?([A-Za-z][A-Za-z0-9_\- ]{1,48}?)\s*$",
+            lower,
+        )
+    if manage_sched and "run_schedule_now" not in {n for n, _ in planned}:
+        mname = _clean_connector_phrase(manage_sched.group(1))
+        mname = re.sub(r"\s+(?:schedule|pipeline)$", "", mname, flags=re.I).strip()
+        if mname and mname not in {"now", "it", "this", "that", "list", "all", "change"}:
+            planned.append(("open_schedule", {"name": mname}))
+            planned.append(("navigate", {"screen": "schedules"}))
+            planned = [(n, a) for n, a in planned if n != "sample_connector_object"]
 
     if any(w in lower for w in ("contracts", "data contract")) and any(w in lower for w in ("list", "show", "what")):
-        planned.append(("list_contracts", {"limit": 50}))
+        # "show contracts" may also navigate — prefer list when asking for contents.
+        if not any(v in lower for v in ("go to", "take me", "navigate to", "open ")):
+            planned.append(("list_contracts", {"limit": 50}))
+            planned = [
+                (n, a) for n, a in planned
+                if not (n == "navigate" and (a or {}).get("screen") == "contracts")
+            ]
 
-    if any(w in lower for w in ("jobs", "transfers", "history")) and "dataset" not in lower and "go" not in lower:
+    # List jobs when the operator wants contents — not when they only want the screen.
+    _nav_only = any(v in lower for v in ("go to", "take me to", "navigate to", "open "))
+    # Platform inventory — Datawrap's own jobs/connectors, never warehouse tables.
+    # "how many jobs failed" must list jobs, not SELECT COUNT(*) FROM jobs.
+    _platform_job_inventory = bool(
+        re.search(
+            r"\b(?:how many\s+jobs|jobs?\s+(?:that\s+)?failed|failed\s+jobs|job\s+failures|"
+            r"failed\s+transfers|how many\s+transfers\s+failed|jobs?\s+that\s+failed)\b",
+            lower,
+        )
+    ) and not re.search(r"\bon\s+[a-z0-9]", lower)
+    if (not _nav_only) and (
+        _platform_job_inventory
+        or any(
+            p in lower
+            for p in (
+                "list jobs",
+                "my jobs",
+                "show my jobs",
+                "show jobs",
+                "recent transfers",
+                "job history",
+                "show my transfers",
+                "list transfers",
+            )
+        )
+        or (
+            any(w in lower for w in ("jobs", "transfers", "history"))
+            and any(w in lower for w in ("list", "show", "recent", "my"))
+            and "dataset" not in lower
+        )
+    ):
         planned.append(("list_jobs", {"limit": 10}))
+        planned = [
+            (n, a) for n, a in planned
+            if not (n == "navigate" and (a or {}).get("screen") == "jobs")
+        ]
+
+    _platform_connector_inventory = bool(
+        re.search(r"\b(?:how many\s+connectors|connector\s+count)\b", lower)
+    ) and not re.search(r"\bon\s+[a-z0-9]", lower)
+    if _platform_connector_inventory or re.search(
+        r"\b(?:list|show|what(?:'s|s)?)\s+(?:my\s+)?(?:databases|dbs)\b",
+        lower,
+    ) or re.search(r"\b(?:can\s+u|can\s+you|could\s+you)\s+list\s+(?:my\s+)?(?:databases|dbs)\b", lower):
+        planned.append(("list_connectors", {}))
+        planned = [
+            (n, a) for n, a in planned
+            if not (n == "navigate" and (a or {}).get("screen") == "connectors")
+        ]
 
     pf_match = re.search(r"\bpf_[a-f0-9]{8,}\b", lower)
-    if pf_match or any(w in lower for w in ("preflight run", "validation run", "why did validate", "why validation failed")):
+    if pf_match or any(
+        w in lower
+        for w in (
+            "preflight run",
+            "validation run",
+            "why did validate",
+            "why validation failed",
+            "why did validation",
+            "validate fail",
+            "validation fail",
+        )
+    ):
         if pf_match:
             planned.append(("get_preflight_run", {"run_id": pf_match.group(0)}))
+        else:
+            # No pf_ id — show recent jobs so the operator can pick a failed run.
+            planned.append(("list_jobs", {"limit": 8}))
+            planned.append(("remediate_validation", {"kind": "open_bad_data_fix"}))
 
     job_match = re.search(r"\b([a-f0-9]{24})\b", lower) or re.search(r"\b(job_[a-z0-9_-]{6,})\b", lower)
     if job_match and not (pf_match and job_match.group(1) == pf_match.group(0)):
@@ -2303,21 +3367,73 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             planned.append(("open_job", {"job_id": jid}))
         else:
             planned.append(("get_job", {"job_id": jid}))
-    elif any(w in lower for w in ("why did this job fail", "why did the transfer fail", "job failed", "transfer failed", "analyze job")):
+    elif any(
+        w in lower
+        for w in (
+            "why did this job fail",
+            "why did the transfer fail",
+            "why did the last transfer fail",
+            "why did last transfer fail",
+            "why did my transfer fail",
+            "why did my job fail",
+            "last transfer fail",
+            "job failed",
+            "transfer failed",
+            "analyze job",
+            "open my last job",
+            "show my last job",
+            "last job",
+            "status of my last transfer",
+            "status of the last transfer",
+            "status of last transfer",
+            "get job details",
+            "job details",
+            "last transfer status",
+        )
+    ) or re.search(r"\bwhy\s+did\s+(?:the\s+)?(?:last\s+)?(?:transfer|job)\s+fail\b", lower) or re.search(
+        r"\b(?:status|details?)\s+of\s+(?:my\s+|the\s+)?(?:last\s+)?(?:transfer|job)\b",
+        lower,
+    ) or re.search(r"\b(?:open|show|get)\s+(?:my\s+|the\s+)?last\s+(?:job|transfer)\b", lower):
         planned.append(("list_jobs", {"limit": 5}))
+        planned = [
+            (n, a) for n, a in planned
+            if not (n == "navigate" and (a or {}).get("screen") == "jobs")
+        ]
 
-    if any(w in lower for w in ("strip control", "strip controls", "fix bad data", "format-control", "normalize control", "quarantine bad")):
-        kind = "normalize_control_chars"
-        if "quarantine" in lower:
+    if any(w in lower for w in (
+        "strip control", "strip controls", "fix bad data", "format-control",
+        "normalize control", "quarantine bad", "heal quarantine", "heal the quarantine",
+        "repair bad", "repair quarantine", "fix quarantine", "open bad data",
+        "quarantine the bad", "bad rows please",
+    )) or re.search(r"\bheal\s+(?:the\s+)?quarantine\b", lower):
+        kind = "open_bad_data_fix"
+        if any(w in lower for w in ("strip control", "normalize control", "format-control")):
+            kind = "normalize_control_chars"
+        elif any(w in lower for w in ("quarantine", "heal quarantine", "heal the quarantine")) or re.search(
+            r"\bheal\s+(?:the\s+)?quarantine\b", lower
+        ):
             kind = "quarantine_and_rerun"
-        elif "fix bad data" in lower or "open fix" in lower:
-            kind = "open_bad_data_fix"
         planned.append(("remediate_validation", {"kind": kind}))
         planned.append(("navigate", {"screen": "transfer"}))
 
-    if any(w in lower for w in ("new transfer", "start a transfer", "open transfer studio")) and not any(
-        p[0] == "navigate" for p in planned
+    # Mapping review — open Map step, don't invent column rewrites in chat.
+    if (
+        re.search(r"\b(?:fix|review|repair)\s+(?:the\s+)?(?:mapping|mappings|map)\b", lower)
+        or re.search(r"\bmapping\s+(?:looks?\s+)?(?:wrong|broken|bad)\b", lower)
+        or re.search(r"\bhelp\s+(?:me\s+)?fix\s+(?:it|my\s+mapping|the\s+mapping)\b", lower)
+        or re.search(r"\b(?:what'?s|whats|what is)\s+wrong\s+with\s+(?:the\s+|my\s+)?mapping\b", lower)
+        or re.search(r"\bwrong\s+with\s+(?:the\s+|my\s+)?mapping\b", lower)
+        or re.search(r"\bmapping\s+is\s+(?:incorrect|wrong|broken|bad)\b", lower)
+        or re.search(r"\bmy\s+mapping\s+is\s+(?:incorrect|wrong|broken|bad)\b", lower)
     ):
+        if "remediate_validation" not in {n for n, _ in planned}:
+            planned.append(("remediate_validation", {"kind": "review_mappings"}))
+            planned.append(("navigate", {"screen": "transfer"}))
+
+    if any(w in lower for w in (
+        "new transfer", "start a transfer", "open transfer studio",
+        "start transfer studio", "open the transfer studio", "launch transfer studio",
+    )) and not any(p[0] == "navigate" for p in planned):
         planned.append(("start_transfer_studio", {}))
 
     if any(w in lower for w in ("capabilities", "what can transfer", "supported", "any to any")):
@@ -2330,32 +3446,107 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         planned.append(("plan_transfer" if plan_only else "start_transfer", transfer_intent))
 
     if not transfer_intent and any(
-        w in lower for w in ("plan transfer", "transfer plan", "route plan", "move from", "migrate from")
+        w in lower
+        for w in (
+            "plan transfer", "transfer plan", "route plan", "plan a route", "plan route",
+            "plan the route", "route from", "good route", "moving data", "move from",
+            "migrate from", "move data", "copy data", "sync data", "cdc from",
+            "copy from", "sync from", "replicate from", "out of", "into snowflake",
+            "into mysql", "into warehouse",
+        )
     ):
         src, dst = "", ""
         route = re.search(
-            r"(?:from|source)\s+[\"']?([^\"'\n]+?)[\"']?\s+(?:to|into|->|destination)\s+[\"']?([^\"'\n]+?)[\"']?\s*$",
+            r"(?:from|source|out of)\s+(.+?)\s+(?:to|into|->|destination)\s+(.+?)\s*$",
             lower,
         ) or re.search(
-            r"move\s+[\"']?([^\"'\n]+?)[\"']?\s+(?:to|into)\s+[\"']?([^\"'\n]+?)[\"']?",
+            r"move\s+(?:data|rows|records)?\s*(?:from\s+)?(.+?)\s+(?:to|into)\s+(.+?)\s*$",
+            lower,
+        ) or re.search(
+            r"(?:cdc|copy|sync|replicate)\s+(?:data\s+)?(?:from\s+)?(.+?)\s+(?:to|into)\s+(.+?)\s*$",
+            lower,
+        ) or re.search(
+            r"(?:plan|route)\s+(?:a\s+|the\s+)?(?:route\s+)?(?:from\s+)?(.+?)\s+(?:to|into)\s+(.+?)\s*$",
+            lower,
+        ) or re.search(
+            r"(?:moving|move)\s+(?:data\s+)?(?:out\s+of\s+)?(.+?)\s+(?:into|to)\s+(.+?)\s*$",
+            lower,
+        ) or re.search(
+            r"go\s+from\s+(.+?)\s+into\s+(.+?)\s*$",
             lower,
         )
         if route:
-            src, dst = route.group(1).strip()[:80], route.group(2).strip()[:80]
+            src = _capture_connector_name(route.group(1))
+            dst = _capture_connector_name(route.group(2))
         planned.append(("plan_transfer_route", {
             "source": src or message[:80],
             "destination": dst or message[-80:],
-            "workload": "unknown",
+            "workload": "cdc" if "cdc" in lower else "unknown",
         }))
+        # Prefer route planning over a bare sync-mode recommendation.
+        planned = [(n, a) for n, a in planned if n != "recommend_sync_mode"]
 
     if any(w in lower for w in ("mapping algorithm", "mapping guarantee", "100% accuracy", "correct columns", "assurance", "how does mapping")):
         planned.append(("explain_mapping_assurance", {}))
 
-    if any(w in lower for w in ("sync mode", "cdc", "incremental", "dedupe", "full refresh")):
+    # Sync-mode recommendation only when the operator asks to choose/recommend a mode —
+    # not for "what is upsert" / bare CDC how-tos (those are product FAQ).
+    _sync_howto = bool(
+        re.search(r"\b(?:what is|what'?s|explain|tell me about|how does|how do)\b", lower)
+    ) and any(
+        w in lower
+        for w in (
+            "upsert", "cdc", "incremental", "sync mode", "merge", "full refresh",
+            "append mode", "append",
+        )
+    )
+    if _sync_howto:
+        planned.append(("explain_product", {"query": message[:240]}))
+    elif (
+        "plan_transfer_route" not in {n for n, _ in planned}
+        and "start_transfer" not in {n for n, _ in planned}
+        and "plan_transfer" not in {n for n, _ in planned}
+    ) and (
+        any(
+            w in lower
+            for w in (
+                "which sync mode",
+                "what sync mode",
+                "what write mode",
+                "which write mode",
+                "recommend sync",
+                "best sync mode",
+                "choose sync",
+                "sync mode for",
+                "should i use cdc",
+                "should i use upsert",
+                "enable change data capture",
+                "enable cdc",
+                "start cdc",
+                "turn on cdc",
+                "make it upsert",
+                "make it cdc",
+                "make it append",
+                "switch to cdc",
+                "switch to upsert",
+                "switch to append",
+                "use upsert",
+                "use cdc",
+                "use append",
+            )
+        ) or (
+            any(w in lower for w in ("sync mode", "write mode", "cdc", "incremental", "dedupe", "full refresh", "upsert", "merge"))
+            and any(w in lower for w in ("recommend", "suggest", "choose", "which", "best for", "should", "enable", "use", "make it", "switch"))
+        )
+    ):
         planned.append(("recommend_sync_mode", {
-            "workload": message[:80],
+            "workload": message[:120],
             "has_cursor": "cursor" in lower or "updated_at" in lower or "timestamp" in lower,
-            "has_primary_key": "primary key" in lower or " id" in lower,
+            "has_primary_key": (
+                "primary key" in lower
+                or "primary_key" in lower
+                or bool(re.search(r"\bpk\b", lower))
+            ),
             "needs_history": "history" in lower or "audit" in lower,
         }))
 
@@ -2368,99 +3559,282 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         elif "type change" in lower:
             change_type = "type_change"
         planned.append(("inspect_schema_policy", {"change_type": change_type, "auto_apply": "auto" in lower}))
+        # Don't also mis-parse "schema drift on orders" as table=drift.
+        # (introspect patterns below would otherwise steal it)
 
     # Live DB schema (saved connectors) — not uploaded datasets
-    schema_of = re.search(
-        r"(?:schema|columns|structure)\s+(?:of|for|on)\s+[\"']?([a-zA-Z0-9_.-]+)[\"']?"
-        r"(?:\s+(?:on|in|from|using)\s+[\"']?(.+?)[\"']?)?\s*$",
+    # Skip when we already scheduled schema-policy inspection.
+    _policy_planned = any(n == "inspect_schema_policy" for n, _ in planned)
+    schema_of = None if _policy_planned else re.search(
+        r"(?:schema|columns|structure)\s+(?:of|for|on)\s+([a-zA-Z0-9_.-]+)"
+        r"(?:\s+(?:on|in|from|using|living\s+on)\s+(.+))?$",
+        lower,
+    ) or re.search(
+        r"(?:i\s+need\s+)?(?:the\s+)?schema\s+for\s+([a-zA-Z0-9_.-]+)"
+        r"(?:\s+(?:on|in|from|using|living\s+on)\s+(.+))?$",
         lower,
     )
-    columns_on = re.search(
-        r"(?:what\s+)?columns\s+(?:are\s+)?(?:on|in|for)\s+[\"']?([a-zA-Z0-9_.-]+)[\"']?"
-        r"(?:\s+(?:on|in|from|using)\s+[\"']?(.+?)[\"']?)?",
+    columns_on = None if _policy_planned else re.search(
+        r"(?:what\s+)?columns\s+(?:are\s+)?(?:on|in|for)\s+([a-zA-Z0-9_.-]+)"
+        r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
+        lower,
+    ) or re.search(
+        r"break\s+down\s+the\s+columns?\s+for\s+([a-zA-Z0-9_.-]+)"
+        r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
+        lower,
+    ) or re.search(
+        # "what columns does orders have on sales"
+        r"(?:what\s+)?columns\s+does\s+([a-zA-Z0-9_.-]+)\s+have"
+        r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
+        lower,
+    ) or re.search(
+        r"what\s+(?:are\s+the\s+)?columns\s+(?:of|for|in)\s+([a-zA-Z0-9_.-]+)"
+        r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
         lower,
     )
-    describe_table = re.search(
-        r"describe\s+(?:table\s+)?[\"']?([a-zA-Z0-9_.-]+)[\"']?"
-        r"(?:\s+(?:on|in|from|using)\s+[\"']?(.+?)[\"']?)?",
+    describe_table = None if _policy_planned else re.search(
+        r"describe\s+(?:table\s+)?([a-zA-Z0-9_.-]+)"
+        r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
         lower,
     )
     # Natural paraphrases: "what's the airports table look like in Local Postgres"
-    table_look = re.search(
-        r"(?:what(?:'s| is)|show)\s+(?:the\s+)?"
-        r"[\"']?([a-zA-Z0-9_.-]+)[\"']?\s+table"
-        r"(?:\s+look(?:s)?\s+like)?"
-        r"(?:\s+(?:on|in|from|using)\s+[\"']?([^\"'\n]+?))[\"']?\s*$",
-        lower,
-    ) or re.search(
-        r"look(?:s)?\s+like\s+(?:the\s+)?[\"']?([a-zA-Z0-9_.-]+)[\"']?\s+(?:table|schema)"
-        r"(?:\s+(?:on|in|from|using)\s+[\"']?([^\"'\n]+?))[\"']?\s*$",
-        lower,
-    ) or re.search(
-        r"(?:table|schema)\s+[\"']?([a-zA-Z0-9_.-]+)[\"']?"
-        r"\s+(?:on|in|from|using)\s+[\"']?([^\"'\n]+?)[\"']?\s*$",
-        lower,
+    table_look = None if _policy_planned else (
+        re.search(
+            r"(?:what(?:'s| is)|show)\s+(?:the\s+)?"
+            r"([a-zA-Z0-9_.-]+)\s+table"
+            r"(?:\s+look(?:s)?\s+like)?"
+            r"(?:\s+(?:on|in|from|using)\s+(.+))$",
+            lower,
+        ) or re.search(
+            r"look(?:s)?\s+like\s+(?:the\s+)?([a-zA-Z0-9_.-]+)\s+(?:table|schema)"
+            r"(?:\s+(?:on|in|from|using)\s+(.+))$",
+            lower,
+        ) or re.search(
+            r"(?:table|schema)\s+([a-zA-Z0-9_.-]+)"
+            r"\s+(?:on|in|from|using)\s+(.+)$",
+            lower,
+        )
     )
     if schema_of or columns_on or describe_table or table_look:
         m = schema_of or columns_on or describe_table or table_look
         table = (m.group(1) or "").strip()
-        connector_name = (m.group(2) or "").strip() if m.lastindex and m.lastindex >= 2 else ""
-        connector_name = re.sub(r"\b(please|now|table|schema)\b", "", connector_name).strip(" .,")
-        args: dict = {"table": table}
-        if connector_name:
-            args["connector_name"] = connector_name
-        planned.append(("introspect_connector_schema", args))
+        # Reject inventory / policy nouns mistaken as table names
+        if table.lower() not in {
+            "drift", "change", "policy", "tables", "collections", "list", "schema", "schemas",
+        }:
+            connector_name = ""
+            if m.lastindex and m.lastindex >= 2 and m.group(2):
+                connector_name = _capture_connector_name(m.group(2))
+            args: dict = {"table": table}
+            if connector_name:
+                args["connector_name"] = connector_name
+            planned.append(("introspect_connector_schema", args))
 
     tables_on = re.search(
-        r"(?:list|show|what)\s+(?:tables|collections|objects)\s+(?:on|in|for)\s+[\"']?(.+?)[\"']?\s*$",
+        r"(?:can\s+you\s+|could\s+you\s+|please\s+|pls\s+|hey\s+)?"
+        r"(?:list|show|get|fetch|pull|grab|what(?:\s+are)?)\s+"
+        r"(?:the\s+|all\s+)?"
+        r"(?:tables|tbls|collections|objects|schemas)\s+"
+        r"(?:from|on|in|for|of)\s+(.+)$",
         lower,
-    ) or re.search(r"(?:tables|collections)\s+(?:on|in)\s+[\"']?(.+?)[\"']?", lower)
+    ) or re.search(
+        r"(?:tables|tbls|collections|objects|schemas)\s+(?:from|on|in|for|of)\s+(.+)$",
+        lower,
+    ) or re.search(
+        r"(?:can\s+you\s+|could\s+you\s+|please\s+)?"
+        r"(?:pull|get|fetch|grab|show|list)\s+(?:the\s+)?"
+        r"(?:table\s+list|list\s+of\s+tables)\s+(?:from|on|in|for)\s+(.+)$",
+        lower,
+    ) or re.search(
+        r"(?:table\s+list|list\s+of\s+tables)\s+(?:from|on|in|for)\s+(.+)$",
+        lower,
+    ) or re.search(
+        r"(?:which|what)\s+tables\s+(?:do\s+we\s+have|exist|are\s+there|are\s+available)\s+(?:on|in|from)\s+(.+)$",
+        lower,
+    ) or re.search(
+        r"(?:everything|all\s+(?:tables|objects))\s+available\s+on\s+(.+)$",
+        lower,
+    ) or re.search(
+        # "how many tables available in X" / typo availabale / "give me tables available in X"
+        r"(?:can\s+you\s+|could\s+you\s+|please\s+)?"
+        r"(?:how\s+many|number\s+of|count(?:\s+of)?|give\s+me|show\s+me|list|get)\s+"
+        r"(?:the\s+|all\s+)?"
+        r"tables?\s+availab(?:le|ale)\s+(?:on|in|from|for)\s+(.+)$",
+        lower,
+    ) or re.search(
+        r"tables?\s+availab(?:le|ale)\s+(?:on|in|from|for)\s+(.+)$",
+        lower,
+    )
     if tables_on and "introspect_connector_schema" not in [p[0] for p in planned]:
-        cname = tables_on.group(1).strip().strip("\"'")
-        planned.append(("list_connector_objects", {"connector_name": cname}))
+        cname = _capture_connector_name(tables_on.group(1))
+        if cname:
+            planned.append(("list_connector_objects", {"connector_name": cname}))
+            # Never also sample a fake table named "tables".
+            planned = [(n, a) for n, a in planned if n != "sample_connector_object"]
+    elif re.search(
+        r"\b(?:list|show|get)\s+tables\b|\bwhat\s+tables\s+(?:do\s+i\s+have|are\s+there|exist)\b|"
+        r"\bmy\s+tables\b|\btables\s+do\s+i\s+have\b",
+        lower,
+    ) and "list_connector_objects" not in [p[0] for p in planned]:
+        # Bare inventory ask — list connectors so we can ask which one to expand.
+        planned.append(("list_connectors", {}))
+        planned = [
+            (n, a) for n, a in planned
+            if not (n == "navigate" and (a or {}).get("screen") == "connectors")
+        ]
+
+    # Bare saved-connector name → list tables (not "I'm not sure how to do X").
+    if not planned and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{1,80}", message.strip()):
+        bare = message.strip()
+        try:
+            from services.connector_store import list_connectors as _list_saved
+
+            saved = _list_saved() or []
+            from .schema_tools import _match_score
+
+            scored = [
+                (_match_score(bare, str(c.get("name") or ""), str(c.get("type") or "")), c)
+                for c in saved
+                if isinstance(c, dict)
+            ]
+            scored = [(s, c) for s, c in scored if s >= 95.0]
+            if len(scored) == 1:
+                planned.append((
+                    "list_connector_objects",
+                    {"connector_name": str(scored[0][1].get("name") or bare)},
+                ))
+        except Exception:
+            pass
 
     # Aggregations: "count of orders by status", "average price in products",
     # "top 5 regions by revenue", "revenue by month". Parsed structurally; the
     # tool then grounds every name in the live schema.
+    # Skip when the operator pasted / ran explicit SQL — that is run_query's job.
     from .aggregate_tools import parse_aggregation_request
 
+    _explicit_sql_intent = bool(
+        re.search(r"(?:run|execute)\s+(?:this\s+)?(?:sql|query)\b", lower)
+        or re.search(r"(?:please\s+)?(?:run|execute)\s+this\s*:", lower)
+        or re.search(r"\b(?:run|execute)\s+select\b", lower)
+        or _SQL_SELECT_SHAPE.match(message.strip())
+        or _SQL_WITH_SHAPE.match(message.strip())
+        or re.search(r"(?:please\s+)?(?:run|execute)\s+this:\s*select\b", lower)
+        or re.search(r":\s*select\b", lower)
+    )
     agg = parse_aggregation_request(message)
-    if agg is not None and not agg.missing and "aggregate_data" not in [p[0] for p in planned]:
-        planned.append(("aggregate_data", agg.as_tool_args()))
+    if (
+        agg is not None
+        and not _explicit_sql_intent
+        and "aggregate_data" not in [p[0] for p in planned]
+        and "list_connector_objects" not in [p[0] for p in planned]
+    ):
+        # Incomplete slots (missing table/column) still plan — the tool + recovery
+        # clarify or auto-pick a unique table. Silent [] is a chatbot dead-end.
+        # "how many tables on sales" is inventory, not aggregate over a table named tables.
+        _inv_tables = (agg.table or "").lower() in {
+            "tables", "table", "collections", "objects", "schemas", "databases",
+        }
+        _inv_col = re.search(r"tables?\s+availab", str(agg.column or ""), re.I)
+        if (_inv_tables or _inv_col) and "list_connector_objects" in [p[0] for p in planned]:
+            pass
+        elif (_inv_tables or _inv_col) and (agg.connector_name or agg.table):
+            # "how many tables available in PostgresVenkat" → table slot = connector.
+            cname = agg.connector_name or (agg.table if _inv_col else "")
+            if cname:
+                planned.append(("list_connector_objects", {
+                    "connector_name": cname,
+                }))
+        else:
+            planned.append(("aggregate_data", agg.as_tool_args()))
 
     # Sample / analyze live table data
+    # Prefer "show the data from <table>" before the generic "show …" pattern —
+    # otherwise "show the data from countries" captures table=`data`.
     sample_m = re.search(
+        r"(?:show|give\s+me|get|fetch|pull)\s+(?:me\s+)?(?:the\s+)?(?:data|rows|records)\s+"
+        r"(?:from|in|on)\s+([a-zA-Z0-9_.-]+)"
+        r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
+        lower,
+    ) or re.search(
         r"(?:sample|preview|show(?:\s+me)?(?:\s+some)?(?:\s+data)?(?:\s+from)?|rows?\s+from|"
-        r"analyze|profile|peek(?:\s+at)?)\s+(?:the\s+)?"
-        r"[\"']?([a-zA-Z0-9_.-]+)[\"']?\s+(?:table|collection)?"
-        r"(?:\s+(?:on|in|from|using)\s+[\"']?([^\"'\n]+?))[\"']?\s*$",
+        r"analyze|profile|peek(?:\s+at)?|(?:give\s+me\s+(?:a\s+)?)?quick\s+look\s+at)\s+(?:the\s+|a\s+)?"
+        r"([a-zA-Z0-9_.-]+)(?:\s+(?:table|collection|rows))?"
+        r"(?:\s+(?:on|in|from|using)\s+(.+))$",
         lower,
     ) or re.search(
-        r"(?:sample|preview|show(?:\s+me)?(?:\s+data)?(?:\s+from)?|analyze)\s+"
-        r"[\"']?([a-zA-Z0-9_.-]+)[\"']?"
-        r"\s+(?:on|in|from|using)\s+[\"']?([^\"'\n]+?)[\"']?\s*$",
+        # "preview first 5 of orders on warehouse"
+        r"(?:sample|preview|peek(?:\s+at)?)\s+(?:the\s+|a\s+)?"
+        r"(?:first|top)\s+\d{1,4}\s+(?:rows?\s+)?(?:of|from)\s+"
+        r"([a-zA-Z0-9_.-]+)"
+        r"(?:\s+(?:on|in|from|using)\s+(.+))$",
         lower,
     ) or re.search(
-        r"(?:data|rows)\s+(?:in|from)\s+[\"']?([a-zA-Z0-9_.-]+)[\"']?"
-        r"(?:\s+(?:on|in|from|using)\s+[\"']?([^\"'\n]+?))[\"']?",
+        r"(?:sample|preview|show(?:\s+me)?(?:\s+data)?(?:\s+from)?|analyze|profile)\s+"
+        r"([a-zA-Z0-9_.-]+)"
+        r"\s+(?:on|in|from|using)\s+(.+)$",
+        lower,
+    ) or re.search(
+        r"(?:show|give\s+me)\s+(?:a\s+)?(?:sample|preview|peek|look|quick\s+look)\s+(?:of|at)\s+"
+        r"([a-zA-Z0-9_.-]+)"
+        r"(?:\s+(?:on|in|from|using)\s+(.+))$",
+        lower,
+    ) or re.search(
+        r"(?:data|rows)\s+(?:in|from)\s+([a-zA-Z0-9_.-]+)"
+        r"(?:\s+(?:on|in|from|using)\s+(.+))$",
+        lower,
+    ) or re.search(
+        # "can you get users data from postgres" / "get users from Local Postgres"
+        r"(?:can\s+you\s+|could\s+you\s+|please\s+)?"
+        r"(?:get|fetch|pull|grab|load|give\s+me)\s+(?:the\s+)?"
+        r"([a-zA-Z0-9_.-]+)\s+(?:data|rows|table|records|collection)?\s*"
+        r"(?:from|on|in|using)\s+(.+)$",
+        lower,
+    ) or re.search(
+        # "users data from postgres" — transfer verbs handled elsewhere
+        r"([a-zA-Z0-9_.-]+)\s+(?:data|rows|records)\s+"
+        r"(?:from|on|in)\s+(.+)$",
         lower,
     )
     if sample_m and "sample_connector_object" not in [p[0] for p in planned]:
-        # Don't steal pure schema introspect intents
-        if "schema" not in lower and "columns" not in lower and "describe" not in lower:
+        # Don't steal transfer / schema / inventory intents
+        if (
+            "schema" not in lower
+            and "columns" not in lower
+            and "describe" not in lower
+            and "list_connector_objects" not in [p[0] for p in planned]
+            and not any(w in lower for w in (" to ", " into ", "->"))
+            and not re.search(r"\b(?:move|transfer|migrate|sync|copy|replicate)\b.+\b(?:from|to)\b", lower)
+        ):
             table = (sample_m.group(1) or "").strip()
-            cname = (sample_m.group(2) or "").strip() if sample_m.lastindex and sample_m.lastindex >= 2 else ""
-            cname = re.sub(r"\b(table|schema|collection)\b", "", cname)
-            cname = _clean_connector_phrase(cname)
-            if table and table not in {"data", "rows", "me", "some", "the"}:
+            cname = ""
+            if sample_m.lastindex and sample_m.lastindex >= 2 and sample_m.group(2):
+                cname = _capture_connector_name(sample_m.group(2))
+            # "get tables from X" is inventory, not a table named "tables".
+            if table.lower() in {"tables", "collections", "objects", "schemas", "databases"}:
+                if cname and "list_connector_objects" not in [p[0] for p in planned]:
+                    planned.append(("list_connector_objects", {"connector_name": cname}))
+            elif table and table not in {"data", "rows", "me", "some", "the", "my", "all"}:
                 args = {"table": table, "analyze": "analy" in lower or "profile" in lower}
                 if cname:
                     args["connector_name"] = cname
                 planned.append(("sample_connector_object", args))
+                planned = [(n, a) for n, a in planned if n != "search_knowledge"]
+
+    # Schedule tools always beat accidental sample parses ("details on schedule X").
+    if any(n in {"open_schedule", "get_schedule", "run_schedule_now", "list_schedules"} for n, _ in planned):
+        planned = [(n, a) for n, a in planned if n != "sample_connector_object"]
 
     # Explicit SQL — either "run this sql: …" or a genuinely pasted statement.
     explicit_sql = re.search(
         r"(?:run|execute)\s+(?:this\s+)?(?:sql|query)\s*[:\-]?\s*(.+)$",
+        message,
+        re.IGNORECASE | re.DOTALL,
+    ) or re.search(
+        r"(?:please\s+)?(?:run|execute)\s+this\s*:\s*(.+)$",
+        message,
+        re.IGNORECASE | re.DOTALL,
+    ) or re.search(
+        r"(?:please\s+)?(?:run|execute)\s+(select\b.+)$",
         message,
         re.IGNORECASE | re.DOTALL,
     )
@@ -2511,13 +3885,13 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     filter_m = re.search(
         r"(?:filter|show\s+rows?)\s+(?:where\s+)?"
         r"[\"']?([a-zA-Z_][a-zA-Z0-9_]*)[\"']?\s*"
-        r"(is\s+not\s+null|is\s+null|equals?|=|!=|<>|contains|like|>|>=|<|<=)\s*"
+        r"(is\s+not\s+null|is\s+null|equals?|\bis\b|=|!=|<>|contains|like|>|>=|<|<=)\s*"
         r"[\"']?([^\"'\n]*?)[\"']?\s*$",
         lower,
     ) or re.search(
         r"(?:rows?\s+where|where)\s+"
         r"[\"']?([a-zA-Z_][a-zA-Z0-9_]*)[\"']?\s*"
-        r"(is\s+not\s+null|is\s+null|equals?|=|!=|<>|contains|like|>|>=|<|<=)\s*"
+        r"(is\s+not\s+null|is\s+null|equals?|\bis\b|=|!=|<>|contains|like|>|>=|<|<=)\s*"
         r"[\"']?([^\"'\n]*?)[\"']?\s*$",
         lower,
     ) or re.search(
@@ -2558,6 +3932,14 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             elif "contain" in op_raw or "like" in op_raw:
                 op = "contains"
             args = {"column": col, "op": op, "value": val}
+            # Strip a trailing "on <connector>" accidentally captured in value.
+            if args.get("value"):
+                args["value"] = re.sub(
+                    r"\s+on\s+[A-Za-z0-9_\- ]+$",
+                    "",
+                    str(args["value"]),
+                    flags=re.I,
+                ).strip()
             if col:
                 planned.append(("filter_result", args))
 
@@ -2567,8 +3949,13 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         lower,
     ) or re.search(
         r"(?:diff|compare)\s+(?:schema(?:s)?\s+(?:of\s+)?)?[\"']?([a-zA-Z0-9_.-]+)[\"']?\s+"
-        r"(?:on|in)\s+[\"']?(.+?)[\"']?\s+(?:vs|versus|and|with)\s+"
+        r"(?:on|in)\s+[\"']?(.+?)[\"']?\s+(?:vs|versus|and|with|against)\s+"
         r"[\"']?([a-zA-Z0-9_.-]+)[\"']?\s+(?:on|in)\s+[\"']?(.+?)[\"']?",
+        lower,
+    ) or re.search(
+        # "diff the orders schema on Local Postgres against Warehouse"
+        r"(?:diff|compare)\s+(?:the\s+)?([a-zA-Z0-9_.-]+)\s+schema\s+"
+        r"(?:on|in)\s+(.+?)\s+(?:against|vs|versus|with)\s+(.+?)\s*$",
         lower,
     ) or re.search(
         r"(?:diff|compare)\s+(?:schema\s+)?[\"']?([a-zA-Z0-9_.-]+)[\"']?\s+vs\s+[\"']?([a-zA-Z0-9_.-]+)[\"']?",
@@ -2582,6 +3969,14 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
                 "dest_table": diff_m.group(3).strip(),
                 "dest_connector_name": diff_m.group(4).strip(),
             }))
+        elif diff_m.lastindex and diff_m.lastindex >= 3:
+            # table + source connector + dest connector (same table name assumed)
+            planned.append(("diff_schemas", {
+                "source_table": diff_m.group(1).strip(),
+                "source_connector_name": _capture_connector_name(diff_m.group(2)),
+                "dest_table": diff_m.group(1).strip(),
+                "dest_connector_name": _capture_connector_name(diff_m.group(3)),
+            }))
         else:
             planned.append(("diff_schemas", {
                 "source_table": diff_m.group(1).strip(),
@@ -2594,10 +3989,23 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         r"[\"']?([a-zA-Z0-9_.-]+)[\"']?\s+(?:on|in|to)\s+[\"']?(.+?)[\"']?\s*$",
         lower,
     ) or re.search(
-        r"map\s+[\"']?([a-zA-Z0-9_.-]+)[\"']?\s+(?:on|in)\s+[\"']?(.+?)[\"']?\s+to\s+[\"']?(.+?)[\"']?\s*$",
+        r"map\s+(?:schema\s+(?:of\s+)?)?[\"']?([a-zA-Z0-9_.-]+)[\"']?\s+"
+        r"(?:on|in)\s+[\"']?(.+?)[\"']?\s+to\s+[\"']?(.+?)[\"']?\s*$",
+        lower,
+    ) or re.search(
+        r"map\s+schema\s+of\s+[\"']?([a-zA-Z0-9_.-]+)[\"']?\s+"
+        r"(?:on|in)\s+(.+?)\s+to\s+(.+?)\s*$",
+        lower,
+    ) or re.search(
+        # "map customers to dim_customer" — connectors clarified at execution
+        r"\bmap\s+(?:table\s+|schema\s+)?"
+        r"[\"']?([a-zA-Z_][a-zA-Z0-9_.-]*)[\"']?\s+"
+        r"(?:to|onto|->)\s+[\"']?([a-zA-Z_][a-zA-Z0-9_.-]*)[\"']?\s*$",
         lower,
     )
     if map_m and "map_connector_schemas" not in [p[0] for p in planned]:
+        # Prefer map over a competing introspect of the same table.
+        planned = [(n, a) for n, a in planned if n != "introspect_connector_schema"]
         if map_m.lastindex and map_m.lastindex >= 4:
             planned.append(("map_connector_schemas", {
                 "source_table": map_m.group(1).strip(),
@@ -2605,28 +4013,177 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
                 "dest_table": map_m.group(3).strip(),
                 "dest_connector_name": map_m.group(4).strip(),
             }))
+        elif map_m.lastindex and map_m.lastindex >= 3:
+            planned.append(("map_connector_schemas", {
+                "source_table": map_m.group(1).strip(),
+                "source_connector_name": _capture_connector_name(map_m.group(2)),
+                "dest_table": map_m.group(1).strip(),
+                "dest_connector_name": _capture_connector_name(map_m.group(3)),
+            }))
         else:
             planned.append(("map_connector_schemas", {
                 "source_table": map_m.group(1).strip(),
-                "source_connector_name": map_m.group(2).strip(),
-                "dest_connector_name": map_m.group(3).strip(),
+                "dest_table": map_m.group(2).strip(),
             }))
 
-    if any(w in lower for w in ("quality rules", "quality gates", "data quality", "profile rules")):
+    product_gate_ask = any(
+        w in lower
+        for w in (
+            "what quality gates",
+            "what are the quality",
+            "list quality gates",
+            "preflight gates",
+            "what gates",
+            "9 gates",
+            "nine gates",
+            "quality gates do you",
+            "what are your gates",
+            "explain the 9",
+            "explain the nine",
+            "explain preflight",
+            "explain the gates",
+            "g1-g9",
+            "g1–g9",
+        )
+    )
+    if product_gate_ask:
+        # Prefer honest product gate list over ontology RAG shards.
+        planned.append(("explain_product", {"query": message[:240]}))
         planned.append(("profile_quality_rules", {}))
+        planned = [(n, a) for n, a in planned if n != "search_knowledge"]
+    elif any(w in lower for w in (
+        "quality rules", "quality gates", "data quality", "profile rules",
+        "suggest improvements", "suggestions for my data", "how can i improve",
+        "data recommendations", "recommend fixes", "suggest quality",
+        "quality suggestions", "suggest quality rules",
+    )):
+        planned.append(("profile_quality_rules", {}))
+        if any(w in lower for w in ("suggest", "recommend", "improve", "fix")):
+            planned.append(("search_knowledge", {"query": message[:200]}))
+
+    # Mapping repair — always Confirm via Transfer Studio (never invent rewrites in chat).
+    if any(
+        w in lower
+        for w in (
+            "fix my mapping", "fix mapping", "mapping broken", "wrong mapping",
+            "help me fix my mapping", "repair mapping", "repair my mapping",
+            "wrong with mapping", "whats wrong with mapping", "what's wrong with mapping",
+            "mapping is incorrect", "mapping is wrong",
+        )
+    ):
+        if "remediate_validation" not in {n for n, _ in planned}:
+            planned.append(("remediate_validation", {"kind": "review_mappings"}))
+            planned.append(("navigate", {"screen": "transfer"}))
+        planned = [
+            (n, a) for n, a in planned
+            if n not in ("search_knowledge", "explain_mapping_assurance", "explain_product")
+        ]
+
+    if re.search(r"\bpii\b", lower):
+        tm = re.search(r"\bin\s+[\"']?([A-Za-z_][A-Za-z0-9_]*)[\"']?", lower)
+        table = (tm.group(1) if tm else "").strip()
+        if table and table not in {"it", "that", "this", "my", "the"}:
+            planned.append(("introspect_connector_schema", {"table": table}))
+            planned = [(n, a) for n, a in planned if n != "search_knowledge"]
 
     # Uploaded dataset compare — only when not already a live schema diff
     if "diff_schemas" not in [p[0] for p in planned]:
-        compare = re.search(r"compare\s+(\w+)\s+(?:and|vs|with|to)\s+(\w+)", lower)
+        compare = re.search(
+            r"compare\s+(?:dataset\s+)?(\w+)\s+(?:and|vs|with|to)\s+(?:dataset\s+)?(\w+)",
+            lower,
+        )
         if compare and "schema" not in lower:
-            planned.append(("compare_datasets", {"dataset_a": compare.group(1), "dataset_b": compare.group(2)}))
+            planned.append(("compare_datasets", {
+                "dataset_a": compare.group(1),
+                "dataset_b": compare.group(2),
+            }))
 
-    search = re.search(r"(?:search|find)\s+(?:for\s+)?['\"]?(\w+)['\"]?", lower)
-    if search and "search_data" not in [p[0] for p in planned]:
-        # Avoid treating connector/table lookups as dataset search
-        if not any(p[0] in _LIVE_SCHEMA_TOOLS for p in planned):
-            planned.append(("search_data", {"query": search.group(1)}))
+    # Explicit knowledge / ontology asks beat dataset search.
+    if re.search(
+        r"\b(?:search\s+knowledge|knowledge\s+for|semantic\s+types?|ontology)\b",
+        lower,
+    ):
+        planned.append(("search_knowledge", {"query": message[:200]}))
+        planned = [(n, a) for n, a in planned if n != "search_data"]
+    else:
+        search = re.search(r"(?:search|find)\s+(?:for\s+)?['\"]?(\w+)['\"]?", lower)
+        if search and "search_data" not in [p[0] for p in planned]:
+            # Avoid treating connector/table lookups as dataset search
+            if not any(p[0] in _LIVE_SCHEMA_TOOLS for p in planned):
+                planned.append(("search_data", {"query": search.group(1)}))
 
+    # Telegraphic count: "count rows airports Local Postgres" / "how big is orders on sales"
+    if "aggregate_data" not in [p[0] for p in planned]:
+        tele = re.search(
+            r"\b(?:count|how many)\s+rows?\s+([A-Za-z_][A-Za-z0-9_]*)\s+"
+            r"([A-Za-z0-9_][A-Za-z0-9_\- ]{1,48}?)\s*$",
+            lower,
+        ) or re.search(
+            r"\b(?:how\s+big\s+is|size\s+of|row\s+count\s+(?:for|of)|how\s+large\s+is)\s+"
+            r"([A-Za-z_][A-Za-z0-9_.]*)"
+            r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
+            lower,
+        )
+        if tele:
+            cname = ""
+            if tele.lastindex and tele.lastindex >= 2 and tele.group(2):
+                cname = _capture_connector_name(tele.group(2))
+            args = {
+                "metric": "count",
+                "table": tele.group(1).strip(),
+            }
+            if cname:
+                args["connector_name"] = cname
+            planned.append(("aggregate_data", args))
+
+    # "does orders have updated_at on sales" → live schema introspect
+    has_col = re.search(
+        r"\bdoes\s+([A-Za-z_][A-Za-z0-9_.]*)\s+have\s+([A-Za-z_][A-Za-z0-9_]*)"
+        r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
+        lower,
+    ) or re.search(
+        r"\b(?:has|have)\s+([A-Za-z_][A-Za-z0-9_.]*)\s+(?:got\s+)?(?:a\s+|an\s+)?"
+        r"([A-Za-z_][A-Za-z0-9_]*)\s+column"
+        r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
+        lower,
+    )
+    if has_col and "introspect_connector_schema" not in [p[0] for p in planned]:
+        args = {"table": has_col.group(1).strip()}
+        if has_col.lastindex and has_col.lastindex >= 3 and has_col.group(3):
+            args["connector_name"] = _capture_connector_name(has_col.group(3))
+        planned.append(("introspect_connector_schema", args))
+
+    # Connector health / ping — prove connectivity by listing live objects.
+    health = re.search(
+        r"\b(?:is|check\s+if)\s+([A-Za-z][A-Za-z0-9_\-]{1,48})\s+"
+        r"(?:is\s+)?(?:connected|healthy|reachable|up|online)\b",
+        lower,
+    ) or re.search(
+        r"\b(?:ping|test)\s+([A-Za-z][A-Za-z0-9_\- ]{1,48}?)\s+connector\b",
+        lower,
+    ) or re.search(
+        r"\b(?:test|ping|check|validate)\s+(?:the\s+)?connection\s+(?:to|for)\s+"
+        r"(?:connector\s+)?([A-Za-z][A-Za-z0-9_\- ]{1,48}?)\s*$",
+        lower,
+    ) or re.search(
+        r"\b(?:test|ping|validate)\s+(?:the\s+)?(?:connector\s+)?"
+        r"([A-Za-z][A-Za-z0-9_\- ]{1,48}?)\s*$",
+        lower,
+    )
+    if health and "list_connector_objects" not in [p[0] for p in planned]:
+        cname = _capture_connector_name(health.group(1))
+        cname = re.sub(r"\s+connector$", "", cname, flags=re.I).strip()
+        # Drop accidental "if …" leftovers from soft parses.
+        cname = re.sub(r"^if\s+", "", cname, flags=re.I).strip()
+        if cname and cname not in {
+            "connection", "the", "my", "a", "an", "it", "this", "that",
+            "mapping", "schema", "data", "job", "transfer", "if",
+        }:
+            planned.append(("list_connector_objects", {"connector_name": cname}))
+            planned = [
+                (n, a) for n, a in planned
+                if n not in ("list_connectors", "search_knowledge", "explain_product")
+            ]
     analyst = get_data_analyst()
     hint = analyst.extract_dataset_hint(message)
     data_signals = [
@@ -2635,11 +4192,48 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     ]
     # "columns"/"schema" alone often mean live DB — only analyze uploaded data
     # when the user clearly asks to analyze / profile a dataset file.
-    if hint and any(s in lower for s in data_signals):
-        if not any(p[0] in _LIVE_SCHEMA_TOOLS for p in planned):
+    if any(s in lower for s in data_signals) and not any(p[0] in _LIVE_SCHEMA_TOOLS for p in planned):
+        if hint:
             planned.append(("analyze_dataset", {"dataset_name": hint}))
+        elif re.search(r"\banalyze\b", lower) and "analyze_dataset" not in [p[0] for p in planned]:
+            # Named dataset that the index doesn't know yet — still invoke so
+            # recovery can list indexed uploads instead of a dead-end reply.
+            m = re.search(
+                r"analyze\s+(?:the\s+)?(.+?)(?:\s+data(?:set)?)?\s*$",
+                lower,
+            )
+            name = (m.group(1) if m else "").strip(" \"'")
+            if name and name not in {"this", "that", "it", "my", "the"}:
+                planned.append(("analyze_dataset", {"dataset_name": name}))
 
-    if not planned and _looks_like_domain_knowledge_query(lower):
+    if _looks_like_product_howto(lower) and not _has_explicit_workspace_subject(lower):
+        # Curated local FAQ — don't wipe stronger product/ops tools already planned.
+        keep = {
+            "profile_quality_rules", "describe_pilot", "explain_product",
+            "explain_mapping_assurance", "remediate_validation", "navigate",
+            "inspect_schema_policy", "get_transfer_capabilities", "list_jobs",
+            "list_connectors", "list_schedules", "aggregate_data",
+            "list_connector_objects", "sample_connector_object", "plan_transfer",
+            "start_transfer", "plan_transfer_route", "create_connector",
+            "run_schedule_now", "introspect_connector_schema",
+        }
+        names = {n for n, _ in planned}
+        if planned and (names & keep):
+            # Keep intentional RAG companion beside quality profiling suggestions.
+            if not ("profile_quality_rules" in names and "search_knowledge" in names):
+                planned = [(n, a) for n, a in planned if n != "search_knowledge"]
+            if "explain_product" not in names and not (
+                names & {"profile_quality_rules", "describe_pilot", "explain_mapping_assurance", "remediate_validation"}
+            ):
+                planned.insert(0, ("explain_product", {"query": message[:240]}))
+        else:
+            planned = [("explain_product", {"query": message[:240]})]
+        # Mapping repair already staged Confirm — don't dilute with a FAQ essay.
+        if "remediate_validation" in {n for n, _ in planned} and re.search(
+            r"\b(?:mapping|mappings)\b", lower
+        ) and re.search(r"\b(?:wrong|fix|repair|broken|bad)\b", lower):
+            planned = [(n, a) for n, a in planned if n != "explain_product"]
+    elif not planned and _looks_like_domain_knowledge_query(lower):
         planned.append(("search_knowledge", {"query": message[:200]}))
 
     # Deduplicate while preserving order

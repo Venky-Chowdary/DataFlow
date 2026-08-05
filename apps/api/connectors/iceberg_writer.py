@@ -59,23 +59,48 @@ def _warehouse_root(host: str, database: str, connection_string: str) -> Path:
 
 
 def _logical_to_iceberg_type(logical: str) -> str:
-    """Single source of truth: type_system.ddl_type — never a parallel scale map."""
-    from services.type_system import ddl_type
+    """Iceberg DDL from Map stamps / logicals — never invent float→double leaves.
 
-    return ddl_type("iceberg", logical or "string")
+    Bare / oversize DECIMAL stamps rematerialize through ``ddl_type`` SSOT so
+    CREATE cannot leave bare ``DECIMAL`` (quarantine no-op) or pass through
+    ``DECIMAL(40,10)`` that Arrow would silently clamp.
+    """
+    from services.type_system import (
+        LOGICAL_DECIMAL,
+        ddl_type,
+        materialize_dest_ddl,
+        normalize_logical_type,
+    )
+
+    raw = (logical or "string").strip()
+    # Nested ARRAY/LIST/T[] stamps go through materialize so list<float> spelling
+    # and float leaves stay authoritative (no dual ddl_type invent path).
+    stamped = materialize_dest_ddl("iceberg", raw)
+    # Normalize single-precision aliases to Iceberg's float token.
+    bare = stamped.upper().split("(", 1)[0].strip()
+    if bare in {"REAL", "FLOAT4", "FLOAT32", "HALF", "FLOAT16", "FLOAT"}:
+        return "float"
+    # Map≡CREATE decimal honesty: bare → decimal(38,10); oversize → string.
+    if normalize_logical_type(raw) == LOGICAL_DECIMAL or normalize_logical_type(
+        stamped
+    ) == LOGICAL_DECIMAL:
+        return ddl_type("iceberg", raw)
+    return stamped
 
 
 def _ensure_iceberg_decimal_carrier(type_str: str) -> str:
-    """Bare ``decimal`` → ``decimal(38,10)`` so shared fit quarantine can parse (p,s)."""
-    from services.type_system import normalize_logical_type
-    from connectors.writer_common import parse_decimal_precision_scale
+    """Map≡CREATE: decimal carriers match ``ddl_type('iceberg', …)`` SSOT.
+
+    Bare ``DECIMAL`` → ``decimal(38,10)`` so shared fit quarantine can parse
+    ``(p,s)``. Over Iceberg max precision → ``string`` (fail-closed) — never
+    leave a bare or oversize stamp that Arrow would invent/clamp.
+    """
+    from services.type_system import LOGICAL_DECIMAL, ddl_type, normalize_logical_type
 
     raw = (type_str or "string").strip()
-    if normalize_logical_type(raw) != "decimal":
+    if normalize_logical_type(raw) != LOGICAL_DECIMAL:
         return raw
-    if parse_decimal_precision_scale(raw) is not None:
-        return raw
-    return _logical_to_iceberg_type(raw)
+    return ddl_type("iceberg", raw)
 
 
 def _decimal_target_types_for_iceberg_write(
@@ -150,6 +175,8 @@ def _decimal_target_types_for_iceberg_write(
         if normalize_logical_type(raw) == LOGICAL_BINARY:
             width = parse_binary_carrier_width(raw)
             if width is not None:
+                # ddl_type legalizes VARBINARY(n) → fixed(n); materialize may
+                # pass through illegal Iceberg tokens.
                 out.append(ddl_type("iceberg", raw) or f"fixed({width})")
                 continue
             out.append("BINARY")
@@ -365,6 +392,15 @@ def _merge_upsert_rows(
         key = _key(row)
         prev = best.get(key)
         if prev is None:
+            # Sparse insert of an unknown PK would invent NULL for absent columns
+            # — refuse, matching the pyiceberg catalog path.
+            if any(is_missing_sentinel(v) for v in row.values()):
+                raise ValueError(
+                    "Iceberg sparse CDC insert of unknown primary key "
+                    f"{key!r} refused — would invent NULL for absent fields. "
+                    "Require a full row image (no DF_MISSING) or an existing "
+                    "destination row to overlay."
+                )
             best[key] = clean
             continue
         if lsn_col in clean or lsn_col in prev:
@@ -378,15 +414,21 @@ def _merge_upsert_rows(
             best[key] = merged
     return list(best.values())
 
-
 def _row_as_dict(columns: list[str], row: Any) -> dict[str, Any]:
     if isinstance(row, dict):
         return {c: row.get(c) for c in columns}
     return {c: row[i] if i < len(row) else None for i, c in enumerate(columns)}
 
 
+def _row_tuple(columns: list[str], row: Any) -> tuple:
+    """Row as a positional tuple aligned to ``columns`` (dict or sequence)."""
+    if isinstance(row, dict):
+        return tuple(row.get(c) for c in columns)
+    return tuple(row[i] if i < len(row) else None for i in range(len(columns)))
+
+
 def _logical_to_arrow_type(logical: str, pa: Any) -> Any:
-    """Map DataFlow logical / Iceberg DDL carrier → pyarrow type (fail-closed decimals)."""
+    """Map Datawrap logical / Iceberg DDL carrier → pyarrow type (fail-closed decimals)."""
     from services.type_system import (
         LOGICAL_BINARY,
         LOGICAL_BOOLEAN,
@@ -407,13 +449,26 @@ def _logical_to_arrow_type(logical: str, pa: Any) -> Any:
     if logical_n == LOGICAL_INTEGER:
         return pa.int64()
     if logical_n == LOGICAL_FLOAT:
+        raw_u = raw.upper().split("(", 1)[0].strip()
+        if raw_u in {"REAL", "FLOAT4", "HALF", "FLOAT16", "FLOAT32", "BINARY_FLOAT", "FLOAT"}:
+            return pa.float32()
         return pa.float64()
     if logical_n == LOGICAL_DECIMAL:
-        precision, scale = parse_numeric_precision_scale(raw)
-        p = int(precision) if precision is not None else 38
-        s = int(scale) if scale is not None else 10
-        p = max(1, min(p, 38))
-        s = max(0, min(s, p))
+        # Map≡CREATE: honor ddl_type SSOT — bare → (38,10); oversize → string.
+        # Never silently clamp DECIMAL(40,10) → decimal128(38,10).
+        from services.type_system import ddl_type
+
+        wire = ddl_type("iceberg", raw)
+        if normalize_logical_type(wire) != LOGICAL_DECIMAL:
+            return pa.large_string()
+        precision, scale = parse_numeric_precision_scale(wire)
+        if precision is None:
+            # SSOT should always parameterize Iceberg decimals; refuse invent.
+            return pa.large_string()
+        p = int(precision)
+        s = int(scale) if scale is not None else 0
+        if p < 1 or p > 38 or s < 0 or s > p:
+            return pa.large_string()
         return pa.decimal128(p, s)
     if logical_n == LOGICAL_DATE:
         return pa.date32()
@@ -571,6 +626,16 @@ def _write_data_file(
                 f"Iceberg Parquet type conversion failed; refusing JSONL type downgrade: {exc}"
             ) from exc
 
+    from services.value_serializer import is_missing_sentinel
+
+    for row in dict_rows:
+        for k, v in row.items():
+            if is_missing_sentinel(v):
+                raise ValueError(
+                    f"Iceberg JSONL write refused residual DF_MISSING on column {k!r} "
+                    "— would serialize the sentinel literally into the data file"
+                )
+
     rel = f"data/{file_id}.jsonl"
     path = data_dir.parent / rel
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -591,17 +656,170 @@ def _checksum_arrow_table(pa_table: Any) -> str:
 
 
 def _pyiceberg_should_use(endpoint: dict[str, Any]) -> bool:
-    """Return True if the endpoint points to a real Iceberg catalog."""
-    if not _pyiceberg_available():
-        return False
+    """Compatibility shim — prefer :func:`resolve_iceberg_write_path`."""
+    return resolve_iceberg_write_path(endpoint) == "catalog"
+
+
+# Iceberg predicate pushdown gets unwieldy past a few hundred terms; scan in
+# slices so a 20k-row CDC batch does not build one giant boolean expression.
+_PK_SCAN_SLICE = 200
+
+
+def _pk_predicate_variants(value: Any) -> list[Any]:
+    """Expand a PK value into the type variants Iceberg may store.
+
+    CDC / SQL_REDO paths often deliver string keys (``"42"``) while the table
+    column is typed as ``long``/``int``. A strict ``In``/``EqualTo`` then
+    returns zero rows, the overlay treats the destination as empty, and a
+    sparse CDC update invents NULLs (or the LSN guard sees nothing to compare).
+    Including every lossless coercion keeps the pushdown honest without a full
+    table scan on every batch.
+    """
+    variants: list[Any] = [value]
+    if value is None:
+        return variants
+    as_str = str(value)
+    if as_str not in variants:
+        variants.append(as_str)
+    if isinstance(value, bool):
+        return variants
+    if isinstance(value, int):
+        return variants
+    if isinstance(value, float) and value.is_integer():
+        variants.append(int(value))
+        return variants
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
+            try:
+                variants.append(int(text))
+            except Exception:
+                pass
+        else:
+            try:
+                as_float = float(text)
+            except Exception:
+                as_float = None
+            if as_float is not None and as_float.is_integer():
+                variants.append(int(as_float))
+    return variants
+
+
+def _pk_row_filter(pk_cols: list[str], key_tuples: list[tuple]) -> Any:
+    """Build a pyiceberg predicate matching exactly these primary keys.
+
+    Single-column keys use ``In``; composite keys use ``Or`` of ``And``
+    equality terms. Returns ``None`` when no predicate can be built so the
+    caller can fall back to a full scan rather than reading nothing.
+    """
+    from pyiceberg.expressions import And, EqualTo, In, Or
+
+    if not pk_cols or not key_tuples:
+        return None
+    if len(pk_cols) == 1:
+        values: list[Any] = []
+        seen: set[tuple[str, Any]] = set()
+        for tup in key_tuples:
+            for variant in _pk_predicate_variants(tup[0]):
+                marker = (type(variant).__name__, variant)
+                if marker in seen:
+                    continue
+                seen.add(marker)
+                values.append(variant)
+        return In(pk_cols[0], values)
+    terms = []
+    for tup in key_tuples:
+        # Cross-product of per-column type variants so a string/int mismatch on
+        # any part of a composite key still finds the destination row.
+        col_variants = [_pk_predicate_variants(tup[i]) for i in range(len(pk_cols))]
+        from itertools import product
+
+        for combo in product(*col_variants):
+            eqs = [EqualTo(col, combo[i]) for i, col in enumerate(pk_cols)]
+            term = eqs[0]
+            for eq in eqs[1:]:
+                term = And(term, eq)
+            terms.append(term)
+    combined = terms[0]
+    for term in terms[1:]:
+        combined = Or(combined, term)
+    return combined
+
+
+def _scan_existing_by_pk(
+    tbl: Any, pk_cols: list[str], key_tuples: list[tuple]
+) -> dict[tuple, dict[str, Any]]:
+    """Read only the destination rows this batch touches, keyed by PK.
+
+    A full ``tbl.scan()`` materialised the entire table into Python dicts for
+    every CDC batch (``_df_lsn`` is present on all of them), which does not
+    survive a real lakehouse table. Push the batch's key set down as a row
+    filter and fall back to a full scan only if the predicate cannot be built
+    or returns nothing for a non-empty key set (typical type-mismatch case).
+    """
+    existing: dict[tuple, dict[str, Any]] = {}
+
+    def _absorb(arrow_table: Any) -> None:
+        names = arrow_table.column_names
+        columns = {name: arrow_table.column(name).to_pylist() for name in names}
+        for idx in range(arrow_table.num_rows):
+            row = {name: columns[name][idx] for name in names}
+            existing[tuple(str(row.get(c, "")) for c in pk_cols)] = row
+
+    unique_keys = list(dict.fromkeys(key_tuples))
+    wanted = {
+        tuple("" if v is None else str(v) for v in tup) for tup in unique_keys
+    }
+    try:
+        for start in range(0, len(unique_keys), _PK_SCAN_SLICE):
+            chunk = unique_keys[start : start + _PK_SCAN_SLICE]
+            row_filter = _pk_row_filter(pk_cols, chunk)
+            if row_filter is None:
+                raise ValueError("empty predicate")
+            _absorb(tbl.scan(row_filter=row_filter).to_arrow())
+        found = set(existing.keys())
+        if not unique_keys or wanted <= found:
+            return existing
+        # A clean but incomplete match is the normal "some of these PKs are
+        # new" case for sparse CDC — do NOT full-scan the lakehouse for that.
+        # A completely empty match with a non-empty key set is almost always a
+        # pushdown type mismatch; fall through to the safety net below.
+        if found:
+            return existing
+    except Exception:
+        # Unsupported predicate (e.g. non-identity partition transform or an
+        # older pyiceberg) — correctness first, read the whole table.
+        pass
+    existing.clear()
+    _absorb(tbl.scan().to_arrow())
+    return {k: v for k, v in existing.items() if k in wanted}
+
+
+def resolve_iceberg_write_path(endpoint: dict[str, Any]) -> str:
+    """Decide catalog vs filesystem write path — fail closed on catalog intent.
+
+    A REST/Glue/SQL catalog endpoint must never silently degrade to a local
+    Parquet tree when ``pyiceberg`` is missing or the catalog config is
+    malformed. That path previously reported ``ok=True`` while writing into a
+    directory named after the REST URL — invisible to Spark/Trino/Athena.
+    """
+    from connectors.driver_guard import platform_driver_unavailable
     from connectors.iceberg_catalog import parse_iceberg_catalog_config
 
     try:
         cfg = parse_iceberg_catalog_config(endpoint)
-        return cfg["catalog_type"] != "filesystem"
-    except Exception:
-        return False
+    except Exception as exc:
+        raise RuntimeError(
+            f"Iceberg catalog configuration is invalid; refusing filesystem "
+            f"fallback that would invent a local warehouse: {exc}"
+        ) from exc
 
+    catalog_type = str(cfg.get("catalog_type") or "filesystem").lower()
+    if catalog_type == "filesystem":
+        return "filesystem"
+    if not _pyiceberg_available():
+        raise RuntimeError(platform_driver_unavailable("Apache Iceberg"))
+    return "catalog"
 
 def _write_mapped_rows_pyiceberg(
     endpoint: dict[str, Any],
@@ -806,106 +1024,17 @@ def _write_mapped_rows_pyiceberg(
                 warnings=type_locked_warnings[:20],
                 driver="iceberg",
             )
-        # Sparse CDC: pyiceberg Table.upsert treats omitted/null as NULL-wipe.
-        # Overlay DF_MISSING onto existing rows before building the Arrow batch.
+        # Sparse CDC + LSN: pyiceberg Table.upsert treats omitted/null as
+        # NULL-wipe and has no LSN guard. Fold every upsert batch through a
+        # running per-PK map (dense replace / sparse overlay) with should_apply.
         from connectors.writer_common import (
+            DF_LSN_COL,
+            assert_sparse_upsert_has_pk,
             row_has_missing_sentinel,
             sparse_present_bindings,
-            split_dense_sparse_rows,
         )
+        from services.cdc_effectively_once import should_apply_pk_row
         from services.value_serializer import is_missing_sentinel
-
-        if mode in upsert_modes and any(row_has_missing_sentinel(r) for r in mapped_rows):
-            pk_cols = [c for c in (conflict_columns or []) if c in target_cols]
-            if not pk_cols:
-                return WriteResult(
-                    ok=False,
-                    rows_written=0,
-                    table_name=table,
-                    target_schema=target_schema,
-                    checksum="",
-                    chunks_completed=0,
-                    error=(
-                        "Iceberg sparse CDC upsert requires explicit conflict_columns"
-                    ),
-                    driver="iceberg",
-                )
-            dense_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
-            existing_by_pk: dict[tuple, dict[str, Any]] = {}
-            try:
-                scanned = tbl.scan().to_arrow()
-                for batch_idx in range(scanned.num_rows):
-                    row_dict = {
-                        name: scanned.column(name)[batch_idx].as_py()
-                        for name in scanned.column_names
-                    }
-                    key = tuple(str(row_dict.get(c, "")) for c in pk_cols)
-                    existing_by_pk[key] = row_dict
-            except Exception as exc:
-                return WriteResult(
-                    ok=False,
-                    rows_written=0,
-                    table_name=table,
-                    target_schema=target_schema,
-                    checksum="",
-                    chunks_completed=0,
-                    error=(
-                        "Iceberg sparse CDC requires a table scan to overlay "
-                        f"absent fields; scan failed: {exc}"
-                    ),
-                    driver="iceberg",
-                )
-            expanded: list[tuple] = list(dense_rows)
-            from connectors.writer_common import DF_LSN_COL, assert_sparse_upsert_has_pk
-            from services.cdc_effectively_once import should_apply_pk_row
-
-            for srow in sparse_rows:
-                present = sparse_present_bindings(srow, target_cols)
-                assert_sparse_upsert_has_pk(present, pk_cols)
-                key = tuple(str(present.get(c, "")) for c in pk_cols)
-                base = existing_by_pk.get(key)
-                if base is None:
-                    # Refuse NULL-invent for absent columns on a new PK
-                    # (SQL sparse paths INSERT only present cols; Arrow upsert cannot).
-                    return WriteResult(
-                        ok=False,
-                        rows_written=0,
-                        table_name=table,
-                        target_schema=target_schema,
-                        checksum="",
-                        chunks_completed=0,
-                        error=(
-                            "Iceberg sparse CDC insert of unknown primary key "
-                            f"{key!r} refused — would invent NULL for absent fields. "
-                            "Require a full row image (no DF_MISSING) or an existing "
-                            "destination row to overlay."
-                        ),
-                        driver="iceberg",
-                    )
-                if DF_LSN_COL in present:
-                    if not should_apply_pk_row(
-                        existing_lsn=base.get(DF_LSN_COL),
-                        incoming_lsn=present[DF_LSN_COL],
-                    ).applied:
-                        continue
-                merged = dict(base)
-                merged.update(present)
-                expanded.append(tuple(merged.get(c) for c in target_cols))
-            mapped_rows = expanded
-
-        dict_rows = [_row_as_dict(target_cols, r) for r in mapped_rows]
-        # Drop any residual missing sentinels (should not remain after expand).
-        for d in dict_rows:
-            for k in list(d.keys()):
-                if is_missing_sentinel(d[k]):
-                    del d[k]
-        arrays = []
-        for field in final_arrow:
-            at = field.type
-            cells = [_coerce_arrow_cell(r.get(field.name), at, pa) for r in dict_rows]
-            arrays.append(pa.array(cells, type=at))
-        pa_table = pa.Table.from_arrays(arrays, schema=final_arrow)
-        checksum = _checksum_arrow_table(pa_table)
 
         if mode in upsert_modes:
             pk_cols = [c for c in (conflict_columns or []) if c in target_cols]
@@ -923,6 +1052,115 @@ def _write_mapped_rows_pyiceberg(
                     ),
                     driver="iceberg",
                 )
+            # A scan is only needed when the batch carries sparse fields to
+            # overlay or an LSN to compare against the destination.
+            needs_scan = DF_LSN_COL in target_cols or any(
+                row_has_missing_sentinel(_row_tuple(target_cols, r))
+                for r in mapped_rows
+            )
+            existing_by_pk: dict[tuple, dict[str, Any]] = {}
+            if needs_scan:
+                batch_key_tuples = [
+                    tuple(_row_as_dict(target_cols, r).get(c) for c in pk_cols)
+                    for r in mapped_rows
+                ]
+                try:
+                    existing_by_pk = _scan_existing_by_pk(
+                        tbl, pk_cols, batch_key_tuples
+                    )
+                except Exception as exc:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table,
+                        target_schema=target_schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=(
+                            "Iceberg upsert requires a table scan for sparse/LSN "
+                            f"guards; scan failed: {exc}"
+                        ),
+                        driver="iceberg",
+                    )
+            # Fold in arrival order so same-PK twice in one batch is correct.
+            for raw in mapped_rows:
+                row_dict = _row_as_dict(target_cols, raw)
+                row_values = _row_tuple(target_cols, raw)
+                if row_has_missing_sentinel(row_values):
+                    present = sparse_present_bindings(row_values, target_cols)
+                    assert_sparse_upsert_has_pk(present, pk_cols)
+                    key = tuple(str(present.get(c, "")) for c in pk_cols)
+                    base = existing_by_pk.get(key)
+                    if base is None:
+                        return WriteResult(
+                            ok=False,
+                            rows_written=0,
+                            table_name=table,
+                            target_schema=target_schema,
+                            checksum="",
+                            chunks_completed=0,
+                            error=(
+                                "Iceberg sparse CDC insert of unknown primary key "
+                                f"{key!r} refused — would invent NULL for absent "
+                                "fields. Require a full row image (no DF_MISSING) "
+                                "or an existing destination row to overlay."
+                            ),
+                            driver="iceberg",
+                        )
+                    if DF_LSN_COL in present and not should_apply_pk_row(
+                        existing_lsn=base.get(DF_LSN_COL),
+                        incoming_lsn=present[DF_LSN_COL],
+                    ).applied:
+                        continue
+                    merged = dict(base)
+                    merged.update(present)
+                    existing_by_pk[key] = merged
+                else:
+                    key = tuple(str(row_dict.get(c, "")) for c in pk_cols)
+                    base = existing_by_pk.get(key)
+                    if (
+                        base is not None
+                        and DF_LSN_COL in row_dict
+                        and not should_apply_pk_row(
+                            existing_lsn=base.get(DF_LSN_COL),
+                            incoming_lsn=row_dict.get(DF_LSN_COL),
+                        ).applied
+                    ):
+                        continue
+                    existing_by_pk[key] = {
+                        **(base or {}),
+                        **{k: v for k, v in row_dict.items() if not is_missing_sentinel(v)},
+                    }
+            # Emit one dense row per PK touched by this batch (plus untouched
+            # existing rows are left alone via upsert join).
+            batch_keys = {
+                tuple(str(_row_as_dict(target_cols, r).get(c, "")) for c in pk_cols)
+                for r in mapped_rows
+            }
+            mapped_rows = [
+                tuple(existing_by_pk[k].get(c) for c in target_cols)
+                for k in batch_keys
+                if k in existing_by_pk
+            ]
+
+        dict_rows = [_row_as_dict(target_cols, r) for r in mapped_rows]
+        for d in dict_rows:
+            for k, v in d.items():
+                if is_missing_sentinel(v):
+                    raise ValueError(
+                        f"Iceberg write refused residual DF_MISSING on column {k!r} "
+                        "— would invent NULL. Sparse overlay must expand first."
+                    )
+        arrays = []
+        for field in final_arrow:
+            at = field.type
+            cells = [_coerce_arrow_cell(r.get(field.name), at, pa) for r in dict_rows]
+            arrays.append(pa.array(cells, type=at))
+        pa_table = pa.Table.from_arrays(arrays, schema=final_arrow)
+        checksum = _checksum_arrow_table(pa_table)
+
+        if mode in upsert_modes:
+            pk_cols = [c for c in (conflict_columns or []) if c in target_cols]
             upsert_result = tbl.upsert(pa_table, join_cols=pk_cols)
             rows_written = upsert_result.rows_updated + upsert_result.rows_inserted
         elif mode in {"overwrite", "replace"}:
@@ -1274,7 +1512,21 @@ def write_mapped_rows(
         **_kwargs,
     }
 
-    if _pyiceberg_should_use(endpoint):
+    try:
+        write_path = resolve_iceberg_write_path(endpoint)
+    except RuntimeError as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error=str(exc),
+            driver="iceberg",
+        )
+
+    if write_path == "catalog":
         return _write_mapped_rows_pyiceberg(
             endpoint,
             headers=headers,
@@ -1353,7 +1605,11 @@ def delete_by_primary_keys(
         "table_name": table_name,
         "schema": schema or cfg.get("schema") or "",
     }
-    if _pyiceberg_should_use(endpoint):
+    try:
+        write_path = resolve_iceberg_write_path(endpoint)
+    except RuntimeError as exc:
+        raise RuntimeError(str(exc)) from exc
+    if write_path == "catalog":
         return _delete_pyiceberg(
             endpoint,
             primary_key_column,

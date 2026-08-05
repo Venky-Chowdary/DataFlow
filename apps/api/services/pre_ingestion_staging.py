@@ -37,10 +37,29 @@ def staging_table_name(dest_table: str | None) -> str:
     return f"{base}_df_staging"[:63]
 
 
-def dest_supports_staging(dest_type: str) -> bool:
-    from services.dest_quarantine import dest_supports_dlq_table
+# SQL table writers only — Mongo/document DLQ ≠ pre-ingestion staging tables.
+_STAGING_SUPPORTED = frozenset({
+    "sqlite",
+    "postgresql",
+    "postgres",
+    "mysql",
+    "sqlserver",
+    "mssql",
+    "oracle",
+    "snowflake",
+    "redshift",
+    "generic_sql",
+    "duckdb",
+    "bigquery",
+})
 
-    return dest_supports_dlq_table(dest_type)
+
+def dest_supports_staging(dest_type: str) -> bool:
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    driver = resolve_driver_type(dest_type or "")
+    raw = (dest_type or "").strip().lower()
+    return driver in _STAGING_SUPPORTED or raw in _STAGING_SUPPORTED
 
 
 def staging_endpoint(destination: Any, *, dest_table: str | None = None) -> Any:

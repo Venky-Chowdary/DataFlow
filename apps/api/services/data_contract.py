@@ -147,11 +147,15 @@ class CircuitBreaker:
         failure_threshold: int = 3,
         recovery_timeout_seconds: float = 60.0,
         half_open_max: int = 1,
+        canary_pct: int = 100,
     ):
         self.contract_id = contract_id
         self.failure_threshold = failure_threshold
         self.recovery_timeout_seconds = recovery_timeout_seconds
         self.half_open_max = half_open_max
+        # When OPEN: 100 = fail-closed (default). <100 allows a deterministic canary fraction
+        # for staged recovery — still logged; never silent. Not a % rollout product.
+        self.canary_pct = max(0, min(100, int(canary_pct)))
         self.state = BreakerState.CLOSED
         self.failure_count = 0
         self.success_count = 0
@@ -169,6 +173,11 @@ class CircuitBreaker:
                 self.success_count = 0
                 self.last_state_change = time.time()
                 return True
+            # Staged canary while OPEN (explicit <100). Deterministic on contract_id hash.
+            if self.canary_pct < 100:
+                import hashlib
+                digest = int(hashlib.sha256(self.contract_id.encode("utf-8")).hexdigest()[:8], 16)
+                return (digest % 100) < self.canary_pct
             return False
         if self.state == BreakerState.HALF_OPEN:
             return self.success_count < self.half_open_max
@@ -207,6 +216,7 @@ class CircuitBreaker:
             "failure_threshold": self.failure_threshold,
             "recovery_timeout_seconds": self.recovery_timeout_seconds,
             "half_open_max": self.half_open_max,
+            "canary_pct": self.canary_pct,
         }
 
     @classmethod
@@ -216,6 +226,7 @@ class CircuitBreaker:
             failure_threshold=data.get("failure_threshold", 3),
             recovery_timeout_seconds=data.get("recovery_timeout_seconds", 60.0),
             half_open_max=data.get("half_open_max", 1),
+            canary_pct=int(data.get("canary_pct", 100) or 100),
         )
         cb.state = BreakerState(data.get("state", "closed"))
         cb.failure_count = data.get("failure_count", 0)

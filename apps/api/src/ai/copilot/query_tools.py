@@ -1,4 +1,4 @@
-"""Live query / sample / result-analysis tools for Data Pilot.
+"""Live query / sample / result-analysis tools for Datawrap Pilot.
 
 Never invent SQL results. Paths:
   saved connector → read-only check → query_router._run_query → result_store
@@ -14,7 +14,7 @@ from collections import Counter
 from datetime import datetime
 from typing import Any
 
-from .schema_tools import AmbiguousConnectorError, _safe_connector
+from .schema_tools import AmbiguousConnectorError, _safe_connector, list_connector_objects
 
 _SAFE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){0,2}$")
 _DEFAULT_SAMPLE = 25
@@ -31,6 +31,71 @@ _DATE_HINTS = (
     "%m/%d/%Y",
     "%d/%m/%Y",
 )
+_MISSING_TABLE_RE = re.compile(
+    r"(?:undefinedtable|does not exist|doesn't exist|unknown relation|"
+    r"no such table|invalid object name|relation\s+[\"'].+[\"']\s+does not exist|"
+    r"table .+ (?:doesn't|does not) exist)",
+    re.I,
+)
+
+
+def _object_names_from_list(listed: Any) -> list[str]:
+    objs = []
+    if getattr(listed, "success", False) and isinstance(listed.output, dict):
+        objs = listed.output.get("objects") or listed.output.get("tables") or []
+    names: list[str] = []
+    for o in objs:
+        if isinstance(o, dict):
+            n = o.get("name") or o.get("table") or o.get("id")
+            if n:
+                names.append(str(n))
+        elif isinstance(o, str):
+            names.append(o)
+    return names
+
+
+def resolve_table_name(
+    conn: dict[str, Any],
+    table: str,
+    *,
+    connector_name: str = "",
+) -> tuple[str | None, str | None, list[str]]:
+    """Exact / case-insensitive / fuzzy table resolve against live inventory.
+
+    Returns ``(resolved_name, note, candidates)``.
+    ``resolved_name`` None means ask the operator (candidates listed).
+    """
+    import difflib
+
+    wanted = (table or "").strip()
+    if not wanted:
+        return None, None, []
+    listed = list_connector_objects(
+        connector_id=str(conn.get("id") or conn.get("_id") or ""),
+        connector_name=str(conn.get("name") or connector_name or ""),
+    )
+    names = _object_names_from_list(listed)
+    if not names:
+        return wanted, None, []
+    lower_map = {n.lower(): n for n in names}
+    if wanted in names:
+        return wanted, None, names
+    if wanted.lower() in lower_map:
+        resolved = lower_map[wanted.lower()]
+        note = f"Using `{resolved}` (matched case-insensitively)." if resolved != wanted else None
+        return resolved, note, names
+    # Unqualified vs schema.table
+    bare = wanted.split(".")[-1].lower()
+    bare_hits = [n for n in names if n.split(".")[-1].lower() == bare]
+    if len(bare_hits) == 1:
+        return bare_hits[0], f"Using `{bare_hits[0]}`.", names
+    close = difflib.get_close_matches(wanted.lower(), list(lower_map.keys()), n=5, cutoff=0.72)
+    if len(close) == 1:
+        resolved = lower_map[close[0]]
+        return resolved, f"Using `{resolved}` (closest match to `{wanted}`).", names
+    if close:
+        return None, None, [lower_map[c] for c in close]
+    return None, None, names[:12]
 
 
 def _tool_result(name: str, *, success: bool, output: Any = None, error: str = ""):
@@ -292,6 +357,7 @@ def sample_connector_object(
 
     ctype = str(conn.get("type") or conn.get("format") or "").lower()
     cid = str(conn.get("id") or conn.get("_id") or "")
+    resolve_note = None
     try:
         from services.connector_store import get_connector
         from src.routers.query_router import QueryExecuteRequest, _run_query
@@ -299,6 +365,33 @@ def sample_connector_object(
         saved = get_connector(cid)
         if not saved:
             return _tool_result(tool, success=False, error="Connector not found in store.")
+
+        resolved, resolve_note, candidates = resolve_table_name(
+            conn, table, connector_name=str(conn.get("name") or connector_name or ""),
+        )
+        if resolved is None:
+            shown = ", ".join(f"`{n}`" for n in (candidates or [])[:12])
+            more = f" (+{len(candidates) - 12} more)" if candidates and len(candidates) > 12 else ""
+            label = conn.get("name") or "this connector"
+            if candidates:
+                return _tool_result(
+                    tool,
+                    success=False,
+                    error=(
+                        f"No table `{table}` on **{label}**. "
+                        f"Did you mean {shown}{more}? "
+                        f'Example: "sample {candidates[0]} on {label}".'
+                    ),
+                )
+            return _tool_result(
+                tool,
+                success=False,
+                error=(
+                    f"No table `{table}` on **{label}**, and I could not list objects. "
+                    f'Ask "list tables on {label}".'
+                ),
+            )
+        table = resolved
 
         if ctype == "mongodb":
             body = QueryExecuteRequest(
@@ -323,6 +416,8 @@ def sample_connector_object(
             "limit": limit,
             "truncated": truncated or len(rows) >= limit,
         }
+        if resolve_note:
+            meta["resolve_note"] = resolve_note
         result_id = _store_result(
             rows=rows,
             columns=columns,
@@ -347,6 +442,34 @@ def sample_connector_object(
         return _tool_result(tool, success=False, error=exc.message)
     except Exception as exc:
         logging.getLogger(__name__).warning("sample_connector_object failed: %s", exc, exc_info=True)
+        msg = str(exc)
+        if _MISSING_TABLE_RE.search(msg):
+            try:
+                _, _, candidates = resolve_table_name(
+                    conn, table, connector_name=str(conn.get("name") or connector_name or ""),
+                )
+            except Exception:
+                candidates = []
+            label = conn.get("name") or "this connector"
+            if candidates:
+                shown = ", ".join(f"`{n}`" for n in candidates[:12])
+                return _tool_result(
+                    tool,
+                    success=False,
+                    error=(
+                        f"No table `{table}` on **{label}**. "
+                        f"Which table? {shown}. "
+                        f'Example: "sample {candidates[0]} on {label}".'
+                    ),
+                )
+            return _tool_result(
+                tool,
+                success=False,
+                error=(
+                    f"No table `{table}` on **{label}**. "
+                    f'Ask "list tables on {label}" to see what is available.'
+                ),
+            )
         return _tool_result(tool, success=False, error=f"Sample failed: {exc}")
 
 

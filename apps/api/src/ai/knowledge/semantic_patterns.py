@@ -1,5 +1,5 @@
 """
-DataTransfer.space — Expanded Semantic Patterns (200+)
+Datawrap — Expanded Semantic Patterns (200+)
 
 Comprehensive semantic type definitions for universal data understanding.
 """

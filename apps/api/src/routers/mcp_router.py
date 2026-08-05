@@ -1,4 +1,4 @@
-"""MCP Server — expose Data Pilot tools to Cursor, Claude, VS Code, and external agents.
+"""MCP Server — expose Datawrap Pilot tools to Cursor, Claude, VS Code, and external agents.
 
 Supports:
   - Native Streamable HTTP at ``POST/GET /api/v1/mcp`` (Cursor ``url`` config)
@@ -23,6 +23,27 @@ class ToolCallRequest(BaseModel):
 
 def _mcp_authenticated(http_request: Request) -> bool:
     return bool(getattr(http_request.state, "user", None) or getattr(http_request.state, "api_key_auth", False))
+
+
+def _require_mcp_tool_auth(http_request: Request) -> None:
+    """Refuse tool execution unless a Bearer JWT / workspace API key is present.
+
+    When platform auth is off (local/dev), tools remain callable without a token
+    so developers can exercise the MCP surface without spinning up users.
+    """
+    from src.services.auth_service import auth_required
+
+    if not auth_required():
+        return
+    if _mcp_authenticated(http_request):
+        return
+    raise HTTPException(
+        status_code=401,
+        detail={
+            "error": "Authentication required",
+            "hint": "Pass Authorization: Bearer <workspace-api-key-or-jwt>",
+        },
+    )
 
 
 @router.api_route("", methods=["GET", "POST", "DELETE"], include_in_schema=True)
@@ -103,7 +124,7 @@ async def mcp_manifest(http_request: Request):
     base = f"{str(http_request.base_url).rstrip('/')}/api/v1/mcp"
     return {
         "name": "dataflow",
-        "title": "DataFlow MCP Server",
+        "title": "Datawrap MCP Server",
         "version": "2.0.0",
         "description": "Universal data movement — analyze, transfer, and query any dataset via AI agents.",
         "protocol": "streamable-http",
@@ -149,18 +170,32 @@ async def list_mcp_tools():
 
 @router.post("/tools/call")
 async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
-    """Execute a Data Pilot tool — same surface external agents use."""
+    """Execute a Datawrap Pilot tool — same surface external agents use."""
+    _require_mcp_tool_auth(http_request)
     from services.mcp_invocation_log import log_mcp_invocation
+    from services.mcp_rate_limit import check_mcp_rate_limit
 
     from ..ai.copilot.tools import get_pilot_tools
 
     client = http_request.headers.get("X-MCP-Client", "unknown")
+    actor = getattr(getattr(http_request, "state", None), "user_email", None) or client
     correlation_id = getattr(http_request.state, "correlation_id", None)
+    limit = check_mcp_rate_limit(str(actor or client))
+    if not limit.get("allowed"):
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "MCP rate limit exceeded",
+                "retry_after_sec": limit.get("retry_after_sec"),
+                "honesty": "MCP is a production API — rate limits protect the control plane.",
+            },
+            headers={"Retry-After": str(int(float(limit.get("retry_after_sec") or 1)))},
+        )
     start = time.perf_counter()
     try:
         result = get_pilot_tools().execute(request.name, request.arguments)
     except Exception as exc:
-        log_mcp_invocation(
+        receipt = log_mcp_invocation(
             tool=request.name,
             client=client,
             arguments=request.arguments,
@@ -168,12 +203,16 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
             error=str(exc),
             duration_ms=(time.perf_counter() - start) * 1000,
             correlation_id=correlation_id,
+            actor=str(actor or "mcp-agent"),
         )
-        raise HTTPException(status_code=500, detail={"error": str(exc), "tool": request.name}) from exc
+        raise HTTPException(
+            status_code=500,
+            detail={"error": str(exc), "tool": request.name, "receipt_id": receipt.get("id")},
+        ) from exc
 
     ms = (time.perf_counter() - start) * 1000
     if not result.success:
-        log_mcp_invocation(
+        receipt = log_mcp_invocation(
             tool=request.name,
             client=client,
             arguments=request.arguments,
@@ -181,23 +220,36 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
             error=result.error or "tool failed",
             duration_ms=ms,
             correlation_id=correlation_id,
+            actor=str(actor or "mcp-agent"),
         )
-        raise HTTPException(status_code=422, detail={"error": result.error, "tool": request.name})
+        raise HTTPException(
+            status_code=422,
+            detail={"error": result.error, "tool": request.name, "receipt_id": receipt.get("id")},
+        )
 
-    log_mcp_invocation(
+    receipt = log_mcp_invocation(
         tool=request.name,
         client=client,
         arguments=request.arguments,
         status="ok",
         duration_ms=ms,
         correlation_id=correlation_id,
+        actor=str(actor or "mcp-agent"),
     )
-    return {"tool": result.name, "success": True, "output": result.output}
+    return {
+        "tool": result.name,
+        "success": True,
+        "output": result.output,
+        "receipt_id": receipt.get("id"),
+        "ms": receipt.get("ms"),
+        "status": "ok",
+    }
 
 
 @router.get("/logs")
-async def mcp_request_logs(limit: int = 50):
+async def mcp_request_logs(http_request: Request, limit: int = 50):
     """Recent MCP tool invocations from persistent log."""
+    _require_mcp_tool_auth(http_request)
     from services.mcp_invocation_log import list_mcp_invocations
 
     rows = list_mcp_invocations(limit=min(limit, 200))

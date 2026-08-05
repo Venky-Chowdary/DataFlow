@@ -35,6 +35,45 @@ def test_honesty_dict_refuses_exactly_once_claim() -> None:
     assert h["append_only_sinks_effectively_once"] is False
 
 
+def test_honesty_dict_explicit_delivery_classes() -> None:
+    """Platform must classify Exactly Once / At Least Once / At Most Once — never invent."""
+    h = honesty_dict()
+    classes = h["delivery_classes"]
+    assert set(classes.keys()) == {"exactly_once", "at_least_once", "at_most_once"}
+    assert classes["exactly_once"]["claimed"] is False
+    assert classes["exactly_once"]["available"] is False
+    assert classes["at_least_once"]["claimed"] is True
+    assert classes["at_least_once"]["default"] is True
+    assert classes["at_most_once"]["claimed"] is False
+    assert classes["at_most_once"]["available"] is False
+    # Silent loss is not a migration-assurance posture.
+    assert "loss" in classes["at_most_once"]["note"].lower() or "not offered" in classes[
+        "at_most_once"
+    ]["note"].lower()
+    assert h["append_sink_acknowledgement_required"] is True
+    assert "append_only_redelivery_duplicates_rows" in h["duplicate_scenarios"]
+
+
+def test_classify_sink_stamps_delivery_class_not_exactly_once() -> None:
+    from services.cdc_effectively_once import classify_sink_delivery
+
+    pg = classify_sink_delivery(
+        dest_type="postgresql", has_primary_key=True, write_mode="upsert"
+    )
+    assert pg["delivery_class"] == "at_least_once"
+    assert pg["exactly_once"] is False
+    assert pg["at_most_once"] is False
+    assert pg["at_least_once"] is True
+
+    csv = classify_sink_delivery(
+        dest_type="csv", has_primary_key=True, write_mode="upsert"
+    )
+    assert csv["delivery_class"] == "at_least_once"
+    assert csv["duplicates_on_redelivery"] is True
+    assert csv["duplicate_scenario"] == "append_only_redelivery_duplicates_rows"
+    assert csv["exactly_once"] is False
+
+
 def test_classify_and_gate_append_only_sink() -> None:
     from services.cdc_effectively_once import (
         CdcAppendOnlySinkError,

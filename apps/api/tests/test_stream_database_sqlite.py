@@ -235,3 +235,40 @@ def test_stream_sqlite_includes_ddl_log_and_summary():
         assert any("STREAM" in line for line in ddl_log)
         assert summary["type"] == "sqlite"
         assert summary["table"] == "orders_out"
+
+
+def test_stream_hard_fails_when_checkpoint_save_rejected():
+    """Fail-closed: a rejected checkpoint write must abort the transfer job."""
+    from services.checkpoint_service import CheckpointPersistenceError
+
+    class _RejectingMongo(_FakeMongo):
+        def update_job_status(self, job_id: str, status: str, **kwargs) -> bool:
+            return False
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        src = _make_source(50, tmp_path)
+        dst = tmp_path / "dst.db"
+
+        source = EndpointConfig(
+            kind="database", format="sqlite", database=str(src), table="orders"
+        )
+        destination = EndpointConfig(
+            kind="database", format="sqlite", database=str(dst), table="orders_out"
+        )
+        mappings = [
+            {"source": "id", "target": "id"},
+            {"source": "amount", "target": "amount"},
+            {"source": "active", "target": "active"},
+        ]
+        schema = {"id": "integer", "amount": "decimal", "active": "boolean"}
+
+        with pytest.raises(CheckpointPersistenceError, match="refusing to continue"):
+            stream_database_transfer(
+                source,
+                destination,
+                mappings,
+                schema,
+                job_id="000000000000000000000001",
+                checkpoint_service=CheckpointService(_RejectingMongo()),
+            )

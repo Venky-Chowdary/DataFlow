@@ -278,6 +278,15 @@ export async function runPreflight(payload: {
     create_new?: boolean;
     assignment_strategy?: string;
     semantic_role?: string;
+    /** Map Accept risk — must reach G3/G4/G9 (do not strip on /preflight/run). */
+    fidelity?: string;
+    type_narrowing?: boolean;
+    risk_acknowledged?: boolean;
+    intentional_omit?: boolean;
+    risk_contract?: Record<string, unknown>;
+    struct_policy?: string;
+    struct_derived?: boolean;
+    struct_parent?: string;
   }[];
   connector_id?: string;
   source_connector_id?: string;
@@ -311,10 +320,18 @@ export async function runPreflight(payload: {
   compliance_acknowledged?: boolean;
   /** Operator acknowledged schema drift under manual_review for this run. */
   schema_drift_acknowledged?: boolean;
+  /** Operator acknowledged destination FK mapping risk (schema coverage only). */
+  fk_risk_acknowledged?: boolean;
+  /** Module 11 — opt-in full-table population orphan scan (only path to RI proven). */
+  run_population_orphan_scan?: boolean;
   /** Who acknowledged (email / display name). */
   acknowledgment_actor?: string;
   /** Why the exception was accepted. */
   acknowledgment_reason?: string;
+  /** Pre-ingestion staging (SQL destinations only). */
+  write_via_staging?: boolean;
+  source_kind?: string;
+  source_type?: string;
 }): Promise<import("./types").PreflightResult> {
   const res = await apiFetch(`${API_BASE}/preflight/run`, {
     method: "POST",
@@ -610,6 +627,7 @@ export interface ModelCapabilities {
   active_provider: string;
   active_model: string;
   agent_mode: string;
+  pilot_engine?: string;
   fallback_order: string[];
   providers: {
     provider: string;
@@ -631,21 +649,21 @@ export function formatPilotReachError(error: unknown, apiBase: string = API_BASE
   const raw = error instanceof Error ? error.message : String(error || "Unknown error");
   const lower = raw.toLowerCase();
   if (lower.includes("timed out") || lower.includes("abort")) {
-    return "Data Pilot took too long to respond. Please try again in a moment.";
+    return "Datawrap Pilot took too long to respond. Please try again in a moment.";
   }
   if (lower.includes("401") || lower.includes("authentication required") || lower.includes("not authenticated")) {
     return "Your session expired. Sign in again, then retry.";
   }
   if (lower.includes("403") || lower.includes("forbidden")) {
-    return "You don’t have permission to use Data Pilot in this workspace.";
+    return "You don’t have permission to use Datawrap Pilot in this workspace.";
   }
   if (lower.includes("failed to fetch") || lower.includes("networkerror") || lower.includes("load failed")) {
-    return "Couldn’t reach Data Pilot right now. Check that the app is online, then try again.";
+    return "Couldn’t reach Datawrap Pilot right now. Check that the app is online, then try again.";
   }
   if (lower.includes("503") || lower.includes("no ai") || lower.includes("provider")) {
-    return "Data Pilot isn’t available right now. Please try again shortly.";
+    return "Datawrap Pilot isn’t available right now. Please try again shortly.";
   }
-  return "Something went wrong with Data Pilot. Please try again.";
+  return "Something went wrong with Datawrap Pilot. Please try again.";
 }
 
 export async function copilotChat(
@@ -706,13 +724,15 @@ export async function confirmCopilotAction(payload: {
   connector_id?: string;
   name?: string;
   type?: string;
-  /** start_transfer */
+  /** start_transfer / run_schedule */
   job_id?: string;
   status?: string;
   source?: string;
   destination?: string;
   sync_mode?: string;
   preflight_run_id?: string;
+  /** run_schedule */
+  schedule_id?: string;
 }> {
   const res = await apiFetch(`${API_BASE}/copilot/confirm`, {
     method: "POST",
@@ -734,7 +754,7 @@ export async function fetchCopilotPrompts(): Promise<string[]> {
 
 export async function fetchPilotTools(): Promise<PilotToolRegistry> {
   const res = await apiFetch(`${API_BASE}/copilot/tools`);
-  if (!res.ok) throw new Error("Data Pilot tools failed");
+  if (!res.ok) throw new Error("Datawrap Pilot tools failed");
   return res.json();
 }
 
@@ -909,6 +929,43 @@ export async function fetchJobMappingProof(jobId: string): Promise<{
     [`${API_BASE}/transfer/${encodeURIComponent(jobId)}/mapping-proof`],
     "Mapping proof not found"
   );
+}
+
+/** HMAC-signed Gate-8 + mapping proof pack for diligence export. */
+export async function fetchSignedProofPack(jobId: string): Promise<Record<string, unknown>> {
+  return requestJson(
+    [`${API_BASE}/transfer/${encodeURIComponent(jobId)}/proof-pack`],
+    "Signed proof pack not available"
+  );
+}
+
+export async function verifySignedProofPack(
+  pack: Record<string, unknown>,
+): Promise<{ ok: boolean; errors: string[]; content_sha256?: string }> {
+  const res = await apiFetch(`${API_BASE}/transfer/proof-pack/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pack }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Proof pack verify failed"));
+  return res.json();
+}
+
+/** Execute signed rollback plan — DISCARD_STAGING only (never population undo). */
+export async function executeJobRollback(
+  jobId: string,
+  body: { approved_by: string; reason: string; plan?: Record<string, unknown> },
+): Promise<Record<string, unknown>> {
+  const res = await apiFetch(
+    `${API_BASE}/transfer/${encodeURIComponent(jobId)}/rollback/execute`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Rollback execute failed"));
+  return res.json();
 }
 
 export async function renameJob(jobId: string, name: string): Promise<JobProgress> {
@@ -1105,6 +1162,10 @@ export function streamJobProgress(
       replication_lag_bytes: raw.replication_lag_bytes != null ? Number(raw.replication_lag_bytes) : null,
       cdc_heartbeat_at: raw.cdc_heartbeat_at ? String(raw.cdc_heartbeat_at) : null,
       cdc_last_ddl_at: raw.cdc_last_ddl_at ? String(raw.cdc_last_ddl_at) : null,
+      mapping_review_required: raw.mapping_review_required == null ? null : Boolean(raw.mapping_review_required),
+      mapping_review_id: raw.mapping_review_id ? String(raw.mapping_review_id) : null,
+      mapping_review_reason: raw.mapping_review_reason ? String(raw.mapping_review_reason) : null,
+      mapping_review_honesty: raw.mapping_review_honesty ? String(raw.mapping_review_honesty) : null,
       cdc_plugin: raw.cdc_plugin ? String(raw.cdc_plugin) : null,
       cdc_slot_name: raw.cdc_slot_name ? String(raw.cdc_slot_name) : null,
       cdc_delivery: raw.cdc_delivery ? String(raw.cdc_delivery) : null,
@@ -1328,7 +1389,7 @@ export async function runScheduleNow(id: string): Promise<{ job_id: string }> {
   return res.json();
 }
 
-export async function exportDataflowManifest(): Promise<Blob> {
+export async function exportDatawrapManifest(): Promise<Blob> {
   const res = await apiFetch(`${API_BASE}/schedules/export/dataflow?format=yaml`);
   if (!res.ok) throw new Error(await parseApiError(res, "Could not export dataflow.yaml"));
   return res.blob();
@@ -1802,6 +1863,8 @@ export async function mapTransferColumns(payload: {
     fidelity?: string;
     fidelity_reason?: string;
     type_narrowing?: boolean;
+    create_new?: boolean;
+    create_new_risks?: Array<{ kind?: string; severity?: string; message?: string }>;
   }>;
   validation: { passed: boolean; issues: string[] };
   destination_aware: boolean;
@@ -1974,6 +2037,8 @@ export async function runUniversalTransfer(options: {
   priorityDirection?: "asc" | "desc";
   limit?: number;
   dateLocale?: string;
+  /** Client-supplied key; when omitted a fresh UUID is sent so HTTP retries converge. */
+  idempotencyKey?: string;
 }) {
   const formData = new FormData();
   if (options.file) formData.append("file", options.file);
@@ -1987,6 +2052,8 @@ export async function runUniversalTransfer(options: {
   formData.append("sync_mode", options.syncMode || "full_refresh_append");
   formData.append("schema_policy", options.schemaPolicy || "manual_review");
   formData.append("validation_mode", options.validationMode || "strict");
+  // Runtime SSOT: only at_least_once is selectable — never invent exactly-once.
+  formData.append("delivery_guarantee", "at_least_once");
   formData.append("backfill_new_fields", options.backfillNewFields === true ? "true" : "false");
   formData.append("write_via_staging", options.writeViaStaging === true ? "true" : "false");
   formData.append("enable_ocr", options.enableOcr === true ? "true" : "false");
@@ -2030,8 +2097,24 @@ export async function runUniversalTransfer(options: {
   }
   if (options.planId) formData.append("plan_id", options.planId);
   formData.append("date_locale", options.dateLocale || "");
-  const res = await apiFetch(`${API_BASE}/transfer/run`, { method: "POST", body: formData, timeoutMs: LONG_REQUEST_TIMEOUT_MS });
+  // A fresh key per click still lets the server fingerprint catch a double-submit
+  // of the same intent; the header itself makes HTTP-level retries of this call
+  // converge on one job instead of starting a second writer.
+  const idempotencyKey =
+    options.idempotencyKey?.trim() ||
+    (typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `df-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
+  const res = await apiFetch(`${API_BASE}/transfer/run`, {
+    method: "POST",
+    body: formData,
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+    headers: { "Idempotency-Key": idempotencyKey },
+  });
   const data = await res.json();
+  if (res.status === 409) {
+    return parseDuplicateTransfer(data);
+  }
   if (!res.ok) {
     const detail = data.detail;
     const errMsg = typeof detail === "string"
@@ -2040,6 +2123,39 @@ export async function runUniversalTransfer(options: {
     return { success: false, error: errMsg };
   }
   return { success: true, async: data.async === true, ...data };
+}
+
+/** Shape of a 409 from the transfer engine when an equivalent run is already live. */
+export type DuplicateTransferResponse = {
+  success: false;
+  error: "duplicate_transfer";
+  duplicate: true;
+  existing_job_id: string;
+  existing_status: string;
+  message: string;
+};
+
+function parseDuplicateTransfer(data: Record<string, unknown>): DuplicateTransferResponse {
+  const detail = (data.detail && typeof data.detail === "object"
+    ? data.detail
+    : data) as Record<string, unknown>;
+  const existing =
+    String(detail.existing_job_id || data.existing_job_id || data.job_id || "").trim();
+  const status = String(detail.existing_status || data.existing_status || "in progress").trim();
+  const message = String(
+    detail.message ||
+      (typeof data.detail === "string" ? data.detail : "") ||
+      data.error ||
+      "An equivalent transfer is already running.",
+  );
+  return {
+    success: false,
+    error: "duplicate_transfer",
+    duplicate: true,
+    existing_job_id: existing,
+    existing_status: status,
+    message,
+  };
 }
 
 /** JSON transfer execute (SDK / GitOps) — Form upload remains on runUniversalTransfer. */
@@ -2053,10 +2169,19 @@ export async function executeTransferJson(payload: {
   skipPreflight?: boolean;
   asyncMode?: boolean;
   planId?: string;
+  idempotencyKey?: string;
 }) {
+  const idempotencyKey =
+    payload.idempotencyKey?.trim() ||
+    (typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `df-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
   const res = await apiFetch(`${API_BASE}/transfer/execute`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": idempotencyKey,
+    },
     body: JSON.stringify({
       source: payload.source,
       destination: payload.destination,
@@ -2064,6 +2189,7 @@ export async function executeTransferJson(payload: {
       sync_mode: payload.syncMode || "full_refresh_append",
       validation_mode: payload.validationMode || "strict",
       schema_policy: payload.schemaPolicy || "manual_review",
+      delivery_guarantee: "at_least_once",
       skip_preflight: payload.skipPreflight === true,
       async_mode: payload.asyncMode !== false,
       plan_id: payload.planId || undefined,
@@ -2071,6 +2197,9 @@ export async function executeTransferJson(payload: {
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
   const data = await res.json();
+  if (res.status === 409) {
+    return parseDuplicateTransfer(data);
+  }
   if (!res.ok) {
     const detail = data.detail;
     const errMsg = typeof detail === "string"
@@ -2165,7 +2294,7 @@ export async function fetchWorkspaceSettings(): Promise<{
 }> {
   const res = await apiFetch(`${API_BASE}/workspace/settings`);
   if (!res.ok) {
-    return { org_name: "DataFlow", timezone: "UTC", retention_days: 90 };
+    return { org_name: "Datawrap", timezone: "UTC", retention_days: 90 };
   }
   return res.json();
 }
@@ -2483,6 +2612,13 @@ export interface QuarantineInfo {
     error?: string | null;
     supported?: boolean | null;
   };
+  /**
+   * Whether the control-plane JSONL DLQ was durably written. ``false`` means
+   * the rows are listed in memory only — Replay would find nothing to rewrite.
+   * ``null``/omitted means an older job that pre-dates the flag.
+   */
+  quarantine_durable?: boolean | null;
+  quarantine_dlq_error?: string | null;
 }
 
 export async function fetchJobQuarantine(jobId: string): Promise<QuarantineInfo> {
@@ -2951,6 +3087,37 @@ export async function signContract(id: string, strict = true): Promise<DataContr
   return res.json();
 }
 
+export interface ContractRevision {
+  version?: number;
+  from_status?: string;
+  to_status?: string;
+  column_count?: number;
+  mapping_count?: number;
+  at?: string;
+  note?: string;
+}
+
+export async function fetchContractHistory(id: string): Promise<{
+  contract_id: string;
+  current_version: number;
+  current_status: string;
+  revisions: ContractRevision[];
+  honesty?: string;
+}> {
+  const res = await apiFetch(`${API_BASE}/contracts/${encodeURIComponent(id)}/history`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load contract history"));
+  return res.json();
+}
+
+export async function acknowledgeCdcMappingReview(reviewId: string): Promise<Record<string, unknown>> {
+  const res = await apiFetch(
+    `${API_BASE}/cdc/mapping-reviews/${encodeURIComponent(reviewId)}/acknowledge`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not acknowledge mapping review"));
+  return res.json();
+}
+
 export async function deprecateContract(id: string): Promise<DataContractSummary> {
   const res = await apiFetch(`${API_BASE}/contracts/${encodeURIComponent(id)}/deprecate`, {
     method: "POST",
@@ -3184,3 +3351,185 @@ export async function cancelJobCdcSnapshot(
   if (!res.ok) throw new Error(await parseApiError(res, "Could not cancel CDC snapshot"));
   return res.json();
 }
+
+// --------------------------------------------------------------------------
+// Post-load SQL transformations (dbt-class models run at the destination).
+// --------------------------------------------------------------------------
+
+export interface TransformDataTest {
+  test_type: "unique" | "not_null" | "accepted_values" | "relationships" | "positive";
+  column?: string;
+  severity?: "error" | "warn";
+  values?: string[];
+  to_model?: string;
+  to_column?: string;
+}
+
+export interface TransformModelDef {
+  name: string;
+  sql: string;
+  materialization: "view" | "table" | "incremental" | "ephemeral";
+  description?: string;
+  unique_key?: string;
+  incremental_strategy?: "merge" | "append" | "delete_insert";
+  tests?: TransformDataTest[];
+  tags?: string[];
+  enabled?: boolean;
+  /** Server-derived: models this one depends on via ref(). */
+  refs?: string[];
+  sources?: string[];
+}
+
+/** Layered execution plan. Models in one layer have no interdependency. */
+export interface TransformPlan {
+  layers?: string[][];
+  order?: string[];
+  model_count?: number;
+  layer_count?: number;
+  max_parallelism?: number;
+  unresolved_refs?: Record<string, string[]>;
+  /** Present instead of the plan when the stored models cannot be resolved. */
+  error?: string;
+}
+
+export interface TransformProject {
+  id: string;
+  name: string;
+  destination_connector_id: string;
+  /** Optional signed DataContract — post-load auto-run requires SIGNED when set. */
+  contract_id?: string;
+  schema: string;
+  models: TransformModelDef[];
+  enabled: boolean;
+  run_after_transfer: boolean;
+  trigger_tables: string[];
+  description: string;
+  workspace_id?: string;
+  created_at?: string;
+  updated_at?: string;
+  version?: number;
+  plan?: TransformPlan;
+}
+
+export interface TransformCompiledModel {
+  name: string;
+  materialization: string;
+  relation: string;
+  strategy: string;
+  refs: string[];
+  sources: string[];
+  statements: string[];
+  error?: string;
+  tests: { test_type: string; column: string; severity: string; sql: string }[];
+}
+
+export interface TransformPlanPreview {
+  plan: TransformPlan;
+  models: TransformCompiledModel[];
+  dialect: string;
+}
+
+export async function fetchTransformProjects(): Promise<TransformProject[]> {
+  const res = await apiFetch(`${API_BASE}/transforms/`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to load transformation projects"));
+  return res.json();
+}
+
+export async function fetchTransformProject(projectId: string): Promise<TransformProject> {
+  const res = await apiFetch(`${API_BASE}/transforms/${encodeURIComponent(projectId)}`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Transformation project not found"));
+  return res.json();
+}
+
+export async function createTransformProject(
+  body: Partial<TransformProject>,
+): Promise<TransformProject> {
+  const res = await apiFetch(`${API_BASE}/transforms/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not save transformation project"));
+  return res.json();
+}
+
+export async function updateTransformProject(
+  projectId: string,
+  body: Partial<TransformProject> & { expected_version?: number },
+): Promise<TransformProject> {
+  const res = await apiFetch(`${API_BASE}/transforms/${encodeURIComponent(projectId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not update transformation project"));
+  return res.json();
+}
+
+export async function deleteTransformProject(projectId: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/transforms/${encodeURIComponent(projectId)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not delete transformation project"));
+}
+
+/**
+ * Compile models and resolve the DAG without touching a warehouse.
+ *
+ * This is what makes the editor safe to use: a dependency cycle or an
+ * unsupported materialization comes back as a 422 while the operator is still
+ * writing, not halfway through a run against production.
+ */
+export async function previewTransformPlan(body: {
+  models: Partial<TransformModelDef>[];
+  dialect?: string;
+  schema?: string;
+}): Promise<TransformPlanPreview> {
+  const res = await apiFetch(`${API_BASE}/transforms/plan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not compile the models"));
+  return res.json();
+}
+
+export interface TransformRunResult {
+  status: "success" | "partial" | "failed" | "skipped";
+  seconds: number;
+  plan: TransformPlan;
+  error: string;
+  warnings: string[];
+  models: import("./types").TransformModelResult[];
+  model_count: number;
+  failed_model_count: number;
+  failed_test_count: number;
+}
+
+export async function runTransformProject(
+  projectId: string,
+  opts: { dryRun?: boolean } = {},
+): Promise<TransformRunResult> {
+  const query = opts.dryRun ? "?dry_run=true" : "";
+  const res = await apiFetch(
+    `${API_BASE}/transforms/${encodeURIComponent(projectId)}/run${query}`,
+    { method: "POST", timeoutMs: 300_000 },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Transformation run failed"));
+  return res.json();
+}
+
+export async function exportTransformProjectDbt(projectId: string): Promise<{
+  project_id: string;
+  project_name: string;
+  file_count: number;
+  files: Record<string, string>;
+  honesty: Record<string, unknown>;
+}> {
+  const res = await apiFetch(
+    `${API_BASE}/transforms/${encodeURIComponent(projectId)}/export/dbt`,
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not export dbt pack"));
+  return res.json();
+}
+

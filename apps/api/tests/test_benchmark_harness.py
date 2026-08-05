@@ -62,7 +62,7 @@ def test_local_sqlite_scale_transfer(tmp_path: Path):
 
 
 def test_dataflow_exceeds_competitive_baseline():
-    """DataFlow's local SQLite benchmark must beat the published competitor baseline."""
+    """Datawrap's local SQLite benchmark must beat the published competitor baseline."""
     from benchmarks.cloud_scale import run_local_benchmark
 
     report = run_local_benchmark(100_000)

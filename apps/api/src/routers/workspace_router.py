@@ -194,8 +194,23 @@ async def patch_ai_provider(provider: str, body: AiProviderBody, request: Reques
     from services.audit_log import append_audit_event
     from services.integrations_store import update_ai_provider
 
+    payload = body.model_dump(exclude_none=True)
+    raw_key = str(payload.get("api_key") or "").strip()
+    if (
+        provider in {"openai", "anthropic"}
+        and raw_key
+        and not raw_key.startswith("•")
+        and not raw_key.startswith("[")
+    ):
+        from ..ai.llm.provider import clear_auth_failures, verify_cloud_api_key
+
+        clear_auth_failures()
+        ok, err = verify_cloud_api_key(provider, raw_key)
+        if not ok:
+            raise HTTPException(status_code=400, detail=err or "API key rejected")
+
     try:
-        updated = update_ai_provider(provider, body.model_dump(exclude_none=True))
+        updated = update_ai_provider(provider, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -550,7 +565,13 @@ async def rotate_tenant_byok_key(key_id: str, request: Request):
 
 def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
     from services.byok_key_manager import key_status_summary
+    from services.cdc_effectively_once import (
+        DELIVERY_DEFAULT,
+        EXACTLY_ONCE_CLAIMED,
+        honesty_dict,
+    )
     from services.platform_config import is_production, validate_production_config
+    from services.recovery_honesty import honesty_dict as recovery_honesty_dict
     from services.secret_vault import secrets_encryption_ready
 
     region = tenant.data_region if tenant else "us-east-1"
@@ -559,10 +580,26 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
     prod = is_production()
     prod_errors = validate_production_config() if prod else []
     audit_logging = True  # append-only JSONL audit path is always mounted
+    cdc_honesty = honesty_dict()
+    recovery_honesty = recovery_honesty_dict()
     return {
         "tenant_id": tenant.id if tenant else None,
         "workspace_id": tenant.workspace_id if tenant else None,
         "custom_domain": tenant.custom_domain if tenant else None,
+        "custom_domain_cors": {
+            "enabled": True,
+            "origin": (
+                f"https://{(tenant.custom_domain or '').strip()}"
+                if tenant and (tenant.custom_domain or "").strip()
+                else None
+            ),
+            "hint": (
+                "Set tenant.custom_domain (e.g. data.customer.com) and point DNS to the "
+                "Datawrap web host. API CORS accepts the tenant origin live via "
+                "TenantAwareCORSMiddleware. Also set DATAWRAP_WEB_DOMAIN / CORS_EXTRA_ORIGINS "
+                "for the primary SPA origin."
+            ),
+        },
         "data_region": region,
         "environment": "production" if prod else "development",
         "encryption_at_rest": encryption_ready,
@@ -576,22 +613,33 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
         "mfa_required": tenant.mfa_required if tenant else False,
         "session_timeout_hours": tenant.session_timeout_hours if tenant else 8,
         "tls_version": "1.3",
+        # Surfaced CDC posture — explicit EO/ALO/AMO; only ALO is claimed.
+        "cdc_delivery": DELIVERY_DEFAULT,
+        "cdc_exactly_once_claimed": EXACTLY_ONCE_CLAIMED,
+        "cdc_at_most_once_claimed": False,
+        "cdc_honesty": cdc_honesty,
+        # Recovery Integrity — refuse invent of one-click undo / restore product.
+        "transfer_undo_claimed": bool(recovery_honesty.get("transfer_undo_claimed")),
+        "recovery_honesty": recovery_honesty,
         "deployment": {
             "models": ["saas_multi_tenant", "customer_vpc_self_host", "air_gapped_compose"],
             "saas_multi_tenant": "Workspace isolation + optional DATAFLOW_REQUIRE_WORKSPACE hard gate",
             "customer_vpc_self_host": "Docker Compose / container deploy in customer VPC — same Transfer Studio engine",
-            "air_gapped": "Supported via offline image load; customer supplies Postgres/object store; no DataFlow SaaS egress required",
+            "air_gapped": "Supported via offline image load; customer supplies Postgres/object store; no Datawrap SaaS egress required",
             "private_link": "not_first_class",
             "data_plane": (
-                "Transfer bytes move source→DataFlow worker→destination over connector TLS "
+                "Transfer bytes move source→Datawrap worker→destination over connector TLS "
                 "(sslmode/rediss/https). Control plane API should sit behind HTTPS. "
-                "DataFlow does not claim zero-copy bypass of the worker for DB→DB migrations."
+                "Datawrap does not claim zero-copy bypass of the worker for DB→DB migrations."
             ),
             "data_loss_controls": [
                 "preflight_gates_g1_g9",
                 "quarantine_not_silent_drop",
                 "post_load_reconciliation_checksum",
                 "sql_null_vs_empty_preserved",
+                "checkpoint_fail_closed",
+                f"cdc_delivery_{DELIVERY_DEFAULT}_pk_lsn_upsert",
+                "no_product_transfer_undo",
             ],
         },
         "private_networking": {
@@ -637,7 +685,7 @@ async def get_security_report(request: Request):
     posture = _security_posture(tenant)
 
     lines = [
-        "# DataFlow Security & Compliance Report",
+        "# Datawrap Security & Compliance Report",
         f"Generated: {datetime.now(timezone.utc).isoformat()}Z",
         f"Environment: {posture['environment']}",
         f"Tenant ID: {posture['tenant_id'] or 'default'}",
@@ -724,7 +772,7 @@ def _baseline_competitors() -> list[dict[str, Any]]:
 
 def _markdown_benchmark_report(report: dict[str, Any]) -> str:
     lines = [
-        "# DataFlow Benchmark Report",
+        "# Datawrap Benchmark Report",
         f"Generated: {report['timestamp']}Z",
         f"Workload: {report['rows']:,} rows from CSV → SQLite (local API host)",
         "",
@@ -744,7 +792,7 @@ def _markdown_benchmark_report(report: dict[str, Any]) -> str:
     ]
     for c in report["competitors"]:
         lines.append(f"| {c['product']} | {c['typical_rps']:,} | {'Yes' if c['resume_from_checkpoint'] else 'No'} | {c['notes']} |")
-    lines.extend(["", "This report was produced by the DataFlow benchmark harness and can be reproduced locally without cloud credentials."])
+    lines.extend(["", "This report was produced by the Datawrap benchmark harness and can be reproduced locally without cloud credentials."])
     return "\n".join(lines)
 
 

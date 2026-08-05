@@ -26,7 +26,15 @@ def get_connection(
     password: str,
     connection_string: str,
     ssl: bool,
+    purpose: str = "write",
 ) -> Any:
+    """Open a MySQL connection.
+
+    ``purpose``:
+      - ``write`` / ``bulk`` — long I/O timeouts for large transfers on public proxies
+      - ``ddl`` — short connect/I/O + tight lock waits so DROP/CREATE cannot hang a
+        5-row demo for minutes behind a metadata lock (fail with a clear timeout)
+    """
     import pymysql
 
     ep = resolve_sql_endpoint(
@@ -41,15 +49,30 @@ def get_connection(
     )
 
     public_proxy = is_public_proxy_host(ep["host"])
-    # Bulk transfers routinely exceed the old 30s socket deadline on public proxies.
-    io_timeout = 300 if public_proxy else 120
+    purpose_l = (purpose or "write").strip().lower()
+    ddl_mode = purpose_l in {"ddl", "drop", "setup", "probe"}
+    # Bulk transfers routinely exceed short socket deadlines on public proxies.
+    # DDL/demo paths must fail fast — lock waits, not silent multi-minute hangs.
+    if ddl_mode:
+        connect_timeout = 10
+        # Short lock wait always (fail-fast on metadata locks). Setup on public
+        # proxies may need longer socket I/O for CREATE/ALTER; DROP/probe stay tight.
+        lock_wait_s = 30
+        if purpose_l == "setup" and public_proxy:
+            io_timeout = 180
+        else:
+            io_timeout = 45
+    else:
+        connect_timeout = 15
+        io_timeout = 300 if public_proxy else 120
+        lock_wait_s = 120
     kwargs: dict[str, Any] = {
         "host": ep["host"],
         "port": ep["port"],
         "user": ep["username"],
         "password": ep["password"],
         "database": ep["database"] or None,
-        "connect_timeout": 15,
+        "connect_timeout": connect_timeout,
         "charset": "utf8mb4",
         "read_timeout": io_timeout,
         "write_timeout": io_timeout,
@@ -82,5 +105,5 @@ def get_connection(
 
     from connectors.write_resilience import apply_mysql_session_guards
 
-    apply_mysql_session_guards(conn)
+    apply_mysql_session_guards(conn, lock_wait_seconds=lock_wait_s)
     return conn

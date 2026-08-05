@@ -77,8 +77,11 @@ def test_uuid_collapse_honesty_iceberg_snowflake():
     assert is_precision_collapse_coercion("UUID", "VARCHAR") is True
     assert is_lossy_coercion("UUID", "VARCHAR") is True
 
-    # Nested UUID → string leaves (Snowflake structured compatibility).
-    assert ddl_type("snowflake", "list<uuid>") == "ARRAY(VARCHAR)"
-    assert ddl_type("snowflake", "struct<a:uuid>") == "OBJECT(a VARCHAR)"
+    # Nested UUID → width-safe string leaves (Snowflake structured compatibility).
+    assert ddl_type("snowflake", "list<uuid>") == "ARRAY(VARCHAR(36))"
+    assert ddl_type("snowflake", "struct<a:uuid>") == "OBJECT(a VARCHAR(36))"
     assert is_nested_shape_collapse("ARRAY<UUID>", "ARRAY<VARCHAR>") is True
     assert is_nested_shape_collapse("STRUCT<a:UUID>", "STRUCT<a:VARCHAR>") is True
+    # Width-safe carriers are not a domain collapse (create-new MySQL/Snowflake).
+    assert uuid_would_collapse("UUID", "VARCHAR(36)") is False
+    assert is_lossy_coercion("UUID", "CHAR(36)") is False

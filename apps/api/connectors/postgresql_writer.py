@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import tempfile
 import json
 import logging
 import time
@@ -13,11 +14,11 @@ from decimal import Decimal
 from typing import Any
 
 from services.schema_inference import infer_type
-from services.type_system import ddl_type
+from services.type_system import materialize_dest_ddl
 from services.value_serializer import json_default
 
 from connectors.postgresql_conn import get_connection
-from connectors.schema_drift import is_wider_type, widen_existing_columns_native
+from connectors.schema_drift import widen_existing_columns_native
 from connectors.sql_temporal import (
     extract_column_from_sql_error,
     is_sql_data_error,
@@ -25,11 +26,11 @@ from connectors.sql_temporal import (
 from connectors.write_resilience import (
     build_write_batch_key,
     close_quietly,
-    ensure_postgres_write_ledger,
+    ensure_raw_write_ledger,
     is_connection_lost,
     is_public_proxy_host,
-    mark_postgres_chunk_committed,
-    postgres_chunk_committed,
+    mark_raw_chunk_committed,
+    raw_chunk_rows_written,
     reconnect_backoff_seconds,
     should_retry_connection_lost,
     write_chunk_size,
@@ -501,13 +502,19 @@ class WriteResult(_WriteResult):
 
 
 def pg_type(inferred: str, engine: str = "postgresql") -> str:
-    """Map logical type to Postgres or Redshift DDL (never invent Redshift JSONB)."""
+    """Map logical type to Postgres or Redshift DDL (never invent Redshift JSONB).
+
+    Honors Map physical stamps via materialize_dest_ddl — never REAL→DOUBLE etc.
+    """
     db = "redshift" if (engine or "").lower() == "redshift" else "postgresql"
-    return ddl_type(db, inferred)
+    return materialize_dest_ddl(db, inferred)
 
 
 def _copy_text_value(value: Any) -> str:
-    if value is None:
+    from services.value_serializer import is_missing_sentinel
+
+    # Dense COPY: absent schemaless fields → SQL NULL (never bind sentinel text).
+    if value is None or is_missing_sentinel(value):
         return "\\N"
     if isinstance(value, bool):
         return "t" if value else "f"
@@ -523,6 +530,11 @@ def _copy_text_value(value: Any) -> str:
     return text.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n").replace("\r", "\\r")
 
 
+
+def _copy_buffer():
+    """Memory-bounded buffer for COPY — spills to disk when wide batches exceed 1 MiB."""
+    return tempfile.SpooledTemporaryFile(max_size=1 * 1024 * 1024, mode="w+", encoding="utf-8", newline="")
+
 def _copy_rows(cur, schema: str, table_name: str, columns: list[str], rows: list[tuple]) -> None:
     from psycopg2 import sql
 
@@ -532,12 +544,161 @@ def _copy_rows(cur, schema: str, table_name: str, columns: list[str], rows: list
         sql.Identifier(table_name),
         cols_sql,
     )
-    buf = io.StringIO()
-    for row in rows:
-        buf.write("\t".join(_copy_text_value(v) for v in row))
-        buf.write("\n")
-    buf.seek(0)
-    cur.copy_expert(copy_sql, buf)
+    buf = _copy_buffer()
+    try:
+        for row in rows:
+            buf.write("\t".join(_copy_text_value(v) for v in row))
+            buf.write("\n")
+        buf.seek(0)
+        cur.copy_expert(copy_sql, buf)
+    finally:
+        buf.close()
+
+
+def _copy_rows_temp(cur, table_name: str, columns: list[str], rows: list[tuple]) -> None:
+    """COPY into a session TEMP table (unqualified identifier)."""
+    from psycopg2 import sql
+
+    cols_sql = sql.SQL(", ").join(map(sql.Identifier, columns))
+    copy_sql = sql.SQL(
+        "COPY {} ({}) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')"
+    ).format(sql.Identifier(table_name), cols_sql)
+    buf = _copy_buffer()
+    try:
+        for row in rows:
+            buf.write("\t".join(_copy_text_value(v) for v in row))
+            buf.write("\n")
+        buf.seek(0)
+        cur.copy_expert(copy_sql, buf)
+    finally:
+        buf.close()
+
+
+def _execute_values_insert(cur, insert_sql: Any, rows: list[tuple] | list[list], *, page_size: int = 1000) -> None:
+    """Bulk INSERT via ``execute_values`` (one round-trip per page, not per row)."""
+    try:
+        from psycopg2.extras import execute_values
+    except ImportError:
+        cur.executemany(insert_sql, rows)
+        return
+    # ``execute_values`` expects ``INSERT ... VALUES %s`` template form.
+    sql_text = insert_sql.as_string(cur) if hasattr(insert_sql, "as_string") else str(insert_sql)
+    # Convert ``VALUES (%s, %s, ...)`` → ``VALUES %s`` for execute_values.
+    marker = " VALUES "
+    idx = sql_text.upper().rfind(marker)
+    if idx < 0:
+        cur.executemany(insert_sql, rows)
+        return
+    template_sql = sql_text[: idx + len(marker)] + "%s"
+    # Strip trailing ON CONFLICT clause for the values template — keep it after %s.
+    on_conflict = ""
+    upper = sql_text.upper()
+    oc_idx = upper.find(" ON CONFLICT ")
+    if oc_idx > idx:
+        on_conflict = " " + sql_text[oc_idx:].strip()
+        # Rebuild: INSERT ... VALUES %s ON CONFLICT ...
+        head = sql_text[:idx + len(marker)]
+        template_sql = head + "%s" + on_conflict
+    execute_values(cur, template_sql, rows, page_size=page_size)
+
+
+def _copy_upsert_batch(
+    cur: Any,
+    sql_mod: Any,
+    *,
+    schema: str,
+    table_name: str,
+    target_cols: list[str],
+    conflict_cols: list[str],
+    batch: list[tuple] | list[list],
+    insert_sql: Any,
+) -> int:
+    """Stage via COPY into a TEMP table, then INSERT…ON CONFLICT from the stage.
+
+    Avoids per-row RTTs on upsert paths while preserving conflict semantics.
+    Falls back to ``execute_values`` when COPY staging is unavailable.
+    """
+    import uuid
+
+    if not batch or not conflict_cols:
+        if batch:
+            _execute_values_insert(cur, insert_sql, [tuple(r) for r in batch])
+        return len(batch)
+
+    # Per-call UUID so a failed prior stage left on a reused session cannot collide.
+    stage = f"_df_copy_ups_{uuid.uuid4().hex[:16]}"
+    conn = getattr(cur, "connection", None)
+
+    def _drop_stage_best_effort() -> None:
+        drop = sql_mod.SQL("DROP TABLE IF EXISTS {}").format(sql_mod.Identifier(stage))
+        try:
+            cur.execute(drop)
+            return
+        except Exception:
+            pass
+        if conn is None:
+            return
+        # Aborted transaction blocks DDL until rollback.
+        try:
+            conn.rollback()
+        except Exception:
+            return
+        try:
+            cur.execute(drop)
+        except Exception as exc:
+            logger.debug("TEMP upsert stage drop skipped: %s", exc)
+
+    try:
+        cur.execute(
+            sql_mod.SQL("CREATE TEMP TABLE {} AS SELECT * FROM {}.{} WHERE 0=1").format(
+                sql_mod.Identifier(stage),
+                sql_mod.Identifier(schema),
+                sql_mod.Identifier(table_name),
+            )
+        )
+        _copy_rows_temp(cur, stage, target_cols, [tuple(r) for r in batch])
+        col_list = sql_mod.SQL(", ").join(sql_mod.Identifier(c) for c in target_cols)
+        conflict = sql_mod.SQL(", ").join(sql_mod.Identifier(c) for c in conflict_cols)
+        update_cols = [c for c in target_cols if c not in conflict_cols]
+        if update_cols:
+            set_clause = sql_mod.SQL(", ").join(
+                sql_mod.SQL("{} = EXCLUDED.{}").format(
+                    sql_mod.Identifier(c), sql_mod.Identifier(c)
+                )
+                for c in update_cols
+            )
+            merge = sql_mod.SQL(
+                "INSERT INTO {}.{} ({}) SELECT {} FROM {} "
+                "ON CONFLICT ({}) DO UPDATE SET {}"
+            ).format(
+                sql_mod.Identifier(schema),
+                sql_mod.Identifier(table_name),
+                col_list,
+                col_list,
+                sql_mod.Identifier(stage),
+                conflict,
+                set_clause,
+            )
+        else:
+            merge = sql_mod.SQL(
+                "INSERT INTO {}.{} ({}) SELECT {} FROM {} "
+                "ON CONFLICT ({}) DO NOTHING"
+            ).format(
+                sql_mod.Identifier(schema),
+                sql_mod.Identifier(table_name),
+                col_list,
+                col_list,
+                sql_mod.Identifier(stage),
+                conflict,
+            )
+        cur.execute(merge)
+        _drop_stage_best_effort()
+        return len(batch)
+    except Exception:
+        # Clear aborted txn + orphan stage, then values-based upsert.
+        _drop_stage_best_effort()
+        _execute_values_insert(cur, insert_sql, [tuple(r) for r in batch])
+        return len(batch)
 
 
 def _open_pg(
@@ -584,6 +745,9 @@ def write_mapped_rows(
     write_mode: str = "insert",
     conflict_columns: list[str] | None = None,
     backfill_new_fields: bool = False,
+    connection: Any | None = None,
+    close_connection: bool | None = None,
+    connection_holder: dict[str, Any] | None = None,
     **_kwargs: Any,
 ) -> WriteResult:
     from connectors.writer_common import resolve_writer_backfill
@@ -593,6 +757,13 @@ def write_mapped_rows(
         mappings=mappings,
         schema_policy=_kwargs.get("schema_policy"),
     )
+    # Shared connection (stream reuse): default to not closing the caller's conn.
+    if close_connection is None:
+        close_connection = connection is None
+    # Prefer explicit holder; also accept kwargs for older call sites.
+    if connection_holder is None:
+        raw_holder = _kwargs.get("connection_holder")
+        connection_holder = raw_holder if isinstance(raw_holder, dict) else None
     if importlib.util.find_spec("psycopg2") is None:
         from connectors.driver_guard import require_driver, stub_writes_allowed
         from connectors.stub_writer import simulate_stub_write
@@ -817,6 +988,10 @@ def write_mapped_rows(
 
     mapped_rows = [_coerce_bind_row(row) for row in mapped_rows]
     sparse_rows = [_coerce_bind_row(row) for row in sparse_rows]
+    # Dense INSERT/COPY: absent schemaless fields → SQL NULL (sparse keeps sentinel).
+    from connectors.writer_common import materialize_missing_as_null_for_dense_write
+
+    mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
 
     rejected_rows = _rejected_row_count(
         data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
@@ -842,14 +1017,14 @@ def write_mapped_rows(
     written = 0
     chunks_completed = 0
     proxy_dest = is_public_proxy_host(host) or is_public_proxy_host(connection_string)
-    # COPY is faster locally but long COPY streams are a common Railway proxy kill.
-    # Prefer chunked INSERT on public proxies so reconnect/ledger can resume cleanly.
+    # Chunked COPY (PROXY_CHUNK_SIZE / CHUNK_SIZE) + per-chunk commit + ledger
+    # resume. Blanket proxy COPY-off forced executemany at ~1k rows and made
+    # 1M CSV→PG loads look like multi-hour jobs vs competitors using COPY.
     use_copy = (
         write_mode == "insert"
         and not conflict_columns
         and not any(t == "BYTEA" for t in target_types)
         and port != 5439
-        and not proxy_dest
     )
     job_id = str(_kwargs.get("job_id") or "").strip()
     write_batch_key = str(_kwargs.get("write_batch_key") or "").strip() or build_write_batch_key(
@@ -917,7 +1092,8 @@ def write_mapped_rows(
         )
 
     def _reconnect():
-        nonlocal conn, cur
+        nonlocal conn, cur, close_connection
+        # Drop the dead handle.
         close_quietly(conn)
         conn = _open_pg(
             host=host,
@@ -928,12 +1104,19 @@ def write_mapped_rows(
             connection_string=connection_string,
             ssl=ssl,
         )
+        if connection_holder is not None:
+            # Hand the replacement back to the stream so later chunks reuse it
+            # and we do not close the live socket at the end of this write.
+            connection_holder["conn"] = conn
+            close_connection = False
+        else:
+            close_connection = True
         cur = conn.cursor()
 
     def _run_setup(cursor) -> None:
         nonlocal target_types
         if use_ledger:
-            ensure_postgres_write_ledger(cursor, schema)
+            ensure_raw_write_ledger(cursor, dialect="postgresql", schema=schema)
         if create_table:
             cursor.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
             if engine not in {"redshift", "amazon_redshift", "redshift_serverless"}:
@@ -971,12 +1154,10 @@ def write_mapped_rows(
                         )
                     )
 
-            # Pick the wider of the mapping-proposed target DDL and the freshly
-            # inferred source DDL from the actual batch samples, then widen any
-            # destination columns that are now too narrow for source drift.
-            # Using the batch samples (with the active date_locale) instead of the
-            # stale peek-file schema prevents MDY/DMY dates from being downgraded
-            # to TEXT after the table is created.
+            # Map≡ALTER: source/batch DDL may propose a wider type, but an
+            # explicit Map target_type is a hard ceiling — never ALTER past it.
+            # Unfit cells quarantine on write (overflow), not silent widen.
+            from connectors.writer_common import desired_types_honoring_map_stamps
             from services.mapping_constraints import write_mappings
 
             active_by_tgt: dict[str, dict] = {}
@@ -984,8 +1165,8 @@ def write_mapped_rows(
                 tgt = sanitize_identifier(str(mapping.get("target") or ""), preserve_case=False)
                 if tgt and tgt not in active_by_tgt:
                     active_by_tgt[tgt] = mapping
-            desired_types: list[str] = []
-            for col, target_type in zip(target_cols, target_types):
+            candidate_by_col: dict[str, str] = {}
+            for col in target_cols:
                 mapping = active_by_tgt.get(col) or {}
                 source = mapping.get("source") or ""
                 source_samples = batch_samples.get(source, []) if batch_samples else []
@@ -997,13 +1178,19 @@ def write_mapped_rows(
                         or mapping.get("source_type")
                         or "VARCHAR"
                     )
-                source_ddl = pg_type(source_type, engine=engine)
-                desired = (
-                    source_ddl
-                    if is_wider_type(target_type, source_ddl)
-                    else target_type
+                candidate_by_col[col] = pg_type(source_type, engine=engine)
+
+            desired_types, alter_refusals = desired_types_honoring_map_stamps(
+                target_cols=target_cols,
+                current_target_types=target_types,
+                mappings=mappings,
+                candidate_by_col=candidate_by_col,
+            )
+            if alter_refusals:
+                logger.info(
+                    "postgresql Map≡ALTER refusals (stamp ceiling): %s",
+                    alter_refusals,
                 )
-                desired_types.append(desired)
 
             widen_existing_columns_native(
                 cursor,
@@ -1036,15 +1223,22 @@ def write_mapped_rows(
         conn.commit()
 
     try:
-        conn = _open_pg(
-            host=host,
-            port=port,
-            database=database,
-            username=username,
-            password=password,
-            connection_string=connection_string,
-            ssl=ssl,
-        )
+        if connection is not None:
+            conn = connection
+            try:
+                conn.autocommit = False
+            except Exception:
+                pass
+        else:
+            conn = _open_pg(
+                host=host,
+                port=port,
+                database=database,
+                username=username,
+                password=password,
+                connection_string=connection_string,
+                ssl=ssl,
+            )
         cur = conn.cursor()
         try:
             setup_attempt = 0
@@ -1109,15 +1303,22 @@ def write_mapped_rows(
                 chunk_written = 0
                 while True:
                     try:
-                        if use_ledger and postgres_chunk_committed(
-                            cur,
-                            schema=schema,
-                            job_id=job_id,
-                            batch_key=write_batch_key,
-                            chunk_idx=chunk_idx,
-                        ):
-                            chunk_written = len(batch)
-                            break
+                        if use_ledger:
+                            already = raw_chunk_rows_written(
+                                cur,
+                                dialect="postgresql",
+                                schema=schema,
+                                job_id=job_id,
+                                batch_key=write_batch_key,
+                                chunk_idx=chunk_idx,
+                            )
+                            if already is not None:
+                                # Credit what the first attempt actually landed.
+                                # The chunk may have quarantined rows, so
+                                # len(batch) would over-report and make the
+                                # reconcile checksum disagree with the table.
+                                chunk_written = already
+                                break
                         if use_copy:
                             _copy_rows(cur, schema, table_name, target_cols, batch)
                         else:
@@ -1152,18 +1353,42 @@ def write_mapped_rows(
                                 )
                                 rows_skipped += skipped
                             if write_batch:
-                                cur.executemany(insert, write_batch)
+                                conflict_for_copy = [
+                                    c for c in (conflict_columns or []) if c in target_cols
+                                ]
+                                if (
+                                    write_mode == "upsert"
+                                    and conflict_for_copy
+                                    and uses_pg_on_conflict_upsert(engine)
+                                    and DF_LSN_COL not in target_cols
+                                ):
+                                    _copy_upsert_batch(
+                                        cur,
+                                        sql,
+                                        schema=schema,
+                                        table_name=table_name,
+                                        target_cols=target_cols,
+                                        conflict_cols=conflict_for_copy,
+                                        batch=write_batch,
+                                        insert_sql=insert,
+                                    )
+                                else:
+                                    _execute_values_insert(
+                                        cur, insert, [tuple(r) for r in write_batch]
+                                    )
+                        landed = len(batch if use_copy else write_batch)
                         if use_ledger:
-                            mark_postgres_chunk_committed(
+                            mark_raw_chunk_committed(
                                 cur,
+                                dialect="postgresql",
                                 schema=schema,
                                 job_id=job_id,
                                 batch_key=write_batch_key,
                                 chunk_idx=chunk_idx,
-                                rows_written=len(write_batch if not use_copy else batch),
+                                rows_written=landed,
                             )
                         conn.commit()
-                        chunk_written = len(write_batch if not use_copy else batch)
+                        chunk_written = landed
                         break
                     except Exception as chunk_exc:
                         try:
@@ -1173,8 +1398,11 @@ def write_mapped_rows(
                         if is_sql_data_error(chunk_exc) and policy in {"quarantine", "coerce_null"}:
                             if insert is None:
                                 insert = _build_insert()
+                            # SAVEPOINT per row + single commit — avoids one RTT/commit
+                            # per rejected cell (was the CDC/quarantine throughput cliff).
                             for row_i, row in enumerate(batch):
                                 try:
+                                    cur.execute("SAVEPOINT df_row_sp")
                                     write_rows = [row]
                                     if redshift_upsert_cols:
                                         write_rows = _redshift_delete_by_keys(
@@ -1188,13 +1416,19 @@ def write_mapped_rows(
                                         )
                                     if write_rows:
                                         cur.execute(insert, write_rows[0])
-                                    conn.commit()
+                                    cur.execute("RELEASE SAVEPOINT df_row_sp")
                                     chunk_written += 1
                                 except Exception as row_exc:
                                     try:
-                                        conn.rollback()
+                                        cur.execute("ROLLBACK TO SAVEPOINT df_row_sp")
                                     except Exception as exc:
                                         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+                                        try:
+                                            conn.rollback()
+                                        except Exception as exc2:
+                                            logger.warning(
+                                                "Exception suppressed: %s", exc2, exc_info=exc2
+                                            )
                                     if is_connection_lost(row_exc):
                                         raise
                                     col_name = extract_column_from_sql_error(row_exc) or "*"
@@ -1212,19 +1446,20 @@ def write_mapped_rows(
                                         "policy": policy,
                                     })
                                     transform_errors.append(str(row_exc)[:200])
-                            if use_ledger and chunk_written:
-                                try:
-                                    mark_postgres_chunk_committed(
+                            try:
+                                if use_ledger and chunk_written:
+                                    mark_raw_chunk_committed(
                                         cur,
+                                        dialect="postgresql",
                                         schema=schema,
                                         job_id=job_id,
                                         batch_key=write_batch_key,
                                         chunk_idx=chunk_idx,
                                         rows_written=chunk_written,
                                     )
-                                    conn.commit()
-                                except Exception as exc:
-                                    logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+                                conn.commit()
+                            except Exception as exc:
+                                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
                             break
                         attempt += 1
                         if not is_connection_lost(chunk_exc) or not should_retry_connection_lost(
@@ -1246,7 +1481,8 @@ def write_mapped_rows(
             except Exception as exc:
                 logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
-        close_quietly(conn)
+        if close_connection:
+            close_quietly(conn)
         return WriteResult(
             ok=True,
             rows_written=written,
@@ -1264,9 +1500,11 @@ def write_mapped_rows(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             warnings=transform_errors,
+            load_method="copy" if use_copy else "insert",
         )
     except Exception as exc:
-        close_quietly(conn)
+        if close_connection:
+            close_quietly(conn)
         return WriteResult(
             ok=False,
             rows_written=written,

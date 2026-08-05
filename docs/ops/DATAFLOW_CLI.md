@@ -1,4 +1,4 @@
-# DataFlow CLI (GitOps)
+# Datawrap CLI (GitOps)
 
 ## Install / run
 

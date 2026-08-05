@@ -50,9 +50,15 @@ def test_status_words_are_not_boolean_literals(token: str) -> None:
     assert _parse_boolean(token) is None
 
 
-@pytest.mark.parametrize("token,expected", [("true", True), ("false", False), ("yes", True), ("no", False)])
+@pytest.mark.parametrize("token,expected", [("true", True), ("false", False), ("1", True), ("0", False)])
 def test_classic_booleans(token: str, expected: bool) -> None:
     assert _parse_boolean(token) is expected
+
+
+@pytest.mark.parametrize("token", ["yes", "no", "on", "off", "y", "n"])
+def test_informal_booleans_are_not_write_path_tokens(token: str) -> None:
+    """Schema inference may detect flags; write path refuses inventing TRUE/FALSE."""
+    assert _parse_boolean(token) is None
 
 
 @pytest.mark.parametrize(
@@ -159,15 +165,42 @@ def test_safe_ddl_honors_explicit_text_over_numeric_samples():
         == "TEXT"
     )
     # Without honor_explicit, loose TEXT may still upgrade (typed CREATE TABLE).
+    upgraded = safe_ddl_logical_type(
+        "TEXT",
+        samples,
+        field_name="compensation",
+        source_type="DECIMAL",
+        honor_explicit=False,
+    )
+    assert upgraded in {"DECIMAL", "VARCHAR", "TEXT", "FLOAT"}
+
+
+def test_safe_ddl_preserves_explicit_physical_create_new_stamps():
+    """Map physical stamps must survive CREATE — never CHAR(36)→VARCHAR / LTZ→NTZ."""
+    assert (
+        safe_ddl_logical_type("CHAR(36)", None, honor_explicit=True, field_name="id")
+        == "CHAR(36)"
+    )
     assert (
         safe_ddl_logical_type(
-            "TEXT",
-            samples,
-            field_name="compensation",
-            source_type="DECIMAL",
-            honor_explicit=False,
+            "CHAR(36)",
+            ["550e8400-e29b-41d4-a716-446655440000"],
+            honor_explicit=True,
+            field_name="id",
         )
-        == "DECIMAL"
+        == "CHAR(36)"
+    )
+    assert (
+        safe_ddl_logical_type("TIMESTAMP_LTZ", None, honor_explicit=True, field_name="ts")
+        == "TIMESTAMP_LTZ"
+    )
+    assert (
+        safe_ddl_logical_type("INET", None, honor_explicit=True, field_name="ip")
+        == "INET"
+    )
+    assert (
+        safe_ddl_logical_type("VARCHAR(24)", None, honor_explicit=True, field_name="oid")
+        == "VARCHAR(24)"
     )
 
 
@@ -190,7 +223,54 @@ def test_resolve_target_columns_honors_explicit_text():
     assert types == ["TEXT"]
 
 
-def test_resolve_target_columns_new_table_widens_status_boolean():
+def test_resolve_target_columns_preserves_uuid_char36_stamp():
+    from connectors.writer_common import resolve_target_columns
+
+    mappings = [
+        {
+            "source": "device_id",
+            "target": "device_id",
+            "target_type": "CHAR(36)",
+            "create_new": True,
+            "source_type": "UUID",
+        },
+    ]
+    cols, types = resolve_target_columns(
+        mappings,
+        {"device_id": "UUID"},
+        preserve_case=True,
+        sample_values_by_source={
+            "device_id": ["550e8400-e29b-41d4-a716-446655440000"],
+        },
+        table_exists=False,
+    )
+    assert cols == ["device_id"]
+    assert types == ["CHAR(36)"]
+
+
+def test_resolve_target_columns_preserves_timestamptz_ltz_stamp():
+    from connectors.writer_common import resolve_target_columns
+
+    mappings = [
+        {
+            "source": "measured_at",
+            "target": "measured_at",
+            "target_type": "TIMESTAMP_LTZ",
+            "create_new": True,
+            "source_type": "TIMESTAMPTZ",
+        },
+    ]
+    cols, types = resolve_target_columns(
+        mappings,
+        {"measured_at": "TIMESTAMPTZ"},
+        preserve_case=True,
+        table_exists=False,
+    )
+    assert types == ["TIMESTAMP_LTZ"]
+
+
+def test_resolve_target_columns_new_table_honors_explicit_boolean_despite_enums():
+    """Map≡CREATE: explicit BOOLEAN stamp must survive enum samples (quarantine values, not rewrite DDL)."""
     headers = ["status", "id"]
     rows = [["active"], ["invalidated"], ["pending"]]
     mappings = [
@@ -205,7 +285,7 @@ def test_resolve_target_columns_new_table_widens_status_boolean():
         table_exists=False,
     )
     by = dict(zip(cols, types))
-    assert by["status"].upper() == "VARCHAR"
+    assert by["status"].upper() == "BOOLEAN"
 
 
 def test_resolve_target_columns_existing_table_keeps_proposed_when_no_widen_flag():

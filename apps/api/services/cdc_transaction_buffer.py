@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+from services.brand_env import getenv_brand
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,7 +32,7 @@ from services.cdc_net_effect import CdcTxnEvent, coalesce_cdc_txn_events, infer_
 
 
 def default_txn_buffer_max_events() -> int:
-    raw = os.getenv("DATAFLOW_CDC_TXN_BUFFER_MAX_EVENTS", "50000")
+    raw = getenv_brand("CDC_TXN_BUFFER_MAX_EVENTS", "50000")
     try:
         return max(100, int(raw))
     except (TypeError, ValueError):
@@ -40,7 +41,7 @@ def default_txn_buffer_max_events() -> int:
 
 def default_txn_spill_after(max_events: int) -> int:
     """Spill in-memory events to disk after this many (keeps RAM bounded)."""
-    raw = os.getenv("DATAFLOW_CDC_TXN_SPILL_AFTER", "").strip()
+    raw = getenv_brand("CDC_TXN_SPILL_AFTER", "").strip()
     if raw:
         try:
             return max(50, int(raw))

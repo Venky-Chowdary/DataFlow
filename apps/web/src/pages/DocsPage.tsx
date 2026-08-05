@@ -82,7 +82,7 @@ const WORKSPACE_SHOTS = [
   },
   {
     src: "/docs/screenshots/app-pilot.png",
-    title: "Data Pilot",
+    title: "Datawrap Pilot",
     caption: "Natural-language triage on the same governed engine.",
   },
 ] as const;
@@ -104,11 +104,10 @@ function DocsHero({
         <span className="df2-docs-hero-kicker">
           <DtIcon name="book" size={14} /> Product documentation
         </span>
-        <h2 className="df2-docs-hero-title">Move any data, prove every row.</h2>
+        <h2 className="df2-docs-hero-title">Move any schema anywhere — proven.</h2>
         <p className="df2-docs-hero-sub">
-          DataFlow runs one canonical pipeline — profile, map, validate, execute, reconcile —
-          so any source reaches any destination with zero silent data loss. Everything below is
-          how it works, end to end.
+          One governed path — map, preflight G1–G8, write with quarantine, and checksum reconcile —
+          so every surface (Studio, Pipelines, Pilot, MCP) proves the load.
         </p>
         <div className="df2-docs-hero-actions">
           <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" onClick={() => onJump("pipeline")}>
@@ -121,19 +120,19 @@ function DocsHero({
         <div className="df2-docs-hero-stats">
           <div className="df2-docs-hero-stat">
             <strong>{transferLive.toLocaleString()}</strong>
-            <span>Transfer-ready connectors</span>
+            <span>Transfer-ready drivers</span>
           </div>
           <div className="df2-docs-hero-stat">
             <strong>{total.toLocaleString()}</strong>
-            <span>Catalog connectors</span>
+            <span>Catalog tiles</span>
           </div>
           <div className="df2-docs-hero-stat">
             <strong>8</strong>
             <span>Preflight gates</span>
           </div>
           <div className="df2-docs-hero-stat">
-            <strong>10k+</strong>
-            <span>Any-to-any routes</span>
+            <strong>0</strong>
+            <span>Silent drops by design</span>
           </div>
         </div>
       </div>
@@ -167,7 +166,7 @@ function ArchitectureDiagram() {
     { x: 230, w: 118, label: "Ingestion", sub: "Parse · Profile · Normalize", tone: "core" },
     { x: 384, w: 118, label: "Canonical", sub: "Schema · Types · Keys", tone: "core" },
     { x: 538, w: 118, label: "Mapper", sub: "AI · Semantic · Rules", tone: "core" },
-    { x: 692, w: 118, label: "Preflight", sub: "8 gates · Evidence", tone: "gate" },
+    { x: 692, w: 118, label: "Preflight", sub: "9 gates · Evidence", tone: "gate" },
     { x: 846, w: 118, label: "Execution", sub: "Chunk · Transform · Write", tone: "core" },
     { x: 1004, w: 148, label: "Targets", sub: "DB · File · Warehouse", tone: "edge" },
   ];
@@ -181,13 +180,13 @@ function ArchitectureDiagram() {
 
   const surfaces = [
     { label: "Transfer Studio", x: 180 },
-    { label: "Data Pilot", x: 420 },
+    { label: "Datawrap Pilot", x: 420 },
     { label: "MCP Agents", x: 640 },
     { label: "Pipelines API", x: 880 },
   ];
 
   return (
-    <div className="df2-docs-architecture" aria-label="DataFlow architecture diagram">
+    <div className="df2-docs-architecture" aria-label="Datawrap architecture diagram">
       <div className="df2-docs-arch-planes">
         <span className="df2-docs-arch-plane-tag">Control surfaces</span>
         <span className="df2-docs-arch-plane-tag is-data">Canonical data plane</span>
@@ -467,7 +466,7 @@ export function DocsPage() {
   return (
     <PageShell
       title="Help & documentation"
-      description="How DataFlow plans, maps, validates, and proves every transfer."
+      description="How Datawrap plans, maps, validates, and proves every transfer."
       fit={false}
       className="df2-page-docs"
     >
@@ -555,7 +554,7 @@ export function DocsPage() {
             <ArchitectureDiagram />
             <img
               src="/docs/pipeline.png"
-              alt="DataFlow pipeline illustration — source ingestion through verified target write"
+              alt="Datawrap pipeline illustration — source ingestion through verified target write"
               className="df2-docs-illustration"
               loading="lazy"
             />
@@ -649,7 +648,7 @@ export function DocsPage() {
             <div className="df2-docs-use-cases">
               <UseCase
                 title="Logistics CSV → Snowflake"
-                body="A 3PL uploads CSV shipment manifests with mixed date formats, currency strings, and empty cells. DataFlow profiles every column, maps to the warehouse schema, validates numbers, and writes clean rows without losing the original records."
+                body="A 3PL uploads CSV shipment manifests with mixed date formats, currency strings, and empty cells. Datawrap profiles every column, maps to the warehouse schema, validates numbers, and writes clean rows without losing the original records."
               />
               <UseCase
                 title="MongoDB → PostgreSQL"
@@ -687,7 +686,7 @@ export function DocsPage() {
           <PageSection title="Troubleshooting a blocked transfer" subtitle="Reading the preflight result">
             <div className="df2-docs-faq">
               <p><strong>Mapping confidence too low?</strong> Review the map step, pin the correct target column, and the gate will re-score.</p>
-              <p><strong>Target DDL incompatible?</strong> Check the target schema. DataFlow can create the target for you or report a type/precision conflict.</p>
+              <p><strong>Target DDL incompatible?</strong> Check the target schema. Datawrap can create the target for you or report a type/precision conflict.</p>
               <p><strong>Dry-run integrity failed?</strong> Look for duplicate primary keys, 100% null columns, or values that cannot be cast to the target type.</p>
               <p><strong>Data type mismatch in CSV?</strong> Use a transform (date, decimal, integer, boolean) or change the inferred column type in the mapping step.</p>
             </div>

@@ -8,12 +8,33 @@ import {
   buildDisplayBlockers,
   buildExecutiveSummary,
   findDuplicateKeyRoot,
+  findFidelityCollapseRoot,
   groupIsoNormalizeIssues,
   isDeclaredFidelityCollapse,
+  isEncodingIntegritySignal,
   isIsoNormalizeCoercion,
   partitionCoercionColumns,
   partitionExplainIssues,
+  remapToTypeForMismatch,
+  rankAndDedupeSuggestedActions,
 } from "./validateIssueGrouping.js";
+
+describe("remapToTypeForMismatch", () => {
+  it("keeps UUID/ObjectId/DECIMAL/temporal families — never invents bare VARCHAR for them", () => {
+    assert.equal(remapToTypeForMismatch("UUID", "VARCHAR"), "UUID");
+    assert.equal(remapToTypeForMismatch("UUID", "CHAR(36)"), "UUID");
+    assert.equal(remapToTypeForMismatch("OBJECTID", "TEXT"), "OBJECTID");
+    assert.equal(remapToTypeForMismatch("OBJECTID", "CHAR(24)"), "OBJECTID");
+    assert.equal(remapToTypeForMismatch("MACADDR", "TEXT"), "MACADDR");
+    assert.equal(remapToTypeForMismatch("FLOAT", "DECIMAL(38,10)"), "DOUBLE");
+    assert.equal(remapToTypeForMismatch("DECIMAL(38,10)", "INTEGER"), "DECIMAL(38,10)");
+    assert.equal(remapToTypeForMismatch("TIMESTAMPTZ", "TIMESTAMP_NTZ"), "TIMESTAMPTZ");
+    assert.equal(remapToTypeForMismatch("VARCHAR", "NUMBER(38,0)"), "VARCHAR");
+    // Create-new dialect twins — keep destination text/json, never invent VARCHAR.
+    assert.equal(remapToTypeForMismatch("TEXT COLLATE UTF8MB4_0900_AI_CI", "TEXT"), "TEXT");
+    assert.equal(remapToTypeForMismatch("JSON", "JSONB"), "JSONB");
+  });
+});
 
 function basePreflight(over: Partial<PreflightResult> = {}): PreflightResult {
   return {
@@ -98,6 +119,32 @@ describe("findDuplicateKeyRoot", () => {
     assert.equal(display[0].kind, "duplicate_root");
     assert.equal(display[1].kind, "blocker");
     assert.match(display[1].title, /mapping/i);
+  });
+
+  it("append sync hint points at PK clear / unique column — not false green", () => {
+    const pf = basePreflight({
+      gates: [
+        {
+          id: "g9_data_integrity",
+          status: "block",
+          message: "id: duplicate key values from source probe (a×4)",
+          duration_ms: 1,
+          details: { primary_key: "id", issue_texts: ["id: duplicate key values from source probe (a×4)"] },
+        },
+      ],
+      blockers: [
+        {
+          id: "g9_data_integrity",
+          message: "id: duplicate key values from source probe (a×4)",
+          details: { primary_key: "id" },
+        },
+      ],
+    });
+    const root = findDuplicateKeyRoot(pf, "full_refresh_append");
+    assert.ok(root);
+    assert.match(root!.fixHint, /Primary key/i);
+    assert.match(root!.fixHint, /unique column|dedupe/i);
+    assert.doesNotMatch(root!.fixHint, /Re-run Validate after the API picks up/i);
   });
 });
 
@@ -259,6 +306,20 @@ describe("buildExecutiveSummary", () => {
     assert.match(summary!.readinessCaption, /10\/13 gates/);
   });
 
+  it("does not claim Execute unlocked when transfer_decision is missing", () => {
+    const summary = buildExecutiveSummary({
+      passed: true,
+      passed_count: 8,
+      total_gates: 8,
+      gates: [],
+      blockers: [],
+      run_id: "pf_api_1",
+    } as any);
+    assert.ok(summary);
+    assert.ok(!/Execute unlocked/i.test(summary!.subtitle));
+    assert.match(summary!.title, /Review/i);
+  });
+
   it("does not claim Execute unlocked for review-grade passed preflight", () => {
     const pf = basePreflight({
       passed: true,
@@ -276,5 +337,131 @@ describe("buildExecutiveSummary", () => {
     assert.equal(summary!.title, "Review before Execute");
     assert.match(summary!.subtitle, /review-grade/i);
     assert.ok(!/Execute unlocked/i.test(summary!.subtitle));
+  });
+});
+
+describe("isEncodingIntegritySignal", () => {
+  it("matches format-control / U+200B integrity failures", () => {
+    assert.equal(
+      isEncodingIntegritySignal("format-control character detected (U+200B)"),
+      true,
+    );
+    assert.equal(isEncodingIntegritySignal("zero-width space in description"), true);
+  });
+
+  it("does not steal type-mismatch CTAs for encoding_id columns", () => {
+    assert.equal(
+      isEncodingIntegritySignal(
+        "Dry-run failed: encoding_id (VARCHAR) → encoding_id (NUMBER(38,0))",
+      ),
+      false,
+    );
+  });
+});
+
+describe("findFidelityCollapseRoot", () => {
+  it("collapses multi-gate fidelity blockers into one root", () => {
+    const pf = basePreflight({
+      gates: [
+        {
+          id: "g3_type_compat",
+          name: "Type",
+          status: "block",
+          message: "DECIMAL → FLOAT fidelity collapse on amt",
+          details: { fidelity_collapse: true },
+        },
+        {
+          id: "g5_sample",
+          name: "Sample",
+          status: "block",
+          message: "Sample shows precision loss on amt",
+          details: { framing: { kind: "fidelity_collapse" } },
+        },
+      ],
+      blockers: [
+        {
+          id: "g3_type_compat",
+          message: "DECIMAL → FLOAT fidelity collapse on amt",
+          details: { fidelity_collapse: true },
+        },
+        {
+          id: "g5_sample",
+          message: "Sample shows precision loss on amt",
+          details: { framing: { kind: "fidelity_collapse" } },
+        },
+      ],
+    });
+    const root = findFidelityCollapseRoot(pf);
+    assert.ok(root);
+    assert.match(root!.title, /fidelity/i);
+    const display = buildDisplayBlockers(pf);
+    assert.equal(display.filter((d) => d.kind === "fidelity_root").length, 1);
+    assert.ok(display.every((d) => d.kind !== "blocker" || !/fidelity|precision loss/i.test(d.message)));
+    // Root items must not invent a `source` payload — Validate UI reads
+    // source.details only for kind === "blocker".
+    const fidelity = display.find((d) => d.kind === "fidelity_root");
+    assert.equal(fidelity?.source, undefined);
+  });
+
+  it("prefers engine root_causes over client collapse", () => {
+    const pf = basePreflight({
+      root_causes: [
+        {
+          root_id: "rc-fidelity-collapse-abc",
+          kind: "fidelity_collapse",
+          title: "Lossy / fidelity collapse across type path",
+          summary: "2 column(s) collapse fidelity — impacts 3 gate check(s)",
+          business_impact: "Execute stays locked until Risk Contract or remap.",
+          affected_columns: ["country_auto_detected", "referral_credit_processed"],
+          affected_rows_sample: 25,
+          estimated_total_rows: 100000,
+          recommended_fix: "Open Map · Accept · cast & continue",
+          alternative_fixes: ["Remap to TEXT"],
+          recovery_strategy: "Re-Validate after contract",
+          quarantine_policy: "holdout_rejected_rows",
+          rollback_policy: "DOCUMENT_ONLY",
+          impacted_gates: ["g3_schema_contract", "g4_mapping_confidence", "g9_data_integrity"],
+          absorbed_blocker_ids: ["g3_schema_contract", "g4_mapping_confidence", "g9_data_integrity"],
+        },
+      ],
+      blockers: [
+        {
+          id: "rc-fidelity-collapse-abc",
+          message: "Lossy / fidelity collapse",
+          details: { root_cause: true },
+        },
+      ],
+      gates: [
+        { id: "g3_schema_contract", status: "block", message: "lossy", details: {} },
+        { id: "g4_mapping_confidence", status: "block", message: "lossy", details: {} },
+        { id: "g9_data_integrity", status: "block", message: "lossy", details: {} },
+      ],
+    });
+    const display = buildDisplayBlockers(pf);
+    assert.equal(display.filter((d) => d.kind === "fidelity_root").length, 1);
+    assert.ok(display[0].issues?.some((i) => /country_auto_detected/i.test(i)));
+    assert.ok(display[0].issues?.some((i) => /Sample rows: 25/i.test(i)));
+  });
+});
+
+describe("rankAndDedupeSuggestedActions", () => {
+  it("dedupes encoding and map families and caps density", () => {
+    const out = rankAndDedupeSuggestedActions([
+      { kind: "normalize_control_chars", label: "Strip controls" },
+      { kind: "quarantine_and_rerun", label: "Quarantine" },
+      { kind: "open_bad_data_fix", label: "Fix bad data" },
+      { kind: "map_column", column: "id", label: "Map id" },
+      { kind: "review_mappings", column: "id", label: "Review id" },
+      { kind: "change_target_type", column: "amt", to_type: "DECIMAL", label: "Widen amt" },
+      { kind: "change_target_type", column: "amt", to_type: "DECIMAL", label: "Widen amt" },
+      { kind: "add_transform", column: "x", label: "t1" },
+      { kind: "add_transform", column: "y", label: "t2" },
+      { kind: "add_transform", column: "z", label: "t3" },
+      { kind: "check_connection", label: "Reconnect" },
+    ], 6);
+    assert.ok(out.length <= 6);
+    assert.equal(out.filter((a) => a.kind === "open_bad_data_fix" || a.kind === "normalize_control_chars" || a.kind === "quarantine_and_rerun").length, 1);
+    assert.equal(out.filter((a) => a.kind === "map_column" || a.kind === "review_mappings").length, 1);
+    assert.equal(out.filter((a) => a.kind === "change_target_type").length, 1);
   });
 });

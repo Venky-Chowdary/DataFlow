@@ -1,5 +1,5 @@
 """
-DataTransfer.space — LLM Provider Abstraction
+Datawrap — LLM Provider Abstraction
 
 Supports OpenAI, Anthropic, Ollama, and local fallback.
 Works without API keys using local reasoning.
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from services.brand_env import getenv_brand
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -24,6 +25,62 @@ def _is_valid_api_key(value: str) -> bool:
         return False
     stripped = value.strip()
     return not (stripped.startswith("[") or stripped.startswith("•"))
+
+
+# Process-wide: a 401 on one OpenAI/Anthropic instance must disable all instances
+# until the process restarts (operator saves a new key and restarts the API).
+_AUTH_FAILED_PROVIDERS: set[str] = set()
+
+
+def clear_auth_failures() -> None:
+    """Test helper — reset soft auth disables after a key rotation."""
+    _AUTH_FAILED_PROVIDERS.clear()
+
+
+def _provider_auth_failed(name: str) -> bool:
+    return name in _AUTH_FAILED_PROVIDERS
+
+
+def _mark_provider_auth_failed(name: str, err: str) -> bool:
+    """Return True if this error should soft-disable the provider."""
+    low = (err or "").lower()
+    if "401" in low or "invalid_api_key" in low or "incorrect api key" in low or "unauthorized" in low:
+        _AUTH_FAILED_PROVIDERS.add(name)
+        return True
+    return False
+
+
+def verify_cloud_api_key(provider: str, api_key: str) -> tuple[bool, str]:
+    """Live-check a cloud key before persisting. Returns (ok, error_message)."""
+    name = (provider or "").strip().lower()
+    if name not in {"openai", "anthropic"}:
+        return True, ""
+    if not _is_valid_api_key(api_key):
+        return False, "API key is empty or masked"
+    try:
+        if name == "openai":
+            from openai import OpenAI
+
+            OpenAI(api_key=api_key.strip()).models.list()
+            _AUTH_FAILED_PROVIDERS.discard("openai")
+            return True, ""
+        import anthropic
+        from services.integrations_store import resolve_provider_model
+
+        model = resolve_provider_model("anthropic", "claude-sonnet-4-20250514")
+        anthropic.Anthropic(api_key=api_key.strip()).messages.create(
+            model=model,
+            max_tokens=1,
+            messages=[{"role": "user", "content": "ping"}],
+        )
+        _AUTH_FAILED_PROVIDERS.discard("anthropic")
+        return True, ""
+    except Exception as e:
+        _mark_provider_auth_failed(name, str(e))
+        msg = str(e)
+        if "invalid_api_key" in msg.lower() or "incorrect api key" in msg.lower() or "401" in msg:
+            return False, "Incorrect API key — paste a valid key from the provider console"
+        return False, msg[:240]
 
 
 @dataclass
@@ -61,6 +118,9 @@ class DataTransferOpenAIProvider(DataTransferLLMProvider):
         self._init_client()
 
     def _init_client(self):
+        if _provider_auth_failed(self.name):
+            self._client = None
+            return
         try:
             from services.integrations_store import resolve_provider_api_key
 
@@ -76,7 +136,11 @@ class DataTransferOpenAIProvider(DataTransferLLMProvider):
             self._client = None
 
     def is_available(self) -> bool:
-        return self._client is not None
+        return self._client is not None and not _provider_auth_failed(self.name)
+
+    def _mark_auth_failure(self, err: str) -> None:
+        if _mark_provider_auth_failed(self.name, err):
+            self._client = None
 
     def generate(self, prompt: str, system: str = "", max_tokens: int = 1024) -> LLMResponse:
         if not self.is_available():
@@ -103,7 +167,84 @@ class DataTransferOpenAIProvider(DataTransferLLMProvider):
                 tokens_used=response.usage.total_tokens if response.usage else 0,
             )
         except Exception as e:
+            self._mark_auth_failure(str(e))
             return LLMResponse(content="", success=False, provider=self.name, metadata={"error": str(e)})
+
+    def generate_agent(
+        self,
+        messages: list[dict],
+        system: str = "",
+        tools: list[dict] | None = None,
+        max_tokens: int = 4096,
+    ) -> dict:
+        """OpenAI chat.completions turn with optional native function/tool calling."""
+        if not self.is_available():
+            return {"success": False, "error": "OpenAI not available"}
+
+        try:
+            openai_tools = None
+            if tools:
+                openai_tools = []
+                for tool in tools:
+                    # Accept Anthropic-shaped TOOL_DEFINITIONS or already-OpenAI shapes.
+                    if tool.get("type") == "function" and isinstance(tool.get("function"), dict):
+                        openai_tools.append(tool)
+                        continue
+                    openai_tools.append({
+                        "type": "function",
+                        "function": {
+                            "name": tool["name"],
+                            "description": tool.get("description") or "",
+                            "parameters": tool.get("input_schema")
+                            or tool.get("parameters")
+                            or {"type": "object", "properties": {}},
+                        },
+                    })
+
+            kwargs: dict = {
+                "model": self.model,
+                "messages": (
+                    ([{"role": "system", "content": system}] if system else [])
+                    + list(messages)
+                ),
+                "max_tokens": max_tokens,
+                "temperature": 0.1,
+            }
+            if openai_tools:
+                kwargs["tools"] = openai_tools
+                kwargs["tool_choice"] = "auto"
+
+            response = self._client.chat.completions.create(**kwargs)
+            choice = response.choices[0].message
+            tool_calls: list[dict] = []
+            for tc in choice.tool_calls or []:
+                raw_args = tc.function.arguments or "{}"
+                try:
+                    parsed = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+                except Exception:
+                    parsed = {}
+                if not isinstance(parsed, dict):
+                    parsed = {}
+                tool_calls.append({
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "input": parsed,
+                })
+
+            usage = response.usage
+            return {
+                "success": True,
+                "content": (choice.content or "").strip(),
+                "tool_calls": tool_calls,
+                "stop_reason": "tool_calls" if tool_calls else (choice.finish_reason or "stop"),
+                "usage": {
+                    "input": getattr(usage, "prompt_tokens", 0) or 0,
+                    "output": getattr(usage, "completion_tokens", 0) or 0,
+                },
+            }
+        except Exception as e:
+            self._mark_auth_failure(str(e))
+            return {"success": False, "error": str(e)}
 
 
 class DataTransferAnthropicProvider(DataTransferLLMProvider):
@@ -117,6 +258,9 @@ class DataTransferAnthropicProvider(DataTransferLLMProvider):
         self._init_client()
 
     def _init_client(self):
+        if _provider_auth_failed(self.name):
+            self._client = None
+            return
         try:
             from services.integrations_store import resolve_provider_api_key
 
@@ -132,7 +276,11 @@ class DataTransferAnthropicProvider(DataTransferLLMProvider):
             self._client = None
 
     def is_available(self) -> bool:
-        return self._client is not None
+        return self._client is not None and not _provider_auth_failed(self.name)
+
+    def _mark_auth_failure(self, err: str) -> None:
+        if _mark_provider_auth_failed(self.name, err):
+            self._client = None
 
     def generate(self, prompt: str, system: str = "", max_tokens: int = 1024) -> LLMResponse:
         if not self.is_available():
@@ -142,7 +290,7 @@ class DataTransferAnthropicProvider(DataTransferLLMProvider):
             response = self._client.messages.create(
                 model=self.model,
                 max_tokens=max_tokens,
-                system=system or "You are a data engineering expert for DataTransfer.space.",
+                system=system or "You are a data engineering expert for Datawrap.",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,
             )
@@ -155,6 +303,7 @@ class DataTransferAnthropicProvider(DataTransferLLMProvider):
                 tokens_used=response.usage.input_tokens + response.usage.output_tokens,
             )
         except Exception as e:
+            self._mark_auth_failure(str(e))
             return LLMResponse(content="", success=False, provider=self.name, metadata={"error": str(e)})
 
     def generate_agent(
@@ -172,7 +321,7 @@ class DataTransferAnthropicProvider(DataTransferLLMProvider):
             kwargs: dict = {
                 "model": self.model,
                 "max_tokens": max_tokens,
-                "system": system or "You are Data Pilot for DataTransfer.space.",
+                "system": system or "You are Datawrap Pilot for Datawrap.",
                 "messages": messages,
                 "temperature": 0.2,
             }
@@ -203,6 +352,7 @@ class DataTransferAnthropicProvider(DataTransferLLMProvider):
                 },
             }
         except Exception as e:
+            self._mark_auth_failure(str(e))
             return {"success": False, "error": str(e)}
 
 
@@ -316,7 +466,7 @@ MODEL_CAPABILITY_MATRIX = [
         "package": "anthropic",
         "tier": "cloud",
         "roles": ["agent_tool_use", "schema_reasoning", "migration_planning", "policy_explanation"],
-        "best_for": "Long-horizon Data Pilot agent runs, tool use, schema-policy reasoning, and migration plan review.",
+        "best_for": "Long-horizon Datawrap Pilot agent runs, tool use, schema-policy reasoning, and migration plan review.",
     },
     {
         "provider": "openai",
@@ -325,8 +475,8 @@ MODEL_CAPABILITY_MATRIX = [
         "env_key": "OPENAI_API_KEY",
         "package": "openai",
         "tier": "cloud",
-        "roles": ["copilot_chat", "rag_answering", "mapping_explanation", "fallback_generation"],
-        "best_for": "Fast grounded chat, mapping explanation, RAG answers, and second-line cloud fallback.",
+        "roles": ["agent_tool_use", "copilot_chat", "rag_answering", "mapping_explanation", "fallback_generation"],
+        "best_for": "Datawrap Pilot tool loops, grounded chat, mapping explanation, RAG answers, and cloud fallback.",
     },
     {
         "provider": "ollama",
@@ -340,13 +490,24 @@ MODEL_CAPABILITY_MATRIX = [
     },
     {
         "provider": "local",
-        "label": "Local deterministic engine",
-        "default_model": "local_knowledge",
+        "label": "Datawrap Pilot local engine",
+        "default_model": "pilot_local_engine",
         "env_key": "",
         "package": "",
         "tier": "deterministic",
-        "roles": ["semantic_rules", "rag_retrieval", "preflight_gates", "mapping_assignment"],
-        "best_for": "Always-on fail-closed semantic analysis, RAG retrieval, preflight, and deterministic mapping safeguards.",
+        "roles": [
+            "agent_tool_use",
+            "copilot_chat",
+            "semantic_rules",
+            "rag_retrieval",
+            "preflight_gates",
+            "mapping_assignment",
+        ],
+        "best_for": (
+            "Primary Datawrap Pilot chatbot — local NL→tools→compose (local tool loop) for "
+            "aggregates, schema, transfers-with-Confirm, jobs, product how-tos. "
+            "OpenAI/Anthropic/Ollama are optional polish add-ons (engine=hybrid only)."
+        ),
     },
 ]
 
@@ -359,6 +520,38 @@ def _package_available(package: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def resolve_pilot_engine() -> str:
+    """Single source of truth for Pilot engine selection.
+
+    Local Datawrap engine is always the primary chatbot.
+    OpenAI / Anthropic / Ollama are optional add-ons — only used when the
+    operator explicitly sets DATAFLOW_PILOT_ENGINE=hybrid|cloud.
+    ``auto`` (default) == local.
+    """
+    raw = (getenv_brand("PILOT_ENGINE") or "auto").strip().lower()
+    if raw in {"hybrid", "cloud"}:
+        return raw
+    # auto / local / unset / anything else → local primary engine
+    return "local"
+
+
+def pick_narration_provider():
+    """Optional polish providers when engine is explicitly hybrid/cloud.
+
+    Never required for Pilot to work. Prefer self-hosted Ollama, then cloud.
+    """
+    ollama = DataTransferOllamaProvider()
+    if ollama.is_available():
+        return ollama, "ollama_polish"
+    anthropic = DataTransferAnthropicProvider()
+    if anthropic.is_available():
+        return anthropic, "anthropic_polish"
+    openai = DataTransferOpenAIProvider()
+    if openai.is_available():
+        return openai, "openai_polish"
+    return None, ""
 
 
 def get_model_capabilities() -> dict:
@@ -384,30 +577,57 @@ def get_model_capabilities() -> dict:
             configured = True
         installed = _package_available(item.get("package", ""))
         available = provider.is_available()
+        if _provider_auth_failed(item["provider"]):
+            available = False
+            status = "invalid_key"
+        elif available:
+            status = "ready"
+        elif item["tier"] == "cloud":
+            status = "configure"
+        else:
+            status = "offline"
         rows.append({
             **item,
             "configured": configured,
             "package_installed": installed,
             "available": available,
-            "status": "ready" if available else "configure" if item["tier"] == "cloud" else "offline",
+            "status": status,
         })
 
-    active = next((p for p in rows if p["available"]), rows[-1])
+    active_local = next((p for p in rows if p["provider"] == "local"), rows[-1])
+    engine = resolve_pilot_engine()
+    if engine in {"hybrid", "cloud"}:
+        # Opt-in narration only — still prefer Ollama when polishing.
+        active = next(
+            (p for p in rows if p["available"] and p["provider"] == "ollama"),
+            None,
+        ) or next(
+            (p for p in rows if p["available"] and p["provider"] != "local"),
+            active_local,
+        )
+        agent_mode = "local_tools"
+        if providers["ollama"].is_available():
+            agent_mode = "ollama_polish"
+        elif providers["anthropic"].is_available():
+            agent_mode = "anthropic_polish"
+        elif providers["openai"].is_available():
+            agent_mode = "openai_polish"
+    else:
+        active = active_local
+        agent_mode = "local_tools"
     return {
         "active_provider": active["provider"],
-        "active_model": active["default_model"],
-        "agent_mode": (
-            "anthropic_tools" if providers["anthropic"].is_available()
-            else "openai_tools" if providers["openai"].is_available()
-            else "ollama_tools" if providers["ollama"].is_available()
-            else "local_tools"
-        ),
-        "fallback_order": ["anthropic", "openai", "ollama", "rag", "local"],
+        "active_model": active.get("default_model") or active.get("model") or "local",
+        "agent_mode": agent_mode,
+        "pilot_engine": engine,
+        "fallback_order": ["local", "ollama", "anthropic", "openai"],
         "providers": rows,
         "guarantees": [
-            "Cloud models are used only when their API key and SDK are configured.",
-            "RAG and deterministic mapping continue when cloud providers are unavailable.",
-            "Preflight gates and schema-policy blockers do not depend on probabilistic model output.",
-            "Ambiguous mappings remain reviewable instead of being silently auto-applied.",
+            "Primary chatbot = Datawrap local engine (NL → tools → compose). Works with zero cloud keys.",
+            "DATAFLOW_PILOT_ENGINE=auto|local (default): full Pilot chatbot offline — OpenAI/Anthropic/Ollama not required.",
+            "DATAFLOW_PILOT_ENGINE=hybrid|cloud: optional narration polish only; tools still run locally first.",
+            "OpenAI, Anthropic, and Ollama are user add-ons — never the first service provider.",
+            "Grounded tool results are executed once; mutations always require operator Confirm.",
+            "Saving a cloud key in Settings live-checks it; invalid keys are rejected.",
         ],
     }

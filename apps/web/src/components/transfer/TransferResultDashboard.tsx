@@ -15,6 +15,10 @@ import { JobTrustScoreCard } from "./JobTrustScoreCard";
 import { CdcCursorGapPanel } from "./CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./CdcRetentionPanel";
 import { MappingProofDrawer, type MappingProof } from "../MappingProofDrawer";
+import { ConnectionReuseCard } from "./ConnectionReuseCard";
+import { PhaseProfileCard } from "./PhaseProfileCard";
+import { ReplaySafetyCard } from "./ReplaySafetyCard";
+import { TransformationsCard } from "./TransformationsCard";
 import { hashForScreen } from "../../lib/appNavigation";
 
 function asMappingProof(raw: unknown): MappingProof | null {
@@ -35,7 +39,7 @@ interface TransferResultDashboardProps {
   onNewTransfer?: () => void;
   onViewJobs?: () => void;
   onSchedule?: () => void;
-  /** Jump back to Validate so Strip / Quarantine / Fix bad data stay reachable from Run. */
+  /** Jump back to Validate so Fix bad data (Strip / Quarantine) stays reachable from Run. */
   onOpenValidate?: () => void;
   /** Resume from durable checkpoint (same API as Jobs). */
   onResume?: () => void;
@@ -43,6 +47,10 @@ interface TransferResultDashboardProps {
   onOpenChildJob?: (jobId: string) => void;
   /** Map / Validate repair mappings for quarantine propose/apply. */
   repairMappings?: RepairMapping[];
+  /** Persist approved repair transforms into Studio before re-validate. */
+  onRepairMappingsApplied?: (mappings: RepairMapping[]) => void;
+  /** When true, omit internal action bar — parent renders shared wizard footer. */
+  hideActions?: boolean;
 }
 
 function fmt(value: string | number | undefined): string | null {
@@ -86,6 +94,8 @@ export function TransferResultDashboard({
   onResume,
   onOpenChildJob,
   repairMappings = [],
+  onRepairMappingsApplied,
+  hideActions = false,
 }: TransferResultDashboardProps) {
   const { setActiveData } = useActiveData();
   const [proofOpen, setProofOpen] = useState(false);
@@ -386,6 +396,7 @@ export function TransferResultDashboard({
           <Gate8ProofCard
             report={report}
             explanation={result.explanation}
+            jobId={result.job_id}
             className="df2-result-gate8"
             onOpenValidate={onOpenValidate}
             onOpenQuarantine={
@@ -438,6 +449,18 @@ export function TransferResultDashboard({
           />
         </section>
       )}
+
+      <TransformationsCard report={ds?.transformations} />
+
+      <PhaseProfileCard profile={ds?.phase_profile} />
+
+      <ReplaySafetyCard report={ds?.replay_safety} />
+
+      <ConnectionReuseCard
+        report={ds?.connection_reuse}
+        traceId={ds?.trace_id}
+        correlationId={ds?.correlation_id}
+      />
 
       {(result.cdc_plugin || result.cdc_delivery || result.cdc_row_filter || result.cdc_shared_reader || result.snapshot_mode || result.watermark || result.cdc_lease_holder || result.source_ha_role) && (
         <section className="df2-result-cdc-strip" aria-label="CDC run summary">
@@ -665,8 +688,12 @@ export function TransferResultDashboard({
               {ds?.warnings && ds.warnings.length > 0 && (
                 <div className="df2-result-warnings-block">
                   <p className="df2-result-warnings-note">
-                    Showing {ds.warnings.length} sample writer message{ds.warnings.length === 1 ? "" : "s"}
-                    {" "}(display capped — not the full row count).
+                    Showing {ds.warnings.length} distinct writer message
+                    {ds.warnings.length === 1 ? "" : "s"}
+                    {ds.warnings_suppressed && ds.warnings_suppressed > 0
+                      ? ` · ${ds.warnings_suppressed.toLocaleString()} more suppressed`
+                      : " · display capped"}
+                    .
                   </p>
                   <ul className="df2-result-warnings">
                     {ds.warnings.map((w) => <li key={w}>{w}</li>)}
@@ -695,10 +722,16 @@ export function TransferResultDashboard({
               rejectedRows={rejected || issueFindings}
               coercedNullRows={coercedNull}
               initialDetails={result.destination_summary?.rejected_details}
+              truncatedDetails={result.destination_summary?.rejected_details_truncated}
               autoLoad
               initiallyOpen
               repairMappings={repairMappings}
               onOpenValidate={onOpenValidate}
+              onRepairMappingsApplied={onRepairMappingsApplied}
+              onRepairDecided={(proposal) => {
+                if (proposal.status === "rejected") return;
+                onOpenValidate?.();
+              }}
               onReplayComplete={(childJobId) => {
                 onOpenChildJob?.(childJobId);
               }}
@@ -707,26 +740,28 @@ export function TransferResultDashboard({
         )}
       </div>
 
-      <div className="df2-result-actions df2-result-actions-remediate">
-        {onOpenValidate && (!result.success || hasIntegrityLoss) && (
-          <button type="button" className="df2-btn df2-btn-primary" onClick={onOpenValidate}>
-            <DtIcon name="gate" size={14} /> Open Validate
+      {!hideActions && (
+        <div className="df2-result-actions df2-result-actions-remediate">
+          {onOpenValidate && (!result.success || hasIntegrityLoss) && (
+            <button type="button" className="df2-btn df2-btn-primary" onClick={onOpenValidate}>
+              <DtIcon name="gate" size={14} /> Open Validate
+            </button>
+          )}
+          <button type="button" className="df2-btn df2-btn-primary" onClick={onNewTransfer}>
+            New transfer
           </button>
-        )}
-        <button type="button" className="df2-btn df2-btn-primary" onClick={onNewTransfer}>
-          New transfer
-        </button>
-        {onViewJobs && (
-          <button type="button" className="df2-btn" onClick={onViewJobs}>
-            <DtIcon name="jobs" size={14} /> Job Theater
-          </button>
-        )}
-        {onSchedule && (
-          <button type="button" className="df2-btn" onClick={onSchedule}>
-            <DtIcon name="activity" size={14} /> Schedule route
-          </button>
-        )}
-      </div>
+          {onViewJobs && (
+            <button type="button" className="df2-btn" onClick={onViewJobs}>
+              <DtIcon name="jobs" size={14} /> Job Theater
+            </button>
+          )}
+          {onSchedule && (
+            <button type="button" className="df2-btn" onClick={onSchedule}>
+              <DtIcon name="activity" size={14} /> Schedule route
+            </button>
+          )}
+        </div>
+      )}
 
       <section className="df2-job-log-panel is-result is-open" aria-label="Job event log">
         <LiveEventLog
@@ -734,6 +769,9 @@ export function TransferResultDashboard({
           variant="result"
           title="Job log"
           empty="No captured events for this job yet. Re-run a transfer to collect a full live event stream."
+          collapsible
+          defaultOpen={false}
+          storageKey="df2-result-log-open"
         />
       </section>
     </div>

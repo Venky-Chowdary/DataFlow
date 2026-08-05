@@ -59,10 +59,17 @@ def test_oracle_shared_poll_demuxes_two_tables() -> None:
     # current_scn, then logminer rows
     cur.fetchone.side_effect = [(200,)]
     cur.fetchall.side_effect = [
+        # V$LOGFILE members, then V$ARCHIVED_LOG names: the session now
+        # ADD_LOGFILEs an explicit redo set instead of using CONTINUOUS_MINE.
+        [("/redo/redo01.log",)],
+        [],
         [
-            # scn, op, sql_redo, table, owner, xidusn, xidslt, xidseq
+            # scn, rs_id, ssn, op, sql_redo, table, owner, xidusn, xidslt, xidseq
+            # RS_ID/SSN are part of LogMiner's true total order and the resume token.
             (
                 150,
+                "0x000001.0001.0001",
+                1,
                 "INSERT",
                 'INSERT INTO "ORDERS"("ID","AMOUNT") VALUES(\'1\',\'10\')',
                 "ORDERS",
@@ -73,6 +80,8 @@ def test_oracle_shared_poll_demuxes_two_tables() -> None:
             ),
             (
                 150,
+                "0x000001.0001.0002",
+                2,
                 "INSERT",
                 'INSERT INTO "USERS"("USER_ID","NAME") VALUES(\'9\',\'alice\')',
                 "USERS",

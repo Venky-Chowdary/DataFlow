@@ -13,13 +13,17 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
+from services.validation_coverage import stamp_validation_coverage
 from services.value_serializer import cell_to_string
 
 # Validation mode → minimum confidence / null tolerance
 _MODE_THRESHOLDS = {
     "maximum": {"confidence": 0.95, "null_rate_max": 0.0, "parse_fail_max": 0.0},
     "strict": {"confidence": 0.85, "null_rate_max": 0.05, "parse_fail_max": 0.02},
+    "audit": {"confidence": 0.85, "null_rate_max": 0.05, "parse_fail_max": 0.02},
     "balanced": {"confidence": 0.75, "null_rate_max": 0.15, "parse_fail_max": 0.05},
+    "migration": {"confidence": 0.75, "null_rate_max": 0.15, "parse_fail_max": 0.05},
+    "discovery": {"confidence": 0.0, "null_rate_max": 1.0, "parse_fail_max": 1.0},
 }
 
 
@@ -107,9 +111,24 @@ def _check_coercion_safety(
         from services.type_system import is_precision_collapse_coercion
 
         src_t = str(source_types.get(src) or "")
-        tgt_name = str((mapping or {}).get("target") or "")
-        tgt_t = str(target_types.get(tgt_name) or "")
-        if mapping and is_precision_collapse_coercion(src_t, tgt_t):
+        from services.type_system import resolve_mapping_target_type
+
+        tgt_t = resolve_mapping_target_type(
+            mapping or {"target": issue.get("target")},
+            target_types=target_types,
+            source_type=src_t,
+            dest_db_type=dest_kind,
+        )
+        if mapping and is_precision_collapse_coercion(src_t, tgt_t, dest_db=dest_kind):
+            hardened.append(issue)
+            continue
+        from services.type_system import is_lossy_coercion
+
+        from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+        risk_cleared = bool(mapping and mapping_has_clearing_risk_contract(mapping))
+        # Match G3/G6: declared lossy cannot be sample-cleared without Risk Contract.
+        if mapping and is_lossy_coercion(src_t, tgt_t, dest_db=dest_kind) and not risk_cleared:
             hardened.append(issue)
             continue
         if mapping and samples_coerce_mapping(
@@ -118,6 +137,10 @@ def _check_coercion_safety(
             target_types=target_types,
             rows=sample_rows,
         ):
+            # Sample coerce still requires a continue-policy contract to demote.
+            if not risk_cleared:
+                hardened.append(issue)
+                continue
             sample_cleared.append(issue.get("message") or src)
             hardened.append({**issue, "severity": "warn", "sample_cleared": True})
             continue
@@ -774,6 +797,21 @@ def _check_duplicate_keys(
             "primary_key": None,
         }
 
+    # Source-side probe is authoritative: it scans the full table, not just the
+    # preview sample. Must run BEFORE the append/no-enforce early return —
+    # Quarantine→balanced must not green Validate when write-time DQ will fail.
+    probe_authoritative = False
+    if primary_key:
+        findings = source_duplicate_findings or []
+        if findings:
+            sample = ", ".join(
+                f"{f.get('value')}×{f.get('count', 1)}" for f in findings[:3]
+            )
+            issues.append(
+                f"{primary_key}: duplicate key values from source probe ({sample})"
+            )
+            probe_authoritative = True
+
     if not enforce_identity and not issues:
         return {
             "check": "duplicate_keys",
@@ -784,18 +822,6 @@ def _check_duplicate_keys(
             "primary_key": primary_key,
             "dest_kind": dest_kind,
         }
-
-    # Source-side probe is authoritative: it scans the full table, not just the
-    # preview sample, so duplicates that would fail the write batch are caught on Validate.
-    if enforce_identity and primary_key:
-        findings = source_duplicate_findings or []
-        if findings:
-            sample = ", ".join(
-                f"{f.get('value')}×{f.get('count', 1)}" for f in findings[:3]
-            )
-            issues.append(
-                f"{primary_key}: duplicate key values from source probe ({sample})"
-            )
 
     # Single-column sample identity — skip when the only covering constraint is
     # composite (same code under different orgs must not false-fail).
@@ -870,14 +896,33 @@ def _check_duplicate_keys(
     issues = deduped
     blocks = len(issues) > 0
     mode = (validation_mode or "").strip().lower()
+    # Full-table probe found duplicates → always block. Quarantine/Strip/balanced
+    # remediations must not enable Execute when the write batch will fail DQ.
+    if probe_authoritative and blocks:
+        return {
+            "check": "duplicate_keys",
+            "passed": False,
+            "blocks_transfer": True,
+            "issues": issues[:15],
+            "warnings": advisory_warnings,
+            "primary_key": primary_key,
+            "dest_kind": dest_kind,
+            "note": (
+                "Source-table probe found duplicate identity keys — Validate cannot "
+                "pass until Primary key is a unique column, sync mode allows non-unique "
+                "rows without that PK, or the source is deduped. Strip/Quarantine cannot fix this."
+            ),
+        }
     if blocks and mode == "balanced":
-        # Balanced may warn-only for append-like routes where duplicates can be
-        # legal. Upsert/CDC/mirror/SCD2/overwrite/schemaless still fail-closed —
-        # Studio "strip+rerun balanced" must not green-light PK collisions.
+        # Balanced may warn-only for append-like routes where sample-only
+        # duplicates can be legal. Upsert/CDC/mirror/SCD2/overwrite/schemaless
+        # still fail-closed — Studio "strip+rerun balanced" must not green-light
+        # PK collisions that write-time DQ will refuse.
         must_block = (
             schemaless
             or sync_requires_unique_identity(sync, dest_kind=dest_kind)
             or _is_overwrite_like(sync)
+            or not _is_append_like(sync)
         )
         if must_block:
             return {
@@ -948,36 +993,44 @@ def _check_mapping_confidence(
     confidence_min: float,
     validation_mode: str = "strict",
 ) -> dict[str, Any]:
-    # Keep G9 aligned with the published/preflight mode floors:
+    """Report mapping confidence for explainability — G4 owns hard blocks.
+
+    Module 3: never ``blocks_transfer`` on confidence alone here. G9 previously
+    duplicated ``g4_mapping_confidence`` and confused Validate with two
+    confidence faces for one threshold.
+    """
+    # Keep G9 aligned with the published/preflight mode floors for *reporting*:
     # maximum=0.95, strict=0.85, balanced=0.75.
     mode = (validation_mode or "strict").strip().lower()
     floor = confidence_min
-    issues: list[str] = []
     warnings: list[str] = []
     for m in mappings:
+        # Align with G4: operator override / risk ack already cleared Map confidence.
+        if m.get("user_override") or m.get("risk_acknowledged") or m.get("riskAcknowledged"):
+            continue
         conf = float(m.get("confidence", 0))
         if conf < floor:
-            msg = f"{m.get('source')}→{m.get('target')}: confidence {conf:.0%} < {floor:.0%}"
-            # Low confidence is a blocker by default; in balanced mode it is
-            # downgraded to a warning when a more concrete issue already blocks,
-            # so the operator sees the real problem (e.g. lossy coercion).
-            issues.append(msg)
+            warnings.append(
+                f"{m.get('source')}→{m.get('target')}: confidence {conf:.0%} < {floor:.0%} "
+                "(G4 is hard authority)"
+            )
         elif m.get("requires_review"):
-            # In balanced mode a near-threshold mapping with a small gap is a
-            # warning, not a hard blocker, so the user can review without being
-            # stopped entirely. In strict/maximum it stays a blocker.
-            msg = f"{m.get('source')}→{m.get('target')}: ambiguous mapping requires review"
-            if mode in {"strict", "maximum"}:
-                issues.append(msg)
-            else:
-                warnings.append(msg)
-    blocks = len(issues) > 0
+            warnings.append(
+                f"{m.get('source')}→{m.get('target')}: ambiguous mapping requires review "
+                "(G4 is hard authority)"
+            )
     return {
         "check": "mapping_confidence",
-        "passed": not blocks,
-        "blocks_transfer": blocks,
-        "issues": issues[:20],
-        "warnings": warnings[:10],
+        "passed": True,
+        "blocks_transfer": False,
+        "issues": [],
+        "warnings": warnings[:20],
+        "authority": "g4_mapping_confidence",
+        "validation_mode": mode,
+        "note": (
+            "Informational only — hard confidence / review blocks are owned by "
+            "g4_mapping_confidence (Module 3 confidence SSOT)."
+        ),
     }
 
 
@@ -1225,6 +1278,22 @@ def run_integrity_audit(
             _check_mapping_confidence(mappings, confidence_min=cfg["confidence"], validation_mode=validation_mode)
         )
 
+    # Mongo majority typing can keep INTEGER while a few TEXT sentinels remain —
+    # warn (never silent) so Validate honesty matches write-time quarantine risk.
+    mix_warnings = [
+        f"{s.get('name')}: {s.get('type_mix_warning')}"
+        for s in source_schemas
+        if s.get("type_mix_warning") and s.get("name")
+    ]
+    if mix_warnings:
+        checks.append({
+            "check": "mongo_type_mix",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+            "warnings": mix_warnings[:12],
+        })
+
     if rows and source_columns:
         checks.append(_check_sample_quality(source_columns, rows, source_types, validation_mode, dest_kind=dest_kind))
 
@@ -1260,21 +1329,8 @@ def run_integrity_audit(
             },
         })
 
-    # Balanced mode: if a more concrete blocker already exists, downgrade
-    # low-confidence mapping issues from blockers to warnings so the UI
-    # surfaces the root cause (lossy/wrong map) instead of a generic score.
-    if mode == "balanced":
-        mc = next((c for c in checks if c.get("check") == "mapping_confidence"), None)
-        if mc and mc.get("blocks_transfer"):
-            other_blockers = [
-                c for c in checks
-                if c.get("blocks_transfer") and c.get("check") != "mapping_confidence"
-            ]
-            if other_blockers:
-                mc["blocks_transfer"] = False
-                mc["passed"] = True
-                mc["warnings"] = list(mc.get("warnings", [])) + list(mc.get("issues", []))
-                mc["issues"] = []
+    # Module 3: mapping_confidence never blocks_transfer (G4 is SSOT), so the
+    # former balanced-mode "downgrade confidence blockers" path is gone.
 
     passed_checks = [c for c in checks if c.get("passed")]
     failed_checks = [c for c in checks if not c.get("passed")]
@@ -1295,6 +1351,14 @@ def run_integrity_audit(
         "checks": checks,
         "issues": all_issues[:30],
         "warnings": all_warnings[:20],
+        "validation_coverage": stamp_validation_coverage(
+            layer="sample",
+            rows_examined=len(rows) if rows else 0,
+            note=(
+                "G9 integrity audit examines Validate sample rows only — "
+                "not population proof."
+            ),
+        ),
         "source_uniqueness_probe": {
             "ran": bool(source_duplicate_probe_ran),
             "primary_key": str(source_duplicate_probe_pk or "") or None,
@@ -1303,6 +1367,11 @@ def run_integrity_audit(
         },
         "summary": (
             f"{len(passed_checks)}/{len(checks)} integrity checks passed"
+            + (
+                " (Validate sample — population uniqueness not proven)"
+                if not source_duplicate_probe_ran
+                else " (full-selected uniqueness probe · other checks on sample)"
+            )
             if checks
             else "No integrity checks run (missing mappings or samples)"
         ),

@@ -1,10 +1,10 @@
 /**
- * DataFlow — Universal Data Platform
+ * Datawrap — Universal Data Platform
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DtIcon } from "./components/DtIcon";
-import { DtLogo } from "./components/DtLogo";
+import { BrandWordmark } from "./components/BrandWordmark";
 import { PageErrorBoundary } from "./components/PageErrorBoundary";
 import { ToastProvider, useToast } from "./components/Toast";
 import { ConfirmProvider, useConfirm } from "./components/ui/ConfirmDialog";
@@ -25,6 +25,7 @@ import { PilotPage } from "./pages/PilotPage";
 import { TransferPage } from "./pages/TransferPage";
 import { ConnectorsPage } from "./pages/ConnectorsPage";
 import { SchedulesPage } from "./pages/SchedulesPage";
+import { TransformsPage } from "./pages/TransformsPage";
 import { JobsPage, type JobsStudioIntent } from "./pages/JobsPage";
 import { ContractsPage } from "./pages/ContractsPage";
 import { McpPage } from "./pages/McpPage";
@@ -51,12 +52,13 @@ const NAV: { id: Screen; label: string; icon: string; desc: string; group: "plat
   { id: "connectors", label: "Connectors", icon: "connectors", desc: "Saved sources & destinations", group: "platform" },
   { id: "contracts", label: "Contracts", icon: "shield", desc: "Schema agreements and breakers", group: "platform" },
   { id: "jobs", label: "Jobs", icon: "jobs", desc: "Live progress and history", group: "ops" },
-  { id: "schedules", label: "Pipelines", icon: "activity", desc: "Recurring syncs", group: "ops" },
+  { id: "schedules", label: "Schedules", icon: "activity", desc: "Recurring syncs", group: "ops" },
+  { id: "transforms", label: "Transforms", icon: "layers", desc: "Post-load SQL models", group: "ops" },
   { id: "query", label: "Query", icon: "search", desc: "Ad-hoc SQL and export", group: "ops" },
   { id: "pilot", label: "Pilot", icon: "sparkle", desc: "Natural-language assistant", group: "ops" },
   { id: "settings", label: "Settings", icon: "settings", desc: "Security, team, SSO", group: "system" },
   { id: "mcp", label: "MCP", icon: "zap", desc: "IDE tool integrations", group: "system" },
-  { id: "docs", label: "Help", icon: "book", desc: "How DataFlow works", group: "system" },
+  { id: "docs", label: "Help", icon: "book", desc: "How Datawrap works", group: "system" },
   { id: "benchmarks", label: "Proofs", icon: "speed", desc: "Scale and fidelity benchmarks", group: "system" },
 ];
 
@@ -276,7 +278,7 @@ function AppShell({
 
   useEffect(() => {
     const onResize = () => {
-      if (window.innerWidth >= 1024) setMobileNavOpen(false);
+      if (window.innerWidth >= 1024) setMobileNavOpen(false); // matches --df-bp-lg / CSS 1023 overlay shell
       if (window.innerWidth < 1280) setCopilotOpen(false);
     };
     window.addEventListener("resize", onResize);
@@ -406,11 +408,11 @@ function AppShell({
 
       <aside className={`df2-sidebar ${mobileNavOpen ? "open" : ""}`} aria-label="Main navigation">
         <div className="df2-sidebar-brand">
-          <DtLogo size={sidebarNavCompact ? 32 : 36} />
-          <div className="df2-sidebar-brand-copy">
-            <div className="df2-brand-name">DataFlow</div>
-            <div className="df2-brand-tag">Universal data platform</div>
-          </div>
+          <BrandWordmark
+            markSize={sidebarNavCompact ? 32 : 34}
+            word={!sidebarNavCompact}
+            title=""
+          />
           <button
             type="button"
             className="df2-sidebar-collapse-btn"
@@ -485,10 +487,7 @@ function AppShell({
         </nav>
 
         <div className="df2-sidebar-foot">
-          <button type="button" className="df2-sidebar-cta" onClick={openFreshTransfer}>
-            <DtIcon name="transfer" size={16} />
-            <span className="df2-sidebar-collapse-label">New transfer</span>
-          </button>
+          {/* New transfer lives in the topbar only — one CTA, one place. */}
           <div className="df2-sidebar-user">
             <button
               type="button"
@@ -529,7 +528,7 @@ function AppShell({
             </button>
             <div className="df2-breadcrumb">
               <span>Workspace</span>
-              <strong> {currentNav?.label ?? "DataFlow"}</strong>
+              <strong> {currentNav?.label ?? "Datawrap"}</strong>
             </div>
             <WorkspaceSearch
               query={searchQuery}
@@ -569,7 +568,7 @@ function AppShell({
                 variant="ghost"
                 className={copilotOpen ? "active" : ""}
                 onClick={() => setCopilotOpen((o) => !o)}
-                aria-label="Toggle Data Pilot"
+                aria-label="Toggle Datawrap Pilot"
                 leadingIcon={<DtIcon name="sparkle" size={16} />}
               >
                 <span className="df2-topbar-btn-text">Pilot</span>
@@ -625,7 +624,7 @@ function AppShell({
               )}
               {mountedScreens.has("pilot") && (
                 <div className={`df2-screen-keep ${showScreen("pilot")}`} hidden={screen !== "pilot"} aria-hidden={screen !== "pilot"}>
-                <PageErrorBoundary label="Data Pilot">
+                <PageErrorBoundary label="Datawrap Pilot">
                   <PilotPage onNavigate={setScreen} />
                 </PageErrorBoundary>
                 </div>
@@ -688,7 +687,7 @@ function AppShell({
               )}
               {mountedScreens.has("schedules") && (
                 <div className={`df2-screen-keep ${showScreen("schedules")}`} hidden={screen !== "schedules"} aria-hidden={screen !== "schedules"}>
-                <PageErrorBoundary label="Pipelines">
+                <PageErrorBoundary label="Schedules">
                   <SchedulesPage
                     connectors={connectors}
                     onViewJobs={() => setScreen("jobs")}
@@ -698,6 +697,13 @@ function AppShell({
                       searchFocus?.screen === "schedules" ? searchFocus.scheduleId : undefined
                     }
                   />
+                </PageErrorBoundary>
+                </div>
+              )}
+              {mountedScreens.has("transforms") && (
+                <div className={`df2-screen-keep ${showScreen("transforms")}`} hidden={screen !== "transforms"} aria-hidden={screen !== "transforms"}>
+                <PageErrorBoundary label="Transformations">
+                  <TransformsPage connectors={connectors} />
                 </PageErrorBoundary>
                 </div>
               )}
@@ -762,7 +768,7 @@ function AppShell({
       </div>
 
       {showCopilotRail && (
-        <aside className="df2-copilot-rail" aria-label="Data Pilot">
+        <aside className="df2-copilot-rail" aria-label="Datawrap Pilot">
           <AICopilot variant="rail" onNavigate={setScreen} onClose={() => setCopilotOpen(false)} />
         </aside>
       )}
@@ -776,7 +782,7 @@ function AppShell({
             await loadConnectors();
             setConnectorsViewToken((n) => n + 1);
             setScreen("connectors");
-            toast({ title: "Connection saved", message: "Visible in My connections.", tone: "success" });
+            // Toast owned by ConnectorModal (includes connector name) — do not double-fire.
           }}
         />
       )}
@@ -787,10 +793,10 @@ function AppShell({
           type="button"
           className="df2-copilot-edge-open"
           onClick={() => setCopilotOpen(true)}
-          aria-label="Expand Data Pilot"
-          title="Expand Data Pilot"
+          aria-label="Expand Datawrap Pilot"
+          title="Expand Datawrap Pilot"
         >
-          <DtIcon name="chevron-left" size={14} />
+          <DtIcon name="sparkle" size={14} />
           <span>Pilot</span>
         </button>
       )}
@@ -801,7 +807,7 @@ function AppShell({
     const target = connectors.find((c) => c.id === id);
     const confirmed = await confirm({
       title: `Delete ${target?.name ?? "this connector"}?`,
-      message: "This removes saved credentials and route references for this connection. Pipelines that used it will need a new connection.",
+      message: "This removes saved credentials and route references for this connection. Schedules that used it will need a new connection.",
       confirmLabel: "Delete connection",
       cancelLabel: "Keep connection",
       tone: "danger",
@@ -927,7 +933,10 @@ function DataTransferAppInner() {
       ? {
           title: marketingMeta.title,
           description: marketingMeta.description,
-          keywords: "DataFlow, data transfer, migration, ETL, Transfer Studio",
+          keywords:
+            marketingMeta.keywords
+            || "Datawrap, data transfer, migration, ETL, Transfer Studio, semantic mapping, preflight",
+          canonicalPath: marketingMeta.canonicalPath || "#/",
           ogType: "website" as const,
         }
       : stage === "login"

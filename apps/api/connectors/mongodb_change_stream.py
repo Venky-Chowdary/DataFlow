@@ -19,6 +19,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from bson import json_util
+from services.brand_env import getenv_brand
 from services.cdc_engine import ChangeBatch
 
 from connectors.mongodb_common import _mongo_client
@@ -98,7 +99,7 @@ class MongodbChangeStreamCdc:
 
         cursor_key = str(cfg.get("cursor_key") or f"mongodb:{self.db_name}:{collection}")
         holder = str(
-            cfg.get("lease_holder_id") or os.getenv("DATAFLOW_CDC_LEASE_HOLDER") or ""
+            cfg.get("lease_holder_id") or getenv_brand("CDC_LEASE_HOLDER") or ""
         )
         self._lease = CdcLeaseGuard(
             cursor_key=cursor_key,

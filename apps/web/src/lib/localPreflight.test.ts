@@ -67,4 +67,31 @@ describe("runLocalPreflight file export honesty", () => {
     assert.equal(pf.passed, false);
     assert.ok(pf.blockers.some((b) => b.id === "g2_destination"));
   });
+
+  it("treats operator-approved low-confidence mappings as passing G4", () => {
+    const pf = runLocalPreflight({
+      columns: ["id", "name"],
+      rowCount: 2,
+      mappings: [
+        { source: "id", target: "id", confidence: 0.55, transform: "none", approved: true, requiresReview: false, isPii: false },
+        { source: "name", target: "name", confidence: 0.55, transform: "none", approved: true, requiresReview: false, isPii: false },
+      ],
+      destKind: "file_export",
+    });
+    assert.equal(pf.passed, true);
+    assert.ok(!pf.blockers.some((b) => b.id === "g4_mapping_confidence"));
+  });
+
+  it("blocks G4 when high-confidence mappings are not operator-approved", () => {
+    const pf = runLocalPreflight({
+      columns: ["id"],
+      rowCount: 1,
+      mappings: [
+        { source: "id", target: "id", confidence: 0.99, transform: "none", approved: false, requiresReview: false, isPii: false },
+      ],
+      destKind: "file_export",
+    });
+    assert.equal(pf.passed, false);
+    assert.ok(pf.blockers.some((b) => b.id === "g4_mapping_confidence"));
+  });
 });

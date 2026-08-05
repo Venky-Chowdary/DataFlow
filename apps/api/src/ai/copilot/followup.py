@@ -1,4 +1,4 @@
-"""Context resolution for Data Pilot follow-up turns.
+"""Context resolution for Datawrap Pilot follow-up turns.
 
 Separate from raw-history replay on purpose. The 2026 multi-turn text-to-SQL
 memory study found that resolving referenced context into an *authoritative
@@ -71,6 +71,34 @@ _AFFIRMATIVE = frozenset({
 })
 
 
+def _extract_edit_where(message: str, focus: PilotFocus | None) -> str:
+    """Parse \"only paid\" / \"where status = paid\" into a filter clause."""
+    text = _clean(message)
+    if not text:
+        return ""
+    where_m = re.search(r"\b(?:where|filter(?:\s+where)?)\s+(.+)$", text, re.I)
+    if where_m:
+        return where_m.group(1).strip()
+    only_m = re.match(
+        r"^(?:only|just)\s+(.+?)(?:\s+ones?|\s+rows?|\s+records?)?$",
+        text,
+        re.I,
+    )
+    if not only_m:
+        return ""
+    val = only_m.group(1).strip().strip("\"'")
+    if not val or val.lower() in _PLATFORM_NOUNS:
+        return ""
+    preferred = ("status", "state", "type", "region", "category", "tier", "channel")
+    cols = [c.lower() for c in ((focus.columns if focus else None) or [])]
+    col = "status"
+    if cols:
+        col = next((c for c in preferred if c in cols), cols[0])
+    if re.fullmatch(r"-?\d+(?:\.\d+)?", val):
+        return f"{col} = {val}"
+    return f"{col} = '{val}'"
+
+
 def _clean(text: str) -> str:
     return (text or "").strip().strip("?!.,;:").strip()
 
@@ -79,9 +107,136 @@ def _words(text: str) -> list[str]:
     return [w for w in re.split(r"\s+", _clean(text)) if w]
 
 
+def last_assistant_content(history: list[dict] | None) -> str:
+    for m in reversed(history or []):
+        if m.get("role") == "assistant" and (m.get("content") or "").strip():
+            return str(m["content"]).strip()
+    return ""
+
+
+def resolve_platform_coreference(
+    message: str,
+    history: list[dict] | None,
+) -> list[tuple[str, dict[str, Any]]] | None:
+    """those jobs / which of those failed → list_jobs from prior turn context."""
+    text = _clean(message)
+    if not text or not _COREFERENCE_RE.search(text):
+        return None
+    prior = last_assistant_content(history).lower()
+    low = text.lower()
+    jobs_cue = bool(re.search(r"\b(?:jobs?|transfers?|failed|failures|runs?)\b", low)) or (
+        "job" in prior or "transfer" in prior or "pipeline" in prior
+    )
+    if jobs_cue and re.search(r"\b(?:those|these|them|that|it)\b", low):
+        return [("list_jobs", {"limit": 10})]
+    connectors_cue = bool(re.search(r"\bconnectors?\b", low)) or "connector" in prior
+    if connectors_cue and re.search(r"\b(?:those|these|them|that|it)\b", low):
+        return [("list_connectors", {})]
+    return None
+
+
+def resolve_table_coreference_tools(
+    message: str,
+    focus: PilotFocus | None,
+) -> list[tuple[str, dict[str, Any]]] | None:
+    """sample/schema that table → tool with focus.table (not only aggregate edits)."""
+    if not focus or not (focus.table or "").strip():
+        return None
+    if not _COREFERENCE_RE.search(message or ""):
+        return None
+    low = (message or "").lower()
+    args: dict[str, Any] = {"table": focus.table}
+    if focus.connector_name:
+        args["connector_name"] = focus.connector_name
+    if re.search(r"\b(?:sample|preview|show\s+(?:me\s+)?(?:some\s+)?rows|fetch)\b", low):
+        return [("sample_connector_object", args)]
+    if re.search(r"\b(?:schema|columns|describe|structure|introspect)\b", low):
+        return [("introspect_connector_schema", args)]
+    return None
+
+
+def pending_from_assistant_clarification(
+    history: list[dict] | None,
+) -> PendingSlot | None:
+    """Rebuild a soft pending when memory TTL cleared but last ask is still in transcript."""
+    q = last_assistant_content(history)
+    if not q:
+        return None
+    low = q.lower()
+    if "which connector" in low:
+        missing = "connector_name"
+        tool = "sample_connector_object"
+    elif "which table" in low or "which collection" in low:
+        missing = "table"
+        tool = "sample_connector_object"
+    else:
+        return None
+    # Bold candidates from the assistant message: **Local Postgres**
+    raw = re.findall(r"\*\*([^*]{1,60})\*\*", q)
+    cleaned: list[str] = []
+    for c in raw:
+        c = c.strip()
+        if not c or len(c) > 48:
+            continue
+        if re.search(r"\b(?:confirm|jobs?|connectors?|settings|transfer|studio)\b", c, re.I):
+            continue
+        cleaned.append(c)
+    return PendingSlot(
+        tool=tool,
+        missing=missing,
+        args={},
+        candidates=cleaned[:8],
+        question=q.split("\n")[0][:240],
+    )
+
+
 # --------------------------------------------------------------------------
 # 1. Clarification answers
 # --------------------------------------------------------------------------
+
+
+_FRESH_INTENT_RE = re.compile(
+    r"\b(?:how\s+many|count|sum|avg|average|total|top|bottom|select|show|list|"
+    r"sample|analyze|filter|group(?:ed)?\s+by|take\s+me|go\s+to|navigate|"
+    r"open|explain|what(?:'s|\s+is)|how\s+does|how\s+do|can\s+you|could\s+you|"
+    r"please|transfer|move|copy|sync|delete|export|create|schedule|"
+    r"fix|repair|heal|quarantine)\b",
+    re.I,
+)
+
+# Elliptical edits must never fill a connector/table clarification slot.
+# Avoid bare metric verbs ("count of orders…") — those are fresh asks; "… instead"
+# is covered by _INSTEAD_RE below.
+_ELLIPTICAL_EDIT_RE = re.compile(
+    r"^(?:only|just|and|also|now|then|same(?:\s+(?:for|but))?|use\s+\w+\s+instead|"
+    r"make\s+it|switch\s+to|filter\s+to|do\s+that\s+again|by|per|"
+    r"group(?:ed)?\s+by|drop\s+(?:the\s+)?group(?:ing)?|no\s+grouping|"
+    r"top\s+\d|bottom\s+\d|"
+    r"where|filter|instead)\b",
+    re.I,
+)
+
+
+def looks_like_fresh_intent(message: str) -> bool:
+    """True when the user clearly started a new request (not a slot fill / typo)."""
+    reply = _clean(message)
+    if not reply:
+        return False
+    return bool(_FRESH_INTENT_RE.search(reply))
+
+
+def looks_like_elliptical_edit(message: str) -> bool:
+    """True for follow-up edits like \"only paid ones\" / \"and by region?\"."""
+    reply = _clean(message)
+    if not reply or len(_words(reply)) > _MAX_FOLLOWUP_WORDS:
+        return False
+    if _ELLIPTICAL_EDIT_RE.search(reply):
+        return True
+    if _INSTEAD_RE.search(reply) and len(_words(reply)) <= 6:
+        return True
+    if _COREFERENCE_RE.search(reply) and len(_words(reply)) <= 8:
+        return True
+    return False
 
 
 def resolve_pending_answer(
@@ -99,14 +254,13 @@ def resolve_pending_answer(
     words = _words(reply)
     if not reply or len(words) > 6:
         return None
-    # A fresh analytics / imperative sentence is never a slot answer, even when
-    # it is short ("count orders now"). Let ordinary routing take it.
-    if re.search(
-        r"\b(?:how\s+many|count|sum|avg|average|total|top|bottom|select|show|list|"
-        r"sample|analyze|filter|group(?:ed)?\s+by)\b",
-        reply,
-        re.I,
-    ):
+    # A fresh analytics / imperative / navigate / explain sentence is never a
+    # slot answer — even when short ("take me to jobs", "fix bad data").
+    if looks_like_fresh_intent(reply):
+        return None
+    # Elliptical edits ("only paid ones", "and by region?") are follow-ups, not
+    # connector/table names — never swallow them into a clarification slot.
+    if looks_like_elliptical_edit(reply):
         return None
 
     lower = reply.lower()
@@ -134,11 +288,19 @@ def resolve_pending_answer(
             return None
 
     if not value:
-        # No candidate list (e.g. "which table?") — accept a bare identifier.
+        # No candidate list (e.g. "which table?") — accept a bare identifier only.
+        # Never accept a multi-word sentence as a connector/table name.
         if lower in _AFFIRMATIVE:
             return None
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_. \-]{0,60}", reply):
-            if lower in {"i don't know", "not sure", "no", "nope", "none"}:
+        if len(words) > 3:
+            return None
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.\-]{0,60}", reply):
+            if lower in {"i don't know", "not sure", "no", "nope", "none", "jobs", "contracts", "settings"}:
+                return None
+            value = reply
+        elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_. \-]{0,40}", reply) and len(words) <= 3:
+            # "Local Postgres" / "Prod Mongo" style names
+            if any(w in lower for w in ("take", "me", "to", "go", "open", "show", "the")):
                 return None
             value = reply
     if not value:
@@ -212,7 +374,20 @@ def _extract_edit_table(message: str) -> str:
     if not m:
         return ""
     table = _clean(m.group(1))
-    if table.lower() in _PLATFORM_NOUNS or table.lower() in _TEMPORAL_GRAINS:
+    banned = _PLATFORM_NOUNS | set(_TEMPORAL_GRAINS) | {
+        "average", "avg", "mean", "sum", "total", "count", "min", "max",
+        "minimum", "maximum", "distinct", "unique", "amount", "price",
+        "revenue", "qty", "quantity", "value", "values",
+    }
+    if table.lower() in banned:
+        return ""
+    # "what about average amount" is a metric edit, not a table switch.
+    if re.search(
+        rf"\b(?:what|how)\s+about\s+{re.escape(table)}\b.{{0,20}}\b"
+        rf"(?:amount|price|revenue|qty|quantity|value|of|for)\b",
+        message,
+        re.I,
+    ):
         return ""
     return table
 
@@ -234,6 +409,19 @@ def looks_like_followup(message: str, focus: PilotFocus | None) -> bool:
     words = _words(text)
     if len(words) > _MAX_FOLLOWUP_WORDS:
         return False
+    # Self-contained asks name their own table/connector — not elliptical.
+    if re.search(
+        r"\b(?:from|in)\s+[A-Za-z_][A-Za-z0-9_]*\b",
+        text,
+        re.I,
+    ) and not _COREFERENCE_RE.search(text):
+        return False
+    if (
+        re.search(r"\bon\s+[A-Za-z_][A-Za-z0-9_\- ]{1,40}\s*$", text, re.I)
+        and len(words) >= 5
+        and not _COREFERENCE_RE.search(text)
+    ):
+        return False
     if _COREFERENCE_RE.search(text):
         return True
     if re.match(r"^(?:and|also|now|then|what\s+about|how\s+about|ok\s+)", text, re.I):
@@ -244,6 +432,11 @@ def looks_like_followup(message: str, focus: PilotFocus | None) -> bool:
     if re.match(r"^(?:group(?:ed)?\s+by|by|per)\b", text, re.I):
         return True
     if re.match(r"^(?:top|bottom)\s+\d", text, re.I):
+        return True
+    # "only paid ones" / "just pending" — filter the remembered subject.
+    if re.match(r"^(?:only|just)\s+\S+", text, re.I):
+        return True
+    if re.match(r"^(?:where|filter)\b", text, re.I):
         return True
     # "no grouping" / "drop the group by" removes a slot without naming a subject.
     if _extract_edit_group_by(text)[1]:
@@ -276,9 +469,15 @@ def resolve_followup(
         connector_name=focus.connector_name,
         limit=focus.limit or 20,
         descending=focus.descending,
+        where=getattr(focus, "where", "") or "",
     )
 
     edited = False
+
+    where_clause = _extract_edit_where(text, focus)
+    if where_clause:
+        req.where = where_clause
+        edited = True
 
     table = _extract_edit_table(text)
     if table:
@@ -348,6 +547,8 @@ def inherit_focus_slots(
                     merged["connector_name"] = focus.connector_name
         if name in _TABLE_SCOPED_TOOLS and not merged.get("table") and focus.table:
             merged["table"] = focus.table
+        if name == "aggregate_data" and not merged.get("where") and getattr(focus, "where", ""):
+            merged["where"] = focus.where
         out.append((name, merged))
     return out
 
@@ -387,6 +588,7 @@ def focus_from_tool_output(name: str, output: dict[str, Any]) -> dict[str, Any]:
             "column": str(output.get("column") or ""),
             "group_by": str(output.get("group_by") or ""),
             "grain": str(output.get("grain") or ""),
+            "where": str(output.get("where") or ""),
         }
         update = {k: v for k, v in update.items() if v not in ("", None, [])}
         update.update(authoritative)
@@ -421,7 +623,14 @@ def clarification_slot(name: str, args: dict[str, Any], error: str) -> PendingSl
             question=text,
             candidates=[c.strip() for c in candidates if c.strip()],
         )
-    if "which table" in lowered:
+    if "which table" in lowered or "did you mean" in lowered and "table" in lowered:
+        return PendingSlot(
+            tool=name,
+            args=dict(args or {}),
+            missing="table",
+            question=text,
+        )
+    if "no table" in lowered and ("which table" in lowered or "did you mean" in lowered or "list tables" in lowered):
         return PendingSlot(
             tool=name,
             args=dict(args or {}),

@@ -40,6 +40,50 @@ def _normalize_signal_primary_key(raw: Any) -> str | list[str]:
     return text
 
 
+def signal_pk_columns(signal_pk: Any, fallback: Any = "id") -> list[str]:
+    """Normalise a signal primary key into an ordered column list.
+
+    Shared by every incremental-snapshot chunk reader so single- and
+    composite-key signals take the same code path. Previously the Postgres
+    reader passed the raw value straight into an identifier quoter, so a
+    composite-key signal raised inside ``fetch_chunk``, the runner marked the
+    signal ``failed``, and the backfill silently never ran.
+    """
+    raw = signal_pk if signal_pk not in (None, "", [], ()) else fallback
+    if isinstance(raw, (list, tuple)):
+        cols = [str(c).strip() for c in raw if str(c).strip()]
+    else:
+        # Accept a comma-joined spelling for configs that flatten lists.
+        cols = [part.strip() for part in str(raw or "").split(",") if part.strip()]
+    return cols or ["id"]
+
+
+def snapshot_records_from_rows(
+    columns: list[str],
+    rows: list[Any],
+) -> list[dict[str, Any]]:
+    """Build snapshot chunk records that preserve SQL NULL and typed values.
+
+    Chunk readers used to build records with
+    ``{col: "" if v is None else str(v)}``, which caused two distinct data
+    defects on every backfilled row:
+
+    * **NULL became empty string.** Backfilled rows landed with ``''`` where the
+      source had ``NULL``, breaking NOT NULL semantics, reconcile checksums, and
+      any downstream ``IS NULL`` predicate.
+    * **``str()`` replaced canonical serialization.** ``datetime``, ``Decimal``,
+      ``bytes``, and ``bool`` were rendered with Python's ``repr``-ish text
+      instead of the wire formats the writers expect.
+
+    Raw values are kept here and serialized once, later, by the shared CDC
+    matrix builder — the same path ordinary stream events take.
+    """
+    return [
+        {columns[i]: (row[i] if i < len(row) else None) for i in range(len(columns))}
+        for row in rows
+    ]
+
+
 @dataclass
 class SnapshotSignal:
     id: str
@@ -56,6 +100,11 @@ class SnapshotSignal:
     # MySQL read-only incremental snapshot watermarks (DBZ-3577).
     gtid_low: str = ""
     gtid_high: str = ""
+    # Postgres equivalents: the WAL position bracketing the chunk SELECT. The low
+    # watermark also stamps `_df_lsn` on snapshotted rows so a redelivered event
+    # older than the read cannot overwrite them.
+    lsn_low: str = ""
+    lsn_high: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -76,6 +125,8 @@ class SnapshotSignal:
             error=str(d.get("error") or ""),
             gtid_low=str(d.get("gtid_low") or ""),
             gtid_high=str(d.get("gtid_high") or ""),
+            lsn_low=str(d.get("lsn_low") or ""),
+            lsn_high=str(d.get("lsn_high") or ""),
         )
 
 

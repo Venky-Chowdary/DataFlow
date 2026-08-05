@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import os
 
+from services.brand_env import getenv_brand
 import pytest
 
 from services.destination_privilege_probe import probe_destination_privileges
@@ -57,14 +58,14 @@ def test_live_snowflake_select_only_is_denied():
     result = probe_destination_privileges(
         "snowflake",
         account=os.environ["DATAFLOW_SNOWFLAKE_ACCOUNT"],
-        host=os.environ.get("DATAFLOW_SNOWFLAKE_ACCOUNT", ""),
-        warehouse=os.environ.get("DATAFLOW_SNOWFLAKE_WAREHOUSE", ""),
+        host=getenv_brand("SNOWFLAKE_ACCOUNT", ""),
+        warehouse=getenv_brand("SNOWFLAKE_WAREHOUSE", ""),
         database=os.environ["DATAFLOW_SNOWFLAKE_DATABASE"],
-        schema=os.environ.get("DATAFLOW_SNOWFLAKE_SCHEMA", "PUBLIC"),
+        schema=getenv_brand("SNOWFLAKE_SCHEMA", "PUBLIC"),
         table=os.environ["DATAFLOW_SNOWFLAKE_TABLE"],
         username=os.environ["DATAFLOW_SNOWFLAKE_USER"],
         password=os.environ["DATAFLOW_SNOWFLAKE_PASSWORD"],
-        role=os.environ.get("DATAFLOW_SNOWFLAKE_ROLE", ""),
+        role=getenv_brand("SNOWFLAKE_ROLE", ""),
         table_exists=True,
     )
     assert result.status == "denied"
@@ -93,7 +94,7 @@ def test_live_sqlserver_select_only_is_denied():
         "sqlserver",
         host=os.environ["DATAFLOW_MSSQL_HOST"],
         database=os.environ["DATAFLOW_MSSQL_DATABASE"],
-        schema=os.environ.get("DATAFLOW_MSSQL_SCHEMA", "dbo"),
+        schema=getenv_brand("MSSQL_SCHEMA", "dbo"),
         table=os.environ["DATAFLOW_MSSQL_TABLE"],
         username=os.environ["DATAFLOW_MSSQL_USER"],
         password=os.environ["DATAFLOW_MSSQL_PASSWORD"],
@@ -108,7 +109,7 @@ def test_live_oracle_select_only_is_denied():
     result = probe_destination_privileges(
         "oracle",
         host=os.environ["DATAFLOW_ORACLE_HOST"],
-        database=os.environ.get("DATAFLOW_ORACLE_DATABASE", ""),
+        database=getenv_brand("ORACLE_DATABASE", ""),
         schema=os.environ["DATAFLOW_ORACLE_SCHEMA"],
         table=os.environ["DATAFLOW_ORACLE_TABLE"],
         username=os.environ["DATAFLOW_ORACLE_USER"],

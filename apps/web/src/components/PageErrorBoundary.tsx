@@ -19,7 +19,7 @@ export class PageErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error(`[DataFlow] ${this.props.label ?? "Page"} crashed`, error, info.componentStack);
+    console.error(`[Datawrap] ${this.props.label ?? "Page"} crashed`, error, info.componentStack);
   }
 
   render() {

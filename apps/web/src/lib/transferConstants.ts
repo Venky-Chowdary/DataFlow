@@ -19,7 +19,58 @@ export type SchemaPolicyId =
   | "pause_on_change"
   | "type_locked";
 
-export type ValidationModeId = "balanced" | "strict" | "maximum";
+export type ValidationModeId =
+  | "balanced"
+  | "strict"
+  | "maximum"
+  | "migration"
+  | "discovery"
+  | "audit";
+
+export const VALIDATION_MODES: {
+  id: ValidationModeId;
+  label: string;
+  threshold: string;
+  detail: string;
+}[] = [
+  {
+    id: "strict",
+    label: "Strict",
+    threshold: "0.85",
+    detail: "Fail on fidelity risks unless an approved Migration Risk Contract continues the column.",
+  },
+  {
+    id: "maximum",
+    label: "Maximum",
+    threshold: "0.95",
+    detail: "Strict posture with a higher mapping confidence floor.",
+  },
+  {
+    id: "balanced",
+    label: "Balanced",
+    threshold: "0.75",
+    detail: "Allow approved risks; Gate-8 may use sample assurance when digests diverge.",
+  },
+  {
+    id: "migration",
+    label: "Migration",
+    threshold: "0.75",
+    detail: "Warn on recoverable issues; unrecoverable fidelity still hard-blocks.",
+  },
+  {
+    id: "discovery",
+    label: "Discovery",
+    threshold: "report",
+    detail: "Report-only — never unlocks Execute / never writes.",
+  },
+  {
+    id: "audit",
+    label: "Audit",
+    threshold: "0.85",
+    detail: "Hard-block audit trail — never writes.",
+  },
+];
+
 export type DateLocaleId = "" | "DMY" | "MDY";
 
 export const SYNC_MODES: { id: SyncModeId; label: string; detail: string }[] = [
@@ -45,8 +96,8 @@ export const SCHEMA_POLICIES: { id: SchemaPolicyId; label: string; detail: strin
   },
   {
     id: "propagate_all",
-    label: "Propagate everything",
-    detail: "Auto-add columns like Propagate columns; incompatible type changes still need review.",
+    label: "Propagate columns (all streams)",
+    detail: "Same additive ADD COLUMN behavior as Propagate columns (not type auto-rewrite). Incompatible type changes still need review.",
   },
   {
     id: "pause_on_change",
@@ -60,14 +111,66 @@ export const SCHEMA_POLICIES: { id: SchemaPolicyId; label: string; detail: strin
   },
 ];
 
-export const VALIDATION_MODES: { id: ValidationModeId; label: string; threshold: string }[] = [
-  { id: "strict", label: "Strict", threshold: "0.85" },
-  { id: "maximum", label: "Maximum", threshold: "0.95" },
-  { id: "balanced", label: "Balanced", threshold: "0.75" },
-];
-
 /** Fallback when the schedules API does not return sync_modes — never invent "incremental". */
 export const DEFAULT_SYNC_MODE_IDS: SyncModeId[] = SYNC_MODES.map((m) => m.id);
+
+/** Destinations that honor SCD2 / mirror streaming paths in the engine. */
+export const SQL_HISTORY_SYNC_DESTS = new Set([
+  "postgresql",
+  "mysql",
+  "sqlite",
+  "snowflake",
+  "bigquery",
+  "redshift",
+  "generic_sql",
+  "sqlserver",
+  "mssql",
+  "oracle",
+  "duckdb",
+]);
+
+/** Sources that can drive CDC (log / change-stream) in production. */
+export const CDC_CAPABLE_SOURCES = new Set([
+  "postgresql",
+  "mysql",
+  "sqlserver",
+  "mssql",
+  "oracle",
+  "mongodb",
+  "azure_sql_database",
+  "microsoft_sql_server",
+  "amazon_rds_sql_server",
+  "amazon_rds_postgresql",
+  "amazon_rds_mysql",
+  "amazon_aurora_postgresql",
+  "amazon_aurora_mysql",
+]);
+
+/**
+ * Sync modes the operator may pick for this route — hide engine-unsupported
+ * combinations so client deploy cannot select a mode that fails at Execute.
+ */
+export function availableSyncModes(opts: {
+  destDriver: string;
+  sourceDriver: string;
+  sourceKind: "file" | "database" | "cloud" | string;
+  isMultiStream: boolean;
+}): { id: SyncModeId; label: string; detail: string }[] {
+  const dest = (opts.destDriver || "").toLowerCase();
+  const src = (opts.sourceDriver || "").toLowerCase();
+  const fileish = opts.sourceKind === "file" || opts.sourceKind === "cloud";
+  return SYNC_MODES.filter((mode) => {
+    if (mode.id === "scd2" || mode.id === "mirror") {
+      if (opts.isMultiStream) return false;
+      if (!dest || !SQL_HISTORY_SYNC_DESTS.has(dest)) return false;
+    }
+    if (mode.id === "cdc") {
+      if (fileish) return false;
+      if (src && !CDC_CAPABLE_SOURCES.has(src)) return false;
+    }
+    return true;
+  });
+}
 
 export const SYNC_MODE_META: Record<string, { label: string; detail: string }> = Object.fromEntries(
   SYNC_MODES.map((m) => [m.id, { label: m.label, detail: m.detail }]),
@@ -78,3 +181,20 @@ export const DATE_LOCALES: { id: DateLocaleId; label: string; detail: string }[]
   { id: "DMY", label: "DMY (day/month/year)", detail: "European / Indian / Australian date order." },
   { id: "MDY", label: "MDY (month/day/year)", detail: "United States date order." },
 ];
+
+/** Single operator-facing copy for SCD2/mirror + multi-stream block (rank 74). */
+export const MULTI_STREAM_SCD2_MIRROR_BLOCK =
+  "Multi-stream SCD2/mirror is not supported. Switch to full/incremental/CDC, or select a single table.";
+
+export function multiStreamScd2MirrorBlockCopy(kind: "alert" | "toast" | "schedule" | "execute" = "alert"): string {
+  if (kind === "schedule") {
+    return "SCD2/mirror cannot be scheduled for multiple streams — use full/incremental/CDC or a single stream.";
+  }
+  if (kind === "toast" || kind === "execute") {
+    return MULTI_STREAM_SCD2_MIRROR_BLOCK;
+  }
+  return MULTI_STREAM_SCD2_MIRROR_BLOCK;
+}
+
+export const MULTI_STREAM_SCD2_PRIMARY_CTA = "Switch to full append";
+

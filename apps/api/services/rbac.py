@@ -1,4 +1,4 @@
-"""Role-based access control for the DataFlow API.
+"""Role-based access control for the Datawrap API.
 
 Permission model (enterprise-friendly):
 
@@ -120,13 +120,21 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("GET", "/api/v1/workspace/proofs/", Permission.WORKSPACE_READ),
     ("POST", "/api/v1/workspace/proofs/", Permission.JOB_RUN),
     ("*", "/api/v1/workspace/", Permission.WORKSPACE_MANAGE),
+    ("*", "/api/v1/resource-acls", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/audit/", Permission.AUDIT_READ),
+    ("POST", "/api/v1/audit/tip/", Permission.WORKSPACE_MANAGE),
+    ("GET", "/api/v1/cdc/mapping-reviews", Permission.JOB_READ),
+    ("POST", "/api/v1/cdc/mapping-reviews/", Permission.JOB_MANAGE),
     ("POST", "/api/v1/transfer/run", Permission.JOB_RUN),
     ("*", "/api/v1/transfer/plans/", Permission.JOB_PLAN),
     ("GET", "/api/v1/transfer/", Permission.JOB_READ),
     ("*", "/api/v1/schedules/", Permission.SCHEDULE_MANAGE),
     ("GET", "/api/v1/audit/", Permission.AUDIT_READ),
     ("*", "/api/v1/ai/", Permission.AI_USE),
+    # MCP tool execution is an AI surface — same permission as Pilot tools.
+    ("POST", "/api/v1/mcp/tools/call", Permission.AI_USE),
+    ("GET", "/api/v1/mcp/logs", Permission.AI_USE),
+    ("*", "/api/v1/mcp/", Permission.AI_USE),
     ("GET", "/api/v1/connectors/", Permission.CONNECTOR_READ),
     ("*", "/api/v1/connectors/", Permission.CONNECTOR_WRITE),
     ("*", "/api/v1/query/", Permission.QUERY_USE),
@@ -158,12 +166,25 @@ def has_permission(user: dict[str, str] | None, permission: str) -> bool:
     return permission in role_permissions(role)
 
 
+def _is_public_mcp_path(path: str) -> bool:
+    """Discovery + Streamable handshake only — not ``/tools/call`` or ``/logs``."""
+    if path in ("/api/v1/mcp", "/api/v1/mcp/"):
+        return True
+    if path.startswith("/api/v1/mcp/manifest") or path.startswith("/api/v1/mcp/status"):
+        return True
+    if path.rstrip("/") == "/api/v1/mcp/tools":
+        return True
+    return False
+
+
 def _is_public_path(path: str) -> bool:
     if path in _PUBLIC_PATHS:
         return True
-    for prefix in ("/api/v1/auth/sso/", "/auth/sso/", "/api/v1/catalog/", "/api/v1/mcp"):
+    for prefix in ("/api/v1/auth/sso/", "/auth/sso/", "/api/v1/catalog/"):
         if path.startswith(prefix):
             return True
+    if _is_public_mcp_path(path):
+        return True
     return False
 
 

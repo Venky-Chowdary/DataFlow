@@ -1,6 +1,6 @@
 """pgvector destination writer — turns rows into embedded vector chunks.
 
-This writer is the first vector-DB destination in DataFlow. It reuses the
+This writer is the first vector-DB destination in Datawrap. It reuses the
 semantic chunking and embedding service in `services/vectorization.py` so that
 any source row with textual content can be indexed for RAG without manual
 field mapping.

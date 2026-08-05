@@ -7,6 +7,61 @@ on:
     branches: [main]
 
 jobs:
+  # Lean evidence pack — no databases. Regenerates claim→metric catalog and
+  # fails when marketing floors exceed measured fixture proofs.
+  mapping-evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API + preflight
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements.txt
+          python -m pip install -e packages/preflight
+
+      - name: Build evidence catalog
+        env:
+          PYTHONPATH: apps/api:packages/preflight/src
+        run: |
+          python apps/api/scripts/run_evidence_pack.py --refresh-pairs --fail-on-miss
+          echo "### Mapping evidence pack" >> "$GITHUB_STEP_SUMMARY"
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          cat = json.loads(Path("apps/api/data/proofs/evidence_catalog.json").read_text())
+          print(f"- **{'PASS' if cat['all_passed'] else 'FAIL'}** — {cat['passed_count']}/{cat['claim_count']} claims")
+          for c in cat["claims"]:
+              mark = "ok" if c["passed"] else "MISS"
+              print(f"- `{c['id']}`: {mark}")
+          print()
+          print("Artifact: `apps/api/data/proofs/EVIDENCE_CATALOG.md`")
+          PY
+
+      - name: Evidence pack pytest gate
+        working-directory: apps/api
+        env:
+          PYTHONPATH: .:../../packages/preflight/src
+        run: |
+          python -m pytest tests/test_evidence_pack.py -q --tb=short
+
+      - name: Upload evidence artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mapping-evidence-catalog
+          path: |
+            apps/api/data/proofs/evidence_catalog.json
+            apps/api/data/proofs/EVIDENCE_CATALOG.md
+            apps/api/data/proofs/abbreviation_coverage.json
+            apps/api/data/proofs/mapping_connector_pair_matrix/
+
   # Fast GitOps gate — no databases. Validates example manifest + CLI plan/apply proofs.
   gitops:
     runs-on: ubuntu-latest

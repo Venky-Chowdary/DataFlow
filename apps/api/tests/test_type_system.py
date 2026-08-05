@@ -23,13 +23,14 @@ def test_oracle_sdo_geometry_normalizes_to_geography():
     ):
         assert normalize_logical_type(raw) == "geography", raw
     assert ddl_type("oracle", "geography") == "SDO_GEOMETRY"
-    # geography → SDO_GEOMETRY is identity, not a lossy sink-to-string.
-    assert is_lossy_coercion("geography", "SDO_GEOMETRY") is False
-    assert is_lossy_coercion("geography", "VARCHAR2") is False  # allowlisted text sink
+    # GEOGRAPHY → SDO invents Oracle opaque polarity — Accept risk (not silent identity).
+    assert is_lossy_coercion("geography", "SDO_GEOMETRY") is True
+    assert is_lossy_coercion("geography", "VARCHAR2") is True
 
 
 def test_type_system_redshift_ddl():
-    assert ddl_type("redshift", "integer") == "BIGINT"
+    # Width-preserving invent — INTEGER stays INTEGER, not invent-widen BIGINT.
+    assert ddl_type("redshift", "integer") == "INTEGER"
     assert ddl_type("redshift", "json") == "SUPER"
     assert ddl_type("postgresql", "JSON") == "JSONB"
     assert ddl_type("snowflake", "ARRAY") == "VARIANT"
@@ -39,10 +40,10 @@ def test_type_system_redshift_ddl():
 
 
 def test_type_system_lakehouse_ddl():
-    assert ddl_type("databricks", "integer") == "BIGINT"
+    assert ddl_type("databricks", "integer") == "INT"
     assert ddl_type("databricks", "json") == "STRING"
     assert ddl_type("delta", "TIMESTAMP") == "TIMESTAMP"
-    assert ddl_type("iceberg", "integer") == "long"
+    assert ddl_type("iceberg", "integer") == "int"
     assert ddl_type("apache_iceberg", "json") == "string"
     assert ddl_type("iceberg", "UUID") == "uuid"
     assert ddl_type("unity_catalog", "DECIMAL") == "DECIMAL(38,10)"
@@ -63,6 +64,15 @@ def test_decimal_precision_propagated_not_truncated():
 
     assert ddl_carrier_type("DECIMAL(12,4)") == "DECIMAL(12,4)"
     assert ddl_carrier_type("numeric(12,4)") == "DECIMAL(12,4)"
+    # UNSIGNED / specialty must not collapse before create-new risk stamping.
+    assert ddl_carrier_type("INT UNSIGNED") == "INT UNSIGNED"
+    assert ddl_carrier_type("BIGINT UNSIGNED") == "BIGINT UNSIGNED"
+    assert ddl_carrier_type("INET") == "INET"
+    assert ddl_carrier_type("OBJECTID") == "OBJECTID"
+    assert ddl_carrier_type("UInt8") == "UInt8"
+    assert ddl_carrier_type("HALFVEC(3)") == "HALFVEC(3)"
+    assert ddl_carrier_type("SPARSEVEC(16)") == "SPARSEVEC(16)"
+    assert ddl_carrier_type("VECTOR(768)") == "VECTOR(768)"
     # Scale beyond MySQL cap (30) → lossless TEXT, never silent truncate
     assert ddl_type("mysql", "NUMBER(38,31)") == "TEXT"
     assert decimal_scale_would_truncate("NUMBER(38,31)", "mysql") is True
@@ -108,6 +118,7 @@ def test_ddl_float_is_not_rewritten_to_fixed_point():
     assert ddl_type("bigquery", "DOUBLE") == "FLOAT64"
     assert "NUMBER(38,10)" not in ddl_type("snowflake", "FLOAT")
     assert is_lossy_coercion("float", "integer") is True
-    assert is_lossy_coercion("integer", "float") is False
+    # Large ints lose precision in IEEE float mantissa — Accept risk required.
+    assert is_lossy_coercion("integer", "float") is True
     assert is_lossy_coercion("float", "decimal") is True
     assert is_lossy_coercion("float", "string") is False

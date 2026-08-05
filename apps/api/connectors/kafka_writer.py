@@ -41,7 +41,7 @@ def _bootstrap(host: str, port: int, connection_string: str) -> str:
 
 
 def _json_schema_property_for_logical(logical: str | None) -> dict[str, Any]:
-    """Map DataFlow logical carriers to JSON Schema types for Registry honesty."""
+    """Map Datawrap logical carriers to JSON Schema types for Registry honesty."""
     from services.type_system import normalize_logical_type
 
     raw = (logical or "string").strip()
