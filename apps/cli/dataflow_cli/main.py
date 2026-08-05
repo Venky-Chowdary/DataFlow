@@ -128,10 +128,12 @@ def _http_bytes(url: str, *, token: str = "") -> bytes:
 def cmd_validate(path: Path) -> int:
     data = _load_file(path)
     kind = str(data.get("kind") or "")
-    if kind == "DataFlowManifest":
+    # Product rename: DatawrapManifest is the canonical kind; DataFlowManifest remains supported.
+    manifest_kinds = {"DatawrapManifest", "DataFlowManifest", "DataflowManifest"}
+    if kind in manifest_kinds:
         resources = data.get("resources") or []
         if not isinstance(resources, list) or not resources:
-            print("validate: FAIL — DataFlowManifest has no resources", file=sys.stderr)
+            print("validate: FAIL — manifest has no resources", file=sys.stderr)
             return 1
         bad = [r for r in resources if not isinstance(r, dict) or not r.get("kind")]
         if bad:
