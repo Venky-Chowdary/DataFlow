@@ -158,7 +158,11 @@ export const EXECUTION_POLICY_OPTIONS: Array<{
   { id: "STOP_COLUMN", label: "STOP_COLUMN — omit bad column; write other columns", continueUnlock: true },
   { id: "QUARANTINE_ROW", label: "QUARANTINE_ROW — holdout row to DLQ for replay", continueUnlock: true },
   { id: "SKIP_ROW", label: "SKIP_ROW — drop row (audit skip, not DLQ replay)", continueUnlock: true },
-  { id: "CAST_AND_CONTINUE", label: "CAST_AND_CONTINUE — cast fail → quarantine", continueUnlock: true },
+  {
+    id: "CAST_AND_CONTINUE",
+    label: "CAST_FAIL_QUARANTINE — cast fail → holdout (value not written)",
+    continueUnlock: true,
+  },
   { id: "TRANSFORM_AND_CONTINUE", label: "TRANSFORM_AND_CONTINUE — transform fail → quarantine", continueUnlock: true },
 ];
 

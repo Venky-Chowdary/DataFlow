@@ -3830,6 +3830,15 @@ export function TransferPage({
         priorityColumn: priorityColumn || undefined,
         priorityDirection,
         limit: rowLimit > 0 ? rowLimit : undefined,
+        complianceAcknowledged,
+        schemaDriftAcknowledged,
+        fkRiskAcknowledged,
+        acknowledgmentActor: readSession()?.email || readSession()?.name || undefined,
+        acknowledgmentReason: [
+          complianceAcknowledged ? "PII/compliance acknowledged on Validate" : "",
+          schemaDriftAcknowledged ? "Schema drift acknowledged on Validate" : "",
+          fkRiskAcknowledged ? "FK risk acknowledged on Validate" : "",
+        ].filter(Boolean).join("; ") || undefined,
       });
       setRunStartupProgress(36);
       setRunStartupPhase(RUN_LAUNCH_STAGES[3]);
@@ -5804,10 +5813,10 @@ export function TransferPage({
             </div>
             <EmptyState
               icon="transfer"
-              title={isGovernedExecuteReady ? "Ready to transfer" : "Confirm Validate before write"}
+              title={isGovernedExecuteReady ? "Execute-ready · not migration proven" : "Confirm Validate before write"}
               description={
                 isGovernedExecuteReady
-                  ? "API preflight approved on Validate. Re-open gate cards anytime, or execute here to start the write."
+                  ? "API preflight approved on Validate. Execute starts the write; Gate-8 post-write proof is still required for migration_proven."
                   : "Execute stays locked until API Validate returns decision approve (local/review-grade cannot unlock)."
               }
             />

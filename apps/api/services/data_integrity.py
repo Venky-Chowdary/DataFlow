@@ -347,21 +347,37 @@ def _check_required_nulls(
 
 
 def _is_append_like(sync_mode: str) -> bool:
-    return (sync_mode or "").strip().lower() in {
-        "full_refresh_append",
-        "incremental_append",
-        "append",
-        "append_only",
-    }
+    """Align with ``sync_cursor.APPEND_SYNC_MODES`` (insert/full_append aliases)."""
+    try:
+        from services.sync_cursor import is_append_sync, normalize_sync_mode
+
+        return is_append_sync(normalize_sync_mode(sync_mode))
+    except Exception:
+        return (sync_mode or "").strip().lower() in {
+            "full_refresh_append",
+            "incremental_append",
+            "append",
+            "append_only",
+            "insert",
+            "full_append",
+        }
 
 
 def _is_overwrite_like(sync_mode: str) -> bool:
-    return (sync_mode or "").strip().lower() in {
-        "full_refresh_overwrite",
-        "overwrite",
-        "full_refresh",
-        "replace",
-    }
+    """Align with ``sync_cursor.OVERWRITE_SYNC_MODES``."""
+    try:
+        from services.sync_cursor import is_overwrite_sync, normalize_sync_mode
+
+        return is_overwrite_sync(normalize_sync_mode(sync_mode))
+    except Exception:
+        return (sync_mode or "").strip().lower() in {
+            "full_refresh_overwrite",
+            "overwrite",
+            "full_refresh",
+            "replace",
+            "truncate",
+            "full_overwrite",
+        }
 
 
 def _target_for_source(source: str, mappings: list[dict]) -> str:
@@ -700,6 +716,9 @@ def _check_duplicate_keys(
     destination_pk_columns: list[str] | None = None,
     destination_unique_keys: list[dict[str, Any]] | None = None,
     target_types: dict[str, str] | None = None,
+    source_duplicate_probe_status: str = "",
+    source_duplicate_probe_message: str = "",
+    source_duplicate_probe_expected: bool = False,
 ) -> dict[str, Any]:
     """Duplicate check on the resolved identity key (sample + source-side probe).
 
@@ -718,7 +737,12 @@ def _check_duplicate_keys(
     from services.primary_key import sync_requires_unique_identity
 
     schemaless = dest_kind in SCHEMALESS_DESTS
-    sync = (sync_mode or "").strip().lower()
+    try:
+        from services.sync_cursor import normalize_sync_mode
+
+        sync = normalize_sync_mode(sync_mode)
+    except Exception:
+        sync = (sync_mode or "").strip().lower()
     target_col = _target_for_source(primary_key, mappings) if primary_key else ""
     advisory_warnings = _advisory_unique_key_warnings(
         dest_kind=dest_kind,
@@ -801,6 +825,7 @@ def _check_duplicate_keys(
     # preview sample. Must run BEFORE the append/no-enforce early return —
     # Quarantine→balanced must not green Validate when write-time DQ will fail.
     probe_authoritative = False
+    probe_status = (source_duplicate_probe_status or "").strip().lower()
     if primary_key:
         findings = source_duplicate_findings or []
         if findings:
@@ -812,7 +837,14 @@ def _check_duplicate_keys(
             )
             probe_authoritative = True
 
-    if not enforce_identity and not issues:
+    probe_unavailable = bool(
+        source_duplicate_probe_expected
+        and probe_status
+        and probe_status != "ran"
+        and not probe_authoritative
+    )
+
+    if not enforce_identity and not issues and not probe_unavailable:
         return {
             "check": "duplicate_keys",
             "passed": True,
@@ -896,9 +928,26 @@ def _check_duplicate_keys(
     issues = deduped
     blocks = len(issues) > 0
     mode = (validation_mode or "").strip().lower()
-    # Full-table probe found duplicates → always block. Quarantine/Strip/balanced
-    # remediations must not enable Execute when the write batch will fail DQ.
-    if probe_authoritative and blocks:
+    # Full-table probe found duplicates. Hard-block only when write-time uniqueness
+    # is actually required (upsert/CDC/overwrite/schemaless/dest PK|UNIQUE).
+    # Append / create-new without a covering unique constraint may legally carry
+    # duplicate source keys — warn, do not invent a Validate-green / Execute-red
+    # asymmetry (operator saw "Ready" then failed at Run on append).
+    uniqueness_required = bool(
+        enforce_identity
+        or covering_single
+        or schemaless
+        or sync_requires_unique_identity(sync, dest_kind=dest_kind)
+        or _is_overwrite_like(sync)
+    )
+    # Probe expected but did not complete → never invent population uniqueness.
+    # Upsert/CDC/overwrite/dest-PK routes fail closed; append/create-new warns.
+    if probe_unavailable and uniqueness_required:
+        detail = (source_duplicate_probe_message or probe_status).strip()
+        issues.append(
+            f"{primary_key}: source uniqueness probe unavailable ({detail}) — "
+            "cannot approve uniqueness-required sync on sample alone"
+        )
         return {
             "check": "duplicate_keys",
             "passed": False,
@@ -908,9 +957,46 @@ def _check_duplicate_keys(
             "primary_key": primary_key,
             "dest_kind": dest_kind,
             "note": (
-                "Source-table probe found duplicate identity keys — Validate cannot "
-                "pass until Primary key is a unique column, sync mode allows non-unique "
-                "rows without that PK, or the source is deduped. Strip/Quarantine cannot fix this."
+                "Source uniqueness probe did not complete. Upsert/CDC/overwrite/"
+                "destination-PK routes fail closed until the probe runs, a unique "
+                "primary key is proven, or sync mode is switched to append without "
+                "a covering UNIQUE constraint."
+            ),
+        }
+    if probe_unavailable and not uniqueness_required:
+        advisory_warnings.append(
+            f"{primary_key}: source uniqueness probe unavailable ({probe_status}) — "
+            "sample-only uniqueness; append may still write duplicate keys"
+        )
+    if probe_authoritative and blocks:
+        if uniqueness_required:
+            return {
+                "check": "duplicate_keys",
+                "passed": False,
+                "blocks_transfer": True,
+                "issues": issues[:15],
+                "warnings": advisory_warnings,
+                "primary_key": primary_key,
+                "dest_kind": dest_kind,
+                "note": (
+                    "Source-table probe found duplicate identity keys — Validate cannot "
+                    "pass until Primary key is a unique column, sync mode allows non-unique "
+                    "rows without that PK, or the source is deduped. Strip/Quarantine cannot fix this."
+                ),
+            }
+        return {
+            "check": "duplicate_keys",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+            "warnings": (advisory_warnings + issues)[:15],
+            "primary_key": primary_key,
+            "dest_kind": dest_kind,
+            "note": (
+                f"Source probe found duplicate values on {primary_key}, but sync mode "
+                f"{sync or 'append'} does not require unique identity and destination has "
+                "no UNIQUE/PK covering that column — rows will append. Switch to upsert "
+                "with a unique primary key if identity must be enforced."
             ),
         }
     if blocks and mode == "balanced":
@@ -1166,6 +1252,9 @@ def run_integrity_audit(
     source_duplicate_findings: list[dict[str, Any]] | None = None,
     source_duplicate_probe_ran: bool = False,
     source_duplicate_probe_pk: str = "",
+    source_duplicate_probe_status: str = "",
+    source_duplicate_probe_message: str = "",
+    source_duplicate_probe_expected: bool = False,
 ) -> dict[str, Any]:
     """
     Run all critical data integrity checks in one pass.
@@ -1272,6 +1361,9 @@ def run_integrity_audit(
                 destination_pk_columns=destination_pk_columns,
                 destination_unique_keys=destination_unique_keys,
                 target_types=target_types,
+                source_duplicate_probe_status=source_duplicate_probe_status,
+                source_duplicate_probe_message=source_duplicate_probe_message,
+                source_duplicate_probe_expected=source_duplicate_probe_expected,
             )
         )
         checks.append(
@@ -1364,6 +1456,11 @@ def run_integrity_audit(
             "primary_key": str(source_duplicate_probe_pk or "") or None,
             "finding_count": len(source_duplicate_findings or []),
             "coverage": "full_selected" if source_duplicate_probe_ran else "sample",
+            "status": (source_duplicate_probe_status or (
+                "ran" if source_duplicate_probe_ran else "sample"
+            )),
+            "message": (source_duplicate_probe_message or "")[:400] or None,
+            "expected": bool(source_duplicate_probe_expected),
         },
         "summary": (
             f"{len(passed_checks)}/{len(checks)} integrity checks passed"

@@ -283,8 +283,10 @@ export function buildValidateDecisionPath(
       executeUnlocked: unlocked,
       migrationProven,
       riskContractIncomplete: risk.incomplete,
-      headline: unlocked ? "Ready to Execute" : "Validate to unlock Execute",
-      note: "Execute-ready is not migration proven. Post-write Gate-8 full_checksum is required for migration_proven.",
+      headline: unlocked
+        ? "Execute unlocked · not migration proven"
+        : "Validate to unlock Execute",
+      note: "Execute-ready is not migration proven. Post-write Gate-8 full_checksum is required for migration_proven. Sample Validate never claims population uniqueness.",
     };
   }
 

@@ -39,13 +39,17 @@ def test_quarantine_policy_holds_out_bad_rows():
 
 
 def test_coerce_null_policy_preserves_row_count():
-    mapped, errors = build_mapped_rows(
+    from connectors.writer_common import build_mapped_rows_with_details
+
+    mapped, errors, details = build_mapped_rows_with_details(
         headers=["is_active"],
         data_rows=[["true"], ["maybe"]],
         mappings=[{"source": "is_active", "target": "is_active", "transform": "boolean"}],
         target_cols=["is_active"],
         column_types={"is_active": "BOOLEAN"},
         error_policy="coerce_null",
+        allow_job_coerce_null=True,
     )
     assert mapped == [(True,), (None,)]
     assert errors
+    assert details and details[0]["policy"] == "coerce_null"

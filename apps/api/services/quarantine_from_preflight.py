@@ -41,12 +41,28 @@ def _enrich_from_message(issue: dict[str, Any]) -> dict[str, Any]:
     return enriched
 
 
+def _issue_is_non_blocking_warn(issue: dict[str, Any]) -> bool:
+    """Skip Risk-Contract-signed / severity=warn noise — not write rejects."""
+    sev = str(issue.get("severity") or "").strip().lower()
+    if sev in ("warn", "warning", "info", "ok", "pass"):
+        return True
+    text = str(issue.get("reason") or issue.get("message") or "").lower()
+    if "risk contract signed" in text or "continue-policy risk contract" in text:
+        return True
+    return False
+
+
 def _collect_issue_lists(preflight: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not preflight:
         return []
     out: list[dict[str, Any]] = []
     for gate in preflight.get("gates") or []:
         if not isinstance(gate, dict):
+            continue
+        # Passed/warn gates often still carry review-grade coercion notes.
+        # Quarantine is for blocking findings — never invent rejects from green gates.
+        status = str(gate.get("status") or "").strip().lower()
+        if status in ("pass", "passed", "ok", "skip", "skipped", "warn", "warning"):
             continue
         details = gate.get("details") or {}
         if not isinstance(details, dict):
@@ -65,7 +81,7 @@ def _collect_issue_lists(preflight: dict[str, Any] | None) -> list[dict[str, Any
                 continue
             for item in raw:
                 parsed = _as_issue_dict(item)
-                if parsed:
+                if parsed and not _issue_is_non_blocking_warn(parsed):
                     out.append(_enrich_from_message(parsed))
         # Nested integrity payload
         for nested_key in ("integrity_issues", "checks"):
@@ -73,7 +89,7 @@ def _collect_issue_lists(preflight: dict[str, Any] | None) -> list[dict[str, Any
             if isinstance(nested, list):
                 for item in nested:
                     parsed = _as_issue_dict(item)
-                    if parsed:
+                    if parsed and not _issue_is_non_blocking_warn(parsed):
                         out.append(_enrich_from_message(parsed))
     for blocker in preflight.get("blockers") or []:
         if not isinstance(blocker, dict):
@@ -87,11 +103,13 @@ def _collect_issue_lists(preflight: dict[str, Any] | None) -> list[dict[str, Any
             or []
         ):
             parsed = _as_issue_dict(item)
-            if parsed:
+            if parsed and not _issue_is_non_blocking_warn(parsed):
                 out.append(_enrich_from_message(parsed))
         msg = blocker.get("message")
         if msg and not out:
-            out.append(_enrich_from_message({"message": str(msg), "reason": str(msg)}))
+            parsed = _enrich_from_message({"message": str(msg), "reason": str(msg)})
+            if not _issue_is_non_blocking_warn(parsed):
+                out.append(parsed)
         if isinstance(guidance, dict) and guidance.get("fix") and out:
             for row in out:
                 row.setdefault("suggested_fix", guidance.get("fix"))

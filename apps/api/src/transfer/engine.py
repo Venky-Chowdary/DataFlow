@@ -656,6 +656,13 @@ def _destination_schema_probe(
                 extra.pop("schema_probe_message", None)
             if probe_msg and exists is False:
                 extra["schema_probe_message"] = probe_msg[:500]
+        # Stamp PK/UNIQUE/FK catalog for Execute preflight SSOT with Validate
+        # (preflight_router passes dest_meta.primary_key_columns / unique_keys).
+        extra["primary_key_columns"] = list(info.get("primary_key_columns") or [])
+        extra["unique_keys"] = list(info.get("unique_keys") or [])
+        extra["foreign_keys"] = list(
+            info.get("foreign_keys") or info.get("destination_foreign_keys") or []
+        )
         # Overwrite recreates the table — do not type or NOT NULL against the
         # stale shape. Append/upsert keep live nullability for G3 contracts.
         if is_overwrite_sync(sync_mode):
@@ -677,8 +684,158 @@ def _destination_schema_probe(
             "schema_probe_error": str(exc)[:500],
             "schema_probe_message": str(exc)[:500],
             "schema_nullability": {},
+            "primary_key_columns": [],
+            "unique_keys": [],
+            "foreign_keys": [],
         }
         return {}, None
+
+
+def _preflight_sample_rows(records: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Execute must use the same sample cap as Validate (not a thinner head)."""
+    from services.coercion_probe import PREFLIGHT_SAMPLE_LIMIT
+
+    rows = list(records or [])
+    if len(rows) > PREFLIGHT_SAMPLE_LIMIT:
+        return rows[:PREFLIGHT_SAMPLE_LIMIT]
+    return rows
+
+
+def _execute_preflight_parity_kwargs(
+    request: TransferRequest,
+    *,
+    destination_connected: bool,
+) -> dict[str, Any]:
+    """Validate≡Execute preflight kwargs — privilege, FK, identity, operator acks.
+
+    Never invent ``can_create``/``can_write`` from connectivity alone when a
+    privilege probe is available. Contract PK prefers the destination stream name
+    (same as ``preflight_router``).
+    """
+    from services.primary_key import extract_contract_primary_key
+    from services.preflight_service import inspect_destination_for_preflight
+
+    dest = request.destination
+    dest_table = str(dest.table or dest.collection or "")
+    contract_pk = (
+        extract_contract_primary_key(
+            getattr(request, "stream_contracts", None) or [],
+            stream_name=dest_table,
+        )
+        or extract_contract_primary_key(getattr(request, "stream_contracts", None) or [])
+        or ""
+    )
+
+    extra = dict(getattr(dest, "extra", None) or {})
+    dest_meta: dict[str, Any] = {}
+    try:
+        dest_meta = inspect_destination_for_preflight(
+            connector_id=dest.connector_id or None,
+            dest_type=dest.format or "",
+            dest_host=dest.host or None,
+            dest_port=int(dest.port or 0) or None,
+            dest_database=dest.database or None,
+            dest_table=dest.table or None,
+            dest_collection=dest.collection or None,
+            dest_schema=getattr(dest, "schema", None) or None,
+            dest_username=dest.username or None,
+            dest_password=dest.password or None,
+            dest_connection_string=dest.connection_string or None,
+            dest_warehouse=getattr(dest, "warehouse", None) or None,
+            dest_auth_source=getattr(dest, "auth_source", None) or None,
+            dest_auth_mode=getattr(dest, "auth_mode", None) or None,
+            dest_auth_role=getattr(dest, "auth_role", None) or None,
+            dest_api_key=getattr(dest, "api_key", None) or None,
+            dest_service_account=getattr(dest, "service_account", None) or None,
+            dest_kind=dest.kind or "database",
+        )
+    except Exception as exc:
+        logger.warning(
+            "Execute destination inspect for preflight parity failed: %s",
+            exc,
+            exc_info=exc,
+        )
+
+    pk_cols = list(
+        dest_meta.get("primary_key_columns")
+        or dest_meta.get("pk_columns")
+        or extra.get("primary_key_columns")
+        or []
+    )
+    unique_keys = list(dest_meta.get("unique_keys") or extra.get("unique_keys") or [])
+    foreign_keys = list(
+        dest_meta.get("foreign_keys")
+        or extra.get("foreign_keys")
+        or []
+    )
+    privilege_probe = dict(
+        dest_meta.get("privilege_probe") or extra.get("privilege_probe") or {}
+    )
+
+    can_create = dest_meta.get("can_create_table")
+    if can_create is None and privilege_probe:
+        if "can_create_table" in privilege_probe:
+            can_create = privilege_probe.get("can_create_table")
+        elif "create" in privilege_probe:
+            can_create = privilege_probe.get("create")
+    if can_create is None:
+        # Last resort — still better than inventing True from a failed inspect.
+        can_create = bool(destination_connected)
+
+    can_write = dest_meta.get("can_write")
+    if can_write is None and privilege_probe:
+        if "can_write" in privilege_probe:
+            can_write = privilege_probe.get("can_write")
+        elif "write" in privilege_probe:
+            can_write = privilege_probe.get("write")
+    if can_write is None:
+        can_write = bool(destination_connected)
+
+    # Keep destination.extra stamped for later gates / theater honesty.
+    extra["primary_key_columns"] = pk_cols
+    extra["unique_keys"] = unique_keys
+    extra["foreign_keys"] = foreign_keys
+    if privilege_probe:
+        extra["privilege_probe"] = privilege_probe
+    dest.extra = extra
+
+    table_exists = dest_meta.get("table_exists")
+    if table_exists is None and "table_exists" not in dest_meta:
+        table_exists = None
+
+    return {
+        "destination_pk_columns": pk_cols,
+        "destination_unique_keys": unique_keys,
+        "destination_foreign_keys": foreign_keys,
+        "contract_primary_key": contract_pk,
+        "privilege_probe": privilege_probe or None,
+        "destination_can_create": bool(can_create),
+        "destination_can_write": bool(can_write),
+        # Prefer inspect existence when known — else leave caller’s probe flag.
+        **(
+            {"destination_table_exists": table_exists}
+            if table_exists is not None
+            else {}
+        ),
+        "compliance_acknowledged": bool(
+            getattr(request, "compliance_acknowledged", False)
+        ),
+        "schema_drift_acknowledged": bool(
+            getattr(request, "schema_drift_acknowledged", False)
+        ),
+        "fk_risk_acknowledged": bool(getattr(request, "fk_risk_acknowledged", False)),
+        "acknowledgment_actor": str(
+            getattr(request, "acknowledgment_actor", "") or ""
+        ).strip(),
+        "acknowledgment_reason": str(
+            getattr(request, "acknowledgment_reason", "") or ""
+        ).strip(),
+    }
+
+
+# Back-compat alias for tests / callers that imported the identity-only helper.
+def _execute_preflight_identity_kwargs(request: TransferRequest) -> dict[str, Any]:
+    return _execute_preflight_parity_kwargs(request, destination_connected=True)
 
 
 def _destination_schema_types(
@@ -2192,6 +2349,9 @@ class UniversalTransferEngine:
             # PRODUCTION_SKU and Studio Execute must prove mapping gates first.
             if not request.skip_preflight:
                 dest_ok, dest_msg = probe_destination(request.destination)
+                parity = _execute_preflight_parity_kwargs(
+                    request, destination_connected=dest_ok
+                )
                 pf = run_file_preflight(
                     columns=columns,
                     column_types=schema,
@@ -2202,7 +2362,7 @@ class UniversalTransferEngine:
                     source_kind=request.source.kind,
                     source_format=request.source.format,
                     sync_mode=request.sync_mode,
-                    sample_rows=records[:100],
+                    sample_rows=_preflight_sample_rows(records),
                     confidence_threshold=confidence_threshold_for_mode(
                         request.validation_mode
                     ),
@@ -2212,7 +2372,6 @@ class UniversalTransferEngine:
                         (request.destination.extra or {}).get("schema_nullability") or {}
                     ),
                     destination_table_exists=dest_table_exists_flag,
-                    destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
                     source_table=(
@@ -2232,6 +2391,7 @@ class UniversalTransferEngine:
                     schema_policy=request.schema_policy,
                     backfill_new_fields=request.backfill_new_fields,
                     date_locale=request.date_locale,
+                    **parity,
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -3028,6 +3188,9 @@ class UniversalTransferEngine:
             )
             if not request.skip_preflight:
                 dest_ok, dest_msg = probe_destination(request.destination)
+                parity = _execute_preflight_parity_kwargs(
+                    request, destination_connected=dest_ok
+                )
                 pf = run_file_preflight(
                     columns=columns,
                     column_types=schema,
@@ -3038,7 +3201,7 @@ class UniversalTransferEngine:
                     source_kind=request.source.kind,
                     source_format=request.source.format,
                     sync_mode=request.sync_mode,
-                    sample_rows=sample_rows,
+                    sample_rows=_preflight_sample_rows(sample_rows),
                     confidence_threshold=confidence_threshold_for_mode(
                         request.validation_mode
                     ),
@@ -3048,7 +3211,6 @@ class UniversalTransferEngine:
                         (request.destination.extra or {}).get("schema_nullability") or {}
                     ),
                     destination_table_exists=dest_table_exists_flag,
-                    destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
                     source_table=(
@@ -3068,6 +3230,7 @@ class UniversalTransferEngine:
                     schema_policy=request.schema_policy,
                     backfill_new_fields=request.backfill_new_fields,
                     date_locale=request.date_locale,
+                    **parity,
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -3659,6 +3822,9 @@ class UniversalTransferEngine:
             )
             if not request.skip_preflight:
                 dest_ok, dest_msg = probe_destination(request.destination)
+                parity = _execute_preflight_parity_kwargs(
+                    request, destination_connected=dest_ok
+                )
                 pf = run_file_preflight(
                     columns=columns,
                     column_types=schema,
@@ -3669,7 +3835,7 @@ class UniversalTransferEngine:
                     source_kind=request.source.kind,
                     source_format=request.source.format,
                     sync_mode=request.sync_mode,
-                    sample_rows=sample_rows,
+                    sample_rows=_preflight_sample_rows(sample_rows),
                     confidence_threshold=confidence_threshold_for_mode(
                         request.validation_mode
                     ),
@@ -3679,7 +3845,6 @@ class UniversalTransferEngine:
                         (request.destination.extra or {}).get("schema_nullability") or {}
                     ),
                     destination_table_exists=dest_table_exists_flag,
-                    destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
                     source_table=(
@@ -3699,6 +3864,7 @@ class UniversalTransferEngine:
                     schema_policy=request.schema_policy,
                     backfill_new_fields=request.backfill_new_fields,
                     date_locale=request.date_locale,
+                    **parity,
                 )
                 pf = apply_policy_gates(
                     pf,

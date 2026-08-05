@@ -2,16 +2,55 @@
 
 Database sources can be larger than the sample used by G9, so a 100-row sample
 may miss duplicates that later cause a write-batch failure. This module runs a
- cheap source-side query (SQL GROUP BY or MongoDB aggregation) to find repeated
+cheap source-side query (SQL GROUP BY or MongoDB aggregation) to find repeated
 values for the resolved identity key before the transfer is approved.
+
+Honesty contract:
+- ``status="ran"`` means the probe query completed (findings may be empty = clean).
+- ``skipped_unsupported`` / ``error`` must NEVER be stamped as full-selected coverage.
+- Callers fail-closed when uniqueness is required but the probe did not run.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
+
+ProbeStatus = Literal[
+    "ran",
+    "skipped_no_pk",
+    "skipped_no_source",
+    "skipped_unsupported",
+    "error",
+]
+
+# SQL path covers generic_sql and all SQL-like catalog IDs.
+SQLISH_SOURCE_TYPES = frozenset({
+    "postgresql", "postgres", "redshift", "cockroachdb", "timescaledb", "supabase",
+    "mysql", "mariadb", "singlestore",
+    "sqlserver", "mssql", "synapse", "azure_sql_database",
+    "oracle", "db2", "sqlite", "duckdb", "generic_sql", "h2",
+    "snowflake", "bigquery", "databricks", "clickhouse", "trino", "presto", "questdb",
+})
+
+PROBED_SOURCE_TYPES = SQLISH_SOURCE_TYPES | frozenset({"mongodb", "mongodb_atlas"})
+
+
+@dataclass
+class SourceDuplicateProbeResult:
+    """Structured probe outcome — never invent population proof from a skip."""
+
+    findings: list[dict[str, Any]] = field(default_factory=list)
+    status: ProbeStatus = "skipped_no_source"
+    message: str = ""
+    db_type: str = ""
+
+    @property
+    def ran(self) -> bool:
+        return self.status == "ran"
 
 
 def _sql_duplicates(cfg: dict[str, Any], table: str, pk: str, limit: int = 5) -> list[dict[str, Any]]:
@@ -77,7 +116,7 @@ def _mongo_duplicates(cfg: dict[str, Any], collection: str, pk: str, limit: int 
     return [{"value": r.get("_id"), "count": int(r.get("count", 1))} for r in rows]
 
 
-def probe_source_duplicate_keys(
+def probe_source_duplicate_keys_result(
     *,
     source_connector_id: str = "",
     source_config: dict[str, Any] | None = None,
@@ -86,19 +125,23 @@ def probe_source_duplicate_keys(
     primary_key: str = "",
     workspace_id: str | None = None,
     limit: int = 5,
-) -> list[dict[str, Any]]:
-    """Return up to ``limit`` duplicate values for ``primary_key`` in the source.
-
-    Accepts either a saved connector id or an inline source config. Inline configs
-    are used when the UI sends the endpoint details directly (no saved connector).
-    Returns an empty list when the source is not a database, the connector cannot
-    be loaded, or the probe fails (probe failures are logged, not raised, so a
-    transient source hiccup does not block validation).
-    """
-    if not primary_key or (not source_table and not source_collection):
-        return []
+) -> SourceDuplicateProbeResult:
+    """Run the source duplicate probe and return an honest status + findings."""
+    if not primary_key:
+        return SourceDuplicateProbeResult(
+            status="skipped_no_pk",
+            message="No primary key resolved for uniqueness probe",
+        )
+    if not source_table and not source_collection:
+        return SourceDuplicateProbeResult(
+            status="skipped_no_source",
+            message="No source table/collection for uniqueness probe",
+        )
     if not source_connector_id and not source_config:
-        return []
+        return SourceDuplicateProbeResult(
+            status="skipped_no_source",
+            message="No source connector id or inline config for uniqueness probe",
+        )
 
     cfg: dict[str, Any] | None = None
     db_type = ""
@@ -123,7 +166,11 @@ def probe_source_duplicate_keys(
             ).lower()
 
         if not cfg:
-            return []
+            return SourceDuplicateProbeResult(
+                status="skipped_no_source",
+                message="Source connector could not be loaded for uniqueness probe",
+                db_type=db_type,
+            )
 
         # Inline endpoint configs use "format" for the database type; normalize to
         # "type" so the generic_sql engine builder can build a URL.
@@ -131,28 +178,74 @@ def probe_source_duplicate_keys(
             cfg = dict(cfg)
             cfg.setdefault("type", db_type)
 
-        if db_type == "mongodb":
+        if db_type in ("mongodb", "mongodb_atlas"):
             coll = source_collection or source_table
             if not coll:
-                return []
-            return _mongo_duplicates(cfg, coll, primary_key, limit=limit)
+                return SourceDuplicateProbeResult(
+                    status="skipped_no_source",
+                    message="Mongo source missing collection for uniqueness probe",
+                    db_type=db_type,
+                )
+            findings = _mongo_duplicates(cfg, coll, primary_key, limit=limit)
+            return SourceDuplicateProbeResult(
+                findings=findings,
+                status="ran",
+                message=f"Mongo uniqueness probe on {coll}.{primary_key}",
+                db_type=db_type,
+            )
 
-        # SQL path covers generic_sql and all SQL-like catalog IDs.
-        sqlish = {
-            "postgresql", "postgres", "redshift", "cockroachdb", "timescaledb", "supabase",
-            "mysql", "mariadb", "singlestore",
-            "sqlserver", "mssql", "synapse", "azure_sql_database",
-            "oracle", "db2", "sqlite", "duckdb", "generic_sql", "h2",
-            "snowflake", "bigquery", "databricks", "clickhouse", "trino", "presto", "questdb",
-        }
-        if db_type not in sqlish:
-            logger.debug("Duplicate-key probe not implemented for source type %s", db_type)
-            return []
+        if db_type not in SQLISH_SOURCE_TYPES:
+            msg = f"Duplicate-key probe not implemented for source type {db_type or 'unknown'}"
+            logger.debug(msg)
+            return SourceDuplicateProbeResult(
+                status="skipped_unsupported",
+                message=msg,
+                db_type=db_type,
+            )
 
         table = source_table or source_collection
         if not table:
-            return []
-        return _sql_duplicates(cfg, table, primary_key, limit=limit)
+            return SourceDuplicateProbeResult(
+                status="skipped_no_source",
+                message="SQL source missing table for uniqueness probe",
+                db_type=db_type,
+            )
+        findings = _sql_duplicates(cfg, table, primary_key, limit=limit)
+        return SourceDuplicateProbeResult(
+            findings=findings,
+            status="ran",
+            message=f"SQL uniqueness probe on {table}.{primary_key}",
+            db_type=db_type,
+        )
     except Exception as exc:
         logger.warning("Source duplicate-key probe failed: %s", exc, exc_info=exc)
-        return []
+        return SourceDuplicateProbeResult(
+            status="error",
+            message=f"Source uniqueness probe failed: {exc}"[:400],
+            db_type=db_type,
+        )
+
+
+def probe_source_duplicate_keys(
+    *,
+    source_connector_id: str = "",
+    source_config: dict[str, Any] | None = None,
+    source_table: str = "",
+    source_collection: str = "",
+    primary_key: str = "",
+    workspace_id: str | None = None,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Return findings only — prefer :func:`probe_source_duplicate_keys_result` for SSOT.
+
+    Empty list is ambiguous (clean vs skipped). New callers must use the result API.
+    """
+    return probe_source_duplicate_keys_result(
+        source_connector_id=source_connector_id,
+        source_config=source_config,
+        source_table=source_table,
+        source_collection=source_collection,
+        primary_key=primary_key,
+        workspace_id=workspace_id,
+        limit=limit,
+    ).findings

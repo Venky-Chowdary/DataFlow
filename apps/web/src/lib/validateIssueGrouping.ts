@@ -605,6 +605,27 @@ export function buildDisplayBlockers(
   return items;
 }
 
+/** True when G9 only sampled uniqueness — Execute may still run a full source probe. */
+export function isSampleUniquenessOnly(
+  preflight: PreflightResult | null | undefined,
+): boolean {
+  if (!preflight) return false;
+  const g9 = (preflight.gates ?? []).find((g) => g.id === "g9_data_integrity");
+  const details = (g9?.details || {}) as Record<string, unknown>;
+  const probe = details.source_uniqueness_probe as
+    | { ran?: boolean; coverage?: string }
+    | undefined;
+  if (probe && (probe.ran === false || String(probe.coverage || "").toLowerCase() === "sample")) {
+    return true;
+  }
+  const scope = details.evidence_scope as { coverage?: string; note?: string } | undefined;
+  if (scope && String(scope.coverage || "").toLowerCase() === "sample") {
+    return true;
+  }
+  const blob = `${g9?.message || ""} ${scope?.note || ""} ${JSON.stringify(details)}`;
+  return /population uniqueness not proven/i.test(blob);
+}
+
 export function buildExecutiveSummary(
   preflight: PreflightResult | null | undefined,
   syncMode?: string,
@@ -624,6 +645,7 @@ export function buildExecutiveSummary(
       || b.source?.details?.compliance_ack_required === true
     )
   ) && rootCauseCount > 0 && blockedGates === 0;
+  const sampleUniqueness = isSampleUniquenessOnly(preflight);
 
   if (preflight.passed) {
     const decision = preflight.proof_bundle?.transfer_decision?.decision;
@@ -641,13 +663,29 @@ export function buildExecutiveSummary(
         aiPromptHint: "Why is this transfer still in review after Validate?",
       };
     }
+    if (sampleUniqueness) {
+      return {
+        title: "Execute-ready · uniqueness sample-only",
+        subtitle:
+          `${passed}/${total} checks passed · population uniqueness not proven on Validate — `
+          + "Execute re-probes the source; append/create-new may warn, upsert/PK will block",
+        untilLines: [
+          "Prefer upsert + unique primary key when identity must be unique",
+          "Re-run Validate after source probe wiring if this route should fail closed earlier",
+        ],
+        rootCauseCount: 0,
+        readinessCaption,
+        railLine: "Execute unlocked · uniqueness not population-proven",
+        aiPromptHint: "Why did Validate pass uniqueness on a sample but Execute fail on duplicates?",
+      };
+    }
     return {
-      title: "Ready to transfer",
-      subtitle: `${passed}/${total} checks passed · Execute unlocked`,
+      title: "Execute-ready · not migration proven",
+      subtitle: `${passed}/${total} checks passed · Execute unlocked — Gate-8 post-write proof still required`,
       untilLines: [],
       rootCauseCount: 0,
       readinessCaption,
-      railLine: "Ready to execute",
+      railLine: "Execute unlocked · migration_proven pending write",
       aiPromptHint: null,
     };
   }

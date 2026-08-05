@@ -32,7 +32,7 @@ from services.connector_capability_registry import (
 )
 from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
 from services.primary_key import resolve_primary_key_source
-from services.source_duplicate_probe import probe_source_duplicate_keys
+from services.source_duplicate_probe import probe_source_duplicate_keys_result
 from services.transform_engine import (
     infer_date_locale,
     reset_active_date_locale,
@@ -78,11 +78,17 @@ class FilePreflightContext(PreflightContext):
         source_duplicate_findings: list[dict[str, Any]] | None = None,
         source_duplicate_probe_ran: bool = False,
         source_duplicate_probe_pk: str = "",
+        source_duplicate_probe_status: str = "",
+        source_duplicate_probe_message: str = "",
+        source_duplicate_probe_expected: bool = False,
     ):
         super().__init__(plan=plan, sample_rows=sample_rows or [])
         self.source_duplicate_findings = source_duplicate_findings or []
         self.source_duplicate_probe_ran = bool(source_duplicate_probe_ran)
         self.source_duplicate_probe_pk = str(source_duplicate_probe_pk or "")
+        self.source_duplicate_probe_status = str(source_duplicate_probe_status or "")
+        self.source_duplicate_probe_message = str(source_duplicate_probe_message or "")
+        self.source_duplicate_probe_expected = bool(source_duplicate_probe_expected)
 
     def _mapping_dict_for_probe(self, m: Any, dest_types: dict[str, str]) -> dict[str, Any]:
         """Serialize plan mappings for coercion / integrity — keep Map Accept risk.
@@ -330,6 +336,9 @@ class FilePreflightContext(PreflightContext):
             source_duplicate_findings=self.source_duplicate_findings,
             source_duplicate_probe_ran=self.source_duplicate_probe_ran,
             source_duplicate_probe_pk=self.source_duplicate_probe_pk,
+            source_duplicate_probe_status=self.source_duplicate_probe_status,
+            source_duplicate_probe_message=self.source_duplicate_probe_message,
+            source_duplicate_probe_expected=self.source_duplicate_probe_expected,
         )
 
 
@@ -934,6 +943,14 @@ def run_file_preflight(
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G9 + host policy)."""
 
+    # Canonical sync vocabulary — G9/DDL/policy must match writers (insert→append).
+    try:
+        from services.sync_cursor import normalize_sync_mode
+
+        sync_mode = normalize_sync_mode(sync_mode)
+    except Exception:
+        sync_mode = (sync_mode or "").strip().lower() or "full_refresh_append"
+
     if row_count <= 0 and sample_rows:
         row_count = len(sample_rows)
 
@@ -1215,14 +1232,18 @@ def run_file_preflight(
 
     # Source-side duplicate-key probe: a small sample can miss duplicates in large
     # tables, so query the source directly when we have a resolved identity key.
+    # Never stamp full_selected coverage unless status == "ran".
     source_duplicate_findings: list[dict[str, Any]] = []
     source_duplicate_probe_ran = False
     source_duplicate_probe_pk = ""
-    if (
+    source_duplicate_probe_status = ""
+    source_duplicate_probe_message = ""
+    source_duplicate_probe_expected = bool(
         (source_connector_id or source_config)
         and source_table
         and source_kind in ("database", "cloud")
-    ):
+    )
+    if source_duplicate_probe_expected:
         try:
             source_pk = resolve_primary_key_source(
                 mappings=mappings,
@@ -1235,15 +1256,27 @@ def run_file_preflight(
             )
             if source_pk:
                 source_duplicate_probe_pk = source_pk
-                source_duplicate_findings = probe_source_duplicate_keys(
+                probe_result = probe_source_duplicate_keys_result(
                     source_connector_id=source_connector_id,
                     source_config=source_config,
                     source_table=source_table,
                     primary_key=source_pk,
                 )
-                source_duplicate_probe_ran = True
+                source_duplicate_findings = list(probe_result.findings or [])
+                source_duplicate_probe_status = probe_result.status
+                source_duplicate_probe_message = probe_result.message
+                source_duplicate_probe_ran = bool(probe_result.ran)
+            else:
+                source_duplicate_probe_status = "skipped_no_pk"
+                source_duplicate_probe_message = (
+                    "No uniqueness primary key resolved — probe not run"
+                )
+                # Without a PK the probe was not expected to prove uniqueness.
+                source_duplicate_probe_expected = False
         except Exception as exc:
             logger.warning("Source duplicate-key probe skipped: %s", exc, exc_info=exc)
+            source_duplicate_probe_status = "error"
+            source_duplicate_probe_message = f"Source uniqueness probe skipped: {exc}"[:400]
 
     ctx = FilePreflightContext(
         plan,
@@ -1251,6 +1284,9 @@ def run_file_preflight(
         source_duplicate_findings=source_duplicate_findings,
         source_duplicate_probe_ran=source_duplicate_probe_ran,
         source_duplicate_probe_pk=source_duplicate_probe_pk,
+        source_duplicate_probe_status=source_duplicate_probe_status,
+        source_duplicate_probe_message=source_duplicate_probe_message,
+        source_duplicate_probe_expected=source_duplicate_probe_expected,
     )
     # Always collect every reachable gate on Validate. fail_fast=True hid G6 DDL
     # behind G5 integrity blocks and forced a multi-run fix loop. Transfer still

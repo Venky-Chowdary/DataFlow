@@ -338,6 +338,36 @@ describe("buildExecutiveSummary", () => {
     assert.match(summary!.subtitle, /review-grade/i);
     assert.ok(!/Execute unlocked/i.test(summary!.subtitle));
   });
+
+  it("softens Ready copy when uniqueness is sample-only", () => {
+    const pf = basePreflight({
+      passed: true,
+      passed_count: 13,
+      gates: [
+        {
+          id: "g9_data_integrity",
+          status: "pass",
+          message: "9/9 integrity checks passed (Validate sample — population uniqueness not proven)",
+          duration_ms: 1,
+          details: {
+            evidence_scope: { coverage: "sample", note: "sample only" },
+            source_uniqueness_probe: { ran: false, coverage: "sample" },
+          },
+        },
+      ],
+      proof_bundle: {
+        transfer_decision: {
+          decision: "approve",
+          blockers: [],
+          reason: "gates clear",
+        },
+      } as never,
+    });
+    const summary = buildExecutiveSummary(pf);
+    assert.ok(summary);
+    assert.match(summary!.title, /sample-only/i);
+    assert.ok(!/Ready to transfer/i.test(summary!.title));
+  });
 });
 
 describe("isEncodingIntegritySignal", () => {

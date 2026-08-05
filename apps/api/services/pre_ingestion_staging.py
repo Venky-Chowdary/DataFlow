@@ -127,20 +127,25 @@ def write_via_pre_ingestion_staging(
     #    the rows the operator needs to diagnose. The original cell value is still
     #    preserved in rejected_details for DLQ and replay.
     _drop_table(stage_ep)
-    staged_n, stage_ddl, stage_summary = write_destination_database(
-        stage_ep,
-        records,
-        columns,
-        schema,
-        mappings,
-        on_checkpoint=on_checkpoint,
-        validation_mode="balanced",
-        backfill_new_fields=backfill_new_fields,
-        write_mode="insert",
-        conflict_columns=None,
-        job_id=f"{job_id}_stg" if job_id else None,
-        error_policy="coerce_null",
-    )
+    # Staging diagnose may coerce_null so the landing table retains every row;
+    # primary promote still uses validation_mode policy (never invent silent NULL).
+    from connectors.writer_common import allow_job_coerce_null_writes
+
+    with allow_job_coerce_null_writes(True):
+        staged_n, stage_ddl, stage_summary = write_destination_database(
+            stage_ep,
+            records,
+            columns,
+            schema,
+            mappings,
+            on_checkpoint=on_checkpoint,
+            validation_mode="balanced",
+            backfill_new_fields=backfill_new_fields,
+            write_mode="insert",
+            conflict_columns=None,
+            job_id=f"{job_id}_stg" if job_id else None,
+            error_policy="coerce_null",
+        )
     ddl_log.extend(list(stage_ddl or [])[:50])
     ddl_log.append(f"PRE-INGESTION STAGE: {staged_n} row(s) → {stage_ep.table}")
 

@@ -183,9 +183,12 @@ def test_integrity_balanced_still_blocks_dupes_on_upsert():
     assert dup_check.get("warnings") or dup_check.get("issues")
 
 
-def test_integrity_source_probe_blocks_even_balanced_append():
-    """Full-table probe findings must keep Validate red after Quarantine/balanced."""
-    # Clean sample (would pass sample-only) + probe says 153 keys repeat.
+def test_integrity_source_probe_warns_append_without_dest_unique():
+    """Append/create-new without dest UNIQUE: probe dups warn — do not hard-block.
+
+    Operators hit Validate-green / Execute-red when sample missed dups but Execute
+    probed; append into a projected CREATE table legally allows duplicate keys.
+    """
     rows = [{"id": "unique-a"}, {"id": "unique-b"}, {"id": "unique-c"}]
     mappings = [{"source": "id", "target": "id", "confidence": 0.99, "primary_key": True}]
     findings = [
@@ -200,6 +203,36 @@ def test_integrity_source_probe_blocks_even_balanced_append():
         destination_db_type="postgresql",
         sync_mode="full_refresh_append",
         contract_primary_key="id",
+        destination_pk_columns=[],
+        source_duplicate_findings=findings,
+        source_duplicate_probe_ran=True,
+        source_duplicate_probe_pk="id",
+    )
+    dup_check = next((c for c in report["checks"] if c["check"] == "duplicate_keys"), None)
+    assert dup_check is not None
+    assert dup_check["blocks_transfer"] is False
+    assert dup_check["passed"] is True
+    warn_blob = " ".join(str(w) for w in (dup_check.get("warnings") or []))
+    assert "source probe" in warn_blob.lower() or "duplicate" in (dup_check.get("note") or "").lower()
+
+
+def test_integrity_source_probe_blocks_append_when_dest_pk_covers():
+    """Append into a table whose PK/UNIQUE covers the key still fail-closes on probe."""
+    rows = [{"id": "unique-a"}, {"id": "unique-b"}, {"id": "unique-c"}]
+    mappings = [{"source": "id", "target": "id", "confidence": 0.99, "primary_key": True}]
+    findings = [
+        {"value": "507f1f77bcf86cd799439011", "count": 4},
+        {"value": "507f1f77bcf86cd799439012", "count": 3},
+    ]
+    report = run_integrity_audit(
+        source_columns=["id"],
+        mappings=mappings,
+        sample_rows=rows,
+        validation_mode="balanced",
+        destination_db_type="postgresql",
+        sync_mode="full_refresh_append",
+        contract_primary_key="id",
+        destination_pk_columns=["id"],
         source_duplicate_findings=findings,
         source_duplicate_probe_ran=True,
         source_duplicate_probe_pk="id",

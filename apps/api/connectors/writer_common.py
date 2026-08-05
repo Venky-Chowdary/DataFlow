@@ -33,6 +33,26 @@ VALID_ERROR_POLICIES = {"fail", "quarantine", "coerce_null"}
 _active_quarantine_mappings: ContextVar[list[dict[str, Any]] | None] = ContextVar(
     "df_quarantine_mappings", default=None
 )
+# Staging / explicit contract-escape hatch for job-level coerce_null.
+# Primary-table writes must never invent coerce_null from env alone.
+_allow_job_coerce_null: ContextVar[bool] = ContextVar(
+    "df_allow_job_coerce_null", default=False
+)
+
+
+def allow_job_coerce_null_writes(enabled: bool = True):
+    """Context manager: permit job-level coerce_null (staging diagnose only)."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _cm():
+        token = _allow_job_coerce_null.set(bool(enabled))
+        try:
+            yield
+        finally:
+            _allow_job_coerce_null.reset(token)
+
+    return _cm()
 
 
 def mapped_row_quarantine_values(row: Any, target_cols: list[str]) -> dict[str, str]:
@@ -1129,9 +1149,38 @@ def bigquery_lsn_match_predicate(
     )
 
 
-def transform_error_policy(policy: str | None = None) -> str:
+def transform_error_policy(
+    policy: str | None = None,
+    *,
+    allow_coerce_null: bool | None = None,
+) -> str:
+    """Resolve job error policy — ``coerce_null`` is gated.
+
+    Job/env ``coerce_null`` silently NULLs failed cells in the primary table.
+    That is forbidden unless:
+    - a Migration Risk Contract quarantine_policy asks for NULL/COERCE (resolved
+      per-mapping in ``resolve_write_action_for_mapping``), or
+    - the caller explicitly allows it (pre-ingestion staging diagnose path).
+    """
     selected = (policy or TRANSFORM_ERROR_POLICY or "quarantine").strip().lower()
-    return selected if selected in VALID_ERROR_POLICIES else "quarantine"
+    if selected not in VALID_ERROR_POLICIES:
+        return "quarantine"
+    if selected != "coerce_null":
+        return selected
+    allowed = (
+        bool(allow_coerce_null)
+        if allow_coerce_null is not None
+        else bool(_allow_job_coerce_null.get())
+    )
+    if allowed:
+        return "coerce_null"
+    import logging
+
+    logging.getLogger(__name__).warning(
+        "Job/env TRANSFORM_ERROR_POLICY=coerce_null demoted to quarantine — "
+        "primary writes require a Risk Contract NULL/COERCE policy or staging allow"
+    )
+    return "quarantine"
 
 
 def reject_on_strict_policy(
@@ -1289,12 +1338,16 @@ def build_mapped_rows_with_details(
     error_policy: str | None = None,
     dest_types: dict[str, str] | None = None,
     preserve_case: bool = False,
+    allow_job_coerce_null: bool | None = None,
+    dest_kind: str = "",
 ) -> tuple[list[tuple], list[str], list[dict[str, Any]]]:
     """Returns mapped rows, error messages, and structured rejected-row details."""
     from services.json_intelligence import materialize_struct_policies
 
     column_types = column_types or {}
-    policy = transform_error_policy(error_policy)
+    policy = transform_error_policy(
+        error_policy, allow_coerce_null=allow_job_coerce_null
+    )
     # Honor Map STRUCT policy (JSON blob vs flatten top-level keys) before bind.
     headers, data_rows = materialize_struct_policies(headers, data_rows, mappings)
     source_indices = {h: i for i, h in enumerate(headers)}
@@ -1427,6 +1480,7 @@ def build_mapped_rows_with_details(
                     src_key, tgt_key = resolve_identity_key(
                         mappings=mappings,
                         source_columns=headers,
+                        dest_kind=dest_kind or "",
                         purpose="uniqueness",
                     )
                     # Prefer source column names — rejected.values is source-shaped.

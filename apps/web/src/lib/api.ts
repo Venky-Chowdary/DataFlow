@@ -2039,6 +2039,12 @@ export async function runUniversalTransfer(options: {
   dateLocale?: string;
   /** Client-supplied key; when omitted a fresh UUID is sent so HTTP retries converge. */
   idempotencyKey?: string;
+  /** Validate→Execute ack trail — must match Studio Validate acknowledgments. */
+  complianceAcknowledged?: boolean;
+  schemaDriftAcknowledged?: boolean;
+  fkRiskAcknowledged?: boolean;
+  acknowledgmentActor?: string;
+  acknowledgmentReason?: string;
 }) {
   const formData = new FormData();
   if (options.file) formData.append("file", options.file);
@@ -2097,6 +2103,24 @@ export async function runUniversalTransfer(options: {
   }
   if (options.planId) formData.append("plan_id", options.planId);
   formData.append("date_locale", options.dateLocale || "");
+  formData.append(
+    "compliance_acknowledged",
+    options.complianceAcknowledged === true ? "true" : "false",
+  );
+  formData.append(
+    "schema_drift_acknowledged",
+    options.schemaDriftAcknowledged === true ? "true" : "false",
+  );
+  formData.append(
+    "fk_risk_acknowledged",
+    options.fkRiskAcknowledged === true ? "true" : "false",
+  );
+  if (options.acknowledgmentActor) {
+    formData.append("acknowledgment_actor", options.acknowledgmentActor);
+  }
+  if (options.acknowledgmentReason) {
+    formData.append("acknowledgment_reason", options.acknowledgmentReason);
+  }
   // A fresh key per click still lets the server fingerprint catch a double-submit
   // of the same intent; the header itself makes HTTP-level retries of this call
   // converge on one job instead of starting a second writer.
@@ -2170,6 +2194,11 @@ export async function executeTransferJson(payload: {
   asyncMode?: boolean;
   planId?: string;
   idempotencyKey?: string;
+  complianceAcknowledged?: boolean;
+  schemaDriftAcknowledged?: boolean;
+  fkRiskAcknowledged?: boolean;
+  acknowledgmentActor?: string;
+  acknowledgmentReason?: string;
 }) {
   const idempotencyKey =
     payload.idempotencyKey?.trim() ||
@@ -2193,6 +2222,11 @@ export async function executeTransferJson(payload: {
       skip_preflight: payload.skipPreflight === true,
       async_mode: payload.asyncMode !== false,
       plan_id: payload.planId || undefined,
+      compliance_acknowledged: payload.complianceAcknowledged === true,
+      schema_drift_acknowledged: payload.schemaDriftAcknowledged === true,
+      fk_risk_acknowledged: payload.fkRiskAcknowledged === true,
+      acknowledgment_actor: payload.acknowledgmentActor || undefined,
+      acknowledgment_reason: payload.acknowledgmentReason || undefined,
     }),
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });

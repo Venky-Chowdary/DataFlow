@@ -20,7 +20,10 @@ from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
 Purpose = Literal["uniqueness", "required_nulls"]
 
 _EXACT_SQL_KEYS = ("id", "_id", "uuid", "pk", "key")
-_DOCUMENT_STORE_DESTS = frozenset({"mongodb", "dynamodb"})
+# Mongo only — Dynamo uses writer-aligned HASH ranking (id/_id/pk/sk/*_id).
+_DOCUMENT_STORE_DESTS = frozenset({"mongodb"})
+# Same preferred names as ``dynamodb_writer._pick_hash_key`` / ``_resolve_key_schema``.
+_DYNAMODB_PREFERRED_KEYS = ("id", "_id", "pk", "sk", "uuid", "key")
 
 # Destinations where every write is identity-keyed (SET/PutItem/upsert by id).
 # Validate must always enforce uniqueness — append still collides on the key.
@@ -107,7 +110,32 @@ def sync_requires_unique_identity(
     kind = normalize_dest_kind(dest_kind) if dest_kind else ""
     if kind in KEY_ADDRESSED_DESTS:
         return True
-    return (sync_mode or "").strip().lower() in _UNIQUE_IDENTITY_SYNC_MODES
+    mode = (sync_mode or "").strip().lower()
+    try:
+        from services.sync_cursor import normalize_sync_mode
+
+        mode = normalize_sync_mode(sync_mode)
+    except Exception:
+        pass
+    return mode in _UNIQUE_IDENTITY_SYNC_MODES
+
+
+def pick_dynamodb_identity_column(candidates: list[str]) -> str | None:
+    """Pick DynamoDB HASH key — same ranking as ``dynamodb_writer``.
+
+    Prefers ``id`` / ``_id`` / ``pk`` / ``sk`` / ``uuid`` / ``key``, then the
+    first ``*_id`` column. Returns ``None`` rather than inventing a weak attr.
+    """
+    if not candidates:
+        return None
+    lower_map = {c.lower(): c for c in candidates}
+    for name in _DYNAMODB_PREFERRED_KEYS:
+        if name in lower_map:
+            return lower_map[name]
+    for c in candidates:
+        if c.lower().endswith("_id"):
+            return c
+    return None
 
 
 def pick_redis_identity_column(candidates: list[str]) -> str | None:
@@ -252,7 +280,8 @@ def resolve_identity_key(
     * Redis: natural-key ranking (``id`` / ``code`` / ``iso`` / ``name`` …) — never
       prefer weak attributes (``capital``) when a stronger key exists. Same ranking
       as ``redis_writer``.
-    * Mongo/Dynamo: only ``_id`` — other ``*_id`` fields are FKs.
+    * Mongo: only ``_id`` — other ``*_id`` fields are FKs.
+    * DynamoDB: writer-aligned HASH ranking (``id``/``_id``/``pk``/``sk``/``*_id``).
     * Operator ``contract_primary_key`` wins when present.
     * Prefer introspected destination primary-key columns when mapped.
     * SQL uniqueness: exact ``id`` / ``_id``; sole ``*_id`` when unambiguous.
@@ -293,9 +322,33 @@ def resolve_identity_key(
         src = src_by_tgt.get(tgt) or src_lower.get(tgt.lower()) or tgt
         return src, tgt
 
-    # Mongo / Dynamo document stores: only ``_id``.
+    # DynamoDB: match dynamodb_writer HASH selection — never invent capital/city.
+    if kind == "dynamodb":
+        for pk in destination_pk_columns or []:
+            name = str(pk or "").strip()
+            if not name:
+                continue
+            matched = tgt_lower.get(name.lower())
+            if matched:
+                return src_by_tgt.get(matched, matched), matched
+            matched_src = src_lower.get(name.lower())
+            if matched_src:
+                return matched_src, tgt_by_src.get(matched_src, matched_src)
+        target_pool = list(tgts) if tgts else list(srcs)
+        picked = pick_dynamodb_identity_column(target_pool)
+        if not picked:
+            return None, None
+        # Prefer target name when it came from mappings; else treat as source.
+        if picked in src_by_tgt or picked.lower() in {t.lower() for t in tgts}:
+            tgt = tgt_lower.get(picked.lower(), picked)
+            src = src_by_tgt.get(tgt) or src_lower.get(picked.lower()) or picked
+            return src, tgt
+        src = src_lower.get(picked.lower(), picked)
+        return src, tgt_by_src.get(src, src)
+
+    # Mongo document stores: only ``_id``.
     if kind in _DOCUMENT_STORE_DESTS or (
-        kind in SCHEMALESS_DESTS and kind != "redis"
+        kind in SCHEMALESS_DESTS and kind not in {"redis", "dynamodb"}
     ):
         for t in tgts:
             if t.lower() == "_id":

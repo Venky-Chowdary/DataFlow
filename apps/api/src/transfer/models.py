@@ -129,6 +129,12 @@ class TransferRequest:
     # CDC / stream delivery honesty — selectable set is enforced by
     # ``assert_delivery_guarantee_allowed`` (exactly_once / at_most_once refused).
     delivery_guarantee: str = "at_least_once"
+    # Operator acks from Validate — Execute must carry the same trail (Validate≡Execute).
+    compliance_acknowledged: bool = False
+    schema_drift_acknowledged: bool = False
+    fk_risk_acknowledged: bool = False
+    acknowledgment_actor: str = ""
+    acknowledgment_reason: str = ""
 
     @property
     def operation(self) -> str:
@@ -272,6 +278,11 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "date_locale": request.date_locale,
         "idempotency_key": request.idempotency_key,
         "delivery_guarantee": request.delivery_guarantee or "at_least_once",
+        "compliance_acknowledged": bool(request.compliance_acknowledged),
+        "schema_drift_acknowledged": bool(request.schema_drift_acknowledged),
+        "fk_risk_acknowledged": bool(request.fk_risk_acknowledged),
+        "acknowledgment_actor": request.acknowledgment_actor or "",
+        "acknowledgment_reason": request.acknowledgment_reason or "",
         "requires_file_reupload": request.source.kind == "file" and bool(request.source_content),
     }
 
@@ -343,6 +354,11 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         date_locale=(data.get("date_locale") or "").strip().upper(),
         idempotency_key=(data.get("idempotency_key") or "").strip(),
         delivery_guarantee=(data.get("delivery_guarantee") or "at_least_once").strip().lower(),
+        compliance_acknowledged=bool(data.get("compliance_acknowledged")),
+        schema_drift_acknowledged=bool(data.get("schema_drift_acknowledged")),
+        fk_risk_acknowledged=bool(data.get("fk_risk_acknowledged")),
+        acknowledgment_actor=str(data.get("acknowledgment_actor") or "").strip(),
+        acknowledgment_reason=str(data.get("acknowledgment_reason") or "").strip(),
     )
 
 

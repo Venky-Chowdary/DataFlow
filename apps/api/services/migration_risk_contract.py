@@ -40,7 +40,7 @@ CONTINUE_POLICIES: frozenset[str] = frozenset(
     {
         "QUARANTINE_ROW",
         "SKIP_ROW",
-        "CAST_AND_CONTINUE",
+        "CAST_AND_CONTINUE",  # wire id; UI may label CAST_FAIL_QUARANTINE
         "TRANSFORM_AND_CONTINUE",
         "STOP_COLUMN",  # omit failing column cells; job continues
     }
@@ -143,14 +143,25 @@ def execution_policy_semantics() -> dict[str, dict[str, Any]]:
             "clears_validate": True,
             "aborts_job": False,
             "row_written": False,
-            "notes": "Lossy cast path; disposition=cast_failure.",
+            "notes": (
+                "Honest name alias: CAST_FAIL_QUARANTINE. On cast failure the row is "
+                "held out (disposition=cast_failure) — the bad value is NOT written "
+                "into the destination. coerce_null only when quarantine_policy "
+                "explicitly contains NULL/COERCE."
+            ),
+            "alias_of": "CAST_FAIL_QUARANTINE",
+            "writes_cast_value": False,
         },
         "TRANSFORM_AND_CONTINUE": {
             "write_action": "quarantine",
             "clears_validate": True,
             "aborts_job": False,
             "row_written": False,
-            "notes": "Named transform path; disposition=transform_failure.",
+            "notes": (
+                "Named transform failure → quarantine (disposition=transform_failure). "
+                "Does not write the failed transform output into the destination."
+            ),
+            "writes_cast_value": False,
         },
     }
 
@@ -263,6 +274,9 @@ def create_migration_risk_contract(
 ) -> MigrationRiskContract:
     """Build a signed contract. Default policy is FAIL_JOB (Execute stays locked)."""
     policy = (execution_policy or DEFAULT_EXECUTION_POLICY).strip().upper()
+    # Preferred UI label → wire id (signed contracts stay CAST_AND_CONTINUE).
+    if policy == "CAST_FAIL_QUARANTINE":
+        policy = "CAST_AND_CONTINUE"
     if policy not in ALL_POLICIES:
         raise ValueError(f"Unknown execution_policy {execution_policy!r}")
     actor = (approved_by or "").strip()
@@ -724,12 +738,17 @@ def resolve_write_action_for_mapping(
     - CAST_AND_CONTINUE / TRANSFORM_AND_CONTINUE → ``quarantine`` or
       ``coerce_null`` per quarantine_policy
     """
+    # Job coerce_null demotion is SSOT in transform_error_policy (staging allow /
+    # Risk Contract NULL|COERCE). Here we honor the resolved job action.
     job = _normalize_job_write_policy(job_error_policy)
     c = mapping_risk_contract(mapping)
     if c is None:
         return job, None, None
 
     exec_pol = (c.execution_policy or DEFAULT_EXECUTION_POLICY).strip().upper()
+    # Preferred UI id CAST_FAIL_QUARANTINE shares wire semantics with CAST_AND_CONTINUE.
+    if exec_pol == "CAST_FAIL_QUARANTINE":
+        exec_pol = "CAST_AND_CONTINUE"
     risk_id = c.risk_id
 
     if exec_pol == "FAIL_JOB":

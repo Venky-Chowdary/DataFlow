@@ -122,10 +122,15 @@ export function PreflightTimeline({
     return typeof firstIssue === "string" ? firstIssue : null;
   };
 
+  const g9Msg = (result.gates || [])
+    .find((g) => g.id === "g9_data_integrity")?.message || "";
+  const sampleUniqueness = /population uniqueness not proven/i.test(g9Msg);
   const headline = running
     ? "Engine running G1–G8…"
-    : decision === "approve" && result.passed
-      ? "Ready to transfer"
+    : decision === "approve" && result.passed && sampleUniqueness
+      ? "Execute-ready · uniqueness sample-only"
+      : decision === "approve" && result.passed
+        ? "Execute-ready · not migration proven"
       : decision === "review"
         ? "Review required — not production-approved"
         : result.passed
@@ -133,8 +138,10 @@ export function PreflightTimeline({
           : "Validation — action needed";
   const subExtra = running
     ? ""
-    : decision === "approve" && result.passed
-      ? " · you can execute the transfer"
+    : decision === "approve" && result.passed && sampleUniqueness
+      ? " · population uniqueness not proven — Execute may re-probe"
+      : decision === "approve" && result.passed
+        ? " · Execute unlocked; Gate-8 proof after write"
       : decision === "review"
         ? " · local or incomplete evidence — treat as review"
         : !result.passed

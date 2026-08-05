@@ -209,6 +209,12 @@ class ExecuteTransferRequest(BaseModel):
     date_locale: str = ""
     # Delivery guarantee selector — only at_least_once is allowed (GA).
     delivery_guarantee: str = "at_least_once"
+    # Validate→Execute ack trail (must match Studio Validate acknowledgments).
+    compliance_acknowledged: bool = False
+    schema_drift_acknowledged: bool = False
+    fk_risk_acknowledged: bool = False
+    acknowledgment_actor: str = ""
+    acknowledgment_reason: str = ""
 
 
 class MapColumnsRequest(BaseModel):
@@ -677,6 +683,11 @@ async def execute_transfer_json(
         triggered_by=_actor_email(request),
         idempotency_key=idempotency_key,
         delivery_guarantee=body.delivery_guarantee or "at_least_once",
+        compliance_acknowledged=bool(body.compliance_acknowledged),
+        schema_drift_acknowledged=bool(body.schema_drift_acknowledged),
+        fk_risk_acknowledged=bool(body.fk_risk_acknowledged),
+        acknowledgment_actor=str(body.acknowledgment_actor or "").strip(),
+        acknowledgment_reason=str(body.acknowledgment_reason or "").strip(),
     )
     from services.batch_progress import effective_backfill_new_fields
 
@@ -857,6 +868,11 @@ async def run_universal_transfer(
     data_region: str = Form(""),
     date_locale: str = Form(""),
     delivery_guarantee: str = Form("at_least_once"),
+    compliance_acknowledged: str = Form("false"),
+    schema_drift_acknowledged: str = Form("false"),
+    fk_risk_acknowledged: str = Form("false"),
+    acknowledgment_actor: str = Form(""),
+    acknowledgment_reason: str = Form(""),
     request: Request = None,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
     idempotency_key: str = Header(default="", alias="Idempotency-Key"),
@@ -986,6 +1002,11 @@ async def run_universal_transfer(
         triggered_by=_actor_email(request),
         idempotency_key=idempotency_key,
         delivery_guarantee=delivery_guarantee or "at_least_once",
+        compliance_acknowledged=compliance_acknowledged.lower() in ("true", "1", "yes"),
+        schema_drift_acknowledged=schema_drift_acknowledged.lower() in ("true", "1", "yes"),
+        fk_risk_acknowledged=fk_risk_acknowledged.lower() in ("true", "1", "yes"),
+        acknowledgment_actor=(acknowledgment_actor or "").strip() or _actor_email(request),
+        acknowledgment_reason=(acknowledgment_reason or "").strip(),
     )
     # Explicit form fields win over stored plan policies (plan used to force
     # validation_mode=strict and re-block encoding after Studio quarantine).

@@ -159,7 +159,7 @@ _TRANSFER_READY_CORE = frozenset({
     "iceberg", "apache_iceberg", "kafka", "apache_kafka",
     "salesforce", "hubspot",
     "csv___tsv", "json", "jsonl", "ndjson", "excel", "parquet",
-    "sftp", "email",
+    # sftp/email: RW caps but preflight:False — demoted until Validate gates exist.
     "pgvector", "qdrant", "weaviate", "pinecone", "milvus",
 })
 
@@ -191,7 +191,6 @@ SUGGESTED_DESTINATIONS = [
     "snowflake", "bigquery",
     "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
     "iceberg", "kafka", "salesforce", "hubspot",
-    "sftp", "email",
     "pgvector", "qdrant", "weaviate", "pinecone", "milvus",
 ]
 

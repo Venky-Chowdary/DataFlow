@@ -2159,7 +2159,18 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
             ),
         )
     probe = report.get("source_uniqueness_probe") or {}
-    probe_ran = bool(probe.get("ran")) or bool(getattr(ctx, "source_duplicate_probe_ran", False))
+    probe_status = str(
+        probe.get("status")
+        or getattr(ctx, "source_duplicate_probe_status", "")
+        or ""
+    ).strip().lower()
+    # Never invent full_selected from a skip/error — only explicit ran.
+    probe_ran = bool(probe.get("ran")) and probe_status in ("", "ran")
+    if not probe_ran:
+        probe_ran = bool(getattr(ctx, "source_duplicate_probe_ran", False)) and probe_status in (
+            "",
+            "ran",
+        )
     coverage = "full_selected" if probe_ran else "sample"
     if probe_ran:
         pk_label = (
@@ -2171,6 +2182,12 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
             f"Source uniqueness probe on identity key {pk_label} "
             f"(GROUP BY / aggregate over selected transfer) · "
             f"other integrity checks use Validate sample — not a full population proof"
+        )
+    elif probe_status in ("error", "skipped_unsupported", "skipped_no_source"):
+        detail = str(probe.get("message") or probe_status)
+        g9_note = (
+            f"Source uniqueness probe unavailable ({detail}) — "
+            "population uniqueness not proven; uniqueness-required syncs fail closed"
         )
     else:
         g9_note = (

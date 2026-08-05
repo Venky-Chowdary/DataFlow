@@ -69,6 +69,7 @@ def test_merge_falls_back_to_preflight():
         "preflight": {
             "gates": [
                 {
+                    "status": "block",
                     "details": {
                         "encoding_issues": [
                             {"column": "description", "row": 1, "message": "format-control", "sample": "a\u200bb"},
@@ -81,6 +82,55 @@ def test_merge_falls_back_to_preflight():
     merged = merge_job_quarantine(job)
     assert len(merged) == 1
     assert merged[0]["column"] == "description"
+
+
+def test_signed_risk_contract_warn_not_quarantined():
+    """Continue-policy fidelity notes must not look like write rejects."""
+    pf = {
+        "passed": False,
+        "gates": [
+            {
+                "id": "g3_schema_contract",
+                "status": "pass",
+                "details": {
+                    "issues_detail": [
+                        {
+                            "source": "country_auto_detected",
+                            "target": "country_auto_detected",
+                            "severity": "warn",
+                            "message": (
+                                "Column 'country_auto_detected' → INTEGER: declared "
+                                "fidelity collapse (TEXT → INTEGER) — continue-policy "
+                                "Risk Contract signed."
+                            ),
+                        }
+                    ],
+                },
+            },
+            {
+                "id": "g9_data_integrity",
+                "status": "block",
+                "details": {
+                    "issues": [
+                        "id: duplicate key values from source probe (a×2)",
+                    ],
+                },
+            },
+        ],
+        "blockers": [
+            {
+                "id": "g9_data_integrity",
+                "message": "Duplicate identity keys",
+                "details": {
+                    "issues": ["id: duplicate key values from source probe (a×2)"],
+                },
+            }
+        ],
+    }
+    rows = quarantine_rows_from_preflight(pf)
+    assert len(rows) == 1
+    assert "duplicate" in rows[0]["reason"].lower()
+    assert "country_auto_detected" not in (rows[0].get("column") or "")
 
 
 def test_schema_policy_finding_does_not_suggest_strip_controls():

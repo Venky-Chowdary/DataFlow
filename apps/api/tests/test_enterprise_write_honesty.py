@@ -1,0 +1,158 @@
+"""Enterprise write honesty — coerce_null gate, CAST semantics, Dynamo identity, catalog."""
+
+from __future__ import annotations
+
+from connectors.writer_common import (
+    allow_job_coerce_null_writes,
+    build_mapped_rows_with_details,
+    transform_error_policy,
+)
+from services.migration_risk_contract import (
+    create_migration_risk_contract,
+    execution_policy_semantics,
+    resolve_write_action_for_mapping,
+)
+from services.primary_key import pick_dynamodb_identity_column, resolve_identity_key
+from src.transfer.connector_capabilities import (
+    TRANSFER_READY_CATALOG_IDS,
+    get_capabilities,
+    resolve_driver_type,
+)
+
+
+def test_job_coerce_null_demoted_without_allow() -> None:
+    assert transform_error_policy("coerce_null") == "quarantine"
+    assert transform_error_policy("coerce_null", allow_coerce_null=True) == "coerce_null"
+    with allow_job_coerce_null_writes(True):
+        assert transform_error_policy("coerce_null") == "coerce_null"
+
+
+def test_build_mapped_rows_refuses_job_coerce_null_without_contract() -> None:
+    """Primary write: bad cell is quarantined, not silently NULLed."""
+    mapped, _errs, details = build_mapped_rows_with_details(
+        headers=["id", "age"],
+        data_rows=[["1", "10"], ["2", "nope"], ["3", "30"]],
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 0.99},
+            {"source": "age", "target": "age", "confidence": 0.99, "transform": "to_integer"},
+        ],
+        target_cols=["id", "age"],
+        column_types={"id": "string", "age": "string"},
+        dest_types={"id": "string", "age": "integer"},
+        error_policy="coerce_null",
+    )
+    assert len(mapped) == 2  # bad row held out
+    assert any(d.get("policy") == "quarantine" for d in details)
+
+
+def test_build_mapped_rows_allows_staging_coerce_null() -> None:
+    mapped, _errs, details = build_mapped_rows_with_details(
+        headers=["id", "age"],
+        data_rows=[["1", "10"], ["2", "nope"], ["3", "30"]],
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 0.99},
+            {"source": "age", "target": "age", "confidence": 0.99, "transform": "to_integer"},
+        ],
+        target_cols=["id", "age"],
+        column_types={"id": "string", "age": "string"},
+        dest_types={"id": "string", "age": "integer"},
+        error_policy="coerce_null",
+        allow_job_coerce_null=True,
+    )
+    assert len(mapped) == 3
+    assert any(d.get("policy") == "coerce_null" for d in details)
+
+
+def test_cast_and_continue_default_is_quarantine_not_write() -> None:
+    sem = execution_policy_semantics()["CAST_AND_CONTINUE"]
+    assert sem["write_action"] == "quarantine"
+    assert sem["row_written"] is False
+    assert sem.get("writes_cast_value") is False
+    assert "not written" in (sem.get("notes") or "").lower() or "hold" in (
+        sem.get("notes") or ""
+    ).lower()
+
+    c = create_migration_risk_contract(
+        column="age",
+        source_type="TEXT",
+        destination_type="INTEGER",
+        approved_by="admin@dataflow.app",
+        reason="Pilot accepts cast-fail holdout",
+        execution_policy="CAST_FAIL_QUARANTINE",
+    )
+    assert c.execution_policy == "CAST_AND_CONTINUE"
+    action, pol, _rid = resolve_write_action_for_mapping(
+        {"source": "age", "target": "age", "risk_contract": c.to_dict()},
+        "quarantine",
+    )
+    assert action == "quarantine"
+    assert pol == "CAST_AND_CONTINUE"
+
+
+def test_cast_contract_coerce_null_only_when_policy_asks() -> None:
+    c = create_migration_risk_contract(
+        column="age",
+        source_type="TEXT",
+        destination_type="INTEGER",
+        approved_by="admin@dataflow.app",
+        reason="Explicit NULL on cast failure",
+        execution_policy="CAST_AND_CONTINUE",
+        quarantine_policy="COERCE_NULL",
+    )
+    action, pol, _rid = resolve_write_action_for_mapping(
+        {"source": "age", "target": "age", "risk_contract": c.to_dict()},
+        "quarantine",
+    )
+    assert action == "coerce_null"
+    assert pol == "CAST_AND_CONTINUE"
+
+
+def test_dynamo_identity_matches_writer_order_id() -> None:
+    assert pick_dynamodb_identity_column(["capital", "order_id", "name"]) == "order_id"
+    assert pick_dynamodb_identity_column(["id", "order_id"]) == "id"
+    src, tgt = resolve_identity_key(
+        mappings=[
+            {"source": "order_id", "target": "order_id", "confidence": 0.99},
+            {"source": "name", "target": "name", "confidence": 0.9},
+        ],
+        source_columns=["order_id", "name"],
+        dest_kind="dynamodb",
+        purpose="uniqueness",
+    )
+    assert src == "order_id"
+    assert tgt == "order_id"
+
+
+def test_mongo_identity_still_id_only() -> None:
+    src, tgt = resolve_identity_key(
+        mappings=[
+            {"source": "user_id", "target": "user_id", "confidence": 0.99},
+            {"source": "_id", "target": "_id", "confidence": 0.99},
+        ],
+        dest_kind="mongodb",
+        purpose="uniqueness",
+    )
+    assert src == "_id"
+    assert tgt == "_id"
+
+
+def test_transfer_ready_excludes_preflight_false_sftp_email() -> None:
+    assert "sftp" not in TRANSFER_READY_CATALOG_IDS
+    assert "email" not in TRANSFER_READY_CATALOG_IDS
+    for cid in ("sftp", "email"):
+        driver = resolve_driver_type(cid)
+        caps = get_capabilities(driver, cid)
+        assert caps.get("preflight") is False
+
+
+def test_transfer_ready_ids_require_preflight_when_not_file() -> None:
+    """No preflight:False driver may sit in TRANSFER_READY (except file sources)."""
+    bad: list[str] = []
+    for cid in sorted(TRANSFER_READY_CATALOG_IDS):
+        driver = resolve_driver_type(cid)
+        caps = get_capabilities(driver, cid)
+        if caps.get("file_source"):
+            continue
+        if caps.get("preflight") is False:
+            bad.append(cid)
+    assert not bad, f"TRANSFER_READY with preflight:False: {bad}"
