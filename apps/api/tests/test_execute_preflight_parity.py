@@ -131,3 +131,68 @@ def test_preflight_sample_rows_match_validate_cap() -> None:
     assert len(sample) == PREFLIGHT_SAMPLE_LIMIT
     # Legacy Execute hard-cap of 100 must not remain.
     assert len(sample) > 100
+
+
+def test_parity_owns_destination_table_exists_no_duplicate_kwarg() -> None:
+    """Regression: Execute crashed with multiple values for destination_table_exists."""
+    meta = {
+        "connected": True,
+        "table_exists": False,
+        "can_create_table": True,
+        "can_write": True,
+        "primary_key_columns": [],
+        "unique_keys": [],
+        "foreign_keys": [],
+        "privilege_probe": {},
+    }
+    with patch(
+        "services.preflight_service.inspect_destination_for_preflight",
+        return_value=meta,
+    ):
+        parity = _execute_preflight_parity_kwargs(
+            _request(),
+            destination_connected=True,
+            destination_table_exists_fallback=True,
+        )
+    assert "destination_table_exists" in parity
+    # Inspect wins over fallback when known.
+    assert parity["destination_table_exists"] is False
+
+    # Simulate engine merge: explicit call-site kwargs + **parity must not collide.
+    call_site = {
+        "columns": ["id"],
+        "column_types": {"id": "VARCHAR"},
+        "row_count": 1,
+        "mappings": [{"source": "id", "target": "id"}],
+        "destination_connected": True,
+        "destination_db_type": "postgresql",
+    }
+    overlap = set(call_site) & set(parity)
+    assert not overlap, f"Execute call-site duplicates parity keys: {overlap}"
+
+    def _accept(**kwargs: Any) -> dict[str, Any]:
+        return kwargs
+
+    merged = _accept(**call_site, **parity)
+    assert merged["destination_table_exists"] is False
+
+
+def test_parity_falls_back_table_exists_when_inspect_omits() -> None:
+    meta = {
+        "connected": True,
+        "can_create_table": True,
+        "can_write": True,
+        "primary_key_columns": [],
+        "unique_keys": [],
+        "foreign_keys": [],
+    }
+    with patch(
+        "services.preflight_service.inspect_destination_for_preflight",
+        return_value=meta,
+    ):
+        parity = _execute_preflight_parity_kwargs(
+            _request(),
+            destination_connected=True,
+            destination_table_exists_fallback=False,
+        )
+    assert parity["destination_table_exists"] is False

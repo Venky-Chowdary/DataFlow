@@ -705,12 +705,16 @@ def _execute_preflight_parity_kwargs(
     request: TransferRequest,
     *,
     destination_connected: bool,
+    destination_table_exists_fallback: bool | None = None,
 ) -> dict[str, Any]:
     """Validate≡Execute preflight kwargs — privilege, FK, identity, operator acks.
 
     Never invent ``can_create``/``can_write`` from connectivity alone when a
     privilege probe is available. Contract PK prefers the destination stream name
     (same as ``preflight_router``).
+
+    Owns ``destination_table_exists`` so callers must not also pass that kwarg
+    into ``run_file_preflight`` (duplicate keyword → hard Execute failure).
     """
     from services.primary_key import extract_contract_primary_key_columns
     from services.preflight_service import inspect_destination_for_preflight
@@ -807,8 +811,8 @@ def _execute_preflight_parity_kwargs(
     dest.extra = extra
 
     table_exists = dest_meta.get("table_exists")
-    if table_exists is None and "table_exists" not in dest_meta:
-        table_exists = None
+    if table_exists is None:
+        table_exists = destination_table_exists_fallback
 
     return {
         "destination_pk_columns": pk_cols,
@@ -819,12 +823,8 @@ def _execute_preflight_parity_kwargs(
         "privilege_probe": privilege_probe or None,
         "destination_can_create": bool(can_create),
         "destination_can_write": bool(can_write),
-        # Prefer inspect existence when known — else leave caller’s probe flag.
-        **(
-            {"destination_table_exists": table_exists}
-            if table_exists is not None
-            else {}
-        ),
+        # Always owned here — never also pass at the call site with **parity.
+        "destination_table_exists": table_exists,
         "compliance_acknowledged": bool(
             getattr(request, "compliance_acknowledged", False)
         ),
@@ -2375,7 +2375,9 @@ class UniversalTransferEngine:
             if not request.skip_preflight:
                 dest_ok, dest_msg = probe_destination(request.destination)
                 parity = _execute_preflight_parity_kwargs(
-                    request, destination_connected=dest_ok
+                    request,
+                    destination_connected=dest_ok,
+                    destination_table_exists_fallback=dest_table_exists_flag,
                 )
                 pf = run_file_preflight(
                     columns=columns,
@@ -2396,7 +2398,6 @@ class UniversalTransferEngine:
                     destination_column_nullability=(
                         (request.destination.extra or {}).get("schema_nullability") or {}
                     ),
-                    destination_table_exists=dest_table_exists_flag,
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
                     source_table=(
@@ -3214,7 +3215,9 @@ class UniversalTransferEngine:
             if not request.skip_preflight:
                 dest_ok, dest_msg = probe_destination(request.destination)
                 parity = _execute_preflight_parity_kwargs(
-                    request, destination_connected=dest_ok
+                    request,
+                    destination_connected=dest_ok,
+                    destination_table_exists_fallback=dest_table_exists_flag,
                 )
                 pf = run_file_preflight(
                     columns=columns,
@@ -3235,7 +3238,6 @@ class UniversalTransferEngine:
                     destination_column_nullability=(
                         (request.destination.extra or {}).get("schema_nullability") or {}
                     ),
-                    destination_table_exists=dest_table_exists_flag,
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
                     source_table=(
@@ -3848,7 +3850,9 @@ class UniversalTransferEngine:
             if not request.skip_preflight:
                 dest_ok, dest_msg = probe_destination(request.destination)
                 parity = _execute_preflight_parity_kwargs(
-                    request, destination_connected=dest_ok
+                    request,
+                    destination_connected=dest_ok,
+                    destination_table_exists_fallback=dest_table_exists_flag,
                 )
                 pf = run_file_preflight(
                     columns=columns,
@@ -3869,7 +3873,6 @@ class UniversalTransferEngine:
                     destination_column_nullability=(
                         (request.destination.extra or {}).get("schema_nullability") or {}
                     ),
-                    destination_table_exists=dest_table_exists_flag,
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
                     source_table=(
