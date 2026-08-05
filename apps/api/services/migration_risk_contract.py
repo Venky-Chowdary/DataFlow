@@ -455,11 +455,12 @@ def mapping_has_clearing_risk_contract(mapping: Any) -> bool:
     return contract_clears_validate_block(raw)
 
 
-# Align with Map FE ``SAFE_NORMALIZE_TRANSFORMS`` — trim/case/email/phone are
-# not fidelity Risk Contract paths (Approve is enough).
+# Align with Map FE ``SAFE_NORMALIZE_TRANSFORMS`` and preflight.risk_contract —
+# trim/trim_id/case/email/phone are not fidelity Risk Contract paths.
 _SAFE_NORMALIZE_TRANSFORMS: frozenset[str] = frozenset(
     {
         "trim",
+        "trim_id",
         "lower",
         "upper",
         "email",
@@ -471,6 +472,12 @@ _SAFE_NORMALIZE_TRANSFORMS: frozenset[str] = frozenset(
 
 def _is_safe_normalize_mapping(m: Any) -> bool:
     """True when transform is a safe normalize and fidelity is not lossy_cast."""
+    try:
+        from preflight.risk_contract import is_safe_normalize_mapping as _shared
+
+        return bool(_shared(m))
+    except ImportError:
+        pass
     if isinstance(m, dict):
         if m.get("type_narrowing") or m.get("typeNarrowing"):
             return False

@@ -22,6 +22,40 @@ CONTINUE_POLICIES: frozenset[str] = frozenset(
     }
 )
 
+# Align with Map FE SAFE_NORMALIZE_TRANSFORMS + apps/api migration_risk_contract.
+# trim_id is the engine pipeline id preserved by uiTransformToEngine (UI shows trim).
+SAFE_NORMALIZE_TRANSFORMS: frozenset[str] = frozenset(
+    {
+        "trim",
+        "trim_id",
+        "lower",
+        "upper",
+        "email",
+        "phone",
+        "strip_controls",
+    }
+)
+
+
+def is_safe_normalize_mapping(mapping: Any) -> bool:
+    """True when transform is a safe normalize and fidelity is not lossy_cast.
+
+    Map marks these Ready without a Migration Risk Contract; G4 must match.
+    """
+    if isinstance(mapping, dict):
+        if mapping.get("type_narrowing") or mapping.get("typeNarrowing"):
+            return False
+        if str(mapping.get("fidelity") or "").lower() == "lossy_cast":
+            return False
+        transform = str(mapping.get("transform") or "").strip().lower()
+    else:
+        if getattr(mapping, "type_narrowing", False):
+            return False
+        if str(getattr(mapping, "fidelity", None) or "").lower() == "lossy_cast":
+            return False
+        transform = str(getattr(mapping, "transform", None) or "").strip().lower()
+    return transform in SAFE_NORMALIZE_TRANSFORMS
+
 
 def _canonical_payload(payload: dict[str, Any]) -> str:
     body = {k: v for k, v in payload.items() if k != "signature"}

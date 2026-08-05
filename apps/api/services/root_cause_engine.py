@@ -172,6 +172,40 @@ def _is_confidence_floor_signal(
     return bool(re.search(r"below floor|ambiguous mapping", msg, re.I))
 
 
+def _is_risk_contract_incomplete_signal(
+    message: str,
+    details: dict[str, Any] | None,
+    gate_id: str,
+) -> bool:
+    """G4/proof: signed continue-policy Risk Contract missing — not fidelity collapse.
+
+    Prefer structured ``risk_unacknowledged`` lists. Message-only matching is narrow
+    so genuine type-path G4 blocks (with issues_detail / fidelity_collapse) still
+    absorb into the fidelity root.
+    """
+    details = details or {}
+    if details.get("fidelity_collapse") is True or details.get("issues_detail"):
+        return False
+    if details.get("risk_unacknowledged") or details.get("structural_unacknowledged"):
+        return True
+    gid = str(gate_id or "")
+    if gid not in {
+        "g4_mapping_confidence",
+        "risk_contracts",
+        "migration_risk_contract",
+        "proof_bundle",
+    }:
+        return False
+    msg = message or ""
+    return bool(
+        re.search(
+            r"migration risk contract|risk contract required|require(?:s)? a signed",
+            msg,
+            re.I,
+        )
+    )
+
+
 def _is_fidelity_signal(
     message: str,
     details: dict[str, Any] | None,
@@ -180,6 +214,9 @@ def _is_fidelity_signal(
     details = details or {}
     # Pure confidence floor is Module 3 mapping_confidence root — not fidelity.
     if _is_confidence_floor_signal(message, details, gate_id):
+        return False
+    # Missing Risk Contract is its own root — never "0 columns collapse fidelity".
+    if _is_risk_contract_incomplete_signal(message, details, gate_id):
         return False
     if details.get("fidelity_collapse") is True:
         return True
@@ -217,6 +254,17 @@ def _is_duplicate_signal(
     return gate_id in _DUP_GATE_IDS and bool(_DUP_RE.search(blob))
 
 
+def _source_from_pair_label(label: str) -> str:
+    """Parse ``source→target`` / ``source -> target`` labels to source column."""
+    name = str(label or "").strip()
+    if not name:
+        return ""
+    for sep in ("→", "->"):
+        if sep in name:
+            return name.split(sep, 1)[0].strip()
+    return name.split("(")[0].strip()
+
+
 def _columns_from_details(details: dict[str, Any] | None) -> list[str]:
     details = details or {}
     cols: list[str] = []
@@ -226,6 +274,11 @@ def _columns_from_details(details: dict[str, Any] | None) -> list[str]:
             cols.extend(str(x) for x in val if x)
         elif isinstance(val, str) and val.strip():
             cols.append(val.strip())
+    for key in ("risk_unacknowledged", "structural_unacknowledged"):
+        for entry in details.get(key) or []:
+            left = _source_from_pair_label(str(entry))
+            if left:
+                cols.append(left)
     for issue in details.get("issues_detail") or details.get("issues") or []:
         if isinstance(issue, dict):
             src = issue.get("source") or issue.get("column") or issue.get("target")
@@ -236,9 +289,13 @@ def _columns_from_details(details: dict[str, Any] | None) -> list[str]:
             if m:
                 cols.append(m.group(1))
             else:
-                m2 = re.search(r"^([\w.]+)\s*\(", issue)
-                if m2:
-                    cols.append(m2.group(1))
+                left = _source_from_pair_label(issue)
+                if left:
+                    cols.append(left)
+                else:
+                    m2 = re.search(r"^([\w.]+)\s*\(", issue)
+                    if m2:
+                        cols.append(m2.group(1))
     # Dedupe preserve order
     seen: set[str] = set()
     out: list[str] = []
@@ -343,11 +400,17 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             col_label = ", ".join(cols[:5]) + (
                 f" (+{len(cols) - 5} more)" if len(cols) > 5 else ""
             )
-            summary = (
-                f"{len(cols)} column(s) collapse fidelity on write"
-                + (f" ({col_label})" if cols else "")
-                + f" — impacts {len(absorbed)} gate check(s)"
-            )
+            if cols:
+                summary = (
+                    f"{len(cols)} column(s) collapse fidelity on write"
+                    f" ({col_label}) — impacts {len(absorbed)} gate check(s)"
+                )
+            else:
+                # Never claim "0 columns collapse" — that is an extraction bug.
+                summary = (
+                    f"Fidelity risk across type path — impacts "
+                    f"{len(absorbed)} gate check(s); open Map for column detail"
+                )
             roots.append(
                 MigrationRootCause(
                     root_id=_root_id("fidelity_collapse", cols, gate_ids or absorbed),
@@ -391,6 +454,121 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     documentation="docs/MIGRATION_RISK_CONTRACT.md",
                     impacted_gates=gate_ids or absorbed,
                     absorbed_blocker_ids=absorbed,
+                    severity="block",
+                )
+            )
+
+    # Incomplete Migration Risk Contract — only a standalone root when there is
+    # no fidelity collapse. Same lossy path with G3/G6/G9 + missing contract
+    # collapses into the fidelity root (one operator CTA).
+    risk_gates = [
+        g
+        for g in gates
+        if g.get("status") == "block"
+        and _is_risk_contract_incomplete_signal(
+            str(g.get("message") or ""), g.get("details") or {}, str(g.get("id") or "")
+        )
+    ]
+    risk_blockers = [
+        b
+        for b in blockers
+        if _is_risk_contract_incomplete_signal(
+            str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or "")
+        )
+    ]
+    if risk_gates or risk_blockers:
+        risk_absorbed = sorted(
+            {
+                *[str(g.get("id")) for g in risk_gates if g.get("id")],
+                *[str(b.get("id")) for b in risk_blockers if b.get("id")],
+            }
+        )
+        risk_cols: list[str] = []
+        for src in risk_gates + risk_blockers:
+            risk_cols.extend(_columns_from_details(src.get("details") or {}))
+        risk_cols = list(dict.fromkeys(risk_cols))
+        fidelity_root = next((r for r in roots if r.kind == "fidelity_collapse"), None)
+        if fidelity_root is not None:
+            merged_cols = list(
+                dict.fromkeys([*fidelity_root.affected_columns, *risk_cols])
+            )
+            merged_absorbed = sorted(
+                set(fidelity_root.absorbed_blocker_ids) | set(risk_absorbed)
+            )
+            col_label = ", ".join(merged_cols[:5]) + (
+                f" (+{len(merged_cols) - 5} more)" if len(merged_cols) > 5 else ""
+            )
+            fidelity_root.affected_columns = merged_cols
+            fidelity_root.absorbed_blocker_ids = merged_absorbed
+            fidelity_root.impacted_gates = sorted(
+                set(fidelity_root.impacted_gates) | set(risk_absorbed)
+            )
+            if merged_cols:
+                fidelity_root.summary = (
+                    f"{len(merged_cols)} column(s) collapse fidelity on write"
+                    f" ({col_label}) — impacts {len(merged_absorbed)} gate check(s)"
+                )
+            else:
+                fidelity_root.summary = (
+                    f"Fidelity risk across type path — impacts "
+                    f"{len(merged_absorbed)} gate check(s); open Map for column detail"
+                )
+        else:
+            col_label = ", ".join(risk_cols[:5]) + (
+                f" (+{len(risk_cols) - 5} more)" if len(risk_cols) > 5 else ""
+            )
+            roots.append(
+                MigrationRootCause(
+                    root_id=_root_id(
+                        "risk_contract_incomplete", risk_cols, risk_absorbed
+                    ),
+                    kind="risk_contract_incomplete",
+                    title="Migration Risk Contract required",
+                    summary=(
+                        (
+                            f"{len(risk_cols)} mapping(s) need a signed continue-policy "
+                            f"Risk Contract ({col_label})"
+                            if risk_cols
+                            else "Signed continue-policy Risk Contract required"
+                        )
+                        + f" — impacts {len(risk_absorbed)} gate check(s)"
+                    ),
+                    business_impact=(
+                        "Map already flagged these paths, but Validate did not receive a "
+                        "verified Migration Risk Contract with an explicit continue policy "
+                        "(CAST_AND_CONTINUE / QUARANTINE_ROW / …). Boolean ack alone never "
+                        "unlocks Execute."
+                    ),
+                    affected_columns=risk_cols,
+                    affected_rows_sample=sample_n,
+                    estimated_total_rows=est_n,
+                    risk_level="high",
+                    recommended_fix=(
+                        "Open Map → Accept risk → choose an explicit execution policy → "
+                        "Sign Risk Contract → re-run Validate (contracts must be on the "
+                        "mappings payload)."
+                    ),
+                    alternative_fixes=[
+                        "Remap to a fidelity-preserving destination type",
+                        "Use QUARANTINE_ROW when cast failures should hold out rows",
+                        "Confirm Validate request includes risk_contract on each column",
+                    ],
+                    recovery_strategy=(
+                        "After a clearing contract is present on each listed column, "
+                        "re-Validate. Execute stays locked until G4 / proof contract "
+                        "checks pass."
+                    ),
+                    expected_runtime_impact=(
+                        "Re-Validate only — no destination rewrite until Execute"
+                    ),
+                    quarantine_policy=(
+                        "per signed execution_policy "
+                        "(see docs/MIGRATION_RISK_CONTRACT.md)"
+                    ),
+                    rollback_policy="DOCUMENT_ONLY",
+                    documentation="docs/MIGRATION_RISK_CONTRACT.md",
+                    impacted_gates=risk_absorbed or ["g4_mapping_confidence"],
+                    absorbed_blocker_ids=risk_absorbed,
                     severity="block",
                 )
             )

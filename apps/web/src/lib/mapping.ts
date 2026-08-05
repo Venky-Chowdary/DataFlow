@@ -428,9 +428,11 @@ export function engineStampedRiskChip(m: EditableMapping): {
   return null;
 }
 
-/** Safe normalizations — trim/case/email/phone — not precision or semantic risk. */
+/** Safe normalizations — trim/case/email/phone — not precision or semantic risk.
+ * Include engine ``trim_id`` (pipeline id preserved on Validate) alongside UI ``trim``. */
 const SAFE_NORMALIZE_TRANSFORMS = new Set<string>([
   "trim",
+  "trim_id",
   "lower",
   "upper",
   "email",

@@ -171,6 +171,26 @@ def test_safe_normalize_mutate_does_not_require_risk_contract():
     assert lossy_mappings_missing_risk_contracts(mappings) == []
 
 
+def test_trim_id_mutate_does_not_require_risk_contract():
+    """Engine preserves trim_id on Validate; must match Map Ready trim path."""
+    mappings = [
+        {
+            "source": "id",
+            "target": "id",
+            "fidelity": "mutate",
+            "transform": "trim_id",
+            "approved": True,
+        },
+        {
+            "source": "stripe_customer_id",
+            "target": "stripe_customer_id",
+            "fidelity": "mutate",
+            "transform": "trim_id",
+        },
+    ]
+    assert lossy_mappings_missing_risk_contracts(mappings) == []
+
+
 def test_assert_mappings_executable_blocks_boolean_ack_without_contract():
     from services.mapping_pipeline import assert_mappings_executable
 

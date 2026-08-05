@@ -14,7 +14,7 @@ from preflight.models import (
     GateStatus,
     PreflightContext,
 )
-from preflight.risk_contract import mapping_risk_cleared
+from preflight.risk_contract import is_safe_normalize_mapping, mapping_risk_cleared
 
 GateFn = Callable[[PreflightContext], GateResult]
 
@@ -1145,7 +1145,13 @@ def _is_lossy_mapping(m: Any) -> bool:
 
 
 def _requires_risk_ack(m: Any) -> bool:
-    """Lossy casts, type narrowing, and mutate transforms need explicit ack."""
+    """Lossy casts, type narrowing, and value-mutating transforms need a contract.
+
+    Safe normalize (trim / trim_id / email / phone / case) is Map-Ready — not a
+    Migration Risk Contract path. Must stay aligned with Map ``isSafeNormalizeMapping``.
+    """
+    if is_safe_normalize_mapping(m):
+        return False
     if _is_lossy_mapping(m):
         return True
     fidelity = str(getattr(m, "fidelity", None) or "").strip().lower()

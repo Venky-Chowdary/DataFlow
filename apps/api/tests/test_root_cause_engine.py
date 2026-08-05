@@ -214,6 +214,93 @@ def test_single_unrelated_blocker_does_not_invent_fidelity_root():
     assert not any(r.kind == "fidelity_collapse" for r in roots)
 
 
+def test_risk_unacknowledged_is_not_zero_column_fidelity_collapse():
+    """Map→Validate: missing contracts list columns — never '0 columns collapse'."""
+    pf = {
+        "gates": [
+            {
+                "id": "g4_mapping_confidence",
+                "status": "block",
+                "message": (
+                    "4 mapping(s) require a signed Migration Risk Contract "
+                    "with a continue execution policy (lossy/narrowing/mutate)"
+                ),
+                "details": {
+                    "risk_unacknowledged": [
+                        "id→id",
+                        "stripe_customer_id→stripe_customer_id",
+                        "google_id→google_id",
+                        "provider_id→provider_id",
+                    ]
+                },
+            }
+        ],
+        "blockers": [
+            {
+                "id": "g4_mapping_confidence",
+                "message": (
+                    "4 mapping(s) require a signed Migration Risk Contract "
+                    "with a continue execution policy (lossy/narrowing/mutate)"
+                ),
+                "details": {
+                    "risk_unacknowledged": [
+                        "id→id",
+                        "stripe_customer_id→stripe_customer_id",
+                        "google_id→google_id",
+                        "provider_id→provider_id",
+                    ]
+                },
+            }
+        ],
+    }
+    roots = build_root_causes(pf)
+    assert not any(r.kind == "fidelity_collapse" for r in roots), roots
+    risk = [r for r in roots if r.kind == "risk_contract_incomplete"]
+    assert len(risk) == 1, roots
+    assert "id" in risk[0].affected_columns
+    assert "stripe_customer_id" in risk[0].affected_columns
+    assert "0 column" not in risk[0].summary.lower()
+
+
+def test_fidelity_absorbs_risk_contract_incomplete_same_path():
+    """Charter: one root when G3 fidelity + proof/G4 missing-contract coexist."""
+    pf = {
+        "gates": [
+            {
+                "id": "g3_schema_contract",
+                "status": "block",
+                "message": "Lossy type coercion: amt (FLOAT) → amt (INTEGER)",
+                "details": {"fidelity_collapse": True, "columns": ["amt"]},
+            },
+            {
+                "id": "g4_mapping_confidence",
+                "status": "block",
+                "message": (
+                    "1 mapping(s) require a signed Migration Risk Contract "
+                    "with a continue execution policy (lossy/narrowing/mutate)"
+                ),
+                "details": {"risk_unacknowledged": ["amt→amt"]},
+            },
+        ],
+        "blockers": [
+            {
+                "id": "proof_bundle",
+                "message": "Migration Risk Contract required (execution policy) for: amt",
+                "details": {"columns": ["amt"]},
+            }
+        ],
+    }
+    roots = build_root_causes(pf)
+    assert not any(r.kind == "risk_contract_incomplete" for r in roots), roots
+    fidelity = [r for r in roots if r.kind == "fidelity_collapse"]
+    assert len(fidelity) == 1, roots
+    absorbed = set(fidelity[0].absorbed_blocker_ids)
+    assert "g3_schema_contract" in absorbed
+    assert "g4_mapping_confidence" in absorbed
+    assert "proof_bundle" in absorbed
+    assert "amt" in fidelity[0].affected_columns
+
+
 def test_run_file_preflight_emits_root_causes_for_text_to_int():
     from services.preflight_service import run_file_preflight
 
