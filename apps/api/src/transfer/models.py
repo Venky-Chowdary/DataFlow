@@ -129,6 +129,9 @@ class TransferRequest:
     # CDC / stream delivery honesty — selectable set is enforced by
     # ``assert_delivery_guarantee_allowed`` (exactly_once / at_most_once refused).
     delivery_guarantee: str = "at_least_once"
+    # Immutable Migration Decision Artifact produced by the kernel and consumed
+    # by Map, Validate, Execute, and Proof.
+    migration_decision: dict = field(default_factory=dict)
 
     @property
     def operation(self) -> str:

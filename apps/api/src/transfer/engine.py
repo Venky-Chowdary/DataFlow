@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 from services.brand_env import getenv_brand
@@ -1636,6 +1637,137 @@ class UniversalTransferEngine:
             logger.debug("peak memory read failed: %s", exc, exc_info=exc)
             return 0
 
+    @staticmethod
+    def _build_kernel_decision(request: TransferRequest):
+        """Best-effort authoritative MigrationDecision from live introspection.
+
+        Returns ``None`` when source/destination schemas cannot be loaded, so
+        transfers continue to rely on the existing mapping validation path.
+        """
+        from services.migration_kernel import (
+            ColumnModel,
+            MigrationKernel,
+            SchemaModel,
+            TypeCarrier,
+        )
+        from services import schema_introspect as introspect
+
+        kernel = MigrationKernel()
+
+        def _schema_from_endpoint(endpoint: EndpointConfig) -> SchemaModel | None:
+            if endpoint.kind != "database":
+                return None
+            table = (
+                endpoint.table
+                or endpoint.collection
+                or getattr(endpoint, "object", "")
+                or ""
+            )
+            if not table:
+                return None
+            try:
+                data = introspect.introspect_schema(
+                    endpoint.format or endpoint.kind,
+                    host=endpoint.host or "localhost",
+                    port=endpoint.port or 0,
+                    database=endpoint.database,
+                    username=endpoint.username,
+                    password=endpoint.password,
+                    connection_string=endpoint.connection_string,
+                    schema=endpoint.schema or "public",
+                    table=table,
+                    ssl=endpoint.ssl,
+                    warehouse=endpoint.warehouse,
+                    api_key=endpoint.api_key,
+                )
+            except Exception as exc:
+                logger.debug("kernel introspection skipped: %s", exc, exc_info=exc)
+                return None
+            if not data or not data.get("ok"):
+                return None
+            columns: list[ColumnModel] = []
+            raw_cols = data.get("columns") or []
+            if not raw_cols and data.get("tables"):
+                table_name = table
+                table_obj = next(
+                    (t for t in data["tables"] if t.get("name") == table_name),
+                    data["tables"][0] if data["tables"] else {},
+                )
+                raw_cols = table_obj.get("columns") or []
+            for c in raw_cols:
+                native = str(
+                    c.get("native_type") or c.get("inferred_type") or ""
+                ).strip()
+                carrier = kernel.canonicalize_type(native)
+                # Enrich carrier with introspection metadata not captured by
+                # the native type string alone.
+                carrier = TypeCarrier(
+                    logical=carrier.logical,
+                    native=native,
+                    precision=carrier.precision,
+                    scale=carrier.scale,
+                    length=carrier.length,
+                    nullable=bool(c.get("nullable", True)),
+                    is_identity=bool(c.get("is_identity")) or carrier.is_identity,
+                    is_generated=bool(c.get("is_generated")) or carrier.is_generated,
+                    is_auto_increment=bool(c.get("auto_increment"))
+                    or carrier.is_auto_increment,
+                    metadata={
+                        **carrier.metadata,
+                        "primary_key": bool(c.get("primary_key")),
+                    },
+                )
+                columns.append(
+                    ColumnModel(
+                        name=str(c.get("name") or ""),
+                        source_name=str(c.get("source_name") or ""),
+                        carrier=carrier,
+                        primary_key=bool(c.get("primary_key")),
+                        nullable=bool(c.get("nullable", True)),
+                        default_value=str(c.get("default_value"))
+                        if c.get("default_value") is not None
+                        else None,
+                        position=int(c.get("position") or 0),
+                        metadata={
+                            k: v
+                            for k, v in c.items()
+                            if k
+                            not in {
+                                "name",
+                                "native_type",
+                                "inferred_type",
+                                "nullable",
+                                "primary_key",
+                            }
+                        },
+                    )
+                )
+            return SchemaModel(
+                kind="database",
+                format=endpoint.format or "",
+                name=table,
+                columns=tuple(columns),
+                constraints=data.get("constraints") or [],
+                indexes=data.get("indexes") or [],
+                metadata={"source": "introspection"},
+            )
+
+        source_schema = _schema_from_endpoint(request.source)
+        destination_schema = _schema_from_endpoint(request.destination)
+        if source_schema is None or destination_schema is None:
+            return None
+        try:
+            decision = kernel.build_decision(
+                source_schema,
+                destination_schema,
+                dest_db=request.destination.format or "",
+                validation_mode=request.validation_mode,
+            )
+        except Exception as exc:
+            logger.warning("kernel build_decision failed: %s", exc, exc_info=exc)
+            return None
+        return decision
+
     def _resolve_saved_connectors(self, request: TransferRequest) -> None:
         """Expand connector_id references into full host/port/credentials before execution."""
         try:
@@ -1690,6 +1822,45 @@ class UniversalTransferEngine:
                 error=str(mapping_exc),
                 records_transferred=0,
             )
+
+        # Authoritative Migration Decision Kernel check. If the kernel can build a
+        # decision from live introspection, Execute must respect it; otherwise the
+        # existing mapping validation path remains authoritative.
+        decision = self._build_kernel_decision(request)
+        if decision is not None:
+            request.migration_decision = dataclasses.asdict(decision)
+            if not decision.validation.write_permitted:
+                if request.validation_mode == "strict":
+                    gate_messages = "; ".join(
+                        f"{g.gate_id}: {g.message}"
+                        for g in decision.validation.gates
+                        if g.status == "block"
+                    )
+                    msg = (
+                        "Migration Decision Kernel blocked execution: "
+                        + gate_messages
+                    )
+                    mongo = get_mongodb_service()
+                    mongo.update_job_status(
+                        job_id,
+                        "failed",
+                        phase="failed",
+                        message=msg,
+                        error=msg,
+                    )
+                    return TransferResult(
+                        success=False,
+                        job_id=job_id,
+                        error=msg,
+                        records_transferred=0,
+                    )
+                logger.warning(
+                    "Migration Decision Kernel flagged write_permitted=false "
+                    "for %s but validation_mode=%s; continuing",
+                    job_id,
+                    request.validation_mode,
+                )
+
         # Persist accepted Risk Contracts on the job for Proof Pack / audit
         # (mappings alone can be dropped from transfer_request redaction paths).
         from services.signed_proof_pack import collect_accepted_risks_from_job
