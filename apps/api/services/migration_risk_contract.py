@@ -455,6 +455,134 @@ def mapping_has_clearing_risk_contract(mapping: Any) -> bool:
     return contract_clears_validate_block(raw)
 
 
+def hydrate_risk_contract_dict(
+    mapping: dict[str, Any],
+    *,
+    table: str = "",
+    migration_id: str = "",
+) -> dict[str, Any] | None:
+    """Verify or sign a Migration Risk Contract draft on one mapping.
+
+    Same authority Validate uses — Execute must call this before gating so
+    Map unsigned drafts that greened Validate do not fail at write time.
+
+    - Valid signature → return as-is.
+    - Signature present but invalid → refuse (None). Never re-sign tamper.
+    - Unsigned draft → sign from fields (Map draft path).
+    """
+    raw = mapping.get("risk_contract") or mapping.get("riskContract")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        has_sig = bool(str(raw.get("signature") or "").strip())
+        if has_sig and verify_risk_contract(raw):
+            return dict(raw)
+        if has_sig:
+            return None
+        meta = dict(raw.get("metadata") or {})
+        if raw.get("loss_classification") and "loss_classification" not in meta:
+            meta["loss_classification"] = raw.get("loss_classification")
+        table_stamp = str(
+            raw.get("table") or mapping.get("table") or table or ""
+        ).strip()
+        mig_stamp = str(
+            raw.get("migration_id")
+            or raw.get("plan_id")
+            or mapping.get("migration_id")
+            or mapping.get("plan_id")
+            or migration_id
+            or ""
+        ).strip()
+        signed = create_migration_risk_contract(
+            column=str(raw.get("column") or mapping.get("source") or ""),
+            source_type=str(
+                raw.get("source_type") or mapping.get("source_type") or ""
+            ),
+            destination_type=str(
+                raw.get("destination_type")
+                or mapping.get("target_type")
+                or mapping.get("targetType")
+                or ""
+            ),
+            approved_by=str(raw.get("approved_by") or ""),
+            reason=str(raw.get("reason") or ""),
+            execution_policy=str(raw.get("execution_policy") or "FAIL_JOB"),
+            root_cause=str(raw.get("root_cause") or ""),
+            severity=str(raw.get("severity") or "high"),
+            transform=raw.get("transform"),
+            rows_sampled=int(raw.get("rows_sampled") or 0),
+            estimated_rows=raw.get("estimated_rows"),
+            expected_failure_pct=raw.get("expected_failure_pct"),
+            expected_precision_loss=bool(raw.get("expected_precision_loss", True)),
+            expected_truncation=bool(raw.get("expected_truncation", False)),
+            expected_nulls=bool(raw.get("expected_nulls", False)),
+            quarantine_policy=str(
+                raw.get("quarantine_policy") or "holdout_rejected_rows"
+            ),
+            retry_policy=str(raw.get("retry_policy") or "none"),
+            rollback_strategy=str(
+                raw.get("rollback_strategy") or "DOCUMENT_ONLY"
+            ),
+            proof_pack_ref=raw.get("proof_pack_ref"),
+            mapping_hash=str(raw.get("mapping_hash") or ""),
+            plan_id=raw.get("plan_id") or (mig_stamp or None),
+            target=str(
+                raw.get("target")
+                or mapping.get("target")
+                or mapping.get("source")
+                or ""
+            ),
+            migration_id=mig_stamp,
+            table=table_stamp,
+            loss_classification=str(raw.get("loss_classification") or ""),
+            fidelity=str(mapping.get("fidelity") or ""),
+            metadata=meta,
+        )
+        payload = signed.to_dict()
+        try:
+            from services.audit_log import append_audit_event
+
+            append_audit_event(
+                action="migration_risk_contract.signed",
+                resource=f"risk_contract:{payload.get('risk_id')}",
+                actor=str(payload.get("approved_by") or "system"),
+                details={
+                    "risk_id": payload.get("risk_id"),
+                    "column": payload.get("column"),
+                    "execution_policy": payload.get("execution_policy"),
+                    "approved_by": payload.get("approved_by"),
+                },
+            )
+        except Exception:
+            pass
+        return payload
+    except (TypeError, ValueError):
+        return None
+
+
+def hydrate_mappings_risk_contracts(
+    mappings: list[Any] | None,
+    *,
+    table: str = "",
+    migration_id: str = "",
+) -> list[dict[str, Any]]:
+    """Sign/verify Risk Contracts on every mapping (Validate + Execute SSOT)."""
+    out: list[dict[str, Any]] = []
+    for m in mappings or []:
+        row = dict(m) if isinstance(m, dict) else {}
+        if not row and m is not None and not isinstance(m, dict):
+            continue
+        signed = hydrate_risk_contract_dict(
+            row, table=table, migration_id=migration_id
+        )
+        if signed is not None:
+            row["risk_contract"] = signed
+            if contract_clears_validate_block(signed):
+                row["risk_acknowledged"] = True
+        out.append(row)
+    return out
+
+
 # Align with Map FE ``SAFE_NORMALIZE_TRANSFORMS`` and preflight.risk_contract —
 # trim/trim_id/case/email/phone are not fidelity Risk Contract paths.
 _SAFE_NORMALIZE_TRANSFORMS: frozenset[str] = frozenset(

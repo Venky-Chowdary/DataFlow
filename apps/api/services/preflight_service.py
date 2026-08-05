@@ -48,102 +48,10 @@ def _hydrate_risk_contract(
     table: str = "",
     migration_id: str = "",
 ) -> dict[str, Any] | None:
-    """Verify or sign a Migration Risk Contract draft on the mapping.
+    """Verify or sign a Migration Risk Contract draft — SSOT in migration_risk_contract."""
+    from services.migration_risk_contract import hydrate_risk_contract_dict
 
-    - Valid signature → return as-is.
-    - Signature present but invalid → refuse (None). Never re-sign tamper.
-    - Unsigned draft → sign from fields (Map draft path) + audit event.
-    """
-    raw = m.get("risk_contract") or m.get("riskContract")
-    if not isinstance(raw, dict):
-        return None
-    try:
-        from services.migration_risk_contract import (
-            create_migration_risk_contract,
-            verify_risk_contract,
-        )
-
-        has_sig = bool(str(raw.get("signature") or "").strip())
-        # Verify stored payload as-is — never re-serialize (field-set compat).
-        if has_sig and verify_risk_contract(raw):
-            return dict(raw)
-        if has_sig:
-            # Tampered or stale signature — fail closed; do not re-sign.
-            return None
-        # Unsigned draft — sign from authoritative fields.
-        meta = dict(raw.get("metadata") or {})
-        if raw.get("loss_classification") and "loss_classification" not in meta:
-            meta["loss_classification"] = raw.get("loss_classification")
-        table_stamp = str(
-            raw.get("table") or m.get("table") or table or ""
-        ).strip()
-        mig_stamp = str(
-            raw.get("migration_id")
-            or raw.get("plan_id")
-            or m.get("migration_id")
-            or m.get("plan_id")
-            or migration_id
-            or ""
-        ).strip()
-        signed = create_migration_risk_contract(
-            column=str(raw.get("column") or m.get("source") or ""),
-            source_type=str(raw.get("source_type") or m.get("source_type") or ""),
-            destination_type=str(
-                raw.get("destination_type")
-                or m.get("target_type")
-                or m.get("targetType")
-                or ""
-            ),
-            approved_by=str(raw.get("approved_by") or ""),
-            reason=str(raw.get("reason") or ""),
-            execution_policy=str(raw.get("execution_policy") or "FAIL_JOB"),
-            root_cause=str(raw.get("root_cause") or ""),
-            severity=str(raw.get("severity") or "high"),
-            transform=raw.get("transform"),
-            rows_sampled=int(raw.get("rows_sampled") or 0),
-            estimated_rows=raw.get("estimated_rows"),
-            expected_failure_pct=raw.get("expected_failure_pct"),
-            expected_precision_loss=bool(raw.get("expected_precision_loss", True)),
-            expected_truncation=bool(raw.get("expected_truncation", False)),
-            expected_nulls=bool(raw.get("expected_nulls", False)),
-            quarantine_policy=str(
-                raw.get("quarantine_policy") or "holdout_rejected_rows"
-            ),
-            retry_policy=str(raw.get("retry_policy") or "none"),
-            rollback_strategy=str(
-                raw.get("rollback_strategy")
-                or "DOCUMENT_ONLY"
-            ),
-            proof_pack_ref=raw.get("proof_pack_ref"),
-            mapping_hash=str(raw.get("mapping_hash") or ""),
-            plan_id=raw.get("plan_id") or (mig_stamp or None),
-            target=str(raw.get("target") or m.get("target") or m.get("source") or ""),
-            migration_id=mig_stamp,
-            table=table_stamp,
-            loss_classification=str(raw.get("loss_classification") or ""),
-            fidelity=str(m.get("fidelity") or ""),
-            metadata=meta,
-        )
-        payload = signed.to_dict()
-        try:
-            from services.audit_log import append_audit_event
-
-            append_audit_event(
-                action="migration_risk_contract.signed",
-                resource=f"risk_contract:{payload.get('risk_id')}",
-                actor=str(payload.get("approved_by") or "system"),
-                details={
-                    "risk_id": payload.get("risk_id"),
-                    "column": payload.get("column"),
-                    "execution_policy": payload.get("execution_policy"),
-                    "approved_by": payload.get("approved_by"),
-                },
-            )
-        except Exception:
-            pass
-        return payload
-    except (TypeError, ValueError):
-        return None
+    return hydrate_risk_contract_dict(m, table=table, migration_id=migration_id)
 
 
 def _with_date_locale(fn):

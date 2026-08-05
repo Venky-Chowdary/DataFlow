@@ -3699,8 +3699,13 @@ export function TransferPage({
     setTransferLaunch(null);
     setRunStartupProgress(12);
     setRunStartupPhase(RUN_LAUNCH_STAGES[0]);
-    const transferMappings = columnMappings.length
-      ? buildPreflightMappings(analysis?.columns ?? [], columnMappings)
+    // Prefer Validate-echoed signed contracts over Map drafts (setState race).
+    const mappingsForExecute = mergeSignedRiskContracts(
+      columnMappings,
+      preflight?.signed_mappings,
+    );
+    const transferMappings = mappingsForExecute.length
+      ? buildPreflightMappings(analysis?.columns ?? [], mappingsForExecute)
       : analysis
         ? buildPreflightMappings(analysis.columns)
         : undefined;

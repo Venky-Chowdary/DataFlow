@@ -209,6 +209,40 @@ def test_assert_mappings_executable_blocks_boolean_ack_without_contract():
         )
 
 
+def test_assert_mappings_executable_signs_unsigned_draft_like_validate():
+    """Validate green + Map unsigned draft must not fail Execute (hydrate SSOT)."""
+    from services.mapping_pipeline import assert_mappings_executable
+    from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+    mappings = [
+        {
+            "source": "email_verified",
+            "target": "email_verified",
+            "fidelity": "cast",
+            "risk_acknowledged": True,
+            "approved": True,
+            "requires_review": False,
+            "risk_contract": {
+                "column": "email_verified",
+                "source_type": "TIMESTAMP",
+                "destination_type": "TIMESTAMP",
+                "execution_policy": "CAST_AND_CONTINUE",
+                "approved_by": "admin@dataflow.app",
+                "reason": "Operator acknowledged cast/quarantine path",
+                "expected_precision_loss": True,
+                "quarantine_policy": "holdout_rejected_rows",
+                "retry_policy": "none",
+                "rollback_strategy": "DOCUMENT_ONLY",
+            },
+        }
+    ]
+    assert_mappings_executable(mappings)
+    assert mapping_has_clearing_risk_contract(mappings[0])
+    assert str(mappings[0]["risk_contract"].get("signature") or "").startswith(
+        "mrc-sha256:"
+    )
+
+
 def test_run_file_preflight_signs_draft_contract_and_approves():
     """Map draft CAST_AND_CONTINUE contract is signed on Validate and unlocks approve."""
     from services.preflight_service import run_file_preflight

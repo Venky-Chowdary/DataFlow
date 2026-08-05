@@ -333,9 +333,23 @@ def assert_mappings_executable(mappings: list[dict] | None) -> None:
 
     Enterprise GA: boolean ``risk_acknowledged`` alone never unlocks a lossy
     write — lossy mappings must carry a verified continue-policy Risk Contract.
+
+    Unsigned Map drafts are signed here (same hydrate Validate uses) so a green
+    Validate cannot fail Execute solely because the FE still held drafts.
+    When ``mappings`` is a list, it is updated in place with signed contracts.
     """
+    from services.migration_risk_contract import (
+        hydrate_mappings_risk_contracts,
+        lossy_mappings_missing_risk_contracts,
+    )
+
+    hydrated = hydrate_mappings_risk_contracts(list(mappings or []))
+    if isinstance(mappings, list):
+        mappings[:] = hydrated
+    work = hydrated
+
     pending: list[str] = []
-    for m in mappings or []:
+    for m in work:
         if not m.get("requires_review"):
             continue
         if m.get("user_override") or m.get("approved") or m.get("operator_approved"):
@@ -350,9 +364,7 @@ def assert_mappings_executable(mappings: list[dict] | None) -> None:
             f"{len(pending)} mapping(s) require review before Execute: {sample}{more}"
         )
 
-    from services.migration_risk_contract import lossy_mappings_missing_risk_contracts
-
-    missing_contracts = lossy_mappings_missing_risk_contracts(mappings or [])
+    missing_contracts = lossy_mappings_missing_risk_contracts(work)
     if missing_contracts:
         sample = "; ".join(missing_contracts[:8])
         more = (
