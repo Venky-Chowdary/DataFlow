@@ -49,7 +49,6 @@ export function DestinationPicker({
   const [filter, setFilter] = useState("all");
   const [connectorQuery, setConnectorQuery] = useState("");
   const [engineQuery, setEngineQuery] = useState("");
-  const [showAllEngines, setShowAllEngines] = useState(false);
 
   const filtered = useMemo(() => {
     const cq = connectorQuery.trim().toLowerCase();
@@ -66,10 +65,9 @@ export function DestinationPicker({
 
   const featuredEngines = useMemo(() => {
     const byId = new Map(liveDestTypes.map((d) => [d.id, d]));
-    const featured = FEATURED_DEST_IDS
+    return FEATURED_DEST_IDS
       .map((id) => byId.get(id) ?? { id, label: getConnectorDefaults(id).label })
       .filter((d) => matchesEngineQuery(d, query));
-    return featured;
   }, [liveDestTypes, query]);
 
   const otherEngines = useMemo(() => {
@@ -79,17 +77,17 @@ export function DestinationPicker({
       .sort((a, b) => a.label.localeCompare(b.label));
   }, [liveDestTypes, query]);
 
-  const showBrowseAll = showAllEngines || Boolean(query);
-  const visibleOthers = showBrowseAll ? otherEngines : [];
-  const hiddenCount = otherEngines.length;
+  const selectedOutsideFeatured = Boolean(
+    destType && !FEATURED_DEST_IDS.includes(destType as (typeof FEATURED_DEST_IDS)[number]),
+  );
 
   return (
     <div className="df2-dest-picker">
       <div className="df2-dest-picker-head">
         <div>
-          <label className="df2-label">Choose destination</label>
-          <p className="df2-label-hint" style={{ margin: "2px 0 0" }}>
-            Pick a saved connection — the route updates to that system, not a default engine.
+          <label className="df2-label">Connection</label>
+          <p className="df2-label-hint">
+            Saved connector or custom host credentials.
           </p>
         </div>
         {connectors.length > 0 && typeFilters.length > 1 && (
@@ -152,7 +150,7 @@ export function DestinationPicker({
         >
           <DtIcon name="connectors" size={18} />
           <span className="df2-dest-connector-card-name">Custom connection</span>
-          <span className="df2-dest-connector-card-meta">Enter host & credentials</span>
+          <span className="df2-dest-connector-card-meta">Host & credentials</span>
         </button>
       </div>
 
@@ -166,13 +164,12 @@ export function DestinationPicker({
                 type="search"
                 value={engineQuery}
                 onChange={(e) => setEngineQuery(e.target.value)}
-                placeholder="Search engines…"
+                placeholder="Search…"
                 aria-label="Search destination engines"
               />
             </label>
           </div>
 
-          <p className="df2-dest-engine-hint">Popular engines</p>
           <div className="df2-dest-type-chips" role="listbox" aria-label="Featured destination engines">
             {featuredEngines.map((d) => (
               <button
@@ -188,72 +185,58 @@ export function DestinationPicker({
               </button>
             ))}
             {featuredEngines.length === 0 && (
-              <span className="df2-label-hint">No featured engines match “{engineQuery.trim()}”.</span>
+              <span className="df2-label-hint">No featured engines match.</span>
             )}
           </div>
 
-          {hiddenCount > 0 && !showBrowseAll && (
-            <button
-              type="button"
-              className="df2-btn df2-btn-sm df2-btn-ghost df2-dest-engine-more"
-              onClick={() => setShowAllEngines(true)}
-            >
-              Browse all engines ({hiddenCount})
-            </button>
-          )}
-
-          {showBrowseAll && (
-            <>
-              <div className="df2-dest-engine-more-head">
-                <p className="df2-dest-engine-hint">
-                  {query ? `Matches (${visibleOthers.length})` : `All engines (${visibleOthers.length})`}
-                </p>
-                {!query && (
-                  <button
-                    type="button"
-                    className="df2-btn df2-btn-sm df2-btn-ghost"
-                    onClick={() => setShowAllEngines(false)}
-                  >
-                    Show less
-                  </button>
-                )}
-              </div>
-              <div
-                className="df2-dest-type-chips df2-dest-type-chips--scroll"
-                role="listbox"
-                aria-label="All destination engines"
+          {(otherEngines.length > 0 || selectedOutsideFeatured) && (
+            <label className="df2-field" style={{ margin: 0 }}>
+              <span className="df2-label">More engines</span>
+              <select
+                className="df2-dest-engine-select"
+                value={selectedOutsideFeatured ? destType : ""}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  if (next) onSelectType(next);
+                }}
+                aria-label="Select other destination engine"
               >
-                {visibleOthers.map((d) => (
-                  <button
-                    key={d.id}
-                    type="button"
-                    role="option"
-                    aria-selected={destType === d.id}
-                    className={`df2-dest-type-chip${destType === d.id ? " active" : ""}`}
-                    onClick={() => onSelectType(d.id)}
-                  >
-                    <ConnectorIcon id={d.id} size={14} />
+                <option value="">
+                  {otherEngines.length
+                    ? `Choose from ${otherEngines.length} more…`
+                    : "Select engine…"}
+                </option>
+                {(selectedOutsideFeatured
+                  && !otherEngines.some((d) => d.id === destType)
+                  ? [
+                      {
+                        id: destType,
+                        label: liveDestTypes.find((d) => d.id === destType)?.label
+                          ?? getConnectorDefaults(destType).label,
+                      },
+                      ...otherEngines,
+                    ]
+                  : otherEngines
+                ).map((d) => (
+                  <option key={d.id} value={d.id}>
                     {d.label}
-                  </button>
+                  </option>
                 ))}
-                {visibleOthers.length === 0 && (
-                  <span className="df2-label-hint">No engines match “{engineQuery.trim()}”.</span>
-                )}
-              </div>
-            </>
+              </select>
+            </label>
           )}
         </div>
       )}
 
       {connectors.length === 0 && (
         <p className="df2-label-hint df2-dest-picker-empty">
-          No saved connectors yet — use Custom connection or add connectors in the Connectors page.
+          No saved connectors yet — use Custom connection or add one under Connectors.
         </p>
       )}
 
       {manualActive && !destType && (
         <p className="df2-label-hint">
-          Select an engine above. The route stays empty until you choose a destination.
+          Select an engine to continue.
         </p>
       )}
     </div>

@@ -5013,7 +5013,7 @@ export function TransferPage({
             <div className="df2-dest-step-left">
               <div className="df2-dest-toolbar">
                 <div className="df2-field df2-dest-mode-field">
-                  <label className="df2-label">Destination Mode</label>
+                  <label className="df2-label">Mode</label>
                   <div className="df2-dest-mode-row">
                     <FilterBar ariaLabel="Destination mode">
                       <FilterTabs
@@ -5128,10 +5128,10 @@ export function TransferPage({
           {!connectorId && destType && destType !== "bigquery" && destDriverType !== "iceberg" && (
           <div className="df2-dest-section df2-dest-manual-fields">
             <label className="df2-label">Connection</label>
-            <div className="df2-form-row">
-              {destDriverType === "mongodb" || isGenericSql(destType) || ["mysql", "postgresql", "redshift", "sqlite"].includes(destDriverType) ? (
-                <div className="df2-field df2-field-flex">
-                  <label className="df2-label">Connection String (optional)</label>
+            <div className="df2-dest-manual-grid">
+              {(destDriverType === "mongodb" || isGenericSql(destType) || ["mysql", "postgresql", "redshift", "sqlite"].includes(destDriverType)) && (
+                <div className="df2-field df2-dest-manual-span">
+                  <label className="df2-label">Connection string (optional)</label>
                   <input
                     className="df2-input"
                     value={destConnectionString}
@@ -5139,8 +5139,8 @@ export function TransferPage({
                     placeholder={destDriverType === "mongodb" ? "mongodb://localhost:27017/" : getGenericSqlPlaceholder(destType)}
                   />
                 </div>
-              ) : null}
-              <div className="df2-field df2-field-md">
+              )}
+              <div className="df2-field">
                 <label className="df2-label">
                   {destDriverType === "pinecone" ? "Index host" : "Host"}
                 </label>
@@ -5151,11 +5151,9 @@ export function TransferPage({
                   placeholder={
                     destDriverType === "pinecone"
                       ? "my-index-xxxx.svc.pinecone.io"
-                      : destDriverType === "weaviate"
+                      : destDriverType === "weaviate" || destDriverType === "milvus"
                         ? "localhost"
-                        : destDriverType === "milvus"
-                          ? "localhost"
-                          : undefined
+                        : undefined
                   }
                 />
               </div>
@@ -5165,26 +5163,26 @@ export function TransferPage({
                 <input type="number" className="df2-input" value={destPort} onChange={(e) => setDestPort(Number(e.target.value))} />
               </div>
               )}
+              {destDriverType === "snowflake" && (
+                <div className="df2-field">
+                  <label className="df2-label">Warehouse</label>
+                  <input className="df2-input" value={destWarehouse} onChange={(e) => setDestWarehouse(e.target.value)} placeholder="COMPUTE_WH" />
+                </div>
+              )}
               {destType !== "mongodb" && (
-                <>
+                <div className="df2-dest-manual-creds">
                   {destDriverType !== "pinecone" && destDriverType !== "qdrant" && destDriverType !== "weaviate" && (
-                  <div className="df2-field df2-field-140">
+                  <div className="df2-field">
                     <label className="df2-label">Username</label>
                     <input className="df2-input" value={destUsername} onChange={(e) => setDestUsername(e.target.value)} placeholder={destDriverType === "milvus" ? "root" : undefined} />
                   </div>
                   )}
-                  <div className="df2-field df2-field-140">
+                  <div className="df2-field">
                     <label className="df2-label">
                       {["pinecone", "qdrant", "weaviate"].includes(destDriverType) ? "API key" : "Password"}
                     </label>
                     <input type="password" className="df2-input" value={destPassword} onChange={(e) => setDestPassword(e.target.value)} placeholder={destDriverType === "milvus" ? "Milvus" : undefined} />
                   </div>
-                </>
-              )}
-              {destDriverType === "snowflake" && (
-                <div className="df2-field df2-field-160">
-                  <label className="df2-label">Warehouse</label>
-                  <input className="df2-input" value={destWarehouse} onChange={(e) => setDestWarehouse(e.target.value)} placeholder="COMPUTE_WH" />
                 </div>
               )}
             </div>
@@ -5440,7 +5438,7 @@ export function TransferPage({
                 {VALIDATION_MODES.find((m) => m.id === validationMode)?.label ?? validationMode} validation
               </p>
               <p className="df2-label-hint">
-                Overwrite, CDC, SCD2, mirror, cursors, and drift policies open from Advanced.
+                Change overwrite, CDC, and identity in Advanced.
               </p>
             </div>
             <div className="df2-dest-sync-summary-actions">
@@ -5478,8 +5476,6 @@ export function TransferPage({
               </p>
             )}
           </div>
-            </div>
-          </div>
 
           {destKindMode === "database" && destColumns.length > 0 && !destSchemaLoading && (
             <div className="df2-dest-schema-preview">
@@ -5487,7 +5483,7 @@ export function TransferPage({
                 columns={destColumns}
                 schema={destSchemaMap}
                 title="Existing destination schema"
-                subtitle={`${destColumns.length} fields in ${targetDb}.${targetCollection} — mapping will align to these columns`}
+                subtitle={`${destColumns.length} fields in ${targetDb}.${targetCollection}`}
               />
             </div>
           )}
@@ -5517,6 +5513,8 @@ export function TransferPage({
               )}
             </div>
           )}
+            </div>
+          </div>
         </div>
         <div className="df2-card-footer df2-wizard-footer">
           <button type="button" className="df2-btn" onClick={() => setStep(STEP_SOURCE)}>← Back to source</button>
