@@ -10119,20 +10119,26 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   }
 
   .df2-page-transfer-studio .df2-dest-connector-grid {
-    grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
-    gap: 5px;
+    grid-template-columns: 1fr;
+    gap: 6px;
   }
 
   .df2-page-transfer-studio .df2-dest-connector-card {
-    flex-direction: row;
+    display: grid;
+    grid-template-columns: 22px minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+    column-gap: 8px;
+    row-gap: 1px;
     align-items: center;
-    gap: 6px;
-    padding: 6px 8px;
+    padding: 8px 10px;
   }
 
-  .df2-page-transfer-studio .df2-dest-connector-card-meta,
+  .df2-page-transfer-studio .df2-dest-connector-card-meta {
+    display: block;
+  }
+
   .df2-page-transfer-studio .df2-dest-connector-card-status {
-    display: none;
+    display: block;
   }
 
   .df2-page-transfer-studio .df2-dest-picker-head {
