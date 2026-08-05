@@ -2323,12 +2323,24 @@ def inspect_destination_for_preflight(
             elif probe.status == "unavailable" and probe.detail:
                 out["privilege_probe_warning"] = probe.detail
         except Exception as exc:  # noqa: BLE001
-            out["privilege_probe"] = {
-                "status": "unavailable",
-                "detail": str(exc),
-                "can_write": None,
-                "can_create_table": None,
-            }
+            # Never leave pre-probe invent (connected ⇒ can_create=True).
+            # Unavailable: write may proceed; create-table must not soft-pass.
+            from services.destination_privilege_probe import (
+                PrivilegeProbeResult,
+                resolve_write_flags,
+            )
+
+            probe = PrivilegeProbeResult(
+                can_write=None,
+                can_create_table=None,
+                status="unavailable",
+                detail=f"Privilege probe failed: {exc}"[:400],
+            )
+            can_write, can_create, priv_meta = resolve_write_flags(True, probe)
+            out["can_write"] = can_write
+            out["can_create_table"] = can_create
+            out["privilege_probe"] = priv_meta
+            out["privilege_probe_warning"] = str(exc)[:400]
     # Persist auto-resolved Mongo authSource so Validate/Execute match Connectors Test.
     resolved_auth = (getattr(endpoint, "auth_source", "") or "").strip()
     if (

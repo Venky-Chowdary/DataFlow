@@ -136,6 +136,102 @@ def test_mongo_identity_still_id_only() -> None:
     assert tgt == "_id"
 
 
+def test_empty_currency_transform_quarantines_not_silent_null() -> None:
+    mapped, _errs, details = build_mapped_rows_with_details(
+        headers=["amt"],
+        data_rows=[[""], ["$12.00"]],
+        mappings=[
+            {"source": "amt", "target": "amt", "transform": "currency", "confidence": 0.9}
+        ],
+        target_cols=["amt"],
+        column_types={"amt": "string"},
+        dest_types={"amt": "decimal"},
+        error_policy="quarantine",
+    )
+    assert len(mapped) == 1
+    assert any("empty" in str(d.get("reason") or "").lower() for d in details)
+
+
+def test_empty_text_to_integer_quarantines_not_silent_null() -> None:
+    """MySQL '' → Postgres INTEGER must not write NULL without contract/job path."""
+    mapped, _errs, details = build_mapped_rows_with_details(
+        headers=["id", "age"],
+        data_rows=[["1", ""], ["2", "30"]],
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 0.99},
+            {
+                "source": "age",
+                "target": "age",
+                "confidence": 0.99,
+                "transform": "integer",
+            },
+        ],
+        target_cols=["id", "age"],
+        column_types={"id": "string", "age": "string"},
+        dest_types={"id": "string", "age": "integer"},
+        error_policy="quarantine",
+        dest_kind="postgresql",
+    )
+    assert len(mapped) == 1
+    assert details
+    assert any("empty" in str(d.get("reason") or "").lower() for d in details)
+    assert any(d.get("policy") == "quarantine" for d in details)
+
+
+def test_empty_text_to_integer_coerce_null_only_with_contract() -> None:
+    c = create_migration_risk_contract(
+        column="age",
+        source_type="TEXT",
+        destination_type="INTEGER",
+        approved_by="admin@dataflow.app",
+        reason="Explicit empty→NULL",
+        execution_policy="CAST_AND_CONTINUE",
+        quarantine_policy="COERCE_NULL",
+    )
+    mapped, _errs, details = build_mapped_rows_with_details(
+        headers=["age"],
+        data_rows=[[""], ["3"]],
+        mappings=[
+            {
+                "source": "age",
+                "target": "age",
+                "transform": "integer",
+                "risk_contract": c.to_dict(),
+            }
+        ],
+        target_cols=["age"],
+        column_types={"age": "string"},
+        dest_types={"age": "integer"},
+        error_policy="quarantine",
+        allow_job_coerce_null=False,
+    )
+    assert len(mapped) == 2  # empty coerced to NULL under contract
+    assert any(d.get("policy") == "coerce_null" for d in details)
+
+
+def test_composite_pk_stamped_on_quarantine_details() -> None:
+    mapped, _errs, details = build_mapped_rows_with_details(
+        headers=["org_id", "code", "age"],
+        data_rows=[["o1", "a", "nope"]],
+        mappings=[
+            {"source": "org_id", "target": "org_id", "confidence": 0.99},
+            {"source": "code", "target": "code", "confidence": 0.99},
+            {"source": "age", "target": "age", "transform": "integer", "confidence": 0.9},
+        ],
+        target_cols=["org_id", "code", "age"],
+        column_types={"org_id": "string", "code": "string", "age": "string"},
+        dest_types={"org_id": "string", "code": "string", "age": "integer"},
+        error_policy="quarantine",
+        dest_kind="postgresql",
+        destination_pk_columns=["org_id", "code"],
+    )
+    assert len(mapped) == 0
+    assert details
+    assert details[0].get("primary_key") == ["org_id", "code"]
+    assert details[0].get("pk_value", {}).get("org_id") == "o1"
+    assert details[0].get("pk_value", {}).get("code") == "a"
+
+
 def test_unverified_risk_contract_fails_closed_not_job_policy() -> None:
     """Present but bad signature must abort — never demote to job quarantine."""
     mapped, _errs, details = build_mapped_rows_with_details(

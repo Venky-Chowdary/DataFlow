@@ -1326,6 +1326,9 @@ def build_mapped_rows_with_details(
     preserve_case: bool = False,
     allow_job_coerce_null: bool | None = None,
     dest_kind: str = "",
+    destination_pk_columns: list[str] | None = None,
+    contract_primary_key: str | None = None,
+    stream_contracts: list[dict[str, Any]] | None = None,
 ) -> tuple[list[tuple], list[str], list[dict[str, Any]]]:
     """Returns mapped rows, error messages, and structured rejected-row details."""
     from services.json_intelligence import materialize_struct_policies
@@ -1454,28 +1457,20 @@ def build_mapped_rows_with_details(
                     detail["retry_count"] = 1
                 if risk_id:
                     detail["risk_id"] = risk_id
-                # Stamp durable identity for upsert replay (composite / non-id PKs).
+                # Stamp durable identity for upsert replay — full composite when known.
                 pk_cols: list[str] = []
                 try:
-                    from services.primary_key import resolve_identity_key
+                    from services.primary_key import resolve_primary_key_source_columns
 
-                    src_key, tgt_key = resolve_identity_key(
+                    pk_cols = resolve_primary_key_source_columns(
                         mappings=mappings,
                         source_columns=headers,
                         dest_kind=dest_kind or "",
                         purpose="uniqueness",
+                        destination_pk_columns=destination_pk_columns,
+                        contract_primary_key=contract_primary_key,
+                        stream_contracts=stream_contracts,
                     )
-                    # Prefer source column names — rejected.values is source-shaped.
-                    if src_key and src_key in values:
-                        pk_cols = [src_key]
-                    elif tgt_key:
-                        # Map target → source via mapping when needed.
-                        for mm in mappings:
-                            if str(mm.get("target") or "") == tgt_key and mm.get("source"):
-                                pk_cols = [str(mm["source"])]
-                                break
-                        if not pk_cols and tgt_key in values:
-                            pk_cols = [tgt_key]
                 except Exception:
                     pk_cols = []
                 if not pk_cols:

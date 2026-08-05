@@ -165,9 +165,11 @@ _KEEP_EMPTY_TRANSFORMS = frozenset({
 _NONFINITE_TOKENS = frozenset({"nan", "infinity", "+infinity", "-infinity"})
 
 #: Transforms that parse into a concrete type, so null sentinels mean null.
+#: Includes currency/percentage — empty must not silent-NULL into numeric sinks.
 _TYPED_TRANSFORMS = frozenset({
     "decimal", "integer", "boolean", "date", "datetime", "time",
     "json", "uuid", "binary", "vector",
+    "currency", "percentage",
 })
 
 # Per-request date locale for ambiguous MDY/DMY parsing.  The engine and
@@ -1078,6 +1080,12 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
     # Identity / text transforms: empty string is a real value.
     if text == "" and transform_l in _KEEP_EMPTY_TRANSFORMS:
         return "", None
+    # Typed transforms: empty/whitespace must not silently become SQL NULL.
+    # That bypassed Risk Contracts (no err → no CAST/QUARANTINE path) and looked
+    # like a successful TEXT→INTEGER write. Empty → error; continue policies may
+    # quarantine or coerce_null only when the contract/job policy says so.
+    if text == "" and transform_l in _TYPED_TRANSFORMS:
+        return None, f"Empty value cannot coerce to {transform_l}"
     if text == "":
         return None, None
 
