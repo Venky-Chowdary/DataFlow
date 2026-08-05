@@ -241,7 +241,37 @@ def write_mapped_rows(
             driver="none",
         )
 
-    records = [dict(zip(headers, row)) for row in data_rows]
+    from connectors.writer_common import prepare_records_for_vector_write
+
+    pk_cols = list(
+        _kwargs.get("destination_pk_columns")
+        or _kwargs.get("conflict_columns")
+        or []
+    ) or None
+    records, map_rejected, map_abort = prepare_records_for_vector_write(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        column_types=column_types,
+        error_policy=error_policy,
+        dest_kind="weaviate",
+        destination_pk_columns=pk_cols,
+        stream_contracts=_kwargs.get("stream_contracts"),
+        contract_primary_key=_kwargs.get("contract_primary_key"),
+        label="weaviate",
+    )
+    if map_abort:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "",
+            checksum="",
+            chunks_completed=0,
+            error=map_abort,
+            rejected_details=map_rejected,
+            rejected_rows=len(map_rejected),
+        )
     try:
         vector_rows = vectorize_records(
             records,
@@ -264,6 +294,8 @@ def write_mapped_rows(
             checksum="",
             chunks_completed=0,
             error=f"Vectorization failed: {exc}",
+            rejected_details=list(map_rejected),
+            rejected_rows=len(map_rejected),
         )
 
     class_name = _class_name(table_name or database or "DataflowChunk")
@@ -275,6 +307,9 @@ def write_mapped_rows(
             target_schema=schema or "",
             checksum="",
             chunks_completed=0,
+            rejected_details=list(map_rejected),
+            rejected_rows=len(map_rejected),
+            warnings=[r.get("reason") or "" for r in map_rejected[:10] if r.get("reason")],
         )
 
     from services.vector_embedding import resolve_embedding_dimension
@@ -289,7 +324,7 @@ def write_mapped_rows(
             checksum="",
             chunks_completed=0,
             error=dim_err or "embedding dimension unknown — refuse fabricated defaults",
-            rejected_details=[{
+            rejected_details=list(map_rejected) + [{
                 "row": "",
                 "column": "embedding",
                 "target": "vector",
@@ -297,11 +332,15 @@ def write_mapped_rows(
                 "reason": dim_err or "no embeddings",
                 "policy": "fail",
             }],
+            rejected_rows=len(map_rejected) + 1,
         )
 
     key = api_key or password or username or ""
     base_url = _base_url(host, port, ssl, connection_string)
-    objects, rejected = build_weaviate_objects(vector_rows, class_name=class_name, dimension=dimension)
+    objects, embed_rejected = build_weaviate_objects(
+        vector_rows, class_name=class_name, dimension=dimension
+    )
+    rejected = list(map_rejected) + list(embed_rejected)
     if not objects and rejected:
         return WriteResult(
             ok=False,
@@ -310,8 +349,10 @@ def write_mapped_rows(
             target_schema=schema or "",
             checksum="",
             chunks_completed=0,
-            error=rejected[0].get("reason") or "all embeddings rejected",
+            error=(embed_rejected[0].get("reason") if embed_rejected else None)
+            or "all embeddings rejected",
             rejected_details=rejected,
+            rejected_rows=len(rejected),
         )
     from connectors.writer_common import reject_on_strict_policy, transform_error_policy
 

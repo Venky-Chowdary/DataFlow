@@ -290,6 +290,8 @@ export async function runPreflight(payload: {
   }[];
   connector_id?: string;
   source_connector_id?: string;
+  /** Ad-hoc / inline source endpoint when no saved connector — uniqueness + orphan probes. */
+  source_config?: Record<string, unknown>;
   source_table?: string;
   source_collection?: string;
   dest_type?: string;

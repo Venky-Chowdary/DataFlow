@@ -100,7 +100,37 @@ def write_mapped_rows(
             driver="none",
         )
 
-    records = [dict(zip(headers, row)) for row in data_rows]
+    from connectors.writer_common import prepare_records_for_vector_write
+
+    pk_cols = list(
+        _kwargs.get("destination_pk_columns")
+        or _kwargs.get("conflict_columns")
+        or []
+    ) or None
+    records, map_rejected, map_abort = prepare_records_for_vector_write(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        column_types=column_types,
+        error_policy=error_policy,
+        dest_kind="pgvector",
+        destination_pk_columns=pk_cols,
+        stream_contracts=_kwargs.get("stream_contracts"),
+        contract_primary_key=_kwargs.get("contract_primary_key"),
+        label="pgvector",
+    )
+    if map_abort:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "public",
+            checksum="",
+            chunks_completed=0,
+            error=map_abort,
+            rejected_details=map_rejected,
+            rejected_rows=len(map_rejected),
+        )
     try:
         vector_rows = vectorize_records(
             records,
@@ -123,6 +153,8 @@ def write_mapped_rows(
             checksum="",
             chunks_completed=0,
             error=f"Vectorization failed: {exc}",
+            rejected_details=list(map_rejected),
+            rejected_rows=len(map_rejected),
         )
 
     if not vector_rows:
@@ -133,6 +165,9 @@ def write_mapped_rows(
             target_schema=schema or "public",
             checksum="",
             chunks_completed=0,
+            rejected_details=list(map_rejected),
+            rejected_rows=len(map_rejected),
+            warnings=[r.get("reason") or "" for r in map_rejected[:10] if r.get("reason")],
         )
 
     # Determine dimension from valid embeddings only — never invent 384.
@@ -148,10 +183,12 @@ def write_mapped_rows(
             checksum="",
             chunks_completed=0,
             error=dim_err or "embedding dimension unknown — refuse fabricated defaults",
+            rejected_details=list(map_rejected),
+            rejected_rows=len(map_rejected),
         )
 
     inserted = 0
-    rejected_details: list[dict[str, Any]] = []
+    rejected_details: list[dict[str, Any]] = list(map_rejected)
     valid_rows: list[dict[str, Any]] = []
     conn = get_connection(
         host=host,
@@ -186,6 +223,8 @@ def write_mapped_rows(
                             f"pgvector destination {schema or 'public'}.{table_name} "
                             "is missing and create_table is disabled"
                         ),
+                        rejected_details=list(map_rejected),
+                        rejected_rows=len(map_rejected),
                     )
 
             schema_id = sql.Identifier(schema or "public")
@@ -280,6 +319,8 @@ def write_mapped_rows(
             checksum="",
             chunks_completed=(inserted + 999) // 1000,
             error=str(exc),
+            rejected_details=rejected_details,
+            rejected_rows=len(rejected_details),
         )
     finally:
         conn.close()

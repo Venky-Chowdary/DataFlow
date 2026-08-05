@@ -605,6 +605,8 @@ def write_mapped_rows(
             column_types=column_types,
             dest_types=dest_types,
             error_policy=policy,
+            dest_kind="bigquery",
+            destination_pk_columns=list(conflict_columns or []) or None,
         )
         # Prefer physical table (p,s) so append into NUMERIC never silent-overflows.
         physical_schema = None

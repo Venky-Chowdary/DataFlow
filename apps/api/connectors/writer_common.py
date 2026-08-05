@@ -1545,6 +1545,114 @@ def build_mapped_rows_with_details(
     return mapped, errors, rejected_details
 
 
+def prepare_records_for_vector_write(
+    *,
+    headers: list[str],
+    data_rows: list[list[str]],
+    mappings: list[dict],
+    column_types: dict[str, str] | None = None,
+    error_policy: str | None = None,
+    dest_kind: str = "",
+    destination_pk_columns: list[str] | None = None,
+    stream_contracts: list[dict[str, Any]] | None = None,
+    contract_primary_key: str | None = None,
+    label: str = "vector",
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
+    """Apply Map transforms + Risk Contracts before embedding/upsert.
+
+    Records stay **source-header keyed** (legacy ``zip(headers, row)``) so
+    ``content_column`` / ``metadata_columns`` from Studio ``extra`` still resolve,
+    while mapped transforms overlay source+target keys. Unmapped headers pass through.
+    Returns ``(records, rejected_details, abort_message)``.
+    """
+    target_cols: list[str] = []
+    source_for_target: list[str] = []
+    dest_types: dict[str, str] = {}
+    for m in mappings or []:
+        try:
+            from services.mapping_constraints import is_intentional_omit
+
+            if is_intentional_omit(m):
+                continue
+        except Exception:
+            pass
+        src = str(m.get("source") or "").strip()
+        tgt = str(m.get("target") or src).strip()
+        if not tgt:
+            continue
+        if tgt not in target_cols:
+            target_cols.append(tgt)
+            source_for_target.append(src or tgt)
+        dest_types[tgt] = str(
+            m.get("target_type") or m.get("dest_type") or (column_types or {}).get(src) or "string"
+        )
+    if not target_cols:
+        target_cols = list(headers)
+        source_for_target = list(headers)
+        dest_types = {h: (column_types or {}).get(h, "string") for h in target_cols}
+
+    mapped, _errors, rejected = build_mapped_rows_with_details(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=list(mappings or []),
+        target_cols=target_cols,
+        column_types=column_types or {},
+        dest_types=dest_types,
+        error_policy=error_policy,
+        dest_kind=dest_kind,
+        destination_pk_columns=destination_pk_columns,
+        stream_contracts=stream_contracts,
+        contract_primary_key=contract_primary_key,
+    )
+    abort = reject_on_strict_policy(error_policy, rejected, label)
+    if abort:
+        return [], list(rejected), abort
+
+    # Rows held out of primary write (same set as build_mapped_rows continue).
+    holdout_policies = {
+        "fail",
+        "stop_table",
+        "abort_transaction",
+        "quarantine",
+        "skip_row",
+    }
+    held_out_rows = {
+        int(d["row"])
+        for d in rejected
+        if d.get("row") is not None
+        and str(d.get("policy") or "").lower() in holdout_policies
+    }
+
+    def _cell(val: Any) -> Any:
+        if val is None:
+            return ""
+        if isinstance(val, (str, int, float, bool)):
+            return val
+        return str(val)
+
+    records: list[dict[str, Any]] = []
+    mapped_i = 0
+    for row_number, raw in enumerate(data_rows, start=1):
+        if row_number in held_out_rows:
+            continue
+        if mapped_i >= len(mapped):
+            break
+        tup = mapped[mapped_i]
+        mapped_i += 1
+        # Preserve unmapped source headers for metadata_columns / content_column.
+        row: dict[str, Any] = {
+            h: _cell(raw[i] if i < len(raw) else None) for i, h in enumerate(headers)
+        }
+        for i, tgt in enumerate(target_cols):
+            val = _cell(tup[i] if i < len(tup) else None)
+            row[tgt] = val
+            src = source_for_target[i] if i < len(source_for_target) else ""
+            if src:
+                row[src] = val
+        records.append(row)
+    return records, list(rejected), None
+
+
 def sample_values_by_source_from_batch(
     headers: list[str],
     data_rows: list[list[str]],

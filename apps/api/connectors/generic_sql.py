@@ -4135,6 +4135,9 @@ def write_mapped_rows(
         error_policy=policy,
         dest_types=target_column_types,
         preserve_case=True,
+        dest_kind=str(dest_db or type or "sql").lower(),
+        # Upsert conflict cols / dest PK — full composite for quarantine replay identity.
+        destination_pk_columns=list(conflict_columns or []) or None,
     )
     _tgt_types_pre = [str(target_column_types.get(c, "") or "") for c in target_cols]
     # Engine-honest dialect labels (Databricks/Delta via generic_sql share this path).

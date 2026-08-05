@@ -801,6 +801,8 @@ def write_mapped_rows(
         column_types=column_types,
         dest_types=dest_types,
         error_policy=policy,
+        dest_kind="snowflake",
+        destination_pk_columns=list(conflict_columns or []) or None,
     )
 
     # Size Snowflake NUMBER columns from the actual batch data only when Map

@@ -202,6 +202,8 @@ def write_mapped_rows(
             dest_types=dest_types,
             error_policy=policy,
             preserve_case=True,
+            dest_kind="mongodb",
+            destination_pk_columns=list(conflict_columns or []) or None,
         )
         rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
         coerced_null_rows = _coerced_null_row_count(rejected_details, policy)

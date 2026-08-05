@@ -396,6 +396,8 @@ def write_mapped_rows(
                 dest_types=dest_types,
                 error_policy=policy,
                 preserve_case=True,
+                dest_kind="sqlite",
+                destination_pk_columns=list(conflict_columns or []) or None,
             )
         )
         # Shared quarantine matrix — SQLite is PRODUCTION_SKU; never skip fit

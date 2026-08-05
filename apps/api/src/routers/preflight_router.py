@@ -56,6 +56,8 @@ class PreflightRequest(BaseModel):
     mappings: list[MappingItem]
     connector_id: str | None = None
     source_connector_id: str | None = None
+    # Ad-hoc / inline source endpoint when no saved connector — uniqueness + orphan probes.
+    source_config: dict[str, Any] | None = None
     source_kind: str = "file"
     source_type: str | None = None
     source_table: str | None = None
@@ -269,6 +271,7 @@ async def run_preflight(body: PreflightRequest):
             privilege_probe=dest_meta.get("privilege_probe"),
             destination_db_type=(dest_meta.get("db_type") or body.dest_type or "postgresql").lower(),
             source_connector_id=body.source_connector_id or "",
+            source_config=body.source_config,
             source_table=(body.source_table or body.source_collection or ""),
             destination_table=(body.dest_table or body.dest_collection or ""),
             source_filename="",

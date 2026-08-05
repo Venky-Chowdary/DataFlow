@@ -327,3 +327,83 @@ def test_transfer_ready_ids_require_preflight_when_not_file() -> None:
         if caps.get("preflight") is False:
             bad.append(cid)
     assert not bad, f"TRANSFER_READY with preflight:False: {bad}"
+
+
+def test_prepare_records_for_vector_write_applies_transforms() -> None:
+    """Vector writers must not zip raw headers — Risk Contracts + transforms apply."""
+    from connectors.writer_common import prepare_records_for_vector_write
+
+    records, rejected, abort = prepare_records_for_vector_write(
+        headers=["id", "age", "title"],
+        data_rows=[["1", "10", "hello"], ["2", "nope", "skip"]],
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 0.99},
+            {
+                "source": "age",
+                "target": "age_num",
+                "confidence": 0.99,
+                "transform": "to_integer",
+                "target_type": "integer",
+            },
+        ],
+        column_types={"id": "string", "age": "string", "title": "string"},
+        error_policy="quarantine",
+        dest_kind="pgvector",
+        label="pgvector",
+    )
+    assert abort is None
+    assert len(records) == 1
+    # Source-key content_column still resolves after rename mapping.
+    assert records[0]["age"] == 10 or records[0]["age"] == "10"
+    assert records[0]["age_num"] == 10 or records[0]["age_num"] == "10"
+    # Unmapped metadata column must pass through.
+    assert records[0]["title"] == "hello"
+    assert rejected
+
+
+def test_prepare_records_for_vector_write_fail_job_aborts() -> None:
+    from connectors.writer_common import prepare_records_for_vector_write
+
+    c = create_migration_risk_contract(
+        column="age",
+        source_type="TEXT",
+        destination_type="INTEGER",
+        approved_by="admin@dataflow.app",
+        reason="Vector FAIL_JOB must abort before embed",
+        execution_policy="FAIL_JOB",
+    )
+    records, rejected, abort = prepare_records_for_vector_write(
+        headers=["id", "age"],
+        data_rows=[["1", "nope"]],
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 0.99},
+            {
+                "source": "age",
+                "target": "age",
+                "confidence": 0.99,
+                "transform": "to_integer",
+                "target_type": "integer",
+                "risk_contract": c.to_dict(),
+            },
+        ],
+        column_types={"id": "string", "age": "string"},
+        error_policy="quarantine",
+        dest_kind="milvus",
+        label="milvus",
+    )
+    assert records == []
+    assert rejected
+    assert abort is not None
+    assert "FAIL_JOB" in abort or "risk contract" in abort.lower() or "rejected" in abort.lower()
+
+
+def test_preflight_request_accepts_source_config() -> None:
+    from src.routers.preflight_router import PreflightRequest
+
+    body = PreflightRequest(
+        columns=["id"],
+        mappings=[{"source": "id", "target": "id", "confidence": 0.99}],
+        source_config={"type": "mysql", "host": "db.example", "database": "crown"},
+    )
+    assert body.source_config is not None
+    assert body.source_config["type"] == "mysql"
