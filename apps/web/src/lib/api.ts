@@ -2052,6 +2052,8 @@ export async function runUniversalTransfer(options: {
   formData.append("sync_mode", options.syncMode || "full_refresh_append");
   formData.append("schema_policy", options.schemaPolicy || "manual_review");
   formData.append("validation_mode", options.validationMode || "strict");
+  // Runtime SSOT: only at_least_once is selectable — never invent exactly-once.
+  formData.append("delivery_guarantee", "at_least_once");
   formData.append("backfill_new_fields", options.backfillNewFields === true ? "true" : "false");
   formData.append("write_via_staging", options.writeViaStaging === true ? "true" : "false");
   formData.append("enable_ocr", options.enableOcr === true ? "true" : "false");
@@ -2187,6 +2189,7 @@ export async function executeTransferJson(payload: {
       sync_mode: payload.syncMode || "full_refresh_append",
       validation_mode: payload.validationMode || "strict",
       schema_policy: payload.schemaPolicy || "manual_review",
+      delivery_guarantee: "at_least_once",
       skip_preflight: payload.skipPreflight === true,
       async_mode: payload.asyncMode !== false,
       plan_id: payload.planId || undefined,

@@ -10,13 +10,15 @@ import hashlib
 import json
 from typing import Any
 
-# RETRY excluded — no cell-level retry engine; must not clear Validate as continue.
+# Must match apps/api services.migration_risk_contract.CONTINUE_POLICIES.
+# RETRY excluded — fail-closed after one re-attempt; never clears Validate.
 CONTINUE_POLICIES: frozenset[str] = frozenset(
     {
         "QUARANTINE_ROW",
         "SKIP_ROW",
         "CAST_AND_CONTINUE",
         "TRANSFORM_AND_CONTINUE",
+        "STOP_COLUMN",
     }
 )
 

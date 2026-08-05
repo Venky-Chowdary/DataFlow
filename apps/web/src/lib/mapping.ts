@@ -131,32 +131,35 @@ export type ExecutionPolicy =
   | "STOP_COLUMN"
   | "QUARANTINE_ROW"
   | "SKIP_ROW"
+  | "RETRY"
   | "CAST_AND_CONTINUE"
   | "TRANSFORM_AND_CONTINUE"
   | "ABORT_TRANSACTION";
 
-/** Policies that unlock Validate→Execute (must match BE CONTINUE_POLICIES). RETRY is never continue. */
+/** Policies that unlock Validate→Execute (must match BE CONTINUE_POLICIES). */
 export const CONTINUE_EXECUTION_POLICIES = new Set<ExecutionPolicy>([
   "QUARANTINE_ROW",
   "SKIP_ROW",
   "CAST_AND_CONTINUE",
   "TRANSFORM_AND_CONTINUE",
+  "STOP_COLUMN",
 ]);
 
-/** Operator-selectable policies — no hidden default; RETRY omitted (fail-closed on write). */
+/** Operator-selectable policies — labels match runtime semantics (no placeholders). */
 export const EXECUTION_POLICY_OPTIONS: Array<{
   id: ExecutionPolicy;
   label: string;
   continueUnlock: boolean;
 }> = [
-  { id: "FAIL_JOB", label: "FAIL_JOB — stop the job", continueUnlock: false },
-  { id: "STOP_TABLE", label: "STOP_TABLE — stop this table", continueUnlock: false },
-  { id: "STOP_COLUMN", label: "STOP_COLUMN — stop this column", continueUnlock: false },
-  { id: "ABORT_TRANSACTION", label: "ABORT_TRANSACTION — abort txn", continueUnlock: false },
-  { id: "QUARANTINE_ROW", label: "QUARANTINE_ROW — holdout bad rows", continueUnlock: true },
-  { id: "SKIP_ROW", label: "SKIP_ROW — skip bad rows", continueUnlock: true },
-  { id: "CAST_AND_CONTINUE", label: "CAST_AND_CONTINUE — cast & write", continueUnlock: true },
-  { id: "TRANSFORM_AND_CONTINUE", label: "TRANSFORM_AND_CONTINUE — transform & write", continueUnlock: true },
+  { id: "FAIL_JOB", label: "FAIL_JOB — abort the job write", continueUnlock: false },
+  { id: "STOP_TABLE", label: "STOP_TABLE — abort this table/stream write", continueUnlock: false },
+  { id: "ABORT_TRANSACTION", label: "ABORT_TRANSACTION — abort txn (or fail if none)", continueUnlock: false },
+  { id: "RETRY", label: "RETRY — one re-attempt then abort", continueUnlock: false },
+  { id: "STOP_COLUMN", label: "STOP_COLUMN — omit bad column; write other columns", continueUnlock: true },
+  { id: "QUARANTINE_ROW", label: "QUARANTINE_ROW — holdout row to DLQ for replay", continueUnlock: true },
+  { id: "SKIP_ROW", label: "SKIP_ROW — drop row (audit skip, not DLQ replay)", continueUnlock: true },
+  { id: "CAST_AND_CONTINUE", label: "CAST_AND_CONTINUE — cast fail → quarantine", continueUnlock: true },
+  { id: "TRANSFORM_AND_CONTINUE", label: "TRANSFORM_AND_CONTINUE — transform fail → quarantine", continueUnlock: true },
 ];
 
 export type MigrationRiskContractDraft = {

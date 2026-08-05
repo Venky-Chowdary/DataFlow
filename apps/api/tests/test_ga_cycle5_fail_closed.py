@@ -32,13 +32,34 @@ def test_retry_policy_is_fail_closed_not_continue():
     mapping = {"source": "amt", "risk_contract": c.to_dict(), "risk_acknowledged": True}
     assert mapping_has_clearing_risk_contract(mapping) is False
     action, pol, _rid = resolve_write_action_for_mapping(mapping, "quarantine")
-    assert action == "fail"
+    assert action == "retry_then_fail"
     assert pol == "RETRY"
 
 
-def test_stop_column_aborts_partial_write_message():
+def test_stop_column_does_not_abort_job_write():
+    """STOP_COLUMN omits the column — job continues (distinct from FAIL_JOB)."""
     from connectors.writer_common import reject_on_strict_policy
+    from services.migration_risk_contract import (
+        CONTINUE_POLICIES,
+        resolve_write_action_for_mapping,
+        create_migration_risk_contract,
+    )
 
+    assert "STOP_COLUMN" in CONTINUE_POLICIES
+    c = create_migration_risk_contract(
+        column="amt",
+        source_type="TEXT",
+        destination_type="INTEGER",
+        approved_by="admin@dataflow.app",
+        reason="stop column only",
+        execution_policy="STOP_COLUMN",
+    )
+    action, pol, _rid = resolve_write_action_for_mapping(
+        {"source": "amt", "risk_contract": c.to_dict()},
+        "quarantine",
+    )
+    assert action == "stop_column"
+    assert pol == "STOP_COLUMN"
     msg = reject_on_strict_policy(
         "quarantine",
         [
@@ -46,13 +67,12 @@ def test_stop_column_aborts_partial_write_message():
                 "row": 1,
                 "column": "amt",
                 "execution_policy": "STOP_COLUMN",
-                "policy": "fail",
+                "policy": "stop_column",
             }
         ],
         "pg",
     )
-    assert msg is not None
-    assert "fail-closed" in msg.lower() or "blocks" in msg.lower()
+    assert msg is None
 
 
 def test_datatype_validation_layer_exists():

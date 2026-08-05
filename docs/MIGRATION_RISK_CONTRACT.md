@@ -18,22 +18,24 @@ Never silently continue. A continue policy must be chosen explicitly.
 
 ## Continue policies (may unlock Validate → Execute)
 
-| Policy | Meaning |
-|--------|---------|
-| `CAST_AND_CONTINUE` | Lossy cast at write; document precision/null expectations |
-| `TRANSFORM_AND_CONTINUE` | Named transform owns the conversion |
-| `QUARANTINE_ROW` | Rejecting cells go to quarantine / DLQ; job may continue |
-| `SKIP_ROW` | Drop the row from the primary write (must be audited) |
+Runtime SSOT: `execution_policy_semantics()` / `resolve_write_action_for_mapping`.
 
-## Fail-closed policies (awareness only / write abort)
+| Policy | Write action | Behavior |
+|--------|--------------|----------|
+| `CAST_AND_CONTINUE` | `quarantine` (or `coerce_null`) | Cast failure → row holdout; `disposition=cast_failure` |
+| `TRANSFORM_AND_CONTINUE` | `quarantine` (or `coerce_null`) | Transform failure → row holdout; `disposition=transform_failure` |
+| `QUARANTINE_ROW` | `quarantine` | Entire row held in DLQ for replay; `quarantine_required=true` |
+| `SKIP_ROW` | `skip_row` | Row dropped from primary; audit skip (`disposition=skipped`), not replay-quarantine |
+| `STOP_COLUMN` | `stop_column` | Failing column omitted; **other columns on the row still write**; job continues |
 
-| Policy | Meaning |
-|--------|---------|
-| `FAIL_JOB` | Default — job fails if this path would lose fidelity |
-| `STOP_TABLE` | Stop the current table/stream |
-| `STOP_COLUMN` | Fail closed for the mapped column write path |
-| `ABORT_TRANSACTION` | Abort the active transaction when available |
-| `RETRY` | Reserved — no cell-level retry engine; **fail closed** (never invent quarantine) |
+## Fail-closed policies (do not unlock Validate; abort write unit)
+
+| Policy | Write action | Behavior |
+|--------|--------------|----------|
+| `FAIL_JOB` | `fail` | Default — abort job write (`stop_scope=job`) |
+| `STOP_TABLE` | `stop_table` | Abort current table/stream write unit (`stop_scope=table`) |
+| `ABORT_TRANSACTION` | `abort_transaction` | Request txn abort when sink supports it; otherwise fail-closed with `transaction_available=false` |
+| `RETRY` | `retry_then_fail` | **Exactly one** `apply_transform` re-attempt, then abort (never silent quarantine) |
 
 ## Contract fields
 
@@ -56,21 +58,24 @@ Never silently continue. A continue policy must be chosen explicitly.
    **verified continue-policy** contract.
 4. **Writers honor the contract** (`build_mapped_rows_with_details` +
    `reject_on_strict_policy`):
-   - `FAIL_JOB` / `STOP_TABLE` / `ABORT_TRANSACTION` → abort partial write
-     even when the job error_policy is `quarantine`
-   - `CAST_AND_CONTINUE` / `TRANSFORM_AND_CONTINUE` → cast failures follow
-     `quarantine_policy` (default: row holdout to DLQ; never invent NULL)
-   - `QUARANTINE_ROW` / `SKIP_ROW` → hold out bad rows; batch may continue
-   - Rejected cells stamp `execution_policy` + `risk_id` for audit
+   - `FAIL_JOB` / `STOP_TABLE` / `ABORT_TRANSACTION` / exhausted `RETRY` →
+     abort partial write even when the job error_policy is `quarantine`
+   - `STOP_COLUMN` → omit failing column; write remaining columns (no job abort)
+   - `CAST_AND_CONTINUE` / `TRANSFORM_AND_CONTINUE` → follow `quarantine_policy`
+     (default row holdout; never invent NULL unless policy asks coerce)
+   - `QUARANTINE_ROW` → hold out row for DLQ replay; `SKIP_ROW` → drop with
+     skip audit (not replay quarantine)
+   - Rejected cells stamp `execution_policy`, `disposition`, `risk_id`, `stop_scope`
 
 ## Honesty
 
-- Rollback remains **not productized** (`docs/MIGRATION_ROLLBACK.md`).
+- Rollback remains **staging discard only** when planned (`DISCARD_STAGING`);
+  warehouse snapshot/swap/Iceberg branch restore are **not** executed
+  (`docs/MIGRATION_ROLLBACK.md`).
 - Sample rows on the contract do not prove population outcomes.
 - Signature is a tamper-evident digest, not a PKI certificate.
-- Fit/type quarantine matrix (`apply_write_quarantine_matrix`) still uses
-  job-level policy for post-transform DECIMAL/width failures — transform-path
-  contract enforcement is Module 1b; matrix per-column contracts are 1c.
+- `ABORT_TRANSACTION` does not invent a transaction on sinks without one.
+- Quarantine DLQ is fail-closed durable; it is **not** destination 2PC.
 
 ## Code SSOT
 

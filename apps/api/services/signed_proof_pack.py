@@ -250,6 +250,16 @@ def execution_policies_from_risks(accepted_risks: list[dict[str, Any]]) -> list[
     return policies
 
 
+def _execution_policy_semantics_for_proof() -> dict[str, Any]:
+    """Embed runtime policy semantics so proof packs cannot outrun the writer."""
+    try:
+        from services.migration_risk_contract import execution_policy_semantics
+
+        return execution_policy_semantics()
+    except Exception:
+        return {}
+
+
 def mapping_risk_contracts_expected(job: dict[str, Any] | None) -> list[dict[str, Any]]:
     """Risk contracts present on job mappings (expected in Proof Pack)."""
     if not isinstance(job, dict):
@@ -426,6 +436,7 @@ def build_signed_proof_pack(
         "accepted_risks": risks,
         "risk_contracts": risks,
         "execution_policies": policies,
+        "execution_policy_semantics": _execution_policy_semantics_for_proof(),
         "proof_incomplete_reasons": list(completeness_errors),
         "require_risk_completeness": require_complete,
         "rejected_rows_count": len(rejected_rows or []),

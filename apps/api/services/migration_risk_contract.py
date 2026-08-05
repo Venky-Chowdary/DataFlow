@@ -35,31 +35,124 @@ ExecutionPolicy = Literal[
 ]
 
 # Policies that may clear Validate / Execute for a lossy mapping.
-# RETRY is intentionally excluded — there is no cell-level retry engine; claiming
-# RETRY as a continue policy would invent silent quarantine (fail closed).
+# Each has a distinct write-path action (see resolve_write_action_for_mapping).
 CONTINUE_POLICIES: frozenset[str] = frozenset(
     {
         "QUARANTINE_ROW",
         "SKIP_ROW",
         "CAST_AND_CONTINUE",
         "TRANSFORM_AND_CONTINUE",
+        "STOP_COLUMN",  # omit failing column cells; job continues
     }
 )
 
-# Policies that record awareness but keep Execute locked / fail closed on write.
+# Policies that keep Execute locked and abort the table/job write on failure.
 FAIL_CLOSED_POLICIES: frozenset[str] = frozenset(
     {
         "FAIL_JOB",
         "STOP_TABLE",
-        "STOP_COLUMN",
         "ABORT_TRANSACTION",
-        "RETRY",  # reserved — no cell retry engine; write fails closed
+        "RETRY",  # one in-cell re-attempt, then abort (never silent continue)
+    }
+)
+
+# Rejected-detail policies that must abort the partial primary write.
+JOB_ABORT_POLICIES: frozenset[str] = frozenset(
+    {
+        "FAIL_JOB",
+        "STOP_TABLE",
+        "ABORT_TRANSACTION",
+        "RETRY",
     }
 )
 
 DEFAULT_EXECUTION_POLICY: ExecutionPolicy = "FAIL_JOB"
 
 ALL_POLICIES: frozenset[str] = CONTINUE_POLICIES | FAIL_CLOSED_POLICIES
+
+# Writer cell actions — SSOT for build_mapped_rows_with_details.
+WriteAction = Literal[
+    "fail",
+    "stop_table",
+    "stop_column",
+    "abort_transaction",
+    "retry_then_fail",
+    "quarantine",
+    "skip_row",
+    "coerce_null",
+]
+
+
+def execution_policy_semantics() -> dict[str, dict[str, Any]]:
+    """Runtime-honest semantics for every selectable execution policy."""
+    return {
+        "FAIL_JOB": {
+            "write_action": "fail",
+            "clears_validate": False,
+            "aborts_job": True,
+            "row_written": False,
+            "notes": "Default. Any failure under this contract aborts the write.",
+        },
+        "STOP_TABLE": {
+            "write_action": "stop_table",
+            "clears_validate": False,
+            "aborts_job": True,
+            "row_written": False,
+            "notes": "Stops the current table/stream write unit (stop_scope=table).",
+        },
+        "STOP_COLUMN": {
+            "write_action": "stop_column",
+            "clears_validate": True,
+            "aborts_job": False,
+            "row_written": True,
+            "notes": "Omits failing column values; other columns on the row still write.",
+        },
+        "ABORT_TRANSACTION": {
+            "write_action": "abort_transaction",
+            "clears_validate": False,
+            "aborts_job": True,
+            "row_written": False,
+            "notes": (
+                "Requests writer txn abort when available; otherwise fail-closed "
+                "with transaction_available=false."
+            ),
+        },
+        "RETRY": {
+            "write_action": "retry_then_fail",
+            "clears_validate": False,
+            "aborts_job": True,
+            "row_written": False,
+            "notes": "Exactly one apply_transform re-attempt; then abort.",
+        },
+        "QUARANTINE_ROW": {
+            "write_action": "quarantine",
+            "clears_validate": True,
+            "aborts_job": False,
+            "row_written": False,
+            "notes": "Hold out entire row for DLQ recovery/replay.",
+        },
+        "SKIP_ROW": {
+            "write_action": "skip_row",
+            "clears_validate": True,
+            "aborts_job": False,
+            "row_written": False,
+            "notes": "Drop row from primary; disposition=skipped (not replay-quarantine).",
+        },
+        "CAST_AND_CONTINUE": {
+            "write_action": "quarantine",
+            "clears_validate": True,
+            "aborts_job": False,
+            "row_written": False,
+            "notes": "Lossy cast path; disposition=cast_failure.",
+        },
+        "TRANSFORM_AND_CONTINUE": {
+            "write_action": "quarantine",
+            "clears_validate": True,
+            "aborts_job": False,
+            "row_written": False,
+            "notes": "Named transform path; disposition=transform_failure.",
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -483,17 +576,18 @@ def resolve_write_action_for_mapping(
 ) -> tuple[str, str | None, str | None]:
     """Resolve effective writer action for one mapping on cell failure.
 
-    Returns ``(write_action, execution_policy, risk_id)`` where write_action is
-    ``fail`` | ``quarantine`` | ``coerce_null``.
+    Returns ``(write_action, execution_policy, risk_id)``.
 
-    Rules (contract narrows / specializes job policy — never silent invent):
-    - No verified contract → job error_policy
-    - FAIL_JOB / STOP_* / ABORT_TRANSACTION / RETRY → ``fail`` (RETRY has no
-      cell-retry engine; fail-closed)
-    - QUARANTINE_ROW / SKIP_ROW → ``quarantine`` holdout
-    - CAST_AND_CONTINUE / TRANSFORM_AND_CONTINUE → on failure, honor
-      ``quarantine_policy`` (default quarantine holdout; never invent NULL unless
-      the contract's quarantine_policy explicitly asks for coerce/null)
+    Distinct actions (Enterprise GA — never collapse STOP_*/SKIP/RETRY into one):
+    - FAIL_JOB → ``fail``
+    - STOP_TABLE → ``stop_table`` (abort write unit; stop_scope=table)
+    - STOP_COLUMN → ``stop_column`` (omit cell; write other columns)
+    - ABORT_TRANSACTION → ``abort_transaction``
+    - RETRY → ``retry_then_fail`` (one re-attempt in writer, then fail)
+    - QUARANTINE_ROW → ``quarantine``
+    - SKIP_ROW → ``skip_row`` (drop row; disposition=skipped)
+    - CAST_AND_CONTINUE / TRANSFORM_AND_CONTINUE → ``quarantine`` or
+      ``coerce_null`` per quarantine_policy
     """
     job = _normalize_job_write_policy(job_error_policy)
     c = mapping_risk_contract(mapping)
@@ -503,20 +597,27 @@ def resolve_write_action_for_mapping(
     exec_pol = (c.execution_policy or DEFAULT_EXECUTION_POLICY).strip().upper()
     risk_id = c.risk_id
 
-    if exec_pol in FAIL_CLOSED_POLICIES:
-        # FAIL_JOB / STOP_* / ABORT / RETRY — never invent silent continue.
+    if exec_pol == "FAIL_JOB":
         return "fail", exec_pol, risk_id
-
-    if exec_pol in {"QUARANTINE_ROW", "SKIP_ROW"}:
+    if exec_pol == "STOP_TABLE":
+        return "stop_table", exec_pol, risk_id
+    if exec_pol == "ABORT_TRANSACTION":
+        return "abort_transaction", exec_pol, risk_id
+    if exec_pol == "RETRY":
+        return "retry_then_fail", exec_pol, risk_id
+    if exec_pol == "STOP_COLUMN":
+        return "stop_column", exec_pol, risk_id
+    if exec_pol == "SKIP_ROW":
+        return "skip_row", exec_pol, risk_id
+    if exec_pol == "QUARANTINE_ROW":
         return "quarantine", exec_pol, risk_id
 
-    if exec_pol in CONTINUE_POLICIES:
+    if exec_pol in {"CAST_AND_CONTINUE", "TRANSFORM_AND_CONTINUE"}:
         qp = (c.quarantine_policy or "").strip().upper()
         if "FAIL" in qp and "QUARANTINE" not in qp:
             return "fail", exec_pol, risk_id
         if "NULL" in qp or "COERCE" in qp:
             return "coerce_null", exec_pol, risk_id
-        # Default: hold out bad cells; good rows continue (cast & continue).
         return "quarantine", exec_pol, risk_id
 
     # Unknown policy — fail closed (never fall through to job quarantine default).
@@ -524,12 +625,13 @@ def resolve_write_action_for_mapping(
 
 
 def rejected_details_require_job_abort(rejected_details: list[dict[str, Any]] | None) -> bool:
-    """True when any rejected cell carries a fail-closed Migration Risk Contract."""
+    """True when any rejected cell carries a job-abort Migration Risk Contract."""
     for d in rejected_details or []:
         pol = str(d.get("execution_policy") or "").strip().upper()
-        if pol in FAIL_CLOSED_POLICIES:
+        if pol in JOB_ABORT_POLICIES:
             return True
-        if d.get("policy") == "fail" and pol in FAIL_CLOSED_POLICIES:
+        action = str(d.get("policy") or "").strip().lower()
+        if action in {"fail", "stop_table", "abort_transaction", "retry_then_fail"}:
             return True
     return False
 
@@ -537,7 +639,7 @@ def rejected_details_require_job_abort(rejected_details: list[dict[str, Any]] | 
 def rejected_details_are_continue_contract_only(
     rejected_details: list[dict[str, Any]] | None,
 ) -> bool:
-    """True when every rejection is under a continue-policy contract (quarantine OK)."""
+    """True when every rejection is under a continue-policy contract (no job abort)."""
     details = list(rejected_details or [])
     if not details:
         return False
@@ -546,3 +648,19 @@ def rejected_details_are_continue_contract_only(
         if pol not in CONTINUE_POLICIES:
             return False
     return True
+
+
+def disposition_for_execution_policy(exec_pol: str | None) -> str:
+    """Audit disposition stamp for rejected_details / proof."""
+    pol = (exec_pol or "").strip().upper()
+    return {
+        "FAIL_JOB": "job_aborted",
+        "STOP_TABLE": "table_stopped",
+        "STOP_COLUMN": "column_stopped",
+        "ABORT_TRANSACTION": "transaction_abort_requested",
+        "RETRY": "retry_exhausted",
+        "QUARANTINE_ROW": "quarantined",
+        "SKIP_ROW": "skipped",
+        "CAST_AND_CONTINUE": "cast_failure",
+        "TRANSFORM_AND_CONTINUE": "transform_failure",
+    }.get(pol, "rejected")

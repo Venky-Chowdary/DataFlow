@@ -1159,21 +1159,35 @@ def reject_on_strict_policy(
         rejected_details_are_continue_contract_only = None  # type: ignore[assignment]
 
     if rejected_details_require_job_abort and rejected_details_require_job_abort(details):
-        n = sum(
-            1
-            for d in details
-            if str(d.get("execution_policy") or "").upper()
-            in {
+        try:
+            from services.migration_risk_contract import JOB_ABORT_POLICIES
+        except Exception:
+            JOB_ABORT_POLICIES = {
                 "FAIL_JOB",
                 "STOP_TABLE",
-                "STOP_COLUMN",
                 "ABORT_TRANSACTION",
                 "RETRY",
             }
+        n = sum(
+            1
+            for d in details
+            if str(d.get("execution_policy") or "").upper() in JOB_ABORT_POLICIES
+            or str(d.get("policy") or "").lower()
+            in {"fail", "stop_table", "abort_transaction", "retry_then_fail"}
         )
+        scopes = sorted(
+            {
+                str(d.get("stop_scope") or d.get("execution_policy") or "FAIL_JOB")
+                for d in details
+                if str(d.get("execution_policy") or "").upper() in JOB_ABORT_POLICIES
+                or str(d.get("policy") or "").lower()
+                in {"fail", "stop_table", "abort_transaction", "retry_then_fail"}
+            }
+        )
+        scope_note = f" ({', '.join(scopes[:4])})" if scopes else ""
         return (
             f"{label} rejected {n or len(details)} row(s); "
-            "Migration Risk Contract fail-closed policy blocks partial write"
+            f"Migration Risk Contract abort policy blocks partial write{scope_note}"
         )
 
     if (
@@ -1323,11 +1337,18 @@ def build_mapped_rows_with_details(
     except Exception:
         resolve_write_action_for_mapping = None  # type: ignore[assignment]
 
+    try:
+        from services.migration_risk_contract import disposition_for_execution_policy
+    except Exception:
+        disposition_for_execution_policy = None  # type: ignore[assignment]
+
     mapped: list[tuple] = []
     for row_number, raw in enumerate(data_rows, start=1):
         out = [None] * len(sanitized_target_cols)
         row_has_error = False
-        row_action = "ok"  # ok | fail | quarantine | coerce_null
+        # ok | fail | stop_table | abort_transaction | retry_then_fail |
+        # quarantine | skip_row | stop_column | coerce_null
+        row_action = "ok"
         for source_idx, target_idx, transform, src_name, tgt_name, mapping in mapping_infos:
             val = raw[source_idx] if source_idx is not None and source_idx < len(raw) else None
             # Preserve sparse-CDC missing before transforms (omit-from-SET, never NULL wipe).
@@ -1336,12 +1357,25 @@ def build_mapped_rows_with_details(
                     out[target_idx] = DF_MISSING_SENTINEL
                 continue
             converted, err = apply_transform(val, transform)
+            cell_policy = policy
+            exec_pol: str | None = None
+            risk_id: str | None = None
+            retry_attempted = False
+            if err and resolve_write_action_for_mapping is not None:
+                cell_policy, exec_pol, risk_id = resolve_write_action_for_mapping(
+                    mapping, policy
+                )
+                # RETRY: exactly one re-attempt of the same transform, then fail.
+                if cell_policy == "retry_then_fail":
+                    retry_attempted = True
+                    converted, err = apply_transform(val, transform)
+                    if not err:
+                        cell_policy = "ok"
+                    else:
+                        cell_policy = "fail"
             if err:
                 row_has_error = True
-                cell_policy = policy
-                exec_pol: str | None = None
-                risk_id: str | None = None
-                if resolve_write_action_for_mapping is not None:
+                if resolve_write_action_for_mapping is not None and exec_pol is None:
                     cell_policy, exec_pol, risk_id = resolve_write_action_for_mapping(
                         mapping, policy
                     )
@@ -1363,6 +1397,26 @@ def build_mapped_rows_with_details(
                 }
                 if exec_pol:
                     detail["execution_policy"] = exec_pol
+                    if disposition_for_execution_policy is not None:
+                        detail["disposition"] = disposition_for_execution_policy(exec_pol)
+                    if exec_pol == "STOP_TABLE":
+                        detail["stop_scope"] = "table"
+                    elif exec_pol == "STOP_COLUMN":
+                        detail["stop_scope"] = "column"
+                    elif exec_pol == "FAIL_JOB":
+                        detail["stop_scope"] = "job"
+                    elif exec_pol == "ABORT_TRANSACTION":
+                        detail["stop_scope"] = "transaction"
+                        detail["transaction_abort_requested"] = True
+                        # Writers without a real txn still fail closed — honesty stamp.
+                        detail["transaction_available"] = False
+                    elif exec_pol == "SKIP_ROW":
+                        detail["quarantine_required"] = False
+                    elif exec_pol == "QUARANTINE_ROW":
+                        detail["quarantine_required"] = True
+                if retry_attempted:
+                    detail["retry_attempted"] = True
+                    detail["retry_count"] = 1
                 if risk_id:
                     detail["risk_id"] = risk_id
                 # Stamp durable identity for upsert replay (composite / non-id PKs).
@@ -1411,27 +1465,50 @@ def build_mapped_rows_with_details(
                 rejected_details.append(detail)
                 if len(errors) < 10:
                     errors.append(f"row {row_number} {src_name}→{tgt_name}: {err}")
-                if cell_policy == "fail":
-                    row_action = "fail"
+                # Escalate row_action by severity — abort > skip/quarantine > stop_column.
+                abort_actions = {
+                    "fail",
+                    "stop_table",
+                    "abort_transaction",
+                    "retry_then_fail",
+                }
+                if cell_policy in abort_actions:
+                    row_action = cell_policy if cell_policy != "retry_then_fail" else "fail"
+                    converted = None
+                elif cell_policy == "skip_row":
+                    if row_action not in abort_actions:
+                        row_action = "skip_row"
                     converted = None
                 elif cell_policy == "quarantine":
-                    if row_action != "fail":
+                    if row_action not in abort_actions and row_action != "skip_row":
                         row_action = "quarantine"
+                    converted = None
+                elif cell_policy == "stop_column":
+                    # Omit this cell; allow other columns on the same row to write.
+                    if row_action == "ok":
+                        row_action = "stop_column"
                     converted = None
                 elif cell_policy == "coerce_null":
                     if row_action == "ok":
                         row_action = "coerce_null"
-                    # Explicit NULL-in-place — operator opted into altered primary rows.
                     converted = None
                 else:
                     continue
             if target_idx >= 0:
                 out[target_idx] = converted
-        if row_has_error and row_action in {"fail", "quarantine"}:
+        # Rows not written to primary: abort / quarantine / skip.
+        if row_has_error and row_action in {
+            "fail",
+            "stop_table",
+            "abort_transaction",
+            "quarantine",
+            "skip_row",
+        }:
             continue
         if row_has_error and row_action == "ok" and policy in {"fail", "quarantine"}:
             # Legacy path when resolve unavailable — keep prior job semantics.
             continue
+        # stop_column / coerce_null: row is written with omitted/NULL failing cells.
         mapped.append(tuple(out))
 
     return mapped, errors, rejected_details

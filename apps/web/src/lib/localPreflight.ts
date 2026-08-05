@@ -129,6 +129,7 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     "SKIP_ROW",
     "CAST_AND_CONTINUE",
     "TRANSFORM_AND_CONTINUE",
+    "STOP_COLUMN",
   ]);
   const hasClearingContract = (m: (typeof activeMaps)[number]) => {
     const pol = String(m.riskContract?.execution_policy || "").toUpperCase();
