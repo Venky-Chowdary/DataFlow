@@ -136,7 +136,7 @@ export function ValidateActionsRail({
             <>
               {(blocked || (!preflight && !preflighting)) && (
                 <Button
-                  variant={!preflight ? "primary" : "secondary"}
+                  variant={!preflight ? "primary" : "ghost"}
                   onClick={onRunPreflight}
                   loading={preflighting}
                   leadingIcon={<DtIcon name="gate" size={16} />}
@@ -147,7 +147,7 @@ export function ValidateActionsRail({
 
               {blocked && onPrimaryFix && primaryFixLabel && (
                 <Button
-                  variant="secondary"
+                  variant="primary"
                   onClick={onPrimaryFix}
                   leadingIcon={
                     <DtIcon
@@ -167,9 +167,9 @@ export function ValidateActionsRail({
                 </Button>
               )}
 
-              {blocked && riskAckPendingCount > 0 && (
+              {blocked && riskAckPendingCount > 0 && !onPrimaryFix && (
                 <Button
-                  variant="secondary"
+                  variant="primary"
                   onClick={onOpenMapForRisk || onBack}
                   leadingIcon={<DtIcon name="shield" size={16} />}
                   title="Accept risk on Map — Approve-all cannot clear lossy/specialty rows"
@@ -178,9 +178,13 @@ export function ValidateActionsRail({
                 </Button>
               )}
 
-              {blocked && mappingBlocked && mappingReviewCount > 0 && riskAckPendingCount === 0 && (
+              {blocked
+                && mappingBlocked
+                && mappingReviewCount > 0
+                && riskAckPendingCount === 0
+                && !onPrimaryFix && (
                 <Button
-                  variant="secondary"
+                  variant="primary"
                   onClick={onApproveMappings}
                   leadingIcon={<DtIcon name="check" size={16} />}
                 >
@@ -190,7 +194,7 @@ export function ValidateActionsRail({
 
               {preflight && (
                 <Button
-                  variant={blocked || reviewGrade ? "secondary" : "primary"}
+                  variant={blocked || reviewGrade ? "ghost" : "primary"}
                   onClick={onExecute}
                   loading={transferring}
                   loadingLabel="Starting…"
@@ -218,6 +222,7 @@ export function ValidateActionsRail({
 
               {preflight && onSaveAsContract && (
                 <Button
+                  variant="ghost"
                   onClick={onSaveAsContract}
                   loading={savingContract}
                   loadingLabel="Saving…"

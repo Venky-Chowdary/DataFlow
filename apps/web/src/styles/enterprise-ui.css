@@ -4258,8 +4258,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   border-radius: 9px !important;
 }
 
-/* Validate panel: HOST is the scroll container (content grows inside).
-   overflow-y:auto — scrollbar only when content overflows. */
+/* Validate panel: HOST pins layout; body scrolls (Dest/Source pattern). */
 .df2-validate-step.df2-validate-split,
 .df2-transfer-step-viewport.df2-validate-dashboard-host,
 .df2-validate-dashboard-host {
@@ -4269,8 +4268,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   min-height: 0 !important;
   max-height: 100% !important;
   height: 100% !important;
-  overflow-x: hidden !important;
-  overflow-y: auto !important;
+  overflow: hidden !important;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
   padding: 0 !important;

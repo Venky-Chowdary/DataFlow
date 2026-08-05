@@ -201,7 +201,7 @@ export function TransferMapStep({
     : `${approvedCount} ready`;
 
   return (
-    <div className="df2-transfer-step-panel df2-map-step-panel">
+    <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-map-step-panel">
       <div
         className="df2-card-head df2-map-step-head"
         title={`${columnMappings.length} mappings · ${approvedCount} ready${mappingReviewCount > 0 ? ` · ${mappingReviewCount} need review` : ""}`}
@@ -400,7 +400,7 @@ export function TransferMapStep({
           {onOpenIdentitySettings && (
             <button
               type="button"
-              className={`df2-btn${requiresPrimaryKey && !primaryKeyField ? " df2-btn-secondary" : ""}`}
+              className="df2-btn df2-btn-ghost"
               onClick={onOpenIdentitySettings}
               title="Open Advanced settings — primary key, sync mode, cursor (same drawer as Destination)"
             >

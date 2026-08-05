@@ -4904,14 +4904,14 @@ export function TransferPage({
                   <DtIcon name="activity" size={15} />
                   <strong>
                     {isMultiStreamSource
-                      ? `${multiStreamNames.length} streams — each read separately`
-                      : "Single stream or multi-stream"}
+                      ? `${multiStreamNames.length} streams`
+                      : "Stream selection"}
                   </strong>
                 </div>
                 <p>
                   {isMultiStreamSource
-                    ? "Each comma-separated name is a real table/collection. Preview opens one tab per stream. Full/incremental runs streams sequentially (own watermark each); CDC prefers a shared log reader when available. Divergent schemas get a Map tab per stream. Configure cursor / primary key per stream in Destination → Advanced."
-                    : "For CDC or incremental across multiple tables, enter comma-separated names (example: sessions, users). Preview shows a tab for each; each stream keeps its own watermark. Map step rematches when stream schemas differ."}
+                    ? "Each name is a separate table/collection with its own watermark. Configure identity in Destination → Advanced."
+                    : "Use commas for multi-table sync (example: sessions, users)."}
                 </p>
                 {isMultiStreamSource && (
                   <ul className="df2-source-stream-chips" aria-label="Streams to sync">
@@ -5521,7 +5521,7 @@ export function TransferPage({
           <div className="df2-btn-row">
           <button
             type="button"
-            className="df2-btn"
+            className="df2-btn df2-btn-ghost"
             onClick={() => void loadTransferPlan()}
             disabled={
               !canConfigureDest
