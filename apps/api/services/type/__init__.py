@@ -7,6 +7,6 @@ and the per-database logical mappers that currently live in
 
 from __future__ import annotations
 
-from services.type.dialects import postgresql
+from services.type.dialects import mysql, postgresql
 
-__all__ = ["postgresql"]
+__all__ = ["mysql", "postgresql"]
