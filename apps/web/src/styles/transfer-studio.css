@@ -2014,10 +2014,13 @@ th.df2-type-string .df2-type-badge {
   border-radius: 8px;
 }
 
-.df2-page-transfer-studio .df2-wizard-footer,
-.df2-page-transfer-studio .df2-studio-actions {
-  padding: 10px 16px !important;
-  gap: 8px;
+/* Beat shell-polish card footer padding inside Transfer Studio only */
+.df2-page-transfer-studio .df2-card-footer.df2-wizard-footer,
+.df2-page-transfer-studio .df2-wizard-footer {
+  padding: 6px 12px !important;
+  background: #fff !important;
+  border-radius: 0 !important;
+  gap: 8px !important;
 }
 
 .df2-page-transfer-studio .df2-filter-bar {
@@ -2335,47 +2338,58 @@ th.df2-type-string .df2-type-badge {
   color: #94a3b8;
 }
 
-/* Studio wizard footer — single HD standard (all Transfer steps) */
+/* Studio wizard footer — compact, consistent, responsive (all Transfer steps) */
 .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-footer.df2-wizard-footer,
 .df2-page-transfer-studio .df2-transfer-step-panel > .df2-card-footer.df2-wizard-footer,
 .df2-page-transfer-studio .df2-map-step-panel > .df2-card-footer.df2-wizard-footer,
 .df2-page-transfer-studio .df2-validate-step > .df2-card-footer.df2-wizard-footer,
-.df2-page-transfer-studio .df2-dest-step .df2-card-footer.df2-wizard-footer {
+.df2-page-transfer-studio .df2-dest-step .df2-card-footer.df2-wizard-footer,
+.df2-dest-step .df2-card-footer.df2-wizard-footer,
+.df2-validate-step > .df2-wizard-footer,
+.df2-validate-step > .df2-studio-actions {
   flex-shrink: 0;
   position: relative !important;
   box-shadow: none !important;
   border-top: 1px solid #e8edf3;
   margin-top: 0;
-  padding: 10px 16px !important;
+  padding: 6px 12px !important;
   background: #fff;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  min-height: 56px;
+  gap: 8px;
+  flex-wrap: nowrap;
+  min-height: 0;
+  max-height: none;
 }
 
 .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-footer.df2-wizard-footer .df2-btn,
 .df2-page-transfer-studio .df2-map-step-panel > .df2-card-footer.df2-wizard-footer .df2-btn,
 .df2-page-transfer-studio .df2-validate-step > .df2-card-footer.df2-wizard-footer .df2-btn,
-.df2-page-transfer-studio .df2-dest-step .df2-card-footer.df2-wizard-footer .df2-btn {
-  min-height: 36px;
-  height: 36px;
-  padding: 0 14px;
-  border-radius: 8px;
-  font-size: 13px;
+.df2-page-transfer-studio .df2-dest-step .df2-card-footer.df2-wizard-footer .df2-btn,
+.df2-page-transfer-studio .df2-wizard-footer .df2-btn,
+.df2-page-transfer-studio .df2-validate-footer-actions .df2-btn {
+  min-height: 32px !important;
+  height: 32px !important;
+  padding: 0 12px !important;
+  border-radius: 8px !important;
+  font-size: 12.5px !important;
   font-weight: 600;
   box-sizing: border-box;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .df2-page-transfer-studio .df2-wizard-footer .df2-btn-row,
 .df2-page-transfer-studio .df2-wizard-footer .df2-map-footer-actions,
-.df2-page-transfer-studio .df2-wizard-footer .df2-run-footer-actions {
+.df2-page-transfer-studio .df2-wizard-footer .df2-run-footer-actions,
+.df2-page-transfer-studio .df2-wizard-footer .df2-validate-footer-actions {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+  gap: 6px;
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+  min-width: 0;
 }
 
 .df2-page-transfer-studio .df2-wizard-footer .df2-btn-ghost,
@@ -2389,14 +2403,82 @@ th.df2-type-string .df2-type-badge {
   box-shadow: none;
 }
 
-.df2-dest-step .df2-card-footer.df2-wizard-footer {
-  flex-shrink: 0;
-  position: relative !important;
-  box-shadow: none !important;
-  border-top: 1px solid #e8edf3;
-  margin-top: 0;
-  padding: 10px 16px !important;
-  background: #fff;
+.df2-page-transfer-studio .df2-map-footer-status,
+.df2-page-transfer-studio .df2-validate-footer-status,
+.df2-page-transfer-studio .df2-run-footer-status {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.2;
+  color: #64748b;
+}
+
+.df2-page-transfer-studio .df2-map-footer-status > span,
+.df2-page-transfer-studio .df2-validate-footer-status > span,
+.df2-page-transfer-studio .df2-run-footer-status > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Narrow / short viewports — keep footer one compact band */
+@media (max-width: 960px), (max-height: 720px) {
+  .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-footer.df2-wizard-footer,
+  .df2-page-transfer-studio .df2-transfer-step-panel > .df2-card-footer.df2-wizard-footer,
+  .df2-page-transfer-studio .df2-map-step-panel > .df2-card-footer.df2-wizard-footer,
+  .df2-page-transfer-studio .df2-validate-step > .df2-card-footer.df2-wizard-footer,
+  .df2-page-transfer-studio .df2-dest-step .df2-card-footer.df2-wizard-footer,
+  .df2-dest-step .df2-card-footer.df2-wizard-footer {
+    padding: 5px 10px !important;
+    gap: 6px;
+  }
+
+  .df2-page-transfer-studio .df2-map-footer-status,
+  .df2-page-transfer-studio .df2-validate-footer-status,
+  .df2-page-transfer-studio .df2-run-footer-status {
+    display: none;
+  }
+
+  .df2-page-transfer-studio .df2-wizard-footer .df2-btn-row,
+  .df2-page-transfer-studio .df2-wizard-footer .df2-map-footer-actions,
+  .df2-page-transfer-studio .df2-wizard-footer .df2-validate-footer-actions,
+  .df2-page-transfer-studio .df2-wizard-footer .df2-run-footer-actions {
+    margin-left: auto;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    max-width: 100%;
+  }
+}
+
+@media (max-width: 640px) {
+  .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-footer.df2-wizard-footer,
+  .df2-page-transfer-studio .df2-map-step-panel > .df2-card-footer.df2-wizard-footer,
+  .df2-page-transfer-studio .df2-validate-step > .df2-card-footer.df2-wizard-footer,
+  .df2-page-transfer-studio .df2-dest-step .df2-card-footer.df2-wizard-footer {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .df2-page-transfer-studio .df2-wizard-footer .df2-btn,
+  .df2-page-transfer-studio .df2-validate-footer-actions .df2-btn {
+    min-height: 34px !important;
+    height: 34px !important;
+    flex: 1 1 auto;
+    min-width: min(100%, 120px);
+    justify-content: center;
+  }
+
+  .df2-page-transfer-studio .df2-wizard-footer > .df2-btn:first-child {
+    flex: 0 0 auto;
+    min-width: 0;
+  }
 }
 
 .df2-dest-step-right {
@@ -3181,9 +3263,9 @@ th.df2-type-string .df2-type-badge {
 .df2-validate-step > .df2-studio-actions,
 .df2-validate-step > .df2-wizard-footer {
   flex-shrink: 0;
-  padding: 10px 16px;
-  border-top: 1px solid #f1f5f9;
-  background: #fafbfc;
+  padding: 6px 12px;
+  border-top: 1px solid #e8edf3;
+  background: #fff;
 }
 
 /* Step 5 — run: theater scrolls inside card, page stays fixed */
@@ -4528,20 +4610,21 @@ th.df2-type-string .df2-type-badge {
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
-  gap: 10px 14px;
+  gap: 8px;
   flex-shrink: 0;
 }
 
 .df2-validate-footer-status {
   display: flex;
   flex-direction: row;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 6px 14px;
-  font-size: 12.5px;
-  color: #475569;
+  gap: 6px 12px;
+  font-size: 12px;
+  color: #64748b;
   min-width: 0;
   flex: 1 1 auto;
+  overflow: hidden;
 }
 
 .df2-validate-footer-status strong {
@@ -8064,7 +8147,7 @@ button.df2-vd-assist-toggle:focus-visible {
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
-  gap: 10px 14px;
+  gap: 8px;
 }
 /* Back is first child — left-aligned like Source/Dest */
 .df2-map-footer > .df2-btn:first-child {
@@ -8074,13 +8157,14 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-map-footer-status {
   display: flex;
   flex-direction: row;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 6px 16px;
-  font-size: 12.5px;
-  color: #475569;
+  gap: 6px 12px;
+  font-size: 12px;
+  color: #64748b;
   min-width: 0;
   flex: 1 1 auto;
+  overflow: hidden;
 }
 .df2-map-footer-status strong {
   color: #0f172a;

@@ -4237,25 +4237,26 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   z-index: 1;
   display: flex !important;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 8px;
-  padding: 10px 14px !important;
-  border-top: 1px solid #e2e8f0 !important;
-  background: rgba(255, 255, 255, 0.96) !important;
-  backdrop-filter: blur(8px);
+  padding: 6px 12px !important;
+  border-top: 1px solid #e8edf3 !important;
+  background: #fff !important;
+  backdrop-filter: none;
 }
 
 .df2-transfer-step-viewport > .df2-wizard-footer > .df2-btn:first-child,
 .df2-map-step-panel > .df2-wizard-footer > .df2-btn:first-child {
-  margin-right: auto;
+  margin-right: 0;
+  flex-shrink: 0;
 }
 
 .df2-transfer-step-viewport > .df2-wizard-footer .df2-btn,
 .df2-map-step-panel > .df2-wizard-footer .df2-btn {
-  height: 36px !important;
-  min-height: 36px !important;
+  height: 32px !important;
+  min-height: 32px !important;
   padding: 0 12px !important;
-  border-radius: 9px !important;
+  border-radius: 8px !important;
 }
 
 /* Validate panel: HOST pins layout; body scrolls (Dest/Source pattern). */
