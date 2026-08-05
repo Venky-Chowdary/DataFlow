@@ -36,6 +36,38 @@ def is_sensitive_name(name: str) -> bool:
     return any(hint in lower for hint in SENSITIVE_NAME_HINTS)
 
 
+def _looks_structured(text: str) -> bool:
+    """JSON / array wire forms — must never be replaced by a single PII match."""
+    s = (text or "").lstrip()
+    return s.startswith("{") or s.startswith("[")
+
+
+def _mask_email_address(raw: str) -> str:
+    """Shape-preserving email mask — keep local first char + TLD only."""
+    local, _, domain = raw.partition("@")
+    if not local or not domain:
+        return "*" * max(1, len(raw))
+    local_mask = f"{local[0]}{'*' * max(1, len(local) - 1)}"
+    if "." in domain:
+        name, _, tld = domain.rpartition(".")
+        domain_mask = f"{'*' * max(3, len(name))}.{tld}"
+    else:
+        domain_mask = "*" * max(3, len(domain))
+    return f"{local_mask}@{domain_mask}"
+
+
+def _mask_matched_token(raw: str) -> str:
+    """Mask one regex match without recursing into structured redact."""
+    stripped = (raw or "").strip()
+    if PII_PATTERNS["email"].fullmatch(stripped):
+        return _mask_email_address(stripped)
+    if len(raw) <= 4:
+        return "*" * len(raw)
+    if len(raw) <= 12:
+        return raw[:2] + "*" * (len(raw) - 4) + raw[-2:]
+    return raw[:6] + "…" + raw[-4:]
+
+
 def detect_pii(value: Any) -> dict[str, Any]:
     """Detect PII patterns in a single value."""
     text = str(value) if value is not None else ""
@@ -48,27 +80,22 @@ def detect_pii(value: Any) -> dict[str, Any]:
 
 
 def mask(value: Any) -> str:
-    """Mask a sensitive value for safe logging and operator previews."""
+    """Mask a sensitive value for safe logging and operator previews.
+
+    Honesty: JSON/array (and any multi-token string with embedded PII) is
+    redacted **in place**. Never replace an entire notifications/referrals
+    payload with a single masked email — that destroyed operator preview fidelity.
+    """
     if value is None:
         return ""
     text = str(value)
-    # Prefer shape-preserving masks for common PII so operators still see type.
-    email_match = PII_PATTERNS["email"].fullmatch(text.strip())
-    if email_match is None and "@" in text:
-        email_match = PII_PATTERNS["email"].search(text)
-    if email_match is not None:
-        raw = email_match.group(0)
-        local, _, domain = raw.partition("@")
-        if local and domain:
-            # Keep local first character + TLD so operators still see "this is an
-            # email", but never leave the full domain (org identity) readable.
-            local_mask = f"{local[0]}{'*' * max(1, len(local) - 1)}"
-            if "." in domain:
-                name, _, tld = domain.rpartition(".")
-                domain_mask = f"{'*' * max(3, len(name))}.{tld}"
-            else:
-                domain_mask = "*" * max(3, len(domain))
-            return f"{local_mask}@{domain_mask}"
+    stripped = text.strip()
+    # Pure email scalar.
+    if PII_PATTERNS["email"].fullmatch(stripped):
+        return _mask_email_address(stripped)
+    # Structured wire or embedded PII — preserve surrounding structure.
+    if _looks_structured(text) or any(p.search(text) for p in PII_PATTERNS.values()):
+        return _redact_text(text)
     if len(text) <= 4:
         return "*" * len(text)
     if len(text) <= 12:
@@ -122,11 +149,11 @@ def classify_columns(columns: list[str]) -> dict[str, str]:
 
 
 def _redact_text(text: str) -> str:
-    """Substitute PII/PHI patterns in a string with a safe mask."""
+    """Substitute PII/PHI patterns in a string with a safe mask (structure-preserving)."""
     if not isinstance(text, str):
         return text
     for _label, pattern in PII_PATTERNS.items():
-        text = pattern.sub(lambda m: mask(m.group()), text)
+        text = pattern.sub(lambda m: _mask_matched_token(m.group(0)), text)
     return text
 
 

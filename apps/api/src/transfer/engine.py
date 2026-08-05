@@ -546,19 +546,11 @@ def _mapping_proof_for_request(request: TransferRequest) -> dict[str, Any]:
     if not mappings:
         return {}
     dest_extra = getattr(request.destination, "extra", None) or {}
-    table_exists = dest_extra.get("table_exists") if isinstance(dest_extra, dict) else None
-    if not isinstance(table_exists, bool):
-        pending = any(
-            str(m.get("assignment_strategy") or "") == "pending_dest_schema" for m in mappings
-        )
-        all_create = (not pending) and all(
-            bool(m.get("create_new"))
-            or str(m.get("assignment_strategy") or "")
-            in {"identity_passthrough", "create_compatible_new"}
-            for m in mappings
-        )
-        # Whole-plan identity create-new only — never flip match_existing ADDs.
-        table_exists = False if all_create else None
+    raw_exists = dest_extra.get("table_exists") if isinstance(dest_extra, dict) else None
+    # Existence SSOT is introspect/parity only. Never invent False from create_new
+    # / identity_passthrough stamps — that forged "Projected CREATE" when the
+    # destination table already existed (e.g. railway.users).
+    table_exists = raw_exists if isinstance(raw_exists, bool) else None
     return build_mapping_proof(
         mappings,
         destination_db_type=(request.destination.format or "").lower(),
@@ -802,17 +794,19 @@ def _execute_preflight_parity_kwargs(
     if can_write is None:
         can_write = bool(destination_connected)
 
+    table_exists = dest_meta.get("table_exists")
+    if table_exists is None:
+        table_exists = destination_table_exists_fallback
+
     # Keep destination.extra stamped for later gates / theater honesty.
     extra["primary_key_columns"] = pk_cols
     extra["unique_keys"] = unique_keys
     extra["foreign_keys"] = foreign_keys
+    if isinstance(table_exists, bool):
+        extra["table_exists"] = table_exists
     if privilege_probe:
         extra["privilege_probe"] = privilege_probe
     dest.extra = extra
-
-    table_exists = dest_meta.get("table_exists")
-    if table_exists is None:
-        table_exists = destination_table_exists_fallback
 
     return {
         "destination_pk_columns": pk_cols,

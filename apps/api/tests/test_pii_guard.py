@@ -62,6 +62,41 @@ def test_mask_short_and_long():
     assert "alice" not in masked
 
 
+def test_mask_preserves_json_array_with_embedded_email():
+    """Regression: notifications/referrals previews must not collapse to one email."""
+    import json
+
+    raw = json.dumps(
+        [
+            {
+                "_id": "69584f2a",
+                "data": {
+                    "referredEmail": "gayathriprasadkadiyala@gmail.com",
+                    "referredUserId": "69584f27",
+                },
+                "type": "REFERRAL_INVITE_USED_INVITER",
+            }
+        ]
+    )
+    masked = mask(raw)
+    assert masked.lstrip().startswith("[")
+    assert "referredEmail" in masked
+    assert "REFERRAL_INVITE_USED_INVITER" in masked
+    assert "gayathriprasadkadiyala" not in masked
+    assert "@" in masked
+    # Still parseable JSON after in-place redaction.
+    parsed = json.loads(masked)
+    assert isinstance(parsed, list) and parsed[0]["type"] == "REFERRAL_INVITE_USED_INVITER"
+
+
+def test_mask_embedded_email_keeps_surrounding_prose():
+    masked = mask("contact me at alice@example.com today")
+    assert masked.startswith("contact me at ")
+    assert masked.endswith(" today")
+    assert "alice" not in masked
+    assert "example" not in masked
+
+
 def test_mask_record():
     record = {"email": "a@b.com", "amount": "100"}
     masked = mask_record(record, {"email"})

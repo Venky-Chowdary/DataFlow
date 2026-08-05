@@ -3430,7 +3430,10 @@ export function TransferPage({
           dest_username: destKindMode === "database" && !connectorId ? destUsername || undefined : undefined,
           dest_password: destKindMode === "database" && !connectorId ? destPassword || undefined : undefined,
           dest_connection_string: destKindMode === "database" && !connectorId ? destConnectionString || undefined : undefined,
-          dest_schema: destKindMode === "database" && !connectorId
+          // Always send Studio schema — even with a saved connector. Omitting it
+          // made Validate inspect public/default while Map/Execute used railway
+          // (false create-new / "Projected CREATE · not dest-proven").
+          dest_schema: destKindMode === "database"
             ? (foldSchemaForDriver(destDriverType || destType, destSchema) || undefined)
             : undefined,
           dest_warehouse: destKindMode === "database" && destDriverType === "snowflake" ? destWarehouse || undefined : undefined,

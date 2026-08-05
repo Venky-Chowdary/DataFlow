@@ -26,6 +26,7 @@ import {
   findDuplicateKeyRoot,
   isDeclaredFidelityCollapse,
   isEncodingIntegritySignal,
+  isSampleUniquenessOnly,
   partitionCoercionColumns,
   partitionExplainIssues,
   remapToTypeForMismatch,
@@ -1081,10 +1082,11 @@ export function ValidateDashboard({
     "mirror",
   ].includes(syncMode || "");
   const syncMeta = syncMode ? SYNC_MODE_META[syncMode] : null;
+  const uniquenessSampleOnly = isSampleUniquenessOnly(preflight);
   const heroReadyLabel = running
     ? "elapsed"
     : decision === "approve"
-      ? "ready"
+      ? (uniquenessSampleOnly ? "sample-only" : "execute-ready")
       : decision === "block"
         ? "blocked"
         : decision === "review"
@@ -1559,8 +1561,10 @@ export function ValidateDashboard({
               {decision === "review"
                 ? (executiveSummary?.subtitle
                   ?? "Checks passed · review-grade — confirm API Validate before Execute")
-                : (executiveSummary?.readinessCaption
-                  ?? "All required gates passed. Review the cards below, then Execute.")}
+                : (executiveSummary?.subtitle
+                  ?? (uniquenessSampleOnly
+                    ? "Gates passed on sample · population uniqueness not proven — Execute re-probes; not migration proven."
+                    : "Execute-ready · not migration proven. Review cards below; Gate-8 proof is after write."))}
             </p>
           )}
           {!running && preflight && engineMsTotal > 0 && (
