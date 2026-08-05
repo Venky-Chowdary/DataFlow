@@ -160,3 +160,115 @@ def test_preflight_append_create_new_warns_on_source_duplicate_keys(
         return
     assert dup_check.get("blocks_transfer") is False
     assert dup_check.get("passed") is True
+
+
+@pytest.fixture
+def sqlite_composite_connector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
+    """Composite (org_id, code) — org_id alone duplicates; full tuple is unique except one pair."""
+    monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE_BACKEND", "file")
+    store_path = tmp_path / "connectors_composite.json"
+    monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE", str(store_path))
+
+    db_path = tmp_path / "composite.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE items (org_id TEXT, code TEXT, name TEXT)")
+    conn.executemany(
+        "INSERT INTO items VALUES (?, ?, ?)",
+        [
+            ("o1", "a", "A1"),
+            ("o1", "b", "B1"),  # same org_id, different code — legal composite
+            ("o2", "a", "A2"),
+            ("o1", "a", "A1dup"),  # true composite duplicate
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    from services.connector_store import create_connector
+
+    saved = create_connector(
+        {
+            "name": "SQLite Composite",
+            "type": "sqlite",
+            "role": "source",
+            "connection_string": f"sqlite:///{db_path}",
+            "ssl": False,
+        }
+    )
+    return str(saved.id), "items"
+
+
+def test_composite_source_probe_groups_full_key(
+    sqlite_composite_connector: tuple[str, str],
+) -> None:
+    """Must not false-fail on org_id alone — only (org_id, code) duplicates."""
+    connector_id, table = sqlite_composite_connector
+    from services.source_duplicate_probe import probe_source_duplicate_keys_result
+
+    single = probe_source_duplicate_keys_result(
+        source_connector_id=connector_id,
+        source_table=table,
+        primary_key="org_id",
+    )
+    assert single.ran
+    assert any(f.get("value") == "o1" for f in single.findings)
+
+    composite = probe_source_duplicate_keys_result(
+        source_connector_id=connector_id,
+        source_table=table,
+        primary_key_columns=["org_id", "code"],
+    )
+    assert composite.ran
+    assert composite.primary_key_columns == ["org_id", "code"]
+    assert len(composite.findings) == 1
+    assert composite.findings[0]["count"] == 2
+    vals = composite.findings[0].get("values") or {}
+    assert vals.get("org_id") == "o1"
+    assert vals.get("code") == "a"
+
+
+def test_preflight_composite_dest_pk_blocks_on_tuple_dupes(
+    sqlite_composite_connector: tuple[str, str],
+) -> None:
+    """Upsert + composite dest PK probes the full tuple and blocks true composite dups."""
+    connector_id, table = sqlite_composite_connector
+    from services.preflight_service import run_file_preflight
+
+    mappings = [
+        {"source": "org_id", "target": "org_id", "confidence": 0.99, "transform": None},
+        {"source": "code", "target": "code", "confidence": 0.99, "transform": None},
+        {"source": "name", "target": "name", "confidence": 0.99, "transform": None},
+    ]
+    result = run_file_preflight(
+        columns=["org_id", "code", "name"],
+        column_types={"org_id": "VARCHAR", "code": "VARCHAR", "name": "VARCHAR"},
+        row_count=4,
+        mappings=mappings,
+        destination_connected=True,
+        destination_can_create=True,
+        source_connected=True,
+        source_kind="database",
+        source_format="sqlite",
+        sync_mode="upsert",
+        sample_rows=[{"org_id": "o2", "code": "a", "name": "A2"}],
+        destination_db_type="postgresql",
+        source_connector_id=connector_id,
+        source_table=table,
+        destination_table="items",
+        destination_table_exists=True,
+        destination_pk_columns=["org_id", "code"],
+        validation_mode="strict",
+    )
+    gate_status = {g["id"]: g for g in result["gates"]}
+    assert gate_status["g9_data_integrity"]["status"] == "block"
+    details = gate_status["g9_data_integrity"].get("details") or {}
+    blob = " ".join(str(i) for i in (details.get("issues") or []))
+    assert "source probe" in blob.lower() or "duplicate" in blob.lower()
+    probe_pk = str(
+        (details.get("source_uniqueness_probe") or {}).get("primary_key")
+        or details.get("primary_key")
+        or ""
+    )
+    # Prefer composite label when the integrity report surfaces the probe pk.
+    if probe_pk:
+        assert "code" in probe_pk or "org_id" in probe_pk

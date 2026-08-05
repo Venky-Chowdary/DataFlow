@@ -1198,25 +1198,14 @@ def reject_on_strict_policy(
     if not details:
         return None
 
-    try:
-        from services.migration_risk_contract import (
-            rejected_details_are_continue_contract_only,
-            rejected_details_require_job_abort,
-        )
-    except Exception:
-        rejected_details_require_job_abort = None  # type: ignore[assignment]
-        rejected_details_are_continue_contract_only = None  # type: ignore[assignment]
+    # In-tree SSOT — never soft-import and demote FAIL_JOB / continue contracts.
+    from services.migration_risk_contract import (
+        JOB_ABORT_POLICIES,
+        rejected_details_are_continue_contract_only,
+        rejected_details_require_job_abort,
+    )
 
-    if rejected_details_require_job_abort and rejected_details_require_job_abort(details):
-        try:
-            from services.migration_risk_contract import JOB_ABORT_POLICIES
-        except Exception:
-            JOB_ABORT_POLICIES = {
-                "FAIL_JOB",
-                "STOP_TABLE",
-                "ABORT_TRANSACTION",
-                "RETRY",
-            }
+    if rejected_details_require_job_abort(details):
         n = sum(
             1
             for d in details
@@ -1239,10 +1228,7 @@ def reject_on_strict_policy(
             f"Migration Risk Contract abort policy blocks partial write{scope_note}"
         )
 
-    if (
-        rejected_details_are_continue_contract_only
-        and rejected_details_are_continue_contract_only(details)
-    ):
+    if rejected_details_are_continue_contract_only(details):
         # Operator contracted continue + quarantine — do not abort the batch.
         return None
 
@@ -1384,16 +1370,13 @@ def build_mapped_rows_with_details(
     # Resolve once per call, not once per cell. This import sat inside the
     # innermost loop, so a 20-column table paid an import-system lookup per cell
     # — billions of them on a large transfer.
+    # Risk Contract module is in-tree: hard-require it. Soft-import previously
+    # demoted FAIL_JOB / SKIP_ROW / CAST contracts to bare job policy.
     from services.value_serializer import DF_MISSING_SENTINEL, is_missing_sentinel
-    try:
-        from services.migration_risk_contract import resolve_write_action_for_mapping
-    except Exception:
-        resolve_write_action_for_mapping = None  # type: ignore[assignment]
-
-    try:
-        from services.migration_risk_contract import disposition_for_execution_policy
-    except Exception:
-        disposition_for_execution_policy = None  # type: ignore[assignment]
+    from services.migration_risk_contract import (
+        disposition_for_execution_policy,
+        resolve_write_action_for_mapping,
+    )
 
     mapped: list[tuple] = []
     for row_number, raw in enumerate(data_rows, start=1):
@@ -1414,7 +1397,7 @@ def build_mapped_rows_with_details(
             exec_pol: str | None = None
             risk_id: str | None = None
             retry_attempted = False
-            if err and resolve_write_action_for_mapping is not None:
+            if err:
                 cell_policy, exec_pol, risk_id = resolve_write_action_for_mapping(
                     mapping, policy
                 )
@@ -1428,7 +1411,7 @@ def build_mapped_rows_with_details(
                         cell_policy = "fail"
             if err:
                 row_has_error = True
-                if resolve_write_action_for_mapping is not None and exec_pol is None:
+                if exec_pol is None:
                     cell_policy, exec_pol, risk_id = resolve_write_action_for_mapping(
                         mapping, policy
                     )
@@ -1450,8 +1433,7 @@ def build_mapped_rows_with_details(
                 }
                 if exec_pol:
                     detail["execution_policy"] = exec_pol
-                    if disposition_for_execution_policy is not None:
-                        detail["disposition"] = disposition_for_execution_policy(exec_pol)
+                    detail["disposition"] = disposition_for_execution_policy(exec_pol)
                     if exec_pol == "STOP_TABLE":
                         detail["stop_scope"] = "table"
                     elif exec_pol == "STOP_COLUMN":

@@ -9,6 +9,8 @@ Honesty contract:
 - ``status="ran"`` means the probe query completed (findings may be empty = clean).
 - ``skipped_unsupported`` / ``error`` must NEVER be stamped as full-selected coverage.
 - Callers fail-closed when uniqueness is required but the probe did not run.
+- Composite identity uses ``GROUP BY c1, c2, …`` — never invent single-column
+  uniqueness from the first composite column alone.
 """
 
 from __future__ import annotations
@@ -47,13 +49,42 @@ class SourceDuplicateProbeResult:
     status: ProbeStatus = "skipped_no_source"
     message: str = ""
     db_type: str = ""
+    primary_key_columns: list[str] = field(default_factory=list)
 
     @property
     def ran(self) -> bool:
         return self.status == "ran"
 
 
-def _sql_duplicates(cfg: dict[str, Any], table: str, pk: str, limit: int = 5) -> list[dict[str, Any]]:
+def _normalize_pk_columns(
+    primary_key: str = "",
+    primary_key_columns: list[str] | None = None,
+) -> list[str]:
+    cols = [str(c).strip() for c in (primary_key_columns or []) if str(c or "").strip()]
+    if cols:
+        return cols
+    raw = str(primary_key or "").strip()
+    if not raw:
+        return []
+    if "," in raw:
+        return [p.strip() for p in raw.split(",") if p.strip()]
+    return [raw]
+
+
+def _finding_value(columns: list[str], values: tuple[Any, ...]) -> Any:
+    """Scalar for single-col (backward compat); joined label for composite."""
+    if len(columns) == 1:
+        return values[0] if values else None
+    parts = ["" if v is None else str(v) for v in values]
+    return "(" + ", ".join(parts) + ")"
+
+
+def _sql_duplicates(
+    cfg: dict[str, Any],
+    table: str,
+    pk_columns: list[str],
+    limit: int = 5,
+) -> list[dict[str, Any]]:
     import sqlalchemy as sa
 
     from connectors.generic_sql import _engine
@@ -64,12 +95,12 @@ def _sql_duplicates(cfg: dict[str, Any], table: str, pk: str, limit: int = 5) ->
     # Build a dialect-agnostic query so SQLAlchemy emits the right LIMIT/TOP/FETCH
     # syntax for SQL Server, Oracle, etc.
     tbl = sa.table(table, schema=schema)
-    pk_col = sa.column(pk)
+    pk_cols = [sa.column(c) for c in pk_columns]
     cnt = sa.func.count().label("_cnt")
     stmt = (
-        sa.select(pk_col, cnt)
+        sa.select(*pk_cols, cnt)
         .select_from(tbl)
-        .group_by(pk_col)
+        .group_by(*pk_cols)
         .having(cnt > 1)
         .limit(limit)
     )
@@ -77,13 +108,28 @@ def _sql_duplicates(cfg: dict[str, Any], table: str, pk: str, limit: int = 5) ->
     with engine.connect() as conn:
         rows = conn.execute(stmt).fetchall()
 
-    return [
-        {"value": row[0] if row else None, "count": int(row[1]) if len(row) > 1 else 1}
-        for row in rows
-    ]
+    out: list[dict[str, Any]] = []
+    n = len(pk_columns)
+    for row in rows:
+        vals = tuple(row[i] if i < len(row) else None for i in range(n))
+        count = int(row[n]) if len(row) > n else 1
+        out.append(
+            {
+                "value": _finding_value(pk_columns, vals),
+                "values": {pk_columns[i]: vals[i] for i in range(n)},
+                "columns": list(pk_columns),
+                "count": count,
+            }
+        )
+    return out
 
 
-def _mongo_duplicates(cfg: dict[str, Any], collection: str, pk: str, limit: int = 5) -> list[dict[str, Any]]:
+def _mongo_duplicates(
+    cfg: dict[str, Any],
+    collection: str,
+    pk_columns: list[str],
+    limit: int = 5,
+) -> list[dict[str, Any]]:
     from pymongo import MongoClient
 
     from connectors.mongodb_common import normalize_mongodb_connection_string
@@ -104,8 +150,12 @@ def _mongo_duplicates(cfg: dict[str, Any], collection: str, pk: str, limit: int 
     coll = db[collection]
 
     try:
+        if len(pk_columns) == 1:
+            group_id: Any = f"${pk_columns[0]}"
+        else:
+            group_id = {c: f"${c}" for c in pk_columns}
         pipeline = [
-            {"$group": {"_id": f"${pk}", "count": {"$sum": 1}}},
+            {"$group": {"_id": group_id, "count": {"$sum": 1}}},
             {"$match": {"count": {"$gt": 1}}},
             {"$limit": limit},
         ]
@@ -113,7 +163,28 @@ def _mongo_duplicates(cfg: dict[str, Any], collection: str, pk: str, limit: int 
     finally:
         client.close()
 
-    return [{"value": r.get("_id"), "count": int(r.get("count", 1))} for r in rows]
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        rid = r.get("_id")
+        count = int(r.get("count", 1))
+        if len(pk_columns) == 1:
+            vals = (rid,)
+            values = {pk_columns[0]: rid}
+        elif isinstance(rid, dict):
+            vals = tuple(rid.get(c) for c in pk_columns)
+            values = {c: rid.get(c) for c in pk_columns}
+        else:
+            vals = (rid,)
+            values = {pk_columns[0]: rid}
+        out.append(
+            {
+                "value": _finding_value(pk_columns, vals),
+                "values": values,
+                "columns": list(pk_columns),
+                "count": count,
+            }
+        )
+    return out
 
 
 def probe_source_duplicate_keys_result(
@@ -123,11 +194,13 @@ def probe_source_duplicate_keys_result(
     source_table: str = "",
     source_collection: str = "",
     primary_key: str = "",
+    primary_key_columns: list[str] | None = None,
     workspace_id: str | None = None,
     limit: int = 5,
 ) -> SourceDuplicateProbeResult:
     """Run the source duplicate probe and return an honest status + findings."""
-    if not primary_key:
+    pk_columns = _normalize_pk_columns(primary_key, primary_key_columns)
+    if not pk_columns:
         return SourceDuplicateProbeResult(
             status="skipped_no_pk",
             message="No primary key resolved for uniqueness probe",
@@ -136,15 +209,18 @@ def probe_source_duplicate_keys_result(
         return SourceDuplicateProbeResult(
             status="skipped_no_source",
             message="No source table/collection for uniqueness probe",
+            primary_key_columns=pk_columns,
         )
     if not source_connector_id and not source_config:
         return SourceDuplicateProbeResult(
             status="skipped_no_source",
             message="No source connector id or inline config for uniqueness probe",
+            primary_key_columns=pk_columns,
         )
 
     cfg: dict[str, Any] | None = None
     db_type = ""
+    pk_label = ",".join(pk_columns)
     try:
         if source_connector_id:
             from services.connector_store import get_connector
@@ -170,6 +246,7 @@ def probe_source_duplicate_keys_result(
                 status="skipped_no_source",
                 message="Source connector could not be loaded for uniqueness probe",
                 db_type=db_type,
+                primary_key_columns=pk_columns,
             )
 
         # Inline endpoint configs use "format" for the database type; normalize to
@@ -185,13 +262,15 @@ def probe_source_duplicate_keys_result(
                     status="skipped_no_source",
                     message="Mongo source missing collection for uniqueness probe",
                     db_type=db_type,
+                    primary_key_columns=pk_columns,
                 )
-            findings = _mongo_duplicates(cfg, coll, primary_key, limit=limit)
+            findings = _mongo_duplicates(cfg, coll, pk_columns, limit=limit)
             return SourceDuplicateProbeResult(
                 findings=findings,
                 status="ran",
-                message=f"Mongo uniqueness probe on {coll}.{primary_key}",
+                message=f"Mongo uniqueness probe on {coll}.({pk_label})",
                 db_type=db_type,
+                primary_key_columns=pk_columns,
             )
 
         if db_type not in SQLISH_SOURCE_TYPES:
@@ -201,6 +280,7 @@ def probe_source_duplicate_keys_result(
                 status="skipped_unsupported",
                 message=msg,
                 db_type=db_type,
+                primary_key_columns=pk_columns,
             )
 
         table = source_table or source_collection
@@ -209,13 +289,15 @@ def probe_source_duplicate_keys_result(
                 status="skipped_no_source",
                 message="SQL source missing table for uniqueness probe",
                 db_type=db_type,
+                primary_key_columns=pk_columns,
             )
-        findings = _sql_duplicates(cfg, table, primary_key, limit=limit)
+        findings = _sql_duplicates(cfg, table, pk_columns, limit=limit)
         return SourceDuplicateProbeResult(
             findings=findings,
             status="ran",
-            message=f"SQL uniqueness probe on {table}.{primary_key}",
+            message=f"SQL uniqueness probe on {table}.({pk_label})",
             db_type=db_type,
+            primary_key_columns=pk_columns,
         )
     except Exception as exc:
         logger.warning("Source duplicate-key probe failed: %s", exc, exc_info=exc)
@@ -223,6 +305,7 @@ def probe_source_duplicate_keys_result(
             status="error",
             message=f"Source uniqueness probe failed: {exc}"[:400],
             db_type=db_type,
+            primary_key_columns=pk_columns,
         )
 
 
@@ -233,6 +316,7 @@ def probe_source_duplicate_keys(
     source_table: str = "",
     source_collection: str = "",
     primary_key: str = "",
+    primary_key_columns: list[str] | None = None,
     workspace_id: str | None = None,
     limit: int = 5,
 ) -> list[dict[str, Any]]:
@@ -246,6 +330,7 @@ def probe_source_duplicate_keys(
         source_table=source_table,
         source_collection=source_collection,
         primary_key=primary_key,
+        primary_key_columns=primary_key_columns,
         workspace_id=workspace_id,
         limit=limit,
     ).findings

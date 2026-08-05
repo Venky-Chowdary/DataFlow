@@ -156,3 +156,105 @@ def test_probe_result_missing_source_is_honest() -> None:
     )
     assert result.status == "skipped_no_source"
     assert result.ran is False
+
+
+def test_composite_probe_findings_block_upsert() -> None:
+    """Composite tuple findings are authoritative for uniqueness-required modes."""
+    result = _dup_check(
+        sync_mode="upsert",
+        primary_key="org_id",
+        source_duplicate_findings=[
+            {
+                "value": "(o1, a)",
+                "values": {"org_id": "o1", "code": "a"},
+                "columns": ["org_id", "code"],
+                "count": 2,
+            }
+        ],
+        destination_pk_columns=["org_id", "code"],
+        mappings=[
+            {"source": "org_id", "target": "org_id", "confidence": 0.99},
+            {"source": "code", "target": "code", "confidence": 0.99},
+        ],
+    )
+    assert result["blocks_transfer"] is True
+
+
+def test_append_with_composite_dest_pk_blocks_on_probe_tuple_dups() -> None:
+    """Append into composite UNIQUE/PK must not green Validate when probe finds tuple dups."""
+    result = _dup_check(
+        sync_mode="full_refresh_append",
+        primary_key="org_id",
+        source_duplicate_findings=[
+            {
+                "value": "(o1, a)",
+                "values": {"org_id": "o1", "code": "a"},
+                "columns": ["org_id", "code"],
+                "count": 2,
+            }
+        ],
+        destination_pk_columns=["org_id", "code"],
+        mappings=[
+            {"source": "org_id", "target": "org_id", "confidence": 0.99},
+            {"source": "code", "target": "code", "confidence": 0.99},
+        ],
+    )
+    assert result["blocks_transfer"] is True
+
+
+def test_resolve_primary_key_source_columns_composite_dest() -> None:
+    from services.primary_key import resolve_primary_key_source_columns
+
+    cols = resolve_primary_key_source_columns(
+        mappings=[
+            {"source": "org_id", "target": "org_id"},
+            {"source": "code", "target": "code"},
+        ],
+        source_columns=["org_id", "code", "name"],
+        dest_kind="postgresql",
+        destination_pk_columns=["org_id", "code"],
+    )
+    assert cols == ["org_id", "code"]
+
+
+def test_resolve_primary_key_source_columns_from_stream_contracts() -> None:
+    """Create-new without dest PK still probes full Studio composite contract."""
+    from services.primary_key import resolve_primary_key_source_columns
+
+    cols = resolve_primary_key_source_columns(
+        mappings=[
+            {"source": "org_id", "target": "org_id"},
+            {"source": "code", "target": "code"},
+        ],
+        source_columns=["org_id", "code", "name"],
+        dest_kind="postgresql",
+        destination_pk_columns=[],
+        contract_primary_key="org_id",  # truncated legacy first-col must not win
+        stream_contracts=[
+            {"name": "items", "selected": True, "primary_key": ["org_id", "code"]}
+        ],
+        stream_name="items",
+    )
+    assert cols == ["org_id", "code"]
+
+
+def test_resolve_primary_key_source_columns_ignores_unmatched_stream() -> None:
+    """Mismatched stream_name must not steal contracts[0] identity."""
+    from services.primary_key import resolve_primary_key_source_columns
+
+    cols = resolve_primary_key_source_columns(
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "order_id", "target": "order_id"},
+        ],
+        source_columns=["id", "order_id"],
+        dest_kind="postgresql",
+        destination_pk_columns=["id"],
+        stream_contracts=[
+            {"name": "orders", "selected": True, "primary_key": ["order_id"]},
+            {"name": "users", "selected": True, "primary_key": ["id"]},
+        ],
+        stream_name="users_v2",  # no exact match
+    )
+    # Fall through to destination PK / resolver — not orders.order_id.
+    assert cols == ["id"]

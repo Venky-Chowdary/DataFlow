@@ -206,15 +206,25 @@ async def run_preflight(body: PreflightRequest):
         # when non-empty; drift path still treats unknown as non-live.
         dest_column_types = body.destination_column_types or {}
 
-    from services.primary_key import extract_contract_primary_key
+    from services.primary_key import extract_contract_primary_key_columns
 
-    contract_pk = extract_contract_primary_key(
+    # Full composite — never truncate to first column (source probe + G9 SSOT).
+    # Exact stream match; single-contract Studio may omit matching names.
+    _stream_name = body.dest_table or body.dest_collection or ""
+    contract_pk_cols = extract_contract_primary_key_columns(
         body.stream_contracts,
-        stream_name=body.dest_table or body.dest_collection or "",
+        stream_name=_stream_name,
+        fallback_first=False,
     )
-    # Prefer primary stream contract when dest name does not match a stream name.
-    if not contract_pk:
-        contract_pk = extract_contract_primary_key(body.stream_contracts)
+    if not contract_pk_cols:
+        selected = [
+            c
+            for c in (body.stream_contracts or [])
+            if isinstance(c, dict) and c.get("selected", True)
+        ]
+        if len(selected) == 1:
+            contract_pk_cols = extract_contract_primary_key_columns(selected)
+    contract_pk = ",".join(contract_pk_cols) if contract_pk_cols else None
 
     try:
         from services.tracing import get_correlation_id, start_span
@@ -268,6 +278,7 @@ async def run_preflight(body: PreflightRequest):
             destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
             destination_unique_keys=dest_meta.get("unique_keys") or [],
             destination_foreign_keys=dest_meta.get("foreign_keys") or [],
+            stream_contracts=list(body.stream_contracts or []),
             date_locale=body.date_locale,
             compliance_acknowledged=bool(body.compliance_acknowledged),
             schema_drift_acknowledged=bool(body.schema_drift_acknowledged),

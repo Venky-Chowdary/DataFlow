@@ -31,7 +31,6 @@ from services.connector_capability_registry import (
     recommended_batch_size,
 )
 from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
-from services.primary_key import resolve_primary_key_source
 from services.source_duplicate_probe import probe_source_duplicate_keys_result
 from services.transform_engine import (
     infer_date_locale,
@@ -932,6 +931,7 @@ def run_file_preflight(
     destination_pk_columns: list[str] | None = None,
     destination_unique_keys: list[dict[str, Any]] | None = None,
     destination_foreign_keys: list[dict[str, Any]] | None = None,
+    stream_contracts: list[dict[str, Any]] | None = None,
     date_locale: str = "",
     cursor_fields: list[str] | None = None,
     compliance_acknowledged: bool = False,
@@ -1245,7 +1245,9 @@ def run_file_preflight(
     )
     if source_duplicate_probe_expected:
         try:
-            source_pk = resolve_primary_key_source(
+            from services.primary_key import resolve_primary_key_source_columns
+
+            source_pk_cols = resolve_primary_key_source_columns(
                 mappings=mappings,
                 source_columns=columns,
                 dest_kind=dest_kind,
@@ -1253,14 +1255,17 @@ def run_file_preflight(
                 purpose="uniqueness",
                 destination_pk_columns=destination_pk_columns,
                 contract_primary_key=contract_primary_key,
+                stream_contracts=stream_contracts,
+                stream_name=str(destination_table or source_table or ""),
             )
-            if source_pk:
-                source_duplicate_probe_pk = source_pk
+            if source_pk_cols:
+                source_duplicate_probe_pk = ",".join(source_pk_cols)
                 probe_result = probe_source_duplicate_keys_result(
                     source_connector_id=source_connector_id,
                     source_config=source_config,
                     source_table=source_table,
-                    primary_key=source_pk,
+                    primary_key=source_pk_cols[0],
+                    primary_key_columns=source_pk_cols,
                 )
                 source_duplicate_findings = list(probe_result.findings or [])
                 source_duplicate_probe_status = probe_result.status

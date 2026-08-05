@@ -43,6 +43,35 @@ def _request(**kwargs: Any) -> TransferRequest:
     return TransferRequest(**base)
 
 
+def test_parity_kwargs_preserves_composite_stream_contract_pk() -> None:
+    meta = {
+        "connected": True,
+        "table_exists": True,
+        "can_create_table": True,
+        "can_write": True,
+        "primary_key_columns": [],
+        "unique_keys": [],
+        "foreign_keys": [],
+        "privilege_probe": {},
+    }
+    req = _request(
+        stream_contracts=[
+            {
+                "name": "users",
+                "selected": True,
+                "primary_key": ["org_id", "code"],
+            }
+        ]
+    )
+    with patch(
+        "services.preflight_service.inspect_destination_for_preflight",
+        return_value=meta,
+    ):
+        kw = _execute_preflight_parity_kwargs(req, destination_connected=True)
+    assert kw["contract_primary_key"] == "org_id,code"
+    assert kw["stream_contracts"][0]["primary_key"] == ["org_id", "code"]
+
+
 def test_parity_kwargs_prefer_stream_matched_contract_pk() -> None:
     meta = {
         "connected": True,

@@ -712,19 +712,26 @@ def _execute_preflight_parity_kwargs(
     privilege probe is available. Contract PK prefers the destination stream name
     (same as ``preflight_router``).
     """
-    from services.primary_key import extract_contract_primary_key
+    from services.primary_key import extract_contract_primary_key_columns
     from services.preflight_service import inspect_destination_for_preflight
 
     dest = request.destination
     dest_table = str(dest.table or dest.collection or "")
-    contract_pk = (
-        extract_contract_primary_key(
-            getattr(request, "stream_contracts", None) or [],
-            stream_name=dest_table,
-        )
-        or extract_contract_primary_key(getattr(request, "stream_contracts", None) or [])
-        or ""
+    stream_contracts = list(getattr(request, "stream_contracts", None) or [])
+    # Full composite contract PK — Validate≡Execute must not truncate to first col.
+    # Prefer exact stream match; only fall back to first when a single contract is selected.
+    contract_pk_cols = extract_contract_primary_key_columns(
+        stream_contracts, stream_name=dest_table, fallback_first=False
     )
+    if not contract_pk_cols:
+        selected = [
+            c
+            for c in stream_contracts
+            if isinstance(c, dict) and c.get("selected", True)
+        ]
+        if len(selected) == 1:
+            contract_pk_cols = extract_contract_primary_key_columns(selected)
+    contract_pk = ",".join(contract_pk_cols) if contract_pk_cols else ""
 
     extra = dict(getattr(dest, "extra", None) or {})
     dest_meta: dict[str, Any] = {}
@@ -808,6 +815,7 @@ def _execute_preflight_parity_kwargs(
         "destination_unique_keys": unique_keys,
         "destination_foreign_keys": foreign_keys,
         "contract_primary_key": contract_pk,
+        "stream_contracts": stream_contracts,
         "privilege_probe": privilege_probe or None,
         "destination_can_create": bool(can_create),
         "destination_can_write": bool(can_write),
@@ -1055,6 +1063,23 @@ def _persist_job_quarantine(
     if not details:
         dest_summary["quarantine_durable"] = True
         return
+    from services.quarantine_dlq import (
+        is_contract_skip_detail,
+        persist_rejected_rows,
+        replay_quarantine_details,
+    )
+
+    skip_n = sum(1 for d in details if is_contract_skip_detail(d))
+    replay_all = replay_quarantine_details(details)
+    dest_summary["rows_skipped_contract"] = skip_n
+    dest_summary["rows_quarantined_replay"] = len(replay_all)
+    if not replay_all:
+        # SKIP_ROW / audit-skip only — no replay DLQ required.
+        dest_summary["quarantine_durable"] = True
+        dest_summary["quarantine_dlq_persisted_count"] = len(details)
+        if already_persisted is not None:
+            already_persisted[0] = len(details)
+        return
     already = int(
         (already_persisted[0] if already_persisted else None)
         or dest_summary.get("quarantine_dlq_persisted_count")
@@ -1063,8 +1088,6 @@ def _persist_job_quarantine(
     already = max(0, min(already, len(details)))
     delta = details[already:]
     try:
-        from services.quarantine_dlq import persist_rejected_rows
-
         if delta:
             persist_rejected_rows(
                 job_id=job_id,
@@ -1093,17 +1116,19 @@ def _persist_job_quarantine(
     # Destination-side DLQ table (SQL sinks). Failures are surfaced — never silent.
     # Control-plane durability remains the fail-closed authority for Module 5.
     # Skip when a prior finalize already wrote the dest quarantine for this job.
+    # SKIP_ROW audit skips are excluded — not replay holdouts.
     if (
         request is not None
         and getattr(request, "destination", None) is not None
         and not dest_summary.get("dest_quarantine_rows")
+        and replay_all
     ):
         try:
             from services.dest_quarantine import write_dest_quarantine
 
             dest_result = write_dest_quarantine(
                 request.destination,
-                details,
+                replay_all,
                 job_id=job_id,
             )
             dest_summary["dest_quarantine"] = dest_result

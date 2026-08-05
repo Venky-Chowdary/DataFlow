@@ -136,6 +136,81 @@ def test_mongo_identity_still_id_only() -> None:
     assert tgt == "_id"
 
 
+def test_unverified_risk_contract_fails_closed_not_job_policy() -> None:
+    """Present but bad signature must abort — never demote to job quarantine."""
+    mapped, _errs, details = build_mapped_rows_with_details(
+        headers=["age"],
+        data_rows=[["nope"], ["3"]],
+        mappings=[
+            {
+                "source": "age",
+                "target": "age",
+                "transform": "to_integer",
+                "risk_contract": {
+                    "risk_id": "mrc-tampered",
+                    "column": "age",
+                    "source_type": "TEXT",
+                    "destination_type": "INTEGER",
+                    "execution_policy": "SKIP_ROW",
+                    "approved_by": "ops@dataflow.app",
+                    "reason": "tampered",
+                    "signature": "not-a-valid-hmac",
+                },
+            }
+        ],
+        target_cols=["age"],
+        column_types={"age": "string"},
+        dest_types={"age": "integer"},
+        error_policy="quarantine",
+    )
+    assert len(mapped) == 1
+    assert details
+    assert details[0].get("policy") == "fail"
+    assert details[0].get("execution_policy") == "FAIL_JOB"
+
+
+def test_skip_row_excluded_from_replay_dlq_persist(monkeypatch) -> None:
+    from services.quarantine_dlq import persist_rejected_rows, persist_job_quarantine_outcome
+
+    events: list[dict] = []
+
+    def _capture(**kwargs):
+        events.append(kwargs)
+        return {"ok": True, "ts": "t"}
+
+    monkeypatch.setattr("services.quarantine_dlq.append_dlq_event", _capture)
+    out = persist_rejected_rows(
+        job_id="job-skip",
+        rejected_details=[
+            {
+                "row": 1,
+                "reason": "bad",
+                "execution_policy": "SKIP_ROW",
+                "disposition": "skipped",
+                "quarantine_required": False,
+            }
+        ],
+    )
+    assert out is not None
+    assert out.get("rows") == 0
+    assert out.get("skipped_contract") == 1
+    assert events == []
+    outcome = persist_job_quarantine_outcome(
+        {
+            "rejected_details": [
+                {
+                    "row": 1,
+                    "execution_policy": "SKIP_ROW",
+                    "disposition": "skipped",
+                    "quarantine_required": False,
+                }
+            ]
+        }
+    )
+    assert outcome["ok"] is True
+    assert outcome["rejected_count"] == 0
+
+
 def test_transfer_ready_excludes_preflight_false_sftp_email() -> None:
     assert "sftp" not in TRANSFER_READY_CATALOG_IDS
     assert "email" not in TRANSFER_READY_CATALOG_IDS

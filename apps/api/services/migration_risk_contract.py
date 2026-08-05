@@ -719,6 +719,15 @@ def mapping_risk_contract(mapping: Any) -> MigrationRiskContract | None:
     return None
 
 
+def _mapping_risk_contract_payload(mapping: Any) -> Any:
+    """Raw risk_contract payload when present (dict or dataclass), else None."""
+    if mapping is None:
+        return None
+    if isinstance(mapping, dict):
+        return mapping.get("risk_contract") or mapping.get("riskContract")
+    return getattr(mapping, "risk_contract", None)
+
+
 def resolve_write_action_for_mapping(
     mapping: Any,
     job_error_policy: str | None,
@@ -737,11 +746,21 @@ def resolve_write_action_for_mapping(
     - SKIP_ROW → ``skip_row`` (drop row; disposition=skipped)
     - CAST_AND_CONTINUE / TRANSFORM_AND_CONTINUE → ``quarantine`` or
       ``coerce_null`` per quarantine_policy
+
+    A present but unverified ``risk_contract`` fails closed (``fail`` / FAIL_JOB)
+    — never demote to job quarantine/continue.
     """
     # Job coerce_null demotion is SSOT in transform_error_policy (staging allow /
     # Risk Contract NULL|COERCE). Here we honor the resolved job action.
     job = _normalize_job_write_policy(job_error_policy)
-    c = mapping_risk_contract(mapping)
+    raw = _mapping_risk_contract_payload(mapping)
+    if raw is not None:
+        c = mapping_risk_contract(mapping)
+        if c is None:
+            # Signature missing/tampered — refuse lossy write under job policy.
+            return "fail", "FAIL_JOB", None
+    else:
+        c = None
     if c is None:
         return job, None, None
 

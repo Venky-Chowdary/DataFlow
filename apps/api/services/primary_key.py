@@ -213,11 +213,15 @@ def extract_contract_primary_key_columns(
     stream_contracts: Iterable[Any] | None,
     *,
     stream_name: str = "",
+    fallback_first: bool = True,
 ) -> list[str]:
     """Ordered composite primary key columns from Studio ``stream_contracts``.
 
     Prefer this over :func:`extract_contract_primary_key` when callers need the
     full composite (CDC deletes, uniqueness probes). Empty list when unset.
+
+    When ``stream_name`` is set and no contract matches, ``fallback_first=False``
+    returns ``[]`` instead of silently using ``contracts[0]`` (wrong-stream probe).
     """
     contracts = [
         c
@@ -234,9 +238,13 @@ def extract_contract_primary_key_columns(
             if name == want:
                 chosen = c
                 break
-    c = chosen or contracts[0]
-    raw = c.get("primary_key") if c else None
-    if raw is None and c:
+        if chosen is None and not fallback_first:
+            return []
+    c = chosen or (contracts[0] if fallback_first else None)
+    if not c:
+        return []
+    raw = c.get("primary_key")
+    if raw is None:
         raw = c.get("primary_keys")
     if isinstance(raw, (list, tuple)):
         out = [str(item).strip() for item in raw if str(item or "").strip()]
@@ -436,3 +444,119 @@ def resolve_primary_key_source(
         contract_primary_key=contract_primary_key,
     )
     return src
+
+
+def _map_identity_names_to_source(
+    names: list[str],
+    *,
+    mappings: Iterable[Any],
+    source_columns: list[str] | None = None,
+) -> list[str]:
+    """Map dest/contract identity names onto source columns when possible."""
+    pairs = _mapping_pairs(mappings)
+    tgt_by_src = {s: t for s, t in pairs}
+    src_by_tgt = {t: s for s, t in pairs}
+    srcs = [s for s, _ in pairs]
+    if source_columns:
+        for c in source_columns:
+            if c not in srcs:
+                srcs.append(c)
+    src_lower = {s.lower(): s for s in srcs}
+    tgt_lower = {t.lower(): t for t in src_by_tgt}
+    out: list[str] = []
+    for raw in names:
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        matched_src = src_lower.get(name.lower())
+        if matched_src:
+            out.append(matched_src)
+            continue
+        matched_tgt = tgt_lower.get(name.lower())
+        if matched_tgt:
+            out.append(src_by_tgt.get(matched_tgt, matched_tgt))
+            continue
+        # Unmapped contract name — keep as-is so the probe can still GROUP BY.
+        out.append(name)
+    # Preserve order, drop empties/dupes.
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for c in out:
+        key = c.lower()
+        if not c or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(c)
+    return deduped
+
+
+def resolve_primary_key_source_columns(
+    mappings: Iterable[Any],
+    source_columns: list[str] | None,
+    dest_kind: str,
+    *,
+    validation_mode: str = "strict",
+    purpose: Purpose = "uniqueness",
+    destination_pk_columns: list[str] | None = None,
+    contract_primary_key: str | None = None,
+    stream_contracts: Iterable[Any] | None = None,
+    stream_name: str = "",
+) -> list[str]:
+    """Full composite source identity columns for uniqueness probes.
+
+    Prefer this over :func:`resolve_primary_key_source` when the covering key is
+    multi-column — probing only the first column false-fails (same org_id) or
+    false-greens (first col unique, tuple not).
+    """
+    # 1. Stream contracts (Studio) — authoritative composite when selected.
+    # Never fall back to contracts[0] when a stream_name was requested but missed
+    # — that probes the wrong stream's identity on multi-table Validate/Execute.
+    want_stream = bool((stream_name or "").strip())
+    contract_cols = extract_contract_primary_key_columns(
+        stream_contracts,
+        stream_name=stream_name,
+        fallback_first=not want_stream,
+    )
+    if len(contract_cols) > 1:
+        return _map_identity_names_to_source(
+            contract_cols, mappings=mappings, source_columns=source_columns
+        )
+
+    # 2. Comma-joined operator contract string.
+    raw_contract = str(contract_primary_key or "").strip()
+    if raw_contract and "," in raw_contract:
+        parts = [p.strip() for p in raw_contract.split(",") if p.strip()]
+        if len(parts) > 1:
+            return _map_identity_names_to_source(
+                parts, mappings=mappings, source_columns=source_columns
+            )
+
+    # 3. Introspected destination PK composite — map each column to source.
+    dest_pks = [
+        str(p).strip() for p in (destination_pk_columns or []) if str(p or "").strip()
+    ]
+    if len(dest_pks) > 1:
+        mapped = _map_identity_names_to_source(
+            dest_pks, mappings=mappings, source_columns=source_columns
+        )
+        if len(mapped) > 1:
+            return mapped
+
+    # 4. Single-column stream/contract / resolver fallback.
+    if len(contract_cols) == 1:
+        mapped = _map_identity_names_to_source(
+            contract_cols, mappings=mappings, source_columns=source_columns
+        )
+        if mapped:
+            return mapped
+
+    src = resolve_primary_key_source(
+        mappings,
+        source_columns,
+        dest_kind,
+        validation_mode=validation_mode,
+        purpose=purpose,
+        destination_pk_columns=destination_pk_columns,
+        contract_primary_key=contract_primary_key,
+    )
+    return [src] if src else []

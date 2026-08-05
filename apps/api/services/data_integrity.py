@@ -936,6 +936,7 @@ def _check_duplicate_keys(
     uniqueness_required = bool(
         enforce_identity
         or covering_single
+        or covering_composite_only
         or schemaless
         or sync_requires_unique_identity(sync, dest_kind=dest_kind)
         or _is_overwrite_like(sync)

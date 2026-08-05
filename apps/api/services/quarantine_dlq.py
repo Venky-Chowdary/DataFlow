@@ -34,24 +34,63 @@ class QuarantineDlqLostError(RuntimeError):
     """
 
 
+def is_contract_skip_detail(detail: Any) -> bool:
+    """True for SKIP_ROW / audit-skip rows — not replay-DLQ quarantine.
+
+    Intentional contract skips must not enter ``{table}_df_quarantine`` or the
+    control-plane replay queue. They remain in ``rejected_details`` for audit.
+    """
+    if not isinstance(detail, dict):
+        return False
+    if detail.get("quarantine_required") is False:
+        return True
+    if str(detail.get("disposition") or "").strip().lower() == "skipped":
+        return True
+    if str(detail.get("execution_policy") or "").strip().upper() == "SKIP_ROW":
+        return True
+    return False
+
+
+def replay_quarantine_details(
+    rejected_details: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Filter to rows that must be durable in the replay DLQ."""
+    return [
+        d
+        for d in (rejected_details or [])
+        if isinstance(d, dict) and not is_contract_skip_detail(d)
+    ]
+
+
 def persist_job_quarantine_outcome(dest_summary: dict[str, Any] | None) -> dict[str, Any]:
     """Evaluate whether quarantine durability is acceptable for terminal status."""
     summary = dest_summary or {}
     details = list(summary.get("rejected_details") or [])
-    if not details:
+    replay = replay_quarantine_details(details)
+    skip_count = max(0, len(details) - len(replay))
+    if not replay:
         return {
             "ok": True,
             "fail_closed": False,
             "rejected_count": 0,
+            "skipped_contract_count": skip_count,
             "quarantine_durable": True,
-            "note": "No rejected rows — DLQ durability not required.",
+            "note": (
+                "No replay-quarantine rows — DLQ durability not required."
+                if not details
+                else (
+                    f"{skip_count} SKIP_ROW/audit-skip row(s) only — "
+                    "not DLQ replay; durability not required."
+                )
+            ),
         }
     durable = summary.get("quarantine_durable")
     ok = durable is True
     return {
         "ok": ok,
         "fail_closed": not ok,
-        "rejected_count": len(details),
+        "rejected_count": len(replay),
+        "skipped_contract_count": skip_count,
         "quarantine_durable": durable,
         "error": summary.get("quarantine_dlq_error"),
         "note": (
@@ -169,12 +208,24 @@ def persist_rejected_rows(
     raw = list(rejected_details or [])
     if not raw:
         return None
+    skip_n = sum(1 for d in raw if is_contract_skip_detail(d))
+    replay = replay_quarantine_details(raw)
+    if not replay:
+        # SKIP_ROW / audit-skip only — durable audit stamp, not replay DLQ.
+        return {
+            "rows": 0,
+            "chunks": 0,
+            "quarantine_durable": True,
+            "total_rejected": 0,
+            "skipped_contract": skip_n,
+            "note": "Contract skip rows excluded from replay DLQ",
+        }
     jid = str(job_id or "").strip()
     if not jid:
         raise QuarantineRowContractError(
             "persist_rejected_rows requires job_id — refuse undurable quarantine"
         )
-    rows = normalize_quarantine_rows(raw, job_id=jid, connector=connector)
+    rows = normalize_quarantine_rows(replay, job_id=jid, connector=connector)
     assert_quarantine_rows_contract(rows, require_job_id=True)
     chunk_size = _DLQ_CHUNK_SIZE
     chunks = [rows[i : i + chunk_size] for i in range(0, len(rows), chunk_size)]
@@ -191,6 +242,7 @@ def persist_rejected_rows(
                 "chunk_index": idx,
                 "chunk_count": len(chunks),
                 "total_rejected": len(rows),
+                "skipped_contract": skip_n,
             },
         )
     return {
@@ -199,6 +251,7 @@ def persist_rejected_rows(
         "chunks": len(chunks),
         "quarantine_durable": True,
         "total_rejected": len(rows),
+        "skipped_contract": skip_n,
     }
 
 
