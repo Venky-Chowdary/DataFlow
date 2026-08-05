@@ -34,7 +34,6 @@ export function DestinationPicker({
   onSelectManual,
   onSelectType,
 }: DestinationPickerProps) {
-  // Filter tabs only reflect saved connector types — never dump the full catalog.
   const typeFilters = useMemo(() => {
     const fromConnectors = [...new Set(connectors.map((c) => c.type))].sort();
     return [
@@ -83,81 +82,97 @@ export function DestinationPicker({
 
   return (
     <div className="df2-dest-picker">
-      <div className="df2-dest-picker-head">
-        <div>
-          <label className="df2-label">Connection</label>
-          <p className="df2-label-hint">
-            Saved connector or custom host credentials.
-          </p>
-        </div>
-        {connectors.length > 0 && typeFilters.length > 1 && (
-          <FilterBar ariaLabel="Filter destinations by type">
-            <FilterTabs
-              ariaLabel="Filter destinations by type"
-              value={filter}
-              onChange={setFilter}
-              items={typeFilters}
+      <section className="df2-dest-picker-section" aria-label="Saved connections">
+        <header className="df2-dest-picker-section-head">
+          <div className="df2-dest-picker-section-title">
+            <span className="df2-label">Connection</span>
+            <p className="df2-label-hint">Saved connector or custom host credentials.</p>
+          </div>
+          {connectors.length > 0 && typeFilters.length > 1 && (
+            <FilterBar ariaLabel="Filter destinations by type">
+              <FilterTabs
+                ariaLabel="Filter destinations by type"
+                value={filter}
+                onChange={setFilter}
+                items={typeFilters}
+              />
+            </FilterBar>
+          )}
+        </header>
+
+        {connectors.length > 3 && (
+          <label className="df2-dest-connector-search">
+            <DtIcon name="search" size={13} />
+            <input
+              type="search"
+              value={connectorQuery}
+              onChange={(e) => setConnectorQuery(e.target.value)}
+              placeholder="Search connections…"
+              aria-label="Search destination connections"
             />
-          </FilterBar>
+          </label>
         )}
-      </div>
 
-      {connectors.length > 3 && (
-        <label className="df2-dest-connector-search">
-          <DtIcon name="search" size={13} />
-          <input
-            type="search"
-            value={connectorQuery}
-            onChange={(e) => setConnectorQuery(e.target.value)}
-            placeholder="Search connections…"
-            aria-label="Search destination connections"
-          />
-        </label>
-      )}
-
-      <div className="df2-dest-connector-grid" role="listbox" aria-label="Destination connectors">
-        {filtered.map((c) => (
-          <button
-            key={c.id}
-            type="button"
-            role="option"
-            aria-selected={connectorId === c.id}
-            className={`df2-dest-connector-card${connectorId === c.id ? " active" : ""}`}
-            onClick={() => onSelectConnector(c.id)}
-          >
-            <ConnectorIcon id={c.type} size={18} />
-            <span className="df2-dest-connector-card-name" title={c.name}>{c.name}</span>
-            <span
-              className="df2-dest-connector-card-meta"
-              title={[
-                getConnectorDefaults(c.type).label,
-                c.database || c.host || "",
-              ].filter(Boolean).join(" · ")}
+        <div className="df2-dest-connector-list" role="radiogroup" aria-label="Destination connectors">
+          {filtered.map((c) => (
+            <button
+              key={c.id}
+              type="button"
+              role="radio"
+              aria-checked={connectorId === c.id}
+              className={`df2-dest-connector-card${connectorId === c.id ? " active" : ""}`}
+              onClick={() => onSelectConnector(c.id)}
             >
-              {getConnectorDefaults(c.type).label}
-              {c.database ? ` · ${c.database}` : c.host ? ` · ${c.host}` : ""}
-            </span>
-            {c.last_test_ok === true && (
-              <span className="df2-dest-connector-card-status ok">Tested</span>
-            )}
-          </button>
-        ))}
+              <span className="df2-dest-connector-card-icon" aria-hidden>
+                <ConnectorIcon id={c.type} size={18} />
+              </span>
+              <span className="df2-dest-connector-card-text">
+                <span className="df2-dest-connector-card-name" title={c.name}>{c.name}</span>
+                <span
+                  className="df2-dest-connector-card-meta"
+                  title={[
+                    getConnectorDefaults(c.type).label,
+                    c.database || c.host || "",
+                  ].filter(Boolean).join(" · ")}
+                >
+                  {getConnectorDefaults(c.type).label}
+                  {c.database ? ` · ${c.database}` : c.host ? ` · ${c.host}` : ""}
+                </span>
+              </span>
+              {c.last_test_ok === true && (
+                <span className="df2-dest-connector-card-status ok">Tested</span>
+              )}
+            </button>
+          ))}
 
-        <button
-          type="button"
-          className={`df2-dest-connector-card df2-dest-connector-manual${manualActive ? " active" : ""}`}
-          onClick={onSelectManual}
-        >
-          <DtIcon name="connectors" size={18} />
-          <span className="df2-dest-connector-card-name">Custom connection</span>
-          <span className="df2-dest-connector-card-meta">Host & credentials</span>
-        </button>
-      </div>
+          <button
+            type="button"
+            role="radio"
+            aria-checked={manualActive}
+            className={`df2-dest-connector-card df2-dest-connector-manual${manualActive ? " active" : ""}`}
+            onClick={onSelectManual}
+          >
+            <span className="df2-dest-connector-card-icon" aria-hidden>
+              <DtIcon name="connectors" size={18} />
+            </span>
+            <span className="df2-dest-connector-card-text">
+              <span className="df2-dest-connector-card-name">Custom connection</span>
+              <span className="df2-dest-connector-card-meta">Host & credentials</span>
+            </span>
+          </button>
+        </div>
+
+        {connectors.length === 0 && (
+          <p className="df2-label-hint df2-dest-picker-empty">
+            No saved connectors yet — use Custom connection or add one under Connectors.
+          </p>
+        )}
+      </section>
 
       {manualActive && (
-        <div className="df2-dest-manual-types">
-          <div className="df2-dest-engine-toolbar">
-            <span className="df2-dest-manual-types-label">Engine</span>
+        <section className="df2-dest-picker-section df2-dest-picker-engines" aria-label="Destination engine">
+          <header className="df2-dest-picker-section-head df2-dest-engine-toolbar">
+            <span className="df2-label">Engine</span>
             <label className="df2-dest-engine-search">
               <DtIcon name="search" size={13} />
               <input
@@ -168,20 +183,21 @@ export function DestinationPicker({
                 aria-label="Search destination engines"
               />
             </label>
-          </div>
+          </header>
 
-          <div className="df2-dest-type-chips" role="listbox" aria-label="Featured destination engines">
+          <div className="df2-dest-engine-grid" role="radiogroup" aria-label="Featured destination engines">
             {featuredEngines.map((d) => (
               <button
                 key={d.id}
                 type="button"
-                role="option"
-                aria-selected={destType === d.id}
-                className={`df2-dest-type-chip${destType === d.id ? " active" : ""}`}
+                role="radio"
+                aria-checked={destType === d.id}
+                className={`df2-dest-engine-tile${destType === d.id ? " active" : ""}`}
                 onClick={() => onSelectType(d.id)}
+                title={d.label}
               >
-                <ConnectorIcon id={d.id} size={14} />
-                {d.label}
+                <ConnectorIcon id={d.id} size={16} />
+                <span>{d.label}</span>
               </button>
             ))}
             {featuredEngines.length === 0 && (
@@ -190,7 +206,7 @@ export function DestinationPicker({
           </div>
 
           {(otherEngines.length > 0 || selectedOutsideFeatured) && (
-            <label className="df2-field" style={{ margin: 0 }}>
+            <label className="df2-dest-engine-more">
               <span className="df2-label">More engines</span>
               <select
                 className="df2-dest-engine-select"
@@ -225,19 +241,11 @@ export function DestinationPicker({
               </select>
             </label>
           )}
-        </div>
-      )}
 
-      {connectors.length === 0 && (
-        <p className="df2-label-hint df2-dest-picker-empty">
-          No saved connectors yet — use Custom connection or add one under Connectors.
-        </p>
-      )}
-
-      {manualActive && !destType && (
-        <p className="df2-label-hint">
-          Select an engine to continue.
-        </p>
+          {!destType && (
+            <p className="df2-label-hint">Select an engine to continue.</p>
+          )}
+        </section>
       )}
     </div>
   );

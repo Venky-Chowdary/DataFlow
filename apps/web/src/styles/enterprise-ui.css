@@ -4239,7 +4239,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 6px 12px !important;
+  padding: 4px 12px !important;
+  min-height: 0;
+  max-height: 44px;
   border-top: 1px solid #e8edf3 !important;
   background: #fff !important;
   backdrop-filter: none;
@@ -10117,31 +10119,14 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
     min-height: calc(10 * 32px + 36px) !important;
   }
 
-  .df2-page-transfer-studio .df2-dest-connector-grid {
-    grid-template-columns: 1fr;
+  .df2-page-transfer-studio .df2-dest-connector-list {
+    display: flex;
+    flex-direction: column;
     gap: 6px;
   }
 
-  .df2-page-transfer-studio .df2-dest-connector-card {
-    display: grid;
-    grid-template-columns: 22px minmax(0, 1fr) auto;
-    grid-template-rows: auto auto;
-    column-gap: 8px;
-    row-gap: 1px;
-    align-items: center;
-    padding: 8px 10px;
-  }
-
-  .df2-page-transfer-studio .df2-dest-connector-card-meta {
-    display: block;
-  }
-
-  .df2-page-transfer-studio .df2-dest-connector-card-status {
-    display: block;
-  }
-
-  .df2-page-transfer-studio .df2-dest-picker-head {
-    margin-bottom: 4px;
+  .df2-page-transfer-studio .df2-dest-picker-section-head {
+    margin-bottom: 0;
   }
 
   .df2-page-transfer-studio .df2-dest-sync-summary {
