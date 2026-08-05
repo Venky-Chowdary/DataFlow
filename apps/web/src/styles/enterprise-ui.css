@@ -4697,7 +4697,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   flex-direction: column !important;
   gap: 0 !important;
   padding: 0 !important;
-  overflow: hidden auto !important;
+  overflow: hidden !important;
   background: #fff;
   border: none;
   border-radius: 0;
@@ -4712,12 +4712,12 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-theater-v3-log-section {
-  position: sticky;
-  bottom: 0;
-  padding: 12px 14px;
+  position: relative;
+  flex: 0 0 auto;
+  padding: 8px 14px;
   background: #ffffff;
   border-top: 1px solid #e2e8f0;
-  z-index: 2;
+  z-index: 1;
 }
 
 .df2-theater-v3-top {
@@ -5007,9 +5007,35 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding: 8px 10px;
+  padding: 10px 12px;
   border-radius: 8px;
   border: 1px solid #e2e8f0;
+  position: relative;
+  z-index: 0;
+  min-width: 0;
+  overflow: visible;
+}
+
+.df2-theater-v3-alert-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.df2-theater-v3-alert-body > p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.df2-theater-v3-alert-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
 }
 
 .df2-theater-v3-alert.success {
@@ -5026,21 +5052,19 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-theater-v3-next {
   display: flex;
-  flex-wrap: nowrap;
-  align-items: center;
+  flex-wrap: wrap;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px 12px;
   margin: 0;
-  padding: 10px 4px;
-  border-radius: 0;
-  border: none;
-  border-top: 1px solid #e2e8f0;
-  background: transparent;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
   min-width: 0;
-  position: sticky;
-  bottom: 0;
-  z-index: 2;
-  order: 99;
+  position: static;
+  z-index: auto;
+  order: 0;
 }
 
 .df2-theater-v3-next-copy {

@@ -245,6 +245,7 @@ export function SourceStepAside({
         title="Detected structure"
         subtitle={`${parsed.columns.length} fields · ${parsed.row_count.toLocaleString()} rows`}
         fill
+        maxRows={10}
         showBadge
         allowJson
       />
@@ -294,6 +295,7 @@ export function SourceStepAside({
             : "Fields discovered from the selected connector"
         }
         fill
+        maxRows={10}
         showBadge
         allowJson
         sampleWarning={
