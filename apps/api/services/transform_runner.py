@@ -33,7 +33,6 @@ from services.engine_pool import release_engine
 from services.dialect_profiles import dialect_profile, normalize_driver
 from services.transform_models import (
     TransformModel,
-    TransformPlan,
     build_plan,
     describe_plan,
     extract_refs,

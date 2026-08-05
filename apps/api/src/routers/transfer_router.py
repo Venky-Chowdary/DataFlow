@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from services.brand_env import getenv_brand
 from pathlib import Path
 from typing import Optional

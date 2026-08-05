@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import json
-import os
 from services.brand_env import getenv_brand
 import re
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from services.reconciliation import _iter_fingerprints, checksum_rows
 from services.transform_engine import apply_transform

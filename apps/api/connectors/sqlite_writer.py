@@ -11,7 +11,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Callable
 
-from services.type_system import ddl_type, materialize_dest_ddl
+from services.type_system import materialize_dest_ddl
 from services.value_serializer import json_default
 
 from connectors.sqlite_common import sqlite_file_path

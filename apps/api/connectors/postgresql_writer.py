@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import io
 import tempfile
 import json
 import logging
@@ -39,7 +38,6 @@ from connectors.writer_common import (
     DF_LSN_COL,
     _coerced_null_row_count,
     _rejected_row_count,
-    assert_sparse_upsert_has_pk,
     build_mapped_rows_with_details,
     dedupe_rows,
     dedupe_rows_by_pk_and_lsn,
@@ -61,7 +59,6 @@ from connectors.writer_common import (
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
-    sparse_present_bindings,
     transform_error_policy,
 )
 from connectors.writer_common import (

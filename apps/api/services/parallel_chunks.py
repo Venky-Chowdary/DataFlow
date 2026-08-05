@@ -17,7 +17,6 @@ caller supplies a ``process(idx, item)`` function.
 from __future__ import annotations
 
 import concurrent.futures
-import os
 from services.brand_env import getenv_brand
 import queue
 import threading

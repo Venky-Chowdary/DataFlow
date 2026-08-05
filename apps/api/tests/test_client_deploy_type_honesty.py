@@ -155,7 +155,7 @@ def test_json_scalar_wrap_is_warn_not_silent_ok():
 
 
 def test_timetz_preserves_offset_and_refuses_naive_utc_invent():
-    from datetime import time, timezone, timedelta
+    from datetime import time, timedelta
     import pytest
     from connectors.sql_temporal import coerce_sql_temporal
     from services.transform_engine import apply_transform
@@ -181,7 +181,7 @@ def test_timetz_preserves_offset_and_refuses_naive_utc_invent():
 
 def test_boolean_refuses_informal_yes_invent():
     from services.transform_engine import apply_transform
-    from services.type_system import boolean_value_fits, is_lossy_coercion
+    from services.type_system import boolean_value_fits
     from connectors.sql_bind import coerce_boolean_wire
 
     val, err = apply_transform("yes", "boolean")
@@ -831,7 +831,6 @@ def test_bounded_sink_lob_tier_national_srid_wave13():
 
 def test_g3_same_logical_and_specialty_invent_wave12():
     from services.type_coercion_validator import (
-        coerce_blocks_transfer,
         validate_mapping_coercions,
     )
     from services.type_system import (

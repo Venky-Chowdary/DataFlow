@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from services.data_contract import BreakerState, CircuitBreaker
 from services.reconciliation import sample_compare_rows
@@ -71,7 +71,7 @@ def test_finalize_notifies_on_breaker_open():
     b = CircuitBreaker(cid, failure_threshold=1, canary_pct=100)
     store.save_breaker(b)
 
-    with patch("src.transfer.contract_engine.notify_workspace", create=True) as mock_nw:
+    with patch("src.transfer.contract_engine.notify_workspace", create=True):
         # Patch where imported inside function
         with patch("services.notification_service.notify_workspace") as nw:
             nw.return_value = [{"ok": True}]

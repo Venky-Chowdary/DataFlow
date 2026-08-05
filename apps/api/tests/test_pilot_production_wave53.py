@@ -76,7 +76,6 @@ def test_run_schedule_now_stages_ack_ledger(tmp_path, monkeypatch):
     monkeypatch.setenv("DATAFLOW_SCHEDULE_STORE", str(tmp_path / "s.json"))
 
     from services import connector_store, schedule_store
-    from services.schedule_store import PipelineSchedule
 
     connector_store._backend_choice = None
     schedule_store._backend_choice = None  # type: ignore[attr-defined]

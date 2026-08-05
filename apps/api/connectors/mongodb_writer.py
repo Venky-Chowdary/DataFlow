@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 from services.brand_env import getenv_brand
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -240,7 +239,6 @@ def write_mapped_rows(
         from datetime import datetime as _datetime
         from datetime import time as _time
 
-        from bson.binary import Binary
         from bson.decimal128 import Decimal128
 
         transform_by_col = {

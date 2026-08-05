@@ -149,7 +149,7 @@ def test_ephemeral_session_enables_followup_without_explicit_id(monkeypatch, tmp
     _isolated(monkeypatch, tmp_path)
     _seed(tmp_path)
     agent = DataPilotAgent()
-    first = agent.chat("how many rows in orders on PilotSQLite")
+    _ = agent.chat("how many rows in orders on PilotSQLite")
     second = agent.chat("only paid ones")
     assert "aggregate_data" in [t.get("name") for t in (second.tools_used or [])]
     assert "not sure" not in (second.answer or "").lower()

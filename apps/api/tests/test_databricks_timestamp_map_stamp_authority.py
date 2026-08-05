@@ -6,7 +6,6 @@ ddl_type invents TIMESTAMP_NTZ (wall-clock), silently flipping Map polarity.
 
 from __future__ import annotations
 
-import pytest
 import sqlalchemy as sa
 
 from connectors.generic_sql import _sa_type_for_logical

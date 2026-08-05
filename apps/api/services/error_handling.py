@@ -9,7 +9,6 @@ quarantine for malformed records, and resume/replay support.
 from __future__ import annotations
 
 import logging
-import os
 from services.brand_env import getenv_brand
 import random
 import re

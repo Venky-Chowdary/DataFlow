@@ -100,7 +100,6 @@ class MySqlChangeStreamCdc:
         self._signal_table_ready = False
         self._last_signal_poll_at = 0.0
         try:
-            import os as _os
 
             self._signal_poll_interval_sec = float(
                 getenv_brand(

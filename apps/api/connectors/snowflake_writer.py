@@ -135,7 +135,6 @@ def resolve_snowflake_create_types(
     unfit cells are quarantined instead. Bare DECIMAL rematerializes to
     ``NUMBER(38,10)`` via ``ddl_type`` — never batch-inferred invent.
     """
-    from services.type_system import ddl_type, normalize_logical_type
 
     out: list[str] = []
     for i, t in enumerate(logical_types):
@@ -158,7 +157,6 @@ def _quarantine_unfit_decimals(
     policy: str,
 ) -> list[tuple]:
     """Hold out / NULL cells that cannot fit NUMBER(p,s)."""
-    from connectors.writer_common import quarantine_unfit_decimals
 
     return quarantine_unfit_decimals(
         mapped_rows,
@@ -333,9 +331,7 @@ def _sf_apply_sparse_upsert(
     from connectors.sql_bind import normalize_sql_bind_value
     from connectors.writer_common import (
         DF_LSN_COL,
-        assert_sparse_upsert_has_pk,
         materialize_sparse_row_for_checksum,
-        sparse_present_bindings,
     )
     from services.cdc_effectively_once import should_apply_pk_row
 
@@ -820,8 +816,6 @@ def write_mapped_rows(
         quarantine_unfit_enum_set,
         quarantine_unfit_integers,
         quarantine_unfit_json,
-        quarantine_unfit_specialty_types,
-        quarantine_unfit_strings,
         quarantine_unfit_temporals,
         quarantine_unfit_years,
     )

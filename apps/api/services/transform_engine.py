@@ -8,7 +8,6 @@ import functools
 import hashlib
 import hmac
 import json
-import os
 from services.brand_env import getenv_brand
 import re
 import unicodedata
@@ -981,7 +980,7 @@ def infer_transform_for_mapping(
         # Binary→text sinks must not force base64 rewrite as identity.
         # Keep bytes as identity payload; Map/G3 treat domain polarity via
         # Accept risk (hex/base64 mutate is not "preserve").
-        if tgt in {"string", "text", "json", "unknown"} or not destination_type:
+        if tgt in {"string", "text", "json", "unknown"} or not destination_db_type:
             return "none"
         return "binary"
     if src == "datetime":

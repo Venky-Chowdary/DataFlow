@@ -15,7 +15,6 @@ import hashlib
 import json
 import logging
 import math
-import os
 from services.brand_env import getenv_brand
 from collections import Counter
 from dataclasses import asdict, dataclass, field

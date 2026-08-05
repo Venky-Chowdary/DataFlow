@@ -7,7 +7,6 @@ assistant privacy-safe even when no local model is configured.
 
 from __future__ import annotations
 
-import os
 from services.brand_env import getenv_brand
 import re
 

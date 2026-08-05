@@ -367,7 +367,7 @@ def _fetch_pk_lsn_map(
     Composite keys are addressed with the same unit-separator join the CDC
     readers emit, so the LSN guard and the delete path share one key space.
     """
-    from services.cdc_snapshot_window import _pk_columns, _pk_value
+    from services.cdc_snapshot_window import _pk_columns
 
     pk_cols = _pk_columns(primary_key_column)
     existing: dict[str, Any] = {str(k): None for k in keys}

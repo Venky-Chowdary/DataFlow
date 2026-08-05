@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from services import reflection_cache
-from services.type_system import ddl_type, materialize_dest_ddl
+from services.type_system import materialize_dest_ddl
 
 from connectors.mysql_conn import get_connection
 from connectors.schema_drift import widen_existing_columns_native

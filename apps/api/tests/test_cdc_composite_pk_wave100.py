@@ -13,7 +13,6 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-import pytest
 
 from connectors.mysql_change_stream import MySqlChangeStreamCdc
 from connectors.sqlserver_cdc_native import classify_mssql_cdc_rows

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from services.brand_env import getenv_brand
 import time
 from collections.abc import Iterator
@@ -1854,7 +1853,6 @@ def _run_cdc_single_stream(
     total_chunks = max(1, int(cp_dict.get("chunk_index") or 0) + 1) if cp_dict else 1
     chunk_idx = int(cp_dict.get("chunk_index") or 0) if cp_dict else 0
 
-    import os
 
     # Continuous CDC: drain snapshot, then poll until idle or budget exhausted.
     max_idle_polls = max(1, int(getenv_brand("CDC_MAX_IDLE_POLLS", "3")))

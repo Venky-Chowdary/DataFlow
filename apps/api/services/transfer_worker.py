@@ -39,7 +39,6 @@ def dispatch_file_to_database(
         try:
             import re
 
-            from connectors.writer_common import row_checksum
             from services.file_parser import get_file, get_file_chunks
 
             record = get_file(file_id)
@@ -116,8 +115,6 @@ def dispatch_file_to_database(
                 driver_out = result.driver
 
                 chunk_idx += 1
-
-            combined_checksum = row_checksum([[c] for c in final_checksum_list])
 
             set_phase(job_id, WorkflowPhase.RECONCILE, "Verifying row fidelity")
             from services.reconciliation import ReconciliationReport

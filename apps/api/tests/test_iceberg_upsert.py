@@ -335,7 +335,7 @@ def test_iceberg_decimal_overflow_quarantines_row(tmp_path: Path) -> None:
 
 def test_iceberg_empty_string_preserved_on_string_column(tmp_path: Path) -> None:
     """Empty string must not become NULL on Iceberg string carriers."""
-    pa = pytest.importorskip("pyarrow")
+    pytest.importorskip("pyarrow")
     import pyarrow.parquet as pq
 
     data_dir = tmp_path / "tbl" / "data"

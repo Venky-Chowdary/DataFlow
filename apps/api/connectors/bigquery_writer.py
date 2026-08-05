@@ -327,9 +327,7 @@ def _bq_apply_sparse_upsert(
     """Per-row BigQuery DML omitting DF_MISSING — never SET col=NULL for absent CDC fields."""
     from connectors.writer_common import (
         DF_LSN_COL,
-        assert_sparse_upsert_has_pk,
         materialize_sparse_row_for_checksum,
-        sparse_present_bindings,
     )
     from services.cdc_effectively_once import should_apply_pk_row
 

@@ -43,7 +43,6 @@ def validate_mapping_coercions(
     type_locked = (schema_policy or "").lower() == "type_locked"
     mode = (validation_mode or "strict").strip().lower()
     balanced = mode in {"balanced", "review"}
-    floor = max(0.0, min(1.0, float(confidence_floor)))
     issues: list[dict[str, Any]] = []
     for m in mappings:
         src = m.get("source", "")

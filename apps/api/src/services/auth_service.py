@@ -6,7 +6,6 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 from services.brand_env import getenv_brand
 import re
 import time

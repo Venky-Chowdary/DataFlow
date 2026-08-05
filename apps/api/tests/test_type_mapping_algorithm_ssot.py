@@ -241,7 +241,6 @@ def test_oracle_time_to_varchar2_remains_declared_lossy():
 
 def test_lossy_respects_dest_db_for_timestamp_and_json():
     """is_lossy_coercion must share dest_db-aware collapse SSOT — not MySQL defaults."""
-    from services.type_system import is_lossy_coercion
 
     # Without dest_db: bare TIMESTAMP fail-closed (MySQL FSP 0).
     assert is_lossy_coercion("TIMESTAMP_NTZ(6)", "TIMESTAMP") is True
@@ -275,7 +274,6 @@ def test_validate_mapping_coercions_create_new_pg_timestamp_not_block():
 
 def test_cross_surface_dest_db_agreement_pg_timestamp_and_json():
     """Map/Validate/proof must share dest_db-aware lossy SSOT — no dual verdicts."""
-    from services.type_system import is_lossy_coercion
     from services.mapping_proof import mapping_fidelity
     from services.type_coercion_validator import validate_mapping_coercions
 
@@ -332,7 +330,7 @@ def test_materialize_dest_ddl_honors_map_stamps():
 
 
 def test_bq_timestamptz_to_timestamp_not_polarity_loss():
-    from services.type_system import is_lossy_coercion, is_timezone_polarity_loss
+    from services.type_system import is_timezone_polarity_loss
 
     assert is_timezone_polarity_loss("TIMESTAMPTZ", "TIMESTAMP", dest_db="bigquery") is False
     assert is_lossy_coercion("TIMESTAMPTZ", "TIMESTAMP", dest_db="bigquery") is False
@@ -404,7 +402,6 @@ def test_iceberg_array_float_create_new_keeps_float_leaf():
 def test_create_new_stamps_not_self_lossy():
     from services.type_system import (
         create_new_mapping_target_type,
-        is_lossy_coercion,
         is_precision_collapse_coercion,
     )
 
@@ -428,14 +425,12 @@ def test_create_new_stamps_not_self_lossy():
 
 
 def test_objectid_bare_string_still_collapses_on_bq():
-    from services.type_system import is_lossy_coercion
 
     assert is_lossy_coercion("OBJECTID", "STRING", dest_db="bigquery") is True
 
 def test_create_new_false_self_blocks_cleared():
     from services.type_system import (
         create_new_mapping_target_type,
-        is_lossy_coercion,
         is_precision_collapse_coercion,
         materialize_dest_ddl,
     )
@@ -518,7 +513,7 @@ def test_iceberg_materialize_array_vector_spelling():
 
 def test_dest_db_aliases_normalize_inside_lossy_ssot():
     """spark/delta must not dual-path vs databricks inside is_lossy_coercion."""
-    from services.type_system import is_lossy_coercion, is_timezone_polarity_loss
+    from services.type_system import is_timezone_polarity_loss
 
     for dest in ("databricks", "spark", "delta", "delta_lake"):
         assert is_timezone_polarity_loss(
@@ -532,7 +527,7 @@ def test_dest_db_aliases_normalize_inside_lossy_ssot():
 
 
 def test_oracle_time_and_iceberg_objectid_remain_declared_lossy():
-    from services.type_system import create_new_mapping_target_type, is_lossy_coercion
+    from services.type_system import create_new_mapping_target_type
 
     oracle_time = create_new_mapping_target_type("TIME(6)", "oracle")
     assert "VARCHAR2" in oracle_time.upper()
@@ -546,7 +541,6 @@ def test_spanner_does_not_invent_bigquery_types():
     from services.type_system import (
         _normalize_dest_db,
         create_new_mapping_target_type,
-        is_lossy_coercion,
     )
 
     assert _normalize_dest_db("spanner") == "spanner"
@@ -573,7 +567,7 @@ def test_spanner_does_not_invent_bigquery_types():
 
 
 def test_interval_ym_bq_and_postgis_geography_create_new_not_self_lossy():
-    from services.type_system import create_new_mapping_target_type, is_lossy_coercion
+    from services.type_system import create_new_mapping_target_type
 
     for src, dest in (
         ("INTERVAL YEAR TO MONTH", "bigquery"),

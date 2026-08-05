@@ -9,7 +9,6 @@ for existing un-scoped resources and is always accessible.
 from __future__ import annotations
 
 import json
-import os
 from services.brand_env import getenv_brand
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -264,7 +263,6 @@ def require_workspace_isolation() -> bool:
     the web client historically omitted ``X-Workspace-Id``, which caused schedules /
     contracts / usage to 400 and amplified false offline banners under load.
     """
-    import os
 
     return getenv_brand("REQUIRE_WORKSPACE", "").lower() in ("1", "true", "yes")
 

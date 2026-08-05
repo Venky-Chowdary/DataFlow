@@ -11,7 +11,6 @@ engine.
 from __future__ import annotations
 
 import base64
-import binascii
 import contextlib
 import json
 import logging
@@ -98,20 +97,8 @@ from connectors.writer_common import (
     DF_LSN_COL,
     _coerced_null_row_count,
     _rejected_row_count,
-    assert_sparse_upsert_has_pk,
     build_mapped_rows_with_details,
     compare_lsn,
-    quarantine_currency_markers_into_numeric,
-    quarantine_unfit_binaries,
-    quarantine_unfit_bitstrings,
-    quarantine_unfit_booleans,
-    quarantine_unfit_decimals,
-    quarantine_unfit_enum_set,
-    quarantine_unfit_integers,
-    quarantine_unfit_specialty_types,
-    quarantine_unfit_strings,
-    quarantine_unfit_temporals,
-    quarantine_unfit_years,
     quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
@@ -922,7 +909,6 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
         LOGICAL_TEXT,
         LOGICAL_TIME,
         LOGICAL_UUID,
-        ddl_type,
         normalize_logical_type,
         parse_numeric_precision_scale,
     )

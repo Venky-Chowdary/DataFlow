@@ -147,7 +147,7 @@ def get_project(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ) -> dict[str, Any]:
-    ws = resolve_read_workspace(request, workspace_id)
+    _ = resolve_read_workspace(request, workspace_id)
     project = get_transform_store().get(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Transformation project not found")
@@ -187,7 +187,7 @@ def update_project(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ) -> dict[str, Any]:
-    ws = resolve_write_workspace(request, workspace_id)
+    _ = resolve_write_workspace(request, workspace_id)
     store = get_transform_store()
     project = store.get(project_id)
     if not project:

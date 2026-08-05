@@ -12,7 +12,6 @@ long-lived sockets mid-transfer. Writers must:
 from __future__ import annotations
 
 import logging
-import os
 from services.brand_env import getenv_brand
 import time
 from dataclasses import dataclass

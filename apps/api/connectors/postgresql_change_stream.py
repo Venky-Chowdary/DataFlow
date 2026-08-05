@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 from services.brand_env import getenv_brand
 import re
 from collections.abc import Iterator

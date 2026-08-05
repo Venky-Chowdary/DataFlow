@@ -193,7 +193,6 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
     )
     if not live_target_schema and table_exists is True:
         live_target_schema = plan.target_schema or {}
-    live_target_columns = list(live_target_schema.keys()) if live_target_schema else plan.target_columns
 
     policies = plan.policies
     validation_mode = policies.get("validation_mode", "balanced")

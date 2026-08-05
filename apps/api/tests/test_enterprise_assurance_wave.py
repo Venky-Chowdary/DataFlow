@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 
 def test_audit_tip_anchor_stub(tmp_path, monkeypatch):

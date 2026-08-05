@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
-import os
 from services.brand_env import getenv_brand
 import secrets
 from typing import Any

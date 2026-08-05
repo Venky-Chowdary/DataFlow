@@ -119,14 +119,6 @@ def test_db2_merge_sql_null_safe_and_session_stage():
         name = "ORDERS"
         schema = "APP"
 
-    import sqlalchemy as sa
-
-    table = sa.table(
-        "ORDERS",
-        sa.column("id"),
-        sa.column("amt"),
-        schema="APP",
-    )
     # Use a lightweight stand-in with .name/.schema for our helper.
     table_obj = MagicMock()
     table_obj.name = "ORDERS"

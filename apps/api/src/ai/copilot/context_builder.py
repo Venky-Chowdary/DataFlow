@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 
 from services.brand_env import getenv_brand
 from .data_analyst import get_data_analyst
