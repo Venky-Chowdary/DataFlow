@@ -143,3 +143,35 @@ def test_validation_mode_discovery_never_writes(kernel: MigrationKernel) -> None
     decision = kernel.build_decision(source, destination, dest_db="postgresql", validation_mode="discovery")
     assert decision.validation.mode == "discovery"
     assert not decision.validation.write_permitted
+
+
+def test_canonicalize_temporal_preserves_fsp_and_timezone(kernel: MigrationKernel) -> None:
+    carrier = kernel.canonicalize_type("TIMESTAMP(6) WITH TIME ZONE")
+    assert carrier.logical == "datetime"
+    assert carrier.precision == 6
+    assert carrier.timezone == "tz"
+
+
+def test_canonicalize_time_preserves_fsp_and_ntz(kernel: MigrationKernel) -> None:
+    carrier = kernel.canonicalize_type("TIME(3)")
+    assert carrier.logical == "time"
+    assert carrier.precision == 3
+    assert carrier.timezone == "ntz"
+
+
+def test_canonicalize_binary_extracts_length(kernel: MigrationKernel) -> None:
+    carrier = kernel.canonicalize_type("VARBINARY(2048)")
+    assert carrier.logical == "binary"
+    assert carrier.length == 2048
+
+
+def test_precision_narrowing_is_lossy(kernel: MigrationKernel) -> None:
+    verdict = kernel.classify_conversion("DECIMAL(18,4)", "DECIMAL(12,2)", dest_db="postgresql")
+    assert verdict.classification == ConversionClass.LOSSY
+    assert verdict.execution_policy == "quarantine"
+
+
+def test_same_logical_different_width_is_representation_change(kernel: MigrationKernel) -> None:
+    verdict = kernel.classify_conversion("VARCHAR(50)", "VARCHAR(100)", dest_db="postgresql")
+    assert verdict.classification == ConversionClass.REPRESENTATION_CHANGE
+    assert verdict.confidence == pytest.approx(0.7)

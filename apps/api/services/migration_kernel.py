@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -248,6 +249,7 @@ class MigrationKernel:
         precision = None
         scale = None
         length = None
+        timezone = None
 
         if logical == "decimal":
             precision, scale = self._type_system.parse_numeric_precision_scale(native_type)
@@ -255,6 +257,17 @@ class MigrationKernel:
             length = self._type_system.parse_string_carrier_width(native_type)
         elif logical == "vector":
             length = self._type_system.parse_vector_dimension(native_type)
+        elif logical == "binary":
+            m = re.search(r"\(\s*(\d+)\s*\)", native_type or "")
+            if m:
+                length = int(m.group(1))
+        elif logical in {"datetime", "time", "date"}:
+            precision = self._type_system.parse_temporal_fractional_precision(native_type)
+            tz = self._type_system.datetime_timezone_polarity(native_type)
+            if tz is None and logical == "time":
+                tz = self._type_system.time_timezone_polarity(native_type)
+            if tz:
+                timezone = tz
 
         return TypeCarrier(
             logical=logical,
@@ -262,6 +275,7 @@ class MigrationKernel:
             precision=precision,
             scale=scale,
             length=length,
+            timezone=timezone,
             metadata=metadata,
         )
 
