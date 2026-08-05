@@ -2034,6 +2034,31 @@
   background: var(--df-surface, #fff);
 }
 
+details.df2-theater-v3-mapping-proof {
+  display: block;
+}
+
+details.df2-theater-v3-mapping-proof > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+details.df2-theater-v3-mapping-proof > summary::-webkit-details-marker {
+  display: none;
+}
+
+details.df2-theater-v3-mapping-proof > summary span {
+  font-size: 12px;
+  color: var(--df-text-muted, #64748b);
+}
+
+details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions {
+  margin-top: 12px;
+}
+
 .df2-theater-v3-mapping-proof strong,
 .df2-result-mapping-proof strong {
   display: block;

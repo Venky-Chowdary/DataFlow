@@ -496,6 +496,8 @@ export function JobTheaterView({
   const rejectedRows = Number(job.rejected_rows ?? destinationSummary.rejected_rows ?? 0);
   const coercedNullRows = Number(job.coerced_null_rows ?? destinationSummary.coerced_null_rows ?? 0);
   const droppedRows = Math.max(rejectedRows - coercedNullRows, 0);
+  /** Gate/pre-write fail — hide trust/quarantine/proof theater that has nothing to show. */
+  const earlyFail = isFailed && processed === 0 && rejectedRows === 0;
   const warningCount = Array.isArray(destinationSummary.warnings) ? destinationSummary.warnings.length : 0;
   const checksum = typeof destinationSummary.checksum === "string" ? destinationSummary.checksum : "";
   const loadMethod = typeof destinationSummary.load_method === "string" ? destinationSummary.load_method : "";
@@ -673,11 +675,13 @@ export function JobTheaterView({
                       ? "Recover · append-only sink"
                       : duplicateKeyFailure
                         ? "Recover · set unique primary key"
-                        : "Recover from failure"}
+                        : earlyFail
+                          ? "Fix cause, then Validate → Execute"
+                          : "Recover from failure"}
             </strong>
             <span>
               {isCancelled
-                ? "Use the action bar under the event log — Resume, Map / Validate, or start clean."
+                ? "Resume, reopen Map / Validate, or start clean."
                 : job.cdc_lease_conflict
                   ? "Clear the lease or stop the holder first — Resume alone will hit the same conflict while the lease is live."
                 : job.cdc_cursor_gap
@@ -691,8 +695,47 @@ export function JobTheaterView({
                   ? "Open Map and set Primary key to a column that is unique in the source (not a repeating id). Or use append without that PK / dedupe upstream, then re-run from Validate."
                 : capacityFailure
                   ? "Free destination capacity first, then Resume from checkpoint — Resume alone will hit the same error."
-                  : "Use the action bar under the event log to Resume, fix mappings, or re-run from Validate."}
+                : earlyFail
+                  ? "Nothing was written. Re-run Validate, then Execute — Resume is not useful for a pre-write gate failure."
+                  : "Resume from checkpoint, fix mappings, or re-run from Validate."}
             </span>
+          </div>
+          <div className="df2-theater-v3-next-actions">
+            {duplicateKeyFailure && onBackToMap && (
+              <button type="button" className="df2-btn df2-btn-primary" onClick={onBackToMap}>
+                <DtIcon name="layers" size={16} /> Open Map · set PK
+              </button>
+            )}
+            {!earlyFail
+              && onResume
+              && (job.chunk_current != null || job.checkpoint)
+              && !job.cdc_lease_conflict
+              && !job.cdc_cursor_gap
+              && !duplicateKeyFailure && (
+              <button
+                type="button"
+                className="df2-btn df2-btn-primary"
+                onClick={onResume}
+                disabled={resuming}
+              >
+                <DtIcon name="play" size={16} /> {resuming ? "Resuming…" : "Resume"}
+              </button>
+            )}
+            {onBackToValidate && (
+              <button type="button" className="df2-btn df2-btn-primary" onClick={onBackToValidate}>
+                <DtIcon name="gate" size={16} /> Validate
+              </button>
+            )}
+            {onBackToMap && !duplicateKeyFailure && (
+              <button type="button" className="df2-btn" onClick={onBackToMap}>
+                <DtIcon name="layers" size={16} /> Map
+              </button>
+            )}
+            {onNewTransfer && (
+              <button type="button" className="df2-btn df2-btn-ghost" onClick={onNewTransfer}>
+                <DtIcon name="plus" size={16} /> New transfer
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -722,7 +765,7 @@ export function JobTheaterView({
         <CdcIncrementalSnapshotPanel jobId={job._id} enabled />
       )}
 
-      {(isComplete || isFailed || isCancelled || isQuarantine) && (
+      {!earlyFail && (isComplete || isFailed || isCancelled || isQuarantine) && (
         <JobTrustScoreCard
           job={job}
           onOpenQuarantine={rejectedRows > 0 ? () => {
@@ -1127,7 +1170,7 @@ export function JobTheaterView({
         </div>
       )}
 
-      {(isComplete || isFailed || isCancelled) && (
+      {!earlyFail && (isComplete || isFailed || isCancelled) && (
         <NotificationDeliveryStrip
           notifications={job.notifications}
           className="df2-theater-v3-notify"
@@ -1159,6 +1202,7 @@ export function JobTheaterView({
         })}
       </div>
 
+      {!earlyFail && (
       <div className="df2-theater-v3-sla" aria-label="Execution quality and evidence">
         <article className="df2-theater-v3-sla-card">
           <span>Dropped / rejected</span>
@@ -1203,6 +1247,7 @@ export function JobTheaterView({
           </small>
         </article>
       </div>
+      )}
 
       {isComplete && job.reconciliation && (
         <Gate8ProofCard
@@ -1276,18 +1321,16 @@ export function JobTheaterView({
         </section>
       )}
 
-      {resolvedProof && (
-        <section className="df2-theater-v3-mapping-proof" aria-label="Mapping proof">
-          <div className="df2-theater-v3-mapping-proof-copy">
+      {resolvedProof && !earlyFail && (
+        <details className="df2-theater-v3-mapping-proof" aria-label="Mapping proof">
+          <summary>
             <strong>Mapping proof</strong>
-            <p>
-              Per-column match evidence for this run
+            <span>
               {resolvedProof.summary?.mapped_count != null
-                ? ` · ${resolvedProof.summary.mapped_count} pairs`
-                : ""}
-              . Explains mapping decisions — not Gate-8 row fidelity.
-            </p>
-          </div>
+                ? `${resolvedProof.summary.mapped_count} pairs · decisions only`
+                : "Per-column match evidence · not Gate-8 fidelity"}
+            </span>
+          </summary>
           <div className="df2-theater-v3-mapping-proof-actions">
             <button
               type="button"
@@ -1319,7 +1362,17 @@ export function JobTheaterView({
             sourceLabel={sourceLabel}
             destLabel={destLabel}
           />
-        </section>
+        </details>
+      )}
+
+      {resolvedProof && earlyFail && (
+        <MappingProofDrawer
+          open={mappingProofOpen}
+          onClose={() => setMappingProofOpen(false)}
+          proof={resolvedProof}
+          sourceLabel={sourceLabel}
+          destLabel={destLabel}
+        />
       )}
 
       {isComplete && !isQuarantine && (
@@ -1365,24 +1418,18 @@ export function JobTheaterView({
         );
       })()}
 
-      {(rejectedRows > 0 || isFailed || isQuarantine) && (
+      {(rejectedRows > 0 || isQuarantine) && (
         <section id="df2-theater-quarantine" className="df2-theater-v3-quarantine" aria-label="Quarantined rows">
           <div className="df2-theater-v3-alert warn">
             <DtIcon name="alert" size={18} />
             <div>
               <strong>
-                {isFailed
-                  ? (rejectedRows > 0
-                    ? `${rejectedRows.toLocaleString()} quarantined row(s) — inspect findings`
-                    : "Inspect preflight / quarantine findings")
-                  : droppedRows > 0
-                    ? `${droppedRows.toLocaleString()} rows held out in quarantine`
-                    : `${coercedNullRows.toLocaleString()} value(s) coerced to NULL`}
+                {droppedRows > 0
+                  ? `${droppedRows.toLocaleString()} rows held out in quarantine`
+                  : `${coercedNullRows.toLocaleString()} value(s) coerced to NULL`}
               </strong>
               <p>
-                {isFailed
-                  ? "Exact columns, sample values, reasons, and policies are listed below. Export CSV saves the file to your downloads. Use Validate → Fix bad data… for Strip or Quarantine."
-                  : "Review the quarantine details below and export them for remediation."}
+                Review the quarantine details below and export them for remediation.
               </p>
             </div>
           </div>
@@ -1421,7 +1468,7 @@ export function JobTheaterView({
           title="Live event log"
           empty="Waiting for job events…"
           collapsible
-          defaultOpen
+          defaultOpen={!earlyFail}
           storageKey={`df2-run-log-open:${jobId}`}
         />
         <div className="df2-card-footer df2-wizard-footer df2-theater-v3-footer" role="navigation" aria-label="Run actions">
