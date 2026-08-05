@@ -3,6 +3,9 @@
  * Keep IDs aligned with apps/api/services/preflight_service.py allowed sets.
  */
 
+/** Must match apps/api/services/coercion_probe.py PREFLIGHT_SAMPLE_LIMIT (Validate≡Execute). */
+export const PREFLIGHT_SAMPLE_LIMIT = 500;
+
 export type SyncModeId =
   | "full_refresh_overwrite"
   | "full_refresh_append"

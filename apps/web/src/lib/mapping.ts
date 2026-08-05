@@ -631,10 +631,17 @@ export function acknowledgeMappingRisk(
     expected_truncation: Boolean(m.typeNarrowing),
     expected_nulls: fidelity === "cast" || policy === "QUARANTINE_ROW",
     execution_policy: policy,
+    // CAST/TRANSFORM continue = quarantine holdout (not silent NULL). Stamp the
+    // quarantine policy explicitly so Validate/Execute never look like "signed
+    // contract = write anyway" when cells still go to DLQ.
     quarantine_policy:
       policy === "QUARANTINE_ROW"
+        || policy === "CAST_AND_CONTINUE"
+        || policy === "TRANSFORM_AND_CONTINUE"
         ? "QUARANTINE_ROW_on_failure"
-        : "holdout_rejected_rows",
+        : policy === "STOP_COLUMN"
+          ? "omit_column_on_failure"
+          : "holdout_rejected_rows",
     retry_policy: "none",
     rollback_strategy: "DOCUMENT_ONLY",
     approved_by: actor,

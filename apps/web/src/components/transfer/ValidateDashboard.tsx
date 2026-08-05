@@ -2081,11 +2081,12 @@ export function ValidateDashboard({
             value={quality == null ? null : quality * 100}
             label="Quality"
             tone={
-              qualityNotProfiled
+              // Never paint green for not_profiled / 0% — that greenwashes Approve.
+              qualityNotProfiled || quality == null || quality <= 0
                 ? "review"
-                : decision === "approve"
+                : decision === "approve" && quality >= 0.7
                   ? "approve"
-                  : heroTone
+                  : "review"
             }
             emptyLabel="n/a"
           />

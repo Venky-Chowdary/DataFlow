@@ -73,6 +73,26 @@ def test_scd2_blocks_on_non_sql_destination():
     assert "SQL table destination" in str(g9["details"])
 
 
+def test_cdc_passes_for_database_source_with_cursor_and_pk():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "primary_key": "order_id",
+        }],
+        source_columns=["order_id", "updated_at"],
+        source_kind="database",
+        source_type="mysql",
+        dest_type="postgresql",
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    assert g9["status"] != "block"
+
+
 def test_cdc_blocks_for_file_source():
     gates = run_transfer_policy_gates(
         sync_mode="cdc",

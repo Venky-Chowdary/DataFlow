@@ -498,11 +498,16 @@ def _run_preflight(
             stream_contracts=[],
             backfill_new_fields=False,
             source_columns=columns,
+            dest_type=dest_db_type,
+            source_type=src_db_type,
+            source_kind="database",
         )
         # These must mirror ``UniversalTransferEngine`` exactly. The source
         # config and table are what enable the live coercion probe; without
         # them the pilot would promise "safe to start" and the engine would
         # then block the run, which is worse than refusing up front.
+        # Never invent can_create=True when privilege probe omitted the flag.
+        can_create = dest_probe.get("can_create_table")
         result = run_file_preflight(
             columns=columns,
             column_types=column_types,
@@ -517,7 +522,7 @@ def _run_preflight(
             destination_column_types=dest_probe.get("column_types") or {},
             destination_column_nullability=dest_probe.get("column_nullability") or {},
             destination_table_exists=dest_exists,
-            destination_can_create=bool(dest_probe.get("can_create_table", True)),
+            destination_can_create=can_create if isinstance(can_create, bool) else None,
             destination_db_type=dest_db_type,
             destination_table=dst_table,
             source_kind="database",

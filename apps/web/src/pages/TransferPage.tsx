@@ -70,6 +70,7 @@ import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGeneri
 import {
   availableSyncModes,
   DATE_LOCALES,
+  PREFLIGHT_SAMPLE_LIMIT,
   SCHEMA_POLICIES,
   SYNC_MODES,
   VALIDATION_MODES,
@@ -3275,7 +3276,7 @@ export function TransferPage({
         columns = parsed.columns;
         columnTypes = parsed.schema || {};
         rowCount = parsed.row_count;
-        sampleRows = (parsed.data ?? parsed.sample_data)?.slice(0, 100);
+        sampleRows = (parsed.data ?? parsed.sample_data)?.slice(0, PREFLIGHT_SAMPLE_LIMIT);
         mappings = buildPreflightMappings(
           analysis?.columns ?? [],
           activeMappings.length ? activeMappings : columnMappings,
@@ -3310,7 +3311,7 @@ export function TransferPage({
           columns = cachedColumns;
           columnTypes = cachedSchema;
           rowCount = parsed?.row_count ?? sourceRowEstimate ?? 0;
-          sampleRows = (parsed?.data ?? parsed?.sample_data)?.slice(0, 100);
+          sampleRows = (parsed?.data ?? parsed?.sample_data)?.slice(0, PREFLIGHT_SAMPLE_LIMIT);
           mappings = buildPreflightMappings(
             analysis?.columns ?? cachedColumns.map((c) => ({
               column_name: c,
@@ -3534,7 +3535,7 @@ export function TransferPage({
           columns: parsed.columns,
           rowCount: parsed.row_count,
           mappings: overrideMappings ?? columnMappings,
-          sampleRows: (parsed.data ?? parsed.sample_data)?.slice(0, 100),
+          sampleRows: (parsed.data ?? parsed.sample_data)?.slice(0, PREFLIGHT_SAMPLE_LIMIT),
           confidenceThreshold: threshold,
           destKind: destKindMode,
         });

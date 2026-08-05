@@ -199,24 +199,65 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
     validation_mode = policies.get("validation_mode", "balanced")
     threshold = confidence_threshold_for_mode(validation_mode)
 
-    sample_rows = plan.sample_rows or None
-    if not sample_rows and plan.source.get("kind") == "database" and plan.source_columns:
-        try:
-            source_endpoint = EndpointConfig.from_dict(plan.source.get("kind", "database"), plan.source)
-            records, _headers, _schema = read_source_database(
-                source_endpoint, limit=100, raise_on_truncate=False
-            )
-            sample_rows = records[:100] if records else None
-        except Exception:
-            sample_rows = None
+    from services.coercion_probe import PREFLIGHT_SAMPLE_LIMIT
+    from services.primary_key import extract_contract_primary_key_columns
 
-    from services.primary_key import extract_contract_primary_key
+    sample_rows = list(plan.sample_rows or []) or None
+    # Studio often persists a 25-row snapshot. Execute preflight samples up to
+    # PREFLIGHT_SAMPLE_LIMIT — refetch when the cache is thinner so Validate
+    # cannot Approve on a sample Execute will expand and then block.
+    if (
+        plan.source.get("kind") == "database"
+        and plan.source_columns
+        and (not sample_rows or len(sample_rows) < PREFLIGHT_SAMPLE_LIMIT)
+    ):
+        try:
+            source_endpoint = EndpointConfig.from_dict(
+                plan.source.get("kind", "database"), plan.source
+            )
+            records, _headers, _schema = read_source_database(
+                source_endpoint,
+                limit=PREFLIGHT_SAMPLE_LIMIT,
+                raise_on_truncate=False,
+            )
+            fetched = records[:PREFLIGHT_SAMPLE_LIMIT] if records else None
+            if fetched and (not sample_rows or len(fetched) >= len(sample_rows)):
+                sample_rows = fetched
+        except Exception:
+            pass
+    if sample_rows and len(sample_rows) > PREFLIGHT_SAMPLE_LIMIT:
+        sample_rows = sample_rows[:PREFLIGHT_SAMPLE_LIMIT]
 
     # Previous = revision snapshot (or empty for legacy revisions without snapshot).
     prev_cols = list(rev.source_columns or [])
     prev_schema = dict(rev.source_schema or {})
 
+    stream_contracts = list(policies.get("stream_contracts") or [])
+    dest_table = str(dest.get("table") or dest.get("collection") or "")
+    # Full composite — never truncate to first column (Validate≡Execute probe SSOT).
+    contract_pk_cols = extract_contract_primary_key_columns(
+        stream_contracts, stream_name=dest_table, fallback_first=False
+    )
+    if not contract_pk_cols:
+        selected = [
+            c for c in stream_contracts if isinstance(c, dict) and c.get("selected", True)
+        ]
+        if len(selected) == 1:
+            contract_pk_cols = extract_contract_primary_key_columns(selected)
+    contract_pk = ",".join(contract_pk_cols) if contract_pk_cols else None
+
+    source = plan.source if isinstance(plan.source, dict) else {}
+    source_connector_id = str(source.get("connector_id") or "")
+    source_table = str(source.get("table") or source.get("collection") or "")
+    dest_db_type = (
+        dest_meta.get("db_type") or dest.get("format") or dest.get("type") or "postgresql"
+    ).lower()
+    source_kind = str(source.get("kind") or "file")
+    source_format = str(source.get("format") or source.get("kind") or "file")
+
     # run_file_preflight is the SSOT for drift + gates — do not re-detect/overwrite.
+    # Source connector/table/config + stream_contracts required for uniqueness probe
+    # (Studio plan Validate must not skip the probe Execute will run).
     pf = run_file_preflight(
         columns=plan.source_columns,
         column_types=plan.source_schema,
@@ -225,8 +266,8 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         destination_connected=bool(dest_meta.get("connected")),
         destination_error=None if dest_meta.get("connected") else dest_meta.get("message"),
         source_connected=True,
-        source_kind=plan.source.get("kind", "file"),
-        source_format=plan.source.get("format") or plan.source.get("kind", "file"),
+        source_kind=source_kind,
+        source_format=source_format,
         sync_mode=policies.get("sync_mode", "full_refresh_overwrite"),
         sample_rows=sample_rows,
         confidence_threshold=threshold,
@@ -238,16 +279,27 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         destination_can_create=dest_meta.get("can_create_table"),
         destination_can_write=dest_meta.get("can_write"),
         privilege_probe=dest_meta.get("privilege_probe"),
-        destination_db_type=(dest_meta.get("db_type") or dest.get("format") or dest.get("type") or "postgresql").lower(),
+        destination_db_type=dest_db_type,
+        source_connector_id=source_connector_id,
+        source_config=dict(source) if source else None,
+        source_table=source_table,
+        destination_table=dest_table,
         schema_policy=policies.get("schema_policy", "manual_review"),
         backfill_new_fields=bool(policies.get("backfill_new_fields")),
         stored_source_fp=rev.source_schema_hash or "",
         stored_target_fp=rev.target_schema_hash or "",
         previous_source_columns=prev_cols or None,
         previous_source_schema=prev_schema or None,
-        contract_primary_key=extract_contract_primary_key(policies.get("stream_contracts")),
+        contract_primary_key=contract_pk,
         destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
         destination_unique_keys=dest_meta.get("unique_keys") or [],
+        destination_foreign_keys=dest_meta.get("foreign_keys") or [],
+        stream_contracts=stream_contracts,
+        compliance_acknowledged=bool(policies.get("compliance_acknowledged")),
+        schema_drift_acknowledged=bool(policies.get("schema_drift_acknowledged")),
+        fk_risk_acknowledged=bool(policies.get("fk_risk_acknowledged")),
+        acknowledgment_actor=str(policies.get("acknowledgment_actor") or "").strip(),
+        acknowledgment_reason=str(policies.get("acknowledgment_reason") or "").strip(),
     )
     pf = apply_policy_gates(
         pf,
@@ -255,12 +307,16 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
             sync_mode=policies.get("sync_mode", "full_refresh_overwrite"),
             schema_policy=policies.get("schema_policy", "manual_review"),
             validation_mode=validation_mode,
-            stream_contracts=policies.get("stream_contracts"),
+            stream_contracts=stream_contracts,
             backfill_new_fields=bool(policies.get("backfill_new_fields")),
             source_columns=plan.source_columns,
+            dest_type=dest_db_type,
+            source_type=source_format,
+            source_kind=source_kind,
+            write_via_staging=bool(policies.get("write_via_staging")),
         ),
         validation_mode=validation_mode,
-        destination_db_type=(dest_meta.get("db_type") or dest.get("format") or dest.get("type") or "postgresql").lower(),
+        destination_db_type=dest_db_type,
     )
 
     if pf.get("effective_mappings"):

@@ -840,6 +840,34 @@ def _execute_preflight_identity_kwargs(request: TransferRequest) -> dict[str, An
     return _execute_preflight_parity_kwargs(request, destination_connected=True)
 
 
+def _execute_policy_gates_for_request(
+    request: TransferRequest,
+    *,
+    source_columns: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Validate≡Execute policy gates — never default source_kind to file.
+
+    Studio Validate passes dest_type / source_type / source_kind / write_via_staging.
+    Execute must match or CDC/SCD2/staging falsely block (or skip) after Approve.
+    """
+    from services.preflight_service import run_transfer_policy_gates
+
+    dest = getattr(request, "destination", None)
+    src = getattr(request, "source", None)
+    return run_transfer_policy_gates(
+        sync_mode=str(getattr(request, "sync_mode", "") or ""),
+        schema_policy=str(getattr(request, "schema_policy", "") or "manual_review"),
+        validation_mode=str(getattr(request, "validation_mode", "") or "strict"),
+        stream_contracts=list(getattr(request, "stream_contracts", None) or []),
+        backfill_new_fields=bool(getattr(request, "backfill_new_fields", False)),
+        source_columns=list(source_columns or []),
+        dest_type=str(getattr(dest, "format", None) or getattr(dest, "kind", None) or ""),
+        source_type=str(getattr(src, "format", None) or getattr(src, "kind", None) or ""),
+        source_kind=str(getattr(src, "kind", None) or "file"),
+        write_via_staging=bool(getattr(request, "write_via_staging", False)),
+    )
+
+
 def _destination_schema_types(
     destination: EndpointConfig, sync_mode: str = ""
 ) -> dict[str, str]:
@@ -2415,13 +2443,8 @@ class UniversalTransferEngine:
                 )
                 pf = apply_policy_gates(
                     pf,
-                    run_transfer_policy_gates(
-                        sync_mode=request.sync_mode,
-                        schema_policy=request.schema_policy,
-                        validation_mode=request.validation_mode,
-                        stream_contracts=request.stream_contracts,
-                        backfill_new_fields=request.backfill_new_fields,
-                        source_columns=columns,
+                    _execute_policy_gates_for_request(
+                        request, source_columns=columns
                     ),
                     validation_mode=request.validation_mode,
                     destination_db_type=dst_fmt.lower(),
@@ -3255,13 +3278,8 @@ class UniversalTransferEngine:
                 )
                 pf = apply_policy_gates(
                     pf,
-                    run_transfer_policy_gates(
-                        sync_mode=request.sync_mode,
-                        schema_policy=request.schema_policy,
-                        validation_mode=request.validation_mode,
-                        stream_contracts=request.stream_contracts,
-                        backfill_new_fields=request.backfill_new_fields,
-                        source_columns=columns,
+                    _execute_policy_gates_for_request(
+                        request, source_columns=columns
                     ),
                     validation_mode=request.validation_mode,
                     destination_db_type=dst_fmt.lower(),
@@ -3890,13 +3908,8 @@ class UniversalTransferEngine:
                 )
                 pf = apply_policy_gates(
                     pf,
-                    run_transfer_policy_gates(
-                        sync_mode=request.sync_mode,
-                        schema_policy=request.schema_policy,
-                        validation_mode=request.validation_mode,
-                        stream_contracts=request.stream_contracts,
-                        backfill_new_fields=request.backfill_new_fields,
-                        source_columns=columns,
+                    _execute_policy_gates_for_request(
+                        request, source_columns=columns
                     ),
                     validation_mode=request.validation_mode,
                     destination_db_type=dst_fmt.lower(),

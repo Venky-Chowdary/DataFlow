@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import patch
 
 from src.transfer.engine import (
+    _execute_policy_gates_for_request,
     _execute_preflight_parity_kwargs,
     _preflight_sample_rows,
 )
@@ -175,6 +176,45 @@ def test_parity_owns_destination_table_exists_no_duplicate_kwarg() -> None:
 
     merged = _accept(**call_site, **parity)
     assert merged["destination_table_exists"] is False
+
+
+def test_execute_policy_gates_pass_source_kind_and_dest_type() -> None:
+    """CDC must not false-block as file source after Validate approved database."""
+    gates = _execute_policy_gates_for_request(
+        _request(
+            sync_mode="cdc",
+            stream_contracts=[
+                {
+                    "name": "users",
+                    "selected": True,
+                    "primary_key": "id",
+                    "cursor_field": "updated_at",
+                }
+            ],
+        ),
+        source_columns=["id", "updated_at"],
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    assert g9["status"] != "block" or "database source" not in str(g9.get("details") or "").lower()
+    # Explicit: source_kind database from request.source.kind
+    assert not any(
+        "CDC requires a database source" in str(g.get("details") or g.get("message") or "")
+        for g in gates
+    )
+
+
+def test_execute_policy_gates_scd2_honors_postgres_dest() -> None:
+    gates = _execute_policy_gates_for_request(
+        _request(
+            sync_mode="scd2",
+            stream_contracts=[
+                {"name": "users", "selected": True, "primary_key": "id"}
+            ],
+        ),
+        source_columns=["id"],
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    assert "SQL table destination" not in str(g9.get("details") or "")
 
 
 def test_parity_falls_back_table_exists_when_inspect_omits() -> None:
