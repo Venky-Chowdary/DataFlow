@@ -7,6 +7,6 @@ and the per-database logical mappers that currently live in
 
 from __future__ import annotations
 
-from services.type.dialects import mysql, postgresql
+from services.type.dialects import bigquery, mysql, oracle, postgresql, snowflake, sqlserver
 
-__all__ = ["mysql", "postgresql"]
+__all__ = ["bigquery", "mysql", "oracle", "postgresql", "snowflake", "sqlserver"]
