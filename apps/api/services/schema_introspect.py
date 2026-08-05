@@ -10,6 +10,7 @@ from typing import Any
 
 from services.engine_pool import release_engine
 from services.type.dialects.bigquery import bq_field_to_logical as _bq_field_to_logical
+from services.type.dialects.bigquery import bq_to_logical as _bq_to_logical  # noqa: F401  # backward-compat re-export
 from services.type.dialects.mysql import mysql_to_logical as _mysql_to_logical
 from services.type.dialects.oracle import oracle_to_logical as _oracle_to_logical
 from services.type.dialects.postgresql import pg_to_logical as _pg_to_logical
