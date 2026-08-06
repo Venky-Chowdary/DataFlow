@@ -233,6 +233,7 @@ def write_mapped_rows(
 
             batch_size = 1000
             inserted = 0
+            written_rows: list[dict[str, Any]] = []
             # Filter to rows with valid embeddings matching dimension.
             valid_rows = []
             for row in vector_rows:
@@ -288,6 +289,7 @@ def write_mapped_rows(
             for i in range(0, total, batch_size):
                 batch = valid_rows[i : i + batch_size]
                 values = []
+                batch_written: list[dict[str, Any]] = []
                 for row in batch:
                     from services.vector_embedding import coerce_chunk_index
 
@@ -313,6 +315,7 @@ def write_mapped_rows(
                         row.get("source_id", ""),
                         chunk_idx,
                     ))
+                    batch_written.append(row)
 
                 if not values:
                     continue
@@ -338,6 +341,7 @@ def write_mapped_rows(
                 ).format(schema_id, table_id, sql.SQL(args_str))
                 cur.execute(insert_sql)
                 inserted += len(values)
+                written_rows.extend(batch_written)
                 if on_checkpoint:
                     on_checkpoint(
                         (i // batch_size) + 1,
@@ -395,7 +399,7 @@ def write_mapped_rows(
         rejected_details=rejected_details,
         rejected_rows=len(rejected_details),
         warnings=[r.get("reason") or "" for r in rejected_details[:10] if r.get("reason")],
-        meta=_pgvector_gate8_meta(valid_rows),
+        meta=_pgvector_gate8_meta(written_rows),
     )
 
 

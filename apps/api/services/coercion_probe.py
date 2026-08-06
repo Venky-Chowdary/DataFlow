@@ -324,14 +324,22 @@ def analyze_coercion(
         use_bool_wire = tgt_logical == "boolean" and dest_l in {
             "mysql",
             "mariadb",
+            "tidb",
             "postgresql",
             "postgres",
             "generic_sql",
+            "redshift",
+            "cockroachdb",
+            "timescaledb",
+            "alloydb",
+            "yugabytedb",
             "sqlserver",
             "mssql",
             "duckdb",
             "snowflake",
             "bigquery",
+            "oracle",
+            "oracledb",
         }
         use_specialty_wire = bool(
             specialty_base
