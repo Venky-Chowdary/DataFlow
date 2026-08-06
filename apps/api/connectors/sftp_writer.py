@@ -17,6 +17,7 @@ from services.value_serializer import cell_to_string, json_default
 from connectors.sftp_common import connect_sftp, parse_sftp_config, split_remote_path
 from connectors.writer_common import reject_on_strict_policy, WriteResult as _WriteResult
 from connectors.writer_common import (
+    _coerced_null_row_count,
     _rejected_row_count,
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
@@ -202,6 +203,21 @@ def write_mapped_rows(
         if on_checkpoint:
             on_checkpoint(1, 1, len(records))
 
+        _final_abort = reject_on_strict_policy(policy, rejected_details, "SFTP")
+        if _final_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=len(records),
+                table_name=filename,
+                target_schema=cfg.host,
+                checksum="",
+                chunks_completed=1,
+                error=_final_abort,
+                warnings=transform_errors[:10],
+                rejected_rows=rejected_rows,
+                rejected_details=rejected_details,
+            )
+
         return WriteResult(
             ok=True,
             rows_written=len(records),
@@ -214,6 +230,7 @@ def write_mapped_rows(
             warnings=transform_errors[:10],
             rejected_rows=rejected_rows,
             rejected_details=rejected_details,
+            coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
             meta=gate8_writer_meta(records, target_cols),
         )
     except Exception as exc:

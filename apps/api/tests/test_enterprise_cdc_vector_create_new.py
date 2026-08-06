@@ -175,3 +175,37 @@ def test_url_email_iban_transforms_fail_closed_on_garbage():
     out, err = apply_transform("https://example.com/a", "url")
     assert err is None
     assert out == "https://example.com/a"
+
+
+def test_phone_postal_base64_fail_closed_on_garbage():
+    from services.transform_engine import apply_transform
+
+    out, err = apply_transform("abc", "phone")
+    assert out is None
+    assert err and "Invalid phone" in err
+
+    out, err = apply_transform("+1-555-0199", "phone")
+    assert err is None
+    assert out is not None
+
+    out, err = apply_transform("!!", "postal")
+    assert out is None
+    assert err and "Invalid postal" in err
+
+    out, err = apply_transform("not@@@base64", "base64")
+    assert out is None
+    assert err and "Invalid base64" in err
+
+
+def test_stop_column_rejected_counts_as_coerced_null_rows():
+    from connectors.writer_common import _coerced_null_row_count
+
+    details = [
+        {"row": 1, "policy": "stop_column", "execution_policy": "STOP_COLUMN"},
+        {"row": 1, "policy": "stop_column", "execution_policy": "STOP_COLUMN"},
+        {"row": 2, "policy": "quarantine", "execution_policy": "QUARANTINE_ROW"},
+        {"row": 3, "policy": "coerce_null", "execution_policy": "CAST_AND_CONTINUE"},
+    ]
+    assert _coerced_null_row_count(details, "quarantine") == 2  # rows 1 and 3
+    # Job coerce_null must not count quarantine holdouts as NULL invents.
+    assert _coerced_null_row_count(details, "coerce_null") == 2

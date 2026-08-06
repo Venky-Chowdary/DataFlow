@@ -1223,8 +1223,13 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         if target_string:
             out = str(converted)
             # Explicit semantic transforms must fail-closed on garbage — never
-            # silently "normalize" invalid email/url/iban into the primary table.
-            from services.semantic_types import _EMAIL_RE, _IBAN_RE, _URL_RE
+            # silently "normalize" invalid email/url/iban/phone into the primary table.
+            from services.semantic_types import (
+                _EMAIL_RE,
+                _IBAN_RE,
+                _URL_RE,
+                _digits_only,
+            )
 
             if transform == "email" and not _EMAIL_RE.match(out):
                 return None, f"Invalid email: {text!r}"
@@ -1235,6 +1240,30 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
                 if not _IBAN_RE.match(compact):
                     return None, f"Invalid iban: {text!r}"
                 return compact, None
+            if transform == "phone":
+                digits = _digits_only(out)
+                # E.164-ish: at least 7 digits; refuse embedded letters.
+                if len(digits.replace("+", "")) < 7:
+                    return None, f"Invalid phone: {text!r}"
+                if re.search(r"[A-Za-z]", out):
+                    return None, f"Invalid phone: {text!r}"
+                # Preserve operator-visible formatting on string targets (Map Ready).
+                return out, None
+            if transform == "postal":
+                compact = out.upper().replace(" ", "")
+                # Accept national formats (US ZIP, CA, UK outward+inward) — refuse
+                # empty / punctuation-only garbage that normalize would soft-pass.
+                if not re.match(r"^[A-Z0-9]{3,12}$", compact):
+                    return None, f"Invalid postal: {text!r}"
+                return compact, None
+            if transform == "base64":
+                try:
+                    import base64 as _b64
+
+                    _b64.b64decode(out, validate=True)
+                except Exception:
+                    return None, f"Invalid base64: {text!r}"
+                return out, None
             return out, None
         return str(converted) if isinstance(converted, Decimal) else converted, None
 

@@ -19,6 +19,7 @@ from services.value_serializer import json_default
 from connectors.writer_common import (
     reject_on_strict_policy,
     WriteResult,
+    _coerced_null_row_count,
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
     resolve_mapping_dest_types,
@@ -355,20 +356,33 @@ def write_mapped_rows(
             logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
     fail_closed = policy == "fail" and null_key_rejected > 0 and written == 0
+    _final_abort = reject_on_strict_policy(policy, rejected_details, "Kafka")
+    if _final_abort or fail_closed:
+        return WriteResult(
+            ok=False,
+            rows_written=written,
+            table_name=topic,
+            target_schema="",
+            checksum=digest.hexdigest()[:16] if written else "",
+            chunks_completed=1,
+            error=_final_abort
+            or (
+                f"Kafka produce blocked: {null_key_rejected} row(s) missing key `{key_col}`"
+            ),
+            rejected_details=rejected_details,
+            rejected_rows=len(rejected_details),
+            driver="kafka",
+        )
     return WriteResult(
-        ok=not fail_closed,
+        ok=True,
         rows_written=written,
         table_name=topic,
         target_schema="",
         checksum=digest.hexdigest()[:16] if written else "",
         chunks_completed=1,
-        error=(
-            f"Kafka produce blocked: {null_key_rejected} row(s) missing key `{key_col}`"
-            if fail_closed
-            else None
-        ),
         rejected_details=rejected_details,
         rejected_rows=len(rejected_details),
+        coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
         driver="kafka",
         meta={
             "reconcile_sample": produced_sample,

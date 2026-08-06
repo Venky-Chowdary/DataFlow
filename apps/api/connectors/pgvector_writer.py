@@ -352,6 +352,23 @@ def write_mapped_rows(
     finally:
         conn.close()
 
+    from connectors.writer_common import reject_on_strict_policy as _reject_final
+
+    _final_abort = _reject_final(error_policy, rejected_details, "pgvector")
+    if _final_abort:
+        return WriteResult(
+            ok=False,
+            rows_written=inserted,
+            table_name=table_name,
+            target_schema=schema or "public",
+            checksum="",
+            chunks_completed=(inserted + 999) // 1000,
+            error=_final_abort,
+            rejected_details=rejected_details,
+            rejected_rows=len(rejected_details),
+            warnings=[r.get("reason") or "" for r in rejected_details[:10] if r.get("reason")],
+        )
+
     return WriteResult(
         ok=True,
         rows_written=inserted,

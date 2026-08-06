@@ -386,6 +386,21 @@ def write_mapped_rows(
             rejected_rows=len(rejected),
         )
 
+    _final_abort = reject_on_strict_policy(error_policy, rejected, "Qdrant")
+    if _final_abort:
+        return WriteResult(
+            ok=False,
+            rows_written=inserted,
+            table_name=collection,
+            target_schema=schema or "",
+            checksum="",
+            chunks_completed=(inserted + 99) // 100,
+            error=_final_abort,
+            rejected_details=rejected,
+            rejected_rows=len(rejected),
+            warnings=[r.get("reason") or "" for r in rejected[:10] if r.get("reason")],
+        )
+
     return WriteResult(
         ok=True,
         rows_written=inserted,

@@ -11,6 +11,7 @@ from connectors.aws_common import boto3_client
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
     build_mapped_rows_with_details,
+    _coerced_null_row_count,
     gate8_writer_meta,
     resolve_target_columns,
     row_checksum,
@@ -311,6 +312,20 @@ def write_mapped_rows(
 
         region = resolve_region(cfg)
         endpoint = resolve_endpoint_url(cfg)
+        _final_abort = reject_on_strict_policy(policy, rejected_details, "DynamoDB")
+        if _final_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=written,
+                table_name=table,
+                target_schema=endpoint or region,
+                checksum="",
+                chunks_completed=chunks if valid_rows else 0,
+                error=_final_abort,
+                warnings=errors[:10],
+                rejected_rows=len({d["row"] for d in rejected_details}),
+                rejected_details=list(rejected_details),
+            )
         return WriteResult(
             ok=True,
             rows_written=written,
@@ -326,6 +341,7 @@ def write_mapped_rows(
             warnings=errors[:10],
             rejected_rows=len({d["row"] for d in rejected_details}),
             rejected_details=list(rejected_details),
+            coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
             meta=gate8_writer_meta(valid_rows, target_cols),
         )
     except Exception as exc:

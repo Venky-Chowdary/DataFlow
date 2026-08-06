@@ -1753,15 +1753,45 @@ def _dry_run_transform(value: str, transform: str | None) -> str | None:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return value
     # Non-deterministic / one-way transforms break reconciliation previews.
-    if t in {"uuid", "guid", "hash", "md5", "sha256", "mask", "redact", "pii_mask", "anonymize", "encrypt"}:
+    if t in {"hash", "md5", "sha256", "mask", "redact", "pii_mask", "anonymize", "encrypt"}:
         return None
     # For other deterministic string-preserving transforms, keep the value as-is.
     return value
 
 
 _NON_DETERMINISTIC = {
-    "uuid", "guid", "hash", "md5", "sha256", "mask", "redact", "pii_mask", "anonymize", "encrypt",
+    # Deterministic UUID *parse* stays comparable — only generators/one-way.
+    "hash", "md5", "sha256", "mask", "redact", "pii_mask", "anonymize", "encrypt",
 }
+
+
+def _continue_policy_disposition(mapping: Any) -> str:
+    """Map signed continue-policy to G8 dry-run behavior.
+
+    ``holdout`` — omit row (QUARANTINE_ROW / SKIP_ROW / default CAST quarantine).
+    ``null_cell`` — keep row with NULL cell (STOP_COLUMN / CAST+COERCE).
+    """
+    raw = None
+    if isinstance(mapping, dict):
+        raw = mapping.get("risk_contract") or mapping.get("riskContract")
+    else:
+        raw = getattr(mapping, "risk_contract", None)
+    if not isinstance(raw, dict):
+        return "holdout"
+    pol = str(raw.get("execution_policy") or "").strip().upper()
+    qp = str(
+        raw.get("quarantine_policy") or raw.get("quarantinePolicy") or ""
+    ).strip().upper()
+    if pol == "STOP_COLUMN":
+        return "null_cell"
+    if pol in {"CAST_AND_CONTINUE", "TRANSFORM_AND_CONTINUE"} and qp in {
+        "NULL",
+        "COERCE",
+        "COERCE_NULL",
+        "NULL_CELL",
+    }:
+        return "null_cell"
+    return "holdout"
 
 
 def _apply_write_path_transform(value: str, transform: str | None) -> tuple[str | None, str | None]:
@@ -1842,6 +1872,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
 
     transform_errors: list[str] = []
     contracted_holdouts: list[str] = []
+    contracted_null_cells: list[str] = []
     mapped_rows: list[dict[str, Any]] = []
     for row_idx, row in enumerate(sample_rows, start=1):
         mapped: dict[str, Any] = {}
@@ -1857,12 +1888,16 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
             transformed, err = _apply_write_path_transform(raw_s, m.transform)
             if err:
                 line = f"row {row_idx} {m.source}→{m.target}: {err}"
-                # Continue-policy Risk Contract matches write path: quarantine /
-                # hold out the row — do not invent NULL cells into the dry-run
-                # primary set, and do not hard-block Validate after sign-off.
+                # Continue-policy Risk Contract matches write disposition:
+                # quarantine/skip → omit row; STOP_COLUMN/coerce → NULL cell.
                 if _risk_cleared(m):
-                    contracted_holdouts.append(line)
-                    row_holdout = True
+                    disposition = _continue_policy_disposition(m)
+                    if disposition == "null_cell":
+                        contracted_null_cells.append(line)
+                        mapped[m.target] = None
+                    else:
+                        contracted_holdouts.append(line)
+                        row_holdout = True
                 else:
                     transform_errors.append(line)
                     mapped[m.target] = None
@@ -2128,13 +2163,20 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                     "preview_only": True,
                     "contracted_holdouts": contracted_holdouts[:20],
                     "contracted_holdout_count": len(contracted_holdouts),
+                    "contracted_null_cells": contracted_null_cells[:20],
+                    "contracted_null_cell_count": len(contracted_null_cells),
                     "note": (
                         "Pre-write write-path sample check — live Gate-8 checksum runs after load"
                         + (
-                            f"; {len(contracted_holdouts)} cell(s) / row(s) held out under "
-                            "continue-policy Risk Contract (omitted from primary dry-run; "
-                            "quarantine on write)"
+                            f"; {len(contracted_holdouts)} row(s) held out under "
+                            "quarantine/skip continue-policy"
                             if contracted_holdouts
+                            else ""
+                        )
+                        + (
+                            f"; {len(contracted_null_cells)} cell(s) NULL-invent under "
+                            "STOP_COLUMN/coerce continue-policy"
+                            if contracted_null_cells
                             else ""
                         )
                     ),

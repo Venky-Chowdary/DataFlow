@@ -19,6 +19,7 @@ from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
+    _coerced_null_row_count,
     resolve_target_columns,
     row_checksum,
     to_json_value,
@@ -209,6 +210,20 @@ def write_mapped_rows(
         checksum = row_checksum(mapped_rows, target_cols, dest_db_type="gcs")
         if on_checkpoint:
             on_checkpoint(1, 1, len(records))
+        _final_abort = reject_on_strict_policy(policy, rejected_details, "GCS")
+        if _final_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=len(records),
+                table_name=key,
+                target_schema=bucket,
+                checksum=checksum,
+                chunks_completed=1,
+                error=_final_abort,
+                warnings=errors[:10],
+                rejected_rows=len({d["row"] for d in rejected_details}),
+                rejected_details=list(rejected_details),
+            )
         return WriteResult(
             ok=True,
             rows_written=len(records),
@@ -219,6 +234,7 @@ def write_mapped_rows(
             warnings=errors[:10],
             rejected_rows=len({d["row"] for d in rejected_details}),
             rejected_details=list(rejected_details),
+            coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
         )
     except Exception as exc:
         return WriteResult(

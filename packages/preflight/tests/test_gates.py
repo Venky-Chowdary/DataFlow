@@ -256,11 +256,19 @@ def test_g4_allows_safe_normalize_mutate_without_risk_contract():
 
 
 def test_g4_allows_phone_safe_normalize_without_risk_contract():
+    """phone stays SAFE_NORMALIZE for G4 — Risk Contract not required."""
     plan = _happy_plan()
     plan.mappings[0].fidelity = "mutate"
     plan.mappings[0].transform = "phone"
     plan.mappings[0].user_override = True
-    result = PreflightEngine().run(_happy_ctx(plan))
+    ctx = _happy_ctx(plan)
+    # Phone-shaped samples so G8 fail-closed phone does not mask the G4 check.
+    ctx.sample_rows = [
+        {"AMT": "+1-555-0100", "PAY_DT": "20250101"},
+        {"AMT": "+1-555-0199", "PAY_DT": "20250102"},
+    ]
+    result = PreflightEngine().run(ctx)
+    assert not any(b.gate_id.value == "g4_mapping_confidence" for b in result.blockers)
     assert result.passed, [b.message for b in result.blockers]
 
 

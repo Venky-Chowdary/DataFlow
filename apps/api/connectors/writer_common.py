@@ -1279,14 +1279,45 @@ def _rejected_row_count(
 
 
 def _coerced_null_row_count(rejected_details: list[dict[str, Any]], policy: str) -> int:
-    """Distinct source rows that were KEPT but had a cell coerced to NULL.
+    """Distinct source rows that were KEPT but had a cell coerced/omitted to NULL.
 
-    Only ``coerce_null`` alters primary cells in place. ``quarantine`` holds the
-    whole row out of the primary write (details go to DLQ) so this is 0.
+    Counts job ``coerce_null`` and continue-policy ``STOP_COLUMN`` / contract
+    coerce so Gate-8 reconcile cannot treat NULL invent as zero alteration.
+    Quarantine / skip / abort holdouts are excluded — those never land on primary.
     """
-    if policy == "coerce_null":
-        return len({d["row"] for d in rejected_details})
-    return 0
+    holdout_actions = {
+        "quarantine",
+        "skip_row",
+        "fail",
+        "stop_table",
+        "abort_transaction",
+        "retry_then_fail",
+        "write_quarantine",
+        "write_fail",
+    }
+    holdout_exec = {
+        "QUARANTINE_ROW",
+        "SKIP_ROW",
+        "FAIL_JOB",
+        "STOP_TABLE",
+        "ABORT_TRANSACTION",
+        "RETRY",
+    }
+    rows: set[Any] = set()
+    for d in rejected_details or []:
+        if not isinstance(d, dict) or "row" not in d:
+            continue
+        action = str(d.get("policy") or "").lower()
+        exec_pol = str(d.get("execution_policy") or "").upper()
+        if action in holdout_actions or exec_pol in holdout_exec:
+            continue
+        if (
+            policy == "coerce_null"
+            or action in {"stop_column", "coerce_null"}
+            or exec_pol == "STOP_COLUMN"
+        ):
+            rows.add(d["row"])
+    return len(rows)
 
 
 def map_rows_for_fingerprint(

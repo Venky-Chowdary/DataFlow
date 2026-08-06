@@ -19,6 +19,7 @@ from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
 from connectors.writer_common import (
+    _coerced_null_row_count,
     _rejected_row_count,
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
@@ -181,6 +182,23 @@ def write_mapped_rows(
         checksum = row_checksum(mapped_rows, target_cols, dest_db_type="adls")
         if on_checkpoint:
             on_checkpoint(1, 1, len(records))
+        _final_abort = reject_on_strict_policy(policy, rejected_details, "ADLS")
+        if _final_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=len(records),
+                table_name=key,
+                target_schema=container,
+                checksum=checksum,
+                chunks_completed=1,
+                error=_final_abort,
+                warnings=errors[:10],
+                rejected_rows=max(
+                    _rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
+                    len(data_rows) - len(mapped_rows),
+                ),
+                rejected_details=rejected_details,
+            )
         return WriteResult(
             ok=True,
             rows_written=len(records),
@@ -194,6 +212,7 @@ def write_mapped_rows(
                 len(data_rows) - len(mapped_rows),
             ),
             rejected_details=rejected_details,
+            coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
         )
     except Exception as exc:
         return WriteResult(
