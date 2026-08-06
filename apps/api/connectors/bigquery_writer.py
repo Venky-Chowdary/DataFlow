@@ -16,6 +16,7 @@ from connectors.writer_common import (
     _coerced_null_row_count,
     _rejected_row_count,
     assert_sparse_upsert_has_pk,
+    bind_sql_mapped_rows_with_quarantine,
     build_mapped_rows_with_details,
     dedupe_rows,
     dedupe_rows_by_pk_and_lsn,
@@ -876,8 +877,8 @@ def write_mapped_rows(
             )
         # Map may stamp VARCHAR while physical DDL is DATE/INT — empty must
         # quarantine before records_for_bigquery / sparse DML (no batch abort).
-        from connectors.writer_common import bind_sql_mapped_rows_with_quarantine
-
+        # Module-level bind import — never late-import inside write_mapped_rows
+        # (UnboundLocalError class that aborted MySQL→Postgres).
         mapped_rows = bind_sql_mapped_rows_with_quarantine(
             mapped_rows,
             target_cols,

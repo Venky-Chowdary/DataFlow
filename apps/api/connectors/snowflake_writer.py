@@ -29,9 +29,11 @@ from connectors.writer_common import (
     _coerced_null_row_count,
     _rejected_row_count,
     assert_sparse_upsert_has_pk,
+    bind_sql_mapped_rows_with_quarantine,
     build_mapped_rows_with_details,
     dedupe_rows,
     dedupe_rows_by_pk_and_lsn,
+    materialize_missing_as_null_for_dense_write,
     null_safe_merge_on,
     quarantine_unfit_decimals,
     quarantine_unfit_specialty_types,
@@ -327,11 +329,6 @@ def _bind_rows_for_snowflake(
     ``DF_MISSING`` becomes SQL NULL so BOOL/NUMBER never see the sentinel string.
     Empty NUMBER/FLOAT must quarantine — never invent SQL NULL on upsert wipe.
     """
-    from connectors.writer_common import (
-        bind_sql_mapped_rows_with_quarantine,
-        materialize_missing_as_null_for_dense_write,
-    )
-
     mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
     return bind_sql_mapped_rows_with_quarantine(
         mapped_rows,
@@ -1275,10 +1272,7 @@ def write_mapped_rows(
                 # Map may stamp VARCHAR while live column is DATE/NUMBER —
                 # overlay physical DDL before bind so empty refuses quarantine.
                 physical = _fetch_snowflake_column_types(cur, schema, table_name)
-                from connectors.writer_common import (
-                    bind_sql_mapped_rows_with_quarantine,
-                    require_physical_types_for_existing_table,
-                )
+                from connectors.writer_common import require_physical_types_for_existing_table
 
                 overlay_err = require_physical_types_for_existing_table(
                     table_existed=table_existed,

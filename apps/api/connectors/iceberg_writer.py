@@ -979,14 +979,19 @@ def _write_mapped_rows_pyiceberg(
                 error=str(exc),
                 driver="iceberg",
             )
-    dest_types = {
-        target_cols[i]: (
-            mappings[i].get("target_type")
-            or column_types.get(mappings[i]["source"])
-            or (target_types[i] if i < len(target_types) else "string")
-        )
-        for i in range(len(target_cols))
-    }
+    from connectors.writer_common import resolve_mapping_dest_types
+
+    live_dest = None
+    if isinstance(endpoint, dict):
+        live_dest = endpoint.get("destination_column_types") or endpoint.get("schema_types")
+    dest_types = resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=target_types,
+        live_types=live_dest if isinstance(live_dest, dict) else None,
+        default="string",
+    )
     policy = transform_error_policy(error_policy)
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
@@ -1637,14 +1642,17 @@ def _write_mapped_rows_filesystem(
                 error=str(exc),
                 driver="iceberg",
             )
-    dest_types = {
-        target_cols[i]: (
-            mappings[i].get("target_type")
-            or column_types.get(mappings[i]["source"])
-            or (target_types[i] if i < len(target_types) else "string")
-        )
-        for i in range(len(target_cols))
-    }
+    from connectors.writer_common import resolve_mapping_dest_types
+
+    live_dest = _kwargs.get("destination_column_types") or _kwargs.get("schema_types")
+    dest_types = resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=target_types,
+        live_types=live_dest if isinstance(live_dest, dict) else None,
+        default="string",
+    )
     policy = transform_error_policy(error_policy)
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,

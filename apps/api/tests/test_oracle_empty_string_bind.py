@@ -415,6 +415,15 @@ def test_pg_write_mapped_rows_bind_helper_not_unbound_local():
     assert "bind_sql_mapped_rows_with_quarantine" not in write_mapped_rows.__code__.co_varnames
 
 
+def test_snowflake_bigquery_bind_helper_not_unbound_local():
+    """Same UnboundLocal class as Postgres — hoist bind import off write_mapped_rows."""
+    from connectors.bigquery_writer import write_mapped_rows as bq_write
+    from connectors.snowflake_writer import write_mapped_rows as sf_write
+
+    assert "bind_sql_mapped_rows_with_quarantine" not in sf_write.__code__.co_varnames
+    assert "bind_sql_mapped_rows_with_quarantine" not in bq_write.__code__.co_varnames
+
+
 def test_saas_quarantine_values_preserves_sql_null():
     from connectors.writer_common import saas_quarantine_values
     from services.value_serializer import SQL_NULL_SENTINEL

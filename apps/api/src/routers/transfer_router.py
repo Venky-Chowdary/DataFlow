@@ -150,7 +150,9 @@ def _resolve_write_workspace(request: Request, x_workspace_id: str = Header(defa
         raise HTTPException(status_code=403, detail="Write access to workspace denied")
     return workspace_id
 class EndpointDTO(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    # Allow Studio flat keys (schema_types, table_exists, …) so EndpointConfig.from_dict
+    # can fold them into extra — never silently strip live DDL / existence SSOT.
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     kind: str = Field(..., description="file | database | file_export")
     format: str = Field("", description="csv, json, mongodb, postgresql, snowflake")

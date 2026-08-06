@@ -512,7 +512,7 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
             out["warnings"] = [
                 "Redshift PRIMARY KEY / UNIQUE constraints are informational "
                 "(not enforced at write) — Validate will not invent duplicate "
-                "blockers; maintain uniqueness in the pipeline (dbt/Airbyte class)."
+                "blockers; maintain uniqueness in the pipeline (warehouse advisory keys)."
             ]
             out["message"] = out["warnings"][0]
         return out

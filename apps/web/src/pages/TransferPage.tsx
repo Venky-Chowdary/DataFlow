@@ -497,35 +497,45 @@ export function TransferPage({
       auth_role: selectedDestConnector?.auth_role || undefined,
       api_key: selectedDestConnector?.api_key || undefined,
       service_account: selectedDestConnector?.service_account || undefined,
-      // Tri-state existence for plan Validate≡Map (never invent create-new).
-      table_exists: destTableExists,
-      // Live dest DDL for write-path transform/quarantine (beats Map stamps).
+      // Dual-write: nested extra is SSOT for EndpointConfig / writers; flat root
+      // keeps transfer-plan Map/preflight readers that still look at dest.table_exists.
+      ...(destTableExists === null || destTableExists === undefined
+        ? {}
+        : { table_exists: destTableExists }),
       ...(destTableExists === true && Object.keys(destSchemaMap).length
         ? { schema_types: destSchemaMap }
         : {}),
-      ...(syncMode === "cdc" && allowAppendOnly ? { allow_append_only: true } : {}),
-      ...(isVector
-        ? {
-            ...(vectorContentColumn ? { content_column: vectorContentColumn } : {}),
-            ...(vectorEmbeddingColumn ? { embedding_column: vectorEmbeddingColumn } : {}),
-            ...(metadataCols.length ? { metadata_columns: metadataCols } : {}),
-            ...(vectorExcludePiiColumns
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean).length
-              ? {
-                  exclude_pii_columns: vectorExcludePiiColumns
-                    .split(",")
-                    .map((s) => s.trim())
-                    .filter(Boolean),
-                }
-              : {}),
-            ...(vectorEmbeddingModel ? { embedding_model: vectorEmbeddingModel } : {}),
-            chunk_size: vectorChunkSize,
-            chunk_overlap: vectorChunkOverlap,
-            durable_embedding_cache: vectorDurableCache,
-          }
-        : {}),
+      extra: {
+        ...(destTableExists === null || destTableExists === undefined
+          ? {}
+          : { table_exists: destTableExists }),
+        ...(destTableExists === true && Object.keys(destSchemaMap).length
+          ? { schema_types: destSchemaMap }
+          : {}),
+        ...(syncMode === "cdc" && allowAppendOnly ? { allow_append_only: true } : {}),
+        ...(isVector
+          ? {
+              ...(vectorContentColumn ? { content_column: vectorContentColumn } : {}),
+              ...(vectorEmbeddingColumn ? { embedding_column: vectorEmbeddingColumn } : {}),
+              ...(metadataCols.length ? { metadata_columns: metadataCols } : {}),
+              ...(vectorExcludePiiColumns
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean).length
+                ? {
+                    exclude_pii_columns: vectorExcludePiiColumns
+                      .split(",")
+                      .map((s) => s.trim())
+                      .filter(Boolean),
+                  }
+                : {}),
+              ...(vectorEmbeddingModel ? { embedding_model: vectorEmbeddingModel } : {}),
+              chunk_size: vectorChunkSize,
+              chunk_overlap: vectorChunkOverlap,
+              durable_embedding_cache: vectorDurableCache,
+            }
+          : {}),
+      },
     };
   };
 
@@ -3793,46 +3803,44 @@ export function TransferPage({
           }
           return Object.keys(extra).length ? extra : undefined;
         })(),
-        destExtra:
-          destDriverType === "pgvector" ||
-          destDriverType === "qdrant" ||
-          destDriverType === "weaviate" ||
-          destDriverType === "pinecone" ||
-          destDriverType === "milvus"
-            ? {
-                ...(vectorContentColumn ? { content_column: vectorContentColumn } : {}),
-                ...(vectorEmbeddingColumn ? { embedding_column: vectorEmbeddingColumn } : {}),
-                ...(vectorMetadataColumns
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean).length
-                  ? {
-                      metadata_columns: vectorMetadataColumns
-                        .split(",")
-                        .map((s) => s.trim())
-                        .filter(Boolean),
-                    }
-                  : {}),
-                ...(vectorExcludePiiColumns
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean).length
-                  ? {
-                      exclude_pii_columns: vectorExcludePiiColumns
-                        .split(",")
-                        .map((s) => s.trim())
-                        .filter(Boolean),
-                    }
-                  : {}),
-                ...(vectorEmbeddingModel ? { embedding_model: vectorEmbeddingModel } : {}),
-                chunk_size: vectorChunkSize,
-                chunk_overlap: vectorChunkOverlap,
-                durable_embedding_cache: vectorDurableCache,
-                ...(syncMode === "cdc" && allowAppendOnly ? { allow_append_only: true } : {}),
-              }
-            : syncMode === "cdc" && allowAppendOnly
-              ? { allow_append_only: true }
-              : undefined,
+        destExtra: (() => {
+          const extra: Record<string, unknown> = {};
+          if (destTableExists !== null && destTableExists !== undefined) {
+            extra.table_exists = destTableExists;
+          }
+          if (destTableExists === true && Object.keys(destSchemaMap).length) {
+            // Live DDL must ride multipart dest_extra — form fields alone omit it.
+            extra.schema_types = destSchemaMap;
+          }
+          if (syncMode === "cdc" && allowAppendOnly) {
+            extra.allow_append_only = true;
+          }
+          const isVectorDestRun =
+            destDriverType === "pgvector" ||
+            destDriverType === "qdrant" ||
+            destDriverType === "weaviate" ||
+            destDriverType === "pinecone" ||
+            destDriverType === "milvus";
+          if (isVectorDestRun) {
+            if (vectorContentColumn) extra.content_column = vectorContentColumn;
+            if (vectorEmbeddingColumn) extra.embedding_column = vectorEmbeddingColumn;
+            const meta = vectorMetadataColumns
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean);
+            if (meta.length) extra.metadata_columns = meta;
+            const excludePii = vectorExcludePiiColumns
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean);
+            if (excludePii.length) extra.exclude_pii_columns = excludePii;
+            if (vectorEmbeddingModel) extra.embedding_model = vectorEmbeddingModel;
+            extra.chunk_size = vectorChunkSize;
+            extra.chunk_overlap = vectorChunkOverlap;
+            extra.durable_embedding_cache = vectorDurableCache;
+          }
+          return Object.keys(extra).length ? extra : undefined;
+        })(),
         streamContracts,
         planId: runPlanId,
         priorityColumn: priorityColumn || undefined,

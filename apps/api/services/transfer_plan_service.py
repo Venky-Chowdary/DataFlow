@@ -77,7 +77,9 @@ def run_plan_mapping(
     policies = getattr(plan, "policies", None) or {}
     dest = plan.destination if isinstance(plan.destination, dict) else {}
     src = plan.source if isinstance(plan.source, dict) else {}
-    table_exists = dest.get("table_exists")
+    dest_extra = dest.get("extra") if isinstance(dest.get("extra"), dict) else {}
+    # Prefer nested extra (Studio SSOT) then flat root (legacy plans).
+    table_exists = dest_extra.get("table_exists", dest.get("table_exists"))
     if not isinstance(table_exists, bool):
         table_exists = None
     result = run_mapping_pipeline(

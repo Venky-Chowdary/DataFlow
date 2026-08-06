@@ -203,7 +203,16 @@ def write_mapped_rows(
         "connection_string": connection_string, "ssl": ssl, "api_key": api_key,
     }
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
-    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
+    from connectors.writer_common import resolve_mapping_dest_types
+
+    live_dest = _kwargs.get("destination_column_types")
+    dest_types = resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        live_types=live_dest if isinstance(live_dest, dict) else None,
+    )
     mapped_rows, errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,

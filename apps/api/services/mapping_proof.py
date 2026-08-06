@@ -354,7 +354,7 @@ def _mapping_risks(
             "severity": "warn",
             "message": (
                 f"Timezone polarity drop: {src_type} → {tgt_type} discards offset "
-                "(Airbyte timestamp_with_timezone → without_timezone class). "
+                "(timestamp_with_timezone → without_timezone). "
                 "Prefer TIMESTAMPTZ/TIMESTAMP_TZ/DATETIMEOFFSET on the destination."
             ),
         })
