@@ -948,6 +948,9 @@ def stream_file_to_database(
 
         # Per-batch data-quality / anomaly gate.
         if batch_quality_enabled:
+            audit_sync = (
+                "upsert" if write_mode == "upsert" else effective_sync
+            )
             audit = run_integrity_audit(
                 headers=headers,
                 rows=data_rows,
@@ -955,6 +958,7 @@ def stream_file_to_database(
                 mappings=mappings,
                 validation_mode=validation_mode,
                 dest_kind=dest_type,
+                sync_mode=audit_sync,
             )
             if audit.issues:
                 local_warnings.extend(audit.issues[:10])

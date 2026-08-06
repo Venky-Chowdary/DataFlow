@@ -28,6 +28,71 @@ def test_detects_duplicate_primary_keys():
     assert "Duplicate primary key" in report.issues[0]
 
 
+def test_full_append_warns_not_blocks_duplicate_identity_sql():
+    """Validate↔Run parity: Full append on Postgres must not invent a uniqueness hard-block.
+
+    MySQL→Postgres users tables often repeat business ``id`` values. Sync mode
+    full_refresh_append intentionally writes every row; G9 already skips the
+    uniqueness hard gate — write-batch audit must match.
+    """
+    report = run_integrity_audit(
+        headers=["id", "email"],
+        rows=[
+            ["691f815fbc81b00a4a960383", "a@x.com"],
+            ["691fa7187180823283edb31d", "b@x.com"],
+            ["691f815fbc81b00a4a960383", "a2@x.com"],
+        ],
+        column_types={"id": "VARCHAR", "email": "VARCHAR"},
+        dest_kind="postgresql",
+        validation_mode="strict",
+        sync_mode="full_refresh_append",
+        primary_key="id",
+    )
+    assert report.passed, report.issues
+    assert not report.issues
+    assert any("does not require unique identity" in w for w in report.warnings)
+    assert report.stats.get("require_unique_identity") is False
+
+
+def test_upsert_sync_still_hard_blocks_duplicate_identity():
+    report = run_integrity_audit(
+        headers=["id", "email"],
+        rows=[["1", "a@x.com"], ["1", "b@x.com"]],
+        dest_kind="postgresql",
+        sync_mode="incremental_deduped",
+        primary_key="id",
+    )
+    assert not report.passed
+    assert any("Duplicate primary key" in i for i in report.issues)
+
+
+def test_key_addressed_append_still_hard_blocks_duplicates():
+    """Redis/ES/Dynamo/Mongo: every write is keyed — append still collides."""
+    for kind in ("redis", "mongodb"):
+        report = run_integrity_audit(
+            headers=["_id", "name"],
+            rows=[["oid1", "a"], ["oid1", "b"]],
+            dest_kind=kind,
+            sync_mode="full_refresh_append",
+            primary_key="_id",
+        )
+        assert not report.passed, kind
+        assert any("Duplicate primary key" in i for i in report.issues), kind
+
+
+def test_resume_upsert_posture_hard_blocks_even_when_sync_label_is_append():
+    """When write_mode upgraded to upsert, pass sync_mode='upsert' into the audit."""
+    report = run_integrity_audit(
+        headers=["id", "email"],
+        rows=[["1", "a@x.com"], ["1", "b@x.com"]],
+        dest_kind="postgresql",
+        sync_mode="upsert",
+        primary_key="id",
+    )
+    assert not report.passed
+    assert any("Duplicate primary key" in i for i in report.issues)
+
+
 def test_schemaless_uses_underscore_id_not_business_id():
     """Mongo/Redis: repeating business `id` must not fail when `_id` is unique."""
     report = run_integrity_audit(

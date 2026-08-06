@@ -27,10 +27,13 @@ _DYNAMODB_PREFERRED_KEYS = ("id", "_id", "pk", "sk", "uuid", "key")
 
 # Destinations where every write is identity-keyed (SET/PutItem/upsert by id).
 # Validate must always enforce uniqueness — append still collides on the key.
+# MongoDB ``_id`` is the document primary key: duplicate ``_id`` in a batch is
+# silent drop / last-write-wins under idempotent insert — always hard-block.
 KEY_ADDRESSED_DESTS = frozenset({
     "redis",
     "dynamodb",
     "elasticsearch",
+    "mongodb",
     "pinecone",
     "qdrant",
     "weaviate",

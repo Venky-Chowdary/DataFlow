@@ -263,12 +263,18 @@ def run_integrity_audit(
     validation_mode: str = "strict",
     *,
     dest_kind: str = "",
+    sync_mode: str | None = None,
 ) -> DataQualityReport:
     """Run a sample-based integrity and anomaly audit over raw source rows.
 
-    Hard checks always block: duplicate primary keys, required-null values, and
-    financial precision loss.  Soft checks (null spikes, outliers, future dates,
-    low cardinality, encoding anomalies) produce warnings.  Warnings become
+    Hard checks always block: required-null values and financial precision loss.
+    Duplicate identity keys hard-block only when the sync mode (or key-addressed
+    destination) requires unique identity — matching Validate G6/G8/G9 via
+    ``sync_requires_unique_identity``. Full append / overwrite on SQL must not
+    invent a write failure after Validate unlocked Execute.
+
+    Soft checks (null spikes, outliers, future dates, low cardinality, encoding
+    anomalies, append-mode identity duplicates) produce warnings. Warnings become
     blockers only in ``maximum`` validation mode; in ``strict`` / ``balanced``
     they are surfaced but do not stop the transfer.
 
@@ -276,6 +282,10 @@ def run_integrity_audit(
     ``services.primary_key.resolve_identity_key``. Never invent a PK from
     ``headers[0]`` — that falsely blocks Mongo business ``id`` fields when
     ``_id`` is the real document key.
+
+    ``sync_mode=None`` keeps legacy fail-closed duplicate behavior (callers that
+    do not know the sync contract). Stream / file_stream must pass the effective
+    sync mode so Full append matches Validate.
     """
     report = DataQualityReport()
     if not rows or not headers:
@@ -293,6 +303,20 @@ def run_integrity_audit(
     header_index = {h: i for i, h in enumerate(headers)}
     stats: dict[str, Any] = {"total_rows": total, "columns": {}}
     anomalous_rows: set[int] = set()
+
+    # Unique-identity posture — same SSOT as Validate. None sync_mode = legacy hard.
+    require_unique_identity = True
+    if sync_mode is not None:
+        try:
+            from services.primary_key import sync_requires_unique_identity
+
+            require_unique_identity = sync_requires_unique_identity(
+                sync_mode, dest_kind=dest_kind
+            )
+        except Exception:
+            require_unique_identity = True
+    stats["require_unique_identity"] = require_unique_identity
+    stats["sync_mode"] = sync_mode
 
     # ── Identify primary-key source column (same contract as Validate) ────────
     pk_source = primary_key if primary_key and primary_key in header_index else None
@@ -340,7 +364,7 @@ def run_integrity_audit(
         report.warnings.append(msg)
         report.checks_warned += 1
 
-    # 1. Duplicate primary keys (hard) — skip when no identity key is known
+    # 1. Duplicate primary keys — hard only when sync/dest requires unique identity
     if not pk_source:
         _warn(
             "No identity key resolved for duplicate check "
@@ -356,10 +380,25 @@ def run_integrity_audit(
         dup_counts = Counter(pk_values)
         duplicates = {v: c for v, c in dup_counts.items() if c > 1 and str(v).strip()}
         if duplicates:
-            _hard(
-                f"Duplicate primary key values in '{pk_source}': "
-                f"{len(duplicates)} keys repeat (e.g. {', '.join(str(v) for v in list(duplicates)[:3])})"
-            )
+            examples = ", ".join(str(v) for v in list(duplicates)[:3])
+            if require_unique_identity:
+                _hard(
+                    f"Duplicate primary key values in '{pk_source}': "
+                    f"{len(duplicates)} keys repeat (e.g. {examples})"
+                )
+            else:
+                # Full append / overwrite on SQL: Validate already unlocked Execute.
+                # Writing every row is intentional; inventing a PK uniqueness hard
+                # block here is Validate→Run parity failure (client-deploy blocker).
+                mode_label = sync_mode or "append"
+                _warn(
+                    f"Duplicate values in identity column '{pk_source}': "
+                    f"{len(duplicates)} keys repeat (e.g. {examples}). "
+                    f"Sync mode '{mode_label}' does not require unique identity — "
+                    "all rows will be written. Prefer overwrite/upsert with a unique "
+                    "key, or dedupe upstream, if that is not intended."
+                )
+                report.checks_passed += 1
         else:
             report.checks_passed += 1
 

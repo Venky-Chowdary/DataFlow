@@ -1841,6 +1841,12 @@ def stream_database_transfer(
         ]
         # Per-batch data-quality / anomaly gate for database streams.
         if batch_quality_enabled:
+            # Audit uniqueness must match the *write* posture, not only the sync
+            # label. Resume upgrades insert→upsert while effective_sync stays
+            # append — inventing a soft uniqueness check would last-row-wins.
+            audit_sync = (
+                "upsert" if write_mode == "upsert" else effective_sync
+            )
             audit = run_integrity_audit(
                 headers=batch.headers,
                 rows=batch.rows,
@@ -1850,6 +1856,9 @@ def stream_database_transfer(
                 primary_key=pk_source_col if pk_source_col in batch.headers else None,
                 validation_mode=validation_mode,
                 dest_kind=dest_type,
+                # Validate↔Run parity: Full append must not invent a uniqueness
+                # hard-block after G9 unlocked Execute for the same sync mode.
+                sync_mode=audit_sync,
             )
             if audit.issues:
                 local_warnings.extend(audit.issues[:10])
