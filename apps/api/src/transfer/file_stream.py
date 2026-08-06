@@ -808,6 +808,17 @@ def stream_file_to_database(
             f"Sync mode `{effective_sync}` requires primary_key for upsert; "
             "refuse silent insert fallback (set primary_key on the stream contract)"
         )
+    # Parallel/chunked resume is only safe with idempotent writes (parity with
+    # db stream). Without this, re-processed file chunks append duplicates.
+    resuming = bool(checkpoint and getattr(checkpoint, "chunk_index", 0) > 0)
+    if resuming and write_mode == "insert" and not object_store:
+        if pk_target_cols:
+            write_mode = "upsert"
+        else:
+            raise ValueError(
+                "Cannot resume a streaming insert without a primary key; "
+                "set primary_key on the stream contract or use an upsert sync mode"
+            )
 
     checkpoint_service = checkpoint_service or CheckpointService()
     checkpoint = checkpoint or Checkpoint(job_id=job_id or "")
