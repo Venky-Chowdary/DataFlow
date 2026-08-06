@@ -172,7 +172,9 @@ def test_malformed_json_document_held_but_plain_scalar_allowed():
         assert details == []
 
 
-def test_coerce_null_policy_nulls_cell_instead_of_dropping_row():
+def test_coerce_null_policy_omits_cell_instead_of_dropping_row():
+    from services.value_serializer import DF_MISSING_SENTINEL
+
     details: list[dict] = []
     kept = apply_write_quarantine_matrix(
         [('["not-a-number"]', "keep-me")],
@@ -182,7 +184,7 @@ def test_coerce_null_policy_nulls_cell_instead_of_dropping_row():
         policy="coerce_null",
         dialect_label="Shopify",
     )
-    assert kept == [(None, "keep-me")]
+    assert kept == [(DF_MISSING_SENTINEL, "keep-me")]
     assert details
 
 

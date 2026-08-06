@@ -259,6 +259,11 @@ def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:
     if value is None:
         return SQL_NULL_SENTINEL if preserve_sql_null else ""
 
+    # Sparse CDC / STOP_COLUMN / coerce omit — never serialize the sentinel into
+    # CSV/JSON/export wires (would look like a real client value).
+    if is_missing_sentinel(value):
+        return ""
+
     # Missing-like values (pd.NA, np.nan, etc.) where value != value.
     if _is_na(value):
         return ""

@@ -130,6 +130,33 @@ def test_stop_column_not_null_escalates_to_quarantine():
     assert any(str(d.get("policy") or "").lower() == "quarantine" for d in details)
 
 
+def test_dest_nullability_dict_escalates_without_map_stamp():
+    """Live schema_nullability must reach write-time NOT NULL escalate (not Map-only)."""
+    from connectors.writer_common import build_mapped_rows_with_details
+
+    c = _contract("STOP_COLUMN")
+    mapped, _errs, details = build_mapped_rows_with_details(
+        headers=["id", "amt"],
+        data_rows=[["1", "not-a-number"], ["2", "10"]],
+        mappings=[
+            {"source": "id", "target": "id", "transform": "none"},
+            {
+                "source": "amt",
+                "target": "amt",
+                "transform": "integer",
+                "risk_contract": c.to_dict(),
+                "risk_acknowledged": True,
+            },
+        ],
+        target_cols=["id", "amt"],
+        column_types={"id": "INTEGER", "amt": "INTEGER"},
+        error_policy="quarantine",
+        destination_column_nullability={"amt": False},
+    )
+    assert len(mapped) == 1
+    assert any("NOT NULL" in str(d.get("reason") or "") for d in details)
+
+
 def test_skip_row_drops_row_with_skipped_disposition():
     from connectors.writer_common import build_mapped_rows_with_details
 

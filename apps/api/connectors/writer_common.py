@@ -1441,6 +1441,7 @@ def build_mapped_rows_with_details(
     destination_pk_columns: list[str] | None = None,
     contract_primary_key: str | None = None,
     stream_contracts: list[dict[str, Any]] | None = None,
+    destination_column_nullability: dict[str, bool] | None = None,
 ) -> tuple[list[tuple], list[str], list[dict[str, Any]]]:
     """Returns mapped rows, error messages, and structured rejected-row details."""
     from services.json_intelligence import materialize_struct_policies
@@ -1456,6 +1457,16 @@ def build_mapped_rows_with_details(
     target_index = {c: i for i, c in enumerate(sanitized_target_cols)}
     errors: list[str] = []
     rejected_details: list[dict[str, Any]] = []
+
+    # Live dest nullability (case-insensitive) — write-time NOT NULL escalate SSOT.
+    dest_nullability: dict[str, bool] = {}
+    for k, v in (destination_column_nullability or {}).items():
+        key = str(k or "").strip()
+        if not key:
+            continue
+        dest_nullability[key] = bool(v)
+        dest_nullability[key.lower()] = bool(v)
+        dest_nullability[sanitize_identifier(key, preserve_case=preserve_case)] = bool(v)
 
     mapping_infos = []
     for m in mappings:
@@ -1630,17 +1641,25 @@ def build_mapped_rows_with_details(
                         row_action = "stop_column"
                     converted = DF_MISSING_SENTINEL
                 elif cell_policy == "coerce_null":
+                    # Same omit-from-SET as STOP_COLUMN — upsert NULL would wipe a
+                    # prior good destination value. Dense INSERT materializes to NULL.
                     if row_action == "ok":
                         row_action = "coerce_null"
-                    converted = None
+                    converted = DF_MISSING_SENTINEL
                 else:
                     continue
                 # Write-time NOT NULL parity with G3: refuse NULL invent / omit-as-NULL
-                # into required columns when the Map stamp declares non-nullable.
+                # into required columns when the Map stamp or dest nullability says so.
                 if cell_policy in {"stop_column", "coerce_null"}:
                     tgt_nullable = mapping.get("target_nullable")
                     if tgt_nullable is None:
                         tgt_nullable = mapping.get("nullable")
+                    if tgt_nullable is None and dest_nullability:
+                        key = str(tgt_name or "").strip()
+                        if key in dest_nullability:
+                            tgt_nullable = dest_nullability[key]
+                        else:
+                            tgt_nullable = dest_nullability.get(key.lower())
                     if tgt_nullable is False or (
                         isinstance(tgt_nullable, str)
                         and tgt_nullable.strip().lower() in {"false", "0", "no"}
@@ -2083,7 +2102,8 @@ def quarantine_unfit_decimals(
                 target_cols=target_cols,
             )
             if policy == "coerce_null":
-                cells[col_idx] = None
+                from services.value_serializer import DF_MISSING_SENTINEL
+                cells[col_idx] = DF_MISSING_SENTINEL
             else:
                 hold_out = True
                 break
@@ -2234,7 +2254,8 @@ def quarantine_unfit_bitstrings(
                 target_cols=target_cols,
             )
                 if policy == "coerce_null":
-                    cells[col_idx] = None
+                    from services.value_serializer import DF_MISSING_SENTINEL
+                    cells[col_idx] = DF_MISSING_SENTINEL
                 else:
                     hold_out = True
                     break
@@ -2314,7 +2335,8 @@ def quarantine_unfit_binaries(
                 target_cols=target_cols,
             )
                 if policy == "coerce_null":
-                    cells[col_idx] = None
+                    from services.value_serializer import DF_MISSING_SENTINEL
+                    cells[col_idx] = DF_MISSING_SENTINEL
                 else:
                     hold_out = True
                     break
@@ -2339,7 +2361,8 @@ def quarantine_unfit_binaries(
                 target_cols=target_cols,
             )
                 if policy == "coerce_null":
-                    cells[col_idx] = None
+                    from services.value_serializer import DF_MISSING_SENTINEL
+                    cells[col_idx] = DF_MISSING_SENTINEL
                 else:
                     hold_out = True
                     break
@@ -2421,7 +2444,8 @@ def quarantine_unfit_enum_set(
                 target_cols=target_cols,
             )
             if policy == "coerce_null":
-                cells[col_idx] = None
+                from services.value_serializer import DF_MISSING_SENTINEL
+                cells[col_idx] = DF_MISSING_SENTINEL
             else:
                 hold_out = True
                 break
@@ -2489,7 +2513,8 @@ def quarantine_unfit_years(
                 target_cols=target_cols,
             )
             if policy == "coerce_null":
-                cells[col_idx] = None
+                from services.value_serializer import DF_MISSING_SENTINEL
+                cells[col_idx] = DF_MISSING_SENTINEL
             else:
                 hold_out = True
                 break
@@ -2555,7 +2580,8 @@ def quarantine_unfit_booleans(
                 target_cols=target_cols,
             )
             if policy == "coerce_null":
-                cells[col_idx] = None
+                from services.value_serializer import DF_MISSING_SENTINEL
+                cells[col_idx] = DF_MISSING_SENTINEL
             else:
                 hold_out = True
                 break
@@ -2640,7 +2666,8 @@ def quarantine_unfit_temporals(
                 target_cols=target_cols,
             )
             if policy == "coerce_null":
-                cells[col_idx] = None
+                from services.value_serializer import DF_MISSING_SENTINEL
+                cells[col_idx] = DF_MISSING_SENTINEL
             else:
                 hold_out = True
                 break
@@ -2710,7 +2737,8 @@ def quarantine_currency_markers_into_numeric(
                 target_cols=target_cols,
             )
             if policy == "coerce_null":
-                cells[col_idx] = None
+                from services.value_serializer import DF_MISSING_SENTINEL
+                cells[col_idx] = DF_MISSING_SENTINEL
             else:
                 hold_out = True
                 break
@@ -2809,7 +2837,8 @@ def quarantine_unfit_integers(
                 target_cols=target_cols,
             )
             if policy == "coerce_null":
-                cells[col_idx] = None
+                from services.value_serializer import DF_MISSING_SENTINEL
+                cells[col_idx] = DF_MISSING_SENTINEL
             else:
                 hold_out = True
                 break
@@ -2884,7 +2913,8 @@ def quarantine_unfit_strings(
                 target_cols=target_cols,
             )
             if policy == "coerce_null":
-                cells[col_idx] = None
+                from services.value_serializer import DF_MISSING_SENTINEL
+                cells[col_idx] = DF_MISSING_SENTINEL
             else:
                 hold_out = True
                 break
@@ -3170,7 +3200,8 @@ def quarantine_unfit_arrays(
                 target_cols=target_cols,
             )
             if policy == "coerce_null":
-                cells[col_idx] = None
+                from services.value_serializer import DF_MISSING_SENTINEL
+                cells[col_idx] = DF_MISSING_SENTINEL
             else:
                 hold_out = True
                 break
@@ -3251,7 +3282,8 @@ def quarantine_unfit_json(
                 target_cols=target_cols,
             )
             if policy == "coerce_null":
-                cells[col_idx] = None
+                from services.value_serializer import DF_MISSING_SENTINEL
+                cells[col_idx] = DF_MISSING_SENTINEL
             else:
                 hold_out = True
                 break
@@ -3508,7 +3540,8 @@ def quarantine_unfit_specialty_types(
                 target_cols=target_cols,
             )
             if policy == "coerce_null":
-                cells[col_idx] = None
+                from services.value_serializer import DF_MISSING_SENTINEL
+                cells[col_idx] = DF_MISSING_SENTINEL
             else:
                 hold_out = True
                 break

@@ -410,6 +410,11 @@ def write_mapped_rows(
         conflict_cols = [c for c in (conflict_columns or []) if c in target_cols]
         if write_mode == "upsert" and conflict_cols:
             mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
+        else:
+            # Dense INSERT/COPY — coerce_null/STOP_COLUMN DF_MISSING → SQL NULL.
+            from connectors.writer_common import materialize_missing_as_null_for_dense_write
+
+            mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
 
         converted_rows = [
             tuple(_to_sqlite_value(v, logical_types[i]) for i, v in enumerate(row))

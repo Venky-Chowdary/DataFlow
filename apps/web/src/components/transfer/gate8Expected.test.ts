@@ -114,6 +114,20 @@ describe("Gate-8 pre-write simulation honesty", () => {
     assert.equal(view.fullPass, false);
     assert.equal(view.tone, "warn");
   });
+
+  it("classifyGate8Status never labels file-export unproven as Passed", () => {
+    const view = classifyGate8Status({
+      passed: true,
+      unproven: true,
+      skipped_readback: true,
+      migration_proven: false,
+      coverage: "none",
+      message: "File export checksum recorded (no destination read-back)",
+    });
+    assert.equal(view.label, "Unproven (no read-back)");
+    assert.equal(view.fullPass, false);
+    assert.equal(view.tone, "warn");
+  });
 });
 
 describe("Gate-8 identity-proof honesty", () => {

@@ -284,8 +284,13 @@ def write_mapped_rows(
             request_items = []
             for row in slice_rows:
                 item = {}
+                from services.value_serializer import is_missing_sentinel
+
                 for i, col in enumerate(target_cols):
                     value = row[i]
+                    # STOP_COLUMN / coerce_null omit — never PutItem the sentinel string.
+                    if is_missing_sentinel(value):
+                        continue
                     attr_type = key_types.get(col)
                     if attr_type == "S":
                         value = str(value) if value is not None else ""

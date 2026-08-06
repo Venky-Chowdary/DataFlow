@@ -53,7 +53,10 @@ def test_quarantine_holds_out_unfit_row():
     assert all("does not fit MySQL DECIMAL(10,2)" in d["reason"] for d in details)
 
 
-def test_coerce_null_nulls_cell_keeps_row():
+def test_coerce_null_omits_cell_keeps_row():
+    """coerce_null uses DF_MISSING (omit-from-SET) — never dense NULL wipe on upsert."""
+    from services.value_serializer import DF_MISSING_SENTINEL
+
     rows = [("1.234", "keep")]
     details: list[dict] = []
     out = quarantine_unfit_decimals(
@@ -64,7 +67,7 @@ def test_coerce_null_nulls_cell_keeps_row():
         policy="coerce_null",
         dialect_label="PostgreSQL NUMERIC",
     )
-    assert out == [(None, "keep")]
+    assert out == [(DF_MISSING_SENTINEL, "keep")]
     assert details and "PostgreSQL NUMERIC(10,2)" in details[0]["reason"]
 
 

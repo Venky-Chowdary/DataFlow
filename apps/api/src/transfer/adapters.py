@@ -1477,6 +1477,12 @@ def write_destination_database(
         ),
         "file_batch_idx": 0,
         "skip_preflight": skip_preflight,
+        # Live dest nullability for write-time NOT NULL escalate (G3 parity).
+        "destination_column_nullability": dict(
+            (cfg.get("extra") or {}).get("schema_nullability")
+            or (getattr(endpoint, "extra", None) or {}).get("schema_nullability")
+            or {}
+        ),
     }
 
     if db_type == "snowflake":
@@ -2067,8 +2073,11 @@ def write_destination_file(
 
     if mappings:
         from connectors.writer_common import (
+            apply_write_quarantine_matrix,
             build_mapped_rows_with_details,
+            materialize_missing_as_null_for_dense_write,
             reject_on_strict_policy,
+            transform_error_policy,
         )
 
         headers = columns
@@ -2084,7 +2093,42 @@ def write_destination_file(
             target_cols=target_cols,
             column_types=types,
             error_policy=error_policy,
+            dest_types={
+                str(m.get("target") or ""): str(
+                    m.get("target_type") or m.get("dest_type") or types.get(m.get("source") or "", "")
+                )
+                for m in mappings
+                if str(m.get("target") or "").strip()
+            },
         )
+        # Same typed quarantine matrix as SQL/object writers — never export oversize/
+        # unfit cells that transforms left as strings.
+        dest_type_list = [
+            str(
+                next(
+                    (
+                        m.get("target_type") or m.get("dest_type") or types.get(m.get("source") or "", "")
+                        for m in mappings
+                        if str(m.get("target") or "") == col
+                    ),
+                    types.get(col, ""),
+                )
+                or ""
+            )
+            for col in target_cols
+        ]
+        if mapped_rows and any(str(t).strip() for t in dest_type_list):
+            policy = transform_error_policy(error_policy)
+            mapped_rows = apply_write_quarantine_matrix(
+                mapped_rows,
+                target_cols,
+                dest_type_list,
+                rejected_details,
+                policy,
+                dialect_label="file_export",
+                mappings=list(mappings) or None,
+            )
+        mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
         abort = reject_on_strict_policy(error_policy, rejected_details, "file_export")
         if abort:
             raise FileExportMapBlocked(
@@ -2154,6 +2198,13 @@ def write_destination_file(
         )
 
     def _to_json_value(value: Any, col: str) -> Any:
+        try:
+            from services.value_serializer import is_missing_sentinel
+
+            if is_missing_sentinel(value):
+                return None
+        except Exception:
+            pass
         if value is None:
             return None
         if isinstance(value, str):

@@ -845,6 +845,7 @@ def write_mapped_rows(
         dest_kind="postgresql",
         # Upsert conflict cols / dest PK — full composite for quarantine replay identity.
         destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=_kwargs.get("destination_column_nullability"),
     )
     mapped_rows = quarantine_currency_markers_into_numeric(
         mapped_rows, target_cols, target_types, rejected_details, policy

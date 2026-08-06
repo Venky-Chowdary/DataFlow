@@ -203,6 +203,16 @@ export function classifyGate8Status(
     // Sample ≠ population — never green "ok" (Enterprise GA honesty).
     return { label: "Sample verified", tone: "warn", fullPass: false };
   }
+  // File/object export: API may set passed=true for operational success while
+  // unproven/migration_proven=false — never green "Passed" without read-back.
+  // Check before pre-write simulation so post-write file exports are not
+  // mislabeled as "Pre-write only".
+  if (
+    report.unproven === true
+    || report.skipped_readback === true
+  ) {
+    return { label: "Unproven (no read-back)", tone: "warn", fullPass: false };
+  }
   if (isGate8PreWriteSimulation(report)) {
     return { label: "Pre-write only", tone: "warn", fullPass: false };
   }

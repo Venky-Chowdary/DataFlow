@@ -210,7 +210,14 @@ def write_mapped_rows(
         written = 0
         seen_keys: dict[str, int] = {}
         for i, row in enumerate(mapped_rows):
-            doc = dict(zip(target_cols, row))
+            from services.value_serializer import is_missing_sentinel
+
+            # STOP_COLUMN / coerce_null omit — never JSON-SET the sentinel string.
+            doc = {
+                c: v
+                for c, v in zip(target_cols, row)
+                if not is_missing_sentinel(v)
+            }
             try:
                 doc = _normalize_redis_typed_doc(doc, target_cols, logical_types)
             except (ValueError, TypeError) as cell_exc:

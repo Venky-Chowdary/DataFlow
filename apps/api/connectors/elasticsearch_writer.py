@@ -34,7 +34,10 @@ def _to_es_value(value: Any, source_type: str) -> Any:
     ValueError so the writer can quarantine — never invent UTF-8 bytes or a
     random UUID (Airbyte/Fivetran fail-closed class).
     """
-    if value is None:
+    from services.value_serializer import is_missing_sentinel
+
+    # STOP_COLUMN / coerce_null omit — JSON null, never the sentinel string.
+    if value is None or is_missing_sentinel(value):
         return None
     upper = source_type.upper()
     if upper in {"DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC"}:

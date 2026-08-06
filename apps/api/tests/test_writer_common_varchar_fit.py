@@ -84,7 +84,9 @@ def test_quarantine_holds_out_oversized_string():
     assert details and "exceeds VARCHAR(5)" in details[0]["reason"]
 
 
-def test_coerce_null_nulls_oversized_cell():
+def test_coerce_null_omits_oversized_cell():
+    from services.value_serializer import DF_MISSING_SENTINEL
+
     rows = [("toolong", "keep")]
     details: list[dict] = []
     out = quarantine_unfit_strings(
@@ -94,7 +96,7 @@ def test_coerce_null_nulls_oversized_cell():
         details,
         policy="coerce_null",
     )
-    assert out == [(None, "keep")]
+    assert out == [(DF_MISSING_SENTINEL, "keep")]
     assert details
 
 

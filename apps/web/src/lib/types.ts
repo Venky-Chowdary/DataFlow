@@ -296,6 +296,10 @@ export interface Gate8ReconciliationPayload {
   coverage?: string;
   preview?: boolean;
   post_write_pending?: boolean;
+  /** File/object export Gate-8: operational pass without read-back proof. */
+  unproven?: boolean;
+  skipped_readback?: boolean;
+  migration_proven?: boolean;
   /** key_aligned | positional_only | unproven_identity */
   verification_mode?: string;
   identity?: {

@@ -329,6 +329,7 @@ def write_mapped_rows(
         dest_kind="mysql",
         # Upsert conflict cols / dest PK — full composite for quarantine replay identity.
         destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=_kwargs.get("destination_column_nullability"),
     )
     # Fail-closed DECIMAL(p,s) fit — never silently truncate/round into target.
     mapped_rows = quarantine_currency_markers_into_numeric(
