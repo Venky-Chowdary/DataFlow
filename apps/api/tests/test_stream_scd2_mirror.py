@@ -29,25 +29,54 @@ def _endpoint(path: Path, table: str):
     )
 
 
+def _safe_unlink(path: str | Path) -> None:
+    try:
+        Path(path).unlink(missing_ok=True)
+    except PermissionError:
+        pass
+
+
 @pytest.mark.skipif(getenv_brand("SKIP_SQLITE") == "1", reason="SQLite tests disabled")
 def test_stream_scd2_sqlite_to_sqlite():
     fd, db_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     try:
         with sqlite3.connect(db_path) as conn:
-            conn.execute("CREATE TABLE src (id TEXT, name TEXT, price TEXT)")
+            conn.execute("CREATE TABLE src (id TEXT, name TEXT)")
             for i in range(50):
-                conn.execute("INSERT INTO src (id, name, price) VALUES (?, ?, ?)", (str(i), f"Item {i}", str(10 + i)))
+                conn.execute(
+                    "INSERT INTO src (id, name) VALUES (?, ?)",
+                    (str(i), f"Item {i}"),
+                )
 
         engine = UniversalTransferEngine()
+        mappings = [
+            {
+                "source": "id",
+                "target": "id",
+                "confidence": 1.0,
+                "user_override": True,
+                "transform": "none",
+            },
+            {
+                "source": "name",
+                "target": "name",
+                "confidence": 1.0,
+                "user_override": True,
+                "transform": "none",
+            },
+        ]
         result = engine.execute_tracked(
             TransferRequest(
                 source=_endpoint(db_path, "src"),
                 destination=_endpoint(db_path, "dst"),
                 sync_mode="scd2",
-                stream_contracts=[{"selected": True, "primary_key": "id", "sync_mode": "scd2"}],
-                skip_preflight=True,
-                validation_mode="balanced",
+                stream_contracts=[
+                    {"selected": True, "primary_key": "id", "sync_mode": "scd2"}
+                ],
+                mappings=mappings,
+                validation_mode="strict",
+                skip_preflight=False,
             ),
             "a" * 24,
         )
@@ -60,16 +89,19 @@ def test_stream_scd2_sqlite_to_sqlite():
                 source=_endpoint(db_path, "src"),
                 destination=_endpoint(db_path, "dst"),
                 sync_mode="scd2",
-                stream_contracts=[{"selected": True, "primary_key": "id", "sync_mode": "scd2"}],
-                skip_preflight=True,
-                validation_mode="balanced",
+                stream_contracts=[
+                    {"selected": True, "primary_key": "id", "sync_mode": "scd2"}
+                ],
+                mappings=mappings,
+                validation_mode="strict",
+                skip_preflight=False,
             ),
             "b" * 24,
         )
         assert result2.success, result2.error
         assert result2.records_transferred == 0
     finally:
-        Path(db_path).unlink(missing_ok=True)
+        _safe_unlink(db_path)
 
 
 @pytest.mark.skipif(getenv_brand("SKIP_SQLITE") == "1", reason="SQLite tests disabled")
@@ -78,20 +110,42 @@ def test_stream_mirror_sqlite_to_sqlite():
     os.close(fd)
     try:
         with sqlite3.connect(db_path) as conn:
-            conn.execute("CREATE TABLE src (id TEXT PRIMARY KEY, name TEXT, price TEXT)")
+            conn.execute("CREATE TABLE src (id TEXT PRIMARY KEY, name TEXT)")
             for i in range(50):
-                conn.execute("INSERT INTO src (id, name, price) VALUES (?, ?, ?)", (str(i), f"Item {i}", str(10 + i)))
-            conn.execute("CREATE TABLE dst (id TEXT PRIMARY KEY, name TEXT, price TEXT)")
+                conn.execute(
+                    "INSERT INTO src (id, name) VALUES (?, ?)",
+                    (str(i), f"Item {i}"),
+                )
+            conn.execute("CREATE TABLE dst (id TEXT PRIMARY KEY, name TEXT)")
 
         engine = UniversalTransferEngine()
+        mappings = [
+            {
+                "source": "id",
+                "target": "id",
+                "confidence": 1.0,
+                "user_override": True,
+                "transform": "none",
+            },
+            {
+                "source": "name",
+                "target": "name",
+                "confidence": 1.0,
+                "user_override": True,
+                "transform": "none",
+            },
+        ]
         result = engine.execute_tracked(
             TransferRequest(
                 source=_endpoint(db_path, "src"),
                 destination=_endpoint(db_path, "dst"),
                 sync_mode="mirror",
-                stream_contracts=[{"selected": True, "primary_key": "id", "sync_mode": "mirror"}],
-                skip_preflight=True,
-                validation_mode="balanced",
+                stream_contracts=[
+                    {"selected": True, "primary_key": "id", "sync_mode": "mirror"}
+                ],
+                mappings=mappings,
+                validation_mode="strict",
+                skip_preflight=False,
             ),
             "c" * 24,
         )
@@ -104,12 +158,15 @@ def test_stream_mirror_sqlite_to_sqlite():
                 source=_endpoint(db_path, "src"),
                 destination=_endpoint(db_path, "dst"),
                 sync_mode="mirror",
-                stream_contracts=[{"selected": True, "primary_key": "id", "sync_mode": "mirror"}],
-                skip_preflight=True,
-                validation_mode="balanced",
+                stream_contracts=[
+                    {"selected": True, "primary_key": "id", "sync_mode": "mirror"}
+                ],
+                mappings=mappings,
+                validation_mode="strict",
+                skip_preflight=False,
             ),
             "d" * 24,
         )
         assert result2.success, result2.error
     finally:
-        Path(db_path).unlink(missing_ok=True)
+        _safe_unlink(db_path)

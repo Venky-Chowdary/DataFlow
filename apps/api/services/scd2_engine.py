@@ -288,6 +288,7 @@ def apply_scd2(
     conflict_columns: list[str],
     *,
     batch_size: int = 1_000,
+    validation_mode: str = "strict",
 ) -> dict[str, Any]:
     """Apply an SCD2 merge to ``records`` against the SQL destination.
 
@@ -297,7 +298,11 @@ def apply_scd2(
     """
 
     from connectors.generic_sql import get_sql_schema, get_sqlalchemy_engine
-    from connectors.writer_common import build_mapped_rows
+    from connectors.writer_common import (
+        build_mapped_rows_with_details,
+        reject_on_strict_policy,
+        transform_error_policy_for_validation_mode,
+    )
     from src.transfer.adapters import records_to_matrix, resolve_connector_config
     from src.transfer.connector_capabilities import resolve_driver_type
 
@@ -309,17 +314,41 @@ def apply_scd2(
         raise ValueError("SCD2 sync requires a primary key / conflict column")
 
     target_cols = _target_columns(columns, mappings)
+    effective_mappings = mappings or [{"source": c, "target": c} for c in columns]
+    dest_types = {c: (schema or {}).get(c, "string") for c in target_cols}
+    error_policy = transform_error_policy_for_validation_mode(validation_mode)
 
     _, data_rows = records_to_matrix(records, columns)
-    mapped_tuples, _ = build_mapped_rows(
+    # SCD2 must not silent-drop transform failures — quarantine + Risk Contracts
+    # surface the same way as SQL writers (FAIL_JOB / strict fail abort before merge).
+    mapped_tuples, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=columns,
         data_rows=data_rows,
-        mappings=mappings or [{"source": c, "target": c} for c in columns],
+        mappings=effective_mappings,
         target_cols=target_cols,
         column_types=schema or {},
-        error_policy="quarantine",
+        dest_types=dest_types,
+        error_policy=error_policy,
         preserve_case=True,
+        dest_kind=resolve_driver_type(endpoint.format),
+        destination_pk_columns=list(pk_columns),
     )
+    abort = reject_on_strict_policy(error_policy, rejected_details, "SCD2")
+    if abort:
+        return {
+            "ok": False,
+            "error": abort,
+            "rows_written": 0,
+            "updated_rows": 0,
+            "active_rows": 0,
+            "active_checksum": "",
+            "mode": "scd2",
+            "primary_key_columns": pk_columns,
+            "target_columns": target_cols,
+            "rejected_details": list(rejected_details),
+            "rejected_rows": len(rejected_details),
+            "transform_errors": list(transform_errors)[:20],
+        }
 
     mapped_rows: list[dict[str, Any]] = [dict(zip(target_cols, row)) for row in mapped_tuples]
 
@@ -392,6 +421,7 @@ def apply_scd2(
         release_engine(engine)
 
     return {
+        "ok": True,
         "rows_written": inserted_total,
         "updated_rows": expired_total,
         "active_rows": active_rows,
@@ -399,4 +429,7 @@ def apply_scd2(
         "mode": "scd2",
         "primary_key_columns": pk_columns,
         "target_columns": target_cols,
+        "rejected_details": list(rejected_details),
+        "rejected_rows": len(rejected_details),
+        "transform_errors": list(transform_errors)[:20],
     }

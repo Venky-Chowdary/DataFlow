@@ -62,7 +62,10 @@ def test_scd2_initial_load_creates_history_table():
         assert len(rows) == 2
         conn.close()
     finally:
-        Path(db_path).unlink(missing_ok=True)
+        try:
+            Path(db_path).unlink(missing_ok=True)
+        except PermissionError:
+            pass
 
 
 def test_scd2_update_closes_old_version_and_inserts_new():
@@ -106,7 +109,10 @@ def test_scd2_update_closes_old_version_and_inserts_new():
         assert historical[0][3] is not None
         conn.close()
     finally:
-        Path(db_path).unlink(missing_ok=True)
+        try:
+            Path(db_path).unlink(missing_ok=True)
+        except PermissionError:
+            pass
 
 
 def test_scd2_reidentical_snapshot_is_idempotent():
@@ -133,7 +139,10 @@ def test_scd2_reidentical_snapshot_is_idempotent():
         assert summary["updated_rows"] == 0
         assert summary["active_rows"] == 2
     finally:
-        Path(db_path).unlink(missing_ok=True)
+        try:
+            Path(db_path).unlink(missing_ok=True)
+        except PermissionError:
+            pass
 
 
 def test_scd2_composite_primary_key():
@@ -171,4 +180,99 @@ def test_scd2_composite_primary_key():
         assert summary2["updated_rows"] == 1
         assert summary2["active_rows"] == 2
     finally:
-        Path(db_path).unlink(missing_ok=True)
+        try:
+            Path(db_path).unlink(missing_ok=True)
+        except PermissionError:
+            pass
+
+
+def test_scd2_quarantines_bad_cells_without_silent_drop():
+    """Transform failures must surface in rejected_details — not vanish from history."""
+    from services.migration_risk_contract import create_migration_risk_contract
+
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    try:
+        endpoint = _sqlite_endpoint(Path(db_path))
+        c = create_migration_risk_contract(
+            column="price",
+            source_type="TEXT",
+            destination_type="DECIMAL",
+            approved_by="admin@dataflow.app",
+            reason="SCD2 cast-fail holdout",
+            execution_policy="CAST_AND_CONTINUE",
+        )
+        summary = apply_scd2(
+            endpoint,
+            [
+                {"id": "1", "name": "A", "price": "10.00"},
+                {"id": "2", "name": "B", "price": "not-a-number"},
+            ],
+            columns=["id", "name", "price"],
+            schema={"id": "string", "name": "string", "price": "decimal"},
+            mappings=[
+                {"source": "id", "target": "id"},
+                {"source": "name", "target": "name"},
+                {
+                    "source": "price",
+                    "target": "price",
+                    "transform": "decimal",
+                    "target_type": "decimal",
+                    "risk_contract": c.to_dict(),
+                },
+            ],
+            conflict_columns=["id"],
+        )
+        assert summary.get("ok") is not False
+        assert int(summary.get("rejected_rows") or 0) >= 1
+        assert summary.get("rejected_details")
+        # Good row still lands; bad row held out of SCD2 merge.
+        assert int(summary.get("rows_written") or 0) == 1
+        assert int(summary.get("active_rows") or 0) == 1
+    finally:
+        try:
+            Path(db_path).unlink(missing_ok=True)
+        except PermissionError:
+            pass
+
+
+def test_scd2_fail_job_contract_aborts_before_merge():
+    from services.migration_risk_contract import create_migration_risk_contract
+
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    try:
+        endpoint = _sqlite_endpoint(Path(db_path))
+        c = create_migration_risk_contract(
+            column="price",
+            source_type="TEXT",
+            destination_type="DECIMAL",
+            approved_by="admin@dataflow.app",
+            reason="SCD2 FAIL_JOB must abort",
+            execution_policy="FAIL_JOB",
+        )
+        summary = apply_scd2(
+            endpoint,
+            [{"id": "1", "name": "A", "price": "nope"}],
+            columns=["id", "name", "price"],
+            schema={"id": "string", "name": "string", "price": "decimal"},
+            mappings=[
+                {"source": "id", "target": "id"},
+                {"source": "name", "target": "name"},
+                {
+                    "source": "price",
+                    "target": "price",
+                    "transform": "decimal",
+                    "target_type": "decimal",
+                    "risk_contract": c.to_dict(),
+                },
+            ],
+            conflict_columns=["id"],
+        )
+        assert summary.get("ok") is False
+        assert summary.get("error")
+        assert int(summary.get("rows_written") or 0) == 0
+        assert summary.get("rejected_details")
+    finally:
+        try:
+            Path(db_path).unlink(missing_ok=True)
+        except PermissionError:
+            pass

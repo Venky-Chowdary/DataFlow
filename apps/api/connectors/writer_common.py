@@ -1299,8 +1299,17 @@ def build_mapped_rows(
     error_policy: str | None = None,
     dest_types: dict[str, str] | None = None,
     preserve_case: bool = False,
+    dest_kind: str = "",
+    destination_pk_columns: list[str] | None = None,
+    stream_contracts: list[dict[str, Any]] | None = None,
+    contract_primary_key: str | None = None,
 ) -> tuple[list[tuple], list[str]]:
-    """Returns mapped rows and any transform errors (first 10)."""
+    """Returns mapped rows and any transform errors (first 10).
+
+    Prefer ``build_mapped_rows_with_details`` when quarantine / Risk Contracts
+    must be surfaced — this wrapper drops rejected_details by design for
+    checksum-only callers.
+    """
     mapped, errors, _ = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
@@ -1310,6 +1319,10 @@ def build_mapped_rows(
         error_policy=error_policy,
         dest_types=dest_types,
         preserve_case=preserve_case,
+        dest_kind=dest_kind,
+        destination_pk_columns=destination_pk_columns,
+        stream_contracts=stream_contracts,
+        contract_primary_key=contract_primary_key,
     )
     return mapped, errors
 

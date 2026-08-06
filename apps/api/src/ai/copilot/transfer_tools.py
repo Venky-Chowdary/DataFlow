@@ -274,6 +274,7 @@ def plan_transfer(
     sync_mode: str = "",
     schema_policy: str = "manual_review",
     validation_mode: str = "balanced",
+    write_via_staging: bool = False,
 ):
     """Plan a real transfer: live schemas, real mapping, real preflight gates."""
     tool = "plan_transfer"
@@ -376,6 +377,7 @@ def plan_transfer(
         source_config=_endpoint_dict(src_info.get("endpoint")),
         dest_db_type=str(dst_info.get("db_type") or ""),
         dest_exists=dest_exists,
+        write_via_staging=bool(write_via_staging),
     )
 
     conversions = _type_conversions(mappings)
@@ -459,6 +461,7 @@ def _run_preflight(
     source_config: dict[str, Any],
     dest_db_type: str,
     dest_exists: bool | None,
+    write_via_staging: bool = False,
 ) -> dict[str, Any]:
     """Run the real 9 gates and persist the run so the operator can cite it."""
     from services.preflight_run_store import save_preflight_run
@@ -501,6 +504,8 @@ def _run_preflight(
             dest_type=dest_db_type,
             source_type=src_db_type,
             source_kind="database",
+            # G12 must match Studio / Execute — Pilot cannot soft-skip staging policy.
+            write_via_staging=bool(write_via_staging),
         )
         # These must mirror ``UniversalTransferEngine`` exactly. The source
         # config and table are what enable the live coercion probe; without

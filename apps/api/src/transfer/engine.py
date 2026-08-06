@@ -103,6 +103,7 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
     from src.services import pii_guard
 
 from .adapters import (
+    FileExportMapBlocked,
     parse_file_content,
     read_source_database,
     resolve_connector_config,
@@ -2760,6 +2761,7 @@ class UniversalTransferEngine:
                             schema,
                             mappings,
                             conflict_columns,
+                            validation_mode=request.validation_mode,
                         ),
                         budget=RetryBudget(
                             max_attempts=3,
@@ -2773,11 +2775,53 @@ class UniversalTransferEngine:
                         "schema": _schema_for_endpoint(request.destination),
                         "checksum": scd2_summary.get("active_checksum", ""),
                         "scd2": scd2_summary,
+                        "rejected_details": list(
+                            scd2_summary.get("rejected_details") or []
+                        ),
+                        "rejected_rows": int(scd2_summary.get("rejected_rows") or 0),
                     }
+                    if scd2_summary.get("ok") is False:
+                        block_msg = str(
+                            scd2_summary.get("error")
+                            or "SCD2 map/Risk Contract blocked history merge"
+                        )
+                        _persist_job_quarantine(
+                            job_id,
+                            dest_summary,
+                            request,
+                            already_persisted=_quarantine_persisted,
+                        )
+                        mongo.update_job_status(
+                            job_id,
+                            "failed",
+                            phase="failed",
+                            error=block_msg,
+                            message=block_msg,
+                            records_processed=0,
+                            rejected_rows=int(dest_summary.get("rejected_rows") or 0),
+                            rejected_details=(
+                                dest_summary.get("rejected_details") or []
+                            )[:2000],
+                            destination_summary=dest_summary,
+                            ddl_log=list(ddl_log or [])[:500],
+                        )
+                        return TransferResult(
+                            success=False,
+                            error=block_msg,
+                            job_id=job_id,
+                            operation=request.operation,
+                            destination_summary=dest_summary,
+                            ddl_executed=list(ddl_log or []),
+                        )
                     rows_written = scd2_summary.get("rows_written", 0)
                     ddl_log.append(
                         f"SCD2 merge: {scd2_summary.get('active_rows', 0)} active, "
                         f"{scd2_summary.get('updated_rows', 0)} expired"
+                        + (
+                            f", {dest_summary['rejected_rows']} quarantined"
+                            if dest_summary.get("rejected_rows")
+                            else ""
+                        )
                     )
                 else:
                     rows_written, ddl_log, dest_summary = with_retry(
@@ -2860,20 +2904,58 @@ class UniversalTransferEngine:
                     ),
                 )
             elif request.destination.kind == "file_export":
-                export_bytes, export_name, dest_summary = with_retry(
-                    lambda: write_destination_file(
-                        request.destination,
-                        records,
-                        columns,
-                        source_format=src_fmt,
-                        mappings=mappings,
-                        column_types=request.column_types or schema,
-                    ),
-                    budget=RetryBudget(
-                        max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0
-                    ),
-                )
-                rows_written = len(records)
+                try:
+                    export_bytes, export_name, dest_summary = with_retry(
+                        lambda: write_destination_file(
+                            request.destination,
+                            records,
+                            columns,
+                            source_format=src_fmt,
+                            mappings=mappings,
+                            column_types=request.column_types or schema,
+                            validation_mode=request.validation_mode,
+                        ),
+                        budget=RetryBudget(
+                            max_attempts=3,
+                            base_delay_seconds=0.5,
+                            max_delay_seconds=5.0,
+                        ),
+                    )
+                except FileExportMapBlocked as blocked:
+                    dest_summary = {
+                        "rejected_details": list(blocked.rejected_details),
+                        "rejected_rows": int(blocked.rejected_rows),
+                        "format": request.destination.format or "",
+                    }
+                    _persist_job_quarantine(
+                        job_id,
+                        dest_summary,
+                        request,
+                        already_persisted=_quarantine_persisted,
+                    )
+                    block_msg = str(blocked)
+                    mongo.update_job_status(
+                        job_id,
+                        "failed",
+                        phase="failed",
+                        error=block_msg,
+                        message=block_msg,
+                        records_processed=0,
+                        rejected_rows=int(dest_summary.get("rejected_rows") or 0),
+                        rejected_details=(
+                            dest_summary.get("rejected_details") or []
+                        )[:2000],
+                        destination_summary=dest_summary,
+                    )
+                    return TransferResult(
+                        success=False,
+                        error=block_msg,
+                        job_id=job_id,
+                        operation=request.operation,
+                        destination_summary=dest_summary,
+                    )
+                # Honesty: count exported mapped rows, not source batch size.
+                rows_written = int(dest_summary.get("rows") or 0)
                 ext = os.path.splitext(export_name)[1].lstrip(".") or (
                     request.destination.format or "json"
                 )
@@ -3541,6 +3623,39 @@ class UniversalTransferEngine:
                     validation_mode=request.validation_mode,
                     limit=request.limit,
                 )
+                if isinstance(dest_summary, dict) and dest_summary.get("ok") is False:
+                    block_msg = str(
+                        dest_summary.get("error")
+                        or "SCD2 map/Risk Contract blocked history merge"
+                    )
+                    _persist_job_quarantine(
+                        job_id,
+                        dest_summary,
+                        request,
+                        already_persisted=_quarantine_persisted,
+                    )
+                    mongo.update_job_status(
+                        job_id,
+                        "failed",
+                        phase="failed",
+                        error=block_msg,
+                        message=block_msg,
+                        records_processed=0,
+                        rejected_rows=int(dest_summary.get("rejected_rows") or 0),
+                        rejected_details=(
+                            dest_summary.get("rejected_details") or []
+                        )[:2000],
+                        destination_summary=dest_summary,
+                        ddl_log=list(ddl_log or [])[:500],
+                    )
+                    return TransferResult(
+                        success=False,
+                        error=block_msg,
+                        job_id=job_id,
+                        operation=request.operation,
+                        destination_summary=dest_summary,
+                        ddl_executed=list(ddl_log or []),
+                    )
             elif effective_sync == "cdc":
                 rows_written, ddl_log, dest_summary, _ = run_cdc_database_transfer(
                     request.source,

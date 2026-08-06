@@ -127,6 +127,16 @@ def test_staging_blocks_on_unsupported_destination():
     assert "not supported" in str(g12["details"]).lower()
 
 
+def test_pilot_plan_transfer_signature_accepts_write_via_staging():
+    """Pilot must be able to pass G12 the same way Studio /preflight/run does."""
+    import inspect
+
+    from src.ai.copilot.transfer_tools import plan_transfer
+
+    params = inspect.signature(plan_transfer).parameters
+    assert "write_via_staging" in params
+
+
 def test_stuck_backfill_under_manual_review_does_not_block():
     """Studio toggle stuck true after switching back to manual_review must not fail Execute."""
     gates = run_transfer_policy_gates(

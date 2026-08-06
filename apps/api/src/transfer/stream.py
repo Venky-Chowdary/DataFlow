@@ -2682,6 +2682,8 @@ def stream_scd2_mirror_transfer(
             # Rough batch count for progress reporting; exact number does not matter.
             approx_batches = max(1, math.ceil(rows_staged / batch_size))
 
+            rejected_all: list[dict] = []
+            scd2_block_error: str | None = None
             for records in _read_staging_batches(staging, dest_cfg, schema_name, target_cols, batch_size):
                 if not records:
                     break
@@ -2693,7 +2695,17 @@ def stream_scd2_mirror_transfer(
                     mappings=mappings,
                     conflict_columns=conflict_columns,
                     batch_size=batch_size,
+                    validation_mode=validation_mode,
                 )
+                rejected_all.extend(list(summary.get("rejected_details") or []))
+                if summary.get("ok") is False:
+                    scd2_block_error = str(
+                        summary.get("error")
+                        or "SCD2 map/Risk Contract blocked history merge"
+                    )
+                    active_rows = int(summary.get("active_rows", 0))
+                    active_checksum = str(summary.get("active_checksum", ""))
+                    break
                 written_total += int(summary.get("rows_written", 0))
                 updated_total += int(summary.get("updated_rows", 0))
                 active_rows = int(summary.get("active_rows", 0))
@@ -2702,10 +2714,17 @@ def stream_scd2_mirror_transfer(
                 if on_checkpoint:
                     on_checkpoint(batch_idx, approx_batches, written_total, checkpoint={"phase": "scd2"})
 
-            rows_written = written_total
             dest_summary["active_rows"] = active_rows
             dest_summary["active_checksum"] = active_checksum
             dest_summary["updated_rows"] = updated_total
+            dest_summary["rejected_details"] = rejected_all
+            dest_summary["rejected_rows"] = len(rejected_all)
+            if scd2_block_error:
+                dest_summary["ok"] = False
+                dest_summary["error"] = scd2_block_error
+                rows_written = 0
+            else:
+                rows_written = written_total
 
         elif effective_sync in ("full_refresh_mirror", "mirror"):
             from src.services.mirror_engine import (

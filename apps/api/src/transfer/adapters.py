@@ -45,6 +45,23 @@ from .models import EndpointConfig
 from .type_mapper import ddl_carrier_type, ddl_type, normalize_inferred
 
 
+class FileExportMapBlocked(ValueError):
+    """Map/Risk Contract blocked file export — carry quarantine for DLQ persist."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        rejected_details: list[dict[str, Any]] | None = None,
+        rejected_rows: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.rejected_details = list(rejected_details or [])
+        self.rejected_rows = int(
+            rejected_rows if rejected_rows else len(self.rejected_details)
+        )
+
+
 def resolve_dest_table(
     dest_type: str, destination: EndpointConfig, fallback_name: str = "import"
 ) -> str:
@@ -1962,6 +1979,7 @@ def write_destination_file(
     source_format: str | None = None,
     mappings: list[dict] | None = None,
     column_types: dict[str, str] | None = None,
+    validation_mode: str = "strict",
 ) -> tuple[bytes, str, dict]:
     """Write records to CSV, JSON, JSONL, or TSV using unified format converter."""
     import sys
@@ -1970,7 +1988,10 @@ def write_destination_file(
     _api_root = Path(__file__).resolve().parents[2]
     if str(_api_root) not in sys.path:
         sys.path.insert(0, str(_api_root))
-    from connectors.writer_common import build_mapped_rows, resolve_target_columns
+    from connectors.writer_common import (
+        resolve_target_columns,
+        transform_error_policy_for_validation_mode,
+    )
     from services.format_converter import can_convert, convert_rows
 
     fmt = (endpoint.format or "json").lower()
@@ -1985,22 +2006,58 @@ def write_destination_file(
     export_columns = columns
     export_records = records
     transform_errors: list[str] = []
+    rejected_details: list[dict[str, Any]] = []
 
     if mappings:
+        from connectors.writer_common import (
+            build_mapped_rows_with_details,
+            reject_on_strict_policy,
+        )
+
         headers = columns
         data_rows = [
             [cell_to_string(rec.get(col, "")) for col in headers] for rec in records
         ]
         target_cols, _ = resolve_target_columns(mappings, types)
-        mapped_rows, transform_errors = build_mapped_rows(
+        error_policy = transform_error_policy_for_validation_mode(validation_mode)
+        mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
             headers=headers,
             data_rows=data_rows,
             mappings=mappings,
             target_cols=target_cols,
             column_types=types,
+            error_policy=error_policy,
         )
+        abort = reject_on_strict_policy(error_policy, rejected_details, "file_export")
+        if abort:
+            raise FileExportMapBlocked(
+                abort,
+                rejected_details=rejected_details,
+                rejected_rows=len(rejected_details),
+            )
         export_columns = target_cols
         export_records = [dict(zip(target_cols, row)) for row in mapped_rows]
+
+    def _export_summary(
+        filename: str,
+        *,
+        mime: str | None = None,
+        converted_from: str | None = None,
+    ) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "format": fmt,
+            "filename": filename,
+            "rows": len(export_records),
+            "transform_errors": transform_errors[:10],
+            "mapped": bool(mappings),
+            "rejected_details": list(rejected_details),
+            "rejected_rows": len(rejected_details),
+        }
+        if mime is not None:
+            out["mime"] = mime
+        if converted_from is not None:
+            out["converted_from"] = converted_from
+        return out
 
     grid = [
         [cell_to_string(rec.get(col, "")) for col in export_columns]
@@ -2032,15 +2089,11 @@ def write_destination_file(
         return (
             content,
             filename,
-            {
-                "format": fmt,
-                "filename": filename,
-                "rows": len(export_records),
-                "mime": mime,
-                "converted_from": src_fmt if src_fmt != fmt else None,
-                "transform_errors": transform_errors[:10],
-                "mapped": bool(mappings),
-            },
+            _export_summary(
+                filename=filename,
+                mime=mime,
+                converted_from=src_fmt if src_fmt != fmt else None,
+            ),
         )
 
     def _to_json_value(value: Any, col: str) -> Any:
@@ -2128,13 +2181,7 @@ def write_destination_file(
     return (
         content,
         filename,
-        {
-            "format": fmt,
-            "filename": filename,
-            "rows": len(export_records),
-            "transform_errors": transform_errors[:10],
-            "mapped": bool(mappings),
-        },
+        _export_summary(filename),
     )
 
 

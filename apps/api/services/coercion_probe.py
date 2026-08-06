@@ -357,7 +357,13 @@ def analyze_coercion(
             raw_cell = row.get(src, DF_MISSING_SENTINEL)
             # Sparse schemaless docs (Mongo/Dynamo): absent / SQL-null sentinels
             # are real NULLs at write — never cast failures or silent-loss blocks.
-            if is_missing_sentinel(raw_cell) or raw_cell in {
+            # Never use ``raw_cell in {…}`` for arbitrary cells — list/dict values
+            # (arrays, nested JSON) are unhashable and crashed Validate mid-probe.
+            if is_missing_sentinel(raw_cell) or raw_cell is None:
+                nulls += 1
+                observed_values.append("")
+                continue
+            if isinstance(raw_cell, str) and raw_cell in {
                 DF_MISSING_SENTINEL,
                 SQL_NULL_SENTINEL,
                 "__df_ddb_null__",
