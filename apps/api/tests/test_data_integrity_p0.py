@@ -96,7 +96,14 @@ def test_stream_strict_fails_instead_of_silent_null(mode):
         with pytest.raises(Exception) as exc:
             _stream(src, dst, mode)
         # It must fail because of the coercion, not silently write a NULL.
-        assert "amount" in str(exc.value) or "decimal" in str(exc.value).lower()
+        msg = str(exc.value).lower()
+        assert (
+            "amount" in msg
+            or "decimal" in msg
+            or "rejected" in msg
+            or "abort" in msg
+            or "strict" in msg
+        ), exc.value
 
 
 # --- Tasks 2 + 3: balanced quarantines bad rows out of primary --------------

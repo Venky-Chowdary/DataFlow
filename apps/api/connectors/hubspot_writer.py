@@ -17,6 +17,7 @@ from connectors.saas_common import (
     token,
 )
 from connectors.writer_common import (
+    reject_on_strict_policy,
     WriteResult,
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
@@ -235,7 +236,7 @@ def _normalize_hubspot_temporal_cells(
     policy: str,
 ) -> list[tuple]:
     """Convert DATE/TIMESTAMPTZ cells to HubSpot CRM wire (YYYY-MM-DD / epoch ms)."""
-    from connectors.writer_common import reject_on_strict_policy, append_write_quarantine_detail
+    from connectors.writer_common import append_write_quarantine_detail
     from services.value_serializer import cell_to_string, is_missing_sentinel
 
     temporal_cols: list[tuple[int, str]] = []

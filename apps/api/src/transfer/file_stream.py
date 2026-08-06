@@ -47,7 +47,7 @@ if str(_api_root) not in sys.path:
 
 from connectors.writer_common import (
     CHUNK_SIZE,
-    build_mapped_rows,
+    map_rows_for_fingerprint,
     resolve_target_columns,
     row_fingerprints,
     transform_error_policy_for_validation_mode,
@@ -760,7 +760,12 @@ def stream_file_to_database(
     batch_iter = _batch_iterator_for_type(file_type, content, batch_size)
 
     column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in columns}
-    target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(
+        mappings, column_types, preserve_case=True
+    )
+    fingerprint_dest_types = {
+        target_cols[i]: logical_types[i] for i in range(len(target_cols))
+    }
 
     try:
         from services.sync_cursor import (
@@ -962,14 +967,17 @@ def stream_file_to_database(
 
         # Compute source fingerprints from the mapped batch without materializing
         # the whole file.  This replaces the final FileParser.parse() pass.
-        mapped_rows, _ = build_mapped_rows(
+        mapped_rows, _ = map_rows_for_fingerprint(
             headers=headers,
             data_rows=data_rows,
             mappings=mappings,
             target_cols=target_cols,
             column_types=column_types,
             error_policy=stream_error_policy,
+            dest_types=fingerprint_dest_types,
             preserve_case=True,
+            dest_kind=dest_type,
+            destination_pk_columns=list(pk_target_cols or []) or None,
         )
         fingerprints = row_fingerprints(mapped_rows, target_cols) if mapped_rows else []
 
@@ -1096,14 +1104,17 @@ def stream_file_to_database(
             if not batch:
                 continue
             headers, data_rows = records_to_matrix(batch, columns)
-            mapped_rows, _ = build_mapped_rows(
+            mapped_rows, _ = map_rows_for_fingerprint(
                 headers=headers,
                 data_rows=data_rows,
                 mappings=mappings,
                 target_cols=target_cols,
                 column_types=column_types,
                 error_policy=stream_error_policy,
+                dest_types=fingerprint_dest_types,
                 preserve_case=True,
+                dest_kind=dest_type,
+                destination_pk_columns=list(pk_target_cols or []) or None,
             )
             if mapped_rows:
                 full_accumulator.add_many(row_fingerprints(mapped_rows, target_cols))

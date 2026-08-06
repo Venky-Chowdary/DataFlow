@@ -450,7 +450,7 @@ def write_mapped_rows(
             # would delete destination keys for fields absent in the CDC image).
             from services.value_serializer import is_missing_sentinel
 
-            from connectors.writer_common import reject_on_strict_policy, row_has_missing_sentinel
+            from connectors.writer_common import row_has_missing_sentinel
 
             docs: list[dict[str, Any]] = []
             sparse_flags: list[bool] = []

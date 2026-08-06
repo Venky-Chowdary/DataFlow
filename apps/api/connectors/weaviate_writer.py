@@ -17,7 +17,7 @@ from typing import Any, Callable
 from services.value_serializer import cell_to_string, json_default, sanitize_json_value
 from services.vectorization import vectorize_records
 
-from connectors.writer_common import WriteResult as _WriteResult
+from connectors.writer_common import reject_on_strict_policy, WriteResult as _WriteResult
 
 
 def _requests_session() -> Any:
@@ -354,7 +354,7 @@ def write_mapped_rows(
             rejected_details=rejected,
             rejected_rows=len(rejected),
         )
-    from connectors.writer_common import reject_on_strict_policy, transform_error_policy
+    from connectors.writer_common import transform_error_policy
 
     policy = transform_error_policy(error_policy)
     strict_error = reject_on_strict_policy(policy, rejected, "Weaviate")

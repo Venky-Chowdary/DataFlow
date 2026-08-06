@@ -660,7 +660,7 @@ def write_mapped_rows(
                 conn.commit()
                 written += sparse_written
                 rows_skipped += sparse_skipped
-                from connectors.writer_common import reject_on_strict_policy, row_has_missing_sentinel
+                from connectors.writer_common import row_has_missing_sentinel
 
                 rows_for_checksum = [
                     r for r in rows_for_checksum if not row_has_missing_sentinel(r)

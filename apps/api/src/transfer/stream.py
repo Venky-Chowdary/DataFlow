@@ -22,7 +22,7 @@ if str(_api_root) not in sys.path:
 
 from connectors.writer_common import (  # noqa: E402
     CHUNK_SIZE,
-    build_mapped_rows,
+    map_rows_for_fingerprint,
     resolve_target_columns,
     row_fingerprints,
     transform_error_policy_for_validation_mode,
@@ -1347,7 +1347,13 @@ def stream_database_transfer(
             if name in schema and schema[name] in {"string", "VARCHAR", "TEXT", "S"}:
                 schema[name] = str(lt)
                 column_types[name] = ddl_carrier_type(str(lt))
-    target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(
+        mappings, column_types, preserve_case=True
+    )
+    # Write-path dest_types for Gate-8 fingerprint remap parity.
+    fingerprint_dest_types = {
+        target_cols[i]: logical_types[i] for i in range(len(target_cols))
+    }
 
     total_rows = probe.total_rows
     if total_rows is not None and limit > 0:
@@ -2149,16 +2155,19 @@ def stream_database_transfer(
             )
             if not batch or not batch.rows:
                 break
-            mapped, _ = build_mapped_rows(
+            # Same dest_kind / PK / policy as the write path — fingerprint
+            # remap must not invent a different quarantine hold-out set.
+            mapped, _ = map_rows_for_fingerprint(
                 headers=batch.headers,
                 data_rows=batch.rows,
                 mappings=mappings,
                 target_cols=target_cols,
                 column_types=column_types,
-                # Use the SAME policy as the write path so strict/maximum cannot
-                # silently coerce a bad cell to NULL here and mask a mismatch.
                 error_policy=stream_error_policy,
+                dest_types=fingerprint_dest_types,
                 preserve_case=True,
+                dest_kind=dest_type,
+                destination_pk_columns=list(pk_target_cols or []) or None,
             )
             if mapped:
                 fp_accumulator.add_many(row_fingerprints(mapped, target_cols))
@@ -2662,7 +2671,7 @@ def stream_scd2_mirror_transfer(
 
     try:
         if effective_sync == "scd2":
-            from src.services.scd2_engine import apply_scd2
+            from services.scd2_engine import apply_scd2, prepare_scd2_mapped_rows
 
             batch_size = 1_000
             if contract and contract.primary_key:
@@ -2682,54 +2691,102 @@ def stream_scd2_mirror_transfer(
             # Rough batch count for progress reporting; exact number does not matter.
             approx_batches = max(1, math.ceil(rows_staged / batch_size))
 
+            stage_rejects = list(stage_summary.get("rejected_details") or [])
             rejected_all: list[dict] = []
             scd2_block_error: str | None = None
-            for records in _read_staging_batches(staging, dest_cfg, schema_name, target_cols, batch_size):
+            partial_committed = False
+
+            # Pass 1 — map/PK validate every staging batch BEFORE any history
+            # merge. Per-batch SCD2 commits must not leave partial history when
+            # a later batch hits FAIL_JOB / strict abort.
+            for records in _read_staging_batches(
+                staging, dest_cfg, schema_name, target_cols, batch_size
+            ):
                 if not records:
                     break
-                summary = apply_scd2(
+                prepared = prepare_scd2_mapped_rows(
                     destination,
                     records,
                     target_cols,
                     column_types,
-                    mappings=mappings,
-                    conflict_columns=conflict_columns,
-                    batch_size=batch_size,
+                    mappings,
+                    conflict_columns,
                     validation_mode=validation_mode,
                 )
-                rejected_all.extend(list(summary.get("rejected_details") or []))
-                if summary.get("ok") is False:
+                rejected_all.extend(list(prepared.get("rejected_details") or []))
+                if prepared.get("ok") is False:
                     scd2_block_error = str(
-                        summary.get("error")
+                        prepared.get("error")
                         or "SCD2 map/Risk Contract blocked history merge"
                     )
-                    active_rows = int(summary.get("active_rows", 0))
-                    active_checksum = str(summary.get("active_checksum", ""))
                     break
-                written_total += int(summary.get("rows_written", 0))
-                updated_total += int(summary.get("updated_rows", 0))
-                active_rows = int(summary.get("active_rows", 0))
-                active_checksum = str(summary.get("active_checksum", ""))
-                batch_idx += 1
-                if on_checkpoint:
-                    on_checkpoint(batch_idx, approx_batches, written_total, checkpoint={"phase": "scd2"})
 
-            dest_summary["active_rows"] = active_rows
-            dest_summary["active_checksum"] = active_checksum
-            dest_summary["updated_rows"] = updated_total
-            stage_rejects = list(stage_summary.get("rejected_details") or [])
-            merged_rejects = stage_rejects + rejected_all
-            dest_summary["rejected_details"] = merged_rejects
-            dest_summary["rejected_rows"] = len(merged_rejects)
             if scd2_block_error:
-                # Prior batches may already be committed (per-batch txn). Report
-                # honest progress — never claim 0 writes when history already moved.
                 dest_summary["ok"] = False
                 dest_summary["error"] = scd2_block_error
-                dest_summary["partial_scd2_committed"] = True
-                rows_written = written_total
+                dest_summary["partial_scd2_committed"] = False
+                dest_summary["active_rows"] = 0
+                dest_summary["active_checksum"] = ""
+                dest_summary["updated_rows"] = 0
+                dest_summary["rejected_details"] = stage_rejects + rejected_all
+                dest_summary["rejected_rows"] = len(stage_rejects) + len(rejected_all)
+                dest_summary["primary_key_columns"] = list(conflict_columns)
+                rows_written = 0
             else:
-                rows_written = written_total
+                # Pass 2 — history merge (map already proven on staging snapshot).
+                rejected_all = []
+                for records in _read_staging_batches(
+                    staging, dest_cfg, schema_name, target_cols, batch_size
+                ):
+                    if not records:
+                        break
+                    summary = apply_scd2(
+                        destination,
+                        records,
+                        target_cols,
+                        column_types,
+                        mappings=mappings,
+                        conflict_columns=conflict_columns,
+                        batch_size=batch_size,
+                        validation_mode=validation_mode,
+                    )
+                    rejected_all.extend(list(summary.get("rejected_details") or []))
+                    if summary.get("ok") is False:
+                        # Unexpected after preflight — still report honest partial.
+                        scd2_block_error = str(
+                            summary.get("error")
+                            or "SCD2 map/Risk Contract blocked history merge"
+                        )
+                        partial_committed = written_total > 0
+                        active_rows = int(summary.get("active_rows", 0))
+                        active_checksum = str(summary.get("active_checksum", ""))
+                        break
+                    written_total += int(summary.get("rows_written", 0))
+                    updated_total += int(summary.get("updated_rows", 0))
+                    active_rows = int(summary.get("active_rows", 0))
+                    active_checksum = str(summary.get("active_checksum", ""))
+                    batch_idx += 1
+                    if on_checkpoint:
+                        on_checkpoint(
+                            batch_idx,
+                            approx_batches,
+                            written_total,
+                            checkpoint={"phase": "scd2"},
+                        )
+
+                dest_summary["active_rows"] = active_rows
+                dest_summary["active_checksum"] = active_checksum
+                dest_summary["updated_rows"] = updated_total
+                dest_summary["rejected_details"] = stage_rejects + rejected_all
+                dest_summary["rejected_rows"] = len(stage_rejects) + len(rejected_all)
+                dest_summary["primary_key_columns"] = list(conflict_columns)
+                if scd2_block_error:
+                    dest_summary["ok"] = False
+                    dest_summary["error"] = scd2_block_error
+                    dest_summary["partial_scd2_committed"] = partial_committed
+                    rows_written = written_total
+                else:
+                    rows_written = written_total
 
         elif effective_sync in ("full_refresh_mirror", "mirror"):
             from src.services.mirror_engine import (

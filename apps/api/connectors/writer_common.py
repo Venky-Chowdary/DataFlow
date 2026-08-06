@@ -1289,6 +1289,44 @@ def _coerced_null_row_count(rejected_details: list[dict[str, Any]], policy: str)
     return 0
 
 
+def map_rows_for_fingerprint(
+    *,
+    headers: list[str],
+    data_rows: list[list[str]],
+    mappings: list[dict],
+    target_cols: list[str],
+    column_types: dict[str, str] | None = None,
+    error_policy: str | None = None,
+    dest_types: dict[str, str] | None = None,
+    preserve_case: bool = True,
+    dest_kind: str = "",
+    destination_pk_columns: list[str] | None = None,
+    stream_contracts: list[dict[str, Any]] | None = None,
+    contract_primary_key: str | None = None,
+) -> tuple[list[tuple], list[dict[str, Any]]]:
+    """Map rows for Gate-8 fingerprints with write-path quarantine parity.
+
+    Returns ``(mapped_good_rows, rejected_details)``. Callers must pass the same
+    ``dest_kind`` / ``destination_pk_columns`` / ``error_policy`` as the writer
+    so checksum remap cannot invent a different hold-out set than the load.
+    """
+    mapped, _errors, rejected = build_mapped_rows_with_details(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        error_policy=error_policy,
+        dest_types=dest_types,
+        preserve_case=preserve_case,
+        dest_kind=dest_kind,
+        destination_pk_columns=destination_pk_columns,
+        stream_contracts=stream_contracts,
+        contract_primary_key=contract_primary_key,
+    )
+    return mapped, list(rejected or [])
+
+
 def build_mapped_rows(
     *,
     headers: list[str],
@@ -1306,9 +1344,9 @@ def build_mapped_rows(
 ) -> tuple[list[tuple], list[str]]:
     """Returns mapped rows and any transform errors (first 10).
 
-    Prefer ``build_mapped_rows_with_details`` when quarantine / Risk Contracts
-    must be surfaced — this wrapper drops rejected_details by design for
-    checksum-only callers.
+    Prefer ``map_rows_for_fingerprint`` / ``build_mapped_rows_with_details`` when
+    quarantine / Risk Contracts must be surfaced — this wrapper drops
+    rejected_details by design for legacy callers.
     """
     mapped, errors, _ = build_mapped_rows_with_details(
         headers=headers,

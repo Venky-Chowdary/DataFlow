@@ -757,7 +757,7 @@ def write_mapped_rows(
         use_merge = write_mode == "upsert" and any(c in target_cols for c in conflict_columns)
 
         if sparse_rows and use_merge:
-            from connectors.writer_common import reject_on_strict_policy, row_has_missing_sentinel
+            from connectors.writer_common import row_has_missing_sentinel
 
             sparse_written, sparse_skipped, sparse_checksum = _bq_apply_sparse_upsert(
                 client,

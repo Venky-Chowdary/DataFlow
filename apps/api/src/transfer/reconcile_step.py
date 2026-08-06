@@ -5,7 +5,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from connectors.writer_common import build_mapped_rows, resolve_target_columns
+from connectors.writer_common import (
+    map_rows_for_fingerprint,
+    resolve_target_columns,
+    transform_error_policy_for_validation_mode,
+)
 from services.reconciliation import (
     TargetSampleUnavailable,
     checksum_rows,
@@ -45,8 +49,14 @@ def _compute_source_checksum(
     *,
     dest_db_type: str = "",
     dest_types: dict[str, str] | None = None,
+    validation_mode: str = "strict",
+    destination_pk_columns: list[str] | None = None,
 ) -> str:
-    """Return the writer checksum, or recompute it from mapped source rows."""
+    """Return the writer checksum, or recompute it from mapped source rows.
+
+    Remap uses the same error policy / dest_kind / PK kwargs as the write path
+    so Gate-8 cannot invent a different quarantine hold-out set than the load.
+    """
     if writer_checksum:
         return writer_checksum
     if not records:
@@ -54,15 +64,17 @@ def _compute_source_checksum(
     _, data_rows = records_to_matrix(records, columns)
     if target_cols is None:
         target_cols, _ = resolve_target_columns(mappings, source_schema or {}, preserve_case=True)
-    mapped_rows, _ = build_mapped_rows(
+    mapped_rows, _rejected = map_rows_for_fingerprint(
         headers=columns,
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=source_schema or {},
-        error_policy="quarantine",
+        error_policy=transform_error_policy_for_validation_mode(validation_mode),
         dest_types=dest_types or {},
         preserve_case=True,
+        dest_kind=dest_db_type or "",
+        destination_pk_columns=destination_pk_columns,
     )
     return checksum_rows(
         mapped_rows,
@@ -226,6 +238,11 @@ def run_reconciliation(
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     target_cols = _mapped_targets(mapping_dicts, columns)
+    pk_cols = list(
+        dest_summary.get("primary_key_columns")
+        or dest_summary.get("conflict_columns")
+        or []
+    )
     source_checksum = _compute_source_checksum(
         records,
         columns,
@@ -235,6 +252,8 @@ def run_reconciliation(
         target_cols=target_cols,
         dest_db_type=db_type,
         dest_types=dest_types,
+        validation_mode=validation_mode,
+        destination_pk_columns=[str(c) for c in pk_cols if c] or None,
     )
 
     # Mirror (inferred-delete) and SCD2 transfers already compute an active-row

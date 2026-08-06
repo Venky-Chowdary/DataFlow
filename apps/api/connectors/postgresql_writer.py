@@ -1268,7 +1268,7 @@ def write_mapped_rows(
             rows_skipped = 0
             if sparse_rows and write_mode == "upsert" and conflict_columns:
                 from psycopg2 import sql as _psql
-                from connectors.writer_common import reject_on_strict_policy, row_has_missing_sentinel
+                from connectors.writer_common import row_has_missing_sentinel
 
                 written_sparse, sparse_skipped, sparse_checksum = _pg_apply_sparse_upsert(
                     cur,

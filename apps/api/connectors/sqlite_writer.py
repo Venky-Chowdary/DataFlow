@@ -21,6 +21,7 @@ from connectors.write_resilience import (
     raw_chunk_rows_written,
 )
 from connectors.writer_common import (
+    reject_on_strict_policy,
     CHUNK_SIZE,
     _coerced_null_row_count,
     _rejected_row_count,
@@ -351,7 +352,7 @@ def write_mapped_rows(
             error="SQLite path is required (database or connection_string).",
         )
 
-    from connectors.writer_common import reject_on_strict_policy, sample_values_by_source_from_batch
+    from connectors.writer_common import sample_values_by_source_from_batch
 
     batch_samples = sample_values_by_source_from_batch(headers, data_rows, mappings)
     target_cols, logical_types = resolve_target_columns(

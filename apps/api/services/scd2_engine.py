@@ -279,7 +279,7 @@ def _active_checksum(
     return count, checksum
 
 
-def apply_scd2(
+def prepare_scd2_mapped_rows(
     endpoint: Any,
     records: list[dict[str, Any]],
     columns: list[str],
@@ -287,23 +287,20 @@ def apply_scd2(
     mappings: list[dict[str, Any]] | None,
     conflict_columns: list[str],
     *,
-    batch_size: int = 1_000,
     validation_mode: str = "strict",
 ) -> dict[str, Any]:
-    """Apply an SCD2 merge to ``records`` against the SQL destination.
+    """Map + PK-validate SCD2 rows without writing history.
 
-    ``conflict_columns`` is the destination primary key (one or more columns).
-    Returns a summary dict with ``rows_written`` (new current versions),
-    ``updated_rows`` (closed old versions), ``active_rows``, and ``active_checksum``.
+    Used for stream preflight (abort before any batch commits) and by
+    ``apply_scd2`` before merge. Returns ``ok=False`` when FAIL_JOB / strict
+    policy blocks a partial history write.
     """
-
-    from connectors.generic_sql import get_sql_schema, get_sqlalchemy_engine
     from connectors.writer_common import (
         build_mapped_rows_with_details,
         reject_on_strict_policy,
         transform_error_policy_for_validation_mode,
     )
-    from src.transfer.adapters import records_to_matrix, resolve_connector_config
+    from src.transfer.adapters import records_to_matrix
     from src.transfer.connector_capabilities import resolve_driver_type
 
     if not conflict_columns:
@@ -319,8 +316,6 @@ def apply_scd2(
     error_policy = transform_error_policy_for_validation_mode(validation_mode)
 
     _, data_rows = records_to_matrix(records, columns)
-    # SCD2 must not silent-drop transform failures — quarantine + Risk Contracts
-    # surface the same way as SQL writers (FAIL_JOB / strict fail abort before merge).
     mapped_tuples, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=columns,
         data_rows=data_rows,
@@ -330,7 +325,7 @@ def apply_scd2(
         dest_types=dest_types,
         error_policy=error_policy,
         preserve_case=True,
-        dest_kind=resolve_driver_type(endpoint.format),
+        dest_kind=resolve_driver_type(getattr(endpoint, "format", "") or ""),
         destination_pk_columns=list(pk_columns),
     )
     abort = reject_on_strict_policy(error_policy, rejected_details, "SCD2")
@@ -338,16 +333,13 @@ def apply_scd2(
         return {
             "ok": False,
             "error": abort,
-            "rows_written": 0,
-            "updated_rows": 0,
-            "active_rows": 0,
-            "active_checksum": "",
-            "mode": "scd2",
+            "mapped_rows": [],
             "primary_key_columns": pk_columns,
             "target_columns": target_cols,
             "rejected_details": list(rejected_details),
             "rejected_rows": len(rejected_details),
             "transform_errors": list(transform_errors)[:20],
+            "error_policy": error_policy,
         }
 
     mapped_rows: list[dict[str, Any]] = [dict(zip(target_cols, row)) for row in mapped_tuples]
@@ -379,12 +371,74 @@ def apply_scd2(
             )
             continue
         pk_ok_rows.append(row)
-    mapped_rows = pk_ok_rows
     abort_pk = reject_on_strict_policy(error_policy, rejected_details, "SCD2")
     if abort_pk:
         return {
             "ok": False,
             "error": abort_pk,
+            "mapped_rows": [],
+            "primary_key_columns": pk_columns,
+            "target_columns": target_cols,
+            "rejected_details": list(rejected_details),
+            "rejected_rows": len(rejected_details),
+            "transform_errors": list(transform_errors)[:20],
+            "error_policy": error_policy,
+        }
+
+    for row in pk_ok_rows:
+        row[ROW_HASH_COLUMN] = _row_hash(row, target_cols)
+
+    return {
+        "ok": True,
+        "mapped_rows": pk_ok_rows,
+        "primary_key_columns": pk_columns,
+        "target_columns": target_cols,
+        "rejected_details": list(rejected_details),
+        "rejected_rows": len(rejected_details),
+        "transform_errors": list(transform_errors)[:20],
+        "error_policy": error_policy,
+    }
+
+
+def apply_scd2(
+    endpoint: Any,
+    records: list[dict[str, Any]],
+    columns: list[str],
+    schema: dict[str, str] | None,
+    mappings: list[dict[str, Any]] | None,
+    conflict_columns: list[str],
+    *,
+    batch_size: int = 1_000,
+    validation_mode: str = "strict",
+) -> dict[str, Any]:
+    """Apply an SCD2 merge to ``records`` against the SQL destination.
+
+    ``conflict_columns`` is the destination primary key (one or more columns).
+    Returns a summary dict with ``rows_written`` (new current versions),
+    ``updated_rows`` (closed old versions), ``active_rows``, and ``active_checksum``.
+    """
+
+    from connectors.generic_sql import get_sql_schema, get_sqlalchemy_engine
+    from src.transfer.adapters import resolve_connector_config
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    prepared = prepare_scd2_mapped_rows(
+        endpoint,
+        records,
+        columns,
+        schema,
+        mappings,
+        conflict_columns,
+        validation_mode=validation_mode,
+    )
+    pk_columns = list(prepared.get("primary_key_columns") or [])
+    target_cols = list(prepared.get("target_columns") or [])
+    rejected_details = list(prepared.get("rejected_details") or [])
+    transform_errors = list(prepared.get("transform_errors") or [])
+    if prepared.get("ok") is False:
+        return {
+            "ok": False,
+            "error": prepared.get("error"),
             "rows_written": 0,
             "updated_rows": 0,
             "active_rows": 0,
@@ -392,13 +446,12 @@ def apply_scd2(
             "mode": "scd2",
             "primary_key_columns": pk_columns,
             "target_columns": target_cols,
-            "rejected_details": list(rejected_details),
+            "rejected_details": rejected_details,
             "rejected_rows": len(rejected_details),
-            "transform_errors": list(transform_errors)[:20],
+            "transform_errors": transform_errors[:20],
         }
 
-    for row in mapped_rows:
-        row[ROW_HASH_COLUMN] = _row_hash(row, target_cols)
+    mapped_rows: list[dict[str, Any]] = list(prepared.get("mapped_rows") or [])
 
     db_type = resolve_driver_type(endpoint.format)
     cfg = resolve_connector_config(endpoint)

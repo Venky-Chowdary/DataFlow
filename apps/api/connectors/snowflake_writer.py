@@ -1101,7 +1101,7 @@ def write_mapped_rows(
                 load_method = "merge_batch"
                 written = 0
                 if sparse_rows:
-                    from connectors.writer_common import reject_on_strict_policy, row_has_missing_sentinel
+                    from connectors.writer_common import row_has_missing_sentinel
 
                     sparse_written, sparse_skipped, sparse_checksum = (
                         _sf_apply_sparse_upsert(

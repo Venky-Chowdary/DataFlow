@@ -4364,7 +4364,7 @@ def write_mapped_rows(
                 reflection_cache.invalidate_table(engine, schema_name, table_name)
 
             if sparse_converted and write_mode == "upsert" and conflict_columns:
-                from connectors.writer_common import reject_on_strict_policy, row_has_missing_sentinel
+                from connectors.writer_common import row_has_missing_sentinel
 
                 sparse_written, sparse_skipped, sparse_checksum = (
                     _generic_apply_sparse_upsert(

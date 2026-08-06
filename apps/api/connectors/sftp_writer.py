@@ -15,9 +15,8 @@ from typing import Any
 from services.value_serializer import cell_to_string, json_default
 
 from connectors.sftp_common import connect_sftp, parse_sftp_config, split_remote_path
-from connectors.writer_common import WriteResult as _WriteResult
+from connectors.writer_common import reject_on_strict_policy, WriteResult as _WriteResult
 from connectors.writer_common import (
-    reject_on_strict_policy,
     _rejected_row_count,
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
