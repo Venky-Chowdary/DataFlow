@@ -64,7 +64,11 @@ def test_snowflake_merge_uses_null_safe_on():
             "ORDERS",
             ["ID", "TENANT", "AMOUNT"],
             ["NUMBER", "VARCHAR", "NUMBER"],
-            [(1, None, 10), (2, "a", 20)],
+            # Dense MERGE quarantines null/empty conflict keys; null-safe ON is
+            # proven by the MERGE SQL shape below (IS NULL / OR), not by sending
+            # a NULL TENANT through the stage (that would mass-touch without
+            # quarantine on non-null-safe engines).
+            [(1, "b", 10), (2, "a", 20)],
             ["ID", "TENANT"],
             prefer_copy=False,
             conn=_Conn(),

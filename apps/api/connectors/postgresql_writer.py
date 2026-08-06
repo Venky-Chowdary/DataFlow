@@ -1533,6 +1533,30 @@ def write_mapped_rows(
                             _copy_rows(cur, schema, table_name, target_cols, batch)
                         else:
                             write_batch = batch
+                            if (
+                                write_mode == "upsert"
+                                and conflict_columns
+                                and uses_pg_on_conflict_upsert(engine)
+                                and not redshift_upsert_cols
+                            ):
+                                from connectors.writer_common import (
+                                    partition_dense_upsert_rows,
+                                )
+
+                                conflict_for_part = [
+                                    c for c in conflict_columns if c in target_cols
+                                ]
+                                if conflict_for_part:
+                                    before = len(write_batch)
+                                    write_batch = partition_dense_upsert_rows(
+                                        write_batch,
+                                        conflict_for_part,
+                                        target_cols=target_cols,
+                                        rejected_details=rejected_details,
+                                        policy=policy,
+                                        row_offset=start,
+                                    )
+                                    rows_skipped += before - len(write_batch)
                             if redshift_upsert_cols:
                                 write_batch = _redshift_delete_by_keys(
                                     cur,
@@ -1558,7 +1582,7 @@ def write_mapped_rows(
                                     table_name,
                                     schema,
                                     conflict_cols,
-                                    batch,
+                                    write_batch,
                                     target_cols,
                                     quote='"',
                                     placeholder="%s",

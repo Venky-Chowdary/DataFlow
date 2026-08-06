@@ -242,6 +242,9 @@ def _sqlite_upsert_batch(
     batch: list[tuple],
     conflict_cols: list[str],
     schema: str | None = None,
+    rejected_details: list[dict[str, Any]] | None = None,
+    policy: str = "quarantine",
+    row_offset: int = 0,
 ) -> tuple[int, int]:
     """Upsert with optional ``_df_lsn`` monotonic guard (at-least-once CDC).
 
@@ -249,11 +252,29 @@ def _sqlite_upsert_batch(
     ``INSERT … ON CONFLICT DO UPDATE WHERE`` or delete+insert fallback. Returns
     (rows_written, rows_skipped) for accurate reconciliation accounting.
     """
-    from connectors.writer_common import DF_LSN_COL, dedupe_rows_by_pk_and_lsn, sqlite_lsn_update_guard_sql
+    from connectors.writer_common import (
+        DF_LSN_COL,
+        dedupe_rows_by_pk_and_lsn,
+        partition_dense_upsert_rows,
+        sqlite_lsn_update_guard_sql,
+    )
 
     rows = dedupe_rows_by_pk_and_lsn(batch, conflict_cols, target_cols)
     if not rows:
         return 0, 0
+
+    before_pk = len(rows)
+    rows = partition_dense_upsert_rows(
+        rows,
+        conflict_cols,
+        target_cols=target_cols,
+        rejected_details=rejected_details,
+        policy=policy,
+        row_offset=row_offset,
+    )
+    empty_pk_skipped = before_pk - len(rows)
+    if not rows:
+        return 0, empty_pk_skipped
 
     original_count = len(rows)
     lsn_guarded = DF_LSN_COL in target_cols and conflict_cols
@@ -272,7 +293,7 @@ def _sqlite_upsert_batch(
         skipped = 0
 
     if not rows:
-        return 0, skipped + (original_count - len(rows))
+        return 0, empty_pk_skipped + skipped
 
     table_quoted = quote_sql_identifier(table_name)
     cols_sql = ", ".join(quote_sql_identifier(c) for c in target_cols)
@@ -292,7 +313,7 @@ def _sqlite_upsert_batch(
         )
         try:
             cur.executemany(insert_sql, rows)
-            return len(rows), skipped + (original_count - len(rows))
+            return len(rows), empty_pk_skipped + skipped
         except Exception as exc:
             # Missing UNIQUE on conflict cols — fall through to delete+insert.
             logger.warning("Exception suppressed: %s", exc, exc_info=exc)
@@ -311,7 +332,9 @@ def _sqlite_upsert_batch(
 
     insert_sql = f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({placeholders})"  # nosec B608
     cur.executemany(insert_sql, rows)
-    return len(rows), skipped + (original_count - len(rows))
+    # Dedup may drop duplicates within the batch — count those as skipped too.
+    dedup_skipped = original_count - len(rows) - skipped
+    return len(rows), empty_pk_skipped + skipped + max(0, dedup_skipped)
 
 
 def write_mapped_rows(
@@ -449,12 +472,23 @@ def write_mapped_rows(
             mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
 
         # Map VARCHAR + declared DATE/INT affinity — overlay before bind refuse.
-        from connectors.writer_common import overlay_physical_bind_types
+        # Existing table + empty PRAGMA → fail closed (never invent NULL on typed sinks).
+        from connectors.writer_common import (
+            overlay_physical_bind_types,
+            require_physical_types_for_existing_table,
+        )
 
+        table_existed = False
+        physical: dict[str, str] = {}
         try:
             probe = sqlite3.connect(path, timeout=8)
             try:
                 probe_cur = probe.cursor()
+                probe_cur.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+                    (table_name,),
+                )
+                table_existed = probe_cur.fetchone() is not None
                 probe_cur.execute(f"PRAGMA table_info({table_quoted})")  # nosec B608
                 physical = {
                     str(row[1]): str(row[2] or "")
@@ -463,12 +497,32 @@ def write_mapped_rows(
                 }
             finally:
                 probe.close()
-            if physical:
-                tgt_types = overlay_physical_bind_types(
-                    target_cols, tgt_types, physical
-                )
         except Exception:
             logger.debug("sqlite physical column introspection failed", exc_info=True)
+            table_existed = not create_table
+            physical = {}
+
+        overlay_err = require_physical_types_for_existing_table(
+            table_existed=table_existed,
+            physical=physical,
+            dialect_label="SQLite",
+        )
+        if overlay_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or "main",
+                checksum="",
+                chunks_completed=0,
+                error=overlay_err,
+                rejected_details=rejected_details,
+                warnings=transform_errors,
+            )
+        if physical:
+            tgt_types = overlay_physical_bind_types(
+                target_cols, tgt_types, physical
+            )
 
         converted_rows = bind_sql_mapped_rows_with_quarantine(
             mapped_rows,
@@ -626,7 +680,15 @@ def write_mapped_rows(
                         ledger_chunks_skipped += 1
                     elif write_mode == "upsert" and conflict_cols:
                         chunk_written, chunk_skipped = _sqlite_upsert_batch(
-                            cur, table_name, target_cols, batch, conflict_cols, schema=schema or None
+                            cur,
+                            table_name,
+                            target_cols,
+                            batch,
+                            conflict_cols,
+                            schema=schema or None,
+                            rejected_details=rejected_details,
+                            policy=policy,
+                            row_offset=start,
                         )
                         written += chunk_written
                         rows_skipped += chunk_skipped

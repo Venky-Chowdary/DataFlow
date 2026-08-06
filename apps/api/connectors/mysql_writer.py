@@ -495,6 +495,8 @@ def write_mapped_rows(
     use_ledger = bool(job_id)
     conn = None
     converted_rows: list[tuple] = []
+    # Probed before CREATE so fail-closed overlay can distinguish create-new.
+    table_existed = False
 
     # CREATE/ALTER opens with purpose="setup" (short lock wait) so contended
     # metadata locks fail fast. After setup we reconnect with purpose="write"
@@ -606,38 +608,26 @@ def write_mapped_rows(
             target_types = desired_types
             reflection_cache.invalidate_by_identity(_identity, "", table_name)
 
-        # Bind using physical types so ISO Z never hits a DATETIME column as TEXT.
-        # Empty → INT/FLOAT/DECIMAL must quarantine — never invent SQL NULL on upsert.
-        physical = _fetch_mysql_column_types(cursor, table_name, identity=_identity)
-        target_types = _apply_physical_temporal_types(target_cols, target_types, physical)
-        from connectors.sql_temporal import sql_base_type
-        from services.type_system import normalize_logical_type
+        # Map VARCHAR + live DATE/INT/BOOL/JSON — shared overlay before bind refuse.
+        # Empty physical on an existing table → fail closed (never invent NULL).
+        from connectors.writer_common import (
+            materialize_missing_as_null_for_dense_write,
+            overlay_physical_bind_types,
+            require_physical_types_for_existing_table,
+        )
 
-        # When Map stamped VARCHAR but physical is numeric, bind must see physical DDL
-        # or empty strings invent NULL (destination wipe). Do not clobber ENUM/SET.
-        for i, col in enumerate(target_cols):
-            phys = physical.get(col) or physical.get(col.lower()) or physical.get(col.upper())
-            if not phys:
-                continue
-            map_logical = normalize_logical_type(target_types[i] if i < len(target_types) else "")
-            phys_base = sql_base_type(phys)
-            if map_logical in {"string", "text", "varchar", ""} and phys_base in {
-                "TINYINT",
-                "SMALLINT",
-                "MEDIUMINT",
-                "INT",
-                "INTEGER",
-                "BIGINT",
-                "FLOAT",
-                "DOUBLE",
-                "REAL",
-                "DECIMAL",
-                "NUMERIC",
-                "DEC",
-                "FIXED",
-            }:
-                target_types[i] = phys
-        from connectors.writer_common import materialize_missing_as_null_for_dense_write
+        physical = _fetch_mysql_column_types(cursor, table_name, identity=_identity)
+        overlay_err = require_physical_types_for_existing_table(
+            table_existed=table_existed,
+            physical=physical,
+            dialect_label="MySQL",
+        )
+        if overlay_err:
+            raise RuntimeError(overlay_err)
+        if physical:
+            target_types = overlay_physical_bind_types(
+                target_cols, target_types, physical
+            )
 
         bound = bind_sql_mapped_rows_with_quarantine(
             mapped_rows,
@@ -672,12 +662,40 @@ def write_mapped_rows(
         )
         cur = conn.cursor()
         try:
+            # Existence before CREATE — create-new may skip overlay require.
+            table_existed = False
+            try:
+                cur.execute(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema = DATABASE() AND table_name = %s "
+                    "LIMIT 1",
+                    (table_name,),
+                )
+                table_existed = cur.fetchone() is not None
+            except Exception:
+                table_existed = not create_table
+
             setup_attempt = 0
             setup_started = time.monotonic()
             while True:
                 try:
                     _run_setup(cur)
                     break
+                except RuntimeError as setup_exc:
+                    # Fail-closed physical overlay — do not reconnect-retry.
+                    if "refuse silent Map VARCHAR bind" in str(setup_exc):
+                        return WriteResult(
+                            ok=False,
+                            rows_written=0,
+                            table_name=table_name,
+                            target_schema=database,
+                            checksum="",
+                            chunks_completed=0,
+                            error=str(setup_exc),
+                            rejected_details=rejected_details,
+                            warnings=transform_errors,
+                        )
+                    raise
                 except Exception as setup_exc:
                     try:
                         conn.rollback()
@@ -732,6 +750,7 @@ def write_mapped_rows(
 
             rows_skipped = 0
             sparse_written = 0
+            sparse_checksum_rows: list[tuple] = []
             if sparse_rows and write_mode == "upsert" and conflict_columns:
                 # Convert sparse with physical types but keep DF_MISSING intact.
                 sparse_converted = [
@@ -752,11 +771,27 @@ def write_mapped_rows(
                 conn.commit()
                 written += sparse_written
                 rows_skipped += sparse_skipped
-                from connectors.writer_common import row_has_missing_sentinel
+                sparse_checksum_rows = list(sparse_checksum)
 
-                rows_for_checksum = [
-                    r for r in rows_for_checksum if not row_has_missing_sentinel(r)
-                ] + list(sparse_checksum)
+            # Dense empty PK once before chunks — checksum + write + row-retry
+            # share the same holdouts (never mass-touch on ON DUPLICATE).
+            if write_mode == "upsert" and conflict_columns and converted_rows:
+                from connectors.writer_common import partition_dense_upsert_rows
+
+                conflict_cols = [c for c in conflict_columns if c in target_cols]
+                if conflict_cols:
+                    before = len(converted_rows)
+                    converted_rows = partition_dense_upsert_rows(
+                        converted_rows,
+                        conflict_cols,
+                        target_cols=target_cols,
+                        rejected_details=rejected_details,
+                        policy=policy,
+                    )
+                    rows_skipped += before - len(converted_rows)
+
+            # Ack checksum must match rows that land (partitioned dense + sparse).
+            rows_for_checksum = list(converted_rows) + sparse_checksum_rows
 
             for chunk_idx in range(chunks):
                 start = chunk_idx * chunk_size
@@ -767,6 +802,7 @@ def write_mapped_rows(
                 attempt = 0
                 chunk_started = time.monotonic()
                 chunk_written = 0
+                write_batch = batch
                 while True:
                     try:
                         if use_ledger:
@@ -796,7 +832,7 @@ def write_mapped_rows(
                                 table_name,
                                 None,
                                 conflict_cols,
-                                batch,
+                                write_batch,
                                 target_cols,
                                 quote="`",
                                 placeholder="%s",
@@ -823,8 +859,10 @@ def write_mapped_rows(
                             logger.warning("Exception suppressed: %s", exc, exc_info=exc)
                         # Bad cells: write row-by-row and quarantine failures so one
                         # Incorrect datetime cannot abort a 100k-row transfer.
+                        # write_batch is empty-PK partitioned (pre-loop); never retry
+                        # raw batch conflict keys that would ON DUPLICATE mass-touch.
                         if is_sql_data_error(chunk_exc) and policy in {"quarantine", "coerce_null"}:
-                            for row_i, row in enumerate(batch):
+                            for row_i, row in enumerate(write_batch):
                                 try:
                                     cur.execute(insert_sql, row)
                                     conn.commit()

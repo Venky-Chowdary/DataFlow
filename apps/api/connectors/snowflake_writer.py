@@ -345,6 +345,12 @@ def _bind_rows_for_snowflake(
     )
 
 
+# Snowflake COPY sentinel — intentional SQL NULL. Do not put '' in NULL_IF:
+# that invents NULL for legitimate VARCHAR empty strings (and typed empties
+# that slipped past bind). Typed empties must quarantine at bind; '' stays ''.
+_SNOWFLAKE_CSV_NULL = "\\N"
+
+
 def _write_temp_csv(
     path: Path, target_cols: list[str], mapped_rows: list[tuple]
 ) -> None:
@@ -361,9 +367,10 @@ def _write_temp_csv(
                 )
             # Temporal cells are already warehouse-normalized strings; other
             # types still go through cell_to_string for CSV safety.
+            # None → \N (NULL_IF); '' stays '' so VARCHAR empty is not invented NULL.
             writer.writerow(
                 [
-                    ""
+                    _SNOWFLAKE_CSV_NULL
                     if v is None
                     else (v if isinstance(v, str) else cell_to_string(v))
                     for v in row
@@ -754,7 +761,7 @@ def _copy_into_table(
                 TYPE = CSV
                 SKIP_HEADER = 1
                 FIELD_OPTIONALLY_ENCLOSED_BY = '"'
-                NULL_IF = ('', 'NULL')
+                NULL_IF = ('\\\\N')
                 ERROR_ON_COLUMN_COUNT_MISMATCH = TRUE
             )
             ON_ERROR = 'ABORT_STATEMENT'

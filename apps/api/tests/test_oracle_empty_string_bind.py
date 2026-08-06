@@ -452,3 +452,39 @@ def test_dynamodb_date_refuses_empty():
         _to_dynamo_value("", "DATE")
     with pytest.raises(ValueError, match="refuse silent null invent"):
         _to_dynamo_value("  ", "TIMESTAMP")
+
+
+def test_snowflake_csv_null_sentinel_preserves_empty_varchar(tmp_path):
+    """None → \\N for COPY NULL_IF; '' stays '' (no VARCHAR empty→NULL invent)."""
+    from connectors.snowflake_writer import _SNOWFLAKE_CSV_NULL, _write_temp_csv
+
+    path = tmp_path / "sf.csv"
+    _write_temp_csv(path, ["id", "note"], [("1", None), ("2", "")])
+    text = path.read_text(encoding="utf-8")
+    assert _SNOWFLAKE_CSV_NULL == "\\N"
+    assert '"\\N"' in text or f'"{_SNOWFLAKE_CSV_NULL}"' in text
+    # Empty varchar must remain a quoted empty field, not the null sentinel.
+    assert '""' in text
+    assert "NULL_IF" not in text  # CSV body only
+
+
+def test_snowflake_copy_file_format_drops_empty_null_if():
+    import inspect
+    from connectors import snowflake_writer as sf
+
+    src = inspect.getsource(sf._copy_into_table)
+    assert "NULL_IF = ('', 'NULL')" not in src
+    assert "\\\\N" in src  # intentional-null sentinel only
+
+
+def test_overlay_promotes_mysql_bool_json_from_map_varchar():
+    from connectors.writer_common import overlay_physical_bind_types
+
+    out = overlay_physical_bind_types(
+        ["flag", "payload", "amt"],
+        ["VARCHAR", "TEXT", "VARCHAR"],
+        {"flag": "BIT(1)", "payload": "JSON", "amt": "DECIMAL(10,2)"},
+    )
+    assert "BIT" in out[0].upper() or "BOOL" in out[0].upper()
+    assert "JSON" in out[1].upper()
+    assert "DECIMAL" in out[2].upper()

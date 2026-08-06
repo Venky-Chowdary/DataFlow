@@ -643,11 +643,45 @@ def write_mapped_rows(
             destination_column_nullability=dest_nullability,
         )
         # Prefer physical table (p,s) so append into NUMERIC never silent-overflows.
+        # Known-existing table + failed/empty schema introspect → fail closed
+        # (Map VARCHAR bind invents NULL on DATE/INT/BOOL sinks).
         physical_schema = None
         try:
             physical_schema = list(client.get_table(table_id).schema)
-        except Exception:
+        except Exception as schema_exc:
+            if not create_table:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=dataset_id,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"BigQuery physical schema introspection failed for existing "
+                        f"table {table_id!r} — refuse silent Map VARCHAR bind "
+                        f"(empty→NULL invent risk): {schema_exc}"
+                    ),
+                    rejected_details=rejected_details,
+                    warnings=transform_errors,
+                )
             physical_schema = None
+        if not physical_schema and not create_table:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=dataset_id,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"BigQuery physical schema empty for existing table {table_id!r} — "
+                    "refuse silent Map VARCHAR bind (empty→NULL invent risk). "
+                    "Re-check dataset/table permissions and retry."
+                ),
+                rejected_details=rejected_details,
+                warnings=transform_errors,
+            )
         decimal_target_types = resolve_bigquery_decimal_target_types(
             target_cols, logical_types, physical_schema
         )
@@ -861,9 +895,8 @@ def write_mapped_rows(
                 warnings=transform_errors,
             )
 
+        sparse_checksum_rows: list[tuple] = []
         if sparse_rows and use_merge:
-            from connectors.writer_common import row_has_missing_sentinel
-
             sparse_written, sparse_skipped, sparse_checksum = _bq_apply_sparse_upsert(
                 client,
                 table_id,
@@ -876,24 +909,24 @@ def write_mapped_rows(
             )
             written += sparse_written
             rows_skipped += sparse_skipped
-            rows_for_checksum = [
-                r for r in rows_for_checksum if not row_has_missing_sentinel(r)
-            ] + list(sparse_checksum)
+            sparse_checksum_rows = list(sparse_checksum)
 
-        if use_merge and mapped_rows:
-            from connectors.writer_common import partition_dense_upsert_rows
+        if use_merge:
+            if mapped_rows:
+                from connectors.writer_common import partition_dense_upsert_rows
 
-            mapped_rows = partition_dense_upsert_rows(
-                mapped_rows,
-                conflict,
-                target_cols=target_cols,
-                rejected_details=rejected_details,
-                policy=policy,
-            )
-            if not mapped_rows:
-                # All dense rows quarantined — continue to checksum/result path.
-                pass
-            else:
+                before_dense = len(mapped_rows)
+                mapped_rows = partition_dense_upsert_rows(
+                    mapped_rows,
+                    conflict,
+                    target_cols=target_cols,
+                    rejected_details=rejected_details,
+                    policy=policy,
+                )
+                rows_skipped += before_dense - len(mapped_rows)
+            # Ack checksum = rows that MERGE/land (partitioned dense + sparse images).
+            rows_for_checksum = list(mapped_rows) + sparse_checksum_rows
+            if mapped_rows:
                 staging_name = sanitize_identifier(f"{table_name}_stg_{uuid.uuid4().hex[:8]}")
                 staging_id = f"{project_id}.{dataset_id}.{staging_name}"
                 staging = bigquery.Table(staging_id, schema=schema_fields)
