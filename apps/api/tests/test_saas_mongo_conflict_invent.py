@@ -149,6 +149,37 @@ def test_shopify_upsert_refuses_secondary_conflict_as_id():
     req.assert_not_called()
 
 
+def test_zendesk_upsert_refuses_secondary_conflict_as_id():
+    from connectors.zendesk_writer import write_mapped_rows
+
+    with patch("connectors.zendesk_writer.request") as req:
+        result = write_mapped_rows(
+            host="https://demo.zendesk.com",
+            table_name="tickets",
+            api_key="user@x.com:tok",
+            headers=["id", "external_id"],
+            data_rows=[["", "99"]],
+            mappings=[
+                {"source": "id", "target": "id"},
+                {"source": "external_id", "target": "external_id"},
+            ],
+            column_types={"id": "VARCHAR", "external_id": "VARCHAR"},
+            write_mode="upsert",
+            conflict_columns=["id", "external_id"],
+            error_policy="fail",
+            port=0,
+            database="",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=True,
+        )
+    assert result.ok is False
+    assert "missing numeric id" in (result.error or "").lower()
+    req.assert_not_called()
+
+
 def test_es_float_refuses_string_invent():
     from connectors.elasticsearch_writer import _to_es_value
 

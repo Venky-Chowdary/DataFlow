@@ -380,7 +380,40 @@ def write_mapped_rows(
                         driver="zendesk",
                     )
                 continue
-            for c in candidates:
+            # Zendesk REST updates by numeric resource id only — never take a
+            # secondary conflict column when ``id`` is empty.
+            id_cols = [c for c in candidates if (c or "").lower() == "id"]
+            if not id_cols:
+                detail = {
+                    "row": i + 1,
+                    "column": str(candidates[0]),
+                    "target": obj,
+                    "value": "",
+                    "reason": (
+                        "Zendesk upsert requires conflict column 'id' — "
+                        "refuse create invent from non-id keys "
+                        "(would duplicate under at-least-once retry)"
+                    ),
+                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                }
+                all_rejected.append(detail)
+                warnings.append(detail["reason"])
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=obj,
+                        target_schema=shop_host,
+                        checksum=digest.hexdigest()[:32] if written else "",
+                        chunks_completed=chunks,
+                        error=detail["reason"],
+                        rejected_details=all_rejected,
+                        rejected_rows=len(all_rejected),
+                        warnings=warnings,
+                        driver="zendesk",
+                    )
+                continue
+            for c in id_cols:
                 val = row_dict.get(c)
                 if val is None or is_missing_sentinel(val):
                     continue
@@ -391,7 +424,7 @@ def write_mapped_rows(
             if not record_id or not record_id.isdigit():
                 detail = {
                     "row": i + 1,
-                    "column": str(candidates[0] if candidates else ""),
+                    "column": str(id_cols[0]),
                     "target": obj,
                     "value": str(record_id or ""),
                     "reason": (
