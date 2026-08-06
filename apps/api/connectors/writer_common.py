@@ -3950,6 +3950,8 @@ def run_sparse_cdc_upsert(
     update_non_pk: Callable[[dict[str, Any], list[Any]], int],
     insert_present: Callable[[dict[str, Any]], None],
     hydrate_versioned_insert: bool = False,
+    rejected_details: list[dict[str, Any]] | None = None,
+    policy: str = "quarantine",
 ) -> tuple[int, int, list[tuple]]:
     """Shared sparse CDC upsert: omit DF_MISSING, LSN skip, hydrate checksum rows.
 
@@ -3959,9 +3961,12 @@ def run_sparse_cdc_upsert(
     When ``hydrate_versioned_insert`` is True (ClickHouse ReplacingMergeTree-class),
     INSERT of a sparse image must be a full hydrated row — partial INSERT would
     become the new version and NULL-wipe omitted attributes after merge/FINAL.
+
+    Empty/missing conflict keys quarantine (via ``rejected_details``) instead of
+    aborting the whole CDC chunk — parity with Snowflake/BigQuery sparse paths.
     """
     from services.cdc_effectively_once import should_apply_pk_row
-    from services.value_serializer import is_missing_sentinel
+    from services.value_serializer import cell_to_string, is_missing_sentinel
 
     # Strict casefold resolve — never shrink a composite PK to whatever happens
     # to match case-sensitively (wrong-row MERGE / INSERT fallback).
@@ -3971,9 +3976,30 @@ def run_sparse_cdc_upsert(
     written = 0
     skipped = 0
     checksum_rows: list[tuple] = []
-    for row in sparse_rows:
+    for row_idx, row in enumerate(sparse_rows):
         present = sparse_present_bindings(row, target_cols)
-        assert_sparse_upsert_has_pk(present, conflict)
+        try:
+            assert_sparse_upsert_has_pk(present, conflict)
+        except ValueError as exc:
+            if rejected_details is None:
+                raise
+            sample = ""
+            try:
+                sample = cell_to_string(
+                    next(iter(present.values()), "")
+                )[:120]
+            except Exception:
+                sample = ""
+            rejected_details.append(
+                {
+                    "row": row_idx,
+                    "column": "*",
+                    "value": sample,
+                    "reason": str(exc)[:300],
+                    "policy": policy,
+                }
+            )
+            continue
         non_pk = {k: v for k, v in present.items() if k not in conflict}
         pk_vals = [present[c] for c in conflict]
         existing_tuple = fetch_existing_row(pk_vals)
@@ -4040,6 +4066,75 @@ def run_sparse_cdc_upsert(
                 materialize_sparse_row_for_checksum(present, existing, target_cols)
             )
     return written, skipped, checksum_rows
+
+
+def overlay_physical_bind_types(
+    target_cols: list[str],
+    target_types: list[str],
+    physical: dict[str, str],
+) -> list[str]:
+    """Prefer live DDL when Map stamped VARCHAR over typed sinks.
+
+    Empty ``\"\"`` must refuse at bind against physical DATE/INT/BOOL/NUMBER —
+    never survive as VARCHAR and invent NULL on upsert wipe (MySQL/Snowflake
+    parity). Temporal physical types always win; numeric/bool promote only when
+    the Map carrier is string-like.
+    """
+    from connectors.sql_temporal import is_temporal_ddl, sql_base_type
+    from services.type_system import normalize_logical_type
+
+    if not physical:
+        return list(target_types)
+    out = list(target_types)
+    typed_bases = {
+        "NUMBER",
+        "DECIMAL",
+        "NUMERIC",
+        "INT",
+        "INTEGER",
+        "BIGINT",
+        "SMALLINT",
+        "TINYINT",
+        "MEDIUMINT",
+        "FLOAT",
+        "FLOAT4",
+        "FLOAT8",
+        "DOUBLE",
+        "REAL",
+        "BOOLEAN",
+        "BOOL",
+        "BIT",
+        "JSON",
+        "JSONB",
+        "UUID",
+        "UNIQUEIDENTIFIER",
+    }
+    temporal_extra = {
+        "DATE",
+        "TIME",
+        "DATETIME",
+        "DATETIME2",
+        "SMALLDATETIME",
+        "TIMESTAMP",
+        "TIMESTAMP_NTZ",
+        "TIMESTAMP_LTZ",
+        "TIMESTAMP_TZ",
+        "TIMESTAMPTZ",
+        "TIMETZ",
+        "DATETIMEOFFSET",
+        "YEAR",
+    }
+    for i, col in enumerate(target_cols):
+        phys = physical.get(col) or physical.get(col.lower()) or physical.get(col.upper())
+        if not phys:
+            continue
+        phys_base = sql_base_type(phys)
+        map_logical = normalize_logical_type(out[i] if i < len(out) else "")
+        if is_temporal_ddl(phys_base) or phys_base in temporal_extra:
+            out[i] = phys
+        elif map_logical in {"string", "text", "varchar", ""} and phys_base in typed_bases:
+            out[i] = phys
+    return out
 
 
 def assert_sparse_upsert_has_pk(

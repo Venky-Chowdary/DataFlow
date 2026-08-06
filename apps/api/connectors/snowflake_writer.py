@@ -187,54 +187,10 @@ def _overlay_snowflake_physical_bind_types(
     target_types: list[str],
     physical: dict[str, str],
 ) -> list[str]:
-    """Prefer live DDL when Map stamped VARCHAR over DATE/NUMBER/BOOLEAN.
+    """Prefer live DDL when Map stamped VARCHAR over DATE/NUMBER/BOOLEAN."""
+    from connectors.writer_common import overlay_physical_bind_types
 
-    Empty ``\"\"`` must refuse at bind against physical typed sinks — never
-    survive as VARCHAR and invent NULL on Snowflake coerce.
-    """
-    from connectors.sql_temporal import is_temporal_ddl, sql_base_type
-    from services.type_system import normalize_logical_type
-
-    if not physical:
-        return list(target_types)
-    out = list(target_types)
-    typed_bases = {
-        "NUMBER",
-        "DECIMAL",
-        "NUMERIC",
-        "INT",
-        "INTEGER",
-        "BIGINT",
-        "SMALLINT",
-        "TINYINT",
-        "FLOAT",
-        "FLOAT4",
-        "FLOAT8",
-        "DOUBLE",
-        "REAL",
-        "BOOLEAN",
-        "BOOL",
-    }
-    for i, col in enumerate(target_cols):
-        phys = physical.get(col) or physical.get(col.lower()) or physical.get(col.upper())
-        if not phys:
-            continue
-        phys_base = sql_base_type(phys)
-        map_logical = normalize_logical_type(out[i] if i < len(out) else "")
-        if is_temporal_ddl(phys_base) or phys_base in {
-            "DATE",
-            "TIME",
-            "DATETIME",
-            "TIMESTAMP",
-            "TIMESTAMP_NTZ",
-            "TIMESTAMP_LTZ",
-            "TIMESTAMP_TZ",
-            "TIMESTAMPTZ",
-        }:
-            out[i] = phys
-        elif map_logical in {"string", "text", "varchar", ""} and phys_base in typed_bases:
-            out[i] = phys
-    return out
+    return overlay_physical_bind_types(target_cols, target_types, physical)
 
 
 def _quarantine_unfit_decimals(

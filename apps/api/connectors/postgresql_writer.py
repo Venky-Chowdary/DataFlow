@@ -84,6 +84,8 @@ def _pg_apply_sparse_upsert(
     target_cols: list[str],
     conflict_columns: list[str],
     sparse_rows: list[tuple],
+    rejected_details: list[dict[str, Any]] | None = None,
+    policy: str = "quarantine",
 ) -> tuple[int, int, list[tuple]]:
     """Per-row upsert omitting DF_MISSING — never SET col=NULL for absent CDC fields."""
     from connectors.writer_common import resolve_conflict_targets, run_sparse_cdc_upsert
@@ -142,7 +144,54 @@ def _pg_apply_sparse_upsert(
         fetch_existing_row=fetch_existing,
         update_non_pk=update_non_pk,
         insert_present=insert_present,
+        rejected_details=rejected_details,
+        policy=policy,
     )
+
+
+def _fetch_pg_column_types(cursor: Any, schema: str, table_name: str) -> dict[str, str]:
+    """Live PostgreSQL/Redshift column DDL for physical bind overlay."""
+    try:
+        cursor.execute(
+            """
+            SELECT column_name, data_type, udt_name,
+                   character_maximum_length, numeric_precision, numeric_scale
+            FROM information_schema.columns
+            WHERE table_schema = %s AND table_name = %s
+            """,
+            (schema, table_name),
+        )
+        out: dict[str, str] = {}
+        for name, data_type, udt_name, char_len, precision, scale in cursor.fetchall():
+            udt = str(udt_name or "").upper()
+            data = str(data_type or "").upper()
+            if udt in {"INT2", "INT4", "INT8", "FLOAT4", "FLOAT8", "BOOL", "UUID", "JSON", "JSONB"}:
+                ddl = {
+                    "INT2": "SMALLINT",
+                    "INT4": "INTEGER",
+                    "INT8": "BIGINT",
+                    "FLOAT4": "REAL",
+                    "FLOAT8": "DOUBLE PRECISION",
+                    "BOOL": "BOOLEAN",
+                }.get(udt, udt)
+            elif data in {"DATE", "TIME", "TIMESTAMP", "TIMESTAMP WITHOUT TIME ZONE",
+                          "TIMESTAMP WITH TIME ZONE", "TIME WITHOUT TIME ZONE",
+                          "TIME WITH TIME ZONE"}:
+                ddl = data
+            elif data in {"NUMERIC", "DECIMAL"} and precision is not None:
+                ddl = f"NUMERIC({int(precision)},{int(scale or 0)})"
+            elif data in {"CHARACTER VARYING", "VARCHAR"} and char_len:
+                ddl = f"VARCHAR({int(char_len)})"
+            else:
+                ddl = udt or data
+            key = str(name)
+            out[key] = ddl
+            out[key.lower()] = ddl
+            out[key.upper()] = ddl
+        return out
+    except Exception:
+        logger.debug("postgresql physical column introspection failed", exc_info=True)
+        return {}
 
 
 def uses_pg_on_conflict_upsert(engine: str) -> bool:
@@ -1326,6 +1375,61 @@ def write_mapped_rows(
                     time.sleep(reconnect_backoff_seconds(setup_attempt))
                     _reconnect()
 
+            # Map VARCHAR + live DATE/INT must refuse empty at bind — overlay
+            # physical DDL then re-quarantine (early bind used Map stamps only).
+            from connectors.writer_common import (
+                bind_sql_mapped_rows_with_quarantine,
+                overlay_physical_bind_types,
+            )
+
+            physical = _fetch_pg_column_types(cur, schema, table_name)
+            if physical:
+                bind_types = overlay_physical_bind_types(
+                    target_cols, bind_types, physical
+                )
+                target_types = list(bind_types)
+                mapped_rows = bind_sql_mapped_rows_with_quarantine(
+                    mapped_rows,
+                    target_cols,
+                    bind_types,
+                    rejected_details,
+                    policy,
+                    engine="postgresql",
+                    dialect_label="PostgreSQL",
+                    mappings=mappings,
+                )
+                sparse_rows = bind_sql_mapped_rows_with_quarantine(
+                    sparse_rows,
+                    target_cols,
+                    bind_types,
+                    rejected_details,
+                    policy,
+                    engine="postgresql",
+                    dialect_label="PostgreSQL",
+                    mappings=mappings,
+                )
+                from connectors.writer_common import (
+                    materialize_missing_as_null_for_dense_write,
+                )
+
+                mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
+                rows_for_checksum = list(mapped_rows)
+                _phys_abort = reject_on_strict_policy(
+                    policy, rejected_details, "PostgreSQL", transform_errors
+                )
+                if _phys_abort:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=_phys_abort,
+                        rejected_details=rejected_details,
+                        warnings=transform_errors,
+                    )
+
             rows_skipped = 0
             if sparse_rows and write_mode == "upsert" and conflict_columns:
                 from psycopg2 import sql as _psql
@@ -1339,6 +1443,8 @@ def write_mapped_rows(
                     target_cols=target_cols,
                     conflict_columns=conflict_columns,
                     sparse_rows=sparse_rows,
+                    rejected_details=rejected_details,
+                    policy=policy,
                 )
                 conn.commit()
                 written += written_sparse

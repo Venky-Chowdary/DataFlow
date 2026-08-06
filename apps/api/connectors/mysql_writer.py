@@ -157,6 +157,8 @@ def _mysql_apply_sparse_upsert(
     target_cols: list[str],
     conflict_columns: list[str],
     sparse_rows: list[tuple],
+    rejected_details: list[dict[str, Any]] | None = None,
+    policy: str = "quarantine",
 ) -> tuple[int, int, list[tuple]]:
     """Per-row upsert that omits DF_MISSING columns (never SET col=NULL for absent)."""
     from connectors.writer_common import resolve_conflict_targets, run_sparse_cdc_upsert
@@ -203,6 +205,8 @@ def _mysql_apply_sparse_upsert(
         fetch_existing_row=fetch_existing,
         update_non_pk=update_non_pk,
         insert_present=insert_present,
+        rejected_details=rejected_details,
+        policy=policy,
     )
 
 def _open_mysql(
@@ -741,6 +745,8 @@ def write_mapped_rows(
                         target_cols=target_cols,
                         conflict_columns=conflict_columns,
                         sparse_rows=sparse_converted,
+                        rejected_details=rejected_details,
+                        policy=policy,
                     )
                 )
                 conn.commit()

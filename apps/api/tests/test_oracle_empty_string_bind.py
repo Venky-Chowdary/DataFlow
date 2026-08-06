@@ -146,17 +146,43 @@ def test_bind_sql_mapped_rows_quarantines_empty_integer():
     assert any("refuse silent NULL invent" in str(d.get("reason") or "") for d in details)
 
 
-def test_snowflake_physical_overlay_promotes_varchar_to_date():
-    from connectors.snowflake_writer import _overlay_snowflake_physical_bind_types
+def test_overlay_physical_bind_types_promotes_map_varchar():
+    from connectors.writer_common import overlay_physical_bind_types
 
-    out = _overlay_snowflake_physical_bind_types(
-        ["id", "created", "age"],
-        ["VARCHAR", "VARCHAR", "VARCHAR"],
-        {"created": "DATE", "age": "NUMBER(38,0)"},
+    out = overlay_physical_bind_types(
+        ["id", "created", "age", "flag"],
+        ["VARCHAR", "VARCHAR", "VARCHAR", "TEXT"],
+        {
+            "created": "DATE",
+            "age": "INTEGER",
+            "flag": "BOOLEAN",
+        },
     )
     assert out[1] == "DATE"
-    assert out[2].startswith("NUMBER")
+    assert out[2] == "INTEGER"
+    assert out[3] == "BOOLEAN"
     assert out[0] == "VARCHAR"
+
+
+def test_run_sparse_cdc_upsert_quarantines_empty_pk():
+    from connectors.writer_common import run_sparse_cdc_upsert
+    from services.value_serializer import DF_MISSING_SENTINEL
+
+    details: list[dict] = []
+    written, skipped, checksum = run_sparse_cdc_upsert(
+        target_cols=["id", "note"],
+        conflict_columns=["id"],
+        sparse_rows=[("", "bad"), ("2", "ok")],
+        fetch_existing_row=lambda pk: ("2", "old") if pk == ["2"] else None,
+        update_non_pk=lambda non_pk, pk: 1,
+        insert_present=lambda present: None,
+        rejected_details=details,
+        policy="quarantine",
+    )
+    assert written == 1
+    assert details
+    assert any("null/empty primary-key" in str(d.get("reason") or "") for d in details)
+    del DF_MISSING_SENTINEL, skipped, checksum
 
 
 def test_snowflake_sparse_bind_quarantines_empty_date():

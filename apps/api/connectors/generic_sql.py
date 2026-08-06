@@ -2486,6 +2486,8 @@ def _generic_apply_sparse_upsert(
     sparse_rows: list[dict[str, Any]],
     *,
     dialect_name: str = "",
+    rejected_details: list[dict[str, Any]] | None = None,
+    policy: str = "quarantine",
 ) -> tuple[int, int, list[tuple]]:
     """Per-row upsert omitting DF_MISSING — never SET col=NULL for absent CDC fields."""
     from connectors.writer_common import run_sparse_cdc_upsert
@@ -2567,6 +2569,8 @@ def _generic_apply_sparse_upsert(
         update_non_pk=update_non_pk,
         insert_present=insert_present,
         hydrate_versioned_insert=is_clickhouse,
+        rejected_details=rejected_details,
+        policy=policy,
     )
 
 
@@ -4302,6 +4306,35 @@ def write_mapped_rows(
     )
 
     dialect_name = engine.dialect.name if engine.dialect else ""
+    # Overlay live DDL when Map stamped VARCHAR over typed sinks (empty refuse).
+    try:
+        from connectors.writer_common import overlay_physical_bind_types
+
+        inspector = sa.inspect(engine)
+        existing_cols = inspector.get_columns(table_name, schema=schema_name)
+        physical: dict[str, str] = {}
+        for col_meta in existing_cols or []:
+            name = str(col_meta.get("name") or "")
+            if not name:
+                continue
+            typ = col_meta.get("type")
+            ddl = str(typ) if typ is not None else ""
+            physical[name] = ddl
+            physical[name.lower()] = ddl
+            physical[name.upper()] = ddl
+        if physical:
+            type_list = [
+                target_column_types.get(c, "string") for c in target_cols
+            ]
+            overlaid = overlay_physical_bind_types(target_cols, type_list, physical)
+            for col, typ in zip(target_cols, overlaid):
+                target_column_types[col] = typ
+    except Exception:
+        logger.debug(
+            "generic_sql physical column introspection failed",
+            exc_info=True,
+        )
+
     sa_col_types = {
         col: _sa_type_for_logical(
             target_column_types.get(col, "string"), dialect_name, cfg.get("type", "")
@@ -4357,14 +4390,37 @@ def write_mapped_rows(
             continue
         converted_rows.append(cells)
     sparse_converted: list[dict] = []
+    oracle_upsert_omit_empty = (
+        write_mode == "upsert"
+        and (
+            dialect_name in {"oracle", "oracledb", "oracle_autonomous"}
+            or str(dialect_name).startswith("oracle")
+            or str(cfg.get("type") or "").lower().startswith("oracle")
+        )
+    )
     for row_idx, row in enumerate(sparse_rows):
         cells = {}
         hold_out = False
         for i in range(len(target_cols)):
             col = target_cols[i]
+            from services.value_serializer import DF_MISSING_SENTINEL, is_missing_sentinel
+
+            raw = row[i] if i < len(row) else None
+            if is_missing_sentinel(raw):
+                cells[col] = DF_MISSING_SENTINEL
+                continue
+            # Oracle VARCHAR2 ''→NULL on upsert is a destination wipe — omit
+            # from SET (leave-alone) instead of inventing NULL clear.
+            if (
+                oracle_upsert_omit_empty
+                and isinstance(raw, str)
+                and raw == ""
+            ):
+                cells[col] = DF_MISSING_SENTINEL
+                continue
             try:
                 cells[col] = _to_sa_value(
-                    row[i],
+                    raw,
                     target_column_types.get(col, "string"),
                     sa_col_types.get(col),
                     dialect_name,
@@ -4374,7 +4430,7 @@ def write_mapped_rows(
                 from connectors.writer_common import append_write_quarantine_detail
                 from services.value_serializer import cell_to_string
 
-                sample = cell_to_string(row[i])[:120]
+                sample = cell_to_string(raw)[:120]
                 append_write_quarantine_detail(
                     rejected_details,
                     {
@@ -4396,9 +4452,6 @@ def write_mapped_rows(
                     mappings=mappings,
                 )
                 if policy == "coerce_null":
-                    from services.value_serializer import DF_MISSING_SENTINEL
-
-                    # Sparse CDC: omit from SET — never invent col=NULL wipe.
                     cells[col] = DF_MISSING_SENTINEL
                 else:
                     hold_out = True
@@ -4569,6 +4622,8 @@ def write_mapped_rows(
                             or getattr(getattr(engine, "dialect", None), "name", "")
                             or ""
                         ).lower(),
+                        rejected_details=rejected_details,
+                        policy=policy,
                     )
                 )
                 written += sparse_written

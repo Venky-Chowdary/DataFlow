@@ -448,6 +448,28 @@ def write_mapped_rows(
 
             mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
 
+        # Map VARCHAR + declared DATE/INT affinity — overlay before bind refuse.
+        from connectors.writer_common import overlay_physical_bind_types
+
+        try:
+            probe = sqlite3.connect(path, timeout=8)
+            try:
+                probe_cur = probe.cursor()
+                probe_cur.execute(f"PRAGMA table_info({table_quoted})")  # nosec B608
+                physical = {
+                    str(row[1]): str(row[2] or "")
+                    for row in probe_cur.fetchall()
+                    if row[1]
+                }
+            finally:
+                probe.close()
+            if physical:
+                tgt_types = overlay_physical_bind_types(
+                    target_cols, tgt_types, physical
+                )
+        except Exception:
+            logger.debug("sqlite physical column introspection failed", exc_info=True)
+
         converted_rows = bind_sql_mapped_rows_with_quarantine(
             mapped_rows,
             target_cols,
